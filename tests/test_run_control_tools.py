@@ -176,18 +176,68 @@ def test_missing_or_noncanonical_generation_fails_before_mutation_journal(
     assert commands.calls == [] and not journal.exists()
 
 
-def test_delete_node_takes_subtree_and_heals_best(tmp_path):
+def test_delete_node_default_tombstones_subtree_append_only(tmp_path):
+    # DEFAULT delete is now an append-only tombstone (§6.3): the subtree is logically removed
+    # (excluded from best-pick) while its events STAY in the log — no rewrite, no backup file, and
+    # parent links stay valid because nothing is physically dropped. Reversible.
     rd = tmp_path / "r3"
     _run(rd, nodes=(0, 1, 2)).append("pause", {})   # settled → the fresh-write live backstop stands down
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
                         approver=lambda _action: "allow_once",
                         command_service=_RecordingCommands(tmp_path))
-    out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # deletes 1 AND its descendant 2
+    out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # tombstones 1 AND descendant 2
+    assert "tombstoned node(s) [1, 2]" in out
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert set(st.nodes) == {0, 1, 2}                               # all events kept — nothing rewritten
+    assert st.nodes[1].tombstoned and st.nodes[2].tombstoned        # 1+2 logically deleted
+    assert not st.nodes[0].tombstoned and st.best_node_id == 0      # #0 survives + wins
+    assert not [p for n in st.nodes.values() if not n.tombstoned
+                for p in n.parent_ids if p not in st.nodes]         # no broken links among live nodes
+    assert not (rd / "events.jsonl.bak-del1").exists()              # append-only: no destructive backup
+    types = [e.type for e in EventStore(rd / "events.jsonl").read_all()]
+    assert types.count("node_tombstoned") == 1
+
+
+def test_delete_node_purge_physically_rewrites_and_backs_up(tmp_path):
+    # purge=true keeps the old irreversible behavior: physically drop the subtree's events + workdirs
+    # and leave a recoverable backup.
+    rd = tmp_path / "r3p"
+    _run(rd, nodes=(0, 1, 2)).append("pause", {})
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        approver=lambda _action: "allow_once",
+                        command_service=_RecordingCommands(tmp_path))
+    out = t.execute("delete_node", {"run_id": "r3p", "node_id": 1, "purge": True})
     assert "deleted node(s) [1, 2]" in out
     st = fold(EventStore(rd / "events.jsonl").read_all())
     assert set(st.nodes) == {0}                                     # only #0 remains
     assert not [p for n in st.nodes.values() for p in n.parent_ids if p not in st.nodes]  # no broken links
     assert (rd / "events.jsonl.bak-del1").exists()                  # recoverable backup
+
+
+@pytest.mark.parametrize("purge", [False, True])
+def test_delete_node_rechecks_and_rejects_tree_change_during_permission(tmp_path, purge):
+    rd = tmp_path / ("race-purge" if purge else "race-tombstone")
+    store = _run(rd, nodes=(0, 1, 2))
+    store.append("pause", {})
+
+    def approver(_action):
+        # A new descendant appears while the user is looking at the approval card. Deleting the old
+        # preview [1,2] would orphan or silently omit node 3, so the executor must fail stale.
+        store.append("node_created", {
+            "node_id": 3, "parent_ids": [2], "operator": "improve",
+            "idea": {"operator": "improve", "params": {}}, "code": "c"})
+        store.append("node_evaluated", {"node_id": 3, "metric": 3.0})
+        return "allow_once"
+
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="default", approver=approver)
+    out = tool.execute("delete_node", {
+        "run_id": rd.name, "node_id": 1, "purge": purge})
+    assert "changed while awaiting permission" in out
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    assert set(state.nodes) == {0, 1, 2, 3}
+    assert not any(node.tombstoned for node in state.nodes.values())
+    assert not (rd / "events.jsonl.bak-del1").exists()
 
 
 def test_reset_node_spec_accepts_any_stage_name(tmp_path):
@@ -206,6 +256,52 @@ def test_reset_node_spec_accepts_any_stage_name(tmp_path):
     assert "re-run from train" in out
     ev = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "node_reset"]
     assert ev and ev[-1].data["from_stage"] == "train"
+    assert ev[-1].data["generation"] == 0
+
+    # A second reset targets generation 1 rather than appending an ambiguous id-only event.
+    out2 = t.execute("reset_node", {"run_id": "r5", "node_id": 1, "stage": "eval"})
+    assert "re-run from eval" in out2
+    ev2 = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "node_reset"]
+    assert [e.data["generation"] for e in ev2] == [0, 1]
+    assert fold(EventStore(rd / "events.jsonl").read_all()).nodes[1].attempt == 2
+
+
+def test_reset_node_rejects_any_tail_change_during_permission(tmp_path):
+    rd = tmp_path / "reset-race"
+    store = _run(rd)
+
+    def approver(_action):
+        store.append("hint", {"text": "newer operator intent"})
+        return "allow_once"
+
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="default", approver=approver)
+    out = tool.execute("reset_node", {"run_id": rd.name, "node_id": 1, "stage": "eval"})
+    assert "run intent changed" in out
+    assert not any(event.type == "node_reset" for event in store.read_all())
+
+
+def test_resume_tool_delegates_live_finish_tail_to_command_service(tmp_path, monkeypatch):
+    rd = tmp_path / "resume-tail"
+    store = _run(rd)
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    store.append("run_finished", {})
+    calls = []
+
+    monkeypatch.setattr("looplab.serve.engine_proc._engine_alive", lambda _rd: True)
+
+    def fake_claim(run_dir, args, **kwargs):
+        calls.append((run_dir, args, kwargs))
+        return False
+
+    monkeypatch.setattr("looplab.serve.engine_proc._claim_and_spawn_resume", fake_claim)
+    commands = _RecordingCommands(tmp_path, append=False)
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: True, mode="auto", command_service=commands)
+    out = tool.execute("resume_run", {"run_id": rd.name})
+    assert "completed" in out
+    assert [call[1] for call in commands.calls] == ["resume"]
+    assert calls == []                 # only the command service owns append/launch/handoff
 
 
 def test_destructive_refuses_live_engine(tmp_path):
@@ -216,6 +312,101 @@ def test_destructive_refuses_live_engine(tmp_path):
         command_service=_RecordingCommands(tmp_path))   # engine "live"
     assert "LIVE" in t.execute("delete_run", {"run_id": "r4"})
     assert (tmp_path / "r4").exists()                               # not deleted
+
+
+def test_delete_run_rechecks_tail_after_permission_and_successfully_deletes_snapshot(tmp_path):
+    raced = tmp_path / "delete-race"
+    race_store = _run(raced)
+    race_store.append("pause", {})
+
+    def mutate_while_asking(_action):
+        race_store.append("hint", {"text": "new intent"})
+        return "allow_once"
+
+    guarded = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="default", approver=mutate_while_asking)
+    out = guarded.execute("delete_run", {"run_id": raced.name})
+    assert "changed while awaiting permission" in out and raced.exists()
+
+    settled = tmp_path / "delete-ok"
+    _run(settled).append("pause", {})
+    direct = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once")
+    assert "deleted run" in direct.execute("delete_run", {"run_id": settled.name})
+    assert not settled.exists()
+
+
+def test_delete_run_retires_root_start_record(tmp_path):
+    rd = tmp_path / "delete-start-owner"
+    _run(rd).append("pause", {})
+
+    class Commands(_RecordingCommands):
+        def __init__(self, root):
+            super().__init__(root)
+            self.start_record = {"id": "start_exact", "status": "succeeded"}
+            self.retired = []
+            self.restored = []
+
+        def load_start_record(self, _rd):
+            return dict(self.start_record) if self.start_record is not None else None
+
+        def retire_start_record(self, _rd, start_id):
+            if self.start_record is None or self.start_record["id"] != start_id:
+                return False
+            self.retired.append(start_id)
+            self.start_record = None
+            return True
+
+        def save_start_record(self, _rd, record):
+            self.restored.append(dict(record))
+            self.start_record = dict(record)
+
+    commands = Commands(tmp_path)
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once", command_service=commands)
+
+    assert "deleted run" in tool.execute("delete_run", {"run_id": rd.name})
+    assert not rd.exists()
+    assert commands.retired == ["start_exact"] and commands.restored == []
+
+
+def test_delete_node_rejects_fresh_run_launch_marker(tmp_path, monkeypatch):
+    rd = tmp_path / "node-delete-reset-launch"
+    _run(rd, nodes=(0, 1)).append("pause", {})
+    monkeypatch.setattr(
+        "looplab.serve.engine_proc._fresh_run_launch_pending", lambda _rd: True)
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path))
+
+    out = tool.execute("delete_node", {"run_id": rd.name, "node_id": 1})
+
+    assert "launching" in out
+    assert not any(event.type == "node_tombstoned"
+                   for event in EventStore(rd / "events.jsonl").read_all())
+
+
+@pytest.mark.parametrize("name,args", [
+    ("delete_node", {"node_id": 1}),
+    ("delete_run", {}),
+])
+def test_destructive_tools_reject_fresh_resume_launch_gap(tmp_path, name, args):
+    rd = tmp_path / f"launch-{name}"
+    store = _run(rd)
+    store.append("pause", {})
+    store.append("resume_requested", {"mode": "resume"})
+    tool = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once")
+
+    out = tool.execute(name, {"run_id": rd.name, **args})
+
+    assert "launching" in out and rd.exists()
+    events = store.read_all()
+    assert not any(event.type in ("node_tombstoned", "node_reset") for event in events)
 
 
 def test_traversal_and_unknown_run_rejected(tmp_path):
@@ -248,7 +439,7 @@ def test_lifecycle_and_engine_controls_only_submit_commands(tmp_path):
 
     unavailable = RunControlTools(tmp_path, mode="auto")
     out = unavailable.execute("stop_run", {"run_id": "svc"})
-    assert "run_generation_unavailable" in out
+    assert "command_service_unavailable" in out
     assert (rd / "events.jsonl").read_bytes() == before
 
 
@@ -502,15 +693,20 @@ def test_destructive_approval_then_guard_then_live_recheck(tmp_path, name, args)
         order.append(("approve",))
         return "allow_once"
 
+    live_checks = 0
+
     def alive(_rd):
+        nonlocal live_checks
+        live_checks += 1
         order.append(("live",))
-        return True
+        return live_checks > 1
 
     tool = RunControlTools(tmp_path, alive_fn=alive, mode="default", approver=approve,
                            command_service=Commands(tmp_path))
     out = tool.execute(name, args)
     assert "LIVE" in out and rd.exists()
-    assert [item[0] for item in order] == ["approve", "guard-enter", "live", "guard-exit"]
+    assert [item[0] for item in order] == [
+        "live", "approve", "guard-enter", "live", "guard-exit"]
 
 
 def test_delete_node_requires_reapproval_if_descendant_scope_changes(tmp_path):

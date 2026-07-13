@@ -36,19 +36,52 @@ from looplab.serve.settings_store import SettingsStore
 # cross-run scope-report store at <run-root>/reports/).
 _RESERVED_RUN_IDS = {"reports", "assistant", ".reviews", ".command-locks"}
 
+# Fields that can contain verbatim source, captured process output, private host paths, or an internal
+# model-facing prompt. `state_payload` feeds both the public /state GET and headerless EventSource SSE,
+# so token auth cannot protect them. Keep that projection useful, but recursively remove raw material
+# wherever it is nested (not only under nodes — inject_requests also carries full code/file maps).
+_PUBLIC_STATE_RAW_KEYS = {
+    "abs_path", "code", "deleted", "files", "preview", "raw", "stderr", "stdout", "stdout_tail",
+    "triage_rationale",
+}
+
+
+def _public_state_value(value):
+    from looplab.trust.redact import redact_secrets
+
+    if isinstance(value, dict):
+        return {k: _public_state_value(v) for k, v in value.items()
+                if str(k) not in _PUBLIC_STATE_RAW_KEYS}
+    if isinstance(value, list):
+        return [_public_state_value(v) for v in value]
+    if isinstance(value, tuple):
+        return [_public_state_value(v) for v in value]
+    if isinstance(value, str):
+        # entropy=False (F25): the entropy heuristic masked legitimate high-entropy IDENTIFIERS
+        # (config_hash, data_provenance content digests, run-slugs like `runs/exp_2026_ablation_v3`)
+        # as ***REDACTED*** on the public /state, breaking any UI/client logic keyed on them. Keep only
+        # the known-secret-PATTERN redaction here (sk-…/AWS-key shapes — no usability cost); the one
+        # free-form field where an unknown-format secret could realistically appear, node `error`, still
+        # gets full entropy redaction on its own path in `state_payload`.
+        return redact_secrets(value, entropy=False)
+    return value
+
 
 class AppState:
     """Plain state bag + canonical read helpers shared by the routers of ONE app instance."""
 
     def __init__(self, root: Path, projects: ProjectStore, settings: SettingsStore,
-                 jobs: JobRegistry, reviews: ReviewStore | None = None):
+                 jobs: JobRegistry, reviews: ReviewStore | None = None,
+                 resume_cancel=None):
         self.root = root
         self.projects = projects
         self.settings = settings
         self.jobs = jobs
         self.reviews = reviews or ReviewStore(root / ".reviews")
         self.commands = RunCommandService(self)
-        self.summary_cache: dict[str, tuple] = {}   # run_id -> (size, mtime, summary); skips re-folding
+        self.resume_cancel = resume_cancel
+        # File identity + content metadata mirror state_payload's reset-safe cache signature.
+        self.summary_cache: dict[str, tuple] = {}  # run_id -> (ino, ctime_ns, size, mtime_ns, summary)
         # Per-run folded-state cache keyed by (size, mtime, upto_seq): state_payload re-read + re-folded
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
         # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.
@@ -116,11 +149,12 @@ class AppState:
         last_seq = evs[-1].seq if evs else -1
         # Trim heavy per-node payloads from the live state (code/files/stdout/error) — they are
         # fetched on demand via /nodes/{id}. Keeps SSE ticks small even for code-writing runs.
-        d = st.model_dump(mode="json")
+        d = _public_state_value(st.model_dump(mode="json"))
         better = (lambda a, b: a < b) if st.direction == "min" else (lambda a, b: a > b)
         from looplab.trust.redact import redact_secrets
         for n in d.get("nodes", {}).values():
-            n.pop("code", None); n.pop("files", None)
+            n.pop("code", None)
+            n.pop("files", None)
             # SECURITY (arch-review §4 P1-3): /state is a LIGHT projection served WITHOUT the UI token,
             # so it must not ship raw captured program output — a secret the candidate prints could ride
             # in the stdout tail. Drop stdout_tail entirely (the full tail is behind the token-gated
@@ -142,7 +176,11 @@ class AppState:
                     "count": len(trials), "best": best, "ok": ok, "failed": len(trials) - ok,
                     "series": vals[:64],   # cap the inline sparkline series
                 }
-        finalize_incomplete = incomplete_finalize_scope(evs) is not None
+        # Two durable protocols coexist: branch-scoped projection markers and upstream's
+        # finish-seq handshake (`finalization_required` -> `finalization_finished`). Legacy
+        # markerless finishes fold as already finalized, so the union does not manufacture work.
+        finalize_incomplete = (
+            incomplete_finalize_scope(evs) is not None or st.finalization_pending())
         d["finalization_incomplete"] = finalize_incomplete
         d["phase"] = self.phase(st, finalize_incomplete=finalize_incomplete)
         # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).

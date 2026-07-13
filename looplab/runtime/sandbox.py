@@ -196,9 +196,35 @@ def json_line_trials(text: str) -> Optional[list]:
 _json_line_trials = json_line_trials
 
 
+def parse_mem_bytes(spec) -> Optional[int]:
+    """Parse a human memory size ("8g", "512m", "1073741824", 4096) to a positive int byte count, or
+    None for "" / 0 / an unparseable value (cap disabled). Suffixes k/m/g/t are powers of 1024, matching
+    `docker run --memory`. Best-effort: a bad value silently disables the cap rather than crashing eval."""
+    if spec is None:
+        return None
+    if isinstance(spec, (int, float)):
+        n = int(spec)
+        return n if n > 0 else None
+    s = str(spec).strip().lower()
+    if not s:
+        return None
+    mult = 1
+    if s[-1] in "kmgt":
+        mult = {"k": 1024, "m": 1024**2, "g": 1024**3, "t": 1024**4}[s[-1]]
+        s = s[:-1].strip()
+    try:
+        n = int(float(s) * mult)
+    except (ValueError, OverflowError):
+        # OverflowError: `int(float("inf"))` / `int(float("1e400"))` — a non-finite operator value must
+        # SILENTLY DISABLE the cap (as the docstring promises), not crash make_sandbox on engine setup.
+        return None
+    return n if n > 0 else None
+
+
 def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
-             log_path: Optional[str] = None):
+             log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
+             fsize_bytes: Optional[int] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -221,11 +247,52 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     timeout = finite_timeout(timeout)
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
+    argv = list(argv)
+    docker_cidfile: Optional[Path] = None
+    # Killing the local `docker run` CLI does NOT necessarily stop the daemon-owned container. Attach
+    # a unique host cidfile at the universal argv choke point (covers DockerSandbox and command-eval),
+    # then force-remove that exact container if host timeout/cancel kills the client first.
+    if (len(argv) >= 2 and Path(str(argv[0])).stem.lower() in {"docker", "docker.exe"}
+            and argv[1] == "run" and "--cidfile" not in argv):
+        import tempfile
+        import uuid
+        # SECURITY: the cidfile MUST live outside the bind-mounted workdir. DockerSandbox mounts `wd`
+        # into the container as writable /work (as root, no --user), so a cidfile under `wd` is
+        # enumerable AND overwritable by untrusted solution code — which could then redirect the
+        # post-timeout `docker rm -f <cid>` at a co-tenant container on a shared daemon (cross-tenant
+        # DoS) or turn cleanup into an uncaught crash. Put it in the host-only temp dir the container
+        # never sees; the random name doesn't pre-exist so docker's --cidfile (which refuses an
+        # existing file) writes it, and we unlink it below.
+        docker_cidfile = Path(tempfile.gettempdir()) / f".looplab-container-{uuid.uuid4().hex}.cid"
+        argv[2:2] = ["--cidfile", str(docker_cidfile)]
     kwargs: dict = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kwargs["start_new_session"] = True
+        _mem = int(mem_bytes) if (mem_bytes and mem_bytes > 0) else None
+        _fsize = int(fsize_bytes) if (fsize_bytes and fsize_bytes > 0) else None
+        if _mem is not None or _fsize is not None:
+            # Best-effort resource caps for the trusted_local tier (#5 / doc 17 §7.6, P1-5). RLIMIT_AS
+            # bounds the child's VIRTUAL address space so a runaway trainer hits MemoryError instead of
+            # OOM-killing the whole host (+ the engine); RLIMIT_FSIZE bounds the size of any single file
+            # it writes so a runaway can't fill the disk (SIGXFSZ past the cap). preexec_fn runs in the
+            # child AFTER fork, BEFORE exec — keep it tiny and swallow errors (an exception there aborts
+            # the spawn). POSIX only; Windows has no rlimit (Job Objects would be the analog). Both cap
+            # aggressively (AS is virtual, FSIZE is per-file), so each defaults OFF and the caller opts
+            # in only where it fits (CUDA/torch reserve huge virtual; large checkpoints need big files).
+            def _apply_rlimits(_m=_mem, _f=_fsize):
+                import resource
+                for _res, _val in ((resource.RLIMIT_AS, _m), (resource.RLIMIT_FSIZE, _f)):
+                    if _val is None:
+                        continue
+                    try:
+                        _soft, _hard = resource.getrlimit(_res)
+                        _nh = _val if (_hard == resource.RLIM_INFINITY or _val < _hard) else _hard
+                        resource.setrlimit(_res, (_val, _nh))
+                    except (ValueError, OSError):
+                        pass   # can't lower that limit (unprivileged / already lower) -> run uncapped
+            kwargs["preexec_fn"] = _apply_rlimits
     # Don't hand the child code the host's secrets (review C2): a `print(os.environ)` or a stack
     # trace would otherwise exfiltrate LLM_API_KEY / cloud creds into the durable stdout tail. Drop
     # env vars whose NAME looks secret, but keep everything a process needs (PATH, SYSTEMROOT, …)
@@ -266,16 +333,35 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     if log_path:
         full_env.setdefault("PYTHONUNBUFFERED", "1")
     try:
+        # Keep the pipes binary and decode only after the bounded drain.  TextIOWrapper.readline()
+        # has no size limit: one candidate-controlled, newline-free stdout record can make it buffer
+        # the whole record in host RAM before our tail cap gets a chance to run.  `_tee_drain` reads
+        # fixed-size binary chunks instead, preserving the public str return values without that DoS.
         proc = subprocess.Popen(
             argv, cwd=str(wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", env=full_env, **kwargs)
-    except OSError as e:
+            env=full_env, **kwargs)
+    except (OSError, ValueError, IndexError) as e:
+        # ValueError: embedded NUL in an agent/operator-authored argv/env item.  IndexError: empty
+        # argv.  Both are controlled launch failures, not reasons to crash the whole engine.
+        if docker_cidfile is not None:
+            docker_cidfile.unlink(missing_ok=True)
         return -1, "", f"failed to launch: {e}", False
     # ALWAYS drain through the memory-bounded reader (log_path=None keeps no file but still caps the
     # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
+    if docker_cidfile is not None:
+        # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
+        # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
+        # the path with a directory so unlink raises IsADirectoryError) turn a normal timeout into an
+        # engine-visible crash on the untrusted eval path.
+        try:
+            if timed_out:
+                _remove_docker_container(str(argv[0]), docker_cidfile)
+            docker_cidfile.unlink(missing_ok=True)
+        except OSError:
+            pass
     return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
 
 
@@ -285,15 +371,35 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
 _run_argv = run_argv
 
 
+def _remove_docker_container(docker: str, cidfile: Path) -> None:
+    """Best-effort cleanup after the docker CLI itself was killed. argv execution + strict CID shape
+    avoid a shell/injection surface; `--rm` remains the normal successful-exit cleanup path."""
+    try:
+        cid = cidfile.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return
+    if not re.fullmatch(r"[0-9a-fA-F]{12,64}", cid):
+        return
+    try:
+        subprocess.run([docker, "rm", "-f", cid], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
-    """Drain `proc`'s stdout+stderr concurrently: mirror every line to `log_path` (a live,
-    tail-able combined log) while accumulating bounded per-stream buffers for the return value.
+    """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
+    `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
-    threads (daemon) own the pipes so the parent never deadlocks on a chatty child."""
+    threads (daemon) own the pipes so the parent never deadlocks on a chatty child.  Chunked reads
+    matter for the no-newline case: `readline()` can allocate an arbitrarily large candidate-owned
+    line before returning, which bypasses any cap applied after the read."""
+    import codecs
     import threading
     import time as _time
 
     cap = max(max_output_bytes * 4, 256_000)        # bound memory; the FILE (when set) keeps the full log
+    read_chunk = 64 * 1024                          # hard upper bound for one pipe read/allocation
     logf = None
     if log_path:                                    # log_path=None -> memory-bounded drain, no file
         try:
@@ -304,31 +410,55 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
             # Degrade to no live-file; the drain + deadline + tree-kill below still run.
             logf = None
     lock = threading.Lock()
-    bufs = {"out": [], "err": []}
+    bufs: dict[str, list[bytes]] = {"out": [], "err": []}
 
     def _pump(stream, key):
         size = 0
+        decoder = codecs.getincrementaldecoder("utf-8")("replace") if logf is not None else None
         try:
-            for line in iter(stream.readline, ""):
+            # BufferedReader.read1 returns currently-available pipe data (up to read_chunk), so live
+            # logs still update promptly; the fallback keeps the helper friendly to simple test fakes.
+            read = getattr(stream, "read1", None) or stream.read
+            while True:
+                chunk = read(read_chunk)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):          # defensive compatibility with a text-stream fake
+                    chunk = chunk.encode("utf-8", "replace")
                 buf = bufs[key]
-                buf.append(line)
-                size += len(line)
-                if size > cap * 2:                  # collapse to the last `cap` chars (metric is last line)
-                    joined = "".join(buf)[-cap:]
-                    buf.clear(); buf.append(joined); size = len(joined)
+                buf.append(chunk)
+                size += len(chunk)
+                if size > cap * 2:                  # collapse to the last `cap` bytes (metric is last line)
+                    joined = b"".join(buf)[-cap:]
+                    buf.clear()
+                    buf.append(joined)
+                    size = len(joined)
                 if logf is not None:
+                    text = decoder.decode(chunk, final=False)
                     with lock:
-                        logf.write(line)
+                        logf.write(text)
                         logf.flush()
         except Exception:
             pass
         finally:
-            try: stream.close()
-            except Exception: pass
+            if logf is not None and decoder is not None:
+                try:
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        with lock:
+                            logf.write(text)
+                            logf.flush()
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     t_out = threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True)
     t_err = threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)
-    t_out.start(); t_err.start()
+    t_out.start()
+    t_err.start()
     timed_out = False
     deadline = _time.monotonic() + timeout
     while True:
@@ -338,16 +468,24 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
         except subprocess.TimeoutExpired:
             if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
                 _kill_tree(proc)
-                try: proc.wait(timeout=10)
-                except Exception: pass
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
                 timed_out = True
                 break
-    t_out.join(timeout=5); t_err.join(timeout=5)    # let the final lines flush before we read the buffers
+    # Let the final lines flush before we read the buffers.
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
     if logf is not None:
-        try: logf.close()
-        except Exception: pass
+        try:
+            logf.close()
+        except Exception:
+            pass
     rc = proc.returncode if proc.returncode is not None else -1
-    return rc, "".join(bufs["out"]), "".join(bufs["err"]), timed_out
+    out = b"".join(bufs["out"]).decode("utf-8", "replace")
+    err = b"".join(bufs["err"]).decode("utf-8", "replace")
+    return rc, out, err, timed_out
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:
@@ -384,9 +522,15 @@ class SubprocessSandbox:
     box, so they are best-effort, not a boundary."""
 
     def __init__(self, python: Optional[str] = None, max_output_bytes: int = 64_000,
+                 mem_bytes: Optional[int] = None, fsize_bytes: Optional[int] = None,
                  **_: object):  # ignore tier-specific kwargs (symmetry with DockerSandbox)
         self.python = python or sys.executable
         self.max_output_bytes = max_output_bytes
+        # Best-effort resource caps on the eval child (None = off). See run_argv's preexec_fn:
+        # mem_bytes = RLIMIT_AS (virtual, off for CUDA/torch); fsize_bytes = RLIMIT_FSIZE (per-file,
+        # off where large checkpoints are written).
+        self.mem_bytes = mem_bytes
+        self.fsize_bytes = fsize_bytes
 
     def run(self, code: str, workdir: str, timeout: float = 30.0,
             env: Optional[dict] = None, cancel=None) -> RunResult:
@@ -395,7 +539,8 @@ class SubprocessSandbox:
         (wd / "solution.py").write_text(code, encoding="utf-8")
         rc, out, err, to = _run_argv(
             [self.python, "solution.py"],  # by name, relative to cwd -> no path doubling
-            str(wd), timeout, env, self.max_output_bytes, cancel)
+            str(wd), timeout, env, self.max_output_bytes, cancel,
+            mem_bytes=self.mem_bytes, fsize_bytes=self.fsize_bytes)
         # Discard metric/trials/extras from a TIMED-OUT run: a process killed at the deadline may have
         # printed a partial/misleading metric line before hanging. Matches DockerSandbox.run and
         # command_eval.run_command_eval, which both null these out on timeout.
@@ -439,6 +584,10 @@ class DockerSandbox:
         wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
         (wd / "solution.py").write_text(code, encoding="utf-8")
+        # Bound BEFORE int() and BEFORE embedding the deadline into the container argv.  Bounding only
+        # inside host-side run_argv is too late: NaN/inf crash int(), while a huge finite value leaves
+        # the daemon-owned container running long after the bounded docker CLI has been killed.
+        timeout = finite_timeout(timeout, 30.0)
         envs = []
         for k, v in (env or {}).items():            # pass env into the container explicitly
             envs += ["-e", f"{k}={v}"]
@@ -472,11 +621,14 @@ class DockerSandbox:
 
 
 def make_sandbox(trust_mode: str = "trusted_local", *, image: Optional[str] = None,
-                 **kwargs) -> Sandbox:
+                 mem_local: str = "", fsize_local: str = "", **kwargs) -> Sandbox:
     """Select the sandbox tier from the trust mode (ADR-13). `image` is routed only to the
-    Docker tier (the subprocess tier ignores it)."""
+    Docker tier (the subprocess tier ignores it); `mem_local`/`fsize_local` (human sizes like "8g")
+    are the trusted-local RLIMIT_AS host-OOM and RLIMIT_FSIZE disk-fill caps, routed only to the
+    subprocess tier."""
     if trust_mode == "trusted_local":
-        return SubprocessSandbox(**kwargs)
+        return SubprocessSandbox(mem_bytes=parse_mem_bytes(mem_local),
+                                 fsize_bytes=parse_mem_bytes(fsize_local), **kwargs)
     if trust_mode == "untrusted":
         return DockerSandbox(image=image or "python:3.12-slim", **kwargs)
     if trust_mode == "hostile":

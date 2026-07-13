@@ -156,7 +156,9 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
 
 Bind to `127.0.0.1` (the default) for local use. The control plane is **unauthenticated** unless you
 set a token, so it is not placed on the LAN implicitly. To serve beyond localhost, set
-`LOOPLAB_UI_TOKEN` and bind to `0.0.0.0`.
+`LOOPLAB_UI_TOKEN`, bind to `0.0.0.0`, and add the public hostname to the comma-separated
+`LOOPLAB_UI_HOSTS` allow-list. Requests with any other Host are rejected, closing DNS-rebinding
+attacks against the local API.
 
 The token is never embedded in HTML. The owner enters it at **Unlock LoopLab controls** and it remains
 in that tab's `sessionStorage`. True review links cannot be created in anonymous mode; the reviewer

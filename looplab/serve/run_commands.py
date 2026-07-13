@@ -98,27 +98,38 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_PAUSE: frozenset(),
     EV_RESUME: frozenset(),
     EV_RUN_REOPENED: frozenset(),
-    EV_NODE_ABORT: frozenset({"node_id", "reason"}),
-    EV_NODE_RESET: frozenset({"node_id", "from_stage"}),
+    EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
+    EV_NODE_RESET: frozenset({"node_id", "generation", "from_stage"}),
     EV_BUDGET_EXTEND: frozenset(
         {"add_nodes", "max_seconds", "max_eval_seconds", "timeout", "max_parallel"}),
     EV_HINT: frozenset({"text", "replace"}),
     EV_SET_STRATEGY: frozenset({"strategy"}),
-    EV_FORCE_CONFIRM: frozenset({"node_id"}),
-    EV_FORCE_ABLATE: frozenset({"node_id"}),
-    EV_FORK: frozenset({"from_node_id"}),
+    EV_FORCE_CONFIRM: frozenset({"node_id", "generation"}),
+    EV_FORCE_ABLATE: frozenset({"node_id", "generation"}),
+    EV_FORK: frozenset({"from_node_id", "generation"}),
     EV_INJECT_NODE: frozenset({
-        "idea", "parent_id", "parent_ids", "code", "files", "deleted", "origin",
+        "idea", "parent_id", "parent_ids", "parent_generations", "code", "files", "deleted", "origin",
         "source_run", "source_node"}),
     EV_DEEP_RESEARCH: frozenset(),
-    EV_APPROVAL_GRANTED: frozenset({"node_id"}),
+    EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),
     EV_SPEC_APPROVED: frozenset(),
     EV_ANNOTATION: frozenset({"node_id", "text"}),
-    EV_PROMOTE: frozenset({"node_id", "alias"}),
+    EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
 }
 assert set(CONTROL_DATA_FIELDS) == set(CONTROL_SPECS), "every control event needs a data allowlist"
+
+_LIFECYCLE_CONTROL_TARGETS = {
+    EV_NODE_ABORT: "node_id",
+    EV_NODE_RESET: "node_id",
+    EV_APPROVAL_GRANTED: "node_id",
+    EV_FORCE_CONFIRM: "node_id",
+    EV_FORCE_ABLATE: "node_id",
+    EV_FORK: "from_node_id",
+    EV_PROMOTE: "node_id",
+}
+_ABSENT = object()
 
 
 TERMINAL_STATUSES = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
@@ -309,19 +320,20 @@ def _process_identity(pid: Optional[int]) -> Optional[str]:
 
 
 def task_file_for(rd: Path) -> Optional[str]:
-    """Resolve the same self-describing task source used by the legacy resume route."""
-    task_file: Optional[str] = None
+    """Resolve the immutable run snapshot, with a safe existing-file legacy fallback."""
+    snapshot = rd / "task.snapshot.json"
+    if snapshot.is_file():
+        return str(snapshot)
     meta = rd / "ui_meta.json"
-    if meta.exists():
+    if meta.is_file():
         try:
             row = json.loads(meta.read_text(encoding="utf-8"))
-            if isinstance(row, dict) and row.get("task_file"):
-                task_file = str(row["task_file"])
+            raw = row.get("task_file") if isinstance(row, dict) else None
+            if raw and Path(raw).is_file():
+                return str(raw)
         except (OSError, ValueError, TypeError):
-            task_file = None
-    if not task_file and (rd / "task.snapshot.json").exists():
-        task_file = str(rd / "task.snapshot.json")
-    return task_file
+            pass
+    return None
 
 
 def _normalize_finalize_data(data: dict) -> dict:
@@ -403,18 +415,51 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         return value
 
     if event_type == EV_NODE_RESET:
-        nid = _node("node_id")
         raw_stage = data.get("from_stage", "eval")
         if not isinstance(raw_stage, str):
             raise HTTPException(400, "from_stage must be a string")
         stage = raw_stage.strip()
         if not stage or len(stage) > 64:
             raise HTTPException(400, "from_stage must be a non-empty stage name")
-        data = {"node_id": nid, "from_stage": stage}
+        data["from_stage"] = stage
 
-    if event_type == EV_APPROVAL_GRANTED and data.get("node_id") is not None:
-        nid = _node("node_id")
-        data["node_id"] = nid
+    target_key = _LIFECYCLE_CONTROL_TARGETS.get(event_type)
+    if target_key is not None:
+        current = _state()
+        raw_nid = data.get(target_key)
+        if event_type == EV_APPROVAL_GRANTED and raw_nid is None:
+            best = current.best()
+            if best is None:
+                raise HTTPException(400, "run has no evaluated node to approve")
+            nid = best.id
+        else:
+            nid = _strict_integer(raw_nid, target_key)
+            if nid < 0:
+                raise HTTPException(400, f"{target_key} must be non-negative")
+        node = current.nodes.get(nid)
+        if node is None:
+            raise HTTPException(404, f"no node #{nid} in this run")
+        if node.tombstoned:
+            raise HTTPException(409, f"node #{nid} is tombstoned and cannot be controlled")
+        if nid in current.aborted_nodes and event_type not in (EV_NODE_ABORT, EV_NODE_RESET):
+            raise HTTPException(409, f"node #{nid} is aborted; reset it before {event_type}")
+        raw_generation = data.get("generation", _ABSENT)
+        if raw_generation is _ABSENT:
+            if node.attempt != 0:
+                raise HTTPException(
+                    409, f"stale {event_type}: generation is required "
+                         f"(current generation is {node.attempt})")
+            generation = 0
+        else:
+            generation = _strict_integer(raw_generation, "generation")
+            if generation < 0:
+                raise HTTPException(400, "generation must be non-negative")
+        if generation != node.attempt:
+            raise HTTPException(
+                409, f"stale {event_type}: node #{nid} is generation "
+                     f"{node.attempt}, not {generation}")
+        data[target_key] = nid
+        data["generation"] = generation
 
     if event_type == EV_INJECT_NODE and data.get("source_run") and data.get("source_node") is not None:
         sr = str(data.pop("source_run"))
@@ -430,6 +475,10 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         snode = sst.nodes.get(sn)
         if snode is None:
             raise HTTPException(404, f"no experiment #{sn} in run {sr}")
+        if snode.tombstoned:
+            raise HTTPException(409, f"source experiment #{sn} in run {sr} is tombstoned")
+        if sn in sst.aborted_nodes:
+            raise HTTPException(409, f"source experiment #{sn} in run {sr} is aborted")
         sidea = snode.idea.model_dump(mode="json")
         note = f"imported from run {sr} #{sn}"
         base = (sidea.get("rationale") or "").strip()
@@ -539,7 +588,10 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, "strategy must change policy, policy_params, or fidelity")
         data["strategy"] = clean_strategy
     elif event_type == EV_INJECT_NODE:
-        allowed_inject = {"idea", "parent_id", "parent_ids", "code", "files", "deleted", "origin"}
+        allowed_inject = {
+            "idea", "parent_id", "parent_ids", "parent_generations",
+            "code", "files", "deleted", "origin",
+        }
         unknown_inject = set(data) - allowed_inject
         if unknown_inject:
             raise HTTPException(
@@ -575,6 +627,37 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                     raise HTTPException(404, f"no node #{value} in this run")
                 normalized_parents.append(value)
             data["parent_ids"] = normalized_parents
+        parents = ([data["parent_id"]] if data.get("parent_id") is not None
+                   else list(data.get("parent_ids") or []))
+        if len(set(parents)) != len(parents):
+            raise HTTPException(400, "parent ids must be unique")
+        raw_snapshot = data.get("parent_generations", _ABSENT)
+        if raw_snapshot is not _ABSENT and not isinstance(raw_snapshot, dict):
+            raise HTTPException(400, "parent_generations must be an object")
+        if raw_snapshot is _ABSENT:
+            if any(_state().nodes[pid].attempt != 0 for pid in parents):
+                raise HTTPException(409, "parent generation is required after node reset")
+            raw_snapshot = {str(pid): 0 for pid in parents}
+        if len(raw_snapshot) != len(parents):
+            raise HTTPException(400, "parent generation snapshot does not match parents")
+        normalized_snapshot: dict[str, int] = {}
+        for pid in parents:
+            parent = _state().nodes[pid]
+            if parent.tombstoned:
+                raise HTTPException(409, f"parent #{pid} is tombstoned")
+            if pid in _state().aborted_nodes:
+                raise HTTPException(409, f"parent #{pid} is aborted")
+            raw_generation = raw_snapshot.get(str(pid), raw_snapshot.get(pid, _ABSENT))
+            if raw_generation is _ABSENT:
+                raise HTTPException(400, f"missing generation for parent #{pid}")
+            generation = _strict_integer(raw_generation, "parent generation")
+            if generation < 0:
+                raise HTTPException(400, "parent generation must be non-negative")
+            if generation != parent.attempt:
+                raise HTTPException(
+                    409, f"stale parent #{pid}: current generation is {parent.attempt}")
+            normalized_snapshot[str(pid)] = generation
+        data["parent_generations"] = normalized_snapshot
         if data.get("code") is not None and not isinstance(data["code"], str):
             raise HTTPException(400, "code must be a string or null")
         files = data.get("files")
@@ -1471,8 +1554,8 @@ class RunCommandService:
         if incomplete_finalize_scope(events) is not None:
             return True
         state = state or self.srv.state(rd)
-        return bool(state.stop_requested and (
-            not state.finished or str(state.stop_reason or "").lower() == "error"))
+        return bool(state.finalization_pending() or (state.stop_requested and (
+            not state.finished or str(state.stop_reason or "").lower() == "error")))
 
     def _pending_finalize_intent(self, rd: Path):
         """Return the latest canonical external/legacy run_abort and its semantic digest."""
@@ -2371,7 +2454,8 @@ class RunCommandService:
             events = self._events(rd)
             # New-format engines publish this only after cost/reflection/read-model/trace/tree are
             # complete. A legacy terminal event has no explicit scope and stays backward compatible.
-            if incomplete_finalize_scope(events) is not None:
+            if (incomplete_finalize_scope(events) is not None
+                    or state.finalization_pending()):
                 return False
             # An attached record observes an external/legacy finalize rather than owning a marked
             # intent. Once replay says that same stop is non-error finished and the driver released

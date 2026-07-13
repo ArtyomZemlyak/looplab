@@ -25,11 +25,10 @@ _UNSET_TRACE = object()
 
 
 class EventLogCorruptionError(RuntimeError):
-    """A MID-FILE divergence (a COMPLETE corrupt line followed by MORE complete records) was found in
-    an append-only event log. `read_all` stops at the corrupt line, so appending would durably grow a
-    tail behind the unreadable boundary that `fold` can never see — an invisible tail (arch-review §3
-    P0-4). The store therefore FAILS CLOSED: no append until an operator runs `looplab repair-log`.
-    Reads still return the recoverable prefix (repair needs them). Carries the `log_divergence` detail."""
+    """A COMPLETE corrupt record was found in an append-only event log. `read_all` stops at that
+    record, so even when it is currently the last line, the next append would create a durable tail
+    that `fold` can never see. The store therefore FAILS CLOSED until `looplab repair-log` backs up and
+    truncates the invalid record. Reads still return the recoverable prefix."""
 
     def __init__(self, path: "str | os.PathLike", detail: dict):
         self.path = str(path)
@@ -37,9 +36,25 @@ class EventLogCorruptionError(RuntimeError):
         run_dir = Path(path).parent
         super().__init__(
             f"event log {path} is corrupted at line {detail.get('corrupt_line')}: "
-            f"{detail.get('dropped_lines')} record(s) after it stay on disk but are DROPPED on "
-            f"replay (an invisible tail). Refusing to append. Run `looplab repair-log {run_dir}` "
+            f"the newline-terminated record is invalid and {detail.get('dropped_lines')} later "
+            f"record(s) are DROPPED on replay. Refusing to append. Run `looplab repair-log {run_dir}` "
             f"to back up and truncate the log to its last valid boundary before resuming.")
+
+
+class EventStoreConcurrencyError(RuntimeError):
+    """Optimistic-concurrency (explicit-seq) check failed on `append(expected_last_seq=...)`: the log
+    tail moved between the caller reading state and appending, so another writer landed an event in
+    between. The lean 'explicit seq' half of P1-12 (arch-review §2): the engine writer is already
+    lock-serialized, so this is for a CALLER that wants to append only against the exact state it saw
+    (e.g. a UI control intent raised on a now-stale view). Full multi-writer CAS stays deferred."""
+
+    def __init__(self, path: "str | os.PathLike", expected: int, actual: int):
+        self.path = str(path)
+        self.expected = int(expected)
+        self.actual = int(actual)
+        super().__init__(
+            f"append to {path} expected the log to be at seq {expected}, but it is at {actual} — "
+            f"another writer appended in between; re-read the state and retry.")
 
 
 @contextmanager
@@ -160,13 +175,13 @@ def write_jsonl_atomic(path: str | os.PathLike, rows, *, dumps=orjson.dumps) -> 
 
 
 def log_divergence(path: str | os.PathLike) -> Optional[dict]:
-    """Detect a MID-FILE corruption, distinct from the normal torn tail. `iter_jsonl` STOPS at the
+    """Detect a COMPLETE-record corruption, distinct from the normal torn tail. `iter_jsonl` STOPS at the
     first bad line, so a byte flipped in the MIDDLE of an append-only log — impossible with a single
     local writer, but seen on FUSE / NFS / S3 mounts — silently truncates the replay to the prefix,
-    dropping a valid tail with no signal. Returns `{good_records, corrupt_line, dropped_lines}` when a
-    COMPLETE (newline-terminated) corrupt line is followed by MORE complete lines (the divergence),
-    else None (a bad LAST line is just a torn tail — expected, not a divergence). Diagnostic only: the
-    fold stays pure; callers (resume / run load) surface this so a truncating corruption isn't silent."""
+    dropping a valid tail with no signal. Returns `{good_records, corrupt_line, dropped_lines}` for
+    any invalid COMPLETE (newline-terminated) line, even when it is currently last. Only a final line
+    WITHOUT a newline is a normal torn write: append can safely heal it before writing. Treating an
+    invalid complete last line as harmless lets the next append create an invisible tail behind it."""
     p = Path(path)
     if not p.exists():
         return None
@@ -198,10 +213,8 @@ def log_divergence(path: str | os.PathLike) -> Optional[dict]:
                     ok = False
         if not ok:
             dropped = sum(1 for later in complete[i + 1:] if later.strip())
-            if dropped:                       # a valid tail exists AFTER the corrupt complete line
-                return {"good_records": sum(1 for e in complete[:i] if e.strip()),
-                        "corrupt_line": i + 1, "dropped_lines": dropped}
-            return None                       # corrupt line is effectively the tail — not a divergence
+            return {"good_records": sum(1 for e in complete[:i] if e.strip()),
+                    "corrupt_line": i + 1, "dropped_lines": dropped}
     return None
 
 
@@ -217,8 +230,10 @@ def repair_log(path: str | os.PathLike) -> dict:
     if div is None:
         return {}
     raw = p.read_bytes()
-    ts = int(time.time())
-    backup = p.with_name(p.name + f".corrupt-{ts}.bak")
+    ts_ns = time.time_ns()
+    ts = ts_ns // 1_000_000_000
+    # Nanosecond suffix: two repairs in the same second must never overwrite forensic evidence.
+    backup = p.with_name(p.name + f".corrupt-{ts_ns}.bak")
     backup.write_bytes(raw)  # full original preserved before we truncate
     # Truncate to the last valid boundary: keep every COMPLETE line before the first corrupt one. Those
     # lines are newline-terminated, so re-joining reproduces the exact bytes iter_jsonl would have read.
@@ -281,6 +296,8 @@ class EventStore:
         # read_all() is amortized O(new events). `_cache_bytes` always ends on a newline boundary.
         self._cache: list[Event] = []
         self._cache_bytes: int = 0
+        self._cache_mtime_ns: Optional[int] = None
+        self._cache_identity: Optional[tuple[int, int]] = None
         # The abort watcher (and, under max_parallel>1, several concurrent watchers) call read_all()
         # from worker THREADS while the main loop may also read — guard the cache top-up so a
         # concurrent extend/offset update can't race into a corrupt cache.
@@ -292,19 +309,19 @@ class EventStore:
         # this intra-process lock keeps seq-derivation + `_seq` update atomic even when the flock is a
         # no-op — no torn line / duplicate seq. Held OUTSIDE the flock (consistent order, no deadlock).
         self._append_lock = threading.Lock()
+        self._divergence: Optional[dict] = None
         self._seq = self._scan_last_seq()
         # Fail closed on a MID-FILE divergence (a corrupt COMPLETE line followed by MORE records —
         # a FUSE/NFS/S3 mount can flip a middle byte; a single local writer never can). read_all()
         # stops at it, so a later append is durable-but-invisible to fold (arch-review §3 P0-4).
-        # Detect ONCE here (O(events) at construction, no per-append re-scan); every append then
-        # refuses until `repair_log` truncates to the last valid boundary. Reads keep returning the
-        # recoverable prefix so repair/inspection still work.
-        self._divergence = log_divergence(self.path)
+        # Seed the diagnostic here; incremental read_all revalidates changed bytes before each
+        # append, so corruption introduced after construction also fails closed without rescanning
+        # unchanged history. Reads keep returning the recoverable prefix for repair/inspection.
+        self._divergence = log_divergence(self.path) or self._divergence
 
     @property
     def divergence(self) -> Optional[dict]:
-        """The mid-file divergence detected at construction (see `EventLogCorruptionError`), or None.
-        Commands check this to fail closed with an operator-friendly message before appending."""
+        """The complete-record corruption currently detected, or None (see the error class)."""
         return self._divergence
 
     def _scan_last_seq(self) -> int:
@@ -370,7 +387,8 @@ class EventStore:
             pass  # best-effort healing; a read still tolerates the torn tail
 
     def append(self, type: str, data: dict[str, Any], *,
-               trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE) -> Event:
+               trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
+               expected_last_seq: "int | None" = None) -> Event:
         """Durably append one event and return it (the envelope with its assigned seq).
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
@@ -379,22 +397,35 @@ class EventStore:
         from max(in-memory, on-disk tail) so a concurrent writer can't mint a duplicate.
         The record is written as one line + flush + best-effort fsync — fsync failures
         (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
-        `_seq` advances only AFTER the durable write succeeds."""
+        `_seq` advances only AFTER the durable write succeeds.
+
+        `expected_last_seq` (P1-12 explicit-seq CAS): when given, the append lands ONLY if the log
+        tail is still exactly that seq at the moment we hold the lock — else raise
+        `EventStoreConcurrencyError`. The check + append are one critical section, so a caller that
+        read state at seq N can guarantee no other event slipped in before its intent (optimistic
+        concurrency for a UI control raised on a possibly-stale view). None = today's behavior."""
         # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
         # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
         # explicit None means "no trace" (so it never inherits the ambient node/eval trace by accident).
-        if self._divergence is not None:
-            # Fail closed: a durable append here would grow an invisible tail behind the corrupt line
-            # (arch-review §3 P0-4). Operator must `repair_log` first. read_all() still works.
-            raise EventLogCorruptionError(self.path, self._divergence)
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
         with self._append_lock, _interprocess_lock(Path(str(self.path) + ".lock")):
+            # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
+            # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
+            # appear mid-run, and appending after it would make every new event invisible to replay.
+            self.read_all()
+            if self._divergence is not None:
+                raise EventLogCorruptionError(self.path, self._divergence)
             self._heal_torn_tail()
             # Derive seq from max(in-memory, on-disk tail) so a concurrent writer can't collide.
             # Single-process: _disk_last_seq == self._seq, so seq == self._seq + 1 (unchanged).
-            seq = max(self._seq, self._disk_last_seq()) + 1
+            cur = max(self._seq, self._disk_last_seq())
+            # P1-12 explicit-seq CAS: reject the append if the tail moved since the caller read state.
+            # Inside the critical section, so the check + write are atomic against another writer.
+            if expected_last_seq is not None and cur != expected_last_seq:
+                raise EventStoreConcurrencyError(self.path, expected_last_seq, cur)
+            seq = cur + 1
             e = Event(seq=seq, ts=time.time(), type=type, data=data,
                       trace_id=trace_id, span_id=span_id)
             line = orjson.dumps(e.model_dump(mode="json"))
@@ -404,6 +435,12 @@ class EventStore:
                 best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise/throttle — must not abort the
                 #                                 engine mid-run (read tolerates a torn final line)
             self._seq = seq
+            # Keep cache bytes + file identity synchronized with our own successful write. Without
+            # this top-up, a store that appended but had not yet read the new record could retain
+            # `_cache_identity=None`; replacing its one-record log with an empty file would then look
+            # indistinguishable from the original pre-create state and an OLD expected seq could pass.
+            # Incremental read makes this O(the single new record), not a full rescan.
+            self.read_all()
         return e
 
     def read_all(self) -> list[Event]:
@@ -413,13 +450,25 @@ class EventStore:
         shrank/was replaced (a heal-truncate or a fresh file) so the cache can never go stale."""
         with self._read_lock:
             try:
-                size = self.path.stat().st_size if self.path.exists() else 0
+                st = self.path.stat() if self.path.exists() else None
+                size = st.st_size if st is not None else 0
+                mtime_ns = st.st_mtime_ns if st is not None else None
+                identity = (st.st_dev, st.st_ino) if st is not None else None
             except OSError:
                 size = 0
-            if size < self._cache_bytes:
-                # File shrank/was replaced (heal-truncate / new run at same path) — rebuild from zero.
+                mtime_ns = None
+                identity = None
+            replaced = (self._cache_identity is not None and identity != self._cache_identity)
+            same_size_rewrite = (size == self._cache_bytes and self._cache_mtime_ns is not None
+                                 and mtime_ns != self._cache_mtime_ns)
+            cache_invalidated = size < self._cache_bytes or replaced or same_size_rewrite
+            if cache_invalidated:
+                # File shrank, was replaced, or was rewritten in place without changing length. The
+                # last case matters on network/FUSE mounts: returning the old cached Events would split
+                # the process from disk truth and could hide a newly-corrupt complete record.
                 self._cache = []
                 self._cache_bytes = 0
+                self._divergence = None
             if size > self._cache_bytes:
                 try:
                     with open(self.path, "rb") as f:
@@ -444,6 +493,25 @@ class EventStore:
                     ok_bytes = consumed   # all records valid — trailing blanks count too
                 self._cache.extend(evs)
                 self._cache_bytes += ok_bytes
+                remainder = new[ok_bytes:]
+                if b"\n" in remainder:
+                    # An unconsumed newline means the first rejected record is COMPLETE, not a normal
+                    # torn tail. Compute exact line/count detail only on this exceptional path.
+                    self._divergence = log_divergence(self.path) or {
+                        "good_records": len(self._cache),
+                        "corrupt_line": len(self._cache) + 1,
+                        "dropped_lines": max(0, remainder.count(b"\n") - 1),
+                    }
+            self._cache_mtime_ns = mtime_ns
+            self._cache_identity = identity
+            if cache_invalidated and hasattr(self, "_seq"):
+                # `_seq` is part of the compare-and-set truth, not merely a next-id optimization.
+                # Keeping the pre-replacement high-water mark would let a caller holding that OLD
+                # tail pass `expected_last_seq` after a reset (and would mint a large seq gap in the
+                # replacement log). Rebase it to the bytes we just reparsed so an old CAS conflicts
+                # and a current CAS continues densely. During __init__, `_scan_last_seq()` calls us
+                # before `_seq` exists, hence the narrow hasattr guard.
+                self._seq = self._cache[-1].seq if self._cache else -1
             # Return a snapshot copy so a caller iterating the result can't be perturbed by a
             # concurrent top-up (and so callers expecting a re-iterable list still work).
             return list(self._cache)

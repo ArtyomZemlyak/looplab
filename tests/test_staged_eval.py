@@ -84,8 +84,10 @@ def test_reset_from_pipeline_stage_sets_rerun_stage_and_clears_on_terminal():
     assert st.nodes[0].failed_stage is None and st.nodes[0].code == "c"   # code kept (eval-type)
     # the re-run's terminal clears the marker
     st2 = fold(base + [_ev("node_reset", {"node_id": 0, "from_stage": "eval"}, 4),
-                       _ev("stage_finished", {"node_id": 0, "name": "eval", "status": "ok"}, 5),
-                       _ev("node_evaluated", {"node_id": 0, "metric": 0.9}, 6)])
+                        _ev("stage_finished", {"node_id": 0, "generation": 1,
+                                               "name": "eval", "status": "ok"}, 5),
+                        _ev("node_evaluated", {"node_id": 0, "generation": 1,
+                                               "metric": 0.9}, 6)])
     assert st2.nodes[0].rerun_stage is None and st2.nodes[0].metric == 0.9
 
 

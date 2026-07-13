@@ -12,7 +12,8 @@ import {
 } from '../src/api.js'
 import {
   assistantDirectIntent, assistantRunChanged, assistantStorageFailureOwnsLock,
-  pollAssistantDirectOnce, presentAssistantCommandResult, submitAssistantDirect,
+  pollAssistantDirectOnce, presentAssistantCommandResult, restoreAssistantDirectEntry,
+  submitAssistantDirect,
 } from '../src/assistantCommand.js'
 
 const CMD_A = `cmd_${'a'.repeat(32)}`
@@ -483,12 +484,19 @@ test('CONTROL wrappers use only the command service, never legacy control/resume
   }, async () => {
     await CONTROL.finalize('demo')
     await CONTROL.resume('demo')
-    await CONTROL.fork('demo', 7)
+    await CONTROL.fork('demo', 7, 3)
+    await CONTROL.merge('demo', [7, 8], { 7: 3, 8: 1 })
   })
-  assert.equal(calls.length, 3)
+  assert.equal(calls.length, 4)
   assert.ok(calls.every(call => call.url === '/proxy/app/api/runs/demo/commands'))
   assert.ok(calls.every(call => !call.url.includes('/control') && !call.url.endsWith('/resume')))
-  assert.deepEqual(calls.map(call => JSON.parse(call.options.body).type), ['run_abort', 'resume', 'fork'])
+  assert.deepEqual(calls.map(call => JSON.parse(call.options.body).type),
+    ['run_abort', 'resume', 'fork', 'inject_node'])
+  assert.deepEqual(JSON.parse(calls[2].options.body).data, { from_node_id: 7, generation: 3 })
+  assert.deepEqual(JSON.parse(calls[3].options.body).data, {
+    idea: { operator: 'merge', rationale: 'merge #7 + #8' },
+    parent_ids: [7, 8], parent_generations: { 7: 3, 8: 1 },
+  })
 })
 
 test('idempotency fallback is UUID v4 shaped', () => {
@@ -527,7 +535,7 @@ test('transport recovery persists the same key before command id and restores it
   assert.equal(loadRunTransport('demo run', storage), null)
 })
 
-test('assistant direct recovery stores the key before POST, a safe numeric arg, and no payload or token', () => {
+test('assistant direct recovery stores the key and exact node lifecycle before POST without payload or token', () => {
   const values = new Map()
   const storage = {
     getItem: key => values.get(key) ?? null,
@@ -537,10 +545,15 @@ test('assistant direct recovery stores the key before POST, a safe numeric arg, 
   const idempotencyKey = '12345678-1234-4123-8123-123456789abc'
   assert.equal(saveAssistantRunTransport('demo', {
     action: 'approve', arg: 12, idempotencyKey, record: { status: 'submitting' },
+  }, storage), false, 'an id-less recovery envelope cannot rebind approval to a later node attempt')
+  assert.equal(saveAssistantRunTransport('demo', {
+    action: 'approve', arg: 12, nodeGeneration: 3,
+    idempotencyKey, record: { status: 'submitting' },
   }, storage), true)
   const saved = loadAssistantRunTransport('demo', storage)
   assert.equal(saved.action, 'approve')
   assert.equal(saved.arg, 12)
+  assert.equal(saved.nodeGeneration, 3)
   assert.equal(saved.idempotencyKey, idempotencyKey)
   assert.equal(saved.commandId, '')
   assert.equal('data' in saved, false)
@@ -573,21 +586,53 @@ test('lost-response remount recovers one logical assistant intent with the store
   const execute = (...args) => { calls.push(args); return response }
   const key = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
   const first = submitAssistantDirect('demo', 'approve', 7, key, {
-    expectedGeneration: GEN_A, execute,
+    expectedGeneration: GEN_A, nodeGeneration: 4, execute,
   })
   const remount = submitAssistantDirect('demo', 'approve', 7, key, {
-    expectedGeneration: GEN_A, execute,
+    expectedGeneration: GEN_A, nodeGeneration: 4, execute,
   })
   assert.equal(calls.length, 0, 'submission starts in a microtask so simultaneous remounts can join it')
   await Promise.resolve()
   assert.equal(calls.length, 1)
-  assert.deepEqual(calls[0].slice(0, 3), ['demo', 'approval_granted', { node_id: 7 }])
+  assert.deepEqual(calls[0].slice(0, 3), [
+    'demo', 'approval_granted', { node_id: 7, generation: 4 },
+  ])
   assert.equal(calls[0][3].idempotencyKey, key)
   assert.equal(calls[0][3].expectedGeneration, GEN_A)
   assert.equal(calls[0][3].waitMs, 0)
   assert.equal(calls[0][3].submitRetries, 0)
   release({ id: 'cmd-same', status: 'accepted' })
   assert.deepEqual(await first, await remount)
+})
+
+test('Assistant remount restores the exact approval generation before same-key submission', async () => {
+  const values = new Map()
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: key => values.delete(key),
+  }
+  const key = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+  assert.equal(saveAssistantRunTransport('demo', {
+    action: 'approve', arg: 7, nodeGeneration: 4, idempotencyKey: key,
+    record: { status: 'submitting' },
+  }, storage), true)
+  const saved = loadAssistantRunTransport('demo', storage)
+  const restored = restoreAssistantDirectEntry(saved, { success: 'approved' }, 'demo', {
+    record: saved.record,
+  })
+  const calls = []
+  await submitAssistantDirect(restored.runId, restored.name, restored.arg, restored.idempotencyKey, {
+    expectedGeneration: restored.expectedGeneration,
+    nodeGeneration: restored.nodeGeneration,
+    execute: (...args) => { calls.push(args); return Promise.resolve({ id: CMD_A, status: 'accepted' }) },
+  })
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].slice(0, 3), [
+    'demo', 'approval_granted', { node_id: 7, generation: 4 },
+  ])
+  assert.equal(calls[0][3].idempotencyKey, key)
+  assert.equal(calls[0][3].expectedGeneration, GEN_A)
 })
 
 test('Assistant id-less recovery keeps its persisted generation after a newer one is observed', async () => {
@@ -677,8 +722,11 @@ test('a pending lock from the other surface cannot be overwritten by stale recov
 
 test('assistant direct intent registry only reconstructs allow-listed deterministic data', () => {
   assert.deepEqual(assistantDirectIntent('finalize'), { type: 'run_abort', data: { reason: 'finalized' } })
-  assert.deepEqual(assistantDirectIntent('approve', 9), { type: 'approval_granted', data: { node_id: 9 } })
-  assert.throws(() => assistantDirectIntent('approve', 'not-a-node'), /valid node id/)
+  assert.deepEqual(assistantDirectIntent('approve', 9, 2), {
+    type: 'approval_granted', data: { node_id: 9, generation: 2 },
+  })
+  assert.throws(() => assistantDirectIntent('approve', 'not-a-node', 2), /valid node id/)
+  assert.throws(() => assistantDirectIntent('approve', 9), /exact node generation/)
   assert.throws(() => assistantDirectIntent('inject', null), /Unsupported direct command/)
 })
 

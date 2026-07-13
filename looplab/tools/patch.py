@@ -143,7 +143,8 @@ class SurfacePolicy:
     OUTSIDE_SURFACE = "outside_surface"
 
     def __init__(self, surface: list[str] | None, protected=None, prefixes: list[str] | None = None,
-                 *, protected_exact: bool = False, check_escapes: bool = True):
+                 *, protected_exact: bool = False, check_escapes: bool = True,
+                 allow_exceptions: list[str] | None = None):
         self.surface = None if surface is None else list(surface)
         self.prefixes = list(prefixes or [])
         self.protected_exact = protected_exact
@@ -151,9 +152,21 @@ class SurfacePolicy:
         # the case-insensitive/forward-slash canonical form once, like gate() always did.
         self.protected = (set(protected or []) if protected_exact
                           else [_ci(g) for g in (protected or [])])
+        # Explicit editable EXCEPTIONS that OVERRIDE the protect-list (F11). A protect glob broad enough
+        # to catch every grader (`**/*grader*.py`) also catches migration scripts that merely CONTAIN
+        # "grade" (upgrade.py / downgrade.py / upgrader.py) — which no glob can distinguish from a real
+        # `pregrader.py`. An explicit exception list carves those back out. EMPTY by default, so every
+        # existing site is byte-for-byte unchanged; only the DEFAULT_PROTECT write path opts in. Matched
+        # case-insensitively like the glob-mode protect list. NOT applied to a manifest's explicit
+        # protect entries — those callers pass no exceptions, so their intent always wins.
+        self.allow_exceptions = [_ci(g) for g in (allow_exceptions or [])]
         self.check_escapes = check_escapes
 
     def _is_protected(self, path: str) -> bool:
+        if self.allow_exceptions:
+            pc_x = _ci(path)
+            if any(pc_x == g or _match(pc_x, g) for g in self.allow_exceptions):
+                return False   # an explicit editable exception overrides the protect-list (F11)
         if self.protected_exact:
             if path in self.protected:
                 return True
@@ -187,26 +200,31 @@ class SurfacePolicy:
 
 
 def gate(diff_text: str, allow: list[str], protect: list[str] | None = None,
-         prefixes: list[str] | None = None) -> dict:
+         prefixes: list[str] | None = None,
+         allow_exceptions: list[str] | None = None) -> dict:
     """Check every target path against the allow-list (globs), the protect-list, and escape
     rules. `ok` iff the patch is non-empty and every path is within the surface AND none is
     protected. A protected path is rejected (reject-not-strip) even when it matches the surface
     — the agent must never edit the eval/grader/metric/adapter files, case-insensitively (the
     surface gate + NTFS are case-insensitive, so a case-variant must not slip through).
     `prefixes` (named multi-editable repo dirs) scopes each repo's surface to its own subdir."""
-    policy = SurfacePolicy(allow, protect, [x.rstrip("/") for x in (prefixes or [])])
+    policy = SurfacePolicy(
+        allow, protect, [x.rstrip("/") for x in (prefixes or [])],
+        allow_exceptions=allow_exceptions,
+    )
     paths = changed_paths(diff_text)
     rejected = [p for p in paths if policy.check(p) is not None]
     return {"ok": bool(paths) and not rejected, "paths": paths, "rejected": rejected}
 
 
 def apply_patch(diff_text: str, repo_dir: str, allow: list[str],
-                protect: list[str] | None = None, prefixes: list[str] | None = None) -> dict:
+                protect: list[str] | None = None, prefixes: list[str] | None = None,
+                allow_exceptions: list[str] | None = None) -> dict:
     """Gate, then `git apply --check` then apply, inside `repo_dir`. Never applies a
     patch that fails the surface gate or the dry-run. `protect` (reject, don't strip — for the
     eval/metric/adapter/grader files) MUST be threaded through so this entry point can't be used to
     overwrite the score source; the live cli_agent path passes it and so should every caller."""
-    g = gate(diff_text, allow, protect, prefixes)
+    g = gate(diff_text, allow, protect, prefixes, allow_exceptions)
     if not g["ok"]:
         return {"applied": False, "paths": g["paths"], "rejected": g["rejected"],
                 "error": "out-of-surface" if g["rejected"] else "empty patch"}

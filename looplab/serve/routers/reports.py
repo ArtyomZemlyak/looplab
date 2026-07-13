@@ -13,6 +13,8 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.engine.finalize import incomplete_finalize_scope
+from looplab.events.replay import fold
 
 
 def _prior_learnings_index(reports_dir: Path) -> str:
@@ -67,7 +69,10 @@ def build_router(srv) -> APIRouter:
 
     def _run_brief(run_id: str, labels: dict) -> dict:
         rd = _run_dir(run_id)
-        st = srv.state(rd)
+        events = srv.events(rd)
+        st = fold(events)
+        finalize_incomplete = (
+            incomplete_finalize_scope(events) is not None or st.finalization_pending())
         best = st.best()
         cfg = {}
         snap = rd / "config.snapshot.json"
@@ -79,7 +84,8 @@ def build_router(srv) -> APIRouter:
         return {"run_id": run_id, "label": labels.get(run_id), "task_id": st.task_id,
                 "goal": st.goal, "direction": st.direction,
                 "model": cfg.get("llm_model"), "policy": cfg.get("policy"),
-                "best_metric": (best.metric if best else None), "phase": _phase(st),
+                "best_metric": (best.metric if best else None),
+                "phase": _phase(st, finalize_incomplete=finalize_incomplete),
                 "nodes": len(st.nodes),
                 "report": st.report if isinstance(st.report, dict) else None}
 

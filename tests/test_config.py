@@ -17,6 +17,26 @@ def test_config_lower_bounds():
     assert Settings().max_parallel == 1  # default still valid
 
 
+def test_nonfinite_time_budgets_are_rejected_at_model_boundary():
+    from pydantic import ValidationError
+    from looplab.core.models import Idea
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        # Settings are operator config, validated ONCE at the boundary and never reconstructed from an
+        # event log — so a non-finite time budget must fail LOUD.
+        with pytest.raises(ValidationError):
+            Settings(timeout=bad)
+        with pytest.raises(ValidationError):
+            Settings(max_eval_seconds=bad)
+        # `Idea.eval_timeout`, by contrast, is LLM-authored data that the fold reconstructs via
+        # `Idea(**d["idea"])` on EVERY replay. Rejecting there would raise inside the fold and silently
+        # DROP the node from an old log (invariant-5 back-compat break, F1). It must fail SAFE instead:
+        # coerce a non-finite/non-positive budget to None (== "use the run default"), the same meaning
+        # the consumer already honors (`if etv and etv > 0`). Safety intent preserved (no infinite eval
+        # timeout reaches the sandbox), replay preserved.
+        assert Idea(operator="draft", eval_timeout=bad).eval_timeout is None
+
+
 # C1 — resume reconstructs run-only settings from the snapshot
 def test_settings_roundtrip_through_snapshot():
     s = Settings()

@@ -22,7 +22,7 @@ from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec
 from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
 from looplab.tools.perm_modes import (
-    DEFAULT_PROTECT, approval_allows, decide_action, default_approver)
+    DEFAULT_PROTECT, DEFAULT_PROTECT_EXCEPTIONS, approval_allows, decide_action, default_approver)
 
 _MAX_PREVIEW = 4000
 
@@ -89,6 +89,10 @@ class WriteTools:
         self._roots = _pathsafe.resolve_roots(roots)
         self.mode = mode
         self.protect = list(protect if protect is not None else DEFAULT_PROTECT)
+        # F11: only the DEFAULT protect list carries the broad grader globs, so its migration-script
+        # exceptions apply only here — an operator/manifest that passes its OWN protect list means it
+        # exactly, and gets no exception override.
+        self._protect_exceptions = None if protect is not None else DEFAULT_PROTECT_EXCEPTIONS
         self.approver = approver or default_approver
         self.repo_root = Path(repo_root).resolve() if repo_root else (self._roots[0] if self._roots else Path.cwd())
         self.applied: list[dict] = []
@@ -153,7 +157,8 @@ class WriteTools:
         # resolve_within on the resolved roots, not globs) and check_escapes=False (a traversal
         # can't survive resolve_within). Built per call so a live mutation of `self.protect`
         # keeps taking effect, exactly like the old inline loop.
-        policy = SurfacePolicy(None, self.protect, check_escapes=False)
+        policy = SurfacePolicy(None, self.protect, check_escapes=False,
+                               allow_exceptions=self._protect_exceptions)
         return policy.check(rel) == SurfacePolicy.PROTECTED
 
     def _check(self, path: str):
@@ -257,7 +262,8 @@ class WriteTools:
         if not diff.strip():
             return "(empty diff)"
         allow = ["**/*"]
-        g = _gate(diff, allow, self.protect)
+        g = _gate(diff, allow, self.protect,
+                  allow_exceptions=self._protect_exceptions)
         if not g["ok"]:
             if g["rejected"]:
                 return f"(refused: out-of-surface/protected paths: {', '.join(g['rejected'])})"
@@ -292,7 +298,10 @@ class WriteTools:
             for rp in g["paths"]:
                 if not self.backups.save(self.repo_root / rp):
                     return "(refused: could not create every recovery snapshot; no patch was applied)"
-        res = _apply_patch(diff, str(self.repo_root), allow, self.protect)
+        res = _apply_patch(
+            diff, str(self.repo_root), allow, self.protect,
+            allow_exceptions=self._protect_exceptions,
+        )
         if not res.get("applied"):
             return f"(patch failed: {res.get('error', 'unknown')})"
         self.applied.append(action)
@@ -311,8 +320,8 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
-        if self.backups:
-            self.backups.save(p)
+        if self.backups and not self.backups.save(p):
+            return "(refused: could not create a recovery snapshot; no file change was applied)"
         p.unlink()
         self.applied.append(action)
         return f"(deleted {rel})"

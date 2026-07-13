@@ -274,21 +274,24 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
-        const f = checkedCommand(await CONTROL.merge(runId, [arg.from, arg.to]), {
+        const ids = [arg.from, arg.to]
+        const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
+        const f = checkedCommand(await CONTROL.merge(runId, ids, generations), {
           success: `Merge #${arg.from} + #${arg.to} applied — the engine is processing it`, noop: 'That merge was already satisfied',
           executing: `Merge #${arg.from} + #${arg.to} requested — waiting for the engine`, failure: 'Merge failed',
         })
         showToast(f.message); return
       }
       const id = arg
+      const generation = live2?.nodes?.[id]?.attempt
       if (action === 'explore') {
-        const f = checkedCommand(await CONTROL.fork(runId, id), {
+        const f = checkedCommand(await CONTROL.fork(runId, id, generation), {
           success: `Fork from #${id} applied — the engine is processing it`, noop: `Branch from #${id} already exists`,
           executing: `Fork from #${id} requested — waiting for the engine`, failure: 'Fork failed',
         }); showToast(f.message)
       }
       else if (action === 'ablate') {
-        const f = checkedCommand(await CONTROL.forceAblate(runId, id), {
+        const f = checkedCommand(await CONTROL.forceAblate(runId, id, generation), {
           success: `Ablation of #${id} applied — the engine is processing it`, noop: `Ablation of #${id} was already satisfied`,
           executing: `Ablation of #${id} requested — waiting for the engine`, failure: 'Ablation failed',
         }); showToast(f.message)
@@ -303,7 +306,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
       else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
         const stage = action.split(':')[1]
-        const f = checkedCommand(await CONTROL.resetNode(runId, id, stage), {
+        const f = checkedCommand(await CONTROL.resetNode(runId, id, stage, generation), {
           success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
           executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: 'Reset failed',
         }); showToast(f.message)
@@ -313,7 +316,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         if (!ids.length) { showToast(`#${id}: nothing pending to kill (already evaluated)`); return }
         let waiting = 0
         for (const k of ids) {
-          const f = checkedCommand(await CONTROL.nodeAbort(runId, k), {
+          const f = checkedCommand(await CONTROL.nodeAbort(runId, k, live2?.nodes?.[k]?.attempt), {
             success: `Cancelled #${k}`, noop: `#${k} was already settled`,
             executing: `Cancellation of #${k} requested`, failure: `Could not cancel #${k}`,
           })
@@ -329,7 +332,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const onCanvasSelect = (id) => {
     if (readOnlyMode && mergeFrom != null) { setMergeFrom(null); return }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
-      CONTROL.merge(runId, [mergeFrom, id])
+      const ids = [mergeFrom, id]
+      const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
+      CONTROL.merge(runId, ids, generations)
         .then(record => checkedCommand(record, {
           success: `Merge #${mergeFrom} + #${id} applied — the engine is processing it`, noop: 'That merge was already satisfied',
           executing: `Merge #${mergeFrom} + #${id} requested — waiting for the engine`, failure: 'Merge failed',

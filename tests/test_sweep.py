@@ -17,7 +17,7 @@ from looplab.core.models import Idea
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
-from looplab.runtime.sandbox import SubprocessSandbox, _json_line_trials
+from looplab.runtime.sandbox import RunResult, SubprocessSandbox, _json_line_trials
 from looplab.sweep import enumerate_grid, run_sweep
 from looplab.adapters.toytask import ToyTask
 
@@ -109,6 +109,22 @@ def test_helper_failed_trial_isolated():
     metrics = [t["metric"] for t in trials]
     assert metrics == [1.0, None, 3.0]
     assert "boom" in trials[1]["error"]
+
+
+def test_malformed_trial_items_cannot_crash_the_host_engine(tmp_path):
+    eng = _engine(tmp_path / "run", "min")
+    res = RunResult(exit_code=0, stdout="", stderr="", metric=999.0, timed_out=False,
+                    trials=[1, "bad", {"metric": "junk"},
+                            {"metric": 0.5, "extra_metrics": ["not", "a", "mapping"]}])
+
+    eng._apply_sweep_best(res)
+
+    assert res.metric == 0.5
+    assert res.extra_metrics is None
+
+    res.trials = [1, "bad", None]
+    eng._apply_sweep_best(res)
+    assert res.metric is None
 
 
 def test_clamp_fill_leaves_swept_dims_to_the_grid():

@@ -1,6 +1,8 @@
 """I3 sandbox behavior + I10 variance-gate unit tests."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from looplab.trust.gate import one_se_better
@@ -14,6 +16,78 @@ def test_sandbox_captures_metric(tmp_path):
     assert res.exit_code == 0
     assert res.metric == 42.5
     assert not res.timed_out
+
+
+def test_parse_mem_bytes():
+    from looplab.runtime.sandbox import parse_mem_bytes
+    assert parse_mem_bytes("8g") == 8 * 1024**3
+    assert parse_mem_bytes("512m") == 512 * 1024**2
+    assert parse_mem_bytes("1024k") == 1024 * 1024
+    assert parse_mem_bytes("2t") == 2 * 1024**4
+    assert parse_mem_bytes("1073741824") == 1073741824
+    assert parse_mem_bytes(4096) == 4096
+    for off in ("", "  ", None, "0", "-1g", "garbage"):        # all disable the cap
+        assert parse_mem_bytes(off) is None
+
+
+def test_subprocess_mem_cap_applies_rlimit(tmp_path):
+    """#5 host-OOM guard: with mem_bytes set, the eval child runs under an RLIMIT_AS soft cap, so a
+    runaway allocation gets MemoryError instead of OOM-killing the host. POSIX-only (no rlimit on nt)."""
+    resource = pytest.importorskip("resource")
+    cap = 900 * 1024 * 1024
+    sb = SubprocessSandbox(mem_bytes=cap)
+    # the child reports the RLIMIT_AS it actually runs under -> proves the preexec_fn set it
+    code = ('import resource, json;'
+            ' print(json.dumps({"metric": resource.getrlimit(resource.RLIMIT_AS)[0]}))')
+    res = sb.run(code, str(tmp_path / "capped"), timeout=30.0)
+    assert res.exit_code == 0
+    assert res.metric == cap                                    # soft limit == the requested cap
+
+    # and an allocation past the cap fails rather than being served (would OOM the host uncapped)
+    big = ('x = bytearray(4 * 1024 * 1024 * 1024)\nprint("ALLOCATED", len(x))')
+    res2 = sb.run(big, str(tmp_path / "runaway"), timeout=30.0)
+    assert res2.exit_code != 0 and "ALLOCATED" not in res2.stdout
+
+
+def test_subprocess_mem_cap_off_by_default(tmp_path):
+    # No cap configured -> the child's RLIMIT_AS is untouched (unlimited on a normal box), so the
+    # default trusted-local tier is byte-for-byte unchanged (no regression for CUDA/torch evals).
+    resource = pytest.importorskip("resource")
+    sb = SubprocessSandbox()
+    assert sb.mem_bytes is None
+    code = ('import resource, json;'
+            ' print(json.dumps({"metric": 1.0 if resource.getrlimit(resource.RLIMIT_AS)[0]'
+            ' == resource.RLIM_INFINITY else 0.0}))')
+    res = sb.run(code, str(tmp_path / "uncapped"), timeout=30.0)
+    assert res.exit_code == 0 and res.metric == 1.0
+
+
+def test_make_sandbox_wires_mem_local():
+    from looplab.runtime.sandbox import make_sandbox
+    s = make_sandbox("trusted_local", mem_local="8g", max_output_bytes=1000)
+    assert isinstance(s, SubprocessSandbox) and s.mem_bytes == 8 * 1024**3
+    s2 = make_sandbox("trusted_local")                         # default off
+    assert s2.mem_bytes is None
+
+
+def test_make_sandbox_wires_fsize_local():
+    from looplab.runtime.sandbox import make_sandbox
+    s = make_sandbox("trusted_local", fsize_local="2g")
+    assert isinstance(s, SubprocessSandbox) and s.fsize_bytes == 2 * 1024**3
+    assert make_sandbox("trusted_local").fsize_bytes is None    # default off
+
+
+def test_subprocess_fsize_cap_bounds_a_runaway_write(tmp_path):
+    """#P1-5 disk-fill guard: with fsize_bytes set, a child writing past the per-file cap gets SIGXFSZ
+    instead of filling the disk; a small write under the cap succeeds. POSIX-only."""
+    pytest.importorskip("resource")
+    sb = SubprocessSandbox(fsize_bytes=1 * 1024 * 1024)         # 1 MiB per-file cap
+    ok = sb.run('open("out.bin", "wb").write(b"x" * 1000)\nprint(\'{"metric": 1.0}\')',
+                str(tmp_path / "small"), timeout=30.0)
+    assert ok.exit_code == 0 and ok.metric == 1.0              # small write under the cap is fine
+    big = sb.run('open("out.bin", "wb").write(b"x" * (8 * 1024 * 1024))\nprint("DONE")',
+                 str(tmp_path / "big"), timeout=30.0)
+    assert big.exit_code != 0 and "DONE" not in big.stdout     # 8 MiB > cap -> killed, never completes
 
 
 def test_sandbox_relative_workdir(tmp_path, monkeypatch):
@@ -81,3 +155,151 @@ def test_clamp_tail_bytes_respects_byte_budget_on_multibyte():
     s = "世" * 100                                              # 300 UTF-8 bytes
     out = _clamp_tail_bytes(s, 90)
     assert len(out.encode("utf-8")) <= 90                       # a plain [-90:] would keep 270 bytes
+
+
+@pytest.mark.parametrize("argv", [[], ["python", "bad\x00arg"]])
+def test_run_argv_reports_malformed_argv_as_launch_failure(tmp_path, argv):
+    """An agent-authored empty/NUL argv fails the node; it must not crash the engine process."""
+    from looplab.runtime.sandbox import run_argv
+
+    rc, out, err, timed_out = run_argv(argv, str(tmp_path), timeout=1)
+    assert rc == -1 and out == "" and not timed_out
+    assert "failed to launch" in err
+
+
+def test_tee_drain_reads_newline_free_output_in_bounded_chunks():
+    """A giant candidate-controlled line must never reach an unbounded readline() allocation."""
+    from looplab.runtime.sandbox import _tee_drain
+
+    class GuardedStream:
+        def __init__(self, payload: bytes):
+            self.payload = payload
+            self.pos = 0
+            self.requests = []
+
+        def read1(self, size: int) -> bytes:
+            self.requests.append(size)
+            chunk = self.payload[self.pos:self.pos + size]
+            self.pos += len(chunk)
+            return chunk
+
+        def readline(self, *_args, **_kwargs):
+            raise AssertionError("newline-free output must not use unbounded readline()")
+
+        def close(self):
+            pass
+
+    class Proc:
+        def __init__(self):
+            self.stdout = GuardedStream(b"x" * 1_000_000)  # deliberately no newline
+            self.stderr = GuardedStream(b"")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    proc = Proc()
+    rc, out, err, timed_out = _tee_drain(proc, None, 10.0, 1024, None)
+    assert rc == 0 and not timed_out and err == ""
+    assert proc.stdout.requests and max(proc.stdout.requests) == 64 * 1024
+    # Internal ring is allowed up to 2*max(4*requested, 256k); the public run_argv applies the
+    # tighter requested cap afterward. Most importantly, it never retains the whole 1 MB line.
+    assert 0 < len(out.encode("utf-8")) <= 512_000
+
+
+def test_run_argv_force_removes_daemon_container_after_cancel(tmp_path, monkeypatch):
+    """Killing `docker run` must also kill the daemon-owned container identified by --cidfile."""
+    import io
+    import subprocess
+    import threading
+
+    import looplab.runtime.sandbox as sb
+
+    cid = "a" * 64
+    seen = {"argv": None, "cleanup": None}
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = None
+            seen["argv"] = list(argv)
+            cpath = Path(argv[argv.index("--cidfile") + 1])
+            cpath.write_text(cid, encoding="ascii")
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("docker", timeout)
+            return self.returncode
+
+    cancel = threading.Event()
+    cancel.set()
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    monkeypatch.setattr(sb, "_kill_tree", lambda proc: setattr(proc, "returncode", -9))
+
+    def fake_run(argv, **_kwargs):
+        seen["cleanup"] = list(argv)
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(sb.subprocess, "run", fake_run)
+    rc, _out, _err, timed_out = sb.run_argv(
+        ["docker", "run", "--rm", "image", "python", "solution.py"],
+        str(tmp_path), timeout=30, cancel=cancel,
+    )
+
+    assert rc == -9 and timed_out
+    assert "--cidfile" in seen["argv"]
+    assert seen["cleanup"] == ["docker", "rm", "-f", cid]
+    assert not list(tmp_path.glob(".looplab-container-*.cid"))
+
+
+def test_run_argv_cidfile_lives_outside_the_bind_mounted_workdir(tmp_path, monkeypatch):
+    """SECURITY (#5): the docker cidfile must NOT be created under the workdir, which DockerSandbox
+    bind-mounts into the container as writable /work. If it lived there, untrusted root code could
+    enumerate + overwrite it and redirect the post-timeout `docker rm -f <cid>` at another tenant's
+    container. It must live in the host-only temp dir the container never sees."""
+    import io
+    import looplab.runtime.sandbox as sb
+
+    seen = {"cidfile": None}
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout, self.stderr, self.returncode = io.BytesIO(b""), io.BytesIO(b""), 0
+            seen["cidfile"] = Path(argv[argv.index("--cidfile") + 1])
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    sb.run_argv(["docker", "run", "--rm", "image", "python", "solution.py"],
+                str(tmp_path), timeout=30)
+
+    cidfile = seen["cidfile"]
+    assert cidfile is not None
+    # Not under the bind-mounted workdir…
+    assert tmp_path not in cidfile.parents
+    # …and cleaned up afterwards (no host-temp leak).
+    assert not cidfile.exists()
+
+
+def test_run_argv_cleanup_swallows_a_cidfile_oserror(tmp_path, monkeypatch):
+    """Robustness (#4): a cleanup OSError (e.g. the path turned into a directory, or a FUSE hiccup)
+    must NOT turn a normal run into an engine-visible crash on the untrusted eval path."""
+    import io
+    import looplab.runtime.sandbox as sb
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout, self.stderr, self.returncode = io.BytesIO(b""), io.BytesIO(b""), 0
+            cpath = Path(argv[argv.index("--cidfile") + 1])
+            cpath.mkdir(parents=True, exist_ok=True)   # unlink() on a dir raises IsADirectoryError
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    # Must not raise.
+    rc, _out, _err, _timed = sb.run_argv(
+        ["docker", "run", "--rm", "image", "python", "solution.py"], str(tmp_path), timeout=30)
+    assert rc == 0

@@ -18,11 +18,12 @@ from typing import Optional
 
 import anyio
 
+from looplab.core.models import NodeStatus
 from looplab.engine.options import _UNSET
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
 from looplab.events.types import (EV_DEPS_INSTALLED, EV_NODE_ABORT, EV_NODE_EVALUATED,
-                                  EV_NODE_FAILED, EV_NODE_REPAIRED, EV_PROXY_SCORED,
+                                  EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET, EV_PROXY_SCORED,
                                   EV_REWARD_HACK_SUSPECTED, EV_SPEC_DRIFT, EV_STAGE_FINISHED)
 
 
@@ -43,8 +44,18 @@ class EvaluateMixin:
                         max_es: Optional[float] = None) -> None:
         async with limiter:
           with self.tracer.span("evaluate", new_trace=True, node_id=node_id) as sp:
-            state = fold(self.store.read_all())
-            node = state.nodes[node_id]
+            events_at_start = self.store.read_all()
+            state = fold(events_at_start)
+            node = state.nodes.get(node_id)
+            # A batch is selected from an earlier fold. Before this worker actually starts, reset
+            # (especially implement/propose), abort, tombstone, pause or finish may have won. Never
+            # evaluate blank/not-yet-rebuilt code or terminalize a superseded lifecycle.
+            if (node is None or node.status is not NodeStatus.pending or node.tombstoned
+                    or node.id in state.aborted_nodes or node.rerun_from is not None
+                    or state.paused or state.finished or state.stop_requested):
+                return
+            generation = node.attempt       # immutable identity of THIS worker's node lifecycle
+            start_seq = events_at_start[-1].seq if events_at_start else -1
             sp.set("operator", node.operator)
             # A6 proxy/predictive scoring: cheaply predict this candidate's metric from the observed
             # history and skip a full eval for the doomed bottom fraction (cost lever). Deterministic
@@ -57,10 +68,11 @@ class EvaluateMixin:
                     sp.set_many(proxy_score=round(pred, 6), proxy_skipped=skip)
                     async with self._write_lock:
                         self.store.append(EV_PROXY_SCORED,
-                                          {"node_id": node_id, "score": round(pred, 6), "skipped": skip})
+                                          {"node_id": node_id, "generation": generation,
+                                           "score": round(pred, 6), "skipped": skip})
                         if skip:
                             self.store.append(EV_NODE_FAILED, {
-                                "node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                                "node_id": node_id, "generation": generation,
                                 "error": "skipped by proxy scorer (predicted in the doomed bottom fraction)",
                                 "reason": "proxy_skipped", "eval_seconds": 0.0})
                             self._maybe_crash()
@@ -69,7 +81,15 @@ class EvaluateMixin:
             workdir = self.run_dir / "nodes" / f"node_{node_id}"
             # Phase 2 stage-scoped re-run: REUSE the existing workdir (earlier stages' artifacts — the
             # checkpoint `train` wrote) instead of re-seeding it, which would wipe them.
-            _reuse = bool(node.rerun_stage and workdir.exists())
+            _superseded_marker = workdir / ".looplab-superseded"
+            def _mark_superseded_workdir() -> None:
+                try:
+                    workdir.mkdir(parents=True, exist_ok=True)
+                    _superseded_marker.write_text(str(generation), encoding="ascii")
+                except OSError:
+                    import shutil
+                    shutil.rmtree(workdir, ignore_errors=True)
+            _reuse = bool(node.rerun_stage and workdir.exists() and not _superseded_marker.exists())
             if not _reuse:
                 self._materialize(node, workdir)    # seed tree -> node edits -> task assets
                 # A stage-scoped re-run whose workdir was GONE has nothing to reuse — the re-seed just
@@ -88,6 +108,13 @@ class EvaluateMixin:
             attempt = 0
             dep_rounds = 0                   # env-prep auto-install + re-run rounds (separate from repair attempts)
             total_eval = 0.0                 # summed subprocess wall-clock across all attempts (cost)
+            async def _record_superseded() -> None:
+                async with self._write_lock:
+                    self.store.append(EV_NODE_FAILED, {
+                        "node_id": node_id, "generation": generation,
+                        "error": "superseded by node reset", "reason": "superseded",
+                        "eval_seconds": total_eval})
+                _mark_superseded_workdir()
             triage_outcome = None            # ("abandon"|"reject_idea", rationale) for the terminal event
             err = ""
             reason = "crash"
@@ -107,20 +134,47 @@ class EvaluateMixin:
                 # skip only catches not-yet-started nodes — this kills a running one.
                 cancel = threading.Event()
                 aborted = False
+                superseded = False
                 async with anyio.create_task_group() as _tg:
-                    def _abort_seen() -> bool:   # cached incremental read — no full re-parse each tick
+                    def _intervention_seen() -> str | None:
+                        intervention = None
                         for e in self.store.read_all():
-                            if e.type == EV_NODE_ABORT and e.data.get("node_id") == node_id:
-                                return True
-                        return False
+                            if e.seq <= start_seq or e.data.get("node_id") != node_id:
+                                continue
+                            raw_generation = e.data.get("generation")
+                            # Controls name the lifecycle they intend to mutate. Missing stamps are
+                            # legacy generation-0 only; a stale gen-0 click must never cancel a gen-1
+                            # worker merely because the numeric node id was reused after reset.
+                            if raw_generation is None:
+                                if generation != 0:
+                                    continue
+                            else:
+                                if isinstance(raw_generation, bool):
+                                    continue
+                                try:
+                                    event_generation = int(raw_generation)
+                                except (TypeError, ValueError, OverflowError):
+                                    continue
+                                if (isinstance(raw_generation, float)
+                                        and not raw_generation.is_integer()):
+                                    continue
+                                if event_generation != generation:
+                                    continue
+                            if e.type == EV_NODE_RESET:
+                                return "reset"
+                            if e.type == EV_NODE_ABORT:
+                                intervention = "abort"
+                        return intervention
                     async def _watch():
-                        nonlocal aborted
+                        nonlocal aborted, superseded
                         while True:
                             await anyio.sleep(0.3)
                             if cancel.is_set():
                                 return
-                            if await anyio.to_thread.run_sync(_abort_seen):
-                                aborted = True
+                            intervention = await anyio.to_thread.run_sync(_intervention_seen)
+                            if intervention is not None:
+                                superseded = intervention == "reset"
+                                aborted = intervention == "abort"
                                 cancel.set()
                                 return
                     _tg.start_soon(_watch)
@@ -131,10 +185,16 @@ class EvaluateMixin:
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
                 ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                if superseded:
+                    # The reset discards this lifecycle's metric/state, not compute already spent. A
+                    # stale-generation terminal is fold-budget-only: replay rejects its state fields
+                    # but charges eval_seconds once for this immutable generation.
+                    await _record_superseded()
+                    return                         # the reset owns the next lifecycle generation
                 if aborted and not ok:                       # killed mid-eval by the operator (and the
                     async with self._write_lock:             # eval didn't already finish cleanly first)
                         self.store.append(EV_NODE_FAILED, {
-                            "node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                            "node_id": node_id, "generation": generation,
                             "error": "aborted by operator (killed mid-eval)",
                             "reason": "aborted", "eval_seconds": total_eval})
                         self._maybe_crash()
@@ -170,7 +230,8 @@ class EvaluateMixin:
                         dep_rounds += 1
                         async with self._write_lock:
                             self.store.append(EV_DEPS_INSTALLED, {
-                                "node_id": node_id, "packages": installed, "round": dep_rounds})
+                                "node_id": node_id, "generation": generation,
+                                "packages": installed, "round": dep_rounds})
                         continue   # re-run now that the library is present (no repair attempt spent)
                 # Anti-stuck: when the SAME error recurs with no progress, stop (even under unlimited
                 # repair) so the agent doesn't loop forever on an unfixable failure.
@@ -235,13 +296,20 @@ class EvaluateMixin:
                 attempt += 1
                 async with self._write_lock:
                     self.store.append(EV_NODE_REPAIRED, {
-                        "node_id": node_id, "attempt": attempt, "code": new_code,
+                        "node_id": node_id, "generation": generation,
+                        "attempt": attempt, "code": new_code,
                         "files": repaired_files,
                         "deleted": repaired_deleted,
                         "error_in": err, "triage_action": "repair",
                         "rationale": str(triage.get("rationale", ""))[:300]})
                 node = fold(self.store.read_all()).nodes[node_id]   # node.code now == repaired code
+                if node.attempt != generation:
+                    await _record_superseded()
+                    return                   # reset raced the repair; never adopt its newer lifecycle
                 self._write_node_files(node, workdir)               # re-materialize before re-eval
+                if fold(self.store.read_all()).nodes[node_id].attempt != generation:
+                    await _record_superseded()
+                    return                   # reset raced the filesystem write; force clean next materialize
                 # Choose the NEXT eval's start stage: REUSE the completed earlier stages (the train
                 # checkpoint is still on disk — _write_node_files overlays, never wipes) when the repair
                 # provably didn't touch them, so a fixed score/eval script doesn't pay to re-train. Else
@@ -305,13 +373,15 @@ class EvaluateMixin:
                 # fold + trace show data_prep ✓ / train ✓ / eval ✗, and a later stage-scoped re-run knows
                 # which stages already passed. Empty on the classic single-command eval.
                 for _st in (res.stages or []):
-                    self.store.append(EV_STAGE_FINISHED, {"node_id": node_id, **_st})
+                    self.store.append(EV_STAGE_FINISHED,
+                                      {"node_id": node_id, **_st, "generation": generation})
                 if res.drift is not None:               # Phase 4: uncorroborated metric (audit)
-                    self.store.append(EV_SPEC_DRIFT, {"node_id": node_id, **res.drift})
+                    self.store.append(EV_SPEC_DRIFT,
+                                      {"node_id": node_id, **res.drift, "generation": generation})
                 if ok:
                     self.store.append(
                         EV_NODE_EVALUATED,
-                        {"node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                        {"node_id": node_id, "generation": generation,
                          "metric": res.metric,
                          "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
                          "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
@@ -375,13 +445,22 @@ class EvaluateMixin:
                         for c in critique(node.idea, scan_src, submission_file=sub_file):
                             sigs.append({"signal": "critic:" + c["issue"], "detail": c["detail"]})
                     if sigs:
+                        # P1-7 versioned TrustEvidence: bind the evidence to a schema version + a digest
+                        # of the exact scanned surface (provenance — which bytes produced these signals),
+                        # so a stored flag isn't a bare {node_id, signals}. Additive; the fold reads the
+                        # new fields with defaults, so old logs are unaffected.
+                        import hashlib
                         self.store.append(EV_REWARD_HACK_SUSPECTED,
-                                          {"node_id": node_id, "signals": sigs})
+                                          {"node_id": node_id, "generation": generation,
+                                           "signals": sigs,
+                                           "evidence_version": 1,
+                                           "code_digest": hashlib.sha256(
+                                               scan_src.encode("utf-8", "replace")).hexdigest()[:16]})
                 else:
                     # `err`/`reason` were computed in the attempt loop (reason may be "idea_rejected"
                     # if the crash-triage agent judged the idea fundamentally wrong).
                     sp.set("error_reason", reason)
-                    data = {"node_id": node_id, "attempt": node.attempt,   # P0-1 attempt guard
+                    data = {"node_id": node_id, "generation": generation,
                             "error": err, "reason": reason, "eval_seconds": total_eval}
                     if res.failed_stage:                # Phase 1: pinpoint which pipeline stage broke
                         data["failed_stage"] = res.failed_stage

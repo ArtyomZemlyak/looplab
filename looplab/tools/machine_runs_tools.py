@@ -46,6 +46,23 @@ def _exact_run_generation(value: object) -> str:
     return value
 
 
+def _local_run_generation(rd: Path) -> str:
+    """Compute the same first-event identity as RunCommandService without a tools -> serve import."""
+    from looplab.events.eventstore import EventStore
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    if not events:
+        return ""
+    first = events[0]
+    raw = json.dumps({
+        "seq": first.seq,
+        "ts": first.ts,
+        "type": first.type,
+        "run_id": (first.data or {}).get("run_id"),
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 class _MutationRecoveryBlocked(RuntimeError):
     """Fail-closed signal for a mutation that a recovered assistant turn may not issue."""
 
@@ -252,7 +269,7 @@ class _RunCommandAdapter:
         """Capture the service's current durable generation before fresh intent staging."""
         getter = getattr(self.service, "run_generation", None)
         if not callable(getter):
-            return _exact_run_generation(None)
+            return _exact_run_generation(_local_run_generation(rd))
         try:
             value = getter(rd)
         except Exception as exc:
@@ -404,6 +421,44 @@ class _RunCommandAdapter:
             raise RuntimeError("run disappeared before mutation")
         self._require_generation(rd, expected_generation)
         yield rd
+
+    def retire_start_record_for_delete(self, rd: Path) -> Optional[dict]:
+        """Retire the exact root-sidecar start owner before removing a run directory.
+
+        Keyed Genesis start records deliberately live outside ``rd`` so they survive partial
+        materialization and lost responses.  A storage-level assistant delete must therefore retire
+        that sidecar explicitly; otherwise recreating the same run id can remain permanently blocked
+        (or an old same-key start can be reported as successful after its run was deleted).
+        """
+        load = getattr(self.service, "load_start_record", None)
+        if not callable(load):
+            return None
+        record = load(rd)
+        if record is None:
+            return None
+        retire = getattr(self.service, "retire_start_record", None)
+        save = getattr(self.service, "save_start_record", None)
+        if not callable(retire) or not callable(save):
+            raise _MutationRecoveryBlocked(
+                "run_start_record_unavailable",
+                "The run start owner cannot be retired safely; the run was not deleted.")
+        start_id = record.get("id") if isinstance(record, dict) else None
+        if not isinstance(start_id, str) or not start_id or not retire(rd, start_id):
+            raise _MutationRecoveryBlocked(
+                "run_start_record_changed",
+                "The run start owner changed before deletion; the run was not deleted.")
+        return dict(record)
+
+    def restore_start_record_after_failed_delete(self, rd: Path, record: Optional[dict]) -> None:
+        """Restore an exactly-retired start sidecar when directory deletion was incomplete."""
+        if record is None:
+            return
+        save = getattr(self.service, "save_start_record", None)
+        if not callable(save):
+            raise _MutationRecoveryBlocked(
+                "run_start_record_lost",
+                "Run deletion was incomplete and its start owner could not be restored.")
+        save(rd, record)
 
 
 def _render_command_result(record: dict, *, name: str, run_id: str, completed: str) -> str:
@@ -835,8 +890,9 @@ class RunControlTools:
                 "Freeze a run (pause, NO wrap-up) — resumable later. Use to PAUSE without finalizing.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
             fn_spec("resume_run",
-                "Resume a stopped/finished run. The command service records the intent, attaches the "
-                "engine when needed, and reports the observed outcome.",
+                "Resume a stopped/finished run through the durable singleton-owner handoff. Records "
+                "the intent, lets a live/finalizing owner serve it or hand it off, and otherwise "
+                "claims and launches the engine without requiring a separate UI action.",
                 {"run_id": {"type": "string"}}, ["run_id"]),
             fn_spec("reset_node",
                 "Re-run an existing node IN PLACE from a stage (no new node): 'eval' re-scores (keep the "
@@ -850,10 +906,16 @@ class RunControlTools:
                            "name (train, data_prep, …) to re-run the pipeline from that stage"}},
                 ["run_id", "node_id"]),
             fn_spec("delete_node",
-                "DELETE a node AND its descendants from a run (removes their events, spans and workdirs; "
-                "the best node is recomputed). DESTRUCTIVE + backs the log up. Refuses while the engine "
-                "is live — stop the run first.",
-                {"run_id": {"type": "string"}, "node_id": {"type": "integer"}},
+                "DELETE a node AND its descendants from a run. Default is an APPEND-ONLY tombstone: the "
+                "subtree is logically removed (excluded from best-pick / breeding / re-eval) while its "
+                "events stay in the log, so it's reversible and parent/chosen/archive refs stay valid. "
+                "Pass purge=true for an IRREVERSIBLE physical compaction that also rewrites the log and "
+                "removes spans + workdirs (backs the log up first). Refuses while the engine is live — "
+                "stop the run first.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "purge": {"type": "boolean",
+                           "description": "irreversibly rewrite the log + remove workdirs (default: "
+                           "false = reversible tombstone)"}},
                 ["run_id", "node_id"]),
             fn_spec("delete_run",
                 "DELETE an entire run and all its artifacts. DESTRUCTIVE + irreversible. Refuses while "
@@ -1005,6 +1067,40 @@ class RunControlTools:
                 rd, etype, data, idempotency_key=key, expected_generation=generation)
         return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
+    def _resume_run(self, rid: str, rd: Path) -> str:
+        """Durably hand resume to the singleton owner/claim funnel; never reopen before lock ownership."""
+        from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
+        from looplab.events.types import EV_RESUME_REQUESTED
+        from looplab.serve.engine_proc import (
+            _claim_and_spawn_resume, _engine_alive, _resolve_task_file, _run_lifecycle_lock)
+
+        with _run_lifecycle_lock(rd):
+            task_file = _resolve_task_file(rd)
+            if task_file is None:
+                return (f"(run {rid} is not self-describing; no task.snapshot.json/ui_meta task file — "
+                        "resume it from the UI with its task definition)")
+            store = EventStore(rd / "events.jsonl")
+            for _attempt in range(8):
+                events = store.read_all()
+                tail = events[-1].seq if events else -1
+                try:
+                    store.append(
+                        EV_RESUME_REQUESTED, {"mode": "resume"},
+                        expected_last_seq=tail)
+                    break
+                except EventStoreConcurrencyError:
+                    continue
+            else:
+                return f"(run {rid} changed repeatedly — retry resume)"
+
+        cli_args = ["resume", str(rd), "--task-file", str(task_file)]
+        was_alive = _engine_alive(rd)
+        spawned = _claim_and_spawn_resume(rd, cli_args, wait_on_alive=True)
+        if was_alive and not spawned:
+            return f"(resume recorded for {rid} — current owner will serve it or hand off after exit)"
+        return (f"(resume recorded for {rid} — "
+                f"{'engine launched' if spawned else 'durable launch pending'})")
+
     def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
         """Change an allow-listed LIVE run setting by appending the matching control/config event the UI
         writes (budget extension, a standing directive, or the trust gate). Gated exactly like the other
@@ -1107,14 +1203,30 @@ class RunControlTools:
         stage = str(args.get("stage") or "eval").strip()
         if not stage or len(stage) > 64:      # propose|implement|eval OR an eval-pipeline stage name
             return "(stage must be a non-empty stage name)"
-        if nid not in fold(EventStore(rd / "events.jsonl").read_all()).nodes:
+        store = EventStore(rd / "events.jsonl")
+        inspected_events = store.read_all()
+        expected_tail = inspected_events[-1].seq if inspected_events else -1
+        state = fold(inspected_events)
+        node = state.nodes.get(nid)
+        if node is None:
             return f"(no node #{nid} in {rid})"
+        if node.tombstoned:
+            return f"(node #{nid} in {rid} is tombstoned and cannot be reset)"
+        generation = node.attempt
         blocked, formed_generation = self._gate(
             "reset_node", rid, rd, f"reset node #{nid} of {rid} from {stage}",
-            scope={"run_id": rid, "node_id": nid, "stage": stage})
+            scope={"run_id": rid, "node_id": nid, "generation": generation, "stage": stage})
         if blocked:
             return blocked
-        data = {"node_id": nid, "from_stage": stage}
+        # Permission can stay open while another control changes the node. Reject that stale scope
+        # before handing the exact lifecycle generation to the command sequencer.
+        latest_events = store.read_all()
+        latest_tail = latest_events[-1].seq if latest_events else -1
+        latest = fold(latest_events).nodes.get(nid)
+        if (latest_tail != expected_tail or latest is None or latest.tombstoned
+                or latest.attempt != generation):
+            return f"(node #{nid} or run intent changed while awaiting permission — refresh and retry)"
+        data = {"node_id": nid, "generation": generation, "from_stage": stage}
         with self._mutation_intent(
                 "reset_node", rid, rd, {"event_type": EV_NODE_RESET, "data": data},
                 command_backed=True, expected_generation=formed_generation) as (key, generation):
@@ -1126,102 +1238,267 @@ class RunControlTools:
             completed=f"node #{nid} of {rid} re-run from {stage}")
 
     def _delete_node(self, rid: str, rd: Path, args: dict) -> str:
-        import json
-        import shutil
         from looplab.events.eventstore import EventStore
         from looplab.events.replay import fold
         try:
             nid = int(args.get("node_id"))
         except (TypeError, ValueError):
             return "(delete_node needs an integer node_id)"
-        preview = fold(EventStore(rd / "events.jsonl").read_all())
-        if nid not in preview.nodes:
+        purge = bool(args.get("purge"))
+        if self._live(rd):
+            return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
+        evp = rd / "events.jsonl"
+        store = EventStore(evp)
+        events = store.read_all()
+        st = fold(events)
+        if nid not in st.nodes:
             return f"(no node #{nid} in {rid})"
-
-        def _subtree(st):
-            # The node AND every descendant (deleting a node alone would orphan child parent links).
-            out = {nid}
+        # The node AND every descendant (deleting a node alone would orphan its children's parent links).
+        def _subtree(state):
+            found = {nid}
             changed = True
             while changed:
                 changed = False
-                for node in st.nodes.values():
-                    if node.id not in out and any(parent in out for parent in node.parent_ids):
-                        out.add(node.id)
+                for node in state.nodes.values():
+                    if node.id not in found and any(p in found for p in node.parent_ids):
+                        found.add(node.id)
                         changed = True
-            return out
+            return found
 
-        approved_subtree = _subtree(preview)
+        subtree = _subtree(st)
+        expected_tail = events[-1].seq if events else -1
+        verb = "PURGE (physical, irreversible)" if purge else "tombstone"
         blocked, formed_generation = self._gate(
-            "delete_node", rid, rd, f"delete node(s) {sorted(approved_subtree)} of {rid}",
-            scope={"run_id": rid, "node_id": nid, "subtree": sorted(approved_subtree)})
+            "delete_node", rid, rd, f"{verb} node(s) {sorted(subtree)} of {rid}",
+            scope={"run_id": rid, "node_id": nid, "subtree": sorted(subtree), "purge": purge})
         if blocked:
             return blocked
         with self._mutation_intent(
                 "delete_node", rid, rd,
-                {"node_id": nid, "subtree": sorted(approved_subtree)}, command_backed=False,
-                expected_generation=formed_generation) as (_key, generation):
+                {"node_id": nid, "subtree": sorted(subtree), "purge": purge,
+                 "expected_tail": expected_tail},
+                command_backed=False, expected_generation=formed_generation) as (_key, generation):
             pass
         with self._commands.destructive_guard(
-                rd, "delete node", expected_generation=generation) as rd:
-            # The authoritative liveness/state checks belong after approval and inside the command
-            # sequencer. A command accepted while the confirm card was open cannot spawn under us.
-            if self._live(rd):
+                rd, "delete node", expected_generation=generation) as canonical:
+            if self._live(canonical):
                 return f"(run {rid} is LIVE — stop it first; the engine is the sole writer of its log)"
-            st = fold(EventStore(rd / "events.jsonl").read_all())
-            if nid not in st.nodes:
-                return f"(no node #{nid} in {rid})"
-            subtree = _subtree(st)
-            if subtree != approved_subtree:
-                return (f"(delete scope changed while approval was open: approved "
-                        f"{sorted(approved_subtree)}, now {sorted(subtree)}; review and approve again)")
-            from looplab.core.atomicio import atomic_write_text
-            evp = rd / "events.jsonl"
-            recs = [json.loads(x) for x in evp.read_text("utf-8").splitlines() if x.strip()]
-            kept = [r for r in recs
-                    if not (isinstance(r.get("data"), dict) and r["data"].get("node_id") in subtree)]
-            # Compute the spans filter BEFORE any destructive write: a torn spans line must not be able to
-            # leave the source-of-truth events.jsonl already rewritten while spans/workdirs are un-cleaned
-            # (a misleading half-deletion reported as failure). Guard each parse — a torn/hand-edited span
-            # is KEPT verbatim (soft-fail, mirroring read_run_trace) rather than crashing the whole delete.
-            sp = rd / "spans.jsonl"
-            skept = None
-            if sp.exists():
+            return self._commit_delete_node_snapshot(
+                rid, canonical, nid, subtree, expected_tail, purge=purge)
+
+    def _commit_delete_node_snapshot(self, rid: str, rd: Path, nid: int,
+                                     subtree: set[int], expected_tail: int, *, purge: bool) -> str:
+        from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, _interprocess_lock
+        from looplab.events.replay import fold
+        from looplab.events.types import EV_NODE_TOMBSTONED
+        from looplab.serve.engine_proc import (
+            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
+            _run_lifecycle_lock)
+
+        evp = rd / "events.jsonl"
+
+        def _subtree(state):
+            found = {nid}
+            changed = True
+            while changed:
+                changed = False
+                for node in state.nodes.values():
+                    if node.id not in found and any(parent in found for parent in node.parent_ids):
+                        found.add(node.id)
+                        changed = True
+            return found
+
+        # The launch claim/Popen/child-lock gap is fenced only by the lifecycle lock. Acquire it after
+        # approval, reject a fresh pending launch, then take engine.lock before the event-log CAS.
+        with _run_lifecycle_lock(rd):
+            if _fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd):
+                return f"(run {rid} is launching — retry delete after the engine settles)"
+            if _engine_alive(rd):
+                return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
+            if purge:
+                return self._purge_node_snapshot(rid, rd, nid, subtree, expected_tail)
+            with _interprocess_lock(rd / "engine.lock"):
+                store = EventStore(evp)
+                events = store.read_all()
+                tail = events[-1].seq if events else -1
+                state = fold(events)
+                current_subtree = _subtree(state) if nid in state.nodes else set()
+                if current_subtree != subtree:
+                    return (f"(delete scope changed while awaiting permission: approved "
+                            f"{sorted(subtree)}, now {sorted(current_subtree)}; review and approve "
+                            f"again)")
+                if (tail != expected_tail or nid not in state.nodes
+                        or (state.nodes[nid].tombstoned and not purge)):
+                    return f"(run {rid} changed while awaiting permission — refresh and retry)"
+                try:
+                    store.append(
+                        EV_NODE_TOMBSTONED, {"node_ids": sorted(subtree)},
+                        expected_last_seq=expected_tail)
+                except EventStoreConcurrencyError:
+                    return f"(run {rid} changed before delete could commit — refresh and retry)"
+
+        state = fold(EventStore(evp).read_all())
+        live_left = sum(1 for node in state.nodes.values() if not node.tombstoned)
+        return (f"(tombstoned node(s) {sorted(subtree)} of {rid} — logically deleted, log intact + "
+                f"reversible; {live_left} live nodes left, best now #{state.best_node_id}. "
+                f"Use purge=true for an irreversible physical compaction.)")
+
+    def _purge_node_snapshot(self, rid: str, rd: Path, nid: int,
+                             subtree: set[int], expected_tail: int) -> str:
+        """Physically compact exactly the stopped tree snapshot the operator approved."""
+        import json
+        import shutil
+
+        from looplab.core.atomicio import atomic_write_text
+        from looplab.events.eventstore import EventStore, _interprocess_lock
+        from looplab.events.replay import fold
+
+        evp = rd / "events.jsonl"
+        # Lock order matches the engine (singleton first, event append second). If a resume won the
+        # liveness-check race, wait for it to release engine.lock and then fail the tail CAS; if purge
+        # wins, no child can enter while the source-of-truth logs are rewritten.
+        with (_interprocess_lock(rd / "engine.lock"),
+              _interprocess_lock(Path(str(evp) + ".lock"))):
+            events = EventStore(evp).read_all()
+            actual_tail = events[-1].seq if events else -1
+            state = fold(events)
+            if actual_tail != expected_tail or nid not in state.nodes:
+                return f"(run {rid} changed while awaiting permission — refresh and retry)"
+
+            current_subtree = {nid}
+            changed = True
+            while changed:
+                changed = False
+                for node in state.nodes.values():
+                    if (node.id not in current_subtree
+                            and any(parent in current_subtree for parent in node.parent_ids)):
+                        current_subtree.add(node.id)
+                        changed = True
+            if current_subtree != subtree:
+                return (f"(delete scope changed while awaiting permission: approved "
+                        f"{sorted(subtree)}, now {sorted(current_subtree)}; review and approve again)")
+
+            recs = [json.loads(line) for line in evp.read_text("utf-8").splitlines()
+                    if line.strip()]
+            kept = [record for record in recs
+                    if not (isinstance(record.get("data"), dict)
+                            and record["data"].get("node_id") in subtree)]
+
+            spans = rd / "spans.jsonl"
+            kept_spans = None
+            if spans.exists():
                 def _span_node(line):
                     try:
                         return (json.loads(line).get("attributes") or {}).get("node_id")
                     except (ValueError, TypeError, AttributeError):
-                        return None   # torn OR valid-JSON-non-object line -> unknown node -> keep it
-                skept = [x for x in sp.read_text("utf-8").splitlines()
-                         if x.strip() and _span_node(x) not in subtree]
-            shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")  # recoverable backup before writes
-            # ATOMIC rewrites (temp + os.replace) of BOTH source-of-truth logs.
-            atomic_write_text(evp, "".join(json.dumps(r) + "\n" for r in kept))
-            if skept is not None:
-                atomic_write_text(sp, "".join(x + "\n" for x in skept))
-            for node_id in subtree:
-                shutil.rmtree(rd / "nodes" / f"node_{node_id}", ignore_errors=True)
-            st2 = fold(EventStore(evp).read_all())
-            broken = sorted({p for n in st2.nodes.values() for p in n.parent_ids if p not in st2.nodes})
-            return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(st2.nodes)} nodes left, "
-                    f"best now #{st2.best_node_id}, broken parent links: {broken or 'none'}. "
-                    f"Backup: events.jsonl.bak-del{nid})")
+                        return None   # torn or non-object JSON: unknown node, so retain the line
+
+                kept_spans = [line for line in spans.read_text("utf-8").splitlines()
+                              if line.strip() and _span_node(line) not in subtree]
+
+            shutil.copy(evp, rd / f"events.jsonl.bak-del{nid}")
+            atomic_write_text(evp, "".join(json.dumps(record) + "\n" for record in kept))
+            if kept_spans is not None:
+                atomic_write_text(spans, "".join(line + "\n" for line in kept_spans))
+            for deleted_id in subtree:
+                shutil.rmtree(rd / "nodes" / f"node_{deleted_id}", ignore_errors=True)
+
+        remaining = fold(EventStore(evp).read_all())
+        broken = sorted({parent for node in remaining.nodes.values() for parent in node.parent_ids
+                         if parent not in remaining.nodes})
+        return (f"(deleted node(s) {sorted(subtree)} from {rid}; {len(remaining.nodes)} nodes left, "
+                f"best now #{remaining.best_node_id}, broken parent links: {broken or 'none'}. "
+                f"Backup: events.jsonl.bak-del{nid})")
 
     def _delete_run(self, rid: str, rd: Path) -> str:
-        import shutil
+        if self._live(rd):
+            return f"(run {rid} is LIVE — stop it first before deleting)"
+        from looplab.events.eventstore import EventStore
+
+        events = EventStore(rd / "events.jsonl").read_all()
+        expected_tail = events[-1].seq if events else -1
         blocked, formed_generation = self._gate(
             "delete_run", rid, rd, f"DELETE the entire run {rid} (irreversible)",
-            scope={"run_id": rid})
+            scope={"run_id": rid, "expected_tail": expected_tail})
         if blocked:
             return blocked
         with self._mutation_intent(
-                "delete_run", rid, rd, {}, command_backed=False,
-                expected_generation=formed_generation) as (_key, generation):
+                "delete_run", rid, rd, {"expected_tail": expected_tail},
+                command_backed=False, expected_generation=formed_generation) as (_key, generation):
             pass
         with self._commands.destructive_guard(
-                rd, "delete run", expected_generation=generation) as rd:
-            if self._live(rd):
+                rd, "delete run", expected_generation=generation) as canonical:
+            if self._live(canonical):
                 return f"(run {rid} is LIVE — stop it first before deleting)"
+            return self._delete_run_snapshot(rid, canonical, expected_tail)
+
+    def _delete_run_snapshot(self, rid: str, rd: Path, expected_tail: int) -> str:
+        """Delete only the stopped run snapshot approved before a possibly-slow permission prompt."""
+        from looplab.serve.engine_proc import (
+            _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending,
+            _run_lifecycle_lock)
+
+        with _run_lifecycle_lock(rd):
+            if _fresh_resume_launch_pending(rd) or _fresh_run_launch_pending(rd):
+                return f"(run {rid} is launching — retry delete after the engine settles)"
+            # Mirror the node-delete guard (`_commit_delete_node_snapshot`): a directly-launched engine
+            # (`looplab run/resume`) records no resume launch-claim, so `_fresh_resume_launch_pending` is
+            # False for it. Without this check, an approve-after-the-engine-went-live delete would call
+            # `_delete_run_snapshot_locked`, whose BLOCKING `flock(engine.lock)` waits for the engine to
+            # exit while holding the lifecycle lock — hanging the call and cascading to every other
+            # lifecycle op on this run. Refuse cleanly instead.
+            if _engine_alive(rd):
+                return f"(run {rid} became LIVE while awaiting permission — stop it and retry)"
+            return self._delete_run_snapshot_locked(rid, rd, expected_tail)
+
+    def _delete_run_snapshot_locked(self, rid: str, rd: Path, expected_tail: int) -> str:
+        import shutil
+
+        from looplab.events.eventstore import EventStore, _interprocess_lock
+
+        event_path = rd / "events.jsonl"
+        engine_lock = rd / "engine.lock"
+        event_lock = Path(str(event_path) + ".lock")
+        # Holding engine.lock makes a racing CLI's non-blocking singleton acquisition fail. Holding
+        # the event lock closes the UI-control append race. Remove source-of-truth/artifacts while both
+        # are held, keeping the two open lock files until their contexts release on Windows.
+        retired_start_record = None
+        with _interprocess_lock(engine_lock), _interprocess_lock(event_lock):
+            if not event_path.exists():
+                return f"(run {rid} changed before delete could commit — refresh and retry)"
+            events = EventStore(event_path).read_all()
+            actual_tail = events[-1].seq if events else -1
+            if actual_tail != expected_tail:
+                return f"(run {rid} changed while awaiting permission — refresh and retry)"
+            # This root-sidecar is outside ``rd`` and therefore would survive the directory delete.
+            # The outer destructive guard still owns the command sequencer here, matching the HTTP
+            # delete route's start-record retirement order.
+            retired_start_record = self._commands.retire_start_record_for_delete(rd)
+            try:
+                for child in list(rd.iterdir()):
+                    if child in (engine_lock, event_lock):
+                        continue
+                    if child.is_dir():
+                        shutil.rmtree(child, ignore_errors=True)
+                    else:
+                        try:
+                            child.unlink()
+                        except FileNotFoundError:
+                            pass
+            except Exception:
+                self._commands.restore_start_record_after_failed_delete(rd, retired_start_record)
+                raise
+
+        for lock_path in (event_lock, engine_lock):
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+        try:
+            rd.rmdir()
+        except OSError:
             shutil.rmtree(rd, ignore_errors=True)
-            if rd.exists():
-                return f"(delete failed for run {rid}: some artifacts are still present)"
-            return f"(deleted run {rid} and all its artifacts)"
+        if rd.exists():
+            self._commands.restore_start_record_after_failed_delete(rd, retired_start_record)
+            return f"(run {rid} delete was incomplete — inspect {rd})"
+        return f"(deleted run {rid} and all its artifacts)"

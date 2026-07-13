@@ -53,6 +53,38 @@ def test_file_json_strips_bom(tmp_path):
                        {"kind": "file_json", "path": "m.json", "key": "metric"}) == 0.7
 
 
+# §6.3 freshness gate — a FILE reader rejects a metric file older than the eval start (`since`)
+def test_read_metric_since_rejects_stale_file(tmp_path):
+    import os
+    import time
+    p = tmp_path / "m.json"
+    p.write_text('{"metric": 0.9}', encoding="utf-8")
+    spec = {"kind": "file_json", "path": "m.json", "key": "metric"}
+    assert read_metric("", str(tmp_path), spec) == 0.9                    # no gate -> read (legacy)
+    now = time.time()
+    assert read_metric("", str(tmp_path), spec, since=now - 1.0) == 0.9   # written now -> fresh
+    old = now - 3600
+    os.utime(p, (old, old))                                              # age it: a prior attempt's file
+    assert read_metric("", str(tmp_path), spec, since=now) is None        # stale -> rejected
+
+
+def test_freshness_gate_rejects_stale_metric_file_end_to_end(tmp_path):
+    # A "great" metric file left by a PRIOR attempt in a reused workdir must NOT be promoted when this
+    # eval's command produces no new output (§6.3 workdir-reuse trap); a file the command REWRITES is read.
+    import os
+    import time
+    stale = tmp_path / "m.json"
+    stale.write_text('{"metric": 0.01}', encoding="utf-8")               # a suspiciously perfect score
+    old = time.time() - 3600
+    os.utime(stale, (old, old))
+    spec = {"kind": "file_json", "path": "m.json", "key": "metric"}
+    res = run_command_eval([sys.executable, "-c", "pass"], str(tmp_path), 60, spec)   # writes nothing
+    assert res.exit_code == 0 and res.metric is None                     # stale file NOT promoted
+    res2 = run_command_eval(                                             # this run rewrites m.json
+        [sys.executable, "-c", "open('m.json','w').write('{\"metric\": 0.5}')"], str(tmp_path), 60, spec)
+    assert res2.exit_code == 0 and res2.metric == 0.5                    # fresh -> read normally
+
+
 # #54 — a constraint/metric reader may not be an agent-authored adapter
 def test_constraints_adapter_reader_rejected(tmp_path):
     from looplab.runtime.command_eval import run_command_eval
@@ -149,6 +181,21 @@ def test_docker_wrap_forwards_env(monkeypatch):
     argv = _wrap_argv(monkeypatch, env={"LOOPLAB_EVAL_SEED": "7"})
     i = argv.index("-e")
     assert argv[i + 1] == "LOOPLAB_EVAL_SEED=7"
+
+
+def test_docker_wrap_preserves_posix_absolute_bind_path(monkeypatch, tmp_path):
+    """A Windows Docker client must not prefix a Linux symlink target with its current drive."""
+    import shutil
+    from looplab.runtime import command_eval as ce
+    monkeypatch.setattr(shutil, "which", lambda name: "/usr/bin/docker")
+    native = (tmp_path / "native-data").resolve().as_posix()
+    wrap = ce.make_docker_wrap(
+        str(tmp_path), "img",
+        binds=[("/data/../data/raw", True), (str(tmp_path / "native-data"), False)],
+    )
+    argv = wrap(["python", "solution.py"], str(tmp_path))
+    assert "type=bind,src=/data/raw,dst=/data/raw,readonly" in argv
+    assert f"type=bind,src={native},dst={native}" in argv
 
 
 # ---------------------------------------------------- path-boundary + timeout hardening (P0-7 / P1-5)

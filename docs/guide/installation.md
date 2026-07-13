@@ -31,7 +31,7 @@ Install only what you need:
 pip install -e ".[ui]"      # live React web UI       → adds fastapi, uvicorn
 pip install -e ".[otel]"    # OpenTelemetry export      → adds opentelemetry-*
 pip install -e ".[proc]"    # robust process tree-kill  → adds psutil
-pip install -e ".[dev]"     # test dependencies         → adds pytest, httpx
+pip install -e ".[dev]"     # test dependencies         → adds pytest, httpx, fastapi, uvicorn
 ```
 
 You can combine them: `pip install -e ".[ui,otel,dev]"`.

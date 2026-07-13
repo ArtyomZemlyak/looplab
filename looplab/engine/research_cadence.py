@@ -45,6 +45,9 @@ class ResearchCadenceMixin:
         # Since-last cadence (not `n % every == 0`): a rung-0/seed batch that jumps the node count by
         # k>1 must not step over the only multiple and skip the whole window. The last researched
         # at_node is the marker; `_already_researched_at` above already de-dups the same-n resume.
+        # `default=0` (no prior research → baseline at the run start, node 0): the first deep-research
+        # fires a full `every` nodes in (n >= every), so the opening window is the SAME width as every
+        # later one. (`default=-1` would fire it one node early — a narrower first window.)
         _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
                                 if isinstance(m, dict) and m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):
@@ -224,8 +227,14 @@ class ResearchCadenceMixin:
                       finalize_scope: str | None = None) -> RunState:
         """Generate one run report and record it as a `report_generated` event, then re-fold. Never
         raises — the writer itself degrades to a minimal report on any failure."""
+        return self._write_report_with_seq(
+            state, trigger=trigger, finalize_scope=finalize_scope)[0]
+
+    def _write_report_with_seq(self, state: RunState, *, trigger: str,
+                               finalize_scope: str | None = None) -> tuple[RunState, int | None]:
+        """Write a report and return its event sequence for the natural-finish CAS."""
         if self.report_writer is None:
-            return state
+            return state, None
         with self.tracer.span("report", new_trace=True, trigger=trigger):
             content = self.report_writer.generate(state, trigger=trigger)
             # append INSIDE the span so report_generated is stamped with the report op-trace (UI scopes it).
@@ -234,5 +243,5 @@ class ResearchCadenceMixin:
             }
             if finalize_scope is not None:
                 payload["finalize_scope"] = finalize_scope
-            self.store.append(EV_REPORT_GENERATED, payload)
-        return fold(self.store.read_all())
+            event = self.store.append(EV_REPORT_GENERATED, payload)
+        return fold(self.store.read_all()), event.seq

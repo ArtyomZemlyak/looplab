@@ -19,7 +19,8 @@ from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
 from looplab.serve.protocol import CONTROL_EVENTS, PHASE_FINALIZING  # noqa: E402
 from looplab.serve.run_commands import (  # noqa: E402
-    CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService, _process_identity)
+    CONTROL_DATA_FIELDS, CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
+    _process_identity, normalize_control, task_file_for)
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -117,6 +118,23 @@ def _terminal(client, record, timeout=1.0, run_id="demo"):
 
 def _types(rd):
     return [event.type for event in EventStore(rd / "events.jsonl").read_all()]
+
+
+def test_task_file_for_prefers_immutable_snapshot_and_validates_legacy_target(tmp_path):
+    rd = tmp_path / "run"
+    rd.mkdir()
+    snapshot = rd / "task.snapshot.json"
+    legacy = tmp_path / "mutable-task.json"
+    snapshot.write_text('{"task":"snapshot"}', encoding="utf-8")
+    legacy.write_text('{"task":"legacy"}', encoding="utf-8")
+    (rd / "ui_meta.json").write_text(
+        json.dumps({"task_file": str(legacy)}), encoding="utf-8")
+
+    assert task_file_for(rd) == str(snapshot)
+    snapshot.unlink()
+    assert task_file_for(rd) == str(legacy)
+    legacy.unlink()
+    assert task_file_for(rd) is None
 
 
 def _ack_marked(rd, command_id=None):
@@ -304,6 +322,30 @@ def test_state_cache_changes_generation_when_replacement_reuses_seq_size_and_mti
     assert second["seq"] == first["seq"] and second["max_seq"] == first["max_seq"]
     assert second["state"]["goal"] == "b"
     assert second["generation"] != first["generation"]
+
+
+def test_runs_summary_cache_invalidates_same_size_and_mtime_log_replacement(tmp_path):
+    rd = _seed(tmp_path)
+    client, _srv = _client(tmp_path, _Driver())
+    first = next(row for row in client.get("/api/runs").json() if row["run_id"] == "demo")
+    old_path = rd / "events.jsonl"
+    old_bytes = old_path.read_bytes()
+    old_stat = old_path.stat()
+
+    marker = b'"goal":"g"'
+    assert marker in old_bytes
+    replacement = old_bytes.replace(marker, b'"goal":"b"', 1)
+    old_path.rename(rd / "events.jsonl.generation-a-summary")
+    old_path.write_bytes(replacement)
+    os.utime(old_path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    new_stat = old_path.stat()
+    assert new_stat.st_size == old_stat.st_size
+    assert new_stat.st_mtime_ns == old_stat.st_mtime_ns
+    assert (new_stat.st_ino, new_stat.st_ctime_ns) != (old_stat.st_ino, old_stat.st_ctime_ns)
+
+    second = next(row for row in client.get("/api/runs").json() if row["run_id"] == "demo")
+    assert first["goal"] == "g"
+    assert second["goal"] == "b"
 
 
 def test_state_event_count_is_full_folded_projection_count_for_gaps_cache_hits_and_prefixes(tmp_path):
@@ -498,6 +540,23 @@ def test_stop_and_resume_reject_during_pending_finalize(tmp_path, event_type):
     }
 
 
+def test_finish_seq_only_pending_is_visible_and_rejects_new_commands(tmp_path):
+    rd = _seed(tmp_path)
+    EventStore(rd / "events.jsonl").append(
+        "run_finished", {"reason": "done", "finalization_required": True})
+    client, _srv = _client(tmp_path, _Driver())
+
+    state = client.get("/api/runs/demo/state").json()["state"]
+    listed = client.get("/api/runs").json()[0]
+    assert state["finalization_incomplete"] is True and state["phase"] == PHASE_FINALIZING
+    assert listed["finalization_incomplete"] is True and listed["phase"] == PHASE_FINALIZING
+
+    for event_type in ("pause", "resume"):
+        record = _post(client, event_type, key=f"finish-seq-{event_type}").json()
+        assert record["status"] == "rejected"
+        assert record["error"]["code"] == "finalize_in_progress"
+
+
 def test_pause_waits_for_folded_pause_and_no_engine(tmp_path):
     rd = _seed(tmp_path)
     driver = _Driver(alive=True)
@@ -612,6 +671,69 @@ def test_reset_normalization_is_shared_by_legacy_and_command_routes(tmp_path):
              if event.type == "node_reset"][-1]
     assert reset.data["node_id"] == 0 and reset.data["from_stage"] == "train"
     assert "run_reopened" not in _types(rd)
+
+
+def test_lifecycle_normalizer_requires_exact_attempt_and_parent_snapshot(tmp_path):
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    _client_unused, srv = _client(tmp_path, _Driver())
+
+    lifecycle = {
+        "node_abort": {"node_id": 0},
+        "node_reset": {"node_id": 0, "from_stage": "eval"},
+        "approval_granted": {"node_id": 0},
+        "force_confirm": {"node_id": 0},
+        "force_ablate": {"node_id": 0},
+        "fork": {"from_node_id": 0},
+        "promote": {"node_id": 0},
+    }
+    assert all("generation" in CONTROL_DATA_FIELDS[event_type]
+               for event_type in lifecycle)
+    for event_type, base in lifecycle.items():
+        with pytest.raises(HTTPException) as missing:
+            normalize_control(srv, rd, event_type, base)
+        assert missing.value.status_code == 409 and "generation is required" in str(missing.value.detail)
+        with pytest.raises(HTTPException) as stale:
+            normalize_control(srv, rd, event_type, {**base, "generation": 0})
+        assert stale.value.status_code == 409 and "not 0" in str(stale.value.detail)
+        normalized = normalize_control(srv, rd, event_type, {**base, "generation": 1})
+        assert normalized["generation"] == 1
+
+    idea = {"operator": "manual", "params": {}, "rationale": ""}
+    assert "parent_generations" in CONTROL_DATA_FIELDS["inject_node"]
+    with pytest.raises(HTTPException, match="parent generation is required"):
+        normalize_control(srv, rd, "inject_node", {"idea": idea, "parent_id": 0})
+    with pytest.raises(HTTPException, match="stale parent"):
+        normalize_control(srv, rd, "inject_node", {
+            "idea": idea, "parent_id": 0, "parent_generations": {"0": 0}})
+    normalized_inject = normalize_control(srv, rd, "inject_node", {
+        "idea": idea, "parent_id": 0, "parent_generations": {"0": 1}})
+    assert normalized_inject["parent_generations"] == {"0": 1}
+
+
+@pytest.mark.parametrize("unavailable", ["tombstoned", "aborted"])
+def test_normalizer_rejects_unavailable_inject_parent_and_source(tmp_path, unavailable):
+    parent_rd = _seed(tmp_path, "parent")
+    source_rd = _seed(tmp_path, "source")
+    parent_store = EventStore(parent_rd / "events.jsonl")
+    source_store = EventStore(source_rd / "events.jsonl")
+    event = ("node_tombstoned", {"node_ids": [0]}) if unavailable == "tombstoned" else (
+        "node_abort", {"node_id": 0, "generation": 0})
+    parent_store.append(*event)
+    source_store.append(*event)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    idea = {"operator": "manual", "params": {}, "rationale": ""}
+
+    with pytest.raises(HTTPException) as parent_error:
+        normalize_control(srv, parent_rd, "inject_node", {
+            "idea": idea, "parent_id": 0, "parent_generations": {"0": 0}})
+    assert parent_error.value.status_code == 409 and unavailable in str(parent_error.value.detail)
+
+    with pytest.raises(HTTPException) as source_error:
+        normalize_control(srv, parent_rd, "inject_node", {
+            "source_run": "source", "source_node": 0})
+    assert source_error.value.status_code == 409 and unavailable in str(source_error.value.detail)
 
 
 def test_real_engine_ack_is_exact_idempotent_and_replay_neutral(tmp_path):
@@ -2015,6 +2137,33 @@ def test_finalize_postcondition_requires_explicit_scope_complete_after_hard_kill
     # The engine died after its terminal event but before durable projections completed.
     assert srv.commands._postcondition(rd, record) is False
     store.append("finalize_step", {"scope": scope, "step": "complete"})
+    assert srv.commands._postcondition(rd, record) is True
+
+
+def test_finalize_postcondition_requires_finish_seq_marker_without_scope(tmp_path):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    store = EventStore(rd / "events.jsonl")
+    baseline = store.read_all()[-1].seq
+    intent = store.append("run_abort", {"reason": "finalized"})
+    finish = store.append(
+        "run_finished", {"reason": "aborted", "finalization_required": True})
+    _raw, semantic_digest = srv.commands._payload(
+        "run_abort", {"reason": "finalized"})
+    record = {
+        "id": "cmd_" + "8" * 32,
+        "event_type": "run_abort",
+        "data": {"reason": "finalized"},
+        "semantic_payload_digest": semantic_digest,
+        "attached": True,
+        "attached_event_seq": intent.seq,
+        "attached_semantic_payload_digest": semantic_digest,
+        "observe_after_seq": baseline,
+        "postcondition": "finished_and_stopped",
+    }
+
+    assert srv.commands._postcondition(rd, record) is False
+    store.append("finalization_finished", {"finish_seq": finish.seq})
     assert srv.commands._postcondition(rd, record) is True
 
 

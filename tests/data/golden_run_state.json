@@ -1,11 +1,15 @@
 {
+  "ablate_request_generations": [],
   "ablate_requests": [],
   "ablations": [],
   "aborted_nodes": [],
   "active_strategy": null,
   "agent_decisions": [],
   "annotations": {},
+  "approval_generation": null,
+  "approval_subject": null,
   "approved": false,
+  "approved_node_id": null,
   "archive": {
     "elites": [
       {
@@ -83,10 +87,12 @@
   "building": null,
   "champion": null,
   "config_hash": "1f0bc827ac74",
+  "confirm_request_generations": [],
   "confirm_requests": [],
   "confirm_seed_results": {},
   "confirmed_done": false,
   "confirmed_forced": [],
+  "confirmed_forced_generations": [],
   "coverage_snapshots": [
     {
       "at_node": 3,
@@ -114,12 +120,20 @@
   "data_profile": null,
   "data_provenance": null,
   "direction": "min",
+  "dirty_inputs": [],
   "drifts": [],
+  "env": null,
+  "env_changed": false,
+  "eval_seconds_by_kind": {
+    "node": 0.273
+  },
+  "finalized_finish_seq": 43,
   "finished": true,
   "foresight_selected": [],
   "fork_requests": [],
   "forks_done": 0,
   "goal": "min (x-3)^2",
+  "holdout_epoch_aware": false,
   "holdout_evaluated_ids": [],
   "holdout_fraction": 0.25,
   "holdout_select": true,
@@ -132,6 +146,14 @@
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
+  "last_finish_seq": 43,
+  "last_resume_launch_seq": 0,
+  "last_resume_launch_ts": 0.0,
+  "last_resume_request_mode": "resume",
+  "last_resume_request_seq": 0,
+  "last_resume_request_ts": 0.0,
+  "last_resume_served_seq": 0,
+  "last_stop_request_seq": -1,
   "leakage": null,
   "lessons_distilled": [
     {
@@ -288,6 +310,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 53.054167369999995}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -333,6 +356,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 35.66064084999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -381,6 +405,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 8.51019194}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -431,6 +456,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 9.73679185}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -478,6 +504,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 17.17538701}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -528,6 +555,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 5.57026258}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -579,6 +607,7 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 6.688963449999999}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
@@ -626,12 +655,15 @@
       "stages": [],
       "status": "evaluated",
       "stdout_tail": "{\"metric\": 4.482711760000001}\n",
+      "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
       "violations": []
     }
   },
   "novelty_events": [],
+  "pause_generation": null,
+  "pause_node_id": null,
   "paused": false,
   "pending_hints": [],
   "pending_strategy": null,
@@ -690,8 +722,11 @@
   "research_served": 0,
   "reward_hacks": [],
   "run_id": "golden",
+  "run_setup_done": [],
   "rungs": [],
+  "search_epoch": 0,
   "setup_done": true,
+  "setup_manifest": "",
   "spec_approval_requested": false,
   "spec_confirmed": false,
   "stop_reason": null,

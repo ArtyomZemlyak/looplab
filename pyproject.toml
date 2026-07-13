@@ -23,7 +23,12 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "httpx>=0.27"]   # httpx powers fastapi's TestClient (server tests)
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",       # FastAPI's TestClient transport.
+    "fastapi>=0.110",    # server/assistant tests import TestClient and app helpers directly.
+    "uvicorn>=0.27",     # keep the dev test environment aligned with the runnable UI server.
+]
 # Documentation site (MkDocs + Material). `mkdocs serve` for a live preview; CI builds & deploys it.
 docs = ["mkdocs-material>=9.5,<10", "pymdown-extensions>=10"]
 proc = ["psutil>=5.9"]

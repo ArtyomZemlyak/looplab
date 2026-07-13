@@ -4,7 +4,9 @@ single-user server.
 With ``pip install looplab[jupyterhub]`` the ``jupyter_serverproxy_servers`` entry point (see
 pyproject.toml) points jupyter-server-proxy at :func:`setup_looplab`. JH then shows a **LoopLab tile
 in the Launcher**; one click auto-launches ``looplab ui`` on a free port (``{port}`` is substituted
-by jsp) and proxies it at ``/user/<name>/proxy/<port>/`` — no terminal, no hand-typed URL.
+by jsp) and proxies it at ``/user/<name>/proxy/<port>/`` — no terminal, no hand-typed URL. A
+token-protected owner shell opens in a new tab because its clickjacking policy deliberately forbids
+framing; an anonymous local shell can retain the usual in-frame Launcher experience.
 
 Design choices that make this robust on a typical JH pod:
 - ``--no-build``: the user's home is frequently a noexec / object-store FUSE mount (geesefs) where the
@@ -36,6 +38,7 @@ def setup_looplab():
     and proxies it; we keep ``absolute_url=False`` so jsp strips the prefix and the backend still sees
     plain ``/api/...`` (the SPA joins the served prefix itself)."""
     run_root = _run_root()
+    protected_shell = bool(os.environ.get("LOOPLAB_UI_TOKEN"))
     launcher = {"title": "LoopLab", "enabled": True}
     # Optional Launcher icon — only set when the asset actually exists (jsp tolerates its absence).
     icon = Path(__file__).resolve().parents[2] / "ui" / "public" / "looplab.svg"
@@ -50,7 +53,10 @@ def setup_looplab():
         ],
         "timeout": 60,                    # first launch (+ build-check) can be slow on a FUSE home
         "absolute_url": False,            # jsp strips the prefix; backend sees /api/... (SPA self-prefixes)
-        "new_browser_tab": False,         # open in-frame, like other JH apps
+        # Protected owner/review shells set X-Frame-Options: DENY and CSP frame-ancestors 'none'.
+        # Opening those in-frame would leave the Launcher on a browser error page; use a real tab
+        # without weakening the server's clickjacking boundary. Anonymous local mode can stay framed.
+        "new_browser_tab": protected_shell,
         "launcher_entry": launcher,
         # Belt-and-suspenders so a manual `looplab ui` in this pod resolves the same run-root.
         "environment": {"LOOPLAB_RUN_ROOT": run_root},

@@ -15,6 +15,7 @@ import { useDialogFocus } from './useDialogFocus.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
+import { queuedGenerationControls } from './queue.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   const dialogRef = useRef(null)
@@ -153,7 +154,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
   const cfg = configResource.data
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
     try {
-      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id), {
+      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
         success: `Quarantined #${id}`, noop: `#${id} was already settled`,
         executing: `Quarantine of #${id} requested — waiting for the run`, failure: `Could not quarantine #${id}`,
       }); onToast?.(feedback.message)
@@ -284,11 +285,10 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   const working = nodes.filter(n => n.status === 'running')   // (if the fold ever exposes it)
   const injects = (state.inject_requests || []).slice(state.injects_done || 0)
   const forks = (state.fork_requests || []).slice(state.forks_done || 0)
-  const confirmReq = (state.confirm_requests || []).filter(id => !(state.confirmed_forced || []).includes(id))
-  const ablateReq = state.ablate_requests || []
+  const { confirms: confirmReq, ablates: ablateReq } = queuedGenerationControls(state)
   const cancel = async (id) => {
     try {
-      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id), {
+      const feedback = commandFeedback(await CONTROL.nodeAbort(runId, id, state.nodes?.[id]?.attempt), {
         success: `Cancelled #${id}`, noop: `#${id} was already settled`,
         executing: `Cancellation of #${id} requested — waiting for the run`, failure: `Could not cancel #${id}`,
       }); onToast?.(feedback.message)
@@ -318,8 +318,8 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
         <div className="chips">
           {injects.map((q, i) => <span key={'i' + i} className="chip sm" title="operator-injected experiment awaiting materialization">inject: {(q.idea?.operator || 'experiment')}</span>)}
           {forks.map((q, i) => <span key={'f' + i} className="chip sm" title="fork awaiting materialization">fork #{q.from_node_id ?? q.parent_id ?? '?'}</span>)}
-          {confirmReq.map((id, i) => <span key={'c' + i} className="chip sm">confirm #{id}</span>)}
-          {ablateReq.map((id, i) => <span key={'a' + i} className="chip sm">ablate #{id}</span>)}
+          {confirmReq.map(r => <span key={`c:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>confirm #{r.node_id}</span>)}
+          {ablateReq.map(r => <span key={`a:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>ablate #{r.node_id}</span>)}
         </div>
       </>}
     </Panel>

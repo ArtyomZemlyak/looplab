@@ -2,8 +2,6 @@
 endgame-reserve strategy rule."""
 from __future__ import annotations
 
-import pytest
-
 from looplab.core.models import Idea, RunState
 from looplab.agents.strategist import RuleStrategist, StrategyContext
 from looplab.search.best_of_n import BestOfNDeveloper, _listwise_pick
@@ -109,21 +107,24 @@ def test_llm_cache_serves_stored_body(monkeypatch):
     calls = {"n": 0}
     body = {"choices": [{"message": {"content": "cached"}}], "usage": {}}
 
-    # first call: miss -> hits the (faked) network path once and stores
-    def fake_urlopen(*a, **k):
+    def fake_request(*_args, **_kwargs):
         calls["n"] += 1
         raise AssertionError("network should not be called on a cache hit")
 
     payload = {"model": "m", "messages": [{"role": "user", "content": "q"}], "temperature": 0}
     ck = c._cache_key(payload)
     c._cache[ck] = body                       # pre-seed the cache
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr(c, "_sdk_chat", fake_request)
     out = c._post(payload)
     # served from cache, no network — and returned as a COPY (mutating it must not corrupt the
-    # cached entry, since complete_text mutates the message in place)
-    assert out == body and out is not body and calls["n"] == 0
+    # cached entry, since complete_text mutates the message in place). Cache-hit telemetry is
+    # deliberately zeroed so the same provider call is not charged or traced twice.
+    assert out["choices"] == body["choices"] and out is not body and calls["n"] == 0
+    assert out["usage"] == {
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
+    }
     out["choices"][0]["message"]["content"] = "MUTATED"
-    assert c._cache[ck]["choices"][0]["message"]["content"] == "cached"
+    assert c._cache[ck] == body
 
 
 # --------------------------------------------------------------------------- #

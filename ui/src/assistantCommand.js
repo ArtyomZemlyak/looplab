@@ -7,26 +7,50 @@ const INTENTS = {
   abort: () => ({ type: 'run_abort', data: { reason: 'finalized' } }),
   resume: () => ({ type: 'resume', data: {} }),
   ratify: () => ({ type: 'spec_approved', data: {} }),
-  approve: arg => ({ type: 'approval_granted', data: { node_id: Number(arg) } }),
+  approve: (arg, nodeGeneration) => ({
+    type: 'approval_granted',
+    data: { node_id: Number(arg), generation: Number(nodeGeneration) },
+  }),
 }
 const activeSubmissions = new Map()
 
-export function assistantDirectIntent(action, arg = null) {
+export function assistantDirectIntent(action, arg = null, nodeGeneration = null) {
   const create = INTENTS[action]
   if (!create) throw new Error(`Unsupported direct command: ${action}`)
-  if (action === 'approve' && (!Number.isSafeInteger(Number(arg)) || Number(arg) < 0)) {
+  if (action === 'approve'
+      && (arg == null || !Number.isSafeInteger(Number(arg)) || Number(arg) < 0)) {
     throw new Error('Approve requires a valid node id')
   }
-  return create(arg)
+  if (action === 'approve' && (nodeGeneration == null
+      || !Number.isSafeInteger(Number(nodeGeneration)) || Number(nodeGeneration) < 0)) {
+    throw new Error('Approve requires the exact node generation')
+  }
+  return create(arg, nodeGeneration)
+}
+
+// Rebuild the in-memory controller from the strict persisted envelope. Keep the node lifecycle
+// token alongside the run generation: an id-less /approve recovery must submit the exact attempt the
+// operator saw, never rebind the same durable key to whichever attempt happens to be current now.
+export function restoreAssistantDirectEntry(saved, spec, runId, extra = {}) {
+  return {
+    ...extra,
+    name: saved.action,
+    spec,
+    arg: saved.arg,
+    nodeGeneration: saved.nodeGeneration,
+    runId,
+    expectedGeneration: saved.expectedGeneration,
+    idempotencyKey: saved.idempotencyKey,
+  }
 }
 
 // The Assistant owns polling so its visible state changes as soon as the POST returns accepted; it
 // does not sit in a bounded API wait while rendering a misleading "submitting" state.
 export function submitAssistantDirect(runId, action, arg, idempotencyKey, {
-  expectedGeneration, execute = runCommand, onRecord = null,
+  expectedGeneration, nodeGeneration = null, execute = runCommand, onRecord = null,
 } = {}) {
-  const intent = assistantDirectIntent(action, arg)
-  const key = `${String(runId)}\u0000${String(idempotencyKey)}\u0000${String(expectedGeneration)}`
+  const intent = assistantDirectIntent(action, arg, nodeGeneration)
+  const key = `${String(runId)}\u0000${String(idempotencyKey)}\u0000${String(expectedGeneration)}\u0000${String(nodeGeneration)}`
   const active = activeSubmissions.get(key)
   if (active) return active
   const request = Promise.resolve().then(() => execute(runId, intent.type, intent.data, {

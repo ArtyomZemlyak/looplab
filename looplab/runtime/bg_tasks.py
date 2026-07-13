@@ -47,11 +47,16 @@ _BACKLOG_CAP = 262_144
 # helpers (a full test run, a build, a short training) — the engine's real ML training goes through the
 # sandbox eval path with its own timeout, not here — so a generous 2h cap can't abort legitimate work,
 # but it reaps a hung/runaway child that would otherwise leak a process (+ its growing log) for the life
-# of the server. Enforced LAZILY on read()/list() (no watchdog thread).
+# of the server. Enforced by the always-on watcher thread (below) AND opportunistically on read()/list().
 _BG_MAX_SECONDS = 7200.0
 # Bound retained FINISHED tasks (and their tmp log files): a long server session would else accumulate
 # one log per background command forever. Running tasks are never evicted.
 _MAX_FINISHED = 32
+# Cadence of the always-on deadline watcher (below). Lazy read()/list() enforcement alone let a hung
+# task NOBODY polls leak a process (+ growing log) for the whole server lifetime; a daemon thread now
+# sweeps deadlines on this interval so a wedged child is reaped within ~one tick of its budget even
+# with zero polls. Small vs the 2h budget, generous vs. per-task cost (a lock-guarded snapshot + poll).
+_WATCH_INTERVAL = 30.0
 
 
 def _child_env(argv) -> dict:
@@ -63,11 +68,18 @@ def _child_env(argv) -> dict:
 
 
 class BackgroundManager:
-    def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED):
+    def __init__(self, max_seconds: float = _BG_MAX_SECONDS, max_finished: int = _MAX_FINISHED,
+                 watch_interval: float = _WATCH_INTERVAL):
         self._tasks: dict = {}
         self._lock = threading.Lock()
         self._max_seconds = max_seconds
         self._max_finished = max_finished
+        # Always-on deadline watcher (lazily spawned on first start()): a daemon thread so merely
+        # IMPORTING this module (tests, short CLI paths) never starts a thread, and it never blocks
+        # interpreter exit. `watch_interval=0`/None disables it, falling back to lazy-only enforcement.
+        self._watch_interval = watch_interval
+        self._watcher: threading.Thread | None = None
+        self._stop = threading.Event()
 
     def start(self, argv, cwd: str, wrap=None) -> str:
         run_argv = wrap(argv, cwd) if wrap else list(argv)
@@ -96,10 +108,55 @@ class BackgroundManager:
         with self._lock:
             self._tasks[tid] = {"proc": proc, "log": log, "fh": f, "cursor": 0,
                                 "cmd": " ".join(argv), "cwd": cwd,
+                                "timed_out": False,
+                                # Serialize deadline enforcement per task without blocking readers:
+                                # watcher/read/list may sweep concurrently, but only one may act on
+                                # this PID at a time (the second kill would carry a PID-reuse risk).
+                                "deadline_lock": threading.Lock(),
                                 "deadline": (time.monotonic() + self._max_seconds
                                              if self._max_seconds else None)}
         self._evict_finished()   # bound retained finished tasks + their log files
+        self._ensure_watcher()   # start the always-on deadline sweeper on first use
         return tid
+
+    def _ensure_watcher(self) -> None:
+        """Start the deadline watcher thread on first use (double-checked under the lock). Idempotent:
+        one thread per manager for its whole life. Skipped when the interval is disabled."""
+        if not self._watch_interval or self._watcher is not None:
+            return
+        with self._lock:
+            if self._watcher is None:
+                self._watcher = threading.Thread(target=self._watch_loop,
+                                                 name="looplab-bg-deadline", daemon=True)
+                self._watcher.start()
+
+    def _watch_loop(self) -> None:
+        # Sweep on a fixed cadence until shutdown(). Wrapped so one bad task never kills the watcher —
+        # it just retries next tick; the whole point is that enforcement no longer depends on a poll.
+        while not self._stop.wait(self._watch_interval):
+            try:
+                self._sweep_deadlines()
+            except Exception:  # noqa: BLE001 — a watchdog must survive any single-task error
+                pass
+
+    def _sweep_deadlines(self) -> None:
+        """Enforce deadlines + reap exited children across ALL tasks, then bound retained logs — the
+        same work read()/list() do lazily, now driven by the watcher. Snapshot under the lock, then act
+        outside it: `_enforce_deadline`/`_reap` operate on the handle directly and must not re-enter it."""
+        with self._lock:
+            tasks = list(self._tasks.values())
+        for t in tasks:
+            self._enforce_deadline(t)
+            self._reap(t)
+        self._evict_finished()
+
+    def shutdown(self) -> None:
+        """Stop the watcher thread (idempotent). For clean teardown/tests; the global MANAGER never
+        needs it because the thread is a daemon."""
+        self._stop.set()
+        w = self._watcher
+        if w is not None:
+            w.join(timeout=5)
 
     @staticmethod
     def _reap(t) -> None:
@@ -115,17 +172,31 @@ class BackgroundManager:
     @staticmethod
     def _enforce_deadline(t) -> None:
         """Reap a background task that outlived its wall-clock budget (SIGTERM to the process group,
-        like `kill`). Lazy — called on read()/list(), no watchdog thread. Idempotent; a None deadline
-        (timeout disabled) is a no-op. Operates on the handle `t` directly (never re-enters the lock)."""
+        like `kill`). Driven by the always-on watcher thread and also called opportunistically on
+        read()/list(). Idempotent; a None deadline (timeout disabled) is a no-op. Operates on the
+        handle `t` directly (never re-enters the lock)."""
         dl = t.get("deadline")
-        if dl is None or t.get("timed_out") or t["proc"].poll() is not None:
+        if dl is None or time.monotonic() <= dl or t["proc"].poll() is not None:
             return
-        if time.monotonic() > dl:
+        deadline_lock = t["deadline_lock"]
+        if not deadline_lock.acquire(blocking=False):
+            return
+        try:
+            # Re-check after acquiring: another sweep may have killed/reaped the process while this
+            # caller was racing for the task. Never issue a second kill against a stale/reused PID.
+            if t["proc"].poll() is not None:
+                return
             # Escalating WHOLE-TREE kill (psutil / taskkill /T / killpg -9), not a single SIGTERM a
             # stuck child can ignore forever — the old code sent one TERM and then latched timed_out,
             # permanently suppressing any retry (arch-review §4 P1-4). _kill_tree force-kills the tree.
-            _kill_tree(t["proc"])
+            # Publish the timeout before killing: Windows can expose the process exit while taskkill
+            # is still returning, and observers must not see an exited task without its final status.
+            # Do not use this flag as an early-return latch: if a best-effort tree kill was a no-op,
+            # the next watcher/read sweep must retry while the process remains alive.
             t["timed_out"] = True
+            _kill_tree(t["proc"])
+        finally:
+            deadline_lock.release()
 
     def _evict_finished(self) -> None:
         """Drop the OLDEST finished tasks (insertion order) once more than `max_finished` are retained,
@@ -195,8 +266,13 @@ class BackgroundManager:
             pending = max(0, size - t["cursor"])
             text = skip_note + chunk.decode("utf-8", "replace")
         self._enforce_deadline(t)   # reap a task past its wall-clock budget before reporting status
-        self._reap(t)
-        rc = t["proc"].poll()
+        # Serialize the reaping poll() against a concurrent watcher kill (F10): poll() reaps the child
+        # and frees its PID, so an unlocked poll() here could reap mid-_kill_tree and let killpg target a
+        # REUSED PID — the exact hazard `deadline_lock` exists to prevent. `_enforce_deadline` already
+        # released the lock (or never took it), so re-acquiring here does not re-enter.
+        with t["deadline_lock"]:
+            self._reap(t)
+            rc = t["proc"].poll()
         return {"ok": True, "task_id": tid, "cmd": t["cmd"],
                 "status": "running" if rc is None else "exited", "exit_code": rc,
                 "new_output": text, "pending": pending, "timed_out": t.get("timed_out", False)}
@@ -207,8 +283,9 @@ class BackgroundManager:
         out = []
         for tid, t in items:
             self._enforce_deadline(t)
-            self._reap(t)
-            rc = t["proc"].poll()
+            with t["deadline_lock"]:      # F10: serialize the reaping poll() against a watcher kill
+                self._reap(t)
+                rc = t["proc"].poll()
             out.append({"task_id": tid, "cmd": t["cmd"],
                         "status": "running" if rc is None else "exited", "exit_code": rc,
                         "timed_out": t.get("timed_out", False)})
@@ -220,16 +297,19 @@ class BackgroundManager:
         if not t:
             return {"ok": False, "error": f"no such background task {tid!r}"}
         proc = t["proc"]
-        if proc.poll() is None:
-            # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one SIGTERM/terminate,
-            # never waited, never escalated, and ALWAYS reported success — a parent could die while its
-            # children lived on. _kill_tree escalates to SIGKILL/taskkill /F over the whole tree; then
-            # wait so we report the ACTUAL outcome.
-            _kill_tree(proc)
-            try:
-                proc.wait(timeout=10)
-            except Exception:  # noqa: BLE001 — a wait timeout means it's still alive; reported below
-                pass
+        # Serialize an explicit kill with deadline enforcement too. Otherwise the user-facing kill
+        # can race the watcher exactly like two sweeps and issue a second tree-kill for a stale PID.
+        with t["deadline_lock"]:
+            if proc.poll() is None:
+                # Robust TREE kill + VERIFY (arch-review §4 P1-4): the old kill sent one
+                # SIGTERM/terminate, never waited, never escalated, and ALWAYS reported success — a
+                # parent could die while its children lived on. _kill_tree escalates to
+                # SIGKILL/taskkill /F over the whole tree; then wait so we report the ACTUAL outcome.
+                _kill_tree(proc)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:  # noqa: BLE001 — still alive; reported below
+                    pass
         try:
             t["fh"].close()
         except OSError:

@@ -66,10 +66,11 @@ def test_atomic_write_cleans_temp_on_failure(tmp_path, monkeypatch):
     assert leftovers == [], f"temp not cleaned on failure: {leftovers}"
 
 
-def test_jupyter_serverproxy_spec_is_valid():
+def test_jupyter_serverproxy_spec_is_valid(monkeypatch):
     """The jupyter-server-proxy entry point must return a launch spec jsp can use: a {port}-templated
     command that runs `looplab ui --no-build` with a pinned run-root, prefix-stripping (absolute_url
     False), and a Launcher tile."""
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
     from looplab.runtime.jupyter import setup_looplab
     spec = setup_looplab()
     assert spec["command"][:2] == ["looplab", "ui"]
@@ -77,7 +78,31 @@ def test_jupyter_serverproxy_spec_is_valid():
     assert "--no-build" in spec["command"]            # never build on a noexec/FUSE home
     assert "--run-root" in spec["command"]
     assert spec["absolute_url"] is False              # jsp strips the prefix; backend sees /api/...
+    assert spec["new_browser_tab"] is False           # anonymous local shell may be framed
     assert spec["launcher_entry"]["title"] == "LoopLab"
+
+
+def test_jupyter_protected_shell_opens_outside_frame(monkeypatch):
+    """The protected shell denies framing, so its Launcher entry must not target an iframe."""
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    from looplab.runtime.jupyter import setup_looplab
+
+    assert setup_looplab()["new_browser_tab"] is True
+
+
+def test_compose_protected_ui_wires_host_allowlist_and_public_healthcheck():
+    """The documented protected Compose mode must stay reachable and healthy with auth enabled."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    compose = (root / "docker-compose.yml").read_text(encoding="utf-8")
+    ui_service = compose.split("  ui:\n", 1)[1].split("\n  run:\n", 1)[0]
+    env_example = (root / ".env.example").read_text(encoding="utf-8")
+
+    assert "LOOPLAB_UI_HOSTS: \"${LOOPLAB_UI_HOSTS:-}\"" in ui_service
+    assert "localhost:8765/api/health" in ui_service
+    assert "localhost:8765/api/runs" not in ui_service
+    assert "LOOPLAB_UI_HOSTS=" in env_example
 
 
 def test_run_root_honors_env(monkeypatch):

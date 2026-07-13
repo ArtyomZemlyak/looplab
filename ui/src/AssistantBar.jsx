@@ -11,7 +11,7 @@ import { proposalLaunchChat } from './launchProvenance.js'
 import {
   assistantDirectObservationKind, assistantDirectStatus, assistantRunChanged,
   assistantStorageFailureOwnsLock, pollAssistantDirectOnce,
-  presentAssistantCommandResult, submitAssistantDirect,
+  presentAssistantCommandResult, restoreAssistantDirectEntry, submitAssistantDirect,
 } from './assistantCommand.js'
 import {
   assistantRecoveryFailure, assistantRecoveryPayload, assistantReplyCompletesTurn, danglingAssistantTurn,
@@ -533,6 +533,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     currentRunIdRef.current, entry.runId, () => flash(message))
   const persistDirect = entry => saveAssistantRunTransport(entry.runId, {
     action: entry.name, arg: entry.arg, idempotencyKey: entry.idempotencyKey,
+    nodeGeneration: entry.nodeGeneration,
     expectedGeneration: entry.expectedGeneration,
     commandId: entry.record?.id || '', record: entry.record,
     statusUnavailable: entry.statusUnavailable, observationKind: entry.observationKind,
@@ -683,6 +684,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       const record = await submitAssistantDirect(bound.runId, bound.name, bound.arg,
         bound.idempotencyKey, {
           expectedGeneration: bound.expectedGeneration,
+          nodeGeneration: bound.nodeGeneration,
           onRecord: next => {
             const verified = verifiedDirectEntry(bound, next)
             if (verified) persistDirect({ ...verified, statusUnavailable: false })
@@ -715,7 +717,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       }
     }
   }
-  const runDirect = (d) => {
+  const runDirect = async (d) => {
     if (!runId) { flash(`/${d.name} needs an open run`); return }
     if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to act`); return }
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
@@ -726,13 +728,28 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (directFailure) clearAssistantRunTransport(directFailure.runId, undefined, {
       idempotencyKey: directFailure.idempotencyKey,
     })
-    const entry = { ...d, runId, expectedGeneration: getObservedRunGeneration(runId),
-      idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
-    commandFocusRequestedRef.current = true
-    setCurrentFailure(entry, null)
-    setDirectPending(entry)
     directCaptureRef.current = true
-    executeDirect(entry).finally(() => { directCaptureRef.current = false })
+    try {
+      let nodeGeneration = null
+      if (d.name === 'approve') {
+        const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
+        const node = payload?.state?.nodes?.[d.arg]
+        if (!node) throw new Error(`No experiment #${d.arg} exists in this run`)
+        if (!Number.isSafeInteger(node.attempt) || node.attempt < 0) {
+          throw new Error(`Experiment #${d.arg} has no verifiable lifecycle generation`)
+        }
+        nodeGeneration = node.attempt
+      }
+      const entry = { ...d, runId, nodeGeneration,
+        expectedGeneration: getObservedRunGeneration(runId),
+        idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
+      commandFocusRequestedRef.current = true
+      setCurrentFailure(entry, null)
+      setDirectPending(entry)
+      await executeDirect(entry)
+    } catch (error) {
+      flash(`/${d.name} failed: ${error?.message || error}`)
+    } finally { directCaptureRef.current = false }
   }
   const checkDirect = async () => {
     const entry = directPending
@@ -855,11 +872,10 @@ export default function AssistantBar({ runId, hidden = false }) {
       || (lock.commandId && saved.commandId && lock.commandId !== saved.commandId)
     )
     if (saved.protocolInvalid || lockMismatch) {
-      const restored = { name: saved.action, spec, arg: saved.arg, runId,
-        expectedGeneration: saved.expectedGeneration,
-        idempotencyKey: saved.idempotencyKey, record: saved.record,
+      const restored = restoreAssistantDirectEntry(saved, spec, runId, { record: saved.record,
         statusUnavailable: true, observationKind: 'protocol', checking: false, retrying: false,
-        protocolInvalid: true, canResubmit: false, lockIdentity: lock?.source === 'assistant' ? lock : null }
+        protocolInvalid: true, canResubmit: false,
+        lockIdentity: lock?.source === 'assistant' ? lock : null })
       saveRunCommandLock(runId, { ...restored, source: 'assistant', action: restored.name })
       setDirectPending(restored)
       return
@@ -868,11 +884,10 @@ export default function AssistantBar({ runId, hidden = false }) {
       clearAssistantRunTransport(runId, undefined, { idempotencyKey: saved.idempotencyKey })
       return
     }
-    const restored = { name: saved.action, spec, arg: saved.arg, runId,
-      expectedGeneration: saved.expectedGeneration, idempotencyKey: saved.idempotencyKey,
+    const restored = restoreAssistantDirectEntry(saved, spec, runId, {
       record: saved.record || (saved.commandId ? { id: saved.commandId, status: 'accepted' } : { status: 'submitting' }),
       statusUnavailable: !!saved.statusUnavailable, observationKind: saved.observationKind,
-      checking: false, retrying: !!saved.retrying, lastError: '' }
+      checking: false, retrying: !!saved.retrying, lastError: '' })
     if (COMMAND_FAILED.has(saved.record?.status) && !saved.statusUnavailable
         && !saved.retrying && !saved.checking) {
       clearRunCommandLock(runId, {

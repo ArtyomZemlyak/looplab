@@ -25,6 +25,7 @@ import os
 import subprocess  # noqa: F401 — kept as a module attribute: tests patch `looplab.server.subprocess.Popen`
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 # The wire-protocol names this server shares with the TUI + React UI live in `serve/protocol.py`.
 # CONTROL_EVENTS and POLL_SECONDS are re-exported here (imported, not aliased) so the historical
@@ -35,9 +36,11 @@ from looplab.serve.protocol import CONTROL_EVENTS, POLL_SECONDS  # noqa: F401 �
 # this module (`AppState.make_llm_client`), so the single historical patch point still covers them.
 from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable re-export
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
-    _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks)
+    _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
+    install_resume_reconcile_hooks, sweep_stale_lifecycle_locks)
 from looplab.serve.projects import ProjectStore
 from looplab.serve.reviews import REVIEW_HEADER, ReviewError, ReviewStore, review_request_allowed
+from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
 from looplab.serve.settings_store import SettingsStore
 
 _log = logging.getLogger("looplab.server")
@@ -48,27 +51,18 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
-except ModuleNotFoundError as e:  # pragma: no cover - exercised only without the extra
-    raise ModuleNotFoundError(
-        "The LoopLab UI server needs the [ui] extra: pip install 'looplab[ui]' "
-        "(fastapi + uvicorn)."
-    ) from e
+except ModuleNotFoundError as e:  # allow importing pure re-exports without the [ui] extra
+    if e.name != "fastapi":
+        raise
+    FastAPI = Request = CORSMiddleware = FileResponse = HTMLResponse = JSONResponse = StaticFiles = None  # type: ignore[assignment,misc]
 
-from looplab.serve.appstate import AppState
-from looplab.serve.jobs import JobRegistry
-from looplab.serve import jobs as _jobs_router
-from looplab.serve.routers import (
-    assistant as _assistant_router, boss as _boss_router, control as _control_router,
-    genesis as _genesis_router, misc as _misc_router, org as _org_router,
-    reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
 # Historical `looplab.server.<name>` import paths for the boss/genesis models + mappers (tests and
 # operator tooling import these from here; the definitions moved with their routes).
-from looplab.serve.routers.boss import (  # noqa: F401 — re-exports
+from looplab.serve.routers.boss import (  # noqa: E402, F401 — re-exports after optional UI probe
     _Action, _Plan, _action_to_control, _plan_to_actions)
-from looplab.serve.routers.genesis import _GenesisSpec  # noqa: F401 — re-export
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
-from looplab.events.digest import theme_rollup as _theme_rollup  # noqa: F401 — re-export
+from looplab.events.digest import theme_rollup as _theme_rollup  # noqa: E402, F401 — re-export
 
 
 def _ui_dist() -> Path:
@@ -79,15 +73,85 @@ def _ui_dist() -> Path:
     return ui_dist_dir()
 
 
-# Raw-content GET routes the UI-token middleware gates (as sensitive as mutations). Module-level
-# constants (not rebuilt inside `_require_token` on every request): `_RAW_GET_SUFFIX` match by
-# path suffix, `_RAW_GET_EXACT` by exact path. See `_require_token` for the per-route rationale.
+# P1-3 default-deny route scoping: when a UI token is set, EVERY /api/ request needs it (reads too,
+# not just mutations + an enumerated sensitive list — a new sensitive route that wasn't added to that
+# list used to leak; deny-default closes that whole class). The ONLY exceptions are the light,
+# non-sensitive routes an untokened monitor legitimately needs — kept to zero-model liveness. The
+# authenticated UI attaches the token to every request (ui/src/api.js::_authHeaders), so this never
+# affects it, only an untokened same-origin caller. (The old `_RAW_GET_*` sensitive enumeration is now
+# subsumed by deny-default; kept below only as documentation of the raw surface.)
+_SAFE_UNAUTH_API = (
+    "/api/health",
+    # The tokenless owner shell must learn whether it needs to show the unlock gate. This endpoint
+    # exposes only two booleans and performs no model/disk work.
+    "/api/auth/status",
+)
+
+
+def _unauth_api_ok(p: str) -> bool:
+    """Whether an /api/ path is safe to serve WITHOUT the UI token. Beyond the exact zero-model liveness
+    route, this includes the live-state SSE stream `/api/runs/<id>/events`: the browser consumes it via a
+    headerless `EventSource` that CANNOT attach `X-LoopLab-Token`, and its payload is already redacted
+    (`appstate._public_state_value`) precisely so it is safe unauthenticated. Gating it 401-loops every
+    live update and freezes the dashboard on any token-protected deployment (F3). The suffix match is
+    exact to the one SSE route (`runs.py::stream_events`); no other `/api/runs/.../events` route exists."""
+    return (p in _SAFE_UNAUTH_API
+            or (p.startswith("/api/runs/") and p.endswith("/events"))
+            # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
+            # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
+            # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
+            or p.startswith("/api/assistant/shared/"))
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/log-page", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
 
 
+def _ui_extra_error(missing: str) -> ModuleNotFoundError:
+    return ModuleNotFoundError(
+        "The LoopLab UI server needs the [ui] extra: pip install 'looplab[ui]' "
+        "(fastapi + uvicorn).",
+        name=missing,
+    )
+
+
+def _origin_tuple(value: str | None):
+    """Canonical (scheme, host, port) for an HTTP Origin/target, or None when malformed."""
+    if not value:
+        return None
+    try:
+        p = urlsplit(value)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return None
+        port = p.port or (443 if p.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return p.scheme, p.hostname.lower(), port
+
+
+def _host_name(value: str | None) -> str | None:
+    """Canonical hostname from an HTTP Host header/config entry, rejecting ambiguous syntax."""
+    if not value or any(c in value for c in ("/", "\\", "@")) or any(c.isspace() for c in value):
+        return None
+    try:
+        parsed = urlsplit("//" + value)
+        _ = parsed.port                       # validate a supplied port rather than silently ignoring it
+        host = parsed.hostname
+    except ValueError:
+        return None
+    return host.lower().rstrip(".") if host else None
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
+    if FastAPI is None:
+        raise _ui_extra_error("fastapi")
+    from looplab.serve import jobs as _jobs_router
+    from looplab.serve.appstate import AppState
+    from looplab.serve.jobs import JobRegistry
+    from looplab.serve.routers import (
+        assistant as _assistant_router, boss as _boss_router, control as _control_router,
+        genesis as _genesis_router, misc as _misc_router, org as _org_router,
+        reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
+
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="LoopLab UI", version="0.1.0")
@@ -102,10 +166,52 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
     reviews = ReviewStore(root / ".reviews")
-    # Owner auth: LOOPLAB_UI_TOKEN is entered through the SPA's unlock gate and sent as a request
-    # header.  It is never embedded in public HTML.  A reviewer can therefore navigate to `/` but
-    # cannot promote the read-only capability into owner access.  Unset preserves local open mode;
-    # creation of true share links is refused there because the ambient owner API is anonymous.
+    # Owner auth is entered through the SPA unlock gate and never embedded in public HTML.
+    allowed_origins = {v for o in origins if (v := _origin_tuple(o)) is not None}
+
+    # Host validation closes DNS rebinding: deriving the target origin from request.base_url alone
+    # trusts the attacker-controlled Host header, so Origin=Host=evil.example would look same-origin
+    # after evil.example is rebound to 127.0.0.1. Local names are safe defaults; a deliberate remote
+    # deployment lists its public hostnames in LOOPLAB_UI_HOSTS (comma-separated, optional ports).
+    configured_hosts = {
+        host for raw in os.environ.get("LOOPLAB_UI_HOSTS", "").split(",")
+        if (host := _host_name(raw.strip())) is not None
+    }
+    allowed_hosts = {"localhost", "127.0.0.1", "::1"} | configured_hosts
+
+    @app.middleware("http")
+    async def _reject_untrusted_host(request: "Request", call_next):
+        host = _host_name(request.headers.get("host"))
+        # Starlette's in-process TestClient uses testserver/testclient; it is not a network-reachable
+        # production exception and keeps the HTTP contract tests representative without weakening Host.
+        in_process_test = (host == "testserver" and request.client is not None
+                           and request.client.host == "testclient")
+        if host not in allowed_hosts and not in_process_test:
+            return JSONResponse({"detail": "untrusted Host header"}, status_code=421)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _reject_cross_origin_mutation(request: "Request", call_next):
+        """CORS controls whether browser JS may READ a response; it does not stop a simple cross-site
+        POST from EXECUTING. Reject browser-originated mutations server-side. Requests without Origin
+        remain valid for CLI/TUI clients, while same-origin SPA calls and configured Vite origins work."""
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and request.url.path.startswith("/api/")):
+            origin = request.headers.get("origin")
+            if origin:
+                target = _origin_tuple(str(request.base_url))
+                supplied = _origin_tuple(origin)
+                if supplied is None or (supplied != target and supplied not in allowed_origins):
+                    return JSONResponse({"detail": "cross-origin mutation rejected"}, status_code=403)
+        return await call_next(request)
+    # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
+    # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
+    # SPA is served the token in a same-origin <meta> tag (see _index_response). NOTE: "same-origin"
+    # protects the token only when each principal has its OWN origin — true for the default local
+    # bind (127.0.0.1) and a per-user subdomain. On a SHARED origin (jupyter-server-proxy: every
+    # user under https://hub/user/<name>/proxy/<port>/ shares one origin) the token is a
+    # per-DEPLOYMENT secret, not per-user — see _on_shared_hub() and the deployment guide. Unset
+    # (default local single-user) -> no auth, behaviour unchanged.
     ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
 
     def _owner_authenticated(request: "Request") -> bool:
@@ -151,68 +257,24 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 try:
                     review = reviews.resolve(review_token)
                 except ReviewError as exc:
-                    code = 410 if exc.kind in {"expired", "revoked"} else 401
+                    code = 410 if exc.kind in {"expired", "revoked", "generation"} else 401
                     return _review_denial(str(exc), exc.kind, code)
                 if not review_request_allowed(review, request.method, p):
                     return _review_denial(
                         "read-only review capability does not permit this request",
                         "review_read_only", 403)
-                # A valid review capability is independently authorized for this exact GET.  Do not
-                # require or expose the owner UI token, including on sensitive evidence reads that
-                # the link creator explicitly opted into.
+                # A review identity is independently scoped even if an owner header is also present:
+                # bearer composition must never promote a read-only link into the owner plane.
                 response = await call_next(request)
                 response.headers["Cache-Control"] = "no-store"
                 response.headers["Referrer-Policy"] = "no-referrer"
                 response.headers["Vary"] = REVIEW_HEADER
                 return response
-            # Raw-content / captured-output / model-transcript reads are as sensitive as mutations, so
-            # gate every GET that returns something OTHER than a light folded projection (events/state/
-            # nodes/metrics/cost/config-masked). The raw surface is large — enumerate it exhaustively:
-            #   - /artifact(s): repo files a run produced (a checked-in .env, credentials, a log key)
-            #   - /assistant/sessions: the full model-facing transcript incl. pasted $HOME file contents
-            #   - /log, /nodes/*/logs: RAW event envelopes / captured stdout+stderr (solution code + the
-            #     "a log that printed a key" risk) ; /chat-log: the operator↔boss chat transcript
-            #   - /spans/{sid}: the UNCAPPED span I/O — the FULL LLM prompt (repo source + pasted files +
-            #     printed secrets) and model output ; /trace*, /conversation: the (capped) model transcript
-            #   - /agents_md: the repo's AGENTS.md, served verbatim
-            #   - /api/{prompts,skills,knowledge}: operator-authored files served verbatim
-            #   - /api/memory: cross-run memory rows (goals / rationales / lessons)
-            #   - /assistant/permissions: a preview snippet of the file the assistant is about to write
-            # (The /assistant/shared/{sid} route STRIPS raw and stays open for sharing.) The UI attaches
-            # the token to EVERY request (ui/src/api.js::_authHeaders), so gating these never affects the
-            # authenticated UI — only an untokened same-origin caller, which is who the token defends against.
-            # (_RAW_GET_SUFFIX / _RAW_GET_EXACT are module-level constants — see above make_app.)
-            # /api/runs/{id}/spans/... and /api/runs/{id}/trace[...] carry the raw span I/O. Match the
-            # sub-resource by PATH SEGMENT (parts[4]), not a bare `/trace`/`/spans` substring, so a run
-            # literally named "trace" or "spans" isn't over-gated on its projection routes.
-            _parts = p.split("/")
-            _run_scoped_raw = (len(_parts) > 4 and _parts[1] == "api" and _parts[2] == "runs"
-                               and _parts[4] in ("spans", "trace"))
-            # Node DETAIL (/api/runs/{id}/nodes/{nid}) returns full code, files, persisted stdout_tail,
-            # trials, AND parent code — as sensitive as /logs (already gated), but it was open because
-            # it has no raw suffix (arch-review §4 P1-3: node detail leaked 200 to an untokened caller).
-            # Match the EXACT 6-part path so the LIGHTER /nodes/{nid}/metrics projection (7 parts) and
-            # /nodes/{nid}/logs|conversation (gated by suffix) are unaffected.
-            _node_detail = (len(_parts) == 6 and _parts[1] == "api" and _parts[2] == "runs"
-                            and _parts[4] == "nodes")
-            # Job / genesis-job results carry model output + synthesized scope reports. Random ids make
-            # them less enumerable (the review rates this P2), but gate them too — defense in depth.
-            _job_result = (len(_parts) >= 4 and _parts[1] == "api" and _parts[2] in ("jobs", "genesis"))
-            _review_admin = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
-                             and _parts[4] == "reviews")
-            _command_status = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
-                               and _parts[4] == "commands")
-            # The startup observation key is an owner bearer.  Keep this GET behind the same owner
-            # gate as command status so a shared-origin caller cannot enumerate startup state.
-            _start_status = (len(_parts) == 5 and _parts[1] == "api" and _parts[2] == "start"
-                             and _parts[4] == "status")
-            sensitive_get = (request.method == "GET"
-                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                   or _run_scoped_raw or _node_detail or _job_result
-                                   or _review_admin or _command_status or _start_status
-                                   or "/assistant/sessions" in p))
-            mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
-            if ((mutating or sensitive_get) and p.startswith("/api/")
+
+            # Default-deny every owner API request except the tiny explicit unauthenticated surface.
+            # OPTIONS is a side-effect-free CORS preflight and must reach CORSMiddleware.
+            if (request.method != "OPTIONS" and p.startswith("/api/")
+                    and not _unauth_api_ok(p)
                     and not _owner_authenticated(request)):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)
@@ -236,7 +298,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             try:
                 review = reviews.resolve(review_token)
             except ReviewError as exc:
-                code = 410 if exc.kind in {"expired", "revoked"} else 401
+                code = 410 if exc.kind in {"expired", "revoked", "generation"} else 401
                 return _review_denial(str(exc), exc.kind, code)
             if not review_request_allowed(review, request.method, request.url.path):
                 return _review_denial(
@@ -278,12 +340,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
+    sweep_stale_lifecycle_locks(root)   # F22: GC orphaned per-run lifecycle lock files at startup
+    resume_cancel = install_resume_reconcile_hooks(app, root)
+    # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
+    # then reap every child that was registered before cancellation won the spawn gate.
     install_reap_hooks(app)
     settings_store = SettingsStore(root)
     settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
 
     srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
-                   reviews=reviews)
+                   reviews=reviews, resume_cancel=resume_cancel)
     srv.owner_auth_enabled = bool(ui_token)
     # Explicit app-state handle for lifecycle integrations/tests; routers still close over the same
     # AppState instance, so replacing a dependency such as srv.commands is immediately observed.
@@ -400,7 +466,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
 def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765,
           root_path: str = "") -> None:
-    import uvicorn
+    if FastAPI is None:
+        raise _ui_extra_error("fastapi")
+    try:
+        import uvicorn
+    except ModuleNotFoundError as e:
+        if e.name != "uvicorn":
+            raise
+        raise _ui_extra_error("uvicorn") from e
     # root_path: ASGI mount prefix for a NON-stripping proxy (JupyterHub non-strip / reverse-proxy
     # subpath). Empty for local + the common prefix-stripping jupyter-server-proxy (the SPA derives
     # its own prefix from the page path), so this is a no-op there.

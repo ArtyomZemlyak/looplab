@@ -38,7 +38,8 @@ def test_reset_eval_keeps_code_reopens_terminal():
     assert st.nodes[0].rerun_from is None                    # eval needs no re-develop marker
     # a fresh terminal after the reset is accepted (first-terminal-after-reset wins)
     st = fold(base + [_ev("node_reset", {"node_id": 0, "from_stage": "eval"}, 2),
-                      _ev("node_evaluated", {"node_id": 0, "metric": 0.9}, 3)])
+                       _ev("node_evaluated", {"node_id": 0, "generation": 1,
+                                              "metric": 0.9}, 3)])
     assert st.nodes[0].status is NodeStatus.evaluated and st.nodes[0].metric == 0.9
 
 
@@ -87,3 +88,8 @@ def test_engine_reruns_reset_node_in_place(tmp_path):
     creates = [e for e in EventStore(run_dir / "events.jsonl").read_all()
                if e.type == "node_created" and e.data.get("node_id") == target]
     assert len(creates) >= 2
+    assert creates[-1].data["generation"] == 1
+    terminals = [e for e in EventStore(run_dir / "events.jsonl").read_all()
+                 if e.type in ("node_evaluated", "node_failed") and e.data.get("node_id") == target]
+    assert terminals[-1].data["generation"] == 1
+    assert st1.nodes[target].attempt == 1

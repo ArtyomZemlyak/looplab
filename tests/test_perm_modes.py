@@ -155,16 +155,25 @@ def test_protect_list_covers_integrity_files():
 
 
 def test_grader_globs_precise_boundary():
-    """Architecture review + mega-review: grader/grade files are protected at a filename-COMPONENT
-    boundary (name-start, after a _/- separator, or the autograder convention) — so real grader files
-    stay read-only while upgrade.py/downgrade.py/upgrader.py (which merely CONTAIN 'grade') are editable
-    and autograd.py (the PyTorch lib) is not falsely locked."""
-    from looplab.tools.patch import _match
+    """Grader/grade files are protected BROADLY — any name containing 'grade'/'grader'/'grading',
+    including no-separator forms like mygrader.py / pregrader.py (F11) — while the migration scripts that
+    merely CONTAIN 'grade' (upgrade.py/downgrade.py/upgrader.py) stay editable via the explicit
+    DEFAULT_PROTECT_EXCEPTIONS override, and autograd.py (PyTorch) / gradient.py are not falsely locked.
+    Checks the FULL protection decision (broad glob AND the exception carve-out), as WriteTools uses it."""
+    from looplab.tools.patch import SurfacePolicy
+    from looplab.tools.perm_modes import DEFAULT_PROTECT_EXCEPTIONS
 
     def prot(path):
-        return any(_match(path, glob) for glob in DEFAULT_PROTECT)
+        return (SurfacePolicy(
+            None, DEFAULT_PROTECT, check_escapes=False,
+            allow_exceptions=DEFAULT_PROTECT_EXCEPTIONS,
+        ).check(path) == "protected")
     for f in ("grader.py", "grade.py", "grading.py", "mle_grader.py", "grade_submission.py",
-              "autograder.py", "autograde.py", "sub/autograder.py"):
+              "autograder.py", "autograde.py", "sub/autograder.py",
+              "mygrader.py", "pregrader.py", "finalgrader.py", "src/xgrader.py"):   # F11: no-separator
         assert prot(f), f + " should be protected"
-    for f in ("upgrade.py", "downgrade.py", "upgrader.py", "autograd.py", "gradient.py"):
+    for f in ("upgrade.py", "downgrade.py", "upgrader.py", "upgrade_003.py",
+              "autograd.py", "gradient.py"):
         assert not prot(f), f + " should be editable"
+    # An operator/manifest that passes its OWN protect list gets NO exception override (intent wins).
+    assert SurfacePolicy(None, ["**/upgrade.py"], check_escapes=False).check("upgrade.py") == "protected"

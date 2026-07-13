@@ -23,7 +23,7 @@ const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 // from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
 // unlike the exploratory confirm/ablate/fork which stay in the chat. Appends a node_reset control
 // event; the engine applies it on the next resume.
-function ResetBtn({ runId, id, onToast }) {
+function ResetBtn({ runId, id, generation, onToast }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const STAGES = [
@@ -36,7 +36,7 @@ function ResetBtn({ runId, id, onToast }) {
     setOpen(false)
     setBusy(true)
     try {
-      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, stage), {
+      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, stage, generation), {
         success: `Reset #${id} from ${stage} applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: `Reset #${id} failed`,
       })
@@ -132,7 +132,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
                 : 'Summary-only review. Source, live traces, and actions are not included.'
               : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
-          : <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>}
+          : <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
@@ -183,7 +183,7 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
 // Phase 1: the node's declared eval pipeline as a coloured strip (data_prep ✓ → train ✓ → eval ✗), so a
 // crash is pinpointed to its stage instead of hiding behind one opaque "evaluate". Empty on single-command
 // evals. The failed stage is tinted red; a still-pending tail (not yet reached) shows muted.
-function StagePipeline({ stages, failed, runId, id, onToast }) {
+function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
   const [pendingStage, setPendingStage] = useState(null)
   if (!stages || !stages.length) return null
   const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
@@ -193,7 +193,7 @@ function StagePipeline({ stages, failed, runId, id, onToast }) {
     if (!runId || pendingStage) return
     setPendingStage(name)
     try {
-      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, name), {
+      const feedback = commandFeedback(await CONTROL.resetNode(runId, id, name, generation), {
         success: `Reset #${id} from '${name}' applied — the engine is processing it`, noop: `#${id} already reflects that reset`,
         executing: `Re-run of #${id} from '${name}' requested — waiting for the engine`, failure: 'Re-run failed',
       })
@@ -235,7 +235,7 @@ function Overview({ n, state, runId, onToast }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
-    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} onToast={onToast} />
+    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>

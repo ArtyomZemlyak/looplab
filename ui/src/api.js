@@ -113,7 +113,7 @@ const RUN_ENVELOPE_KEYS = new Set([
   'runId', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
   'observationKind', 'retrying', 'checking', 'updatedAt', 'committed',
 ])
-const ASSISTANT_ENVELOPE_KEYS = new Set([...RUN_ENVELOPE_KEYS, 'arg'])
+const ASSISTANT_ENVELOPE_KEYS = new Set([...RUN_ENVELOPE_KEYS, 'arg', 'nodeGeneration'])
 const LOCK_KEYS = new Set([
   'runId', 'source', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'status', 'statusUnavailable', 'updatedAt',
 ])
@@ -202,7 +202,8 @@ const protocolTransport = (runId, source, payload = null) => {
   const expectedGeneration = validRunGeneration(payload?.expectedGeneration)
     ? String(payload.expectedGeneration) : ''
   return {
-    runId: String(runId), action, arg: null, expectedGeneration, idempotencyKey, commandId,
+    runId: String(runId), action, arg: null, nodeGeneration: null,
+    expectedGeneration, idempotencyKey, commandId,
     record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
     statusUnavailable: true, observationKind: 'protocol', retrying: false, checking: false,
     protocolInvalid: true, canResubmit: false,
@@ -534,7 +535,8 @@ export function clearRunTransport(runId, storage = undefined) {
 }
 
 // Assistant slash commands use the same durable envelope as Dock but a separate key. Only the
-// allow-listed action and an optional numeric node id are persisted; arbitrary command data is not.
+// allow-listed action, optional numeric node id, and that node's exact lifecycle generation are
+// persisted; arbitrary command data is not.
 export function saveAssistantRunTransport(runId, state, storage = undefined) {
   const target = transportStorage(storage)
   if (!target || !runId || !ASSISTANT_TRANSPORT_ACTIONS.has(state?.action) || !state?.idempotencyKey) return false
@@ -547,10 +549,18 @@ export function saveAssistantRunTransport(runId, state, storage = undefined) {
   const expectedGeneration = state.expectedGeneration
   if (!validRunGeneration(expectedGeneration)) return false
   const numericArg = state.arg == null ? null : Number(state.arg)
-  if (state.action === 'approve' && !commandId
-      && (!Number.isSafeInteger(numericArg) || numericArg < 0)) return false
+  const nodeGeneration = state.nodeGeneration == null ? null : Number(state.nodeGeneration)
+  if (state.action === 'approve') {
+    if (numericArg != null && (!Number.isSafeInteger(numericArg) || numericArg < 0)) return false
+    if (nodeGeneration != null
+        && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0)) return false
+    // Before the server returns a durable command id, recovery must retain the exact node lifecycle
+    // inspected by the user. Re-fetching a later attempt would turn recovery into a new action.
+    if (!commandId && (numericArg == null || nodeGeneration == null)) return false
+  } else if (state.nodeGeneration != null) return false
   const payload = {
     runId: String(runId), action: state.action, arg: state.action === 'approve' ? numericArg : null,
+    nodeGeneration: state.action === 'approve' ? nodeGeneration : null,
     expectedGeneration,
     idempotencyKey: String(state.idempotencyKey), commandId, record,
     statusUnavailable: !!state.statusUnavailable,
@@ -611,11 +621,21 @@ export function loadAssistantRunTransport(runId, storage = undefined) {
     if (!record || (payload.commandId && record.id && payload.commandId !== record.id)
         || (!!payload.commandId !== !!record.id)) return protocolTransport(runId, 'assistant', payload)
     const arg = payload.action === 'approve' && payload.arg != null ? Number(payload.arg) : null
+    const nodeGeneration = payload.action === 'approve' && payload.nodeGeneration != null
+      ? Number(payload.nodeGeneration) : null
     if (payload.action === 'approve' && ((arg != null && (!Number.isSafeInteger(arg) || arg < 0))
-        || (!payload.commandId && arg == null))) return protocolTransport(runId, 'assistant', payload)
-    if (payload.action !== 'approve' && payload.arg !== null) return protocolTransport(runId, 'assistant', payload)
+        || (nodeGeneration != null
+          && (!Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0))
+        || (!payload.commandId && (arg == null || nodeGeneration == null)))) {
+      return protocolTransport(runId, 'assistant', payload)
+    }
+    if (payload.action !== 'approve'
+        && (payload.arg !== null || (payload.nodeGeneration != null))) {
+      return protocolTransport(runId, 'assistant', payload)
+    }
     const { committed: _committed, ...restored } = payload
-    return { ...restored, arg, commandId: payload.commandId, record, lastError: '' }
+    return { ...restored, arg, nodeGeneration, commandId: payload.commandId,
+      record, lastError: '' }
   } catch { return protocolTransport(runId, 'assistant') }
 }
 
@@ -982,28 +1002,41 @@ export const CONTROL = {
   // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
   pause: (rid) => runCommand(rid, 'pause', {}),
   abort: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
-  nodeAbort: (rid, id) => runCommand(rid, 'node_abort', { node_id: id, reason: 'ui' }),
+  nodeAbort: (rid, id, generation) => runCommand(
+    rid, 'node_abort', { node_id: id, generation, reason: 'ui' }),
   // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
   // implement=re-run the Developer (keep the idea), propose=full redo. The command service drives it.
-  resetNode: (rid, id, stage) => runCommand(rid, 'node_reset', { node_id: id, from_stage: stage }),
-  approve: (rid, id) => runCommand(rid, 'approval_granted', { node_id: id }),
+  resetNode: (rid, id, stage, generation) => runCommand(
+    rid, 'node_reset', { node_id: id, generation, from_stage: stage }),
+  approve: (rid, id, generation) => runCommand(
+    rid, 'approval_granted', { node_id: id, generation }),
   ratify: (rid) => runCommand(rid, 'spec_approved', {}),
   hint: (rid, text) => runCommand(rid, 'hint', { text }),
   budget: (rid, sec) => runCommand(rid, 'budget_extend', { max_eval_seconds: sec }),
-  forceConfirm: (rid, id) => runCommand(rid, 'force_confirm', { node_id: id }),
-  forceAblate: (rid, id) => runCommand(rid, 'force_ablate', { node_id: id }),
-  fork: (rid, id) => runCommand(rid, 'fork', { from_node_id: id }),
+  forceConfirm: (rid, id, generation) => runCommand(
+    rid, 'force_confirm', { node_id: id, generation }),
+  forceAblate: (rid, id, generation) => runCommand(
+    rid, 'force_ablate', { node_id: id, generation }),
+  fork: (rid, id, generation) => runCommand(
+    rid, 'fork', { from_node_id: id, generation }),
   annotate: (rid, id, text) => runCommand(rid, 'annotation', { node_id: id, text }),
-  promote: (rid, id) => runCommand(rid, 'promote', { node_id: id, alias: 'champion' }),
+  promote: (rid, id, generation) => runCommand(
+    rid, 'promote', { node_id: id, generation, alias: 'champion' }),
   // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,
   // rationale, theme?}; optional parent_id (branch from a node) and code (ship ready-made code).
-  inject: (rid, { idea, parent_id = null, code = null }) =>
-    runCommand(rid, 'inject_node', { idea, parent_id, code }),
+  inject: (rid, { idea, parent_id = null, parent_generation = null, code = null }) =>
+    runCommand(rid, 'inject_node', {
+      idea, parent_id, code,
+      parent_generations: parent_id != null && parent_generation != null
+        ? { [parent_id]: parent_generation } : undefined,
+    }),
   reopen: (rid) => runCommand(rid, 'run_reopened', {}),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).
-  merge: (rid, ids) => runCommand(rid, 'inject_node', {
-    idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` }, parent_ids: ids }),
+  merge: (rid, ids, parentGenerations = undefined) => runCommand(rid, 'inject_node', {
+      idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` },
+      parent_ids: ids, parent_generations: parentGenerations,
+    }),
   // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
   // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),

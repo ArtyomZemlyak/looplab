@@ -23,7 +23,7 @@ from looplab.events.types import EV_TRUST_GATE_CHANGED
 from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import _engine_alive, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
 from looplab.serve.protocol import (
@@ -90,7 +90,9 @@ def build_router(srv) -> APIRouter:
     _state_payload = srv.state_payload
 
     # ------------------------------------------------------------------ runs list
-    _summary_cache = srv.summary_cache   # run_id -> (size, mtime, summary); skips re-folding
+    # File identity is part of the signature: reset replaces events.jsonl and can preserve both
+    # content metadata fields, so size+mtime alone can return generation A's summary for generation B.
+    _summary_cache = srv.summary_cache   # run_id -> (ino, ctime_ns, size, mtime_ns, summary)
 
     @router.get("/api/runs")
     def list_runs():
@@ -102,14 +104,15 @@ def build_router(srv) -> APIRouter:
                 continue
             try:
                 stt = log.stat()
-                sig = (stt.st_size, stt.st_mtime)
+                sig = (stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns)
                 cached = _summary_cache.get(rd.name)
-                if cached and cached[:2] == sig:    # unchanged log -> reuse (finished runs never re-fold)
-                    out.append(cached[2])
+                if cached and cached[:4] == sig:    # unchanged log -> reuse (finished runs never re-fold)
+                    out.append(cached[4])
                     continue
                 events = srv.events(rd)
                 st = fold(events)
-                finalize_incomplete = incomplete_finalize_scope(events) is not None
+                finalize_incomplete = (
+                    incomplete_finalize_scope(events) is not None or st.finalization_pending())
                 best = st.best()
                 summary = {
                     "run_id": rd.name, "task_id": st.task_id, "goal": st.goal,
@@ -119,6 +122,10 @@ def build_router(srv) -> APIRouter:
                     "best_metric": (best.metric if best else None),
                     "best_confirmed": (best.confirmed_mean if best else None),
                     "stop_reason": st.stop_reason,
+                    # Cached with the fold so liveness polling can cheaply decide whether the
+                    # durable-resume reconciler is needed. Without this bit every dashboard poll
+                    # re-read and re-folded every stopped/finished run, defeating the summary cache.
+                    "resume_pending": st.resume_pending(),
                     # Cross-run lineage: distinct sibling run_ids this run SEEDED experiments from
                     # (via `import`). Drives the MapView's "derived-from" edges. Empty for most runs.
                     "seeded_from": sorted({n.origin["run_id"] for n in st.nodes.values()
@@ -138,10 +145,23 @@ def build_router(srv) -> APIRouter:
         st_assign = pdata.get("supertask_assignments", {})
         # engine_running is a live fact (lock probe), so it stays OUT of the mtime-keyed summary cache —
         # a zombie's events.jsonl is unchanged, yet its liveness flips the instant its engine dies.
+        def _alive(rd, resume_pending: bool):
+            alive = _engine_alive(rd)
+            # P1-1 on-load reconcile: any not-alive run may carry an unserved durable resume. This
+            # includes request-after-run_finished (an inject/reopen that hit the old finalization
+            # tail); reconcile_pending_resume itself rejects ordinary finished runs with no pending
+            # request. The detached re-spawn appears as running on the next refresh.
+            if not alive and resume_pending:
+                try:
+                    reconcile_pending_resume(rd, cancel_event=srv.resume_cancel)
+                except Exception:  # noqa: BLE001 — recovery is best-effort; never break the run list
+                    pass
+            return alive
         return [{**s, "project_id": assignments.get(s["run_id"]),
                  "label": labels.get(s["run_id"]),
                  "supertask_id": st_assign.get(s["run_id"]),
-                 "engine_running": _engine_alive(root / s["run_id"])} for s in out]
+                 "engine_running": _alive(
+                     root / s["run_id"], bool(s.get("resume_pending")))} for s in out]
 
     # Late-bind the runs list for the cross-run scope reports (`_scope_run_ids`), breaking the
     # route-calls-route dependency between this router and `routers/reports.py`.

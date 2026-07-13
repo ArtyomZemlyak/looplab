@@ -808,11 +808,24 @@ def test_native_recovery_ignores_markup_quoted_in_code_blocks():
     assert clean2 == ""
 
 
-def test_llm_transport_error_is_clean_and_falls_back():
+def test_llm_transport_error_is_clean_and_falls_back(monkeypatch):
+    """Use a deterministic refused-connection exception. A real localhost port is not portable:
+    some Windows/network sandboxes black-hole it into ConnectTimeout, legitimately exercising eight
+    backoff retries and turning this fail-fast unit test into a >10 minute suite stall."""
+    import httpx
+    import openai
     from looplab.core.llm import OpenAICompatibleClient, LLMError
     from looplab.core.models import Idea
     from looplab.core.parse import ParseError, parse_structured
-    client = OpenAICompatibleClient(model="x", base_url="http://127.0.0.1:9/v1", timeout=2.0)
+    client = OpenAICompatibleClient(model="x", base_url="http://unreachable.test/v1", timeout=2.0)
+    request = httpx.Request("POST", "http://unreachable.test/v1/chat/completions")
+
+    def refused(*_args, **_kwargs):
+        error = openai.APIConnectionError(request=request)
+        error.__cause__ = httpx.ConnectError("connection refused", request=request)
+        raise error
+
+    monkeypatch.setattr(client, "_sdk_chat", refused)
     with pytest.raises(LLMError):                 # raw URLError no longer escapes
         client.complete_text([{"role": "user", "content": "hi"}])
     # parse_structured treats it as a parse failure -> ParseError (the role layer then falls back)

@@ -1040,7 +1040,9 @@ def test_chat_uses_the_runs_snapshot_model_not_ui_env(tmp_path, monkeypatch):
     captured = {}
 
     class _Cap:
-        def __init__(self, s): self.model = s.llm_model; captured["model"] = s.llm_model
+        def __init__(self, s):
+            self.model = s.llm_model
+            captured["model"] = s.llm_model
         def complete_text(self, msgs): return "ok"
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
@@ -1097,7 +1099,9 @@ def test_boss_context_includes_the_run_report(tmp_path, monkeypatch):
 
     class _Cap:
         def __init__(self, s): self.model = s.llm_model
-        def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
+        def complete_text(self, msgs):
+            captured["sys"] = msgs[0]["content"]
+            return "ok"
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
@@ -1182,7 +1186,9 @@ def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
 
     class _Cap:
         def __init__(self, s): self.model = s.llm_model
-        def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
+        def complete_text(self, msgs):
+            captured["sys"] = msgs[0]["content"]
+            return "ok"
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
@@ -1317,7 +1323,8 @@ def test_genesis_proposes_and_normalizes_spec(tmp_path, monkeypatch):
 
 
 def test_genesis_run_id_dedupes_against_existing(tmp_path, monkeypatch):
-    d = tmp_path / "nomad-minimax"; d.mkdir()                            # a REAL run (has events.jsonl)
+    d = tmp_path / "nomad-minimax"
+    d.mkdir()                            # a REAL run (has events.jsonl)
     (d / "events.jsonl").write_text('{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
     client = TestClient(make_app(tmp_path))
     from looplab.serve.server import _GenesisSpec
@@ -1417,7 +1424,8 @@ class _ToolBoss:
 def test_genesis_boss_scouts_repo_before_planning(tmp_path, monkeypatch):
     """The main-menu boss now ACTS like an agent: it reads the repo (README/entry script) via the
     read-only scout tools before emitting the spec, instead of just promising to."""
-    repo = tmp_path / "myrepo"; repo.mkdir()
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py --epochs 50\n", encoding="utf-8")
     boss = _ToolBoss(repo)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
@@ -1438,7 +1446,8 @@ def test_genesis_async_job_path(tmp_path, monkeypatch):
     plan completes in the background, fetched via GET /api/genesis/{id}. Forced here with inline-wait=0."""
     import time as _t
     monkeypatch.setenv("LOOPLAB_GENESIS_INLINE_WAIT", "0")     # always take the async path
-    repo = tmp_path / "myrepo"; repo.mkdir()
+    repo = tmp_path / "myrepo"
+    repo.mkdir()
     (repo / "README.md").write_text("BEST TRAIN: python train.py\n", encoding="utf-8")
     boss = _ToolBoss(repo)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: boss)
@@ -1531,6 +1540,43 @@ def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     assert "runs" in g["content"]["headline"]
     got = client.get(f"/api/scope-report/task/{task_id}").json()
     assert got["exists"] is True and got["stale"] is False and got["current_run_count"] == 2
+
+
+@pytest.mark.parametrize("protocol", ["finish_seq", "scoped"])
+def test_scope_report_brief_marks_both_incomplete_finalization_protocols(
+        tmp_path, monkeypatch, protocol):
+    from looplab.events.eventstore import EventStore
+
+    rd = tmp_path / protocol
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append(
+        "run_started", {"run_id": protocol, "task_id": "t", "goal": "g",
+                        "direction": "min"})
+    finish_data = {"reason": "done"}
+    if protocol == "finish_seq":
+        finish_data["finalization_required"] = True
+    else:
+        finish_data["finalize_scope"] = "finish:scope-report"
+    store.append("run_finished", finish_data)
+    (rd / "task.snapshot.json").write_text(
+        '{"id":"t","kind":"quadratic","goal":"g","direction":"min",'
+        '"bounds":{"x":[-1,1]}}', encoding="utf-8")
+
+    captured = []
+
+    def capture_briefs(_scope, briefs, _client, **_kwargs):
+        captured.extend(briefs)
+        return {"headline": "captured"}
+
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report", capture_briefs)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    response = TestClient(make_app(tmp_path)).post("/api/scope-report/task/t/generate")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["ok"] is True
+    assert len(captured) == 1 and captured[0]["phase"] == "finalizing"
 
 
 def test_scope_report_absent_then_stale_on_new_run(tmp_path, monkeypatch):

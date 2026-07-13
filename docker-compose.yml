@@ -83,22 +83,23 @@ services:
     command: ["LoopLab", "ui", "--host", "0.0.0.0", "--port", "8765", "--run-root", "/app/runs"]
     environment:
       <<: *llm-env
-      # Optional hardening (uncomment / set in .env): require a token + restrict CORS.
+      # Optional hardening (set in .env): owner token, allowed origins, and public Host allow-list.
       LOOPLAB_UI_TOKEN: "${LOOPLAB_UI_TOKEN:-}"
       LOOPLAB_UI_CORS: "${LOOPLAB_UI_CORS:-}"
+      LOOPLAB_UI_HOSTS: "${LOOPLAB_UI_HOSTS:-}"
     volumes:
       - ./runs:/app/runs            # share run artifacts with the host + the run service
     ports:
       # Loopback-only by default: the control-plane is UNAUTHENTICATED unless LOOPLAB_UI_TOKEN
       # is set, so do not expose it on the LAN implicitly. To serve it beyond localhost, set a
-      # token AND set UI_BIND=0.0.0.0 in .env.
+      # token, set UI_BIND=0.0.0.0, AND allow the public hostname in LOOPLAB_UI_HOSTS.
       - "${UI_BIND:-127.0.0.1}:${UI_PORT:-8765}:8765"
     depends_on:
       sglang:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8765/api/runs',timeout=5).status==200 else 1)"]
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8765/api/health',timeout=5).status==200 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 5

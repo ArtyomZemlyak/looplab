@@ -122,16 +122,16 @@ class HoldoutGrader:
             return None
         return _to_float(host_score(g.get("scorer", "rmse"), yp2, yt2))
 
-    def build_holdout_idx(self, fraction: float) -> frozenset:
-        """D1: the reserved holdout partition for a given fraction, or empty when holdout doesn't
-        apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
+    def build_holdout_idx(self, fraction: float, epoch: int = 0) -> frozenset:
+        """D1: the reserved holdout partition for a given fraction (+ search epoch, P0-2), or empty
+        when holdout doesn't apply (no host grader, real MLE-bench, non-list labels, or fraction<=0)."""
         if (self._e._host_grader is None or self._e._host_grader.get("kind") == "mlebench"
                 or float(fraction) <= 0):
             return frozenset()
         from looplab.runtime.command_eval import _LABEL_KEYS, _as_list
         yt = _as_list(self._e._host_grader.get("labels"), self._e._host_grader.get("key"), _LABEL_KEYS)
         if isinstance(yt, list) and len(yt) >= 2:
-            return _holdout_indices(len(yt), float(fraction))
+            return _holdout_indices(len(yt), float(fraction), epoch)
         return frozenset()
 
     def holdout_topk(self, state: RunState) -> list[int]:
@@ -180,5 +180,7 @@ class HoldoutGrader:
                 gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
             async with self._e._write_lock:
                 self._e.store.append(EV_HOLDOUT_EVALUATED, {
-                    "node_id": nid, "metric": m, "gap": gap,
+                    "node_id": nid, "generation": n.attempt,
+                    "search_epoch": state.search_epoch,
+                    "metric": m, "gap": gap,
                     "n_holdout": len(self._e._holdout_idx)})

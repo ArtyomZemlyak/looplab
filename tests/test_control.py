@@ -11,13 +11,14 @@ import time
 from pathlib import Path
 
 import anyio
+import pytest
 
 from looplab.events.eventstore import EventStore
 from looplab.core.models import NodeStatus
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
 from looplab.events.replay import fold
-from looplab.runtime.sandbox import SubprocessSandbox
+from looplab.runtime.sandbox import RunResult, SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +28,8 @@ TASK = ROOT / "examples" / "toy_task.json"
 def _engine(rd, **kw):
     task = ToyTask.load(TASK)
     r, d = task.build_roles()
-    return Engine(rd, task=task, researcher=r, developer=d, sandbox=SubprocessSandbox(),
+    sandbox = kw.pop("sandbox", None) or SubprocessSandbox()
+    return Engine(rd, task=task, researcher=r, developer=d, sandbox=sandbox,
                   policy=GreedyTree(n_seeds=2, max_nodes=4), **kw)
 
 
@@ -187,6 +189,29 @@ def test_inject_node_with_parent_and_replay_safe(tmp_path):
     assert s3.injects_done == 1                        # processed exactly once across resumes
 
 
+def test_tombstoned_parent_is_rejected_by_inject_policy_build_and_ablation(tmp_path):
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    eng.store.append("run_started", {
+        "run_id": "run", "task_id": "toy", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 0.0}}, "code": "c"})
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    eng.store.append("node_tombstoned", {"node_ids": [0]})
+
+    with pytest.raises(ValueError, match="unavailable"):
+        eng._create_injected_node({
+            "idea": {"operator": "improve", "params": {"x": 0.1}}, "parent_id": 0})
+    eng._create_node({"kind": "improve", "parent_id": 0})
+    anyio.run(eng._ablate, 0)
+
+    events = eng.store.read_all()
+    assert not any(event.type == "ablate" for event in events)
+    assert set(fold(events).nodes) == {0}
+
+
 def test_inject_merge_with_parent_ids_builds_multiparent_node(tmp_path):
     # U3 drag-to-merge: an inject_node with a `parent_ids` list + operator "merge" and no code
     # materializes a REAL multi-parent node via the engine's merge/ensemble path (not a blank manual
@@ -247,6 +272,58 @@ def test_run_argv_cancel_kills_inflight(tmp_path):
     assert dt < 6.0 and to   # killed ~0.4s in, NOT after the 20s sleep or 30s timeout
 
 
+class _BlockingProbeSandbox:
+    """A deterministic long probe that only exits through the Sandbox cancel contract."""
+
+    def __init__(self):
+        self.started = threading.Event()
+        self.cancel = None
+
+    def run(self, code, workdir, timeout=30.0, env=None, cancel=None):
+        self.cancel = cancel
+        self.started.set()
+        if cancel is not None:
+            cancel.wait(5.0)
+        return RunResult(exit_code=-9, stdout="", stderr="cancelled", metric=None,
+                         timed_out=bool(cancel and cancel.is_set()))
+
+
+@pytest.mark.parametrize("intervention", ["node_abort", "node_reset"])
+@pytest.mark.parametrize("code_blocks", [False, True])
+def test_ablation_kills_probe_when_parent_lifecycle_changes(
+        tmp_path, intervention, code_blocks):
+    """Abort/reset must kill both parameter and code-block probes, not merely discard their result."""
+    rd = tmp_path / f"run-{intervention}-{code_blocks}"
+    sandbox = _BlockingProbeSandbox()
+    eng = _engine(rd, sandbox=sandbox)
+    eng._ablate_code_blocks = code_blocks
+    store = eng.store
+    store.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {"x": 1.0}},
+        "code": "x = 1\n\nprint(x)\n",
+    })
+    store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0,
+        "stdout_tail": "", "eval_seconds": 0.1,
+    })
+
+    async def _exercise():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(eng._ablate, 0)
+            started = await anyio.to_thread.run_sync(sandbox.started.wait, 2.0)
+            assert started, "ablation probe did not start"
+            store.append(intervention, {"node_id": 0, "generation": 0})
+
+    t0 = time.monotonic()
+    anyio.run(_exercise)
+    assert time.monotonic() - t0 < 3.0
+    assert sandbox.cancel is not None and sandbox.cancel.is_set()
+    events = [e for e in store.read_all() if e.type == "ablate"]
+    assert len(events) == 1 and events[0].data.get("superseded") is True
+
+
 # ---- regression: _ablate must emit a gate-closing event on repo/eval-spec runs (no inf-loop) ----
 def test_ablate_emits_event_on_eval_spec_run(tmp_path):
     rd = tmp_path / "run"
@@ -269,3 +346,127 @@ def test_concurrent_eventstores_unique_seqs(tmp_path):
     s1.append("a", {}); s2.append("b", {}); s1.append("c", {}); s2.append("d", {})
     seqs = [e.seq for e in EventStore(p).read_all()]
     assert seqs == [0, 1, 2, 3]   # no collisions despite independent in-memory counters
+
+
+def test_natural_finish_uses_the_action_decision_sequence(tmp_path):
+    """An inject landing inside policy selection must invalidate that stale no-actions decision."""
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    original = eng.policy.next_actions
+    raced = False
+
+    def _next_actions(state):
+        nonlocal raced
+        actions = original(state)
+        if not actions and state.nodes and not raced:
+            raced = True
+            eng.store.append("inject_node", {
+                "idea": {"operator": "manual", "params": {"x": 0.25},
+                         "rationale": "won the finish race"},
+            })
+            return []
+        return actions
+
+    eng.policy.next_actions = _next_actions
+    state = anyio.run(eng.run)
+    assert raced and state.finished and state.injects_done == 1
+    assert any(n.operator == "manual" and n.status is NodeStatus.evaluated
+               for n in state.nodes.values())
+
+
+def test_live_engine_rebuilds_holdout_partition_when_race_rotates_epoch(tmp_path):
+    """An epoch bump inside one Engine.run cannot keep scoring the prior hidden partition."""
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    original_actions = eng.policy.next_actions
+    original_build = eng._build_holdout_idx
+    rebuilt_epochs = []
+    raced = False
+
+    def _build(fraction, epoch=0):
+        rebuilt_epochs.append(epoch)
+        return original_build(fraction, epoch)
+
+    def _next_actions(state):
+        nonlocal raced
+        actions = original_actions(state)
+        if not actions and state.best() is not None and not raced:
+            raced = True
+            best = state.best()
+            eng.store.append("holdout_evaluated", {
+                "node_id": best.id, "generation": best.attempt,
+                "metric": best.metric, "search_epoch": state.search_epoch})
+            eng.store.append("inject_node", {
+                "idea": {"operator": "manual", "params": {"x": 0.33}}})
+            return []
+        return actions
+
+    eng._build_holdout_idx = _build
+    eng.policy.next_actions = _next_actions
+    state = anyio.run(eng.run)
+    assert raced and state.finished and state.search_epoch == 1
+    assert eng._holdout_epoch == 1 and 1 in rebuilt_epochs
+
+
+def test_finish_report_cannot_hide_a_concurrent_control(tmp_path):
+    """The slow final report is part of the CAS chain, not a window that absorbs a new intent."""
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    injected = False
+
+    class _ReportWriter:
+        def generate(self, state, trigger):
+            nonlocal injected
+            if trigger == "finish" and not injected:
+                injected = True
+                eng.store.append("inject_node", {
+                    "idea": {"operator": "manual", "params": {"x": 0.75},
+                             "rationale": "arrived during final report"},
+                })
+            return {"at_node": len(state.nodes), "summary": "ok"}
+
+    eng.report_writer = _ReportWriter()
+    eng.report_every = 1
+    state = anyio.run(eng.run)
+    assert injected and state.finished and state.injects_done == 1
+    assert any(n.operator == "manual" and n.status is NodeStatus.evaluated
+               for n in state.nodes.values())
+
+
+def test_operator_finalize_writes_report_immediately_before_accepted_finish(tmp_path):
+    """Finalize has the same report-before-finish CAS contract as natural completion."""
+    rd = tmp_path / "run"
+
+    class _ReportWriter:
+        def generate(self, state, trigger):
+            return {"at_node": len(state.nodes), "summary": "final", "trigger": trigger}
+
+    eng = _engine(rd, report_writer=_ReportWriter(), report_every=1)
+    eng.store.append("run_abort", {"reason": "operator"})
+    state = anyio.run(eng.run)
+    events = eng.store.read_all()
+    finish = next(e for e in reversed(events) if e.type == "run_finished" and state.finished)
+    report = next(e for e in reversed(events[:finish.seq]) if e.type == "report_generated")
+    assert report.data["trigger"] == "finish"
+    assert finish.data["after_seq"] == report.seq and finish.seq == report.seq + 1
+    assert state.report and state.report["summary"] == "final"
+
+
+def test_resume_wins_if_it_lands_after_finalize_decision(tmp_path):
+    rd = tmp_path / "run"
+    eng = _engine(rd)
+    eng.store.append("run_abort", {"reason": "finalized"})
+    original = eng._finish_if_quiescent
+    raced = False
+
+    def _finish(data, *, after_seq):
+        nonlocal raced
+        if data.get("reason") == "aborted" and not raced:
+            raced = True
+            eng.store.append("resume", {})
+        return original(data, after_seq=after_seq)
+
+    eng._finish_if_quiescent = _finish
+    state = anyio.run(eng.run)
+    assert raced and state.finished and state.stop_reason != "aborted"
+    assert state.evaluated_nodes()

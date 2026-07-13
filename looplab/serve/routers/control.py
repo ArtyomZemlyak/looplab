@@ -16,11 +16,16 @@ import orjson
 from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 
+from looplab.serve import engine_proc as _engine_proc
 from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
-from looplab.events.eventstore import EventStore, write_jsonl_atomic
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, write_jsonl_atomic
+from looplab.events.replay import fold
+from looplab.events.types import EV_RESUME_REQUESTED
 from looplab.serve.appstate import _RESERVED_RUN_IDS
-from looplab.serve.engine_proc import _engine_alive, _spawn_engine
+from looplab.serve.engine_proc import (
+    _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _fresh_resume_launch_pending,
+    _fresh_run_launch_pending, _mark_run_launching, _resolve_task_file, _run_lifecycle_lock)
 from looplab.serve.launch import (
     idempotency_key_digest,
     launch_request_digest,
@@ -29,9 +34,15 @@ from looplab.serve.launch import (
     safe_run_dir,
     validate_idempotency_key,
 )
-from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
-from looplab.serve.run_commands import normalize_control, task_file_for
+from looplab.serve.protocol import (
+    CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
+from looplab.serve.run_commands import normalize_control
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+
+
+def _spawn_engine(*args, **kwargs):
+    """Late-bound compatibility seam for patches on either this router or engine_proc."""
+    return _engine_proc._spawn_engine(*args, **kwargs)
 
 
 def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
@@ -107,9 +118,24 @@ def build_router(srv) -> APIRouter:
             rd = srv.commands.validate_paths(rd)
             srv.commands.reject_if_active(rd, "append a legacy control event")
             etype = body.get("type")
+            if etype not in CONTROL_EVENTS:
+                raise HTTPException(400, f"unknown control event: {etype!r}")
+            # One shared normalizer owns strict payload validation plus node-attempt and parent
+            # generation CAS. Pass the raw data intact so attempt>0 tokens are never erased here.
             data = normalize_control(srv, rd, etype, body.get("data"))
-            # Fresh EventStore per write (single-writer discipline): it rescans last seq before append.
-            ev = EventStore(rd / "events.jsonl").append(etype, data)
+            expected = body.get("expected_seq")
+            if expected is not None:
+                if isinstance(expected, bool):
+                    raise HTTPException(400, "expected_seq must be an integer")
+                try:
+                    expected = int(expected)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise HTTPException(400, "expected_seq must be an integer") from exc
+            try:
+                ev = EventStore(rd / "events.jsonl").append(
+                    etype, data, expected_last_seq=expected)
+            except EventStoreConcurrencyError as exc:
+                raise HTTPException(409, str(exc)) from exc
         return {"ok": True, "seq": ev.seq, "type": etype}
 
     # ------------------------------------------------------------------ authoritative command lifecycle
@@ -157,39 +183,77 @@ def build_router(srv) -> APIRouter:
             _run_dir(run_id), str(body.get("confirmation") or ""))
 
     # ------------------------------------------------------------------ spawn / resume
+    def _task_file_for(rd: Path) -> Optional[str]:
+        # The resolved immutable snapshot is authoritative. The shared helper tolerates malformed
+        # legacy ui_meta and only accepts its task_file when no snapshot exists and the target exists.
+        return _resolve_task_file(rd)
+
+    def _append_resume_request(rd: Path) -> str:
+        """Classify and durably append one handoff against the exact folded tail."""
+        store = EventStore(rd / "events.jsonl")
+        for _attempt in range(8):
+            events = store.read_all()
+            state = fold(events)
+            last_seq = events[-1].seq if events else -1
+            last_stop = state.last_stop_request_seq
+            last_finish = state.last_finish_seq
+            mode = ("finalize" if state.stop_requested and last_stop > last_finish else "resume")
+            try:
+                store.append(EV_RESUME_REQUESTED, {"mode": mode}, expected_last_seq=last_seq)
+                return mode
+            except EventStoreConcurrencyError:
+                continue
+        raise HTTPException(409, "run state changed repeatedly; retry resume")
 
     @router.post("/api/runs/{run_id}/resume")
     def resume_run(run_id: str):
         rd = _run_dir(run_id)
+        # The command sequencer excludes authoritative command workers while the lifecycle lock
+        # serializes this durable handoff with reset/delete and the resume reconciler.
         with srv.commands.sequence(rd):
             rd = srv.commands.validate_paths(rd)
-            # This endpoint is a stop-aware driver recovery seam: unlike a legacy `/control resume`
-            # event it appends no mutation itself, and the CLI preserves an incomplete terminal scope.
             srv.commands.reject_if_active(
                 rd, "resume through the legacy endpoint", allow_incomplete_finalize=True)
-            # Decide + Popen + spawn lease atomically with command workers. The lease covers the
-            # unavoidable Popen→engine.lock window after this route releases the sequencer.
-            if _engine_alive(rd):
-                return {"ok": True, "already_running": True}
-            if srv.commands.spawn_inflight(rd):
-                return {"ok": True, "already_starting": True}
-            task_file = task_file_for(rd)
+            task_file = _task_file_for(rd)
             if not task_file:
-                raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
-                                         "(it predates self-describing runs; start it via the UI to enable resume)")
+                raise HTTPException(
+                    400, "run is not resumable — no task.snapshot.json or ui_meta.json "
+                         "(it predates self-describing runs; start it via the UI to enable resume)")
+            with _run_lifecycle_lock(rd):
+                # Durable before every liveness branch: a current owner in its final tail, or a
+                # detached child that dies before engine.lock, leaves a recoverable intent.
+                mode = _append_resume_request(rd)
+            cli_args = (
+                ["finalize", str(rd), "--task-file", str(task_file)]
+                if mode == "finalize"
+                else ["resume", str(rd), "--task-file", str(task_file)])
+            was_alive = _engine_alive(rd)
+            # Mirror the launch into the command service's pre-lock lease so command-aware callers
+            # also fail closed during Popen→engine.lock. The event-log claim stays authoritative.
             srv.commands.begin_external_spawn(rd, "legacy-resume")
-            spawned = False
-            try:
-                pid = _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
-                spawned = True
+            popen_returned = False
+
+            def _record_spawn(pid: Optional[int]) -> None:
+                nonlocal popen_returned
+                # Mark the Popen boundary before persisting the PID. If persistence fails, the child
+                # may be live and the PID-less preclaim must remain as duplicate-spawn quarantine.
+                popen_returned = True
                 srv.commands.record_external_spawn(rd, "legacy-resume", pid)
+
+            try:
+                spawned = _claim_and_spawn_resume(
+                    rd, cli_args, cancel_event=srv.resume_cancel, wait_on_alive=True,
+                    spawn_engine=_spawn_engine, on_spawn=_record_spawn)
             except BaseException:
-                # If Popen returned, retain the preclaim even when persisting its PID failed: the
-                # detached child may be live/cold and a retry must not launch a duplicate.
-                if not spawned:
+                if not popen_returned:
                     srv.commands.cancel_external_spawn(rd, "legacy-resume")
                 raise
-            return {"ok": True}
+            if not spawned:
+                # A live owner/post-exit waiter is fenced by the durable resume claim instead.
+                srv.commands.cancel_external_spawn(rd, "legacy-resume")
+            if was_alive and not spawned:
+                return {"ok": True, "already_running": True, "resume_after_exit": True}
+            return {"ok": True, "launch_pending": not spawned}
 
     @router.post("/api/runs/{run_id}/reset")
     def reset_run(run_id: str):
@@ -197,157 +261,179 @@ def build_router(srv) -> APIRouter:
         re-spawn a fresh run on the same run-id. The prior artifacts are RENAMED (not deleted) so the
         history is recoverable."""
         rd = _run_dir(run_id)
+        # The command sequencer protects command-aware work/current spawn leases; the lifecycle
+        # lock additionally serializes durable resume reconciliation and CLI-compatible launch
+        # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
         with srv.commands.destructive_guard(rd, "reset run") as rd:
-            # Re-check liveness/state INSIDE the command sequencer, after all pending workers are
-            # excluded. This closes the check→archive race with a command spawning an engine.
-            if _engine_alive(rd) or not srv.state(rd).finished:
-                raise HTTPException(
-                    409, "run is still active — stop it first (Replay resets a finished run)")
-            task_file = task_file_for(rd)
-            if not task_file:
-                raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
-            # A prior process has no in-memory ledger/activity context for its durable usage outbox.
-            # Reconcile it only now, after liveness/state validation and while the destructive
-            # sequencer is still held, so no late generation-A evidence can cross the reset boundary.
-            flush_durable_costs = getattr(srv, "flush_durable_run_costs", None)
-            if not callable(flush_durable_costs):
-                raise HTTPException(503, "cannot reset run: durable run-cost recovery is unavailable")
-            try:
-                durable_costs_flushed = flush_durable_costs(rd)
-            except Exception as exc:  # noqa: BLE001 - reset must fail closed on unknown evidence
-                raise HTTPException(
-                    503, "cannot reset run: durable run-cost recovery failed") from exc
-            if durable_costs_flushed is not True:
-                raise HTTPException(
-                    409, "cannot reset run: run-cost evidence is pending, busy, malformed, or conflicting")
-
-            def _outbox_archiveable(path: Path) -> bool:
-                """Validate the entry itself; only true absence or a real directory is safe."""
-                try:
-                    entry = path.lstat()
-                except FileNotFoundError:
-                    return False
-                except OSError as exc:
+            with _run_lifecycle_lock(rd):
+                if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                        or _fresh_run_launch_pending(rd)
+                        or not srv.state(rd).finished):
                     raise HTTPException(
-                        409, "cannot reset run: run-cost outbox metadata is inaccessible") from exc
-                try:
-                    if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
-                        raise HTTPException(
-                            409,
-                            "cannot reset run: run-cost outbox is a symlink or reparse point or is not a directory",
-                        )
-                    is_junction = getattr(path, "is_junction", None)
-                    if callable(is_junction) and is_junction():
-                        raise HTTPException(
-                            409, "cannot reset run: run-cost outbox is a junction/reparse point")
-                except HTTPException:
-                    raise
-                except OSError as exc:
+                        409, "run is still active or launching — stop it first "
+                             "(Replay resets a finished run)")
+                task_file = _task_file_for(rd)
+                if not task_file:
                     raise HTTPException(
-                        409, "cannot reset run: run-cost outbox type is inaccessible") from exc
-                return True
+                        400, "run is not resettable — no task.snapshot.json or ui_meta.json")
 
-            outbox_path = rd / ".llm-usage-outbox"
-            _outbox_archiveable(outbox_path)
-            stamp = int(time.time() * 1000)
-            moved = []
+                flush_durable_costs = getattr(srv, "flush_durable_run_costs", None)
+                if not callable(flush_durable_costs):
+                    raise HTTPException(
+                        503, "cannot reset run: durable run-cost recovery is unavailable")
+                try:
+                    durable_costs_flushed = flush_durable_costs(rd)
+                except Exception as exc:  # noqa: BLE001 - fail closed on unknown evidence
+                    raise HTTPException(
+                        503, "cannot reset run: durable run-cost recovery failed") from exc
+                if durable_costs_flushed is not True:
+                    raise HTTPException(
+                        409, "cannot reset run: run-cost evidence is pending, busy, "
+                             "malformed, or conflicting")
 
-            def _rollback_archives() -> list[str]:
-                failed = []
-                for original, archived in reversed(moved):
+                def _outbox_archiveable(path: Path) -> bool:
+                    """Validate the entry itself; only true absence or a real directory is safe."""
                     try:
-                        if os.path.lexists(archived) and not os.path.lexists(original):
-                            archived.rename(original)
-                    except OSError:
-                        failed.append(original.name)
-                # Some Windows/network filesystem layers implement rename as "publish the
-                # destination, then asynchronously retire a case-normalized <source>.tmp".  The
-                # canonical files are already restored at that point, but returning immediately can
-                # expose the transient as a durable ``*.reset-*`` archive (and a caller can mistake
-                # the rollback for partial).  Wait only on the failure/rollback path, and only for
-                # the exact implementation-owned aliases of archives we moved; never unlink an
-                # unknown file that may belong to another process.
-                transient_names = {
-                    f"{archived.name}.tmp".casefold() for _original, archived in moved
-                }
-                if transient_names:
-                    now = time.monotonic()
-                    deadline = now + 1.0
-                    # Retirement may be published a few milliseconds *after* rename returns.  Require
-                    # a short quiet window instead of treating the first empty listing as settled.
-                    quiet_until = now + 0.05
-                    while time.monotonic() < deadline:
-                        try:
-                            transient_present = any(
-                                entry.name.casefold() in transient_names
-                                for entry in rd.iterdir()
-                            )
-                            now = time.monotonic()
-                            if transient_present:
-                                quiet_until = now + 0.05
-                            elif now >= quiet_until:
-                                break
-                        except OSError:
-                            break
-                        time.sleep(0.005)
-                return failed
-
-            # Command idempotency records deliberately survive an in-place reset. A lost response
-            # replaying the same key must resolve to the old terminal record, never re-apply that
-            # budget/fork/finalize intent to the new generation occupying this run id.
-            for name in ("events.jsonl", ".llm-usage-outbox", "spans.jsonl", "readmodel.sqlite",
-                         "nodes", "chat.jsonl"):
-                p = rd / name
-                if os.path.lexists(p):
-                    if name == ".llm-usage-outbox":
-                        try:
-                            _outbox_archiveable(p)
-                        except HTTPException as exc:
-                            rollback_failed = _rollback_archives()
-                            detail = f"{exc.detail}; no engine was started"
-                            if rollback_failed:
-                                detail += f"; rollback also failed for {', '.join(rollback_failed)}"
-                            raise HTTPException(409, detail) from exc
-                    archived = rd / f"{name}.reset-{stamp}"
-                    try:
-                        p.rename(archived)
-                        moved.append((p, archived))
+                        entry = path.lstat()
+                    except FileNotFoundError:
+                        return False
                     except OSError as exc:
-                        rollback_failed = _rollback_archives()
-                        detail = f"reset archive failed at {name!r}; no engine was started"
-                        if rollback_failed:
-                            detail += f"; rollback also failed for {', '.join(rollback_failed)}"
-                        raise HTTPException(500, detail) from exc
-            env: Optional[dict] = None
-            snap = rd / "config.snapshot.json"
-            if snap.exists():
-                try:
-                    cfg = json.loads(snap.read_text(encoding="utf-8"))
-                    env = srv.settings.settings_env({k: v for k, v in cfg.items()
-                                                     if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS
-                                                     and v is not None})
-                except (OSError, json.JSONDecodeError, ValueError):
-                    env = None
-            spawned = False
-            try:
-                # The pre-spawn lease is part of the reset transaction: the run artifacts are already
-                # archived at this point, so even a lease-write failure must restore them before the
-                # request exits.  Keeping this inside the rollback guard also covers an ambiguous
-                # begin that committed its claim and then raised.
-                srv.commands.begin_external_spawn(rd, "reset")
-                pid = _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
-                spawned = True
-                srv.commands.record_external_spawn(rd, "reset", pid)
-            except BaseException:
-                if not spawned:
+                        raise HTTPException(
+                            409, "cannot reset run: run-cost outbox metadata is inaccessible") from exc
                     try:
-                        srv.commands.cancel_external_spawn(rd, "reset")
-                    finally:
-                        _rollback_archives()
-                # After Popen, rolling archives back would mutate the filesystem underneath a
-                # possibly-live new engine. Keep both the archive layout and preclaim fail-closed.
-                raise
-            return {"ok": True}
+                        if stat.S_ISLNK(entry.st_mode) or not stat.S_ISDIR(entry.st_mode):
+                            raise HTTPException(
+                                409, "cannot reset run: run-cost outbox is a symlink or "
+                                     "reparse point or is not a directory")
+                        is_junction = getattr(path, "is_junction", None)
+                        if callable(is_junction) and is_junction():
+                            raise HTTPException(
+                                409, "cannot reset run: run-cost outbox is a junction/reparse point")
+                    except HTTPException:
+                        raise
+                    except OSError as exc:
+                        raise HTTPException(
+                            409, "cannot reset run: run-cost outbox type is inaccessible") from exc
+                    return True
+
+                outbox_path = rd / ".llm-usage-outbox"
+                _outbox_archiveable(outbox_path)
+                # Archive auxiliaries first and the event source of truth last. Command/start records
+                # deliberately survive so lost-response idempotency never re-applies to generation B.
+                names = (
+                    ".llm-usage-outbox", "spans.jsonl", "readmodel.sqlite-wal",
+                    "readmodel.sqlite-shm", "readmodel.sqlite", "nodes", "chat.jsonl",
+                    "events.jsonl",
+                )
+
+                def _present(path: Path) -> bool:
+                    return os.path.lexists(path)
+
+                def _archive_temp(archived: Path) -> Path:
+                    return archived.with_name(f"{archived.name.upper()}.tmp")
+
+                stamp = int(time.time() * 1000)
+                while any(
+                        _present(candidate)
+                        for name in names
+                        for candidate in (
+                            rd / f"{name}.reset-{stamp}",
+                            _archive_temp(rd / f"{name}.reset-{stamp}"))):
+                    stamp += 1
+                moved: list[tuple[Path, Path]] = []
+
+                def _rollback_archives() -> list[str]:
+                    failures: list[str] = []
+                    restored: list[tuple[Path, Path]] = []
+                    for original, archived in reversed(moved):
+                        try:
+                            if _present(archived):
+                                archived.replace(original)
+                            elif not _present(original):
+                                failures.append(original.name)
+                            if _present(original) and not _present(archived):
+                                restored.append((original, archived))
+                        except OSError:
+                            failures.append(original.name)
+                    # A Windows/network layer may publish an implementation-owned, case-variant
+                    # shadow after replace returns. Stamp collision checks prove this exact name did
+                    # not pre-exist, so remove only the temp derived from entries this transaction
+                    # successfully restored; never glob or touch an older approved archive.
+                    deadline = time.monotonic() + 0.1
+                    while restored and time.monotonic() < deadline:
+                        for _original, archived in restored:
+                            temp = _archive_temp(archived)
+                            if _present(temp):
+                                try:
+                                    temp.unlink()  # files/symlinks only; directories fail closed below
+                                except OSError:
+                                    pass
+                        time.sleep(0.01)
+                    for original, archived in restored:
+                        if _present(_archive_temp(archived)):
+                            failures.append(f"{original.name}.tmp")
+                    return failures
+
+                try:
+                    for name in names:
+                        source = rd / name
+                        if not _present(source):
+                            continue
+                        if name == ".llm-usage-outbox":
+                            _outbox_archiveable(source)
+                        archived = rd / f"{name}.reset-{stamp}"
+                        source.rename(archived)
+                        moved.append((source, archived))
+                except (OSError, HTTPException) as exc:
+                    rollback_failures = _rollback_archives()
+                    detail = f"could not archive run for Replay; no engine was started: {exc}"
+                    if rollback_failures:
+                        detail += f"; rollback also failed for {rollback_failures}"
+                    raise HTTPException(500, detail) from exc
+
+                env: Optional[dict] = None
+                snap = rd / "config.snapshot.json"
+                if snap.exists():
+                    try:
+                        cfg = json.loads(snap.read_text(encoding="utf-8"))
+                        if isinstance(cfg, dict):
+                            env = srv.settings.settings_env({
+                                key: value for key, value in cfg.items()
+                                if key in _ALLOWED_FIELDS and key not in _SECRET_FIELDS
+                                and value is not None
+                            })
+                    except (OSError, json.JSONDecodeError, ValueError):
+                        env = None
+
+                spawned = False
+                popen_attempted = False
+                try:
+                    # Stamp both pre-lock launch fences before Popen while both serializers are held.
+                    _mark_run_launching(rd)
+                    srv.commands.begin_external_spawn(rd, "reset")
+                    popen_attempted = True
+                    pid = _spawn_engine(
+                        ["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+                    spawned = True
+                    srv.commands.record_external_spawn(rd, "reset", pid)
+                except BaseException as exc:
+                    if not spawned:
+                        _clear_run_launching(rd)
+                        try:
+                            srv.commands.cancel_external_spawn(rd, "reset")
+                        finally:
+                            rollback_failures = _rollback_archives()
+                        if rollback_failures:
+                            raise HTTPException(
+                                500, "could not launch Replay; rollback also failed for "
+                                     f"{rollback_failures}")
+                        if popen_attempted and isinstance(exc, Exception):
+                            raise HTTPException(
+                                500, f"could not launch Replay: {exc}") from exc
+                    # After Popen, never roll archives back beneath a possibly-live child. The
+                    # preclaim/marker intentionally remain fail-closed if PID persistence failed.
+                    raise
+                return {"ok": True}
 
     @router.post("/api/runs/{run_id}/nodes/{nid}/clear_trace")
     def clear_node_trace(run_id: str, nid: int):

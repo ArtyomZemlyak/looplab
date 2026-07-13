@@ -45,6 +45,8 @@ def ui(run_root: Path = typer.Option(
     try:
         from looplab.serve.server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
     except ModuleNotFoundError as e:
+        if e.name not in {"fastapi", "uvicorn"}:
+            raise
         typer.echo(f"UI extra not installed: {e}")
         raise typer.Exit(1)
     jh_prefix = os.environ.get("JUPYTERHUB_SERVICE_PREFIX")
@@ -61,7 +63,15 @@ def ui(run_root: Path = typer.Option(
                    f"{jh_prefix.rstrip('/')}/proxy/{port}/  (run-root={run_root})")
     else:
         typer.echo(f"LoopLab UI on http://{host}:{port}  (run-root={run_root})")
-    serve(run_root, host=host, port=port, root_path=root_path)
+    try:
+        serve(run_root, host=host, port=port, root_path=root_path)
+    except ModuleNotFoundError as e:
+        # `looplab.serve.server` intentionally remains importable without FastAPI so offline callers
+        # can use its pure re-exports. The dependency error therefore happens at serve(), not import.
+        if e.name not in {"fastapi", "uvicorn"}:
+            raise
+        typer.echo(f"UI extra not installed: {e}")
+        raise typer.Exit(1)
 
 
 @app.command()

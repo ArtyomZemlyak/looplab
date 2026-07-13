@@ -103,6 +103,30 @@ def test_spec_ready_gates():
     assert tui.spec_ready({"run_id": "x", "task_file": "examples/toy_task.json"}) is None
 
 
+def test_web_and_tui_controls_use_the_authoritative_command_service():
+    """Every operator surface delegates lifecycle/spawn postconditions to durable `/commands`.
+
+    The removed NEEDS_RESUME/applyAction twins encoded a racy two-step append-then-resume protocol.
+    Behavioral command tests below cover idempotency/polling; this source contract prevents a surface
+    from silently resurrecting the legacy helper or direct `/control` transport.
+    """
+    root = Path(__file__).resolve().parents[1] / "ui" / "src"
+    api = (root / "api.js").read_text(encoding="utf-8")
+    assistant = (root / "AssistantBar.jsx").read_text(encoding="utf-8")
+    inspector = (root / "Inspector.jsx").read_text(encoding="utf-8")
+    tui_source = Path(tui.__file__).read_text(encoding="utf-8")
+    control = api[api.index("export const CONTROL = {"):api.index("export async function appendAction")]
+
+    combined = "\n".join((api, assistant, inspector, tui_source))
+    assert "NEEDS_RESUME" not in combined
+    assert "actionNeedsEngine" not in combined
+    assert "applyAction" not in combined
+    assert "runCommand(" in control and "/control`" not in control and "/resume`" not in control
+    assert "submitAssistantDirect(" in assistant
+    assert "CONTROL.resetNode(runId, id, stage, generation)" in inspector
+    assert tui_source.count("self.api.run_command(") >= 2
+
+
 def test_is_critical():
     assert tui.is_critical({"type": "run_abort"}) is True
     assert tui.is_critical({"type": "node_abort"}) is True
@@ -170,8 +194,10 @@ def test_signatures_detect_change():
 
 def test_live_prompt_refreshes_then_reads(monkeypatch):
     """The live loop must redraw when the data signature changes while waiting, and still return the
-    typed line. Drive it with a real OS pipe as stdin so select() behaves like a terminal."""
+    typed line. Drive it with a socketpair: Windows ``select`` supports sockets but not anonymous
+    pipe fds, while POSIX supports both. The text reader keeps stdin's ``readline`` contract."""
     import os
+    import socket
     import sys
 
     if not hasattr(__import__("select"), "select"):
@@ -182,8 +208,8 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
     app.api = api
     from rich.console import Console
 
-    r_fd, w_fd = os.pipe()
-    stdin = os.fdopen(r_fd, "r")
+    read_sock, write_sock = socket.socketpair()
+    stdin = read_sock.makefile("r", encoding="utf-8")
     devnull = open(os.devnull, "w")
     app.console = Console(file=devnull)                     # swallow drawing output
     monkeypatch.setattr(sys, "stdin", stdin)
@@ -202,19 +228,17 @@ def test_live_prompt_refreshes_then_reads(monkeypatch):
         # the wait loop is #2 — feed the input right then, so "at least one live refresh" is guaranteed
         # regardless of scheduling/load, and the very next select() returns the typed line.
         if renders["n"] == 2:
-            os.write(w_fd, b"hello\n")
+            write_sock.sendall(b"hello\n")
 
     try:
         line, data = app._live_prompt("» ", fetch=fetch, render=render, sig=lambda d: d, interval=0.02)
         assert line == "hello"
         assert renders["n"] >= 2                            # initial draw + at least one live refresh
     finally:
-        stdin.close()                                      # closes r_fd
+        stdin.close()
+        read_sock.close()
+        write_sock.close()
         devnull.close()
-        try:
-            os.close(w_fd)                                 # idempotent guard if the timer didn't fire
-        except OSError:
-            pass
 
 
 def test_await_job_fast_path():
@@ -1298,13 +1322,12 @@ def test_api_error_structured_command_detail_is_actionable():
 
 def test_genesis_offline_soft_fails(tmp_path, monkeypatch):
     """With no LLM reachable the genesis boss soft-fails (ok:false) instead of throwing, so the TUI can
-    keep the user's draft and show the reason (mirrors GenesisChat's offline handling)."""
-    import looplab.serve.server as server_module
+    keep the user's draft and show the reason (mirrors GenesisChat's offline handling). Force that
+    precondition explicitly: a developer machine may have a healthy local Ollama endpoint."""
+    def _offline(_settings):
+        raise RuntimeError("model endpoint unavailable")
 
-    def offline(*_args, **_kwargs):
-        raise RuntimeError("offline for deterministic test")
-
-    monkeypatch.setattr(server_module, "make_llm_client", offline)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _offline)
     api = tui.Api("http://test")
     _bind(api, TestClient(make_app(tmp_path)))
     r = api.genesis([{"role": "user", "content": "a toy run"}], "a toy run", None)

@@ -12,8 +12,13 @@ from typing import Optional
 
 import anyio
 import orjson
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+try:
+    from fastapi import APIRouter, HTTPException, Request
+    from fastapi.responses import JSONResponse
+except ModuleNotFoundError as e:  # allow importing pure action models/mappers without the [ui] extra
+    if e.name != "fastapi":
+        raise
+    APIRouter = HTTPException = Request = JSONResponse = None  # type: ignore[assignment,misc]
 
 from looplab.core.atomicio import best_effort_fsync
 from looplab.engine.costs import (
@@ -200,18 +205,47 @@ class _Plan(BaseModel):
     actions: list[_Action] = []   # ordered steps to apply; empty list = pure advice
 
 
+def _bound_node_data(st, bound_node_id: int, **data) -> dict:
+    """Stamp a planned action with the lifecycle visible while the plan was produced.
+
+    The UI may leave a confirmation card open across a reset; /control compares this generation with
+    current state and returns 409 instead of applying the old plan to different code under the same id.
+    Lightweight test/dummy states without a `nodes` projection keep the historical mapping shape.
+    """
+    node = ((getattr(st, "nodes", {}) or {}).get(bound_node_id)
+            if st is not None else None)
+    if node is not None:
+        data["generation"] = node.attempt
+    return data
+
+
+def _bound_parent_data(st, bound_parent_id: Optional[int], **data) -> dict:
+    if bound_parent_id is None:
+        return data
+    node = ((getattr(st, "nodes", {}) or {}).get(bound_parent_id)
+            if st is not None else None)
+    if node is not None:
+        data["parent_generations"] = {str(bound_parent_id): node.attempt}
+    return data
+
+
 def _action_to_control(c: "_Action", st) -> Optional[dict]:
     """Map ONE classified boss action to a control {type, data, label}. None => no actionable verb
     (a pure-advice step, skipped). `label` is the human-readable line the UI's applied-row shows."""
     a, nid = c.action, c.node_id
     if a == "confirm" and nid is not None:
-        return {"type": EV_FORCE_CONFIRM, "data": {"node_id": nid}, "label": f"Confirm #{nid} (multi-seed robustness)"}
+        return {"type": EV_FORCE_CONFIRM, "data": _bound_node_data(st, nid, node_id=nid),
+                "label": f"Confirm #{nid} (multi-seed robustness)"}
     if a == "ablate" and nid is not None:
-        return {"type": EV_FORCE_ABLATE, "data": {"node_id": nid}, "label": f"Ablate #{nid} (sensitivity probe)"}
+        return {"type": EV_FORCE_ABLATE, "data": _bound_node_data(st, nid, node_id=nid),
+                "label": f"Ablate #{nid} (sensitivity probe)"}
     if a == "fork" and nid is not None:
-        return {"type": EV_FORK, "data": {"from_node_id": nid}, "label": f"Fork an improve-branch from #{nid}"}
+        return {"type": EV_FORK, "data": _bound_node_data(st, nid, from_node_id=nid),
+                "label": f"Fork an improve-branch from #{nid}"}
     if a == "promote" and nid is not None:
-        return {"type": EV_PROMOTE, "data": {"node_id": nid, "alias": "champion"}, "label": f"Promote #{nid} to champion"}
+        return {"type": EV_PROMOTE,
+                "data": _bound_node_data(st, nid, node_id=nid, alias="champion"),
+                "label": f"Promote #{nid} to champion"}
     if a == "reset" and nid is not None:
         # Re-run an EXISTING node in place (never a new node). Stage picks how far back to rewind:
         # propose (full re-do) / implement (keep idea, re-develop) / eval (re-score, keep code) — OR the
@@ -221,7 +255,8 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         how = {"propose": "re-propose from scratch", "implement": "re-run the Developer (keep the idea)",
                "eval": "re-score (keep the code)"}.get(stage.lower(),
                f"re-run the eval pipeline from '{stage}' (reuse earlier stages)")
-        return {"type": EV_NODE_RESET, "data": {"node_id": nid, "from_stage": stage},
+        return {"type": EV_NODE_RESET,
+                "data": _bound_node_data(st, nid, node_id=nid, from_stage=stage),
                 "label": f"Reset #{nid} in place — {how}"}
     if a == "hint" and c.text:
         # The boss authors the COMPLETE current directive each turn (it has the full chat + run
@@ -247,23 +282,27 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
     if a == "inject":
         idea = {"operator": c.operator or "improve", "params": c.params or {}, "rationale": c.rationale or c.text or ""}
         pp = " ".join(f"{k}={v}" for k, v in (idea["params"] or {}).items())   # "lr=0.1 depth=3", not a dict repr
-        return {"type": EV_INJECT_NODE, "data": {"idea": idea, "parent_id": nid, "code": None},
+        return {"type": EV_INJECT_NODE,
+                "data": _bound_parent_data(st, nid, idea=idea, parent_id=nid, code=None),
                 "label": f"Add experiment: {idea['operator']}" + (f" ({pp})" if pp else "")}
     if a == "import" and c.source_run and c.source_node is not None:
         # Seed an experiment FROM a sibling run. The source idea/code/metric are resolved from disk at
         # apply time (in /control), which then bakes `origin` provenance into the inject_node event —
         # so this rides the existing manual-injection pipeline, no new event type.
         return {"type": EV_INJECT_NODE,
-                "data": {"idea": {"operator": c.operator or "improve", "params": c.params or {},
-                                  "rationale": c.rationale or c.text or ""},
-                         "parent_id": nid, "code": None,
-                         "source_run": c.source_run, "source_node": int(c.source_node)},
+                "data": _bound_parent_data(
+                    st, nid,
+                    idea={"operator": c.operator or "improve", "params": c.params or {},
+                          "rationale": c.rationale or c.text or ""},
+                    parent_id=nid, code=None,
+                    source_run=c.source_run, source_node=int(c.source_node)),
                 "label": f"Import #{c.source_node} from run {c.source_run}"}
     if a == "approve":
         node = nid if nid is not None else st.best_node_id
         if node is None:                      # no champion yet -> not an actionable approve
             return None
-        return {"type": EV_APPROVAL_GRANTED, "data": {"node_id": node}, "label": f"Approve #{node}"}
+        return {"type": EV_APPROVAL_GRANTED,
+                "data": _bound_node_data(st, node, node_id=node), "label": f"Approve #{node}"}
     if a == "ratify":
         return {"type": EV_SPEC_APPROVED, "data": {}, "label": "Ratify the eval spec"}
     if a in ("stop", "pause", "finalize", "abort", "resume"):
@@ -291,6 +330,12 @@ def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
 
 
 def build_router(srv) -> APIRouter:
+    if APIRouter is None:
+        raise ModuleNotFoundError(
+            "The LoopLab boss routes need the [ui] extra: pip install 'looplab[ui]' "
+            "(fastapi + uvicorn).",
+            name="fastapi",
+        )
     router = APIRouter()
     _run_dir = srv.run_dir
     _llm_settings = srv.llm_settings

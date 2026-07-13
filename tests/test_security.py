@@ -56,6 +56,30 @@ def test_untrusted_builds_docker_argv(monkeypatch, tmp_path):
     assert (tmp_path / "solution.py").read_text(encoding="utf-8") == "print(1)"
 
 
+@pytest.mark.parametrize("requested, expected", [(float("inf"), 30.0), (1e18, 24 * 3600.0)])
+def test_untrusted_bounds_timeout_before_building_docker_argv(
+        monkeypatch, tmp_path, requested, expected):
+    """The daemon-owned container deadline must be finite/bounded before int() and argv creation."""
+    import shutil
+
+    import looplab.runtime.sandbox as sb
+
+    monkeypatch.setattr(shutil, "which", lambda _x: "/usr/bin/docker")
+    seen = {}
+
+    def fake_run_argv(argv, workdir, timeout, env=None, max_output_bytes=64_000, cancel=None):
+        seen.update(argv=argv, timeout=timeout)
+        return 0, '{"metric": 1.0}', "", False
+
+    monkeypatch.setattr(sb, "_run_argv", fake_run_argv)
+    res = sb.DockerSandbox().run("print(1)", str(tmp_path), requested)
+
+    assert res.metric == 1.0
+    i = seen["argv"].index("timeout")
+    assert seen["argv"][i:i + 4] == ["timeout", "-k", "5", str(int(expected))]
+    assert seen["timeout"] == expected + 15.0
+
+
 def test_unknown_trust_mode_rejected():
     with pytest.raises(ValueError):
         make_sandbox("bogus")

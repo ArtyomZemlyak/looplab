@@ -67,6 +67,20 @@ def test_reversible_write_aborts_when_recovery_snapshot_fails(tmp_path):
     assert target.read_text(encoding="utf-8") == "before"
 
 
+def test_reversible_delete_aborts_when_recovery_snapshot_fails(tmp_path):
+    target = tmp_path / "must-survive.txt"
+    target.write_text("before", encoding="utf-8")
+    blocked = tmp_path / "backup-path-is-a-file"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    result = WriteTools(
+        [tmp_path], mode="auto", backup_dir=blocked, approver=ALLOW).execute(
+            "delete_file", {"path": str(target)})
+
+    assert "could not create a recovery snapshot" in result
+    assert target.read_text(encoding="utf-8") == "before"
+
+
 def test_ask_allow_writes_ask_deny_does_not(tmp_path):
     WriteTools([tmp_path], mode="default", approver=ALLOW).execute(
         "write_file", {"path": str(tmp_path / "y.txt"), "content": "1"})
@@ -100,7 +114,8 @@ def test_edit_file_match_counting(tmp_path):
 
 
 def test_delete_gated(tmp_path):
-    f = tmp_path / "a.txt"; f.write_text("x")
+    f = tmp_path / "a.txt"
+    f.write_text("x")
     assert "declined" in WriteTools([tmp_path], mode="default", approver=DENY).execute(
         "delete_file", {"path": str(f)})
     assert f.exists()
@@ -121,6 +136,35 @@ def test_apply_patch_gated(tmp_path):
     assert "applied" in r and (tmp_path / "a.txt").read_text() == "two\n"
 
 
+def test_apply_patch_uses_default_protect_exceptions_but_honors_custom_protect(tmp_path):
+    import subprocess
+
+    diff = ("diff --git a/upgrade.py b/upgrade.py\n--- a/upgrade.py\n+++ b/upgrade.py\n"
+            "@@ -1 +1 @@\n-before\n+after\n")
+
+    default_repo = tmp_path / "default"
+    default_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=default_repo, check=True)
+    (default_repo / "upgrade.py").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=default_repo, check=True)
+    allowed = WriteTools([default_repo], mode="auto", repo_root=default_repo).execute(
+        "apply_patch", {"diff": diff})
+    assert "applied" in allowed
+    assert (default_repo / "upgrade.py").read_text(encoding="utf-8") == "after\n"
+
+    custom_repo = tmp_path / "custom"
+    custom_repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=custom_repo, check=True)
+    (custom_repo / "upgrade.py").write_text("before\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=custom_repo, check=True)
+    refused = WriteTools(
+        [custom_repo], mode="auto", repo_root=custom_repo,
+        protect=["**/upgrade.py"],
+    ).execute("apply_patch", {"diff": diff})
+    assert "protected paths" in refused
+    assert (custom_repo / "upgrade.py").read_text(encoding="utf-8") == "before\n"
+
+
 # --- secret-check is root-relative; backup index is gap-safe (assistant review fixes) -------------
 
 def test_secret_check_is_root_relative_not_absolute(tmp_path):
@@ -138,10 +182,14 @@ def test_secret_check_is_root_relative_not_absolute(tmp_path):
 
 def test_file_backups_index_survives_a_gap(tmp_path):
     b = FileBackups(tmp_path / "bak")
-    f = tmp_path / "a.txt"; f.write_text("v0")
-    b.save(f); f.write_text("v1")           # 0.bak = v0
-    b.save(f); f.write_text("v2")           # 1.bak = v1
+    f = tmp_path / "a.txt"
+    f.write_text("v0")
+    b.save(f)
+    f.write_text("v1")           # 0.bak = v0
+    b.save(f)
+    f.write_text("v2")           # 1.bak = v1
     assert b.revert(f) and f.read_text() == "v1"   # pops 1.bak -> gap; content restored to v1
-    b.save(f); f.write_text("v3")           # next index must be max+1 = 1 (not len()=1 collision-safe)
+    b.save(f)
+    f.write_text("v3")           # next index must be max+1 = 1 (not len()=1 collision-safe)
     # revert now restores the snapshot taken just before v3 (which was v1)
     assert b.revert(f) and f.read_text() == "v1"
