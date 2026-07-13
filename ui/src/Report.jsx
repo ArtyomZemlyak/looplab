@@ -59,7 +59,7 @@ function List({ items }) {
 }
 
 export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode, readOnly = false,
-  historySeq = null, readOnlyReason = 'history', evidenceAvailable = true }) {
+  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -80,12 +80,15 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     }
     let alive = true
     setBestCodeResource({ status: 'loading', data: null, error: null })
-    const at = readOnly && historySeq != null ? `?seq=${encodeURIComponent(historySeq)}` : ''
+    const at = readOnly && historySeq != null
+      ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
+      : ''
     get(`/api/runs/${encodeURIComponent(runId)}/nodes/${best.id}${at}`)
       .then(data => { if (alive) setBestCodeResource({ status: 'ready', data, error: null }) })
       .catch(() => { if (alive) setBestCodeResource({ status: 'error', data: null, error: 'The node detail request failed.' }) })
     return () => { alive = false }
-  }, [runId, best?.id, readOnly, historySeq, readOnlyReason, evidenceAvailable, bestCodeNonce])
+  }, [runId, best?.id, readOnly, historySeq, expectedGeneration, readOnlyReason,
+    evidenceAvailable, bestCodeNonce])
   const bestCode = bestCodeResource.data
   // Refresh completes when a newer report (different at_node / trigger) folds in via SSE.
   useEffect(() => {

@@ -94,3 +94,12 @@ test('review access has its own terminal read-only error', () => {
   )
   clearRunAccess('demo')
 })
+
+test('a generation-mismatched diagnostic link fails closed before any run mutation', () => {
+  setRunAccess('demo', { readOnly: true, mode: 'stale-link' })
+  assert.throws(
+    () => assertRunMutationAllowed('/api/runs/demo/control'),
+    error => error.code === 'STALE_LINK_READ_ONLY' && /earlier run generation/i.test(error.message),
+  )
+  clearRunAccess('demo')
+})

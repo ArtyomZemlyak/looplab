@@ -9,6 +9,7 @@ import Markdown from './markdown.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
+import { reviewInspectorTabs } from './runRouteState.js'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -62,7 +63,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
 }
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
-  historySeq = null, readOnlyReason = 'history', evidenceAvailable = true }) {
+  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true }) {
   const [detail, setDetail] = useState(null)
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
@@ -74,12 +75,15 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     if (readOnlyReason === 'review' && !evidenceAvailable) { setDetailStatus('restricted'); return }
     setDetailStatus('loading')
     let on = true
-    const at = readOnly && historySeq != null ? `?seq=${encodeURIComponent(historySeq)}` : ''
+    const at = readOnly && historySeq != null
+      ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
+      : ''
     get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}${at}`)
       .then(d => { if (on) { setDetail(d); setDetailStatus('ready') } })
       .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
     return () => { on = false }
-  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, readOnlyReason, evidenceAvailable, detailNonce])
+  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, expectedGeneration,
+    readOnlyReason, evidenceAvailable, detailNonce])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -112,7 +116,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const sweep = isSweep(n)
   const liveTabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
   const tabs = readOnly
-    ? readOnlyReason === 'review' && !evidenceAvailable ? ['Overview', 'Trust', 'Cost'] : ['Overview', 'Code', 'Trust', 'Cost']
+    ? readOnlyReason === 'review' ? reviewInspectorTabs(evidenceAvailable) : ['Overview', 'Code', 'Trust', 'Cost']
     : liveTabs
   const activeTab = tabs.includes(tab) ? tab : 'Overview'
 

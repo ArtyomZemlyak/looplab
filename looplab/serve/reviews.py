@@ -30,6 +30,7 @@ DEFAULT_TTL_SECONDS = 7 * 24 * 60 * 60
 MIN_TTL_SECONDS = 5 * 60
 MAX_TTL_SECONDS = 30 * 24 * 60 * 60
 REVIEW_HEADER = "X-LoopLab-Review"
+_GENERATION_HEX = frozenset("0123456789abcdef")
 
 
 class ReviewError(ValueError):
@@ -54,6 +55,12 @@ def _finite_number(value, fallback: float | None = None) -> float | None:
     return number if math.isfinite(number) else fallback
 
 
+def exact_review_generation(value: object) -> str | None:
+    """Return only the canonical event-log generation spelling used by run commands."""
+    return (value if isinstance(value, str) and len(value) == 64
+            and all(char in _GENERATION_HEX for char in value) else None)
+
+
 def _public(record: dict) -> dict:
     """Owner/reviewer-safe metadata (never return the persisted credential digest)."""
     scopes = record.get("scopes")
@@ -64,6 +71,7 @@ def _public(record: dict) -> dict:
     return {
         "id": record.get("id") if isinstance(record.get("id"), str) else "",
         "run_id": record.get("run_id") if isinstance(record.get("run_id"), str) else "",
+        "generation": exact_review_generation(record.get("generation")),
         "scopes": safe_scopes,
         "created_at": _finite_number(record.get("created_at"), 0.0),
         "expires_at": _finite_number(record.get("expires_at"), 0.0),
@@ -123,7 +131,8 @@ class ReviewStore:
             return link_id, path
         raise ReviewError("could not allocate a unique review link")
 
-    def create(self, run_id: str, *, ttl_seconds: int = DEFAULT_TTL_SECONDS,
+    def create(self, run_id: str, *, generation: str,
+               ttl_seconds: int = DEFAULT_TTL_SECONDS,
                include_evidence: bool = False) -> tuple[str, dict]:
         try:
             ttl = int(ttl_seconds)
@@ -132,6 +141,10 @@ class ReviewStore:
         if ttl < MIN_TTL_SECONDS or ttl > MAX_TTL_SECONDS:
             raise ReviewError(
                 f"expiry must be between {MIN_TTL_SECONDS} and {MAX_TTL_SECONDS} seconds")
+        exact_generation = exact_review_generation(generation)
+        if exact_generation is None:
+            raise ReviewError(
+                "run generation is missing or malformed", kind="generation")
         now = time.time()
         link_id, path = self._reserve()
         token = f"rv_{link_id[4:]}_{secrets.token_urlsafe(32)}"
@@ -139,6 +152,7 @@ class ReviewStore:
             "id": link_id,
             "token_hash": _digest(token),
             "run_id": str(run_id),
+            "generation": exact_generation,
             "scopes": ["summary"] + (["evidence"] if include_evidence else []),
             "created_at": now,
             "expires_at": now + ttl,
@@ -201,6 +215,11 @@ class ReviewStore:
                 or "summary" not in scopes or not set(scopes).issubset({"summary", "evidence"})
                 or _finite_number(record.get("created_at")) is None):
             raise ReviewError("invalid review link")
+        if exact_review_generation(record.get("generation")) is None:
+            # Pre-generation capabilities and hand-edited malformed records cannot be safely
+            # retargeted to whichever run now occupies the same id.
+            raise ReviewError(
+                "this review link has no valid run generation binding", kind="generation")
         revoked_at = record.get("revoked_at")
         if revoked_at is not None:
             # A malformed marker still fails closed as revoked, while _public normalizes it so the

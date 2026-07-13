@@ -22,7 +22,7 @@ test('historical state reloads and renders only for the displayed run generation
   assert.match(runView, /requestHistory\(want, generation\)/)
   assert.match(runView, /resolveHistory\(current, want, generation, p\)/)
   assert.match(runView, /rejectHistory\(current, want, generation, e\)/)
-  assert.match(runView, /\[viewSeq, runId, historyRetry, generation\]/)
+  assert.match(runView, /\[viewSeq, runId, historyRetry, generation, routeFenceBlocked, reviewMode\]/)
   assert.match(runView, /historyMatches\(history, viewSeq, generation\)/)
 })
 

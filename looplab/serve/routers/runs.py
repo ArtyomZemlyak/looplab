@@ -172,6 +172,26 @@ def build_router(srv) -> APIRouter:
     def get_state(run_id: str, seq: Optional[int] = None):
         return _state_payload(_run_dir(run_id), seq)
 
+    def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
+        if expected is None:
+            raise HTTPException(400, {
+                "code": "historical_generation_required",
+                "message": "Historical node detail requires the exact run generation.",
+                "remediation": "Use the generation returned by the historical /state response.",
+            })
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current = srv.commands.run_generation(rd)
+            if expected != current:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected,
+                    "current_generation": current or None,
+                    "message": "The run was reset or replaced before historical detail was read.",
+                    "remediation": "Open the current generation or reload the exact historical view.",
+                })
+        return current
+
     @router.get("/api/runs/{run_id}/events")
     async def stream_events(run_id: str, request: Request):
         rd = _run_dir(run_id)
@@ -234,11 +254,18 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ node detail
     @router.get("/api/runs/{run_id}/nodes/{nid}")
-    def node_detail(run_id: str, nid: int, seq: Optional[int] = None):
+    def node_detail(run_id: str, nid: int, seq: Optional[int] = None,
+                    expected_generation: Optional[str] = None):
         rd = _run_dir(run_id)
         # Historical Inspector/Report must use the same prefix fold as the visible DAG.  Falling back
         # to the live fold here leaked later code, annotations and confirmations into old snapshots.
+        historical_generation = (_assert_historical_generation(rd, expected_generation)
+                                 if seq is not None else None)
         st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
+        if seq is not None:
+            # The expensive fold runs without the exclusive command sequencer. A reset may win while
+            # it is assembled, but a mixed-generation payload is rejected before any field is returned.
+            historical_generation = _assert_historical_generation(rd, expected_generation)
         n = st.nodes.get(nid)
         if n is None:
             # A node still BUILDING has no node_created yet (not in st.nodes), but its create_node
@@ -270,6 +297,7 @@ def build_router(srv) -> APIRouter:
         out["trace"] = _node_trace(rd, nid) if seq is None else {"nodes": []}
         if seq is not None:
             out["historical_seq"] = seq
+            out["historical_generation"] = historical_generation
         return out
 
     def _node_dir(rd: Path, nid: int) -> Path:

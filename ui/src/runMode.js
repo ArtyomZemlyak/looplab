@@ -99,10 +99,13 @@ export function assertRunMutationAllowed(path) {
   const access = getRunAccess(runId)
   if (!access.readOnly) return
   const review = access.mode === 'review'
+  const staleLink = access.mode === 'stale-link'
   const error = new Error(review
     ? 'This review link is read-only'
-    : `Historical snapshot seq ${access.seq} is read-only — return to live to act`)
-  error.code = review ? 'REVIEW_READ_ONLY' : 'HISTORICAL_READ_ONLY'
+    : staleLink
+      ? 'This diagnostic link targets an earlier run generation — open the current generation before acting'
+      : `Historical snapshot seq ${access.seq} is read-only — return to live to act`)
+  error.code = review ? 'REVIEW_READ_ONLY' : staleLink ? 'STALE_LINK_READ_ONLY' : 'HISTORICAL_READ_ONLY'
   error.runId = runId
   error.seq = access.seq
   throw error

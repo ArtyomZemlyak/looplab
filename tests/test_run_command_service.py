@@ -17,10 +17,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.events.eventstore import EventStore  # noqa: E402
 from looplab.events.replay import fold  # noqa: E402
+from looplab.serve import run_commands as run_commands_module  # noqa: E402
 from looplab.serve.protocol import CONTROL_EVENTS, PHASE_FINALIZING  # noqa: E402
 from looplab.serve.run_commands import (  # noqa: E402
     CONTROL_DATA_FIELDS, CONTROL_SPECS, TERMINAL_STATUSES, EnginePolicy, RunCommandService,
-    _process_identity, normalize_control, task_file_for)
+    _process_identity, normalize_control, run_generation_token, task_file_for)
 from looplab.serve.server import make_app  # noqa: E402
 
 
@@ -240,6 +241,52 @@ def test_empty_event_log_exposes_no_generation_and_rejects_new_commands(tmp_path
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "run_generation_unavailable"
     assert not (rd / ".commands").exists()
+
+
+def test_run_generation_reads_only_the_first_durable_event(tmp_path, monkeypatch):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    first = EventStore(rd / "events.jsonl").read_all()[0]
+    expected = run_generation_token([first])
+    requested_paths = []
+
+    def first_only(path):
+        requested_paths.append(Path(path))
+        yield first.model_dump(mode="json")
+        raise AssertionError("run generation consumed an event after the first durable record")
+
+    monkeypatch.setattr(run_commands_module, "iter_jsonl", first_only)
+    assert srv.commands.run_generation(rd) == expected
+    assert requested_paths == [rd / "events.jsonl"]
+
+    def missing_during_open(_path):
+        raise FileNotFoundError("generation replaced before open")
+        yield  # pragma: no cover - keep this a generator so failure happens on first next()
+
+    monkeypatch.setattr(run_commands_module, "iter_jsonl", missing_during_open)
+    assert srv.commands.run_generation(rd) == ""
+
+
+def test_run_generation_first_record_matches_eventstore_durability_semantics(tmp_path):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    path = rd / "events.jsonl"
+    raw = path.read_bytes()
+    first_line = raw.splitlines(keepends=True)[0]
+    expected = run_generation_token(EventStore(path).read_all())
+
+    path.write_bytes(b"")
+    assert srv.commands.run_generation(rd) == ""
+    path.write_bytes(first_line.rstrip(b"\n"))
+    assert srv.commands.run_generation(rd) == ""
+    path.write_bytes(b"{not-json}\n" + first_line)
+    assert srv.commands.run_generation(rd) == ""
+    path.write_bytes(b"{}\n" + first_line)
+    assert srv.commands.run_generation(rd) == ""
+    path.write_bytes(b'{"seq":0,"type":"run_started","data":[]}\n' + first_line)
+    assert srv.commands.run_generation(rd) == ""
+    path.write_bytes(first_line + b"{not-json}\n")
+    assert srv.commands.run_generation(rd) == expected
 
 
 def test_delayed_first_submit_is_rejected_after_generation_replacement(monkeypatch, tmp_path):

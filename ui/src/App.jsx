@@ -8,6 +8,7 @@ import OwnerAuth from './OwnerAuth.jsx'
 import { reviewManifest, reviewTokenFromLocation } from './api.js'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
+import { routeHashPath } from './runRouteState.js'
 
 initTheme()   // restore the saved design theme before first paint
 initFx()      // restore the saved Energy/Reactor FX level (data-fx) before first paint
@@ -18,7 +19,7 @@ initFx()      // restore the saved Energy/Reactor FX level (data-fx) before firs
 const safeDecode = (s) => { try { return decodeURIComponent(s) } catch { return s } }
 function parseHash() {
   if (/\/review\/?$/.test(location.pathname)) return { view: 'review', token: reviewTokenFromLocation() }
-  const h = location.hash
+  const h = routeHashPath(location.hash)
   if (h === '#/settings') return { view: 'settings' }
   const sh = h.match(/^#\/assistant\/shared\/(.+)$/)
   if (sh) return { view: 'shared', id: safeDecode(sh[1]) }
@@ -55,7 +56,7 @@ function ReviewRoute({ token }) {
       {resource.status === 'error' && <button className="btn primary" onClick={() => setRetry(n => n + 1)}>Retry</button>}
     </div>
   </main>
-  return <RunView key={resource.data.run_id} runId={resource.data.run_id} onBack={null}
+  return <RunView key={`${resource.data.id || token}:${resource.data.run_id}`} runId={resource.data.run_id} onBack={null}
     reviewMode reviewMeta={resource.data} />
 }
 
@@ -64,7 +65,11 @@ export default function App() {
   useEffect(() => {
     const on = () => setRoute(parseHash())
     window.addEventListener('hashchange', on)
-    return () => window.removeEventListener('hashchange', on)
+    window.addEventListener('popstate', on)
+    return () => {
+      window.removeEventListener('hashchange', on)
+      window.removeEventListener('popstate', on)
+    }
   }, [])
   const open = (id) => { location.hash = `#/run/${encodeURIComponent(id)}` }
   const back = () => { location.hash = '' }
@@ -73,7 +78,7 @@ export default function App() {
   // The shared read-only view owns the whole screen (it IS a public chat), so the persistent assistant
   // is hidden there; everywhere else (list / run / settings) the assistant stays available.
   let content, hideAssistant = false
-  if (route.view === 'review') return <ReviewRoute token={route.token} />
+  if (route.view === 'review') return <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
   if (route.view === 'run') content = <RunView key={route.id} runId={route.id} onBack={back} />
   else if (route.view === 'settings') content = <Settings onBack={back} />
   else if (route.view === 'shared') { content = <SharedAssistant sid={route.id} onBack={back} />; hideAssistant = true }

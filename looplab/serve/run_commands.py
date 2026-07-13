@@ -33,9 +33,9 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.models import Idea
+from looplab.core.models import Event, Idea
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_COMMAND_ACK,
@@ -147,12 +147,32 @@ def run_generation_token(events) -> str:
     Empty/startup logs deliberately have no token: accepting a mutation before there is durable
     generation identity would re-open the exact reset race this precondition closes.
     """
-    if not events:
+    iterator = iter(events)
+    try:
+        try:
+            first = next(iterator, None)
+        except OSError:
+            # A concurrent delete/replace or transient filesystem read failure is not a trustworthy
+            # generation. Match EventStore.read_all's fail-closed empty-prefix behavior.
+            return ""
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            close()
+    if first is None:
         return ""
-    first = events[0]
+    if isinstance(first, dict):
+        try:
+            first = Event(**first)
+        except Exception:  # noqa: BLE001 - match EventStore's fail-closed invalid-record boundary
+            return ""
+    seq = first.seq
+    timestamp = first.ts
+    event_type = first.type
+    data = first.data or {}
     raw = json.dumps({
-        "seq": first.seq, "ts": first.ts, "type": first.type,
-        "run_id": (first.data or {}).get("run_id"),
+        "seq": seq, "ts": timestamp, "type": event_type,
+        "run_id": data.get("run_id"),
     }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
     return hashlib.sha256(raw).hexdigest()
 
@@ -836,8 +856,15 @@ class RunCommandService:
         return True
 
     def run_generation(self, rd: Path) -> str:
-        """Stable identity of the event-log generation currently occupying a run id."""
-        return run_generation_token(self._events(rd))
+        """Stable identity of the event-log generation currently occupying a run id.
+
+        Generation identity depends only on the first durable event. Read just that record so callers
+        can validate the identity while holding the run sequencer without turning every poll into an
+        O(events) critical section. ``iter_jsonl`` preserves the event store's torn/corrupt-first-line
+        semantics; ``run_generation_token`` also validates that dictionary through ``Event`` so a
+        complete JSON object with an invalid event schema remains generation-less, as in ``read_all``.
+        """
+        return run_generation_token(iter_jsonl(self._events_path(rd)))
 
     @contextmanager
     def run_activity(self, rd: Path, kind: str, *, generation: str):

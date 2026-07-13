@@ -756,7 +756,8 @@ def test_time_travel_seq(tmp_path):
 
     # Node detail uses the same prefix fold: future annotations and live spans must not leak backward.
     historical_node = client.get(f"/api/runs/demo/nodes/{nid}",
-                                 params={"seq": created_seq}).json()
+                                 params={"seq": created_seq,
+                                         "expected_generation": early["generation"]}).json()
     live_node = client.get(f"/api/runs/demo/nodes/{nid}").json()
     assert historical_node["annotations"] == []
     assert live_node["annotations"] == ["added after the snapshot"]
@@ -766,7 +767,47 @@ def test_time_travel_seq(tmp_path):
     # A future node is an explicit 404 at an earlier prefix rather than a live-detail fallback.
     later = next(e for e in raw if e["type"] == "node_created" and e["seq"] > created_seq)
     assert client.get(f"/api/runs/demo/nodes/{later['data']['node_id']}",
-                      params={"seq": created_seq}).status_code == 404
+                      params={"seq": created_seq,
+                              "expected_generation": early["generation"]}).status_code == 404
+
+
+def test_historical_node_detail_rejects_replaced_run_generation(tmp_path):
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    log = rd / "events.jsonl"
+    raw = list(iter_jsonl(log))
+    created = next(event for event in raw if event["type"] == "node_created")
+    seq = created["seq"]
+    nid = created["data"]["node_id"]
+    client = TestClient(make_app(tmp_path))
+    generation_a = client.get("/api/runs/demo/state", params={"seq": seq}).json()["generation"]
+
+    missing = client.get(f"/api/runs/demo/nodes/{nid}", params={"seq": seq})
+    assert missing.status_code == 400
+    assert missing.json()["detail"]["code"] == "historical_generation_required"
+
+    log.rename(rd / "events.jsonl.generation-a")
+    replacement = []
+    for index, event in enumerate(raw):
+        row = dict(event)
+        row["data"] = dict(event.get("data") or {})
+        if index == 0:
+            row["ts"] = float(event["ts"]) + 1.0
+        if row["type"] == "node_created" and row["data"].get("node_id") == nid:
+            row["data"]["code"] = "GENERATION_B_MUST_NOT_APPEAR_UNDER_A"
+        replacement.append(row)
+    log.write_text("".join(json.dumps(row) + "\n" for row in replacement), encoding="utf-8")
+
+    generation_b = client.get("/api/runs/demo/state", params={"seq": seq}).json()["generation"]
+    assert generation_b != generation_a
+    stale = client.get(f"/api/runs/demo/nodes/{nid}", params={
+        "seq": seq, "expected_generation": generation_a})
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "run_generation_changed"
+    current = client.get(f"/api/runs/demo/nodes/{nid}", params={
+        "seq": seq, "expected_generation": generation_b}).json()
+    assert current["historical_generation"] == generation_b
+    assert current["code"] == "GENERATION_B_MUST_NOT_APPEAR_UNDER_A"
 
 
 def test_clear_node_trace_removes_only_that_nodes_spans(tmp_path):

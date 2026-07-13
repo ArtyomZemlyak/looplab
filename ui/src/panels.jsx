@@ -16,6 +16,7 @@ import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.j
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
+import { hashWithRunRouteState, reviewRouteStateForScope } from './runRouteState.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   const dialogRef = useRef(null)
@@ -900,7 +901,7 @@ export function CrossRunPanel({ state, onClose }) {
 
 // F4 · Collaboration — a thread view of every node annotation (folded from `annotation` events) plus
 // a read-only share link. Annotations are already events; this surfaces them as a reviewable thread.
-export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
+export function CollabPanel({ state, runId, onSelect, onClose, onToast, reviewRouteState = null }) {
   const [ttl, setTtl] = useState(7 * 24 * 60 * 60)
   const [includeEvidence, setIncludeEvidence] = useState(false)
   const [links, setLinks] = useState([])
@@ -939,7 +940,12 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
     try {
       const result = await createRunReview(runId, { ttl_seconds: ttl, include_evidence: includeEvidence })
       const base = `${location.origin}${apiPrefix()}/`
-      const url = new URL(result.path, base).href
+      const target = new URL(result.path, base)
+      const scopedState = reviewRouteStateForScope({ ...(reviewRouteState || {}),
+        generation: result.generation }, { evidence: includeEvidence })
+      target.hash = hashWithRunRouteState(target.hash, scopedState,
+        { reviewMode: true, forceGeneration: true })
+      const url = target.href
       setCreatedUrl(url)
       await copy(url)
       await refreshLinks()
@@ -978,7 +984,7 @@ export function CollabPanel({ state, runId, onSelect, onClose, onToast }) {
           : links.length ? <div className="review-link-list">{links.map(link => <div key={link.id} className="review-link-row">
           <div><b>{link.status}</b> · {(link.scopes || []).includes('evidence') ? 'summary + evidence' : 'summary'}
             <div className="muted">expires {new Date(link.expires_at * 1000).toLocaleString()}</div></div>
-          {link.status === 'active' && <button className="btn sm danger" disabled={busy} onClick={() => revoke(link.id)}>Revoke</button>}
+          {['active', 'stale'].includes(link.status) && <button className="btn sm danger" disabled={busy} onClick={() => revoke(link.id)}>Revoke</button>}
         </div>)}</div> : linksStatus === 'ready' ? <div className="muted">No review links created yet.</div>
           : <div className="review-links-error"><span className="muted">Existing links could not be loaded.</span>
             <button className="btn sm" disabled={busy} onClick={refreshLinks}>Retry</button></div>}

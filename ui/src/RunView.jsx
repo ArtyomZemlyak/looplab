@@ -1,7 +1,9 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
-import { get, fmt, fmtInt, phaseLabel, workingId, CONTROL, commandFeedback,
+import { useRunRouteState } from './useRunRouteState.js'
+import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
+import { get, fmt, fmtInt, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet } from './util.js'
 import Dag from './Dag.jsx'
 import Inspector, { GroupSummary } from './Inspector.jsx'
@@ -39,9 +41,11 @@ const HUBS = [
   ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Collab'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
-const REVIEW_SAFE_PANELS = new Set([
-  'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare',
-])
+// Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
+// config, raw detail, another run, or a sidecar stay closed so `seq + panel` cannot create a hybrid.
+const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data'])
+const LIVE_INSPECT_TABS = ['Overview', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
 
 const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Expanded Timeline controls + pager + transport need enough room to leave a usable event viewport.
@@ -88,44 +92,82 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const { live, seq, generation, eventCount: liveEventCount, connected,
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
+  const route = useRunRouteState({ generation, reviewMode })
+  const { state: routeState, generationMismatch, generationPending } = route
+  const viewSeq = routeState.sequence
+  const selectedId = routeState.nodeId
+  const inspectTab = routeState.inspectTab
+  const panel = routeState.panel
+  const view = routeState.view
+  const themeFilter = routeState.directionFilter
+  const routeFenceBlocked = generationMismatch || generationPending
   // One owner-only paged controller feeds both Dock and EventExplorer. Opening the explorer therefore
   // adds no second raw-log scan, cursor stream, retained window, or competing generation fence.
   const timeline = useTimeline(runId, {
-    liveSeq: seq, liveEventCount, expectedGeneration: generation, enabled: !reviewMode,
+    liveSeq: seq, liveEventCount, expectedGeneration: generation,
+    enabled: !reviewMode && !routeFenceBlocked,
   })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
-  const [viewSeq, setViewSeq] = useState(null)
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
   const historyActive = viewSeq != null
-  const readOnlyMode = reviewMode || historyActive
+  const readOnlyMode = reviewMode || historyActive || routeFenceBlocked
   const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
-  const reviewPanelAllowed = (name) => !reviewMode || (REVIEW_SAFE_PANELS.has(name) && (name !== 'compare' || reviewEvidence))
+  const panelAllowed = (name) => {
+    if (reviewMode) return reviewPanelAllowed(name, reviewEvidence)
+    if (historyActive) return HISTORY_SAFE_PANELS.has(name)
+    return true
+  }
+  const setSelectedId = (value, options = {}) => route.update(current => {
+    const next = typeof value === 'function' ? value(current.nodeId) : value
+    return { ...current, nodeId: next, inspectTab: next == null ? 'Overview' : current.inspectTab }
+  }, options)
+  const setInspectTab = (value, options = {}) => route.update(current => ({
+    ...current, inspectTab: typeof value === 'function' ? value(current.inspectTab) : value,
+  }), options)
+  const setPanel = (value, options = {}) => route.update(current => ({
+    ...current, panel: typeof value === 'function' ? value(current.panel) : value,
+  }), options)
+  const setView = (value, options = {}) => route.update(current => ({
+    ...current, view: typeof value === 'function' ? value(current.view) : value,
+  }), options)
+  const setThemeFilter = (value, options = {}) => route.update(current => ({
+    ...current, directionFilter: typeof value === 'function' ? value(current.directionFilter) : value,
+  }), options)
   const changeViewSeq = (next) => {
-    const n = next == null || Number(next) >= seq ? null : Number(next)
-    setRunAccess(runId, { readOnly: reviewMode || n != null, seq: n,
-      mode: reviewMode ? 'review' : n != null ? 'history' : 'live' })
-    setViewSeq(n)
+    if (reviewMode || routeFenceBlocked) return
+    const value = Number(next)
+    const n = next == null || value >= seq ? null
+      : Number.isSafeInteger(value) && value >= 0 ? value : null
+    route.update(current => ({ ...current, sequence: n }))
   }
   const returnToLive = () => {
     changeViewSeq(null)
     timeline.jumpToLive()
   }
-  useEffect(() => {
-    // A fresh route always starts live. This also heals any stale client registry entry left by an
-    // interrupted historical scrub before the previous workspace could finish unmounting.
-    setRunAccess(runId, { readOnly: reviewMode, seq: null, mode: reviewMode ? 'review' : 'live' })
+  useLayoutEffect(() => {
+    // The mutation boundary follows URL hydration too. A generation-fenced link is fail-closed until
+    // current truth confirms it. Publish in the same layout-effect phase as useRunState's observed
+    // generation so the persistent Assistant/Dock cannot see generation B with generation A's old
+    // live access during the commit-to-passive-effect window.
+    setRunAccess(runId, { readOnly: readOnlyMode, seq: viewSeq,
+      mode: reviewMode ? 'review' : routeFenceBlocked ? 'stale-link' : historyActive ? 'history' : 'live' })
     return () => clearRunAccess(runId)
-  }, [runId, reviewMode])
-  const [selectedId, setSelectedId] = useState(null)
-  const [inspectTab, setInspectTab] = useState('Overview')
+  }, [runId, reviewMode, readOnlyMode, viewSeq, historyActive, routeFenceBlocked])
+  const [toast, setToast] = useState(null)
+  const [routeNotice, setRouteNotice] = useState('')
+  const [copyFallback, setCopyFallback] = useState('')
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
-  const [panel, setPanel] = useState(null)
   useEffect(() => {
-    if (panel && !reviewPanelAllowed(panel)) setPanel(null)
-  }, [panel, reviewMode, reviewEvidence])
+    if (panel && !panelAllowed(panel)) {
+      setRouteNotice(current => [current, historyActive
+        ? `${panel} is not snapshot-safe and was not opened with historical data.`
+        : `${panel} is not included in this review link.`].filter(Boolean).join(' '))
+      setPanel(null, { mode: 'replace', preserveIssues: true })
+    }
+  }, [panel, reviewMode, reviewEvidence, historyActive])
   const panelReturnFocusRef = useRef(null)
   const hubTriggerRef = useRef(null)
   const closePanel = () => {
@@ -137,9 +179,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     })
   }
   const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
-  const [view, setView] = useState('dag')                    // 'dag' | 'report' — primary destination
-  const [themeFilter, setThemeFilter] = useState(null)       // E1: drill the tree to one direction
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
+  const deepLinkLandingRef = useRef(route.hadState)          // even invalid state must not be hidden by auto-report
   // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
   const [sideW, setSideW] = useState(() => +storageGet('ll.sideW', 420) || 420)
   const [dockH, setDockH] = useState(() => +storageGet('ll.dockH', 230) || 230)
@@ -197,20 +238,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const dragCleanupRef = useRef(null)
   useEffect(() => () => dragCleanupRef.current?.(), [])
-  const [toast, setToast] = useState(null)
   const [cfg, setCfg] = useState(null)
-  useEffect(() => { get(`/api/runs/${encodeURIComponent(runId)}/config`).then(setCfg).catch(() => {}) }, [runId])
+  useEffect(() => {
+    if (routeFenceBlocked) { setCfg(null); return }
+    let active = true
+    get(`/api/runs/${encodeURIComponent(runId)}/config`)
+      .then(value => { if (active) setCfg(value) }).catch(() => { if (active) setCfg(null) })
+    return () => { active = false }
+  }, [runId, routeFenceBlocked])
   const liveTerminalReady = terminalReady(live || {})
   // Auto-land only after terminal write-out genuinely completed. A run_finished(error) during an
   // explicit finalize is recovery state, not a completed report, and a still-live engine may still be
   // writing report/lessons/cost after the terminal event appeared.
   useEffect(() => {
-    if (!historyActive && liveTerminalReady && !landedRef.current) {
+    if (!historyActive && liveTerminalReady && !landedRef.current && !deepLinkLandingRef.current
+        && !runRouteStateHasTarget(routeState, { reviewMode })) {
       landedRef.current = true; setView('report')
     }
-  }, [liveTerminalReady, historyActive])
+  }, [liveTerminalReady, historyActive, routeState, reviewMode])
   useEffect(() => {
     if (viewSeq == null) { setHistory(liveHistory()); return }
+    if (!generation || routeFenceBlocked || reviewMode) return
     let alive = true
     const want = Number(viewSeq)
     setHistory(requestHistory(want, generation))
@@ -218,7 +266,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       .then(p => { if (alive) setHistory(current => resolveHistory(current, want, generation, p)) })
       .catch(e => { if (alive) setHistory(current => rejectHistory(current, want, generation, e)) })
     return () => { alive = false }
-  }, [viewSeq, runId, historyRetry, generation])
+  }, [viewSeq, runId, historyRetry, generation, routeFenceBlocked, reviewMode])
   const currentHistory = historyMatches(history, viewSeq, generation) ? history : null
   const hist = currentHistory?.status === 'ready' ? currentHistory.data : null
   const toastTimer = useRef(null)
@@ -235,7 +283,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
   }, [hist, live, groupMode, selectedGroup])
   // Node selection clears any group selection (the side panel shows one or the other).
-  const selectNode = (id) => { setSelectedId(id); if (id != null) setSelectedGroup(null) }
+  const selectNode = (id) => {
+    setSelectedId(id)
+    if (id != null) {
+      setSelectedGroup(null)
+      if (compactWorkspace) setCompactInspectorOpen(true)
+      else setSideC(false)
+    }
+  }
   // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
   const [mergeFrom, setMergeFrom] = useState(null)   // arm: next node click merges with this one
   const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
@@ -243,19 +298,61 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (!historyActive) return
     setMergeFrom(null)
     setComparePair(null)
-    setPanel(null)
     setOpenHub(null)
     setSelectedGroup(null)
-    setInspectTab('Overview')
     if (history.status === 'ready') {
-      setSelectedId(id => {
-        const next = reconcileHistoricalSelection(id, history.data)
-        if (id != null && next == null) setCompactInspectorOpen(false)
-        return next
-      })
+      route.update(current => {
+        const nextNode = reconcileHistoricalSelection(current.nodeId, history.data)
+        if (current.nodeId != null && nextNode == null) setCompactInspectorOpen(false)
+        return {
+          ...current,
+          nodeId: nextNode,
+          inspectTab: nextNode == null ? 'Overview' : current.inspectTab,
+          sequence: Number.isSafeInteger(history.resolvedSeq) ? history.resolvedSeq : current.sequence,
+        }
+      }, { mode: 'replace', preserveIssues: true })
     }
   }, [historyActive, history.status, history.resolvedSeq])
   const live2 = hist || live
+  const allowedInspectTabs = useMemo(() => {
+    if (reviewMode) return reviewInspectorTabs(reviewEvidence)
+    if (historyActive) return READ_ONLY_INSPECT_TABS
+    const node = selectedId == null ? null : live2?.nodes?.[selectedId]
+    return node && !isSweep(node) ? LIVE_INSPECT_TABS.filter(tab => tab !== 'Trials') : LIVE_INSPECT_TABS
+  }, [reviewMode, reviewEvidence, historyActive, live2, selectedId])
+  const effectiveInspectTab = allowedInspectTabs.includes(inspectTab) ? inspectTab : 'Overview'
+  useEffect(() => {
+    if (inspectTab === effectiveInspectTab) return
+    setRouteNotice(current => [current,
+      `${inspectTab} is unavailable for this node or access level; opened Overview instead.`]
+      .filter(Boolean).join(' '))
+    setInspectTab(effectiveInspectTab, { mode: 'replace', preserveIssues: true })
+  }, [inspectTab, effectiveInspectTab])
+  useEffect(() => {
+    if (!live2 || selectedId == null || (historyActive && history.status !== 'ready')) return
+    if (live2.nodes?.[selectedId]) return
+    setRouteNotice(current => [current, `Experiment #${selectedId} is not available in this run state.`]
+      .filter(Boolean).join(' '))
+    route.update(current => ({ ...current, nodeId: null, inspectTab: 'Overview' }),
+      { mode: 'replace', preserveIssues: true })
+    setCompactInspectorOpen(false)
+  }, [live2, selectedId, historyActive, history.status])
+  useEffect(() => {
+    if (!live2 || !themeFilter) return
+    const exists = Object.values(live2.nodes || {}).some(node => node.idea?.theme === themeFilter)
+    if (exists) return
+    setRouteNotice(current => [current, `Direction “${themeFilter}” is not available in this run state.`]
+      .filter(Boolean).join(' '))
+    setThemeFilter(null, { mode: 'replace', preserveIssues: true })
+  }, [live2, themeFilter])
+  useEffect(() => {
+    // Initial hydration and Back/Forward are navigation, not a hidden selection: reveal the actual
+    // Inspector destination even when a persisted desktop rail or a compact drawer was closed.
+    if (selectedId == null) return
+    setSelectedGroup(null)
+    if (compactWorkspace) setCompactInspectorOpen(true)
+    else setSideC(false)
+  }, [route.navigationRevision])
   const pendingDescendants = (rootId) => {   // for "kill branch": abort the node + its PENDING subtree
     const ns = live2?.nodes || {}
     const kids = {}; Object.values(ns).forEach(n => (n.parent_ids || []).forEach(p => { (kids[p] ||= []).push(n.id) }))
@@ -354,11 +451,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [mergeFrom])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, eventSeq) => {
-    selectNode(id)
+    const value = Number(eventSeq)
+    const targetSeq = eventSeq == null || value >= seq ? null
+      : Number.isSafeInteger(value) && value >= 0 ? value : null
+    route.update(current => ({ ...current, nodeId: id,
+      inspectTab: tab || current.inspectTab, sequence: reviewMode ? null : targetSeq }))
+    setSelectedGroup(null)
     if (compactWorkspace) setCompactInspectorOpen(true)
     else setSideC(false)     // drill-down means "show me the inspector" — un-fold a collapsed panel
-    if (tab) setInspectTab(tab)
-    if (eventSeq != null) changeViewSeq(eventSeq)
   }
   // --- semantic-zoom grouping controls ---
   const toggleGroup = (key) => setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
@@ -388,6 +488,20 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }, [live?.finished, groupMode, historyActive])
 
+  const copyViewLink = async () => {
+    const relative = route.exactHref(routeState, { forReview: reviewMode })
+    const url = new URL(relative, window.location.origin).href
+    setCopyFallback('')
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error('clipboard unavailable')
+      await navigator.clipboard.writeText(url)
+      showToast(reviewMode ? 'Read-only review view copied' : 'View link copied — owner access is still required')
+    } catch {
+      setCopyFallback(url)
+      showToast('Clipboard access was denied; select the visible link and copy it manually')
+    }
+  }
+
   if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
@@ -413,6 +527,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <div className="history-spinner" aria-hidden="true" />
         <h1>Opening run…</h1><p>Loading the latest search state.</p>
       </>}
+    </main>
+  </div>
+  if (routeFenceBlocked) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
+    <div className="topbar run-head">
+      <span className="brand"><span className="dot">◉</span> LoopLab</span>
+      {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
+        : <span className="pill">read-only review</span>}
+    </div>
+    <main className="run-resource-state stale-route-state" role={generationMismatch ? 'alert' : 'status'}>
+      <div className="resource-state-icon" aria-hidden="true">{generationMismatch ? '↺' : '…'}</div>
+      <h1>{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
+      {generationMismatch ? <>
+        <p>The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.</p>
+        <div className="route-generation-detail">
+          <code>link {routeState.generation?.slice(0, 12)}</code><span>≠</span><code>current {generation?.slice(0, 12)}</code>
+        </div>
+        <div className="resource-state-actions">
+          <button className="btn primary" onClick={() => { setRouteNotice(''); route.openCurrentGeneration() }}>Open current generation</button>
+          {onBack && <button className="btn" onClick={onBack}>Back to runs</button>}
+        </div>
+      </> : <p>Confirming that this node and sequence still belong to the run generation named by the link.</p>}
     </main>
   </div>
   // Liveness reflects the ACTUAL run, not the viewed snapshot: green+breathing only while a
@@ -514,6 +649,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             }}
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
+        <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
+          title={reviewMode ? 'Copy this read-only capability with the exact visible context' : 'Copy the exact view; recipients still need owner access'}>
+          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy view</span>
+        </button>
         <EnergyToggle />
         <span className="pill phase">{displayedPhase}</span>
         <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
@@ -537,6 +676,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 : lifecycle.mode === 'finishing' ? 'finishing' : 'finalizing'}</span>
           : live.paused && <span className="chip warn"><OpIcon name="pause" size={11} /> paused</span>}
       </div>
+
+      {(routeNotice || route.issues.length > 0) && <div className="route-state-notice" role="status">
+        <OpIcon name="info" size={13} />
+        <span>{[...route.issues, routeNotice].filter(Boolean).join(' ')}</span>
+        <button type="button" className="btn xs ghost" aria-label="Dismiss link-state notice"
+          onClick={() => { setRouteNotice(''); route.clearIssues() }}>×</button>
+      </div>}
+      {copyFallback && <div className="copy-link-fallback" role="status">
+        <label htmlFor="copy-view-fallback">Clipboard blocked — select and copy this link</label>
+        <input id="copy-view-fallback" readOnly value={copyFallback} onFocus={event => event.currentTarget.select()} />
+        <button type="button" className="btn xs ghost" onClick={() => setCopyFallback('')} aria-label="Close copy fallback">×</button>
+      </div>}
 
       {reviewMode && <div className="review-banner" role="status">
         <span className="history-lock" aria-hidden="true">◈</span>
@@ -579,20 +730,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               panel is active. Report/Overview live in the view-toggle above; Settings is dedicated. */}
           {HUBS.map(([label, items]) => <div className="more-wrap" key={label}>
             <button className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
-                    disabled={historyActive}
                     onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{label} ▾</button>
             {openHub === label && <>
               <div className="menu-backdrop" onClick={() => setOpenHub(null)} />
               <div className="run-menu more-menu" onClick={e => e.stopPropagation()}>
                 {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
-                  disabled={!reviewPanelAllowed(k)}
-                  title={!reviewPanelAllowed(k)
-                    ? k === 'compare' && reviewMode && !reviewEvidence
-                      ? 'Requires a review link with redacted evidence'
-                      : 'Unavailable in read-only review'
+                  disabled={!panelAllowed(k)}
+                  title={!panelAllowed(k)
+                    ? reviewMode
+                      ? k === 'compare' && !reviewEvidence
+                        ? 'Requires a review link with redacted evidence'
+                        : 'Unavailable in read-only review'
+                      : 'Unavailable while viewing a historical snapshot'
                     : undefined}
                   onClick={() => {
-                    if (!reviewPanelAllowed(k)) return
+                    if (!panelAllowed(k)) return
                     panelReturnFocusRef.current = hubTriggerRef.current; setOpenHub(null); setPanel(k)
                   }}>{l}</button>)}
               </div>
@@ -609,9 +761,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         ? <div className="main"><div className="report-scroll">
             <ReportView state={state} runId={runId} onToast={showToast}
               readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+              expectedGeneration={routeState.generation}
               readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
               onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
-              onPickNode={(id) => { setView('dag'); selectNode(id) }} /></div></div>
+              onPickNode={(id) => {
+                route.update(current => ({ ...current, view: 'dag', nodeId: id }))
+                setSelectedGroup(null)
+                if (compactWorkspace) setCompactInspectorOpen(true)
+                else setSideC(false)
+              }} /></div></div>
         : <>
       <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       <WhyStrip state={state} onSelect={selectNode} />
@@ -648,14 +806,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   <span className="muted">{selectedGroup != null ? 'group' : 'inspector'}</span>
                   <span className="spacer" style={{ flex: 1 }} />
                   <button ref={compactInspectorCloseRef} className="btn sm ghost" title={compactWorkspace ? 'close panel' : 'collapse panel'}
+                          aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${selectedGroup != null ? 'group details' : 'experiment inspector'}`}
                           onClick={() => compactWorkspace ? setCompactInspectorOpen(false) : setSideC(true)}>⟩</button>
                 </div>
                 {selectedGroup != null
                   ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
                       state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); setCompactInspectorOpen(false) }} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                      tab={inspectTab} setTab={setInspectTab} onToast={showToast}
+                      tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
                       readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                      expectedGeneration={routeState.generation}
                       readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
               </aside>
             </>}
@@ -667,6 +827,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
             timeline={timeline}
             viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
+            filter={routeState.timelineFilter}
+            onFilterChange={value => route.update(current => ({ ...current, timelineFilter: value }), { mode: 'replace' })}
+            kindFilters={routeState.timelineKinds}
+            onKindFiltersChange={value => route.update(current => ({ ...current, timelineKinds: value }))}
             onToast={showToast}
             readOnly={historyActive}
             publishTransport={setTransportController}
@@ -675,29 +839,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             height={dockH} />}
         </>}
 
-      {panel === 'overview' && reviewPanelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
-        onOpenPanel={p => { if (reviewPanelAllowed(p)) setPanel(p) }} />}
-      {panel === 'research' && reviewPanelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
-      {panel === 'trust' && reviewPanelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={readOnlyMode} />}
-      {panel === 'queue' && reviewPanelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'hypotheses' && reviewPanelAllowed('hypotheses') && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'sensitivity' && reviewPanelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'importance' && reviewPanelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
-      {panel === 'failures' && reviewPanelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'pareto' && reviewPanelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNode} onClose={closePanel} />}
-      {panel === 'data' && reviewPanelAllowed('data') && <DataQualityPanel state={state} onClose={closePanel} />}
-      {panel === 'compare' && reviewPanelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
+      {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
+        onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
+      {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'trust' && panelAllowed('trust') && <TrustPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} readOnly={readOnlyMode} />}
+      {panel === 'queue' && panelAllowed('queue') && <QueuePanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'hypotheses' && panelAllowed('hypotheses') && <HypothesisBoard state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
+      {panel === 'sensitivity' && panelAllowed('sensitivity') && <SensitivityPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'importance' && panelAllowed('importance') && <HyperImportancePanel state={state} onClose={closePanel} />}
+      {panel === 'failures' && panelAllowed('failures') && <FailuresPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'pareto' && panelAllowed('pareto') && <ParetoPanel state={state} onSelect={selectNode} onClose={closePanel} />}
+      {panel === 'data' && panelAllowed('data') && <DataQualityPanel state={state} onClose={closePanel} />}
+      {panel === 'compare' && panelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
         onClose={() => { closePanel(); setComparePair(null) }} />}
-      {panel === 'crossrun' && reviewPanelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
-      {panel === 'collab' && reviewPanelAllowed('collab') && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} />}
-      {panel === 'config' && reviewPanelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
-      {panel === 'authoring' && reviewPanelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
-      {panel === 'memory' && reviewPanelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
-      {panel === 'registry' && reviewPanelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
-      {panel === 'gpu' && reviewPanelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
-      {panel === 'events' && reviewPanelAllowed('events') && <EventExplorer runId={runId} timeline={timeline}
+      {panel === 'crossrun' && panelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
+      {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} reviewRouteState={routeState} />}
+      {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
+      {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
+      {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
+      {panel === 'registry' && panelAllowed('registry') && <RegistryPanel state={state} onClose={closePanel} />}
+      {panel === 'gpu' && panelAllowed('gpu') && <GpuPanel onClose={closePanel} />}
+      {panel === 'events' && panelAllowed('events') && <EventExplorer runId={runId} timeline={timeline}
         historyActive={historyActive} onReturnToLive={returnToLive} onClose={closePanel} />}
-      {panel === 'artifacts' && reviewPanelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
+      {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
 
       {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
     </div>

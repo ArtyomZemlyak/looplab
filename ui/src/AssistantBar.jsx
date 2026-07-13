@@ -147,6 +147,13 @@ const readFileText = (file) => new Promise((resolve) => {
 export default function AssistantBar({ runId, hidden = false }) {
   const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
   const historical = !!runId && runAccess.readOnly
+  const staleDiagnostic = historical && runAccess.mode === 'stale-link'
+  const readOnlyAction = staleDiagnostic
+    ? 'This diagnostic link targets an earlier run generation — open the current generation to act'
+    : `History seq ${runAccess.seq} is read-only — return live to act`
+  const readOnlyShort = staleDiagnostic
+    ? 'Stale diagnostic link · open the current generation'
+    : `History seq ${runAccess.seq} · return live`
   const [input, setInput] = useState('')
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
@@ -490,7 +497,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const resolvePerm = async (reqId, decision) => {
-    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to resolve actions`); return }
+    if (historical) { flash(readOnlyAction); return }
     if (resolvingPermsRef.current.has(reqId)) return
     const requestSession = pending.find(req => req.id === reqId)?.session || sidRef.current
     resolvingPermsRef.current.add(reqId)
@@ -518,7 +525,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     }
   }
   const onRevert = async (absPath) => {
-    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to undo edits`); return }
+    if (historical) { flash(readOnlyAction); return }
     try { const r = await assistantRevert(absPath); flash(r.result || 'reverted') } catch (e) { flash(e.message) }
   }
 
@@ -719,7 +726,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   const runDirect = async (d) => {
     if (!runId) { flash(`/${d.name} needs an open run`); return }
-    if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to act`); return }
+    if (historical) { flash(readOnlyAction); return }
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
     // competing intents before the lock event has caused a render.
     if (directCaptureRef.current || loadRunCommandLock(runId) || (loadAssistantRunTransport(runId) && !directFailure)) {
@@ -1116,7 +1123,7 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   const retryTurn = async (assistantIndex) => {
     if (busy || commandBusy) { flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
-    if (historical) { flash(`Assistant is paused for history seq ${runAccess.seq} — return live to retry`); return }
+    if (historical) { flash(readOnlyAction); return }
     const failedTurn = msgs[assistantIndex]
     const prior = [...msgs.slice(0, assistantIndex)].reverse().find(m => m.role === 'user')
     if (!prior) { flash('The original message is no longer available'); return }
@@ -1187,7 +1194,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const send = () => {
-    if (historical) { flash(`Assistant is paused for history seq ${runAccess.seq} — return live to use run context`); return }
+    if (historical) { flash(readOnlyAction); return }
     const t = input.trim()
     const storedCommand = !!runId && (!!loadRunCommandLock(runId)
       || (!!loadAssistantRunTransport(runId) && !directFailure))
@@ -1395,7 +1402,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   const modeRow = <div className="asst-moderow">
     <div className="asst-modes">
       {MODES.map(x => <button key={x.id} className={'asst-mode' + (x.id === mode ? ' on' : '')}
-        disabled={historical} title={historical ? 'Return live to use run context' : x.hint}
+        disabled={historical} title={historical ? readOnlyShort : x.hint}
         onClick={() => setMode(x.id)}>{x.label}</button>)}
     </div>
     <span className="asst-modehint muted">{activeMode.hint}</span>
@@ -1403,7 +1410,9 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
-    {historical && <div className="assistant-history-lock">History seq {runAccess.seq} · Assistant paused. Return live to ask about or change this run.</div>}
+    {historical && <div className="assistant-history-lock">{staleDiagnostic
+      ? 'Diagnostic link generation mismatch · Assistant paused. Open the current generation to continue.'
+      : `History seq ${runAccess.seq} · Assistant paused. Return live to ask about or change this run.`}</div>}
     {(commandBusy || directFailure) && <div ref={commandStatusRef} tabIndex={-1}
       className={'assistant-command-pending' + (showDirectFailure ? ' error' : '')}
       role={directNeedsAlert ? 'alert' : 'status'} aria-live={directNeedsAlert ? 'assertive' : 'polite'} aria-atomic="true">
@@ -1422,7 +1431,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
         disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
-        placeholder={historical ? `History seq ${runAccess.seq} is read-only` : placeholder} />
+        placeholder={historical ? readOnlyShort : placeholder} />
       {busy
         ? <button className="btn sm" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary" disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>{commandBusy ? 'Waiting…' : 'Send'}</button>}
@@ -1458,7 +1467,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
           disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
-          placeholder={historical ? `History seq ${runAccess.seq} · return live to use Assistant` : runId
+          placeholder={historical ? readOnlyShort : runId
             ? 'Command or ask…  /stop · pause · #12 to attach an experiment · or describe what to do'
             : 'Describe a run to start, or ask the assistant…  ( / for commands )'} />
       </div>

@@ -34,6 +34,13 @@ test('timeline reveal exposes its state and a mobile touch-sized target', async 
   assert.match(css, /@media \(max-width: 900px\)[\s\S]*?\.dock-tabs \.dock-collapse \{ min-width: 44px; min-height: 44px;/)
 })
 
+test('compact Inspector dialog has an explicit close or collapse accessible name', async () => {
+  const runView = await source('RunView.jsx')
+  assert.match(runView, /role=\{compactWorkspace \? 'dialog' : 'complementary'\}/)
+  assert.match(runView,
+    /aria-label=\{`\$\{compactWorkspace \? 'Close' : 'Collapse'\} \$\{selectedGroup != null \? 'group details' : 'experiment inspector'\}`\}/)
+})
+
 test('reduced-motion disables every live CTRL activity indicator', async () => {
   const css = await source('styles.css')
   const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))

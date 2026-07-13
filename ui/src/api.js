@@ -4,6 +4,7 @@
 // unchanged.
 
 import { assertRunMutationAllowed } from './runMode.js'
+import { splitRouteHash } from './runRouteState.js'
 
 const OWNER_TOKEN_KEY = 'll.owner-token'
 let volatileOwnerToken = ''
@@ -14,7 +15,10 @@ export function isReviewLocation(loc = (typeof location !== 'undefined' ? locati
 
 export function reviewTokenFromLocation(loc = (typeof location !== 'undefined' ? location : null)) {
   if (!isReviewLocation(loc)) return ''
-  const m = String(loc.hash || '').match(/^#\/(rv_[A-Za-z0-9_-]+)$/)
+  // Diagnostic state follows the bearer inside the fragment (`#/rv_…?node=4`).  Parse only the
+  // route portion: the credential never moves into the HTTP path/query and forged suffix state can
+  // neither extend the token nor make review mode fall back to an owner credential.
+  const m = splitRouteHash(loc.hash || '').path.match(/^\/(rv_[A-Za-z0-9_-]+)$/)
   return m ? m[1] : ''
 }
 

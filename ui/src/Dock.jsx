@@ -546,13 +546,21 @@ const observationKind = error => {
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
-export default function Dock({ runId, live, liveSeq, expectedGeneration, timeline, viewSeq, setViewSeq, onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false, publishTransport = null }) {
+export default function Dock({ runId, live, liveSeq, expectedGeneration, timeline, viewSeq, setViewSeq,
+  onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
+  publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
+  onKindFiltersChange = null }) {
   const log = timeline.rows
   const [trace, setTrace] = useState(null)
   const [traceError, setTraceError] = useState(false)
   const [traceNonce, setTraceNonce] = useState(0)
-  const [filter, setFilter] = useState('')
-  const [kinds, setKinds] = useState(() => new Set())     // selected kind chips (empty = all)
+  // URL-owned diagnostic filters: Dock renders them, while RunView commits the canonical fragment
+  // state. This lets reload/Back/Forward restore the exact event lens without a second store.
+  const kinds = useMemo(() => new Set(kindFilters), [kindFilters])
+  const setKinds = (value) => {
+    const next = typeof value === 'function' ? value(new Set(kinds)) : value
+    onKindFiltersChange?.([...next])
+  }
   const restoredRef = useRef(null)
   if (!restoredRef.current || restoredRef.current.runId !== runId) {
     restoredRef.current = { runId, ...recoveryForRun(runId) }
@@ -608,6 +616,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // round-7: scrubber + filter chips collapse into one block to save space; default hidden, remembered.
   const [showControls, setShowControls] = useState(() => storageGet('ll.dock.controls') === '1')
   const toggleControls = () => setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
+  useEffect(() => {
+    if (filter || kinds.size > 0) setShowControls(true)
+  }, [filter, kinds.size])
   const traceWanted = useMemo(() => log.some(event => {
     const expansion = eventExpansion.get(timelineEventKey(event))
     return expansion?.open && TRACE_OWNER_TYPES.has(event.type)
@@ -1063,7 +1074,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               onClick={() => toggleKind(g)}>
               <OpIcon name={GROUP_GLYPH[g]} size={12} /> {label}</button>)}
             {kinds.size > 0 && <button className="kind-chip clear" onClick={() => setKinds(new Set())}>clear</button>}
-            <input className="text feed-filter" aria-label="Filter loaded timeline events" placeholder="filter loaded events…" value={filter} onChange={e => setFilter(e.target.value)} />
+            <input className="text feed-filter" aria-label="Filter loaded timeline events" placeholder="filter loaded events…" value={filter} onChange={e => onFilterChange?.(e.target.value)} />
           </div>
         </div>}
         <div className="timeline-pagebar">

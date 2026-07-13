@@ -446,6 +446,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             if path in ("", "index.html"):
                 # Keep /index.html and the bare root on the same tokenless owner shell.
                 return _index_response(request)
+            if path == "api" or path.startswith("api/"):
+                # Unknown API paths are protocol errors, never client-side routes. In particular an
+                # allowed review bearer must not turn `/api/review/typo` into a misleading 200 SPA.
+                return JSONResponse({"detail": "no such API route"}, status_code=404)
             base = dist.resolve()
             target = (dist / path).resolve()
             if (target == base or base in target.parents) and target.is_file():

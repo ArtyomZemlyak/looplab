@@ -8,8 +8,11 @@ const TOKEN = 'rv_0123456789ab_abcdefghijklmnopqrstuvwxyzABCDEFG'
 test('review bearer is read only from the fragment, never the HTTP path', () => {
   assert.equal(isReviewLocation({ pathname: '/proxy/review', hash: '' }), true)
   assert.equal(reviewTokenFromLocation({ pathname: '/proxy/review', hash: `#/${TOKEN}` }), TOKEN)
+  assert.equal(reviewTokenFromLocation({ pathname: '/proxy/review',
+    hash: `#/${TOKEN}?gen=${'a'.repeat(64)}&node=4&tab=code` }), TOKEN)
   assert.equal(reviewTokenFromLocation({ pathname: `/proxy/review/${TOKEN}`, hash: '' }), '')
   assert.equal(reviewTokenFromLocation({ pathname: '/proxy/', hash: `#/${TOKEN}` }), '')
+  assert.equal(reviewTokenFromLocation({ pathname: '/proxy/review', hash: `#/${TOKEN}/extra?node=4` }), '')
 })
 
 test('review reads use the capability namespace and preserve query parameters', () => {

@@ -82,19 +82,41 @@ first shows **Unlock LoopLab controls**; enter the same value there. The SPA sen
 `X-LoopLab-Token` for the rest of that tab. Neither the owner page nor `/review` contains the token in
 HTML, and it is not written to a persistent browser store.
 
+Inside an owner run, **Copy view** produces a generation-fenced diagnostic fragment such as
+`#/run/<id>?gen=…&node=…&tab=…`. It copies context, not authority: a recipient still needs the owner
+credential to open that URL. The generation remains in an otherwise-default copied view. Historical
+Inspector/Report detail sends `seq` plus `expected_generation`; the server checks that generation
+before and after folding without holding the command lock across the fold, and returns `409` if the
+run was reset or replaced.
+
 Read-only sharing is available only when this owner credential is configured. From a run's
 **Lab → Collaboration** panel, the owner chooses an expiry (one hour through 30 days), optionally
 includes redacted source evidence, and creates a link. The link is a one-run bearer capability:
 
-- the bearer is after the URL fragment on the tokenless `/review` shell, not in the HTTP path;
+- a review URL has the form `/review#/rv_…?gen=…&node=…`: the bearer and diagnostic state are both
+  after `#`, never in the HTTP path/query or a proxy access log;
 - the server stores only its digest under `<run-root>/.reviews/` and returns the bearer once;
-- reviewer requests are confined to the dedicated GET-only `/api/review/*` namespace;
+- reviewer requests are confined to the dedicated GET-only `/api/review/*` namespace; an unknown API
+  path returns JSON `404` rather than falling through to the owner SPA;
+- every capability is bound to the exact 64-hex run generation captured while the run sequencer is
+  held. Each review projection uses short pre/post sequencer fences for path/generation validation,
+  while its state fold or metrics read runs outside the exclusive owner-command lock;
 - `summary` includes the DAG/report, masked configuration, cost, and derived metrics;
-- optional `evidence` adds redacted node source/results and parent diff;
-- raw logs, prompts, traces, live sidecars, artifacts, Assistant, owner settings, and every mutation
-  remain unavailable;
-- expiry and revocation are checked on every request. Revocation blocks future reads but cannot erase
-  material the recipient already copied.
+- optional `evidence` adds redacted node source/results and parent diff through an explicit field
+  allow-list, so a future Node field is not disclosed by default;
+- minted review context is capability-scoped: summary permits summary-safe tabs/panels, evidence may
+  add Code and Compare, and both remove historical `seq` plus raw Timeline `q`/`kinds`;
+- raw logs and captured process output including `stdout_tail`, prompts, traces, live sidecars,
+  artifacts, Assistant, owner settings, and every mutation remain unavailable;
+- expiry, revocation, and generation binding are checked on every request. Reset, replacement,
+  deletion, or a legacy/malformed missing generation ends the old link with `410 Gone` and **Review
+  access ended**; the owner must create a new link for the replacement generation, and the old bearer
+  is never retargeted. The owner list marks that old link `stale` and keeps **Revoke** available for
+  explicit cleanup. Revocation blocks future reads but cannot erase material the recipient already
+  copied.
+
+Copying an exact review view preserves the existing bearer and only state allowed by that capability;
+it does not add history, raw Timeline filters, or new evidence scope.
 
 This is scoped read-only access, not an identity provider, RBAC system, or DLP guarantee. Do not share
 from anonymous mode: the server refuses link creation without `LOOPLAB_UI_TOKEN`. Known credential
