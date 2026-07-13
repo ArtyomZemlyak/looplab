@@ -74,7 +74,10 @@ _DELETE_RE = re.compile(
 # ABSTAINS (returns []) on unparseable code so the text pass still covers it. This is the first step of
 # the doc's "regex -> AST/semantic evidence" direction; token/dataflow depth + calibration remain.
 _ANSWER_FILE_RE = re.compile(r"solutions?\.csv$|answer[_-]?key|test[_-]?labels", re.IGNORECASE)
-_READER_ATTRS = frozenset({"read_csv", "read_table", "read_parquet", "loadtxt", "genfromtxt", "load"})
+_READER_ATTRS = frozenset({"read_csv", "read_table", "read_parquet", "loadtxt", "genfromtxt", "load",
+                           # A variable-path answer-key read through a non-CSV reader (pd.read_json(f))
+                           # otherwise slips BOTH the AST pass and the literal-path regexes.
+                           "read_json", "read_excel", "read_pickle", "read_feather", "read_hdf"})
 
 
 def detect_reward_hacks_ast(code: str) -> list[dict]:

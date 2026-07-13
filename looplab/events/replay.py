@@ -253,7 +253,6 @@ def _nonneg_seconds(v) -> float:
     TypeError the WHOLE fold — taking down every view/replay/resume of the run — and a negative value
     would silently REDUCE total_eval_seconds, extending the budget (arch-review §5 P2). Normal engine
     emitters always produce a clean non-negative float, so this only guards malformed input."""
-    import math
     try:
         f = float(v)
     except (TypeError, ValueError):
@@ -639,7 +638,12 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
     # Idempotent: setting the flag twice (duplicate/overlapping tombstone events) is a no-op. Ids
     # coerced defensively — a forged/unhashable id in a hand-edited log is skipped, not a fold crash.
     affected: set[int] = set()
-    for raw in (d.get("node_ids") or []):
+    # `node_ids` MUST be a list. A forged/hand-edited event with a truthy SCALAR (e.g. {"node_ids": 42})
+    # would make `42 or []` -> `42` and `for raw in 42` raise TypeError — and the fold loop has no
+    # per-event try/except, so that one bad record bricks EVERY replay/resume/view of the run. Guard the
+    # type like `_parent_generation_map_matches` already does for `parent_ids` (fold must stay total).
+    raw_ids = d.get("node_ids")
+    for raw in (raw_ids if isinstance(raw_ids, list) else []):
         nid = _coerce_node_id({"node_id": raw})
         n = st.nodes.get(nid) if nid is not None else None
         if n is not None and not n.tombstoned:

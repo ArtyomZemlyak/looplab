@@ -62,8 +62,12 @@ def _build_readmodel_atomic(events, path: Path) -> RunState:
 
 def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -> RunState:
     """Finalize a run() invocation and return the final RunState (the fold, or the read-model's
-    equivalent fold). `entry_finished` is whether the run was ALREADY finished when run() was
-    entered; `start_time` is run()'s wall-clock entry time (for the budget summary)."""
+    equivalent fold). The durable wrap-up runs whenever the fold reports `finalization_pending()`
+    (finished, but the `finalization_finished` marker doesn't yet name this finish sequence) — so a
+    re-entry after a crash mid-finalization RETRIES the idempotent steps; a fully finalized run is a
+    no-op. `start_time` is run()'s wall-clock entry time (for the budget summary). `entry_finished` is
+    accepted-but-ignored (`del` below): it's retained only for existing callers' signatures — the
+    `finalization_pending()` gate, not this flag, decides whether wrap-up runs."""
     # Durable wrap-up: `run_finished` and finalization are separate crash boundaries. A process that
     # died between them re-enters with finished=True but no finalization_finished marker; retry the
     # idempotent/last-wins side effects until the marker names this exact finish sequence. A fully

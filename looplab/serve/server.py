@@ -79,7 +79,7 @@ def _ui_dist() -> Path:
 # authenticated UI attaches the token to every request (ui/src/api.js::_authHeaders), so this never
 # affects it, only an untokened same-origin caller. (The old `_RAW_GET_*` sensitive enumeration is now
 # subsumed by deny-default; kept below only as documentation of the raw surface.)
-_SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK /api/ route
+_SAFE_UNAUTH_API = ("/api/health",)   # zero-model liveness — the sole untokened-OK exact /api/ route
 _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/chat-log",
                    "/conversation", "/assistant/permissions", "/assistant/progress")
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
@@ -217,7 +217,11 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # an untokened same-origin caller, which is who the token defends against. The raw surface
             # the old list enumerated (/artifacts, /log, /spans, /nodes/{nid}, /assistant/sessions,
             # /api/{prompts,skills,knowledge,memory}, …) is all covered now by "deny unless allow-listed".
-            if (p.startswith("/api/") and p not in _SAFE_UNAUTH_API
+            # OPTIONS is the CORS preflight: the browser sends it WITHOUT the token, before the real
+            # request, and it has no side effect. Gating it here 401s the preflight before CORSMiddleware
+            # can answer it, which blocks EVERY cross-origin API call from an allow-listed origin. Let it
+            # through so CORSMiddleware can respond.
+            if (request.method != "OPTIONS" and p.startswith("/api/") and p not in _SAFE_UNAUTH_API
                     and request.headers.get("X-LoopLab-Token") != ui_token):
                 return JSONResponse({"detail": "unauthorized (missing/invalid UI token)"},
                                     status_code=401)

@@ -35,7 +35,10 @@ from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, fin
 # (arch-review §3 P0-7). The allowlist is deliberately strict: an alnum start, then alnum/_/-/.  with
 # no `..` anywhere, bounded length. Both authoring (declare_stages) and consume (EvalSpec.stages)
 # validate through validate_stages, so a bad name can never reach the runner.
-_STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# `\Z` (not `$`): Python's `$` also matches just BEFORE a trailing newline, so `$` would accept
+# `"train\n"` — a control char the "filesystem-safe slug" contract promises to reject (it would land
+# in a log filename and trace/span attributes). `\Z` anchors the true end of string.
+_STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 def safe_stage_name(name: str) -> bool:

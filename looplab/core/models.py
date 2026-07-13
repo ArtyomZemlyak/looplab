@@ -1,10 +1,11 @@
 """Domain models + event envelope (I0). Pydantic v2; JSON Schemas derive from these."""
 from __future__ import annotations
 
+import math
 from enum import Enum
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_serializer, model_validator
+from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
 
 class NodeStatus(str, Enum):
@@ -26,7 +27,7 @@ class Idea(BaseModel):
     # Honored by the engine ONLY when the governance matrix grants the researcher the "timeout" setting
     # (Settings.agent_control); otherwise ignored. None => use the run-wide timeout. Flows through the
     # event log on the Idea automatically (no new event), so it's replay-safe.
-    eval_timeout: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
+    eval_timeout: Optional[float] = None
     # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
@@ -83,6 +84,24 @@ class Idea(BaseModel):
             if v < lo or v > hi:
                 self.params[k] = round(min(hi, max(lo, v)), 6)
         return self
+
+    @field_validator("eval_timeout", mode="before")
+    @classmethod
+    def _coerce_eval_timeout(cls, v):
+        # `eval_timeout` is LLM-proposed and its ONLY consumer treats a non-positive/non-finite value as
+        # "unset" (engine/eval_dispatch: `if etv and etv > 0`). COERCE such values to None rather than
+        # REJECT them: the fold rebuilds every idea through this validator, so a hard `gt=0`/`allow_inf_nan`
+        # constraint would raise ValidationError inside `Idea(**d["idea"])` and silently DROP a node when
+        # replaying an old log that carried eval_timeout ∈ {0, negative, inf, nan} — an invariant-5
+        # back-compat break (old logs must fold as before). Coercing keeps the "0 => use run default"
+        # semantics the consumer already honors, on both the live and replay paths, in one place.
+        if v is None:
+            return None
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if math.isfinite(f) and f > 0 else None
 
 
 class Trial(BaseModel):
