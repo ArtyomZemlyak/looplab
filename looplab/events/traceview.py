@@ -9,6 +9,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
+
+import orjson
+from pathlib import Path
 from collections import defaultdict
 from typing import Optional
 
@@ -20,6 +24,182 @@ def load_spans(path: str | os.PathLike) -> list[dict]:
     from looplab.events.eventstore import iter_jsonl
     return list(iter_jsonl(path))
 
+
+def _index_db_path(path: str | os.PathLike) -> Path:
+    p = Path(path)
+    return p.with_name(p.name + ".index.sqlite")
+
+
+def _read_span_at(path: str | os.PathLike, offset: int, nbytes: int | None = None) -> dict | None:
+    try:
+        with open(path, "rb") as f:
+            f.seek(int(offset))
+            line = f.read(int(nbytes)) if nbytes else f.readline()
+        return json.loads(line)
+    except Exception:  # noqa: BLE001 - corrupt index entries are ignored by callers
+        return None
+
+
+def _connect_index(db: Path) -> sqlite3.Connection:
+    con = sqlite3.connect(str(db), timeout=30)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    con.execute("""
+        CREATE TABLE IF NOT EXISTS spans (
+            span_id TEXT PRIMARY KEY,
+            trace_id TEXT,
+            parent_id TEXT,
+            node_id TEXT,
+            offset INTEGER NOT NULL,
+            bytes INTEGER NOT NULL,
+            start REAL,
+            kind TEXT,
+            name TEXT,
+            status TEXT
+        )
+    """)
+    con.execute("CREATE INDEX IF NOT EXISTS idx_spans_node ON spans(node_id, start, offset)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_spans_trace ON spans(trace_id, start, offset)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_spans_root_node ON spans(parent_id, node_id, trace_id)")
+    return con
+
+
+def ensure_span_index(path: str | os.PathLike) -> Path:
+    """Synchronize the SQLite byte-offset index used by trace UI lookups.
+
+    This is intentionally a derived cache: `spans.jsonl` remains the source of truth, and this DB can be
+    deleted/rebuilt at any time. The first read of a historical run scans once; later reads query indexed
+    `node_id`/`trace_id`/`span_id` instead of scanning a huge text sidecar or the full span log.
+    """
+    p = Path(path)
+    db = _index_db_path(p)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return db
+    con = _connect_index(db)
+    try:
+        row = con.execute("SELECT value FROM meta WHERE key='indexed_bytes'").fetchone()
+        indexed = int(row[0]) if row else 0
+        if indexed > size:
+            con.execute("DELETE FROM spans")
+            con.execute("DELETE FROM meta")
+            indexed = 0
+        if indexed == size:
+            return db
+        # Single writer per cache DB. Other request threads will wait here instead of doing duplicate
+        # 1GB scans. Readers see the previous committed index until this transaction commits.
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT value FROM meta WHERE key='indexed_bytes'").fetchone()
+        indexed = int(row[0]) if row else 0
+        if indexed > size:
+            con.execute("DELETE FROM spans")
+            con.execute("DELETE FROM meta")
+            indexed = 0
+        if indexed < size:
+            with open(p, "rb") as src:
+                src.seek(indexed)
+                batch = []
+                last_good = indexed
+                while True:
+                    off = src.tell()
+                    line = src.readline()
+                    if not line:
+                        last_good = off
+                        break
+                    if not line.endswith(b"\n"):
+                        break  # tolerate a live/torn final line; next sync resumes here
+                    try:
+                        sp = orjson.loads(line)
+                        a = sp.get("attributes") or {}
+                        batch.append((sp.get("span_id"), sp.get("trace_id"), sp.get("parent_id"),
+                                      None if a.get("node_id") is None else str(a.get("node_id")),
+                                      off, len(line), sp.get("start"), sp.get("kind"), sp.get("name"),
+                                      sp.get("status")))
+                    except Exception:  # noqa: BLE001
+                        pass
+                    last_good = src.tell()
+                    if len(batch) >= 5000:
+                        con.executemany("""
+                            INSERT OR REPLACE INTO spans
+                            (span_id, trace_id, parent_id, node_id, offset, bytes, start, kind, name, status)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """, batch)
+                        batch.clear()
+                if batch:
+                    con.executemany("""
+                        INSERT OR REPLACE INTO spans
+                        (span_id, trace_id, parent_id, node_id, offset, bytes, start, kind, name, status)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, batch)
+                con.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('indexed_bytes', ?)", (str(last_good),))
+        con.commit()
+    except Exception:
+        con.rollback()
+        raise
+    finally:
+        con.close()
+    return db
+
+
+def warm_span_index(path: str | os.PathLike) -> None:
+    """Best-effort background prewarm for the UI; diagnostics must never break the server."""
+    try:
+        ensure_span_index(path)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _query_index(path: str | os.PathLike, sql: str, params: tuple = ()) -> list[tuple]:
+    db = ensure_span_index(path)
+    try:
+        con = _connect_index(db)
+        try:
+            return list(con.execute(sql, params))
+        finally:
+            con.close()
+    except sqlite3.DatabaseError:
+        try:
+            db.unlink()
+        except OSError:
+            pass
+        db = ensure_span_index(path)
+        con = _connect_index(db)
+        try:
+            return list(con.execute(sql, params))
+        finally:
+            con.close()
+
+
+def load_spans_for_node(path: str | os.PathLike, node_id) -> list[dict]:
+    """Load only spans belonging to one node using the SQLite byte-offset index.
+
+    Includes direct per-span node_id matches (modern traces) plus all spans from traces whose root span
+    carries that node_id (back-compat for older root-only traces).
+    """
+    nid = str(node_id)
+    rows = _query_index(path, """
+        SELECT offset, bytes FROM spans
+        WHERE node_id = ?
+           OR trace_id IN (SELECT trace_id FROM spans WHERE parent_id IS NULL AND node_id = ?)
+        ORDER BY start, offset
+    """, (nid, nid))
+    spans = [_read_span_at(path, off, nbytes) for off, nbytes in rows]
+    return [s for s in spans if s]
+
+
+def load_spans_by_trace(path: str | os.PathLike, trace_id: str) -> list[dict]:
+    rows = _query_index(path, "SELECT offset, bytes FROM spans WHERE trace_id = ? ORDER BY start, offset", (trace_id,))
+    spans = [_read_span_at(path, off, nbytes) for off, nbytes in rows]
+    return [s for s in spans if s]
+
+
+def load_span_by_id(path: str | os.PathLike, span_id: str) -> dict | None:
+    rows = _query_index(path, "SELECT offset, bytes FROM spans WHERE span_id = ? LIMIT 1", (span_id,))
+    if not rows:
+        return None
+    return _read_span_at(path, rows[0][0], rows[0][1])
 
 def _tree(spans: list[dict]) -> list[dict]:
     """Build the parent->child forest for one trace from a flat span list."""

@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from looplab.core.atomicio import atomic_write_text
@@ -317,17 +317,24 @@ def build_router(srv) -> APIRouter:
 
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
-            from looplab.events.traceview import build_trace_view, load_spans
+            from looplab.events.traceview import build_trace_view, load_spans_for_node
             st = srv.state(rd)
             # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
             # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
             # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
-            tv = build_trace_view(st, load_spans(rd / "spans.jsonl"), light=True)
+            tv = build_trace_view(st, load_spans_for_node(rd / "spans.jsonl", nid), light=True)
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
         except Exception:  # noqa: BLE001
             return {"nodes": [], "rollup": {}, "summary": {}}
+
+    @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
+    def node_trace(run_id: str, nid: int):
+        """Lightweight trace tree for ONE node. This is the hot path for clicking/expanding trace
+        cards: it uses the spans.jsonl byte-offset index instead of materializing the whole run trace.
+        """
+        return _node_trace(_run_dir(run_id), nid)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):
@@ -336,11 +343,12 @@ def build_router(srv) -> APIRouter:
         long run's trace is browser-safe; the complete text lives here and in spans.jsonl. No info lost."""
         rd = _run_dir(run_id)
         try:
-            for s in iter_jsonl(rd / "spans.jsonl"):
-                if s.get("span_id") == sid:
-                    return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
-                            "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
-                            "duration_s": s.get("duration_s"), "status": s.get("status")}
+            from looplab.events.traceview import load_span_by_id
+            s = load_span_by_id(rd / "spans.jsonl", sid)
+            if s:
+                return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
+                        "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
+                        "duration_s": s.get("duration_s"), "status": s.get("status")}
         except Exception:  # noqa: BLE001
             pass
         return {"span_id": sid, "attributes": {}, "events": []}
@@ -415,8 +423,8 @@ def build_router(srv) -> APIRouter:
         raw span tree / spans.jsonl)."""
         rd = _run_dir(run_id)
         try:
-            from looplab.events.traceview import build_conversation, load_spans
-            return build_conversation(srv.state(rd), load_spans(rd / "spans.jsonl"), nid)
+            from looplab.events.traceview import build_conversation, load_spans_for_node
+            return build_conversation(srv.state(rd), load_spans_for_node(rd / "spans.jsonl", nid), nid)
         except Exception:  # noqa: BLE001
             return {"run_id": run_id, "node_id": str(nid), "stages": []}
 
@@ -469,6 +477,18 @@ def build_router(srv) -> APIRouter:
                 "truncated": size > _ART_MAX_BYTES,
                 "content": body.decode("utf-8", errors="replace")}
 
+    @router.post("/api/runs/{run_id}/trace/index")
+    def warm_trace_index(run_id: str, background_tasks: BackgroundTasks):
+        """Kick off a best-effort background build/sync of the derived spans index.
+
+        The Dock calls this on mount so historical 1GB traces can be indexed while the user is reading
+        the event feed, instead of making the first trace-card click pay the whole sequential scan.
+        """
+        rd = _run_dir(run_id)
+        from looplab.events.traceview import warm_span_index
+        background_tasks.add_task(warm_span_index, rd / "spans.jsonl")
+        return {"ok": True}
+
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):
         rd = _run_dir(run_id)
@@ -489,10 +509,9 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
-        from looplab.events.traceview import load_spans, _tree, _cap_span_io
+        from looplab.events.traceview import load_spans_by_trace, _tree, _cap_span_io
         try:
-            spans = [_cap_span_io(s) for s in load_spans(rd / "spans.jsonl")
-                     if s.get("trace_id") == trace_id]
+            spans = [_cap_span_io(s) for s in load_spans_by_trace(rd / "spans.jsonl", trace_id)]
             return {"spans": _tree(spans), "count": len(spans)}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             return {"spans": [], "count": 0}
