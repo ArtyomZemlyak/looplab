@@ -1099,6 +1099,66 @@ def test_windows_case_aliases_share_command_lock_and_spawn_claim(tmp_path):
     lower = tmp_path / "casealias"
     assert service._sequence_path(upper) == service._sequence_path(lower)
     assert service._spawn_claim_path(upper) == service._spawn_claim_path(lower)
+    assert service._start_record_path(upper) == service._start_record_path(lower)
+
+
+def test_start_record_sidecar_atomic_roundtrip_and_exact_retirement(tmp_path):
+    app = make_app(tmp_path)
+    service = app.state.looplab.commands
+    rd = tmp_path / "not-materialized-yet"
+    first = {
+        "id": "start_0123456789abcdef0123456789abcdef",
+        "status": "accepted",
+        "created_at": 1.0,
+    }
+
+    assert service.load_start_record(rd) is None
+    service.save_start_record(rd, first)
+    assert service.load_start_record(rd) == first
+    path = service._start_record_path(rd)
+    assert path.parent == tmp_path / ".command-locks"
+    assert path.name.endswith(".start.json")
+
+    updated = {**first, "status": "executing", "updated_at": 2.0}
+    service.save_start_record(rd, updated)
+    assert service.load_start_record(rd) == updated
+    assert service.retire_start_record(rd, "start_different") is False
+    assert service.load_start_record(rd) == updated
+    assert service.retire_start_record(rd, first["id"]) is True
+    assert service.load_start_record(rd) is None
+    assert service.retire_start_record(rd, first["id"]) is False
+
+
+def test_start_record_malformed_and_symlink_evidence_fail_closed(tmp_path):
+    app = make_app(tmp_path)
+    service = app.state.looplab.commands
+    rd = tmp_path / "future-run"
+    path = service._start_record_path(rd)
+    path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(HTTPException) as malformed:
+        service.load_start_record(rd)
+    assert malformed.value.status_code == 503
+    assert malformed.value.detail["code"] == "start_record_unavailable"
+    with pytest.raises(HTTPException):
+        service.retire_start_record(rd, "start_any")
+    assert path.exists()
+
+    path.unlink()
+    target = tmp_path / "attacker-owned-start.json"
+    target.write_text('{"id":"start_attacker"}', encoding="utf-8")
+    try:
+        path.symlink_to(target)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation is unavailable: {exc}")
+    with pytest.raises(HTTPException) as linked:
+        service.load_start_record(rd)
+    assert linked.value.status_code == 409
+    with pytest.raises(HTTPException):
+        service.save_start_record(rd, {"id": "start_replacement"})
+    with pytest.raises(HTTPException):
+        service.retire_start_record(rd, "start_attacker")
+    assert json.loads(target.read_text(encoding="utf-8"))["id"] == "start_attacker"
 
 
 def test_monitor_reensures_dead_preexisting_driver_and_heartbeats_long_pause(tmp_path):

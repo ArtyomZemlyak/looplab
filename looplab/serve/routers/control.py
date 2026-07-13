@@ -3,7 +3,9 @@ processes. Handler bodies are verbatim moves from `serve/server.py::make_app` (B
 from __future__ import annotations
 
 import json
+import math
 import os
+import secrets
 import stat
 import time
 from pathlib import Path
@@ -12,12 +14,21 @@ from typing import Optional
 import anyio
 import orjson
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
-from looplab.core.atomicio import best_effort_fsync
+from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, write_jsonl_atomic
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
+from looplab.serve.launch import (
+    idempotency_key_digest,
+    launch_request_digest,
+    preflight_response,
+    preflight_start,
+    safe_run_dir,
+    validate_idempotency_key,
+)
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.run_commands import normalize_control, task_file_for
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
@@ -40,6 +51,7 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
     `engine/genesis.py::default_backend`, shared with cli.py's genesis defaulting."""
     if "backend" in settings:
         return False
+    file_settings: dict = {}
     if not (isinstance(task_spec, dict) and task_spec):
         if not task_file:
             return False
@@ -50,7 +62,7 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
         # actually parses out of the very same file (read parity).
         try:
             from looplab.core.appconfig import load_document
-            task_spec, _file_settings, _out = load_document(Path(task_file))
+            task_spec, file_settings, _out = load_document(Path(task_file))
         except (OSError, ValueError):
             return False                # unreadable/foreign task file → no default; fails downstream
         if not (isinstance(task_spec, dict) and task_spec):
@@ -68,7 +80,11 @@ def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
     if default_backend(kind, chosen=False) != "llm":
         return False
     try:
-        return "backend" not in getattr(Settings(**(ui_settings or {})), "model_fields_set", set())
+        # A unified task file's settings outrank UI/env defaults in the CLI. Treat its backend as an
+        # explicit choice too, so the display-only Genesis hint cannot promise llm while the child
+        # would actually consume backend=toy from that file.
+        selected = {**(ui_settings or {}), **(file_settings or {})}
+        return "backend" not in getattr(Settings(**selected), "model_fields_set", set())
     except ValueError:  # pydantic ValidationError ⊂ ValueError — bad saved/env settings fail later,
         return False    # in the spawned engine's own Settings(); don't inject on top of them
 
@@ -244,6 +260,36 @@ def build_router(srv) -> APIRouter:
                             archived.rename(original)
                     except OSError:
                         failed.append(original.name)
+                # Some Windows/network filesystem layers implement rename as "publish the
+                # destination, then asynchronously retire a case-normalized <source>.tmp".  The
+                # canonical files are already restored at that point, but returning immediately can
+                # expose the transient as a durable ``*.reset-*`` archive (and a caller can mistake
+                # the rollback for partial).  Wait only on the failure/rollback path, and only for
+                # the exact implementation-owned aliases of archives we moved; never unlink an
+                # unknown file that may belong to another process.
+                transient_names = {
+                    f"{archived.name}.tmp".casefold() for _original, archived in moved
+                }
+                if transient_names:
+                    now = time.monotonic()
+                    deadline = now + 1.0
+                    # Retirement may be published a few milliseconds *after* rename returns.  Require
+                    # a short quiet window instead of treating the first empty listing as settled.
+                    quiet_until = now + 0.05
+                    while time.monotonic() < deadline:
+                        try:
+                            transient_present = any(
+                                entry.name.casefold() in transient_names
+                                for entry in rd.iterdir()
+                            )
+                            now = time.monotonic()
+                            if transient_present:
+                                quiet_until = now + 0.05
+                            elif now >= quiet_until:
+                                break
+                        except OSError:
+                            break
+                        time.sleep(0.005)
                 return failed
 
             # Command idempotency records deliberately survive an in-place reset. A lost response
@@ -336,6 +382,180 @@ def build_router(srv) -> APIRouter:
                 write_jsonl_atomic(sp, kept)
             return {"ok": True, "removed": removed, "kept": len(kept)}
 
+    def _start_public(record: dict) -> dict:
+        status = str(record.get("status") or "uncertain")
+        # ``accepted`` proves only that Popen returned and its ownership evidence was persisted.  The
+        # child is positively started only once its exact PID generation, engine lock, or run_started
+        # event is observed.  Likewise, never advertise retry while a paid effect may have escaped.
+        started = status in {"executing", "succeeded"}
+        paid_effect_unknown = bool(record.get("paid_effect_unknown"))
+        can_retry = status in {"not_started", "failed"} and not paid_effect_unknown
+        result = {
+            "ok": status in {"accepted", "executing", "succeeded"},
+            "run_id": str(record.get("run_id") or ""),
+            "start_id": str(record.get("id") or ""),
+            "status": status,
+            "started": started,
+            "can_retry": can_retry,
+            "paid_effect_unknown": paid_effect_unknown,
+        }
+        if record.get("validation_token"):
+            result["validation_token"] = str(record["validation_token"])
+        if record.get("error_code"):
+            result["error"] = {"code": str(record["error_code"])}
+        return result
+
+    def _start_meta_id(rd: Path) -> str:
+        path = rd / "ui_meta.json"
+        if path.is_symlink():
+            return ""
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, UnicodeDecodeError):
+            return ""
+        return str(value.get("start_id") or "") if isinstance(value, dict) else ""
+
+    def _has_first_run_started(rd: Path) -> bool:
+        """Whether the first identity event is a durable, correlated ``run_started``.
+
+        Current engines durably emit ``setup_started``/``setup_step`` immediately before their
+        identity anchor; older valid engines emitted ``run_started`` at sequence zero.  Accept both
+        layouts, but fail closed on a torn line, a malformed/unsupported envelope, a sequence gap,
+        an unrelated pre-identity event, or a run id that does not name this exact directory.  A
+        merely parseable ``{"type": "run_started"}`` is not process evidence.
+        """
+        path = rd / "events.jsonl"
+        if path.is_symlink():
+            return False
+        try:
+            with path.open("rb") as stream:
+                expected_seq = 0
+                total_bytes = 0
+                for _ in range(4096):
+                    raw = stream.readline(1_048_577)
+                    if not raw:
+                        return False
+                    total_bytes += len(raw)
+                    if (len(raw) > 1_048_576 or total_bytes > 4_194_304
+                            or not raw.endswith(b"\n") or not raw.strip()):
+                        return False
+                    event = orjson.loads(raw)
+                    if not isinstance(event, dict):
+                        return False
+                    version = event.get("v")
+                    seq = event.get("seq")
+                    ts = event.get("ts")
+                    event_type = event.get("type")
+                    data = event.get("data")
+                    if (type(version) is not int or version != 1
+                            or type(seq) is not int or seq != expected_seq
+                            or isinstance(ts, bool) or not isinstance(ts, (int, float))
+                            or not math.isfinite(ts) or ts <= 0
+                            or not isinstance(event_type, str)
+                            or not isinstance(data, dict)):
+                        return False
+                    expected_seq += 1
+                    if event_type == "run_started":
+                        run_id = data.get("run_id")
+                        return isinstance(run_id, str) and run_id == rd.name
+                    if event_type not in {"setup_started", "setup_step"}:
+                        return False
+                return False
+        except (OSError, ValueError, TypeError, orjson.JSONDecodeError):
+            return False
+
+    def _reconcile_start(rd: Path, record: dict) -> tuple[dict, dict]:
+        """Fold durable run/claim evidence into one observational startup state.
+
+        Callers hold ``commands.sequence(rd)``. This function may retire an observed/dead spawn
+        claim through the command service, but never creates a directory, lease, event, or process.
+        """
+        updated = dict(record)
+        start_id = str(updated.get("id") or "")
+        meta_matches = _start_meta_id(rd) == start_id
+
+        def transition(**changes) -> None:
+            # Stable polling must be observational: publish a new timestamp only for an actual state
+            # transition, not on every GET of the same evidence.
+            if any(updated.get(key) != value for key, value in changes.items()):
+                updated.update(changes)
+                updated["updated_at"] = time.time()
+
+        if meta_matches and _has_first_run_started(rd):
+            transition(status="succeeded", phase="event_observed", paid_effect_unknown=False,
+                       error_code=None)
+        elif meta_matches and _engine_alive(rd):
+            transition(status="executing", phase="engine_observed", paid_effect_unknown=False,
+                       error_code=None)
+        elif str(updated.get("phase") or "") in {
+                "popen_pending", "popen_returned", "engine_observed"}:
+            evidence = srv.commands.observe_external_spawn(rd, f"start:{start_id}")
+            # A start_id in ui_meta is the durable correlation between this sidecar and this run
+            # directory.  An engine lock without it may belong to a manually replaced incarnation.
+            if meta_matches and evidence in {"live", "pending_known"}:
+                transition(status="executing", paid_effect_unknown=False, error_code=None)
+            elif not meta_matches or evidence in {"uncertain", "mismatched"}:
+                transition(status="uncertain", paid_effect_unknown=True,
+                           error_code="start_uncertain")
+            else:
+                # Popen may already have crossed the provider boundary before dying. A new explicit
+                # launch is possible only after review/revalidation; never call it automatically.
+                transition(status="failed", phase="failed_after_spawn",
+                           paid_effect_unknown=True, error_code="start_failed_after_spawn")
+        elif str(updated.get("phase") or "") in {"reserved", "materialized"}:
+            evidence = srv.commands.observe_external_spawn(rd, f"start:{start_id}")
+            if evidence in {"absent", "dead_or_cleared"}:
+                transition(status="not_started", paid_effect_unknown=False, error_code=None)
+            else:
+                transition(status="uncertain", paid_effect_unknown=True,
+                           error_code="start_uncertain")
+        if updated != record:
+            srv.commands.save_start_record(rd, updated)
+        return updated, _start_public(updated)
+
+    def _inspect_keyed_start(rd: Path, key_digest: str, request_digest: str):
+        record = srv.commands.load_start_record(rd)
+        if record is None:
+            return None, None, False
+        same_key = secrets.compare_digest(
+            str(record.get("idempotency_key_digest") or ""), key_digest)
+        if same_key and not secrets.compare_digest(
+                str(record.get("request_digest") or ""), request_digest):
+            raise HTTPException(409, {
+                "code": "idempotency_key_reused",
+                "message": "this idempotency key belongs to a different launch request",
+                "field_errors": {"idempotency_key": "generate a new key for the edited proposal"},
+            })
+        reconciled, public = _reconcile_start(rd, record)
+        return reconciled, public, same_key
+
+    def _raise_existing_start(public: dict, *, same_key: bool) -> None:
+        status = str(public.get("status") or "uncertain")
+        if not same_key:
+            raise HTTPException(409, {
+                "code": "run_id_conflict",
+                "message": "this run name is already owned by another startup",
+                "start_id": public.get("start_id"),
+                "field_errors": {"run_id": "choose another run name"},
+                "remediation": "Use the card that owns the existing startup, or choose another name.",
+            })
+        if same_key and status in {"accepted", "executing", "succeeded"}:
+            return
+        if status == "uncertain":
+            raise HTTPException(409, {
+                "code": "start_uncertain",
+                "message": "the earlier startup may have crossed Popen; observe it before retrying",
+                "start_id": public.get("start_id"),
+                "remediation": "Use the startup status endpoint; do not submit another launch.",
+            })
+        if same_key:
+            raise HTTPException(409, {
+                "code": "start_not_completed",
+                "message": "this startup did not establish a run",
+                "start_id": public.get("start_id"),
+                "remediation": "Review provider/error evidence, then validate again before a new launch.",
+            })
+
     @router.post("/api/start/{run_id}/resolve-claim")
     async def resolve_start_claim(run_id: str, request: Request, response: Response):
         """Operator recovery for a crash-window claim whose child identity cannot be proven."""
@@ -351,160 +571,247 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "bad run_id")
         return srv.commands.resolve_spawn_claim(rd, str(body.get("confirmation") or ""))
 
+    @router.get("/api/start/{run_id}/status")
+    def start_status(run_id: str, request: Request, response: Response,
+                     idempotency_key: str | None = None):
+        """Observe one exact durable startup. GET never launches or resumes an engine."""
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
+        raw_header_key = request.headers.get("Idempotency-Key")
+        header_key = (validate_idempotency_key(raw_header_key)
+                      if raw_header_key is not None else None)
+        query_key = (validate_idempotency_key(idempotency_key)
+                     if idempotency_key is not None else None)
+        if (header_key is not None and query_key is not None
+                and not secrets.compare_digest(
+                    idempotency_key_digest(header_key), idempotency_key_digest(query_key))):
+            raise HTTPException(400, {
+                "code": "idempotency_key_mismatch",
+                "message": "Idempotency-Key header and query parameter disagree",
+                "field_errors": {"idempotency_key": "send one exact startup key"},
+            })
+        key = header_key if header_key is not None else query_key
+        if key is None:
+            raise HTTPException(400, {
+                "code": "invalid_idempotency_key",
+                "message": "Idempotency-Key header is required",
+                "field_errors": {"idempotency_key": "send the startup observation key"},
+            })
+        rd = safe_run_dir(root, run_id, check_conflict=False)
+        digest = idempotency_key_digest(key)
+        with srv.commands.sequence(rd):
+            record = srv.commands.load_start_record(rd)
+            if record is None or not secrets.compare_digest(
+                    str(record.get("idempotency_key_digest") or ""), digest):
+                raise HTTPException(404, {
+                    "code": "start_not_found",
+                    "message": "no startup is recorded for this run name and idempotency key",
+                })
+            _record, public = _reconcile_start(rd, record)
+        return public
+
+    @router.post("/api/start/preflight")
+    async def start_preflight(request: Request):
+        """Validate and resolve a launch without writing, reserving a name, or starting an engine."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, {
+                "code": "invalid_launch_request",
+                "message": "start body must be valid JSON",
+                "field_errors": {},
+            }) from exc
+        return preflight_response(await anyio.to_thread.run_sync(lambda: preflight_start(srv, body)))
+
     @router.post("/api/start")
     async def start_run(request: Request):
         try:
             body = await request.json()
         except (ValueError, UnicodeDecodeError) as exc:
-            raise HTTPException(400, "start body must be valid JSON") from exc
+            raise HTTPException(400, {
+                "code": "invalid_launch_request", "message": "start body must be valid JSON",
+                "field_errors": {},
+            }) from exc
         if not isinstance(body, dict):
-            raise HTTPException(400, "start body must be a JSON object")
-        run_id = body.get("run_id")
-        if not isinstance(run_id, str) or not run_id:
-            raise HTTPException(400, "run_id is required")
-        reserved_devices = {"CON", "PRN", "AUX", "NUL",
-                            *(f"COM{i}" for i in range(1, 10)),
-                            *(f"LPT{i}" for i in range(1, 10))}
-        if (len(run_id) > 255 or run_id != run_id.strip() or run_id.endswith((".", " "))
-                or ":" in run_id or any(ord(ch) < 32 for ch in run_id)
-                or run_id.split(".", 1)[0].upper() in reserved_devices):
-            raise HTTPException(400, "bad run_id (unsafe or filesystem-ambiguous name)")
-        requested_rd = root / run_id
-        rd = requested_rd.resolve()
-        # A run id must resolve to a DIRECT child of the runs root: this rejects "." (which would make
-        # the runs root itself a run — an invisible ghost engine writing events.jsonl at the root),
-        # nested "a/b" (invisible to the run list), and traversal. Check the RESERVED names against the
-        # resolved directory name, so "./reports" can't sneak into the cross-run report store.
-        if rd.parent != root or rd == root:
-            raise HTTPException(400, "bad run_id (must be a plain name, not a path)")
-        # Case-INSENSITIVE (arch-review §5 P2): on a case-insensitive FS (Windows/macOS default) an
-        # `ASSISTANT` run dir aliases the reserved `assistant` service store, so compare lowercased.
-        if rd.name.lower() in _RESERVED_RUN_IDS:   # don't let a run clobber the report/assistant stores
-            raise HTTPException(400, f"run_id {rd.name!r} is reserved")
-        if (rd / "events.jsonl").exists():
-            raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
-        task_file = body.get("task_file")
-        task = body.get("task")
-        inline_task = isinstance(task, dict) and bool(task)
-        # Inline task (the genesis flow authors one): a COMPOSABLE spec needs no `kind` — the capability
-        # fields (repo/dataset/cmd/kaggle) infer it. VALIDATE it the same way the engine will
-        # (validate_task → normalize + model_validate) BEFORE materializing anything — so a bad spec
-        # (unknown kind, mlebench_real with an unknown/empty competition, a missing required field, an
-        # uninferrable kind-less dict) fails HERE with a 400 instead of spawning a detached engine that
-        # dies (DEVNULL'd) before writing any events, leaving a phantom never-started run.
-        if inline_task:
-            from looplab.adapters.tasks import validate_task
-            # A COMPOSABLE task carries no `kind` — validate_task normalizes (inferring the kind from
-            # repo/dataset/cmd/kaggle) and validates in ONE guarded call, so every malformed spelling
-            # (a string `cmd`, an unknown kind, an uninferrable task) is a 400 with the validator's
-            # message — never an unhandled 500 from a pre-check outside the try (mega-review fix; a
-            # separate normalize_task pre-check also normalized the same dict twice).
-            try:
-                adapter = await anyio.to_thread.run_sync(lambda: validate_task(task))
-            except HTTPException:
-                raise
-            except Exception as e:  # noqa: BLE001 - normalization/validation failed (e.g. bad competition)
-                raise HTTPException(400, f"invalid task: {e}")
-            kind = getattr(adapter, "kind", "")
-            # Repo task: the editable repo must actually exist on THIS machine at submit time (the
-            # model can't check that — a snapshot loads on any host). A relative/missing path would
-            # otherwise only surface as a warning, then fail deep in materialize. Reject it now.
-            if kind == "repo":
-                ep = getattr(adapter, "editable_path", "") or ""
-                if ep and not Path(ep).exists():
-                    raise HTTPException(400, f"editable_path does not exist: {ep!r} — point it at the "
-                                             "repo to edit (an ABSOLUTE path, e.g. /home/jovyan/data/…).")
-            task_file = str(rd / "task.input.json")
-        if not isinstance(task_file, str) or not task_file:
-            raise HTTPException(400, "task_file or task is required")
-        # Inline input is intentionally not materialized until the per-run start reservation below.
-        # An external task, however, must already exist before we reserve the run id.
-        if not inline_task and not Path(task_file).exists():
-            raise HTTPException(400, f"task file not found: {task_file}")
-        # Carry the GENESIS conversation (the chat-first creation flow, where the boss planned this run)
-        # into the run's saved chat, so that planning becomes the OPENING history of the run's chat.jsonl
-        # instead of vanishing the moment the run launches. Stamp each turn with the creation time (which
-        # is < the engine's run_started ts) so it sorts at the TOP of the run's chat feed, and a
-        # chat-range seq so the Dock renders it as a conversation turn (not an engine event).
-        seed_chat = body.get("chat")
-        # Per-run settings = the saved UI defaults overlaid with whatever the launch dialog set.
-        # Everything reaches the engine as LOOPLAB_* env on the spawned process, so ANY Settings
-        # field is configurable from the UI without growing the CLI surface (Settings() reads env).
-        # Bind the saved defaults ONCE: the merge and the backend predicate below must see the SAME
-        # store read (and a second disk read per launch bought nothing).
-        ui = srv.settings.load_ui_settings()
-        launch_settings = body.get("settings") or {}
-        if not isinstance(launch_settings, dict):
-            raise HTTPException(400, "settings must be a JSON object")
-        settings = {**ui, **launch_settings}
-        # F4 (CLI parity, mega-review P10): /api/start is the ONE launch funnel — genesis cards, the
-        # assistant's propose_run cards, and direct API callers all land here — so the generative-kind
-        # backend default is applied HERE, not per-card. Without it a repo/dataset task launched with
-        # the default Settings.backend="toy" gets NoOpRepoDeveloper: every node silently re-evaluates
-        # the unchanged baseline (no error, a flat run). cli.py's genesis path already defaults
-        # backend=llm for GENERATIVE_KINDS; this closes the HTTP gap for ALL launches (the genesis
-        # card's own injection is display-only sugar over this same rule). The predicate itself owns
-        # the "backend already chosen" / non-dict-task guards — no caller-side pre-checks.
-        if _defaults_backend_llm(task, task_file, settings, ui):
-            settings["backend"] = "llm"
-        # Drop fields that equal what the chosen profile resolves to anyway: the launch dialog
-        # echoes back EVERY resolved field, and passing them all as explicit LOOPLAB_* env would
-        # defeat `_apply_profile`'s "explicit key wins" check in the child — selecting a profile
-        # in the dialog would be a complete no-op.
-        try:
-            prof_defaults = Settings(profile=settings.get("profile") or "default").model_dump()
-            settings = {k: v for k, v in settings.items()
-                        if k == "profile" or prof_defaults.get(k, object()) != v}
-        except Exception:  # noqa: BLE001 — an invalid profile fails later, in Settings validation
-            pass
-        env = srv.settings.settings_env(settings)
+            raise HTTPException(400, {
+                "code": "invalid_launch_request", "message": "start body must be a JSON object",
+                "field_errors": {},
+            })
 
-        # Atomic run-id reservation. The first request installs a durable spawn lease BEFORE it
-        # materializes files or calls Popen; a concurrent request can therefore never pass the same
-        # preflight and launch a second engine during the Popen→engine.lock window. The early
-        # events.jsonl check above is only a fast path — the ownership decision is authoritative here,
-        # under the cross-process per-run sequencer.
+        key = validate_idempotency_key(body.get("idempotency_key"))
+        key_digest = idempotency_key_digest(key) if key else ""
+        request_digest = launch_request_digest(body) if key else ""
+        rd = safe_run_dir(root, body.get("run_id"), check_conflict=False)
+
+        # Lost-response replay is resolved before rereading mutable sources/defaults or rejecting the
+        # now-owned run name. The request digest contains effects, never the raw idempotency key.
+        if key:
+            with srv.commands.sequence(rd):
+                record, public, same_key = _inspect_keyed_start(rd, key_digest, request_digest)
+                if record is not None:
+                    if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
+                        return JSONResponse(public)
+                    if same_key or public["status"] not in {"not_started", "failed"}:
+                        _raise_existing_start(public, same_key=same_key)
+
+        plan = await anyio.to_thread.run_sync(lambda: preflight_start(srv, body))
+        submitted_token = body.get("validation_token") or ""
+        if key and not submitted_token:
+            raise HTTPException(409, {
+                "code": "launch_validation_required",
+                "message": "validate this exact launch proposal before starting it",
+                "field_errors": {"validation_token": "run the free preflight first"},
+            })
+        if submitted_token and submitted_token != plan.validation_token:
+            raise HTTPException(409, {
+                "code": "launch_validation_stale",
+                "message": "the launch draft changed after it was validated",
+                "field_errors": {"validation_token": "validate the current draft again"},
+            })
+
+        run_id = plan.run_id
+        requested_rd = root / run_id
+        task_file = rd / "task.input.json"
+        # The canonical unified file carries every resolved setting. Keep the process environment to
+        # actual deviations from this server's Settings baseline so profile/default provenance and
+        # legacy non-generative launches are not turned into explicit overrides accidentally.
+        base_settings = Settings().model_dump(mode="json")
+        base_settings.pop("llm_api_key", None)
+        env = srv.settings.settings_env({
+            setting: value for setting, value in plan.effective_settings.items()
+            if base_settings.get(setting, object()) != value
+        })
+
+        start_result = None
         with srv.commands.sequence(rd):
+            if key:
+                existing, public, same_key = _inspect_keyed_start(
+                    rd, key_digest, request_digest)
+                if existing is not None:
+                    if same_key and public["status"] in {"accepted", "executing", "succeeded"}:
+                        return JSONResponse(public)
+                    if same_key or public["status"] not in {"not_started", "failed"}:
+                        _raise_existing_start(public, same_key=same_key)
+
             current_rd = requested_rd.resolve()
             if requested_rd.is_symlink() or current_rd != rd or current_rd.parent != root:
-                raise HTTPException(409, "run path changed while start was being prepared")
+                raise HTTPException(409, {
+                    "code": "run_path_changed",
+                    "message": "run path changed while start was being prepared",
+                    "field_errors": {"run_id": "choose a stable run name"},
+                })
+            current_token = plan.current_token(srv)
+            if current_token != plan.validation_token:
+                raise HTTPException(409, {
+                    "code": "launch_validation_changed",
+                    "message": "task, settings, run name, chat, or a referenced path changed before launch",
+                    "field_errors": {},
+                    "remediation": "Run preflight again and review the updated launch preview.",
+                })
             if (rd / "events.jsonl").exists():
-                raise HTTPException(409, f"run {run_id!r} already exists — pick another id")
+                raise HTTPException(409, {
+                    "code": "run_id_conflict", "message": f"run {run_id!r} already exists",
+                    "field_errors": {"run_id": "choose another run name"},
+                })
             if _engine_alive(rd):
-                raise HTTPException(409, f"run {run_id!r} already has an engine starting")
+                raise HTTPException(409, {
+                    "code": "external_start_in_progress" if key else "start_in_progress",
+                    "message": f"run {run_id!r} already has an engine starting",
+                })
             if srv.commands.spawn_inflight(rd):
-                raise HTTPException(409, f"run {run_id!r} start is already in progress")
+                raise HTTPException(409, {
+                    "code": "external_start_uncertain" if key else "start_uncertain",
+                    "message": f"run {run_id!r} already has an unresolved startup",
+                    "remediation": "Observe or explicitly resolve the spawn claim; do not retry.",
+                })
 
-            srv.commands.begin_external_spawn(rd, "start")
-            spawned = False
+            start_id = f"start_{secrets.token_hex(16)}" if key else ""
+            created_at = time.time()
+            record = None
+            if key:
+                record = {
+                    "version": 1, "id": start_id, "run_id": run_id,
+                    "idempotency_key_digest": key_digest, "request_digest": request_digest,
+                    "validation_token": plan.validation_token,
+                    "status": "preparing", "phase": "reserved",
+                    "paid_effect_unknown": False,
+                    "created_at": created_at, "updated_at": created_at,
+                }
+                srv.commands.save_start_record(rd, record)
+
+            owner = f"start:{start_id}" if key else "start"
+            lease_started = False
+            popen_boundary_entered = False
             try:
                 rd.mkdir(parents=True, exist_ok=True)
-                if inline_task:
-                    Path(task_file).write_text(json.dumps(task, indent=2), encoding="utf-8")
-                (rd / "ui_meta.json").write_text(
-                    json.dumps({"task_file": str(task_file)}), encoding="utf-8")
-                if isinstance(seed_chat, list) and seed_chat:
-                    t0 = time.time()
-                    with open(rd / "chat.jsonl", "ab") as f:
-                        for i, m in enumerate(seed_chat):
-                            if not isinstance(m, dict) or m.get("role") not in ("user", "assistant"):
-                                continue
-                            f.write(orjson.dumps({
-                                "role": m["role"], "content": str(m.get("content", "")),
-                                "ts": t0 + i * 1e-3, "seq": GENESIS_CHAT_SEQ_BASE + i,
-                                "genesis": True}) + b"\n")
-                        f.flush()
-                        # FUSE/S3 fsync may raise — don't fail the launch.
-                        best_effort_fsync(f.fileno())
+                atomic_write_text(task_file, json.dumps(plan.canonical_document, indent=2))
+                meta = {"task_file": str(task_file)}
+                if plan.source_task_file:
+                    meta["source_task_file"] = plan.source_task_file
+                if key:
+                    meta["start_id"] = start_id
+                atomic_write_text(rd / "ui_meta.json", json.dumps(meta, indent=2))
+
+                chat_path = rd / "chat.jsonl"
+                if plan.seed_chat:
+                    chat_bytes = b"".join(orjson.dumps({
+                        "role": turn["role"], "content": turn["content"],
+                        "ts": created_at + i * 1e-3, "seq": GENESIS_CHAT_SEQ_BASE + i,
+                        "genesis": True,
+                    }) + b"\n" for i, turn in enumerate(plan.seed_chat))
+                    atomic_write_bytes(chat_path, chat_bytes)
+                elif chat_path.exists():
+                    atomic_write_bytes(chat_path, b"")
+                if record is not None:
+                    record.update(phase="materialized", updated_at=time.time())
+                    srv.commands.save_start_record(rd, record)
+
+                srv.commands.begin_external_spawn(rd, owner)
+                lease_started = True
+                if record is not None:
+                    # After this durable phase, crash-before-call and crash-after-Popen are
+                    # indistinguishable. The PID-less claim therefore remains fail-closed.
+                    record.update(status="executing", phase="popen_pending",
+                                  paid_effect_unknown=True, updated_at=time.time())
+                    srv.commands.save_start_record(rd, record)
+                # From this assignment onward, an exception cannot prove whether the helper failed
+                # before or after the OS accepted Popen. Retain the claim and report uncertainty.
+                popen_boundary_entered = True
                 pid = _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
-                spawned = True
-                srv.commands.record_external_spawn(rd, "start", pid)
-            except BaseException:
-                # Once Popen returned, retain the pre-spawn lease even if persisting its PID failed:
-                # the child may be live, and releasing ownership would permit a duplicate launch.
-                if not spawned:
-                    srv.commands.cancel_external_spawn(rd, "start")
+                srv.commands.record_external_spawn(rd, owner, pid)
+                if record is not None:
+                    record.update(status="accepted", phase="popen_returned",
+                                  paid_effect_unknown=False, updated_at=time.time())
+                    srv.commands.save_start_record(rd, record)
+                    # Fold immediately available positive evidence into the response: a known-live
+                    # PID becomes executing and a durable run_started becomes succeeded. PID-less or
+                    # uncorrelated evidence becomes uncertain, so clients never navigate on Popen alone.
+                    record, start_result = _reconcile_start(rd, record)
+            except BaseException as exc:
+                # Clear ownership only while we still know the Popen boundary was never entered.
+                if lease_started and not popen_boundary_entered:
+                    srv.commands.cancel_external_spawn(rd, owner)
+                if record is not None:
+                    detail = getattr(exc, "detail", None)
+                    code = (str(detail.get("code"))
+                            if isinstance(detail, dict) and detail.get("code")
+                            else "spawn_failed" if record.get("phase") == "popen_pending"
+                            else "start_materialization_failed")
+                    record.update(
+                        status="uncertain" if popen_boundary_entered else "failed",
+                        phase=("failed_after_spawn" if popen_boundary_entered
+                               else "failed_before_spawn"),
+                        error_code=code, paid_effect_unknown=popen_boundary_entered,
+                        updated_at=time.time(),
+                    )
+                    try:
+                        srv.commands.save_start_record(rd, record)
+                    except Exception:  # noqa: BLE001 - preserve original error + the spawn claim
+                        pass
                 raise
-        return {"ok": True, "run_id": run_id}
+
+        if start_result is not None:
+            return start_result
+        return {"ok": True, "run_id": run_id, "validation_token": plan.validation_token}
 
     return router

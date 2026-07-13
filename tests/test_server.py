@@ -146,7 +146,7 @@ def test_reserved_run_id_is_case_insensitive(tmp_path):
     for rid in ("assistant", "ASSISTANT", "Assistant", "REPORTS"):
         r = client.post("/api/start", json={"run_id": rid, "task": {"kind": "quadratic",
                                                                      "goal": "g", "direction": "min"}})
-        assert r.status_code == 400 and "reserved" in r.json()["detail"], rid
+        assert r.status_code == 400 and "reserved" in r.json()["detail"]["message"], rid
 
 
 def test_start_rejects_filesystem_ambiguous_run_names(tmp_path):
@@ -628,7 +628,7 @@ def test_concurrent_start_reserves_run_before_popen(tmp_path, monkeypatch):
     assert sorted(r.status_code for r in responses) == [200, 409]
     assert len(calls) == 1
     conflict = next(r for r in responses if r.status_code == 409)
-    assert "start is already in progress" in conflict.json()["detail"]
+    assert conflict.json()["detail"]["code"] == "start_uncertain"
 
 
 def test_inject_node_control_append(tmp_path):

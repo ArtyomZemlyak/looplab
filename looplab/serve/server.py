@@ -202,11 +202,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                              and _parts[4] == "reviews")
             _command_status = (len(_parts) >= 5 and _parts[1] == "api" and _parts[2] == "runs"
                                and _parts[4] == "commands")
+            # The startup observation key is an owner bearer.  Keep this GET behind the same owner
+            # gate as command status so a shared-origin caller cannot enumerate startup state.
+            _start_status = (len(_parts) == 5 and _parts[1] == "api" and _parts[2] == "start"
+                             and _parts[4] == "status")
             sensitive_get = (request.method == "GET"
-                             and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
-                                  or _run_scoped_raw or _node_detail or _job_result
-                                  or _review_admin or _command_status
-                                  or "/assistant/sessions" in p))
+                              and (p.endswith(_RAW_GET_SUFFIX) or p in _RAW_GET_EXACT
+                                   or _run_scoped_raw or _node_detail or _job_result
+                                   or _review_admin or _command_status or _start_status
+                                   or "/assistant/sessions" in p))
             mutating = request.method in ("POST", "PUT", "PATCH", "DELETE")
             if ((mutating or sensitive_get) and p.startswith("/api/")
                     and not _owner_authenticated(request)):
@@ -257,10 +261,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         parts = request.url.path.split("/")
         is_command = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                       and parts[4] == "commands")
-        if is_command:
+        is_start_status = (len(parts) == 5 and parts[1] == "api" and parts[2] == "start"
+                           and parts[4] == "status")
+        if is_command or is_start_status:
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
-            vary.update({"X-LoopLab-Token", "Authorization"})
+            vary.update({"X-LoopLab-Token", "Authorization", "Idempotency-Key"})
             response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
         return response
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)

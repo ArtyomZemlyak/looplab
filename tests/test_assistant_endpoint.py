@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -192,13 +193,16 @@ def test_run_turn_propose_run(tmp_path):
     # task's data path must EXIST, so point it at a real file under tmp_path.
     data = tmp_path / "train.csv"; data.write_text("a,b,y\n1,2,0\n")
     spec = {"run_id": "titanic-baseline", "task": {"kind": "dataset", "goal": "predict survival",
-            "direction": "max", "data_path": str(data)}, "settings": {"max_nodes": 20}}
+            "direction": "max", "data_path": str(data)}, "settings": {"max_nodes": 20},
+            "setup_steps": ["Confirm the target column", "", "Pin the data version"]}
     client = _FakeChatClient([_call("propose_run", spec), _final("Proposed a titanic run.")])
     res = run_turn(client, tmp_path, [], "start a titanic run", "plan")
     assert res["ok"] and res["proposals"]
     p = res["proposals"][0]
     assert p["run_id"] == "titanic-baseline" and p["task"]["kind"] == "dataset"
     assert p["settings"]["max_nodes"] == 20
+    assert uuid.UUID(p["proposal_id"])
+    assert p["setup_steps"] == ["Confirm the target column", "Pin the data version"]
 
 
 def test_plan_mode_has_no_write_tool(tmp_path):

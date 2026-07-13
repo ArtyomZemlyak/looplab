@@ -1231,7 +1231,7 @@ def test_command_async_job_path(tmp_path, monkeypatch):
 # ---- chat-first run creation: /api/start inline task + /api/genesis (pre-run BOSS) ----
 def test_start_accepts_inline_task_and_spawns(tmp_path, monkeypatch):
     """The genesis flow launches via an INLINE task (no catalogue file): /api/start validates it,
-    materializes it to the run dir, and spawns the engine on that file."""
+    freezes the canonical task + effective settings, and spawns the engine on that unified file."""
     import json as _j
     client = TestClient(make_app(tmp_path))
     calls = []
@@ -1244,7 +1244,7 @@ def test_start_accepts_inline_task_and_spawns(tmp_path, monkeypatch):
     assert r["ok"] is True and r["run_id"] == "g-run"
     rd = tmp_path / "g-run"
     ti = _j.loads((rd / "task.input.json").read_text(encoding="utf-8"))
-    assert ti["competition"] == "nomad2018-predict-transparent-conductors"
+    assert ti["task"]["competition"] == "nomad2018-predict-transparent-conductors"
     meta = _j.loads((rd / "ui_meta.json").read_text(encoding="utf-8"))
     assert meta["task_file"].endswith("task.input.json")
     assert calls and "run" in calls[0]                                   # engine spawned…
@@ -1255,7 +1255,7 @@ def test_start_rejects_unknown_inline_kind(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "bad", "task": {"kind": "definitely-not-a-kind"}})
-    assert r.status_code == 400                                          # validated before any spawn
+    assert r.status_code == 422                                          # validated before any spawn
 
 
 def test_start_rejects_inline_task_missing_kind(tmp_path, monkeypatch):
@@ -1265,7 +1265,7 @@ def test_start_rejects_inline_task_missing_kind(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     monkeypatch.setattr("looplab.serve.server.subprocess.Popen", lambda *a, **k: None)
     r = client.post("/api/start", json={"run_id": "nk", "task": {"competition": "nomad2018-x"}})
-    assert r.status_code == 400
+    assert r.status_code == 422
     assert not (tmp_path / "nk" / "task.input.json").exists()            # nothing materialized
 
 
@@ -1280,7 +1280,7 @@ def test_start_rejects_invalid_inline_task_before_spawn(tmp_path, monkeypatch):
         raise ValueError("unknown competition: nope")
     monkeypatch.setattr("looplab.adapters.tasks.validate_task", _bad)
     r = client.post("/api/start", json={"run_id": "iv", "task": {"kind": "mlebench_real", "competition": "nope"}})
-    assert r.status_code == 400 and not spawned                          # validated -> rejected -> no engine
+    assert r.status_code == 422 and not spawned                          # validated -> rejected -> no engine
     assert not (tmp_path / "iv" / "task.input.json").exists()            # not materialized
 
 

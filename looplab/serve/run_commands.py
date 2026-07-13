@@ -698,6 +698,60 @@ class RunCommandService:
             raise HTTPException(409, "run spawn claim must not be a symlink")
         return path
 
+    def _start_record_path(self, rd: Path) -> Path:
+        """Root-sidecar path for the durable start operation occupying ``rd``.
+
+        A start record must exist before the run directory does and must survive a partial
+        materialization, so it cannot live underneath ``rd``. Deriving it from the sequencer path
+        gives it exactly the same case/Unicode identity as the lock and spawn claim.
+        """
+        path = self._sequence_path(rd).with_suffix(".start.json")
+        if path.is_symlink():
+            raise HTTPException(409, "run start record must not be a symlink")
+        return path
+
+    def load_start_record(self, rd: Path) -> Optional[dict]:
+        """Load one start sidecar, failing closed on unreadable or malformed ownership evidence."""
+        path = self._start_record_path(rd)
+        if not path.exists():
+            return None
+        record = self._load(path)
+        # Atomic writers publish a complete JSON object. Once the path exists, an unreadable value
+        # or a record without its exact operation identity is therefore unresolved evidence, never
+        # permission for a caller to reserve the run or invoke Popen again.
+        if record is None or not isinstance(record.get("id"), str) or not record.get("id"):
+            raise HTTPException(503, {
+                "code": "start_record_unavailable",
+                "message": "The durable run-start record is unreadable or malformed.",
+                "remediation": "Inspect the .command-locks start sidecar; do not start another engine.",
+            })
+        return record
+
+    def save_start_record(self, rd: Path, record: dict) -> None:
+        """Atomically publish a complete start record while the caller holds ``sequence(rd)``."""
+        if not isinstance(record, dict) or not isinstance(record.get("id"), str) \
+                or not record.get("id"):
+            raise ValueError("start record requires a non-empty string id")
+        self._save(self._start_record_path(rd), record)
+
+    def retire_start_record(self, rd: Path, start_id: str) -> bool:
+        """Retire only the sidecar whose stored id exactly matches ``start_id``.
+
+        The caller must hold ``sequence(rd)`` when retirement is part of delete/replacement. A
+        mismatched id and malformed evidence are deliberately not cleared.
+        """
+        record = self.load_start_record(rd)
+        if record is None or not isinstance(start_id, str) or record.get("id") != start_id:
+            return False
+        path = self._start_record_path(rd)
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError as exc:
+            raise HTTPException(503, f"could not retire run start record: {exc}") from exc
+        return True
+
     def run_generation(self, rd: Path) -> str:
         """Stable identity of the event-log generation currently occupying a run id."""
         return run_generation_token(self._events(rd))
@@ -750,6 +804,24 @@ class RunCommandService:
             if _process_identity_proves_reuse(stored_identity, current_identity):
                 return True
         return False
+
+    def _claim_child_exactly_alive(self, row: dict) -> bool:
+        """Whether a spawn claim names the exact currently-live PID generation."""
+        pid = row.get("pid")
+        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return False
+        try:
+            if self.process_alive(pid) is not True:
+                return False
+        except Exception:  # noqa: BLE001 - an inaccessible process is ambiguous, not known-live
+            return False
+        stored_identity = row.get("process_identity")
+        if not isinstance(stored_identity, str) or not stored_identity:
+            return False
+        try:
+            return self.process_identity(pid) == stored_identity
+        except Exception:  # noqa: BLE001 - identity lookup failure stays fail-closed/uncertain
+            return False
 
     def _execution_owner_definitely_gone(self, path: Path) -> bool:
         """Return true only when a stale execution claim cannot still have a live owner.
@@ -1036,6 +1108,62 @@ class RunCommandService:
     def cancel_external_spawn(self, rd: Path, owner: str) -> None:
         self._clear_spawn_claim(rd, f"external:{owner}")
 
+    def observe_external_spawn(self, rd: Path, owner: str) -> str:
+        """Observe the spawn claim correlated to ``owner`` without ever starting a process.
+
+        The bounded result vocabulary is intentionally evidence-oriented:
+
+        * ``absent``: no claim and no engine lock are visible;
+        * ``live``: the engine lock is visible, including after its claim was already retired;
+        * ``pending_known``: a matching claim names the exact live PID generation, pre-lock;
+        * ``uncertain``: matching/malformed evidence cannot prove either liveness or death;
+        * ``dead_or_cleared``: the matching claim was definitively dead and was retired;
+        * ``mismatched``: the extant claim belongs to another external owner.
+
+        This delegates expiry, quarantine, engine-lock retirement, PID-death and PID-reuse handling
+        to ``_recent_spawn_claim``. It never exposes the stored PID creation identity. Callers that
+        make a subsequent ownership decision should hold ``sequence(rd)`` across both operations.
+        """
+        expected = f"external:{owner}"
+        path = self._spawn_claim_path(rd)
+        row = self._load(path)
+        if not path.exists():
+            return "live" if self.engine_alive(rd) else "absent"
+        if row is None or not isinstance(row.get("command_id"), str) \
+                or not row.get("command_id"):
+            # Preserve the existing fail-closed semantics (and any future quarantine bookkeeping).
+            self._recent_spawn_claim(rd)
+            return "uncertain"
+        if row.get("command_id") != expected:
+            # Still let the canonical observer retire a definitively dead/lock-observed claim, but
+            # never alias another owner's operation to the supplied owner in this decision.
+            self._recent_spawn_claim(rd)
+            return "mismatched"
+
+        active = self._recent_spawn_claim(rd)
+        if not active:
+            return "dead_or_cleared"
+
+        # For a valid matching row, `_recent_spawn_claim` can return true with no remaining path only
+        # on the decision that observed engine.lock and retired the lease. Preserve that positive
+        # observation even if the lock changes immediately after the probe.
+        if not path.exists():
+            return "live"
+        current = self._load(path)
+        if current is None or not isinstance(current.get("command_id"), str) \
+                or not current.get("command_id"):
+            return "uncertain"
+        if current.get("command_id") != expected:
+            return "mismatched"
+        if self.engine_alive(rd):
+            # The first `_recent_spawn_claim` probe may have raced just before lock acquisition. Run
+            # it once more so the existing claim-retirement behavior remains centralized.
+            self._recent_spawn_claim(rd)
+            return "live"
+        if self._claim_child_exactly_alive(current):
+            return "pending_known"
+        return "uncertain"
+
     def resolve_spawn_claim(self, rd: Path, confirmation: str = "") -> dict:
         """Safely retire a quarantined/unknown claim, with an explicit operator escape hatch.
 
@@ -1066,16 +1194,7 @@ class RunCommandService:
                     except OSError as exc:
                         raise HTTPException(503, f"could not retire dead-child spawn claim: {exc}") from exc
                     return {"ok": True, "resolved": True, "reason": "child_definitively_gone"}
-                try:
-                    pid_state = self.process_alive(row.get("pid"))
-                except Exception:  # noqa: BLE001
-                    pid_state = None
-                stored_identity = row.get("process_identity")
-                try:
-                    current_identity = self.process_identity(row.get("pid"))
-                except Exception:  # noqa: BLE001
-                    current_identity = None
-                if pid_state is True and stored_identity and current_identity == stored_identity:
+                if self._claim_child_exactly_alive(row):
                     raise HTTPException(409, {
                         "code": "engine_start_uncertain",
                         "message": "The exact claimed child process is still alive.",

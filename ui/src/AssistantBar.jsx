@@ -5,6 +5,10 @@ import { usePoll } from './hooks.js'
 import { getRunAccess } from './runMode.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import {
+  clearLaunchDraftSession, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
+} from './launchDraftStore.js'
+import { proposalLaunchChat } from './launchProvenance.js'
+import {
   assistantDirectObservationKind, assistantDirectStatus, assistantRunChanged,
   assistantStorageFailureOwnsLock, pollAssistantDirectOnce,
   presentAssistantCommandResult, submitAssistantDirect,
@@ -25,7 +29,8 @@ import {
   COMMAND_SUCCEEDED, COMMAND_FAILED,
   createIdempotencyKey, saveAssistantRunTransport, loadAssistantRunTransport,
   clearAssistantRunTransport, clearRunCommandLock, loadRunCommandLock, saveRunCommandLock,
-  subscribeRunCommandLock, storageGet, storageSet, storageRemove,
+  listLaunchTransports, subscribeLaunchTransports, subscribeRunCommandLock,
+  storageGet, storageSet, storageRemove,
 } from './util.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -145,6 +150,10 @@ export default function AssistantBar({ runId, hidden = false }) {
   const [input, setInput] = useState('')
   const [sid, setSid] = useState(null)
   const [msgs, setMsgs] = useState([])
+  // Editable Genesis task/settings can be sensitive.  Retain them only in this mounted Assistant's
+  // memory so side/full/bar remounts are lossless without writing payloads or validation tokens to web storage.
+  const [launchDrafts, setLaunchDrafts] = useState({})
+  const [launchRecoveries, setLaunchRecoveries] = useState(() => listLaunchTransports())
   const [busy, setBusy] = useState(false)
   const [directPending, setDirectPending] = useState(null) // retained while an accepted direct command executes
   const [directFailure, setDirectFailure] = useState(null)
@@ -206,6 +215,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     setRunCommandLock(loadRunCommandLock(runId))
     return subscribeRunCommandLock(runId, setRunCommandLock)
   }, [runId])
+  useEffect(() => subscribeLaunchTransports(setLaunchRecoveries), [])
   useEffect(() => {
     if (assistantRunChanged(toastRunIdRef.current, runId)) {
       if (flashTimerRef.current) clearTimeout(flashTimerRef.current)
@@ -299,11 +309,11 @@ export default function AssistantBar({ runId, hidden = false }) {
     // stays true forever and the composer wedges on ■.
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
     if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
-    sidRef.current = id; setSid(id)
+    sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
     storageSet('ll.asstSid', id)
     try {
       const s = await assistantGet(id)
-      if (!mountedRef.current) return
+      if (!mountedRef.current || sidRef.current !== id) return
       const arr = s.messages || []
       setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
@@ -396,12 +406,26 @@ export default function AssistantBar({ runId, hidden = false }) {
         })
       }
     } catch (e) {
+      if (sidRef.current !== id) return
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
       if ((e.status === 404 || /404/.test(e.message)) && sidRef.current === id) { newChat() }
       else flash(e.message)
     }
+  }
+  const openLaunchRecovery = async () => {
+    const recovery = launchRecoveries[0]
+    if (!recovery) return
+    const recoverySession = launchDraftSession(recovery.identity)
+    if (!recoverySession) {
+      openFull()
+      flash('Startup recovery exists, but its Assistant session cannot be identified. Reopen the proposal that created it.')
+      return
+    }
+    if (sidRef.current !== recoverySession) await openSession(recoverySession)
+    if (sidRef.current === recoverySession) openSide()
+    else flash('Could not reopen the Assistant session that owns this startup recovery.')
   }
   // Restore the last session on mount so a full page reload never loses the conversation — and if its
   // last turn has no reply yet, recover the in-flight answer (the fix for "typed in the bar, reloaded,
@@ -443,14 +467,26 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
     runningRef.current = false; setBusy(false); setPending([])
-    sidRef.current = null; setSid(null); setMsgs([]); setPreview(''); setHasNew(false); setInput(''); setFiles([])
+    sidRef.current = null; setSid(null); setMsgs([])
+    setPreview(''); setHasNew(false); setInput(''); setFiles([])
     storageRemove('ll.asstSid')
   }
   const delSession = async (id, e) => {
     e?.stopPropagation()
+    const unresolved = listLaunchTransports()
+      .find(item => launchDraftSession(item.identity) === String(id))
+    if (unresolved) {
+      flash(`Check or release startup recovery${unresolved.runId ? ` for “${unresolved.runId}”` : ''} before deleting this chat`)
+      if (sidRef.current === id) openSide()
+      return
+    }
     setSessions(ss => ss.filter(s => s.id !== id))   // optimistic: drop it now (geesefs list can lag)
-    if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
-    try { await assistantDelete(id); if (id === sid) newChat() } catch (e2) { flash(e2.message); refreshSessions() }
+    try {
+      await assistantDelete(id)
+      setLaunchDrafts(current => clearLaunchDraftSession(current, id))
+      if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
+      if (id === sidRef.current) newChat()
+    } catch (e2) { flash(e2.message); refreshSessions() }
   }
 
   const resolvePerm = async (reqId, decision) => {
@@ -939,8 +975,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   // Stream one instruction to the assistant. `userText` = the bubble shown; `instruction` = what the
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
-    retryFiles = null, turnMode = null } = {}) => {
-    if (ensureVisible && view === 'bar' && hasChat) setView('side')
+    retryFiles = null, turnMode = null, clearComposer = false } = {}) => {
+    if (ensureVisible && view === 'bar') setView('side')
     const wasBar = view === 'bar' && !ensureVisible
     setPreview(''); setHasNew(false)
     const atts = retryFiles || files
@@ -952,6 +988,9 @@ export default function AssistantBar({ runId, hidden = false }) {
       try { const m = await assistantCreate((userText || instruction).slice(0, 60), effectiveMode); id = m.id; sidRef.current = id; storageSet('ll.asstSid', id); if (mountedRef.current) setSid(id) }
       catch { flash('assistant offline'); return }
     }
+    // Keep a typed /new goal intact if creating the Assistant session failed.  Once a durable session
+    // exists, the exact visible/raw turn below owns recovery and the composer can safely clear.
+    if (clearComposer) setInput('')
     if (!retryFiles) setFiles([])   // a retry reuses its own snapshot; do not clear newly composed files
     // What was silently attached to this turn (run, #experiments, files) — shown as a faint caption
     // ABOVE the user's bubble so the injected context is visible, not hidden inside the instruction.
@@ -1055,10 +1094,10 @@ export default function AssistantBar({ runId, hidden = false }) {
     }
   }
 
-  const requestNewRun = (goal = '') => runLLM(
+  const requestNewRun = (goal = '', options = {}) => runLLM(
     goal ? `Plan a new run for this goal and show me a launch card to start it: ${goal}`
          : 'I want to start a new run. Propose a run spec (name, task, key settings) as a launch card I can start; ask me for anything you need first.',
-    { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true })
+    { userText: goal ? `/new ${goal}` : '/new', ensureVisible: true, ...options })
 
   const retryTurn = async (assistantIndex) => {
     if (busy || commandBusy) { flash(commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
@@ -1143,9 +1182,8 @@ export default function AssistantBar({ runId, hidden = false }) {
     }
     const mNew = /^\/(new|genesis|run)\b\s*([\s\S]*)$/i.exec(t)
     if (mNew) {
-      setInput('')
       const goal = mNew[2].trim()
-      requestNewRun(goal)
+      requestNewRun(goal, { clearComposer: true })
       return
     }
     const direct = parseDirect(t)
@@ -1163,12 +1201,18 @@ export default function AssistantBar({ runId, hidden = false }) {
   useEffect(() => {
     const onNewRun = (event) => {
       if (busy || commandBusy || historical) { flash(historical ? 'Return live before starting a run from this context' : commandBusy ? 'A run command is pending' : 'Assistant is busy'); return }
-      setInput('')
-      requestNewRun(String(event.detail?.goal || '').trim())
+      const goal = String(event.detail?.goal || '').trim()
+      const command = goal ? `/new ${goal}` : '/new '
+      const existing = input.trim()
+      if (!existing || existing === command.trim()) setInput(command)
+      else flash('Draft preserved — clear it before starting a new run')
+      setView(current => current === 'bar' ? 'side' : current)
+      setHasNew(false)
+      requestAnimationFrame(() => inputRef.current?.focus())
     }
     window.addEventListener('ll:new-run', onNewRun)
     return () => window.removeEventListener('ll:new-run', onNewRun)
-  }, [busy, commandBusy, historical])
+  }, [busy, commandBusy, historical, input])
 
   const stop = () => {
     runningRef.current = false                              // halt reattach/recover polling immediately
@@ -1203,6 +1247,12 @@ export default function AssistantBar({ runId, hidden = false }) {
   // Suppress an A-scoped toast during the very first render for B; the effect below then clears its
   // timer/state. This avoids a one-frame stale announcement between route commit and useEffect.
   const visibleToast = assistantRunChanged(toastRunIdRef.current, runId) ? null : toast
+  const launchRecoveryButton = launchRecoveries.length > 0
+    ? <button type="button" className="btn sm asst-launch-global" onClick={openLaunchRecovery}
+        title="Reopen the Assistant proposal that owns this durable startup identity">
+        Check startup{launchRecoveries.length > 1 ? ` (${launchRecoveries.length})` : ''}
+      </button>
+    : null
   useEffect(() => {
     if (!commandFocusRequestedRef.current || (!directPending && !directFailure && !externalCommandPending)) return
     requestAnimationFrame(() => {
@@ -1278,6 +1328,10 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (prior?.context?.files?.length && !prior.retryPayload) return null
     return () => retryTurn(assistantIndex)
   }
+  // /api/start already knows how to seed a run with its creation conversation.  Scope it from the
+  // latest explicit Genesis command through the owning proposal message; unrelated session history,
+  // attachment payloads, system/tool records, and unfinished turns fail closed.
+  const launchChatThrough = index => proposalLaunchChat(msgs, index)
   const renderThread = () => <>
     {msgs.length === 0 && <div className="asst-empty">
       <div className="muted" style={{ fontSize: 12, marginBottom: 10 }}>
@@ -1296,7 +1350,11 @@ export default function AssistantBar({ runId, hidden = false }) {
       </div>}
       <Turn m={m} runsById={runsById} readOnly={historical} onRevert={historical ? null : onRevert}
         onRetry={retryHandlerFor(i)}
-        onOpenSettings={openAssistantSettings} />
+        onOpenSettings={openAssistantSettings} launchChat={launchChatThrough(i)}
+        launchSessionId={sid} launchMessageId={m.turn_id || m.id} launchMessageIndex={i}
+        launchDrafts={launchDrafts}
+        onLaunchDraft={(key, draft) => setLaunchDrafts(current => retainLaunchDraft(current, key, draft))}
+        onLaunchStarted={key => setLaunchDrafts(current => removeLaunchDraft(current, key))} />
     </React.Fragment>)}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
       aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
@@ -1366,6 +1424,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
     {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
       <button className="cmdbar-ic" title="open the full assistant" onClick={openFull}>✦</button>
+      {launchRecoveryButton}
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
@@ -1426,6 +1485,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       <div className="asst-drawer-h">
         <b className="asst-drawer-ttl">Assistant</b>
         {ctxChip}
+        {launchRecoveryButton}
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm ghost" title="new chat" onClick={newChat}>＋ New</button>
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
@@ -1457,6 +1517,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         <div className="asst-main-h">
           <span className="ttl" style={{ flex: 1 }}>{sessions.find(s => s.id === sid)?.title || 'New chat'}</span>
           {ctxChip}
+          {launchRecoveryButton}
           {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
             try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch (e) { flash(e.message) }
           }}>⑂ fork</button>}

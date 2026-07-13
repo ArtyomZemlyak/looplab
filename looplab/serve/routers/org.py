@@ -109,6 +109,11 @@ def build_router(srv) -> APIRouter:
         import shutil
         rd = _run_dir(run_id)
         with srv.commands.destructive_guard(rd, "delete run") as rd:
+            # A keyed Genesis start lives beside the sequencer so it survives response loss and a
+            # partial run directory. Capture its exact identity while this same guard owns the run;
+            # successful deletion retires that sidecar so a later intentional reuse of the name is
+            # not confused with the deleted incarnation.
+            start_record = srv.commands.load_start_record(rd)
             # Approval/routing happened before the guard; liveness must be checked again *inside* it,
             # after pending command workers are excluded, or one can spawn between check and rmtree.
             if _engine_alive(rd):
@@ -127,6 +132,15 @@ def build_router(srv) -> APIRouter:
             if durable_costs_flushed is not True:
                 raise HTTPException(
                     409, "cannot delete run: run-cost evidence is pending, busy, malformed, or conflicting")
+            # Retire the exact durable start identity before the irreversible directory delete. If
+            # sidecar unlink is denied, the run remains intact. A partial rmtree below restores the
+            # exact record while this sequencer still excludes a replacement startup.
+            start_record_retired = False
+            if start_record is not None:
+                if not srv.commands.retire_start_record(rd, str(start_record["id"])):
+                    raise HTTPException(
+                        503, "run start record could not be retired; the run was not deleted")
+                start_record_retired = True
             # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) — that
             # would leave a ghost run the UI thinks is gone. Retry once: an S3-backed FUSE mount (geesefs)
             # can transiently leave entries on the first rmtree pass. Only forget it if the dir is actually
@@ -136,6 +150,12 @@ def build_router(srv) -> APIRouter:
                 if not rd.exists():
                     break
             if rd.exists():
+                if start_record_retired:
+                    try:
+                        srv.commands.save_start_record(rd, start_record)
+                    except Exception as exc:  # noqa: BLE001 - durable ownership loss must be loud
+                        raise HTTPException(
+                            503, "run deletion failed and its start record could not be restored") from exc
                 leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
                 raise HTTPException(500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
                                          "may be open or the storage is read-only); retry once nothing holds it")

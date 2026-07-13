@@ -1,8 +1,10 @@
-import React, { useEffect, useId, useRef, useState } from 'react'
+import React, { useEffect, useId, useRef } from 'react'
 import Markdown from './markdown.jsx'
-import { fmt, startRun } from './util.js'
+import { fmt } from './util.js'
 import { assistantErrorInfo } from './assistantErrors.js'
 import { permissionPresentation } from './assistantPermission.js'
+import LaunchCard from './LaunchCard.jsx'
+import { launchDraftKey } from './launchDraftStore.js'
 
 const RUN_MENTION = /@run:([^\s.,;:!?)]+)/g
 const runMentions = (s) => [...new Set([...(s || '').matchAll(RUN_MENTION)].map(m => m[1]))]
@@ -44,8 +46,10 @@ function AssistantErrorCard({ error, onRetry, onOpenSettings }) {
     </div>
   </div>
 }
-
-export function Turn({ m, runsById, onRevert, onRetry, onOpenSettings, readOnly = false }) {
+export function Turn({
+  m, runsById, onRevert, onRetry, onOpenSettings, launchChat, readOnly = false,
+  launchSessionId, launchMessageId, launchMessageIndex, launchDrafts, onLaunchDraft, onLaunchStarted,
+}) {
   const who = m.role === 'user' ? 'you' : 'assistant'
   const content = m.role === 'user' ? stripCtx(m.content) : m.content
   // Provider payloads can contain URLs, model routing, account ids and other implementation details.
@@ -89,7 +93,14 @@ export function Turn({ m, runsById, onRevert, onRetry, onOpenSettings, readOnly 
       {mentions.length > 0 && <div className="asst-runchips">
         {mentions.map(id => <RunChip key={id} id={id} run={runsById && runsById[id]} />)}
       </div>}
-      {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => <LaunchCard key={i} spec={sp} />)}
+      {!readOnly && Array.isArray(m.proposals) && m.proposals.map((sp, i) => {
+        const draftKey = launchDraftKey({ sessionId: launchSessionId, messageId: launchMessageId,
+          messageIndex: launchMessageIndex, proposalId: sp.proposal_id, proposalIndex: i })
+        return <LaunchCard key={draftKey} spec={sp} chat={launchChat} launchIdentity={draftKey}
+          retainedDraft={launchDrafts?.[draftKey]}
+          onDraftChange={draft => onLaunchDraft?.(draftKey, draft)}
+          onStarted={() => onLaunchStarted?.(draftKey)} />
+      })}
     </div>
   </div>
 }
@@ -162,33 +173,4 @@ export function PermCard({ req, onResolve, busy = false, autoFocus = false }) {
   </div>
 }
 
-// A launch card for a run the assistant proposed (propose_run). The user reviews and starts it via
-// the existing /api/start; the New-run flow becomes one assistant capability.
-function LaunchCard({ spec }) {
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState(null)
-  const [done, setDone] = useState(false)
-  const task = spec.task || {}
-  const what = spec.task_file ? spec.task_file.split(/[\\/]/).pop() : (task.kind || 'task')
-  const launch = async () => {
-    setBusy(true); setErr(null)
-    try {
-      const body = { run_id: spec.run_id, settings: spec.settings || {} }
-      if (spec.task_file) body.task_file = spec.task_file; else body.task = task
-      await startRun(body)
-      setDone(true); location.hash = `#/run/${encodeURIComponent(spec.run_id)}`
-    } catch (e) { setErr(e.status === 409 ? `"${spec.run_id}" already exists — rename it` : e.message); setBusy(false) }
-  }
-  return <div className="asst-launch">
-    <div className="asst-launch-h"><span className="asst-perm-badge">new run</span><b>{spec.run_id}</b>
-      <span className="muted"> · {what}</span></div>
-    {spec.rationale && <div className="muted" style={{ fontSize: 12, margin: '4px 0' }}>{spec.rationale}</div>}
-    {spec.settings && Object.keys(spec.settings).length > 0 &&
-      <div className="asst-steps">{Object.entries(spec.settings).map(([k, v]) =>
-        <span key={k} className="asst-step">{k}={String(v)}</span>)}</div>}
-    {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3', marginTop: 6 }}>{err}</div>}
-    <div className="asst-perm-actions">
-      <button className="btn xs primary" disabled={busy || done} onClick={launch}>{done ? 'started ✓' : (busy ? '…' : '▶ Start run')}</button>
-    </div>
-  </div>
-}
+export { LaunchCard }

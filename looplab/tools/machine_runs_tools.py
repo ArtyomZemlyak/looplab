@@ -741,7 +741,9 @@ class RunLauncherTools:
                  "task": {"type": "object", "description": "composable inline task: goal + direction + the fields you have (repo / dataset / cmd{command|stages,metric:{reader,key},timeout} / kaggle). No `kind`."},
                  "task_file": {"type": "string", "description": "a catalogue task path (alternative to task)"},
                  "settings": {"type": "object", "description": "engine overrides, e.g. {\"llm_model\":..,\"max_nodes\":..}"},
-                 "rationale": {"type": "string"}},
+                 "rationale": {"type": "string"},
+                 "setup_steps": {"type": "array", "items": {"type": "string"},
+                                 "description": "operator-facing readiness/adaptation notes; these are not executed automatically"}},
                 ["run_id"]),
         ]
 
@@ -781,9 +783,12 @@ class RunLauncherTools:
                         "A repo task MUST carry a `cmd` {command|stages, metric:{reader,key}} — point it "
                         "at a file the agent will BUILD if no scorer exists — or set metric.reader "
                         "\"auto\"; `repo` must be an ABSOLUTE path that exists.)")
-        spec = {"run_id": rid, "task": task or {}, "task_file": task_file,
+        steps = [str(step).strip() for step in (args.get("setup_steps") or [])
+                 if str(step).strip()][:12]
+        spec = {"proposal_id": str(uuid.uuid4()),
+                "run_id": rid, "task": task or {}, "task_file": task_file,
                 "settings": args.get("settings") if isinstance(args.get("settings"), dict) else {},
-                "rationale": str(args.get("rationale") or "")}
+                "rationale": str(args.get("rationale") or ""), "setup_steps": steps}
         self.proposals.append(spec)
         # describe the proposal by WHAT the composable task carries (there is no `kind` field)
         what = task_file or (task and ("repo" if task.get("repo") else

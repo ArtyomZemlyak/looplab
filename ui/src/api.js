@@ -43,7 +43,9 @@ const TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume'])
 const ASSISTANT_TRANSPORT_STORAGE_PREFIX = 'll.assistant-command-transport.'
 const ASSISTANT_TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume', 'pause', 'abort', 'ratify', 'approve'])
 const RUN_COMMAND_LOCK_PREFIX = 'll.command-lock.'
+const LAUNCH_TRANSPORT_PREFIX = 'll.launch-transport.'
 const RUN_COMMAND_LOCK_EVENT = 'll:command-lock'
+const LAUNCH_TRANSPORT_EVENT = 'll:launch-transport'
 const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const validRunGeneration = value => typeof value === 'string' && RUN_GENERATION_RE.test(value)
@@ -115,6 +117,7 @@ const ASSISTANT_ENVELOPE_KEYS = new Set([...RUN_ENVELOPE_KEYS, 'arg'])
 const LOCK_KEYS = new Set([
   'runId', 'source', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'status', 'statusUnavailable', 'updatedAt',
 ])
+const LAUNCH_TRANSPORT_KEYS = new Set(['identity', 'runId', 'idempotencyKey', 'updatedAt'])
 
 export const commandEventForAction = (action, source = 'assistant') =>
   (source === 'dock' ? TRANSPORT_EVENT_BY_ACTION : ASSISTANT_EVENT_BY_ACTION)[action] || null
@@ -243,6 +246,96 @@ const transportStorage = (storage) => {
 const transportStorageKey = runId => TRANSPORT_STORAGE_PREFIX + encodeURIComponent(String(runId || ''))
 const assistantTransportStorageKey = runId => ASSISTANT_TRANSPORT_STORAGE_PREFIX + encodeURIComponent(String(runId || ''))
 const runCommandLockKey = runId => RUN_COMMAND_LOCK_PREFIX + encodeURIComponent(String(runId || ''))
+const launchTransportKey = identity => LAUNCH_TRANSPORT_PREFIX + encodeURIComponent(String(identity || ''))
+const safeLaunchText = (value, max) => typeof value === 'string' && value.length > 0
+  && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
+
+const parsedLaunchTransport = (raw, identity) => {
+  let payload
+  try { payload = JSON.parse(raw) } catch { return { invalid: true } }
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)
+      || !hasOnlyKeys(payload, LAUNCH_TRANSPORT_KEYS)
+      || payload.identity !== String(identity) || !safeLaunchText(payload.runId, 255)
+      || !safeLaunchText(payload.idempotencyKey, 200) || !Number.isFinite(payload.updatedAt)) {
+    return { invalid: true }
+  }
+  return payload
+}
+
+const notifyLaunchTransports = () => {
+  if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function'
+      || typeof CustomEvent === 'undefined') return
+  try { window.dispatchEvent(new CustomEvent(LAUNCH_TRANSPORT_EVENT)) } catch { /* reload can recover */ }
+}
+
+// New-run transport stores identity only: never task/settings/chat/token/provider data. A paid Start
+// is blocked when this tab-scoped recovery key cannot be committed before the request leaves.
+export function saveLaunchTransport(identity, state, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !safeLaunchText(identity, 300) || !safeLaunchText(state?.runId, 255)
+      || !safeLaunchText(state?.idempotencyKey, 200)) return false
+  const payload = {
+    identity: String(identity), runId: String(state.runId),
+    idempotencyKey: String(state.idempotencyKey), updatedAt: Date.now(),
+  }
+  try {
+    target.setItem(launchTransportKey(identity), JSON.stringify(payload))
+    const saved = target.getItem(launchTransportKey(identity)) === JSON.stringify(payload)
+    if (saved && storage === undefined) notifyLaunchTransports()
+    return saved
+  } catch { return false }
+}
+
+export function loadLaunchTransport(identity, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !safeLaunchText(identity, 300)) return null
+  try {
+    const raw = target.getItem(launchTransportKey(identity))
+    if (raw == null) return null
+    return parsedLaunchTransport(raw, identity)
+  } catch { return { invalid: true } }
+}
+
+// Global recovery UI needs only safe correlation metadata.  Idempotency keys never leave the API
+// module or enter DOM events/state; malformed entries remain visible as attention-required records.
+export function listLaunchTransports(storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target) return []
+  const records = []
+  try {
+    for (let index = 0; index < target.length; index += 1) {
+      const key = target.key(index)
+      if (typeof key !== 'string' || !key.startsWith(LAUNCH_TRANSPORT_PREFIX)) continue
+      const encoded = key.slice(LAUNCH_TRANSPORT_PREFIX.length)
+      let identity
+      try { identity = decodeURIComponent(encoded) } catch { identity = encoded }
+      const parsed = parsedLaunchTransport(target.getItem(key), identity)
+      records.push(parsed.invalid
+        ? { identity, runId: '', updatedAt: 0, invalid: true }
+        : { identity: parsed.identity, runId: parsed.runId, updatedAt: parsed.updatedAt, invalid: false })
+    }
+  } catch { return [] }
+  return records.sort((left, right) => right.updatedAt - left.updatedAt)
+}
+
+export function subscribeLaunchTransports(callback) {
+  if (typeof window === 'undefined' || typeof window.addEventListener !== 'function') return () => {}
+  const listener = () => callback(listLaunchTransports())
+  window.addEventListener(LAUNCH_TRANSPORT_EVENT, listener)
+  return () => window.removeEventListener(LAUNCH_TRANSPORT_EVENT, listener)
+}
+
+export function clearLaunchTransport(identity, storage = undefined) {
+  const target = transportStorage(storage)
+  if (!target || !safeLaunchText(identity, 300)) return false
+  try {
+    const key = launchTransportKey(identity)
+    target.removeItem(key)
+    const cleared = target.getItem(key) == null
+    if (cleared && storage === undefined) notifyLaunchTransports()
+    return cleared
+  } catch { return false }
+}
 
 const notifyRunCommandLock = (runId) => {
   if (typeof window === 'undefined' || typeof window.dispatchEvent !== 'function'
@@ -1020,15 +1113,17 @@ function assertNotReviewMutation(path) {
   throw error
 }
 
-export async function get(path) {
+export async function get(path, options = {}) {
   // Carry the UI token on reads too: most GETs don't need it, but the artifact routes (raw file
   // content) are token-gated server-side. _authHeaders is a no-op when no token is set (local), so
   // ordinary local use is unchanged.
   const requestPath = reviewReadPath(path)
   // Every review bearer addresses the same small URL namespace.  Force a cache bypass so a cached
   // 401/410 from a revoked capability can never poison a subsequently created link in this tab.
+  const { headers = {}, ...fetchOptions } = options || {}
   const r = await fetch(apiUrl(requestPath), {
-    headers: _authHeaders({}),
+    ...fetchOptions,
+    headers: _authHeaders(headers),
     ...(isReviewLocation() ? { cache: 'no-store' } : {}),
   })
   if (!r.ok) await _throw(r, path)
@@ -1109,7 +1204,15 @@ export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { 
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). Blocked server-side while the run's engine is live.
 export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
+// New-run creation is propose -> edit -> validate -> start.  The preflight is non-billable and
+// side-effect free; its opaque token binds the exact payload the server checked.  An inconclusive
+// launch is observed by idempotency key instead of blindly POSTing a second engine start.
+export const preflightRunStart = (body) => post('/api/start/preflight', body)
 export const startRun = (body) => post('/api/start', body)
+export const getStartStatus = (runId, idempotencyKey) => get(
+  `/api/start/${encodeURIComponent(runId)}/status`, {
+    cache: 'no-store', headers: { 'Idempotency-Key': String(idempotencyKey || '') },
+  })
 
 // cross-run aggregate reports over a scope (project | task | supertask). GET returns the stored report
 // + staleness ({exists, content, generated_at, run_ids, stale, added, current_run_count}); generate
