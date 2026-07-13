@@ -7,7 +7,7 @@
 | Metadata | Value |
 |---|---|
 | **Status** | current research / proposed distributed-execution direction |
-| **As of code commit** | `13579ca9b0c2a7fd5c1f6d94fbe9414ef9aa235a` |
+| **As of code commit** | `5ed2e83c4f559a8907dad8cd81d88e80aeaf0233` (code references re-verified 2026-07-13) |
 | **Normative for** | terminology, option analysis, proposed target architecture, multi-user resource operating model, external-model boundary, experiment-workspace linkage, and promotion gates for distributed execution |
 | **Not normative for** | shipped behavior or permission to bypass doc 17's stabilization order |
 | **Depends on** | [doc 17](17-project-review-and-directions-2026-07-11.md), especially its remote-worker prerequisite row |
@@ -180,27 +180,27 @@ evaluation, and a two-replica inference service; the API must retain that intent
 
 LoopLab already has most of the user-facing shell:
 
-- the `looplab` console entry points lead to one Typer application (`pyproject.toml:45-53`);
+- the `looplab` console entry points lead to one Typer application (`pyproject.toml:50-52`);
 - the FastAPI server exposes the web control/read plane and launches Engine subprocesses
-  (`looplab/serve/server.py:1-7`, `looplab/serve/engine_proc.py:121-151`);
-- the TUI can be a thin client of a remote server (`looplab/cli/ui_cmds.py:67-84`);
+  (`looplab/serve/server.py:1-7`, `looplab/serve/engine_proc.py:176-206`);
+- the TUI can be a thin client of a remote server (`looplab/cli/ui_cmds.py:78-91`);
 - run state, SSE, reports, artifacts, projects, controls, and assistant surfaces already exist.
 
 The execution and state assumptions are nevertheless single-machine:
 
 | Current behavior | Evidence | Distributed consequence |
 |---|---|---|
-| `max_parallel > 1` uses an AnyIO task group and local `CapacityLimiter` | `looplab/engine/orchestrator.py:963-998` | this is local concurrency, not a worker pool |
-| `_evaluate` calls synchronous evaluation in a worker thread | `looplab/engine/evaluate.py:42-142` | cancellation and result delivery are process-local |
+| `max_parallel > 1` uses an AnyIO task group and local `CapacityLimiter` | `looplab/engine/orchestrator.py:1146-1165` | this is local concurrency, not a worker pool |
+| `_evaluate` calls synchronous evaluation in a worker thread | `looplab/engine/evaluate.py:43-185` | cancellation and result delivery are process-local |
 | classic evaluation calls local `Sandbox.run(code, workdir, …)` | `looplab/runtime/sandbox.py:120-123`, `looplab/engine/eval_dispatch.py:113-200` | the contract has no manifest, resources, image digest, lease, or artifact identity |
 | repo evaluation is a separate local command-eval path | `looplab/engine/eval_dispatch.py:127-176` | a remote `Sandbox` alone would miss a major execution path |
 | host grading reads the local workdir after either path | `looplab/engine/eval_dispatch.py:195-201` | trusted scoring and candidate execution must be separated explicitly |
 | workspace construction copies/symlinks host paths | `looplab/engine/workspace.py:125-230` | another host cannot reproduce it without a portable input snapshot |
-| Docker sandbox is local and does not allocate GPU/CDI resources | `looplab/runtime/sandbox.py:408-471` | untrusted/container mode is not a distributed GPU backend |
+| Docker sandbox is local (`docker run --network none`) and allocates no GPU/CDI resources | `looplab/runtime/sandbox.py:551-620` | untrusted/container mode is not a distributed GPU backend |
 | GPU support is best-effort `nvidia-smi` inventory and prompt context | `looplab/core/hardware.py:20-104` | there is no reservation, device pinning, queue, or admission |
 | UI liveness probes a local `engine.lock` | `looplab/serve/engine_proc.py:28-72`, `looplab/serve/appstate.py` | remote liveness needs durable leases and scheduler reconciliation |
 | state is read from a local `events.jsonl` | `looplab/serve/appstate.py:81-110` | workers cannot safely share or append this file |
-| deployment warns against S3/geesefs FUSE for the run root | `docs/guide/deployment.md:90` | a shared mutable filesystem is not the migration path |
+| deployment warns against S3/geesefs FUSE for the run root | `docs/guide/deployment.md:92` | a shared mutable filesystem is not the migration path |
 
 There is also a semantic mismatch worth fixing before a shared cluster: current prompt guidance says
 to use all available GPUs. In distributed mode the correct rule is **use all GPUs allocated to the
@@ -383,7 +383,7 @@ The control-plane substrate options are deliberately separated:
 A Kubernetes CRD may still be a backend-owned projection/handle, but it must not become the only
 representation of a LoopLab Run.
 
-Artifact publication is two-phase:
+Artifact publication stages bytes first, then commits a reference in one atomic step:
 
 1. upload into an attempt-scoped temporary prefix;
 2. upload an immutable manifest last;
@@ -451,6 +451,49 @@ other users.
 An `ExternalModelEndpoint` and `ModelBinding` do **not** contain a `ComputeRequest`: they describe an
 authorized external API dependency. Their rate/token budgets and health observations belong to a
 model-access plane, not the GPU admission queue.
+
+### 4.8 Control-plane durability and recovery
+
+The whole design makes PostgreSQL, the transactional outbox, and immutable object storage the
+singleton authority (§4.4, §8). That authority is the one component whose loss loses everything: a
+worker crash costs one attempt, but a lost or corrupted command/event store loses lineage, budgets,
+leases, and provenance for every Run. A document this careful about worker and attempt failure must
+be equally explicit about the control plane's own recovery, and it should be a first-class SLO, not
+an operational afterthought. This subsection is the single-domain baseline; §10.6 and the U8 gate
+cover multi-region and regulated-residency DR, which are a superset, not a substitute.
+
+| Component | Durability mechanism | Recovery boundary |
+|---|---|---|
+| authoritative Postgres | continuous WAL archiving + [PITR](https://www.postgresql.org/docs/current/continuous-archiving.html); ≥1 synchronous streaming replica for HA failover; automated, encrypted base backups | restore to a consistent LSN; a backup never restored in a drill is not a backup |
+| transactional outbox/reconciler | committed in the same transaction as its command/event; reconciler is idempotent and at-least-once | pending effects replay safely after restore; no effect is lost or double-committed by design |
+| object store / CAS | versioning plus object-lock (WORM) on immutable blobs; cross-AZ/region replication; lifecycle rules that never expire a blob still referenced by a live manifest | a blob, once accepted, is retrievable for its retention window |
+| JSONL projection (local mode) | the existing single-writer `engine.lock` + atomic-rename file store | unchanged; a single-machine run recovers by re-fold, as today |
+
+Recovery is made tractable by the same properties the rest of the design already depends on: events
+are the source of truth and `fold` is deterministic, order-tolerant, and idempotent (the same
+files-as-truth replay the local engine already guarantees). A restore to a consistent (database
+snapshot, object-store point) is therefore internally consistent and re-foldable; there is no
+separate derived state to repair by hand. Three rules keep a restore honest:
+
+1. **Treat every in-flight lease and fence as expired on restore.** A pre-crash `ExecutionAttempt`
+   may still be running on a backend. Bump a monotonic fence-floor (an epoch) at restore so no
+   pre-restore fence can win, then reconcile live backend job state (§11.2) before issuing a newer
+   fence. A recovered coordinator adopts running work by reconciliation, never by assuming the old
+   lease still holds.
+2. **Re-settle budget against backend accounting, not the restored snapshot.** A reservation
+   restored from a slightly stale point may over- or under-count; reconcile incurred GPU-seconds
+   from scheduler/device telemetry and settle once per real physical attempt, including orphans
+   created during the outage (§11.3).
+3. **Protect the backups as tenancy-sensitive.** The store holds `SecretRef`, not secret values, but
+   it does hold principals, project lineage, and provenance; a leaked or unencrypted backup is a
+   cross-tenant disclosure. Encrypt backups, scope restore rights to platform admins, and audit
+   restores like break-glass access (§8.2).
+
+Set an explicit single-domain control-plane **RPO/RTO** target — for example RPO of minutes via WAL
+shipping and RTO of minutes via replica promotion — and prove it in a restore drill before shared
+exposure. During a control-plane outage, admitted/running backend jobs continue and outbound domain
+agents spool events (§10.5); the guarantee is that recovery re-converges to at most one accepted
+current-fence outcome per evaluation, never that physical execution paused.
 
 ---
 
@@ -659,6 +702,44 @@ component graph into container executions
 - map DCGM GPU metrics to LoopLab attempt labels where the allocation model supports it;
 - track GPU-seconds, utilization, OOM/ECC/Xid signals, queue wait, preemption, and retry;
 - time-sliced GPU attribution is weaker and must not be presented as exact per-attempt accounting.
+
+### 5.7 Elastic GPU capacity: node autoscaling and provisioning
+
+Kueue and the kube-scheduler admit and place work onto **allocatable** capacity; they do not create
+nodes. On a fixed pool that is the correct behavior — full quota means work queues — but a cloud,
+hybrid, or elastic on-prem pool usually wants the pool itself to grow on demand. Without this the
+work-conserving goal of §9.8 and the estimated-start view of §8.4 are only ever measured against a
+static ceiling, and "no eligible capacity" is reported when the real answer is "no node has been
+provisioned yet."
+
+| Mechanism | Correct role | Cost / caveat |
+|---|---|---|
+| [Cluster Autoscaler](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md) | scale a node group up when Pods are `Pending` for lack of resources; scale down when nodes are underused | reactive; adds node boot + GPU driver readiness + image pull to start latency |
+| [Karpenter](https://karpenter.sh/docs/) | just-in-time, groupless nodes shaped to pending Pods; faster consolidation across heterogeneous GPU types | consolidation is a preemption; its churn must respect workload contracts |
+| [Kueue `ProvisioningRequest` admission check](https://kueue.sigs.k8s.io/docs/admission-check-controllers/provisioning/) | admit a workload only once capacity is actually being provisioned, instead of admitting it and leaving it `Pending` | **preferred** — keeps admission and physical capacity honest together |
+
+Wire elastic capacity into the machinery this document already defines:
+
+- **Surface provisioning as its own phase, not a longer spinner.** §11.1 already normalizes
+  `node scale-up` as a status reason; a Pod waiting for a new node is *provisioning*, distinct from
+  queue wait and never a candidate-code failure. A cloud that cannot supply the shape is a
+  `capacity_unavailable` blocker, not an infinite queue.
+- **Fold provisioning latency into the estimate, and keep it an estimate.** §8.4's start-time
+  interval must include node boot when the pool is empty; spot/on-demand capacity can simply be
+  unavailable, so the confidence stays low and the number never becomes a promise.
+- **Scale-down obeys the reclaim contract.** A consolidator or scale-down that drains a node is a
+  preemption: it must honor grace, minimum runtime, checkpoint freshness (§9.7, §11.4) and must not
+  evict a non-preemptible base replica or a running synchronous attempt to save an idle node.
+  Protect a small warm GPU headroom for interactive and service latency, exactly the headroom §9.8
+  already measures against saturation.
+- **Prefer in-cluster autoscaling for one Kubernetes domain; use SkyPilot for cross-infrastructure
+  burst.** Node autoscaling grows an existing cluster within one `ExecutionDomain`; SkyPilot (§6.4)
+  provisions whole clusters/VMs across clouds and remains the optional cost/capacity broker. Do not
+  run both as competing owners of the same decision.
+
+The vendor-neutral profile contract is unchanged: a `compute_profile` still expresses capability and
+policy, and whether it lands on a static node or a freshly provisioned one is a backend detail the
+public Run model never exposes.
 
 ---
 
@@ -2079,6 +2160,9 @@ Track at least:
 - start overhead relative to evaluation duration;
 - stale/duplicate outcome rejection count and any incorrect acceptance (target zero);
 - orphaned jobs/resources after coordinator or worker failure (target zero);
+- node-provisioning latency and unfulfilled scale-up / `capacity_unavailable` rate on an elastic pool;
+- control-plane restore-drill success, measured RPO/RTO, and post-restore stale-fence rejection
+  (target zero incorrect acceptances);
 - budget reservation error and unaccounted physical attempts (target zero);
 - checkpoint recovery success and wasted work on preemption;
 - local-versus-remote metric reproducibility for the same snapshot/image/seed;
@@ -2109,7 +2193,7 @@ applicable D gate and U gate; installing JupyterHub or Kueue alone does not sati
 |---|---|---|
 | **U0 — catalog and shadow accounting** | inventory domains/flavors, ingest scheduler and DCGM telemetry, classify idle reasons; no admission changes | reconciled physical capacity and attempt accounting; stale snapshots are visibly stale, not presented as allocatable capacity |
 | **U1 — shared identity and tenancy** | common OIDC IdP, `(iss, sub)` principal, Organization/Team/Project model, roles, audit, service principals | doc 17 R5 complete; cross-tenant negative tests pass; no human bearer token reaches a worker or domain agent |
-| **U2 — one-cluster shared batch** | Project LocalQueues, Team entitlement boundary, equal default weights, normal and opportunistic classes | hard caps, guarantees, borrowing, fair-share, priority override audit, duplicate submit, and budget settlement pass under contention |
+| **U2 — one-cluster shared batch** | Project LocalQueues, Team entitlement boundary, equal default weights, normal and opportunistic classes | hard caps, guarantees, borrowing, fair-share, priority override audit, duplicate submit, and budget settlement pass under contention; a control-plane restore drill meets the stated RPO/RTO and rejects every pre-restore fence |
 | **U3 — managed workspaces** | CPU/GPU `WorkspaceSession`, JupyterHub named-server integration, bounded profiles, idle and absolute TTL | profile entitlement is server-validated; GPU release is observable; idle culling never claims to checkpoint kernel memory; detached Runs survive workspace deletion |
 | **U3I — experiment-linked IDE and sealing** | AuthoringWorkspace, browser/desktop access grant, writer fence, WorkspaceRevision, Snapshot & Run, debug copy | same saved generation seals to the same digest; unsaved-buffer warning, conflict, revoke/cull, stale Pod, dual-writer partition, secret exclusion, clean materialization, and tainted-live-debug tests pass |
 | **U4 — autonomous reservoir** | bounded PREPARING/READY backlog, adaptive desired parallelism, low-priority fill queue | overnight soak fills policy-compatible idle capacity without unbounded/stale experiments, starving interactive work, or exceeding scientific/budget bounds |
@@ -2133,6 +2217,8 @@ capacity; U5M adds service SLOs that deliberately limit saturation.
 |---|---|
 | one DS, one workstation | current local backend; add explicit local GPU allocation before parallel GPU eval |
 | several DS, existing Kubernetes GPU nodes | LoopLab control plane + Postgres/object store + Job/Kueue + GPU Operator |
+| cloud/hybrid or elastic pool where start latency matters | add Cluster Autoscaler/Karpenter or a Kueue `ProvisioningRequest` admission check; surface provisioning as its own phase; keep warm interactive/service headroom |
+| shared deployment must survive control-plane loss | Postgres PITR + synchronous replica + object-lock CAS; tested restore drills; bump the fence-floor and reconcile backend state on restore |
 | JupyterHub users need CPU/GPU notebooks and detached experiments | common OIDC IdP; LoopLab `WorkspaceSession` intent and policy; JupyterHub as named-server provider; Runs remain independent of notebook lifetime |
 | users need browser/desktop IDE for an experiment | open one leased AuthoringWorkspace session; bind access to provider allocation/Pod UID; seal WorkspaceRevision before `Snapshot & Run` |
 | failed remote attempt needs interactive debugging | create a sanitized DebugWorkspace from exact InputSnapshot/checkpoint/artifacts; rerun cleanly; do not edit the canonical attempt |
@@ -2168,6 +2254,8 @@ For the most likely shared on-prem installation:
   Organization/Team/Project control plane;
 - PostgreSQL owns distributed command/event/lease/budget/outbox state;
 - MinIO or another S3-compatible store owns immutable blobs and log chunks;
+- continuous WAL archiving/PITR, a synchronous replica, object-lock on the CAS, and rehearsed
+  restores make that singleton authority recoverable to a stated RPO/RTO;
 - OCI registry stores signed, digest-pinned worker/evaluator images;
 - `ResourceCatalog`, expiring `CapacitySnapshot`, entitlement policy, placement leases, and audit
   explain what is possible, promised, queued, and actually allocated;
@@ -2177,6 +2265,8 @@ For the most likely shared on-prem installation:
   clean InputSnapshot materialization, and DebugWorkspace make browser/desktop IDEs clients of
   reproducible state rather than editors of execution truth;
 - Kubernetes Job + Kueue is the ordinary executor;
+- Cluster Autoscaler, Karpenter, or a Kueue `ProvisioningRequest` admission check grows the GPU pool
+  on demand when the deployment is elastic, with provisioning shown as a distinct phase;
 - Kueue cohorts/ClusterQueues/LocalQueues/ResourceFlavors encode guarantees, borrowing, fair-share,
   and GPU classes; ResourceQuota remains a defense-in-depth hard ceiling;
 - GPU Operator + full NVIDIA GPU resources is the baseline;
@@ -2211,9 +2301,13 @@ Do **not**:
 - copy a human OAuth bearer token, kubeconfig, or unrestricted Hub token into workers;
 - let users choose raw scheduler priority or turn an admin override into a permanent entitlement;
 - describe a cached “free GPU” count as a reservation or guaranteed start time;
+- admit a workload against capacity that is not being provisioned and leave it `Pending`
+  indefinitely, or present node provisioning as generic queue wait;
 - conflate hard cap, guaranteed share, borrowed burst, current lease, and cumulative budget;
 - use a shared mutable run directory/event log as worker coordination;
 - let workers write domain events or connect to the metadata database;
+- operate a shared control plane without a rehearsed restore drill and a stated RPO/RTO, or treat an
+  unrestored backup as durability;
 - trust self-reported metrics when private scoring exists;
 - use raw SSH as the production queue;
 - make Celery/Redis, Ray, Argo, Kubeflow Pipelines, MLflow, or dstack the authoritative LoopLab state;
@@ -2284,12 +2378,16 @@ The architecture does not require these answers for D0/D1, but profile and rollo
     PVCs, WorkspaceRevisions, drafts, access grants, and DebugWorkspaces?
 25. Is any live attach to an ExecutionAttempt allowed? If so, who may authorize it, how fast is
     active access revoked, and is `TAINTED_BY_INTERACTIVE_DEBUG` always excluded from promotion?
+26. Is the GPU pool fixed or elastic (cloud/hybrid)? What node-provisioning latency, warm headroom,
+    and `capacity_unavailable` behavior are acceptable, and what single-domain control-plane RPO/RTO
+    must the shared deployment meet — with a restore drill as part of the go-live gate?
 
 ---
 
 ## 16. Verification and primary sources
 
-All external links below were checked on 2026-07-12. The maturity snapshot used for decisions is
+All external links below were checked on 2026-07-12, except the control-plane-durability and
+elastic-capacity group (§4.8, §5.7), which was added 2026-07-13. The maturity snapshot used for decisions is
 Kubernetes 1.36 documentation, NVIDIA GPU Operator 26.3, NVIDIA DRA Driver 0.4.1, Kueue 0.18.3,
 Volcano 1.15.0, JobSet 0.12.0, Kubeflow Trainer 2.2.1, KubeRay 1.6.2, AMD GPU Operator 1.5.0, and
 Slurm 26.05 documentation. This is a research snapshot, not a dependency lock; revalidate the actual
@@ -2366,6 +2464,13 @@ cluster/operator compatibility matrix before implementation.
 - [Kueue SparkApplication integration](https://kueue.sigs.k8s.io/docs/tasks/run/kubeflow/sparkapplications/)
 - [Argo Workflows](https://argo-workflows.readthedocs.io/en/latest/)
 - [Kubeflow Pipelines model](https://www.kubeflow.org/docs/components/pipelines/concepts/pipeline/)
+
+### Control-plane durability and elastic capacity
+
+- [PostgreSQL continuous archiving and point-in-time recovery](https://www.postgresql.org/docs/current/continuous-archiving.html)
+- [Kubernetes Cluster Autoscaler FAQ](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md)
+- [Karpenter documentation](https://karpenter.sh/docs/)
+- [Kueue ProvisioningRequest admission check](https://kueue.sigs.k8s.io/docs/admission-check-controllers/provisioning/)
 
 ### Communal model serving and work-conserving operation
 
