@@ -14,7 +14,7 @@
 | Supersedes | — |
 | Superseded by | — |
 | Last verified | 2026-07-13 |
-| Revision | 2026-07-13 — every §4 code-confirmed claim re-verified at HEAD `5ed2e83` (unchanged; the one area a later fix touched is flagged in §4.2). Added: in-browser/WASM language-intelligence tier (§11.3), non-VS-Code desktop clients — JetBrains Gateway / Positron (§10.7), agent-assisted candidate editing (§11.8), and the multi-user / collaborative-editing boundary shared with doc 20 (§11.9). |
+| Revision | 2026-07-13 — every §4 code-confirmed claim re-verified at HEAD `5ed2e83` (unchanged; the one area a later fix touched is flagged in §4.2). Added: in-browser/WASM language-intelligence tier (§11.3), non-VS-Code desktop clients — JetBrains Gateway / Positron (§10.7), agent-assisted candidate editing (§11.8), and the multi-user / collaborative-editing boundary shared with doc 20 (§11.9), plus an opinionated implementer's build order (§23.1). |
 
 **Companion material:** [current delivery plan](17-project-review-and-directions-2026-07-11.md) ·
 [UI/UX audit](18-ui-ux-review-2026-07-11.md) ·
@@ -1345,6 +1345,42 @@ The recommended end state is deliberately hybrid:
 
 That combination maximizes both responsiveness and functionality without pretending that a large
 browser IDE, a custom editor, and standard SSH are interchangeable.
+
+### 23.1 Implementer's pick (opinionated sequencing)
+
+The list above is option-neutral; this subsection is a single recommended build order for LoopLab
+specifically. It diverges from the hybrid end state only in *sequencing and risk*, not in the final
+architecture, and it remains subordinate to doc 17's delivery gates.
+
+1. **Editor core: CodeMirror 6, local-first** (§9.1, §11.6). The primary journey is candidate-overlay
+   review/edit, not a full IDE; CM6's smaller surface, React/Vite fit, and official merge/diff cover
+   it. Keep Monaco behind the same adapter only to settle the §11.6 A/B, but bet on CM6.
+2. **Language intelligence: the WASM tier first** (§11.3) — `ruff` + `tree-sitter` + a worker-hosted
+   Pyright; defer the server LSP to Phase IDE-4. Highest responsiveness for the least operational
+   surface.
+3. **Build the differentiator before any remote-desktop work.** The purpose-built workspace API
+   (§11.2) → candidate-overlay drafts → one-`inject_node` commit (§11.5) → **agent-assisted diff
+   review** (§11.8). This unlocks human steering of the autonomous loop — the one capability with no
+   off-the-shelf substitute — and the read-only diff view (§4.1) pays off on day one.
+4. **Remote desktop: choose the path that does *not* block on the SSH-policy decision first.** If a
+   SaaS relay is acceptable, run a **Remote Tunnels** pilot (§10.4) — near-zero transport code, and it
+   proves the desktop-local-rendering thesis fast. If SaaS is forbidden, build the **Kubernetes Attach
+   broker** (§10.5): JupyterHub already runs on Kubernetes, so identity/pod binding is closest to what
+   exists, and it sidesteps the protocol argument entirely. Treat the **custom WSS-brokered SSH
+   gateway / Teleport** (§10.1–§10.2, §12) as a REMOTE-1 production decision, built only once a real
+   user demand and an approved SSH policy exist — not as an MVP.
+5. **Explicitly not chosen for LoopLab:** Coder/Theia/code-server as the default. Coder replaces
+   JupyterHub's control plane (a strategic org decision, not an editor — §10.3); code-server/Theia
+   reintroduce the heavy browser workbench that is already the observed lag (§9.5).
+6. **Hosting: keep JSP for the MVP** (§9.7) and replace the proxy only if the §18 A/B attributes
+   material latency to it.
+
+**Where this is more conservative than §23's headline.** §23 pairs the CM6 editor with a custom
+WSS-SSH/Teleport plane as the maximum-functionality answer. This pick agrees on the editor but puts
+**Remote Tunnels or Kubernetes Attach ahead of the custom gateway**, because they deliver most of the
+desktop-local benefit without depending on the unresolved SSH-policy question (§3) or on
+security-sensitive custom auth/lifecycle code (§12.2). The custom gateway remains the *end-state*
+maximum-compatibility option; it is simply not the first thing to build.
 
 ## 24. Primary upstream references
 
