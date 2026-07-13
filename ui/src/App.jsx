@@ -48,7 +48,13 @@ function ReviewRoute({ token }) {
       }) })
     return () => { active = false }
   }, [token, retry])
-  if (resource.status !== 'ready') return <main className="auth-gate" aria-live="polite">
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [resource.status])
+  if (resource.status !== 'ready') return <main className="auth-gate" data-route-main tabIndex={-1} aria-live="polite">
     <div className="auth-card">
       <div className="auth-mark" aria-hidden="true">{resource.status === 'gone' ? '×' : '◉'}</div>
       <h1>{resource.status === 'loading' ? 'Opening review…' : resource.status === 'gone' ? 'Review link unavailable' : 'Could not open review'}</h1>
@@ -58,6 +64,20 @@ function ReviewRoute({ token }) {
   </main>
   return <RunView key={`${resource.data.id || token}:${resource.data.run_id}`} runId={resource.data.run_id} onBack={null}
     reviewMode reviewMeta={resource.data} />
+}
+
+function RouteFocus({ label, routeKey, children }) {
+  useEffect(() => {
+    document.title = `${label} · LoopLab`
+    const frame = requestAnimationFrame(() => {
+      if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [routeKey, label])
+  return <>
+    <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">{label}</div>
+    {children}
+  </>
 }
 
 export default function App() {
@@ -71,6 +91,10 @@ export default function App() {
       window.removeEventListener('popstate', on)
     }
   }, [])
+  const routeLabel = route.view === 'run' ? `Run ${route.id}`
+    : route.view === 'settings' ? 'Settings'
+    : route.view === 'shared' ? 'Shared Assistant chat'
+    : route.view === 'review' ? 'Read-only run review' : 'Runs'
   const open = (id) => { location.hash = `#/run/${encodeURIComponent(id)}` }
   const back = () => { location.hash = '' }
   const settings = () => { location.hash = '#/settings' }
@@ -78,15 +102,18 @@ export default function App() {
   // The shared read-only view owns the whole screen (it IS a public chat), so the persistent assistant
   // is hidden there; everywhere else (list / run / settings) the assistant stays available.
   let content, hideAssistant = false
-  if (route.view === 'review') return <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
+  const routeKey = `${route.view}:${route.id || route.token || ''}`
+  if (route.view === 'review') return <RouteFocus label={routeLabel} routeKey={routeKey}>
+    <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
+  </RouteFocus>
   if (route.view === 'run') content = <RunView key={route.id} runId={route.id} onBack={back} />
   else if (route.view === 'settings') content = <Settings onBack={back} />
   else if (route.view === 'shared') { content = <SharedAssistant sid={route.id} onBack={back} />; hideAssistant = true }
   else content = <RunList onOpen={open} onSettings={settings} />
 
-  return <OwnerAuth><div className="app-shell">
+  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}><div className="app-shell">
       <div className="app-shell-main">{content}</div>
       {/* Mounted once, outside the route switch → the assistant persists across all navigation. */}
       <AssistantBar runId={route.view === 'run' ? route.id : null} hidden={hideAssistant} />
-    </div></OwnerAuth>
+    </div></RouteFocus></OwnerAuth>
 }

@@ -12,6 +12,7 @@ import { OpIcon } from './icons.jsx'
 import { runLifecycle } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
+import { DataTable } from './accessibility.jsx'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -204,10 +205,10 @@ function LiveTrace({ runId, active }) {
   return (
     <div className={'live-trace' + (open ? ' open' : '')}>
       {/* Standard inline disclosure — caret ▸ left of the label, expands IN PLACE (not a popup). */}
-      <div className="lt-toggle" onClick={() => setOpen(o => !o)}
-           title="stream the agent's thoughts + tool calls">
+      <button type="button" className="lt-toggle disclosure-button" aria-expanded={open}
+           onClick={() => setOpen(o => !o)} title="stream the agent's thoughts + tool calls">
         <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
-      </div>
+      </button>
       {open && <div className="lt-body" ref={bodyRef}>
         {tail.length === 0
           ? <div className="muted lt-empty">waiting for the next agent step…</div>
@@ -278,9 +279,10 @@ function agentStatus(live, log) {
 const Disclosure = ({ label, children }) => {
   const [open, setOpen] = useState(false)
   return <div className="think-debug" style={{ marginTop: 6 }}>
-    <div className="role-think" onClick={() => setOpen(v => !v)}
+    <button type="button" className="role-think disclosure-button" aria-expanded={open}
+         onClick={() => setOpen(v => !v)}
          style={{ cursor: 'pointer', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
-      {open ? '▾' : '▸'} {label}</div>
+      {open ? '▾' : '▸'} {label}</button>
     {open && children}
   </div>
 }
@@ -315,11 +317,11 @@ function PolicyDetail({ d }) {
       <div className="section-h">Why this node{d.reason ? ` — ${d.reason}` : ''}</div>
       {entries.length === 0
         ? <div className="v muted">chose #{d.chosen} (no candidate scores recorded)</div>
-        : <table className="tbl"><thead><tr><th>node</th><th>score</th></tr></thead>
+        : <DataTable caption="Candidate scores for node selection" card={false}><table className="tbl"><thead><tr><th>node</th><th>score</th></tr></thead>
             <tbody>{entries.map(([nid, sc]) =>
               <tr key={nid} className={String(nid) === String(d.chosen) ? 'chosen-row' : ''}>
                 <td>#{nid}{String(nid) === String(d.chosen) ? ' ✓ chosen' : ''}</td><td>{fmt(sc, 4)}</td></tr>)}
-            </tbody></table>}
+            </tbody></table></DataTable>}
     </div>
   )
 }

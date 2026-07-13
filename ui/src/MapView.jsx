@@ -9,15 +9,12 @@ import { RegionShell, SuperShell } from './groupnodes.jsx'
 import { OpIcon } from './icons.jsx'
 import { packRunGrid, UNASSIGNED_CLUSTER } from './runMapModel.js'
 import { effectiveRunStatus } from './runIndex.js'
+import { followClientRoute } from './accessibility.jsx'
 
 // Cross-run map: projects are regions and runs are readable cards inside them. Large clusters are
 // represented by a super-node until expanded; expanded runs use bounded grid packing rather than an
 // unbounded horizontal row (55 unassigned runs previously produced an ~11.7k px line).
 const RUN_W = 190, RUN_H = 80, RUN_DX = 214, ROW_DY = 122, INDENT = 64
-
-function activate(event, action) {
-  if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); action() }
-}
 
 function RunNode({ data }) {
   const run = data.run
@@ -26,8 +23,8 @@ function RunNode({ data }) {
   const stalled = status === 'stalled'
   const open = () => data.onOpen(run.run_id)
   return (
-    <div className="run-node" role="button" tabIndex={0} onClick={open}
-         onKeyDown={event => activate(event, open)}
+    <a className="run-node nodrag nopan" href={`#/run/${encodeURIComponent(run.run_id)}`}
+         onClick={event => followClientRoute(event, open)}
          aria-label={`Open ${run.label || run.run_id}, ${status}, ${run.task_id || 'unknown task'}`}
          title={run.goal}>
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
@@ -37,18 +34,18 @@ function RunNode({ data }) {
       <div className="muted">{run.label ? `${run.run_id} · ` : ''}{run.task_id} · best {fmt(run.best_confirmed ?? run.best_metric)} {run.direction || ''}</div>
       {themes.length > 0 && <div className="chips">{themes.slice(0, 4).map(([theme, info]) =>
         <span className="chip sm" key={theme} title={`best ${fmt(info.best_metric)}`}>{theme} <b>{info.count}</b></span>)}</div>}
-    </div>
+    </a>
   )
 }
 
 function ProjRegion({ data }) {
   const toggle = () => data.onToggle(data.id)
   const tab = (
-    <div className="grp-tab" role="button" tabIndex={0}
+    <button type="button" className="grp-tab nodrag nopan"
          onClick={(event) => { event.stopPropagation(); toggle() }}
-         onKeyDown={event => activate(event, toggle)} title={`Collapse ${data.name}`}>
+         title={`Collapse ${data.name}`}>
       <span className="grp-chev">▾</span><OpIcon name="folder" className="t-ic" /> {data.name}<span className="grp-n">{data.count}</span>
-    </div>
+    </button>
   )
   return <RegionShell w={data.w} h={data.h} path={data.path} tint={data.tint} tab={tab} />
 }

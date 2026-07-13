@@ -152,7 +152,7 @@ export default function Settings({ onBack }) {
       <span className="spacer" style={{ flex: 1 }} />
     </div>
 
-    <main className="settings-page">
+    <main className="settings-page" data-route-main tabIndex={-1}>
       {!form ? (loadError
         ? <div className="notice resource-error" role="alert"><b>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={load}>Retry</button></div>
         : <div className="notice" role="status">Loading settings…</div>) : <>

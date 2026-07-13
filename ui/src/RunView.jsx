@@ -14,6 +14,7 @@ import DirectionsOverview from './DirectionsOverview.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
 import { useDialogFocus } from './useDialogFocus.js'
+import { nextRovingIndex } from './accessibility.jsx'
 import {
   clearRunAccess, historyMatches, liveHistory, reconcileHistoricalSelection, rejectHistory,
   requestHistory, resolveHistory, setRunAccess,
@@ -51,6 +52,7 @@ const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
 // Expanded Timeline controls + pager + transport need enough room to leave a usable event viewport.
 // Heal old persisted splitter values instead of allowing a technically scrollable ~15 px sliver.
 const MIN_DOCK_HEIGHT = 200
+const hubMenuId = label => `panel-hub-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`
 
 function DagEmptyOverlay({ presentation, transport, onAction }) {
   if (!presentation) return null
@@ -170,6 +172,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [panel, reviewMode, reviewEvidence, historyActive])
   const panelReturnFocusRef = useRef(null)
   const hubTriggerRef = useRef(null)
+  const hubMenuRef = useRef(null)
   const closePanel = () => {
     setPanel(null)
     requestAnimationFrame(() => {
@@ -179,6 +182,25 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     })
   }
   const [openHub, setOpenHub] = useState(null)               // which panel-hub dropdown is open
+  const closeHub = (restoreFocus = false) => {
+    setOpenHub(null)
+    if (restoreFocus) requestAnimationFrame(() => {
+      const target = hubTriggerRef.current
+      if (target?.isConnected) target.focus({ preventScroll: true })
+    })
+  }
+  const onHubKeyDown = event => {
+    if (event.key === 'Tab') { setOpenHub(null); return }
+    if (event.key === 'Escape') { event.preventDefault(); closeHub(true); return }
+    const items = [...(hubMenuRef.current?.querySelectorAll('[role="menuitem"]:not(:disabled)') || [])]
+    const next = nextRovingIndex(event.key, Math.max(0, items.indexOf(document.activeElement)), items.length)
+    if (next == null) return
+    event.preventDefault(); items[next]?.focus()
+  }
+  useEffect(() => {
+    if (!openHub) return
+    requestAnimationFrame(() => hubMenuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true }))
+  }, [openHub])
   const landedRef = useRef(false)                            // auto-land on Report once, on finish
   const deepLinkLandingRef = useRef(route.hadState)          // even invalid state must not be hidden by auto-report
   // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
@@ -196,8 +218,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [compactInspectorOpen, setCompactInspectorOpen] = useState(false)
   const [compactTimelineOpen, setCompactTimelineOpen] = useState(false)
   const compactInspectorCloseRef = useRef(null)
+  const compactInspectorTriggerRef = useRef(null)
   const compactInspectorRef = useRef(null)
-  useDialogFocus(compactInspectorRef, () => setCompactInspectorOpen(false), compactWorkspace && compactInspectorOpen)
+  const closeCompactInspector = () => {
+    setCompactInspectorOpen(false)
+    requestAnimationFrame(() => {
+      const target = compactInspectorTriggerRef.current
+        || [...(document.querySelectorAll('[data-node-select-id]') || [])]
+          .find(element => element.dataset.nodeSelectId === String(selectedId))
+      target?.focus({ preventScroll: true })
+    })
+  }
+  useDialogFocus(compactInspectorRef, closeCompactInspector, compactWorkspace && compactInspectorOpen)
   useEffect(() => {
     storageSet('ll.sideW', sideW); storageSet('ll.dockH', dockH)
     storageSet('ll.sideC', sideC ? '1' : '0'); storageSet('ll.dockC', dockC ? '1' : '0')
@@ -214,6 +246,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // Drag a splitter: the side panel grows when dragged left, the dock when dragged up.
   const startDrag = (axis) => (e) => {
     e.preventDefault()
+    const target = e.currentTarget, pointerId = e.pointerId
+    target.setPointerCapture?.(pointerId)
     const x0 = e.clientX, y0 = e.clientY, w0 = sideW, h0 = dockH
     const onMove = (ev) => {
       if (axis === 'side') setSideW(clampSide(w0 - (ev.clientX - x0)))
@@ -221,10 +255,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
     const onUp = () => {
       window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', onUp)
+      window.removeEventListener('pointercancel', onUp)
+      if (target.hasPointerCapture?.(pointerId)) target.releasePointerCapture(pointerId)
       document.body.style.userSelect = ''; dragCleanupRef.current = null
     }
     dragCleanupRef.current = onUp   // unmount mid-drag must also detach the window listeners
     window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', onUp)
+    window.addEventListener('pointercancel', onUp)
     document.body.style.userSelect = 'none'
   }
   const resizeWithKeys = (axis) => (e) => {
@@ -293,10 +330,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
   const [mergeFrom, setMergeFrom] = useState(null)   // arm: next node click merges with this one
+  const [mergeTarget, setMergeTarget] = useState('')
+  const [mergeSubmitting, setMergeSubmitting] = useState(false)
+  const mergeReturnFocusRef = useRef(null)
+  const closeMergeChooser = (restoreFocus = true) => {
+    const source = mergeFrom
+    const captured = mergeReturnFocusRef.current
+    mergeReturnFocusRef.current = null
+    setMergeFrom(null)
+    setMergeTarget('')
+    if (!restoreFocus || source == null) return
+    requestAnimationFrame(() => {
+      const fallback = document.querySelector(`[data-node-action-id="${source}"]`)
+        || document.querySelector(`[data-node-select-id="${source}"]`)
+      const target = captured?.isConnected ? captured : fallback
+      target?.focus?.({ preventScroll: true })
+    })
+  }
   const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
   useEffect(() => {
     if (!historyActive) return
     setMergeFrom(null)
+    setMergeTarget('')
+    mergeReturnFocusRef.current = null
     setComparePair(null)
     setOpenHub(null)
     setSelectedGroup(null)
@@ -367,8 +423,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (feedback.kind === 'error') throw new Error(feedback.message)
     return feedback
   }
-  const onNodeAction = async (action, arg) => {
+  const onNodeAction = async (action, arg, context = null) => {
     if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
+    if (action === 'merge' && arg && typeof arg === 'object' && mergeSubmitting && !context?.fromChooser) {
+      showToast('A merge is already being submitted'); return
+    }
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
         const ids = [arg.from, arg.to]
@@ -377,7 +436,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           success: `Merge #${arg.from} + #${arg.to} applied — the engine is processing it`, noop: 'That merge was already satisfied',
           executing: `Merge #${arg.from} + #${arg.to} requested — waiting for the engine`, failure: 'Merge failed',
         })
-        showToast(f.message); return
+        showToast(f.message)
+        if (mergeFrom != null) closeMergeChooser(true)
+        else { setMergeFrom(null); setMergeTarget('') }
+        return
       }
       const id = arg
       const generation = live2?.nodes?.[id]?.attempt
@@ -399,8 +461,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         else setSideC(false)
       }   // un-collapse: with the side
       // panel folded (sideC persists in localStorage!) selecting alone changes nothing visible
-      else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
-      else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
+      else if (action === 'diff') {
+        panelReturnFocusRef.current = context?.returnFocus || null
+        setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare')
+      }
+      else if (action === 'merge') {
+        mergeReturnFocusRef.current = context?.returnFocus || null
+        setMergeFrom(id); setMergeTarget('')
+        showToast(`Choose a destination below or click a node to merge with #${id}`)
+      }
       else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
         const stage = action.split(':')[1]
         const f = checkedCommand(await CONTROL.resetNode(runId, id, stage, generation), {
@@ -427,7 +496,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   // When armed for merge, a node click completes the merge instead of selecting.
   const onCanvasSelect = (id) => {
-    if (readOnlyMode && mergeFrom != null) { setMergeFrom(null); return }
+    if (mergeFrom != null && mergeSubmitting) { showToast('A merge is already being submitted'); return }
+    if (readOnlyMode && mergeFrom != null) {
+      mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget(''); return
+    }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
       const ids = [mergeFrom, id]
       const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
@@ -438,17 +510,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         }))
         .then(feedback => showToast(feedback.message))
         .catch(error => showToast(error.message || 'Merge failed'))
-      setMergeFrom(null); return
+      mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget(''); return
     }
-    if (mergeFrom != null) setMergeFrom(null)
+    if (mergeFrom != null) { mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget('') }
     selectNode(id)
     if (compactWorkspace && id != null) setCompactInspectorOpen(true)
   }
   useEffect(() => {   // Esc cancels the merge-arm
     if (mergeFrom == null) return
-    const h = (e) => { if (e.key === 'Escape') setMergeFrom(null) }
+    const h = (e) => {
+      if (e.key !== 'Escape' || e.defaultPrevented || mergeSubmitting) return
+      if (document.querySelector('[aria-modal="true"]')) return
+      closeMergeChooser(true)
+    }
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
-  }, [mergeFrom])
+  }, [mergeFrom, mergeSubmitting])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, eventSeq) => {
     const value = Number(eventSeq)
@@ -488,6 +564,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }, [live?.finished, groupMode, historyActive])
 
+  const mergeCandidates = useMemo(() => Object.values(live2?.nodes || {})
+    .filter(node => node.id !== mergeFrom).sort((left, right) => left.id - right.id), [live2, mergeFrom])
+  const submitMergeTarget = async (event) => {
+    event.preventDefault()
+    if (mergeTarget === '') return
+    const target = Number(mergeTarget)
+    if (mergeFrom == null || !Number.isSafeInteger(target) || target === mergeFrom || mergeSubmitting) return
+    setMergeSubmitting(true)
+    try { await onNodeAction('merge', { from: mergeFrom, to: target }, { fromChooser: true }) }
+    finally { setMergeSubmitting(false) }
+  }
+
   const copyViewLink = async () => {
     const relative = route.exactHref(routeState, { forReview: reviewMode })
     const url = new URL(relative, window.location.origin).href
@@ -502,13 +590,23 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }
 
+  const routeFocusPhase = !live ? `resource:${runStatus}`
+    : routeFenceBlocked ? `fence:${generationMismatch ? 'mismatch' : 'pending'}`
+    : historyActive && !hist ? `history:${history.status}` : 'ready'
+  useEffect(() => {
+    const frame = requestAnimationFrame(() => {
+      if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [routeFocusPhase])
+
   if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
       <span className="brand"><span className="dot">◉</span> LoopLab</span>
       {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
-    <main className="run-resource-state" aria-live="polite">
+    <main className="run-resource-state" data-route-main tabIndex={-1} aria-live="polite">
       {runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
         <h1>Run not found</h1>
@@ -535,7 +633,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
-    <main className="run-resource-state stale-route-state" role={generationMismatch ? 'alert' : 'status'}>
+    <main className="run-resource-state stale-route-state" data-route-main tabIndex={-1}
+      role={generationMismatch ? 'alert' : 'status'}>
       <div className="resource-state-icon" aria-hidden="true">{generationMismatch ? '↺' : '…'}</div>
       <h1>{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
       {generationMismatch ? <>
@@ -584,11 +683,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <span>read-only</span>
       <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
     </div>
-    <main className="history-resource">
+    <main className="history-resource" data-route-main tabIndex={-1}>
       {currentHistory?.status === 'error'
-        ? <><h2>Snapshot unavailable</h2><p>{currentHistory.error}</p>
+        ? <><h1>Snapshot unavailable</h1><p>{currentHistory.error}</p>
             <button className="btn" onClick={() => setHistoryRetry(n => n + 1)}>Retry</button></>
-        : <><div className="history-spinner" aria-hidden="true" /><h2>Loading snapshot seq {viewSeq}…</h2>
+        : <><div className="history-spinner" aria-hidden="true" /><h1>Loading snapshot seq {viewSeq}…</h1>
             <p>The live workspace is hidden until this exact historical state resolves.</p></>}
     </main>
   </div>
@@ -633,16 +732,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
 
   return (
-    <div className={'app' + (reviewMode ? ' review-mode' : '')}>
+    <main className={'app' + (reviewMode ? ' review-mode' : '')} data-route-main tabIndex={-1}>
+      <h1 className="sr-only">{state.label || state.run_id || runId} run workspace</h1>
       <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
         {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
           : <span className="pill">read-only review</span>}
-        <div className="view-toggle" role="tablist">
-          <button className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
-          <button className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
+        <div className="view-toggle" role="group" aria-label="Run workspace views">
+          <button type="button" aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+          <button type="button" aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
             title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
-          <button className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
+          <button type="button" aria-pressed={panel === 'overview'} className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
             onClick={event => {
               if (panel === 'overview') closePanel()
               else { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }
@@ -661,15 +761,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
             set (strategy + rationale, hints, dedup) moved to the Overview tab so this header stays a
             SINGLE non-wrapping line. Clicking a metric opens Overview for the detail. */}
-        {evalSec > 0 && <span className="chip" title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
-          onClick={event => { if (!historyActive) { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') } }} style={{ cursor: historyActive ? 'default' : 'pointer' }}>
-          <span className="k">eval</span> {fmt(evalSec, 1)}s{maxEval ? ` / ${maxEval}` : ''}</span>}
-        {cost && <span className="chip" title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
-          onClick={event => { if (!historyActive) { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') } }} style={{ cursor: historyActive ? 'default' : 'pointer' }}>
-          <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</span>}
-        {state.reward_hacks?.length > 0 && <span className="chip alarm" title={historyActive ? 'Historical mode — return live to open Trust' : 'suspicious wins flagged (B5) — open Trust'}
-          onClick={event => { if (!historyActive) { panelReturnFocusRef.current = event.currentTarget; setPanel('trust') } }} style={{ cursor: historyActive ? 'default' : 'pointer' }}>
-          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {state.reward_hacks.length}</span>}
+        {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
+          title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
+          onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
+          <span className="k">eval</span> {fmt(evalSec, 1)}s{maxEval ? ` / ${maxEval}` : ''}</button>}
+        {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
+          title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
+          onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
+          <span className="k">tokens</span> {fmtInt(cost.total_tokens)}</button>}
+        {state.reward_hacks?.length > 0 && <button type="button" className="chip alarm run-metric-chip" disabled={historyActive}
+          title={historyActive ? 'Historical mode — return live to open Trust' : 'suspicious wins flagged (B5) — open Trust'}
+          onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('trust') }}>
+          <span className="k"><OpIcon name="alert" size={11} /> hack?</span> {state.reward_hacks.length}</button>}
         {finalizing
           ? <span className="chip warn"><OpIcon name="stop" size={11} />
               {lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'
@@ -724,17 +827,26 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           </>}
         </div>}
 
-      <div className="topbar panel-bar" style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
+      <div className={'topbar panel-bar' + (openHub ? ' hub-open' : '')}
+        style={{ minHeight: 38, paddingTop: 4, paddingBottom: 4 }}>
         <div className="menu">
           {/* 4 consolidated hubs — each a dropdown of related panels; the hub lights when its open
               panel is active. Report/Overview live in the view-toggle above; Settings is dedicated. */}
           {HUBS.map(([label, items]) => <div className="more-wrap" key={label}>
-            <button className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
+            <button type="button" className={'btn sm ghost' + (HUB_OF[panel] === label ? ' on' : '')}
+                    aria-haspopup="menu" aria-expanded={openHub === label} aria-controls={hubMenuId(label)}
+                    disabled={!items.some(([key]) => panelAllowed(key))}
+                    title={!items.some(([key]) => panelAllowed(key)) ? 'No panels in this group are available in the current view' : undefined}
                     onClick={event => { hubTriggerRef.current = event.currentTarget; setOpenHub(o => o === label ? null : label) }}>{label} ▾</button>
             {openHub === label && <>
-              <div className="menu-backdrop" onClick={() => setOpenHub(null)} />
-              <div className="run-menu more-menu" onClick={e => e.stopPropagation()}>
-                {items.map(([k, l]) => <button key={k} className={'mi' + (panel === k ? ' on' : '')}
+              <div className="menu-backdrop" aria-hidden="true" onClick={() => closeHub(true)} />
+              <div ref={hubMenuRef} id={hubMenuId(label)} className="run-menu more-menu" role="menu"
+                aria-label={`${label} panels`} onClick={e => e.stopPropagation()} onKeyDown={onHubKeyDown}
+                onBlur={event => {
+                  if (event.relatedTarget !== hubTriggerRef.current && !event.currentTarget.contains(event.relatedTarget)) closeHub(false)
+                }}>
+                {items.map(([k, l]) => <button type="button" role="menuitem" tabIndex={-1}
+                  key={k} className={'mi' + (panel === k ? ' on' : '')}
                   disabled={!panelAllowed(k)}
                   title={!panelAllowed(k)
                     ? reviewMode
@@ -745,7 +857,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                     : undefined}
                   onClick={() => {
                     if (!panelAllowed(k)) return
-                    panelReturnFocusRef.current = hubTriggerRef.current; setOpenHub(null); setPanel(k)
+                    panelReturnFocusRef.current = hubTriggerRef.current; closeHub(false); setPanel(k)
                   }}>{l}</button>)}
               </div>
             </>}
@@ -756,6 +868,24 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   onClick={event => { setOpenHub(null); panelReturnFocusRef.current = event.currentTarget; setPanel('config') }}>Settings</button>
         </div>
       </div>
+
+      {mergeFrom != null && !readOnlyMode && <form className="merge-destination-bar"
+        aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
+        <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
+        <select id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
+          onChange={event => setMergeTarget(event.target.value)} autoFocus>
+          <option value="">Choose an experiment…</option>
+          {mergeCandidates.map(node => <option key={node.id} value={node.id}>
+            #{node.id} · {node.operator || 'experiment'} · {node.status}
+          </option>)}
+        </select>
+        <button type="submit" className="btn sm primary" disabled={!mergeTarget || mergeSubmitting}>
+          {mergeSubmitting ? 'Merging…' : 'Merge experiments'}
+        </button>
+        <button type="button" className="btn sm ghost" disabled={mergeSubmitting}
+          onClick={() => closeMergeChooser(true)}>Cancel</button>
+        <span className="muted">You can also choose the destination directly on the graph.</span>
+      </form>}
 
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
@@ -784,12 +914,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             onAction={onEmptyAction} />
         </div>
         {compactWorkspace && !showInspector && hasInspectorContext &&
-          <button className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
+          <button ref={compactInspectorTriggerRef} className="workspace-pane-toggle" onClick={() => setCompactInspectorOpen(true)}
                   aria-label={`Open ${selectedGroup != null ? 'group' : 'inspector'} panel`}>
             {selectedGroup != null ? 'Group' : `Inspector · #${selectedId}`}
           </button>}
         {compactWorkspace && showInspector &&
-          <button className="workspace-scrim" onClick={() => setCompactInspectorOpen(false)}
+          <button className="workspace-scrim" onClick={closeCompactInspector}
                   aria-label="Close inspector panel" />}
         {!compactWorkspace && hasInspectorContext && !showInspector
           ? <button className="side-rail" title="show panel" onClick={() => setSideC(false)}>‹ {selectedGroup != null ? 'group' : 'inspector'}</button>
@@ -807,11 +937,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   <span className="spacer" style={{ flex: 1 }} />
                   <button ref={compactInspectorCloseRef} className="btn sm ghost" title={compactWorkspace ? 'close panel' : 'collapse panel'}
                           aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${selectedGroup != null ? 'group details' : 'experiment inspector'}`}
-                          onClick={() => compactWorkspace ? setCompactInspectorOpen(false) : setSideC(true)}>⟩</button>
+                          onClick={() => compactWorkspace ? closeCompactInspector() : setSideC(true)}>⟩</button>
                 </div>
                 {selectedGroup != null
                   ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
-                      state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); setCompactInspectorOpen(false) }} />
+                      state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
                   : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                       tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
                       readOnly={readOnlyMode} historySeq={history.resolvedSeq}
@@ -864,6 +994,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
 
       {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
-    </div>
+    </main>
   )
 }

@@ -21,7 +21,7 @@
   border-radius: 16px;
   background: var(--bg-1);
   color: var(--fg-dim);
-  font: 700 15px/1 var(--mono);
+  font: 700 15px/1 ui-monospace, Consolas, monospace;
 }
 .resource-state-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-top: 8px; }
 .notice.resource-error, .notice.resource-warning {
@@ -30,16 +30,16 @@
   flex-wrap: wrap;
   gap: 10px;
 }
-.notice.resource-error { border-style: solid; border-color: color-mix(in srgb, var(--bad) 45%, var(--line-2)); }
+.notice.resource-error { border-style: solid; border-color: color-mix(in srgb, var(--fail) 45%, var(--line-2)); }
 .notice.resource-error span { flex: 1 1 260px; }
-.notice.resource-warning { border-style: solid; border-color: color-mix(in srgb, var(--warn) 45%, var(--line-2)); }
+.notice.resource-warning { border-style: solid; border-color: color-mix(in srgb, var(--working) 45%, var(--line-2)); }
 .notice.compact-error { margin: 6px 8px; padding: 8px; font-size: 12px; }
 .notice.resource-empty { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
 .splitter:focus-visible { background: var(--accent-dim); outline: 2px solid var(--accent); outline-offset: -2px; }
 .run-card [role="link"]:focus-visible,
 .ptree-row:focus-visible,
 .ptw[role="button"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 5px; }
-.pill.phase.paused { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
-.pill.phase.approval { color: var(--working); border-color: color-mix(in srgb, var(--working) 45%, var(--line-2)); }
-.live.paused { color: var(--working); }
+.pill.phase.paused { color: var(--accent-text); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
+.pill.phase.approval { color: var(--working-text); border-color: color-mix(in srgb, var(--working) 45%, var(--line-2)); }
+.live.paused { color: var(--working-text); }
 .live.paused .led { background: var(--working); box-shadow: none; animation: none; }

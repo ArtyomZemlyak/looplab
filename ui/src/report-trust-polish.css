@@ -1,9 +1,9 @@
 /* Report + Trust semantic polish. Kept separate so these evidence-oriented surfaces can evolve
    without adding more special cases to the core design-system stylesheet. */
 :root {
-  --trust-ok-ink: color-mix(in srgb, var(--ok) 64%, var(--fg));
-  --trust-warn-ink: color-mix(in srgb, var(--working) 62%, var(--fg));
-  --trust-alarm-ink: color-mix(in srgb, var(--alarm) 68%, var(--fg));
+  --trust-ok-ink: var(--ok-text);
+  --trust-warn-ink: var(--working-text);
+  --trust-alarm-ink: var(--alarm-text);
   --trust-neutral-ink: var(--fg-dim);
 }
 
@@ -33,7 +33,7 @@
 .report-step-kind { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .report-step-theme { text-transform: none; letter-spacing: 0; }
 .report-delta { font-weight: 650; }
-.report-delta.baseline { color: var(--accent); }
+.report-delta.baseline { color: var(--accent-text); }
 .report-delta.improved { color: var(--trust-ok-ink); }
 .report-delta.regressed { color: var(--trust-alarm-ink); }
 

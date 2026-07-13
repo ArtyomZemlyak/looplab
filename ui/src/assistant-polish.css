@@ -100,7 +100,7 @@
 }
 .assistant-command-pending.error {
   border-color: color-mix(in srgb, var(--fail) 58%, var(--line));
-  color: var(--fail);
+  color: var(--fail-text);
   background: color-mix(in srgb, var(--fail) 7%, transparent);
 }
 
@@ -111,7 +111,7 @@
   flex-wrap: wrap;
 }
 .cmdbar-status.recovery .btn { min-height: 44px; padding: 8px 10px; flex: none; }
-.cmdbar-status.error { color: var(--fail); }
+.cmdbar-status.error { color: var(--fail-text); }
 
 @media (max-width: 600px) {
   .feed-msg.chat.assistant .chat-bubble.assistant-error-bubble {

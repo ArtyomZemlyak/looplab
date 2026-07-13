@@ -1,8 +1,9 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
-import { usePoll } from './hooks.js'
+import { useMediaQuery, usePoll } from './hooks.js'
 import { getRunAccess } from './runMode.js'
+import { useDialogFocus } from './useDialogFocus.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import {
   clearLaunchDraftSession, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
@@ -137,6 +138,10 @@ const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|
 const FILE_CHAR_CAP = 20000
 const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
+const clampAssistantWidth = value => {
+  const max = Math.max(320, window.innerWidth - 120)
+  return Math.min(Math.max(Number(value) || 440, 320), max)
+}
 const readFileText = (file) => new Promise((resolve) => {
   const r = new FileReader()
   r.onload = () => resolve({ name: file.name, size: file.size, content: String(r.result || '').slice(0, FILE_CHAR_CAP), truncated: (r.result || '').length > FILE_CHAR_CAP })
@@ -145,6 +150,7 @@ const readFileText = (file) => new Promise((resolve) => {
 })
 
 export default function AssistantBar({ runId, hidden = false }) {
+  const compactAssistant = useMediaQuery('(max-width: 1279px)')
   const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
   const historical = !!runId && runAccess.readOnly
   const staleDiagnostic = historical && runAccess.mode === 'stale-link'
@@ -182,8 +188,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   const resolvingPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [files, setFiles] = useState([])          // attached text files [{name,size,content,truncated}]
-  const [sideW, setSideW] = useState(() => Math.min(
-    Math.max(+storageGet('ll.asstW', 440) || 440, 320), window.innerWidth - 120))
+  const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
 
   // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
   // one arrives so the safe Reject-first focus and assertive pending announcement are actually usable.
@@ -204,6 +209,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
   const inputRef = useRef(null)
   const feedRef = useRef(null)
+  const fullDialogRef = useRef(null)
+  const sideDialogRef = useRef(null)
   const atBottomRef = useRef(true)     // is the feed scrolled to (near) the bottom? gates autoscroll
   const flashTimerRef = useRef(null)   // single toast-clear timer so rapid flashes don't clip each other
   const fileRef = useRef(null)
@@ -279,32 +286,56 @@ export default function AssistantBar({ runId, hidden = false }) {
     // failed command recovery remains announced/focused in the newly mounted side/full status node.
     if (commandBusy || directFailure) commandFocusRequestedRef.current = true
     setView(next); setHasNew(false)
+    if (next === 'side') requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
   }
   const openSide = () => openCommandView('side')   // openable any time (even empty)
   const openFull = () => openCommandView('full')
   const collapseToBar = () => {
+    const returnSelector = view === 'side' ? '.cmdbar-drawer-btn' : '.cmdbar-ic'
     const la = lastAssistant()
     if (la && la.content) { setPreview(previewText(la.content)); setHasNew(true) }
     if (commandBusy || directFailure) commandFocusRequestedRef.current = true
     setView('bar')
+    requestAnimationFrame(() => document.querySelector(returnSelector)?.focus())
   }
   const toggleSide = () => (view === 'side' ? collapseToBar() : openSide())
+  useDialogFocus(fullDialogRef, collapseToBar, view === 'full' && !hidden)
+  useDialogFocus(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden)
 
   // ── resizable side panel (drag its left edge) ──
   const resizeCleanupRef = useRef(null)
+  const maxSideWidth = () => Math.max(320, window.innerWidth - 120)
   const startResize = (e) => {
+    if (e.button != null && e.button !== 0) return
     e.preventDefault()
     const x0 = e.clientX, w0 = sideW
-    const onMove = (ev) => setSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), window.innerWidth - 120))
+    const onMove = (ev) => setSideW(Math.min(Math.max(w0 - (ev.clientX - x0), 320), maxSideWidth()))
     const cleanup = () => {
-      window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', cleanup)
+      window.removeEventListener('pointermove', onMove); window.removeEventListener('pointerup', cleanup)
+      window.removeEventListener('pointercancel', cleanup)
       document.body.style.cursor = ''; resizeCleanupRef.current = null
     }
     resizeCleanupRef.current = cleanup   // unmount mid-drag must also detach the window listeners
     document.body.style.cursor = 'col-resize'
-    window.addEventListener('mousemove', onMove); window.addEventListener('mouseup', cleanup)
+    window.addEventListener('pointermove', onMove); window.addEventListener('pointerup', cleanup)
+    window.addEventListener('pointercancel', cleanup)
+  }
+  const resizeWithKeys = event => {
+    const step = event.shiftKey ? 48 : 16
+    let next = null
+    if (event.key === 'ArrowLeft') next = sideW + step
+    else if (event.key === 'ArrowRight') next = sideW - step
+    else if (event.key === 'Home') next = 320
+    else if (event.key === 'End') next = maxSideWidth()
+    if (next == null) return
+    event.preventDefault(); setSideW(Math.min(Math.max(next, 320), maxSideWidth()))
   }
   useEffect(() => () => resizeCleanupRef.current?.(), [])
+  useEffect(() => {
+    const clamp = () => setSideW(width => clampAssistantWidth(width))
+    window.addEventListener('resize', clamp)
+    return () => window.removeEventListener('resize', clamp)
+  }, [])
 
   // ── sessions (full view) ──
   const openSession = async (id, { recover = false } = {}) => {
@@ -480,6 +511,10 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   const delSession = async (id, e) => {
     e?.stopPropagation()
+    const row = e?.currentTarget?.closest('.asst-sess')
+    const focusAfterDelete = row?.nextElementSibling?.querySelector('.asst-sess-open')
+      || row?.previousElementSibling?.querySelector('.asst-sess-open')
+      || document.querySelector('.asst-side-h .btn.primary')
     const unresolved = listLaunchTransports()
       .find(item => launchDraftSession(item.identity) === String(id))
     if (unresolved) {
@@ -488,6 +523,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       return
     }
     setSessions(ss => ss.filter(s => s.id !== id))   // optimistic: drop it now (geesefs list can lag)
+    requestAnimationFrame(() => focusAfterDelete?.isConnected && focusAfterDelete.focus({ preventScroll: true }))
     try {
       await assistantDelete(id)
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
@@ -506,7 +542,12 @@ export default function AssistantBar({ runId, hidden = false }) {
       await assistantResolve(reqId, decision)
       if (sidRef.current === requestSession) setPending(current => {
         const next = current.filter(req => req.id !== reqId)
-        if (!next.length) requestAnimationFrame(() => inputRef.current?.focus())
+        requestAnimationFrame(() => {
+          const target = next.length
+            ? document.querySelector('.asst-perm-region .asst-perm-actions button:not([disabled])')
+            : inputRef.current
+          target?.focus({ preventScroll: true })
+        })
         return next
       })
     } catch (error) {
@@ -1391,17 +1432,19 @@ export default function AssistantBar({ runId, hidden = false }) {
   const fileChips = files.length > 0 && <div className="asst-files">
     {files.map(f => <span key={f.name} className="chip xs file" title={`${(f.size / 1024).toFixed(1)} KB${f.truncated ? ' · truncated' : ''}`}>
       <OpIcon name="doc" size={11} /> {f.name}
-      <button className="chip-x" onClick={() => removeFile(f.name)} title="remove">✕</button></span>)}
+      <button className="chip-x" onClick={() => removeFile(f.name)} aria-label={`Remove ${f.name}`}>✕</button></span>)}
   </div>
 
-  const attachBtn = (cls) => <button className={cls} title={historical ? 'Unavailable while viewing history' : 'attach text file(s)'}
+  const attachBtn = (cls) => <button className={cls} aria-label="Attach text files"
+    title={historical ? 'Unavailable while viewing history' : 'attach text file(s)'}
     disabled={historical} onClick={() => fileRef.current?.click()}>
     <OpIcon name="clip" size={14} /></button>
 
   // mode selector row — placed BELOW the input in the side + full composers.
   const modeRow = <div className="asst-moderow">
     <div className="asst-modes">
-      {MODES.map(x => <button key={x.id} className={'asst-mode' + (x.id === mode ? ' on' : '')}
+      {MODES.map(x => <button key={x.id} aria-pressed={x.id === mode}
+        className={'asst-mode' + (x.id === mode ? ' on' : '')}
         disabled={historical} title={historical ? readOnlyShort : x.hint}
         onClick={() => setMode(x.id)}>{x.label}</button>)}
     </div>
@@ -1424,16 +1467,17 @@ export default function AssistantBar({ runId, hidden = false }) {
     </div>}
     {runId && refNodes(input).length > 0 && <div className="cmdbar-ctx">
       {refNodes(input).map(id => <span key={id} className="chip xs">#{id}
-        <button className="chip-x" title="detach" onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
+        <button className="chip-x" aria-label={`Detach experiment ${id}`} onClick={() => setInput(input.replace(new RegExp(`#(?:node-)?${id}\\b`, 'gi'), '').replace(/\s{2,}/g, ' ').trim())}>✕</button></span>)}
     </div>}
     {fileChips}
     <div className="asst-inrow">
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
+        aria-label="Assistant message"
         disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : placeholder} />
       {busy
-        ? <button className="btn sm" title="stop" onClick={stop}>■</button>
+        ? <button className="btn sm" aria-label="Stop Assistant" title="stop" onClick={stop}>■</button>
         : <button className="btn sm primary" disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>{commandBusy ? 'Waiting…' : 'Send'}</button>}
     </div>
     {modeRow}
@@ -1447,13 +1491,13 @@ export default function AssistantBar({ runId, hidden = false }) {
 
     {/* ── bottom bar — ONLY in bar view (moves into the side panel otherwise) ── */}
     {view === 'bar' && <div className={'cmdbar-wrap'}><div className={'cmdbar-dock' + (busy || commandBusy ? ' thinking' : '') + (hasNew ? ' fresh' : '')}>
-      <button className="cmdbar-ic" title="open the full assistant" onClick={openFull}>✦</button>
+      <button className="cmdbar-ic" aria-label="Open full Assistant" title="open the full assistant" onClick={openFull}>✦</button>
       {launchRecoveryButton}
       <div className="cmdbar-field">
         {(refNodes(input).length > 0 || files.length > 0) && <div className="cmdbar-ctx">
           {runId && refNodes(input).map(id => <span key={id} className="chip xs">#{id}</span>)}
           {files.map(f => <span key={f.name} className="chip xs file"><OpIcon name="doc" size={10} /> {f.name}
-            <button className="chip-x" onClick={() => removeFile(f.name)}>✕</button></span>)}
+            <button className="chip-x" aria-label={`Remove ${f.name}`} onClick={() => removeFile(f.name)}>✕</button></span>)}
         </div>}
         {showSuggestions && <div className="cmdbar-pop" id="assistant-command-listbox" role="listbox" aria-label="Assistant commands">
           {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
@@ -1463,6 +1507,7 @@ export default function AssistantBar({ runId, hidden = false }) {
             <b>/{c.name}</b><span className="muted"> {c.desc}</span></button>)}
         </div>}
         <input className="cmdbar-in" ref={inputRef} value={input}
+          aria-label="Assistant command or question"
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}
           aria-controls="assistant-command-listbox"
           aria-activedescendant={activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined}
@@ -1497,15 +1542,25 @@ export default function AssistantBar({ runId, hidden = false }) {
       {/* send / stop share ONE slot (you can't send mid-turn) — kept separate from the side button
           so stopping never opens a view. */}
       {busy
-        ? <button className="cmdbar-go stop" title="stop the assistant" onClick={stop}>■</button>
-        : <button className="cmdbar-go" title={commandBusy ? 'Waiting for the current run command' : historical ? 'Return live to use Assistant' : 'send (Enter)'} disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
-      <button className="cmdbar-drawer-btn" title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
+        ? <button className="cmdbar-go stop" aria-label="Stop Assistant" title="stop the assistant" onClick={stop}>■</button>
+        : <button className="cmdbar-go" aria-label="Send Assistant message"
+            title={commandBusy ? 'Waiting for the current run command' : historical ? 'Return live to use Assistant' : 'send (Enter)'}
+            disabled={historical || commandBusy || (!input.trim() && files.length === 0)} onClick={send}>▶</button>}
+      <button className="cmdbar-drawer-btn" aria-label="Open Assistant in side view"
+        title="open chat on the right (side view)" onClick={openSide}><OpIcon name="chat" size={13} /></button>
       {visibleToast && <div className="cmdbar-toast" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
     </div></div>}
 
     {/* ── right side panel (resizable) — the composer lives INSIDE it; no bottom bar while open ── */}
-    {view === 'side' && <div className="asst-side-panel" style={{ width: sideW }}>
-      <div className="asst-resize" onMouseDown={startResize} title="drag to resize" />
+    {view === 'side' && compactAssistant && <div className="asst-side-backdrop" aria-hidden="true"
+      onPointerDown={collapseToBar} />}
+    {view === 'side' && <aside ref={sideDialogRef} className="asst-side-panel" aria-label="Assistant"
+      role={compactAssistant ? 'dialog' : undefined} aria-modal={compactAssistant ? 'true' : undefined}
+      tabIndex={compactAssistant ? -1 : undefined} style={{ width: sideW }}>
+      <div className="asst-resize" role="separator" aria-label="Resize Assistant panel"
+        aria-orientation="vertical" aria-valuemin={320} aria-valuemax={maxSideWidth()}
+        aria-valuenow={Math.round(sideW)} tabIndex={0} onPointerDown={startResize}
+        onKeyDown={resizeWithKeys} title="Drag or use arrow keys to resize" />
       <div className="asst-drawer-h">
         <b className="asst-drawer-ttl">Assistant</b>
         {ctxChip}
@@ -1515,13 +1570,16 @@ export default function AssistantBar({ runId, hidden = false }) {
         <button className="btn sm ghost" title="expand to the full view" onClick={openFull}>⤢ full</button>
         <button className="btn sm ghost" title="collapse to the bar" onClick={collapseToBar}>▾ bar</button>
       </div>
-      <div className="asst-drawer-feed" ref={feedRef} onScroll={onFeedScroll}>{renderThread()}</div>
+      <div className="asst-drawer-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
+        aria-live={busy ? 'off' : 'polite'} aria-busy={busy} aria-relevant="additions" tabIndex={0}
+        onScroll={onFeedScroll}>{renderThread()}</div>
       {composer('Message the assistant…  (/ for commands · Enter to send)')}
       {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
-    </div>}
+    </aside>}
 
     {/* ── full page — dedicated OPAQUE view (sessions · thread · composer) ── */}
-    {view === 'full' && <div className="asst-view asst-full">
+    {view === 'full' && <div ref={fullDialogRef} className="asst-view asst-full" role="dialog"
+      aria-modal="true" aria-label="Assistant" tabIndex={-1}>
       <div className="asst-side">
         <div className="asst-side-h">
           <button className="btn sm" title="fold back to the bar" onClick={collapseToBar}>▾ bar</button>
@@ -1530,10 +1588,14 @@ export default function AssistantBar({ runId, hidden = false }) {
         </div>
         <div className="asst-sessions">
           {sessions.length === 0 && <div className="muted" style={{ padding: 12, fontSize: 12 }}>No chats yet.</div>}
-          {sessions.map(s => <div key={s.id} className={'asst-sess' + (s.id === sid ? ' active' : '')} onClick={() => openSession(s.id)}>
-            <div className="asst-sess-t">{s.title || 'Chat'}</div>
-            <div className="asst-sess-m">{fmtAgo(s.updated)}</div>
-            <button className="asst-sess-x" onClick={(e) => delSession(s.id, e)} title="delete chat">✕</button>
+          {sessions.map(s => <div key={s.id} className={'asst-sess' + (s.id === sid ? ' active' : '')}>
+            <button type="button" className="asst-sess-open" aria-current={s.id === sid ? 'page' : undefined}
+              onClick={() => openSession(s.id)}>
+              <span className="asst-sess-t">{s.title || 'Chat'}</span>
+              <span className="asst-sess-m">{fmtAgo(s.updated)}</span>
+            </button>
+            <button className="asst-sess-x" onClick={(e) => delSession(s.id, e)}
+              aria-label={`Delete chat ${s.title || 'Chat'}`}>✕</button>
           </div>)}
         </div>
       </div>
@@ -1556,7 +1618,9 @@ export default function AssistantBar({ runId, hidden = false }) {
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
         </div>
-        <div className="asst-feed" ref={feedRef} onScroll={onFeedScroll}>{renderThread()}</div>
+        <div className="asst-feed" ref={feedRef} role="log" aria-label="Assistant transcript"
+          aria-live={busy ? 'off' : 'polite'} aria-busy={busy} aria-relevant="additions" tabIndex={0}
+          onScroll={onFeedScroll}>{renderThread()}</div>
         {composer('Message the assistant…  (/ for commands · Enter to send)')}
         {visibleToast && <div className="cmdbar-toast side" role="status" aria-live="polite" aria-atomic="true">{visibleToast}</div>}
       </div>

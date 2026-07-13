@@ -9,7 +9,7 @@ import React from 'react'
 export function RegionShell({ w, h, path, tint, tab }) {
   return (
     <div className="grp-region" style={{ width: w, height: h, '--grp-tint': tint }}>
-      <svg width={w} height={h}><path d={path} className="grp-hull" /></svg>
+      <svg width={w} height={h} aria-hidden="true" focusable="false"><path d={path} className="grp-hull" /></svg>
       {tab}
     </div>
   )
@@ -36,13 +36,11 @@ export function GroupRegion({ w, h, label, count, tint, onToggle }) {
 
 // Collapsed-group card shell. Caller supplies the body (children) and the click/selected state.
 export function SuperShell({ tint, selected, onClick, title, children }) {
-  const onKeyDown = onClick ? (event) => {
-    if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); onClick() }
-  } : undefined
   return (
     <div className={'grp-super' + (selected ? ' sel' : '')} style={{ '--grp-tint': tint }}
-         onClick={onClick} onKeyDown={onKeyDown} role={onClick ? 'button' : undefined}
-         tabIndex={onClick ? 0 : undefined} title={title}>
+         title={title}>
+      {onClick && <button type="button" className="grp-super-select" onClick={onClick}
+        aria-label={title || 'Open collapsed group'} aria-pressed={selected || undefined} />}
       {children}
     </div>
   )

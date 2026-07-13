@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { getScopeReport, genScopeReport, fmt, fmtAgo } from './util.js'
 import { OpIcon } from './icons.jsx'
+import { useDialogFocus } from './useDialogFocus.js'
 
 function Section({ title, items }) {
   if (!items || !items.length) return null
@@ -14,6 +15,7 @@ function Section({ title, items }) {
 // stored report (if any); you can Generate when there's none, or Regenerate when it's gone stale. The
 // report is authored by an agent with access to every run in the scope.
 export default function ScopeReport({ scope, onOpen, onClose }) {
+  const dialogRef = useRef(null)
   const [data, setData] = useState(null)        // GET/POST response: {exists, content, generated_at, …}
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState(null)
@@ -33,19 +35,21 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   const c = data?.content
   const label = data?.label || data?.scope?.label || scope.label || `${scope.type} ${scope.id}`
   const added = data?.added || []
+  useDialogFocus(dialogRef, onClose)
 
-  return <div className="overlay" onMouseDown={onClose}>
-    <div className="panel sr-panel" onMouseDown={e => e.stopPropagation()}>
+  return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
+    <div ref={dialogRef} className="panel sr-panel" role="dialog" aria-modal="true"
+      aria-label={`Cross-run report for ${label}`} tabIndex={-1}>
       <div className="panel-h">
         <span className="ttl"><OpIcon name="doc" className="t-ic" /> Cross-run report</span>
         <span className="pill">{label}</span>
         <span className="right" style={{ flex: 1 }} />
         {data?.exists && <button className="btn sm" disabled={busy} onClick={generate}>{busy ? '… generating' : '↻ Regenerate'}</button>}
-        <button className="btn sm ghost" onClick={onClose}>✕</button>
+        <button className="btn sm ghost" onClick={onClose} aria-label="Close cross-run report">✕</button>
       </div>
       <div className="panel-b">
-        {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3' }}>{err}</div>}
-        {data == null && !err && <div className="notice">Loading…</div>}
+        {err && <div className="notice" role="alert" style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>{err}</div>}
+        {data == null && !err && <div className="notice" role="status">Loading…</div>}
 
         {data && !data.exists && <div className="sr-empty">
           <div className="muted" style={{ marginBottom: 12 }}>
@@ -68,12 +72,13 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
           {c.verdict && <div className="sr-verdict">{c.verdict}</div>}
           {c.best_runs?.length > 0 && <div className="sr-sec">
             <div className="sr-h">Best runs</div>
-            <div className="sr-bests">{c.best_runs.map((b, i) => <div key={i} className="sr-best"
-              title={b.run_id ? 'open ' + b.run_id : ''} onClick={() => b.run_id && onOpen?.(b.run_id)}>
+            <div className="sr-bests">{c.best_runs.map((b, i) => <button type="button" key={i}
+              className="sr-best" disabled={!b.run_id}
+              title={b.run_id ? 'open ' + b.run_id : ''} onClick={() => onOpen?.(b.run_id)}>
               <b className="sr-m">{fmt(b.metric)}</b>
               <span className="sr-rid">{b.run_id}</span>
               {b.why && <span className="muted"> · {b.why}</span>}
-            </div>)}</div>
+            </button>)}</div>
           </div>}
           <Section title="What worked" items={c.what_worked} />
           <Section title="What didn’t" items={c.what_didnt} />

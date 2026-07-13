@@ -6,6 +6,7 @@ import { MemoCard } from './panels.jsx'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import { reportStepIdentity } from './trustSemantics.js'
+import { DataTable } from './accessibility.jsx'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -170,7 +171,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
         <div className="section-h">How the metric got better</div>
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption="Metric improvement steps" card={false}><table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
             <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-label={reportStepIdentity(s.operator, s.theme)}>
               <span aria-hidden="true">{s.operator || 'unknown operator'}</span>
@@ -179,7 +180,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
             <td>{fmt(s.to)}</td>
             <td className={`report-delta ${s.delta == null ? 'baseline' : (impr(s) ? 'improved' : 'regressed')}`}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
             <td className="muted">{paramDiffLabel(s.diff)}</td></tr>)}
-        </tbody></table>
+        </tbody></table></DataTable>
         {a.steps.length > 1 && <div className="muted">Total improvement <b>{fmt(a.totalGain)}</b> over {a.steps.length} steps (baseline {fmt(a.firstBest)} → best {fmt(a.finalBest)}).</div>}
       </>}
 
@@ -190,10 +191,10 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
         {rep?.next_directions?.length > 0 && <><div className="muted">next directions</div><List items={rep.next_directions} /></>}
         {imp.length > 0 && <>
           <div className="muted" style={{ marginTop: 6 }}>which knobs mattered (|correlation| with the metric)</div>
-          <table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th></tr></thead><tbody>
+          <DataTable caption="Report hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th></tr></thead><tbody>
             {imp.map(row => <tr key={row.k}><td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
               <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td></tr>)}
-          </tbody></table></>}
+          </tbody></table></DataTable></>}
         {memos.length > 0 && <div style={{ marginTop: 8 }}>
           {memos.map((m, i) => <MemoCard key={i} memo={m} idx={i} open={openMemo === i} onToggle={(k) => setOpenMemo(o => o === k ? null : k)} />)}
         </div>}

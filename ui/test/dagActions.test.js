@@ -32,9 +32,9 @@ test('DAG action popup follows the ARIA menu keyboard pattern and restores focus
   const dag = await source('Dag.jsx')
 
   assert.match(dag, /className="node-menu" role="menu" aria-label=\{`Actions for experiment #\$\{menu\.nodeId\}`\}/)
-  assert.equal((dag.match(/<button role="menuitem"/g) || []).length, 9)
+  assert.equal((dag.match(/<button type="button" role="menuitem" tabIndex=\{-1\}/g) || []).length, 9)
   assert.match(dag, /querySelector\('\[role="menuitem"\]'\)\?\.focus\(\{ preventScroll: true \}\)/)
-  for (const key of ['ArrowDown', 'ArrowUp', 'Home', 'End', 'Escape']) {
+  for (const key of ['Tab', 'ArrowDown', 'ArrowUp', 'Home', 'End', 'Escape']) {
     assert.ok(dag.includes(`event.key === '${key}'`), `${key} must be handled by the menu`)
   }
   assert.match(dag, /returnFocus\?\.isConnected \? returnFocus : fallback \|\| dagRef\.current/,

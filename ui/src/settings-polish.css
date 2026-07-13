@@ -39,7 +39,7 @@
 .settings-help summary {
   width: max-content;
   margin-left: auto;
-  color: var(--accent);
+  color: var(--accent-text);
   cursor: pointer;
 }
 
@@ -153,14 +153,14 @@
 
 .settings-summary-divider { color: var(--line-2); }
 .settings-summary .is-unsaved,
-.settings-save-state.is-unsaved { color: var(--working); }
+.settings-save-state.is-unsaved { color: var(--working-text); }
 
 .settings-summary-link {
   margin-left: auto;
   padding: 2px 0;
   border: 0;
   background: transparent;
-  color: var(--accent);
+  color: var(--accent-text);
   font: inherit;
   cursor: pointer;
 }

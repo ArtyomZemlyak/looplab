@@ -3,6 +3,9 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24.0.0"
+  },
   "scripts": {
     "dev": "vite",
     "test": "node --test test/*.test.js",
@@ -16,6 +19,8 @@
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",
+    "axe-core": "4.12.1",
+    "jsdom": "29.1.1",
     "vite": "^5.4.10"
   }
 }

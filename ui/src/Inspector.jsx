@@ -10,6 +10,7 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
+import { DataTable, nextRovingIndex } from './accessibility.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -27,6 +28,9 @@ const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 function ResetBtn({ runId, id, generation, onToast }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
+  const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const menuRef = useRef(null)
   const STAGES = [
     ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
     ['implement', 're-run the Developer', "keep the Researcher's idea, re-write the code (its code crashed)"],
@@ -35,6 +39,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
   const doReset = async (stage) => {
     if (busy) return
     setOpen(false)
+    requestAnimationFrame(() => triggerRef.current?.focus({ preventScroll: true }))
     setBusy(true)
     try {
       const feedback = commandFeedback(await CONTROL.resetNode(runId, id, stage, generation), {
@@ -45,19 +50,44 @@ function ResetBtn({ runId, id, generation, onToast }) {
     } catch (error) { onToast?.(`Reset #${id} failed: ${error.message || error}`) }
     finally { setBusy(false) }
   }
-  return <span style={{ position: 'relative', marginLeft: 8 }}>
-    <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }}
+  useEffect(() => {
+    if (!open) return
+    requestAnimationFrame(() => menuRef.current?.querySelector('[role="menuitem"]')?.focus())
+  }, [open])
+  useEffect(() => {
+    if (!open) return
+    const dismiss = event => { if (!rootRef.current?.contains(event.target)) setOpen(false) }
+    document.addEventListener('pointerdown', dismiss, true)
+    return () => document.removeEventListener('pointerdown', dismiss, true)
+  }, [open])
+  const onMenuKeyDown = event => {
+    const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
+    const index = items.indexOf(document.activeElement)
+    if (event.key === 'Tab') { setOpen(false); return }
+    if (event.key === 'Escape') {
+      event.preventDefault(); setOpen(false); requestAnimationFrame(() => triggerRef.current?.focus()); return
+    }
+    const next = nextRovingIndex(event.key, Math.max(0, index), items.length)
+    if (next == null) return
+    event.preventDefault(); items[next]?.focus()
+  }
+  return <span ref={rootRef} style={{ position: 'relative', marginLeft: 8 }}>
+    <button ref={triggerRef} className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }}
             title="re-run THIS node in place (no new node) from a chosen stage"
-            disabled={busy} onClick={() => setOpen(o => !o)}>{busy ? '↻ Resetting…' : '↻ Reset ▾'}</button>
-    {open && <div style={{ position: 'absolute', zIndex: 30, top: '110%', left: 0, background: 'var(--panel,#1b1f2a)', border: '1px solid var(--border,#333)', borderRadius: 6, padding: 4, minWidth: 240, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}>
+            aria-haspopup="menu" aria-expanded={open} aria-disabled={busy} aria-busy={busy}
+            onClick={() => { if (!busy) setOpen(!open) }}>{busy ? '↻ Resetting…' : '↻ Reset ▾'}</button>
+    {open && <div ref={menuRef} role="menu" aria-label={`Reset experiment ${id} from stage`}
+      onKeyDown={onMenuKeyDown}
+      onBlur={event => {
+        if (event.relatedTarget !== triggerRef.current && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
+      }}
+      style={{ position: 'absolute', zIndex: 30, top: '110%', left: 0, background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6, padding: 4, minWidth: 240, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}>
       {STAGES.map(([stage, label, desc]) =>
-        <div key={stage} style={{ padding: '6px 8px', cursor: 'pointer', borderRadius: 4 }}
-             title={desc} onMouseDown={() => doReset(stage)}
-             onMouseEnter={e => e.currentTarget.style.background = 'var(--hover,#2a3140)'}
-             onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-          <div><b style={{ fontSize: 12 }}>{label}</b> <span className="muted" style={{ fontSize: 10 }}>from {stage}</span></div>
-          <div className="muted" style={{ fontSize: 10 }}>{desc}</div>
-        </div>)}
+        <button type="button" role="menuitem" key={stage} className="reset-stage-option"
+             tabIndex={-1} title={desc} onClick={() => doReset(stage)}>
+          <span style={{ display: 'block' }}><b style={{ fontSize: 12 }}>{label}</b> <span className="muted" style={{ fontSize: 10 }}>from {stage}</span></span>
+          <span className="muted" style={{ display: 'block', fontSize: 10 }}>{desc}</span>
+        </button>)}
     </div>}
   </span>
 }
@@ -119,15 +149,29 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     ? readOnlyReason === 'review' ? reviewInspectorTabs(evidenceAvailable) : ['Overview', 'Code', 'Trust', 'Cost']
     : liveTabs
   const activeTab = tabs.includes(tab) ? tab : 'Overview'
+  const tabSlug = value => value.toLowerCase().replace(/[^a-z0-9]+/g, '-')
+  const tabId = value => `inspector-${nodeId}-tab-${tabSlug(value)}`
+  const panelId = value => `inspector-${nodeId}-panel-${tabSlug(value)}`
+  const onTabKeyDown = (event, index) => {
+    const next = nextRovingIndex(event.key, index, tabs.length)
+    if (next == null) return
+    event.preventDefault()
+    const nextTab = tabs[next]
+    setTab(nextTab)
+    requestAnimationFrame(() => document.getElementById(tabId(nextTab))?.focus())
+  }
 
   return (
     <>
       <div className="tabs" role="tablist" aria-label="Inspector sections">
-        {tabs.map(t => <button key={t} type="button" role="tab" aria-selected={t === activeTab}
+        {tabs.map((t, index) => <button key={t} id={tabId(t)} type="button" role="tab"
+          aria-selected={t === activeTab} aria-controls={t === activeTab ? panelId(t) : undefined}
+          tabIndex={t === activeTab ? 0 : -1}
           className={'tab' + (t === activeTab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
-          onClick={() => setTab(t)}>{t}</button>)}
+          onClick={() => setTab(t)} onKeyDown={event => onTabKeyDown(event, index)}>{t}</button>)}
       </div>
-      <div className="insp-body">
+      <div className="insp-body" id={panelId(activeTab)} role="tabpanel"
+        aria-labelledby={tabId(activeTab)} tabIndex={0}>
         {detailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
         {detailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
         {readOnly
@@ -166,7 +210,7 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
     <div className="tabs">
       <div className="tab active">Group · {groupKey}</div>
       <span style={{ flex: 1 }} />
-      <button className="btn sm ghost" onClick={onClose} title="close group view">✕</button>
+      <button className="btn sm ghost" onClick={onClose} title="close group view" aria-label="Close group details">✕</button>
     </div>
     <div className="insp-body">
       <div className="kv">
@@ -177,9 +221,10 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
       <div className="section-h">Best over members</div>
       <Trajectory nodes={members} direction={dir} height={150} onPick={onSelectNode} />
       <div className="section-h">Members <span className="pill">{members.length}</span></div>
-      <table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
-        <tbody>{members.map(n => <tr key={n.id} style={{ cursor: 'pointer' }} onClick={() => onSelectNode(n.id)}>
-          <td>#{n.id}</td><td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table>
+      <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
+        <tbody>{members.map(n => <tr key={n.id}>
+          <td><button type="button" className="btn xs ghost" onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
+          <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
     </div>
   </>
 }
@@ -191,7 +236,7 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
   const [pendingStage, setPendingStage] = useState(null)
   if (!stages || !stages.length) return null
   const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
-    : s.status === 'reused' ? 'var(--muted, #888)' : 'var(--fail)'
+    : s.status === 'reused' ? 'var(--fg-mut)' : 'var(--fail)'
   const ic = (s) => s.status === 'ok' ? '✓' : s.status === 'timeout' ? '⧗' : s.status === 'reused' ? '↺' : '✗'
   const rerun = async (name) => {
     if (!runId || pendingStage) return
@@ -381,8 +426,8 @@ function GenBody({ c }) {
       : <div className="muted" style={{ fontSize: 12, padding: '2px 2px 4px' }}>
           {nTools ? `→ called ${nTools} tool${nTools > 1 ? 's' : ''} (shown below)` : '(no text output)'}</div>}
     {c.thinking && <div className="msg think-debug">
-      <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
-        {think ? '▾' : '▸'} reasoning (debug)</div>
+      <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
+        onClick={() => setThink(v => !v)}>{think ? '▾' : '▸'} reasoning (debug)</button>
       {think && <Markdown className="think-body" text={c.thinking} />}</div>}
   </div>
 }
@@ -442,7 +487,8 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
     const a = { ...(s.attributes || {}), ...(io || {}) }
     const c = genToCall({ ...s, attributes: a }), t = callTok(c)
     return <>
-      <div className={'span-row gen' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
+      <button type="button" aria-expanded={open} className={'span-row gen disclosure-button' + (err ? ' err' : '')}
+        style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         {(() => {   // name the call by ROLE so "who writes code" is unmistakable: the Developer's LLM
           // call (under implement/repair) is "writing code"; the Researcher's (under propose) is "reasoning".
@@ -454,7 +500,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {(t.in != null || t.out != null) && <span className="badge" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
         {err && <span className="badge reason">ERROR</span>}
-      </div>
+      </button>
       {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
         {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <GenBody c={c} />}</div>}
       {kids}
@@ -464,13 +510,14 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
     const a = { ...(s.attributes || {}), ...(io || {}) }
     const inp = asText(a.input), outp = asText(a.output), name = (s.attributes || {}).tool || a.tool || 'tool'
     return <>
-      <div className={'span-row tool' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for input & output">
+      <button type="button" aria-expanded={open} className={'span-row tool disclosure-button' + (err ? ' err' : '')}
+        style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for input & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b></span>
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {err && <span className="badge reason">ERROR</span>}
-      </div>
+      </button>
       {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
         {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <>
           {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
@@ -486,9 +533,12 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const calls = llmEvents(s)
   const m = stageMeta(s.name)
   const detail = attrs.length || events.length || calls.length
+  const OperationHeader = detail ? 'button' : 'div'
   return <>
-    <div className={'span-row' + (err ? ' err' : '')} style={{ paddingLeft: depth * 14 }}
-         onClick={() => detail && setOpen(o => !o)} title={detail ? 'click for step detail' : ''}>
+    <OperationHeader type={detail ? 'button' : undefined} aria-expanded={detail ? open : undefined}
+         className={'span-row' + (detail ? ' disclosure-button' : '') + (err ? ' err' : '')}
+         style={{ paddingLeft: depth * 14 }} onClick={detail ? () => setOpen(o => !o) : undefined}
+         title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
       <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
       {bar}
@@ -496,7 +546,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
       {calls.length > 0 && (() => { const tok = calls.reduce((a, c) => a + (callTok(c).total || 0), 0)
         return <span className="badge" title="model calls in this step — expand to read prompt & completion">{calls.length}×LLM{tok ? ` · ${ktok(tok)}` : ''}</span> })()}
       {err && <span className="badge reason">ERROR</span>}
-    </div>
+    </OperationHeader>
     {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
       {attrs.length > 0 && <div className="kv">{attrs.map(([k, v]) =>
         <KV key={k} k={k} v={typeof v === 'object' ? JSON.stringify(v) : String(v)} />)}</div>}
@@ -520,7 +570,8 @@ export function LlmCall({ call, idx }) {
   const msgs = (call.prompt || []).length
   const preview = callPreview(call)
   return <div className={'llm-row' + (open ? ' open' : '')}>
-    <div className="llm-line" onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & completion'}>
+    <button type="button" className="llm-line disclosure-button" aria-expanded={open}
+      onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & completion'}>
       <span className="span-tw">{open ? '▾' : '▸'}</span>
       {typeof idx === 'number' && <span className="llm-i">{idx + 1}</span>}
       <span className="llm-op">{call.op || 'llm'}</span>
@@ -529,7 +580,7 @@ export function LlmCall({ call, idx }) {
       {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt (context size)`}>{msgs}m</span>}
       {call.thinking && <span className="llm-think" title="model reasoning captured"><OpIcon name="bulb" /></span>}
       {preview && <span className="llm-prev">{preview}</span>}
-    </div>
+    </button>
     {open && <div className="llm-io">
       {(call.prompt || []).map((m, i) => <div key={i} className="msg">
         <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
@@ -542,9 +593,10 @@ export function LlmCall({ call, idx }) {
       {/* Raw <think> chain-of-thought: a debug aid only, kept collapsed so the clean answer above
           stays the primary view. The conclusion is what matters; this is how it got there. */}
       {call.thinking && <div className="msg think-debug">
-        <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
+        <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
+          onClick={() => setThink(v => !v)}>
           {think ? '▾' : '▸'} reasoning (debug)
-        </div>
+        </button>
         {think && <Markdown className="think-body" text={call.thinking} />}
       </div>}
     </div>}
@@ -593,10 +645,10 @@ function AgentReport({ r }) {
       <span className="spacer" style={{ flex: 1 }} />
       <span className="muted">{r.attempts} attempt{r.attempts === 1 ? '' : 's'}</span>
     </div>
-    <table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
+    <DataTable caption="Agent attempt validation checks" card={false}><table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
       <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
         <td>{c.name}</td><td style={{ color: c.ok ? 'var(--ok)' : 'var(--fail)' }}>{c.ok ? '✓' : '✗'}</td>
-        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table>
+        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table></DataTable>
   </div>
 }
 
@@ -609,12 +661,13 @@ function ConvRequest({ t }) {
   const [open, setOpen] = useState(false)   // system prompt is big — collapsed by default
   const roles = (t.messages || []).map(m => m.role).join(' + ')
   return <div className="conv-req">
-    <div className="conv-req-h" onClick={() => setOpen(o => !o)} title="the system + user prompt for this sub-loop (shown once)">
+    <button type="button" className="conv-req-h disclosure-button" aria-expanded={open}
+      onClick={() => setOpen(o => !o)} title="the system + user prompt for this sub-loop (shown once)">
       <span className="span-tw">{open ? '▾' : '▸'}</span>
       <OpIcon name="chat" className="t-ic" /> <b>request</b>
       {t.label && <span className="llm-op">{t.label}</span>}
       <span className="muted conv-req-roles"> {roles}</span>
-    </div>
+    </button>
     {open && <div className="conv-req-body">
       {(t.messages || []).map((m, i) => <div key={i} className="msg">
         <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
@@ -639,8 +692,8 @@ function ConvGen({ t }) {
       {t.status === 'ERROR' && <span className="badge reason">ERROR</span>}
     </div>
     {t.think && <div className="msg think-debug">
-      <div className="msg-role role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer' }}>
-        {think ? '▾' : '▸'} thinking</div>
+      <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
+        onClick={() => setThink(v => !v)}>{think ? '▾' : '▸'} thinking</button>
       {think && <Markdown className="think-body" text={t.think} />}</div>}
     {text && <div className="conv-out"><Markdown text={text} /></div>}
     {calls.length > 0 && <div className="conv-calls muted">→ called {calls.join(', ')}</div>}
@@ -652,13 +705,14 @@ function ConvTool({ t }) {
   const [open, setOpen] = useState(false)
   const err = t.status === 'ERROR'
   return <div className={'conv-tool' + (err ? ' err' : '')}>
-    <div className="conv-tool-h" onClick={() => setOpen(o => !o)} title="tool call — expand for input & output">
+    <button type="button" className="conv-tool-h disclosure-button" aria-expanded={open}
+      onClick={() => setOpen(o => !o)} title="tool call — expand for input & output">
       <span className="span-tw">{open ? '▾' : '▸'}</span>
       <OpIcon name="gear" className="t-ic" /> <b className="tool-name">{t.name}</b>
       {!open && t.input && <span className="muted conv-tool-prev"> {t.input.slice(0, 60)}</span>}
       {err && <span className="badge reason">ERROR</span>}
       {t.seconds != null && <span className="t">{fmt(t.seconds, 2)}s</span>}
-    </div>
+    </button>
     {open && <div className="conv-tool-body">
       {t.input && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{t.input}</pre></div>}
       {t.output && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{t.output}</pre></div>}
@@ -697,7 +751,8 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   // developer/eval read as distinct bands. Click the header to collapse the whole band.
   return <div className={'stage' + (err ? ' err' : '')}
               style={{ borderLeft: `3px solid ${err ? 'var(--fail)' : m.tone}` }}>
-    <div className="stage-h" title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}
+    <button type="button" className="stage-h disclosure-button" aria-expanded={open}
+         title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}
          style={{ cursor: 'pointer', background: err ? undefined : `color-mix(in srgb, ${m.tone} 12%, transparent)` }}>
       <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
       <span className="stage-ic" style={{ color: err ? 'var(--fail)' : m.tone }}><OpIcon name={m.icon} /></span>
@@ -709,7 +764,7 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
         {tk.context ? ` · ${ktok(tk.context)} ctx` : ''}
         {tk.completion ? ` · ${ktok(tk.completion)} out` : ''}</span> : null}
       {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
-    </div>
+    </button>
     {open && <div className="conv-turns">
       {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
         : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
@@ -754,11 +809,12 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
 // tab; a collapsed footnote under the trace so a setup failure is still inspectable without its own tab.
 function RunSetupLog({ text }) {
   const [open, setOpen] = useState(false)
-  return <div className="stage" style={{ borderLeft: '3px solid var(--muted, #555)', marginTop: 4 }}>
-    <div className="stage-h" onClick={() => setOpen(o => !o)} style={{ cursor: 'pointer' }}>
+  return <div className="stage" style={{ borderLeft: '3px solid var(--fg-mut)', marginTop: 4 }}>
+    <button type="button" className="stage-h disclosure-button" aria-expanded={open}
+      onClick={() => setOpen(o => !o)}>
       <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
       <b className="muted">Run setup <span style={{ fontWeight: 400 }}>· deps install (run-level, once)</span></b>
-    </div>
+    </button>
     {open && <div className="conv-turns"><StageLog text={text} live={false} /></div>}
   </div>
 }
@@ -809,19 +865,19 @@ function Trace({ n, runId, live, working }) {
       <span className="muted" style={{ fontSize: 11, color: 'var(--fail)' }}>{clearing}</span>}
   </span>
   const nav = <span className="trace-nav">
-    <button className="seg" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
-    <button className="seg" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
+    <button className="seg" aria-label="Scroll trace to top" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
+    <button className="seg" aria-label="Scroll trace to newest" title="scroll to newest (bottom)" onClick={() => scrollTo('bottom')}>↓</button></span>
   // STICKY control bar: pinned to the top of the scroll area (position:sticky in .trace-head) so the view
   // toggle / collapse-all / scroll nav stay reachable while you page through a long trace, instead of
   // scrolling off the top. collapse-all is shown only for the conversation view (it acts on the bands).
   const head = <div className="trace-head">
     {status}
     <div className="conv-toggle">
-      <button className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
+      <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
         title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-      <button className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
+      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
         title="The raw span tree with each generation's full re-sent message list">raw spans</button>
-      {view === 'conversation' && <button className="seg" style={{ fontSize: 10 }} title="collapse or expand every stage"
+      {view === 'conversation' && <button className="seg" aria-pressed={allOpen} style={{ fontSize: 10 }} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
       <span style={{ flex: 1 }} />{clearBtn}{nav}
     </div>
@@ -918,16 +974,16 @@ function Metrics({ n, detail, state, runId }) {
   ]
   return <>
     <div className="section-h">Reported metrics{champ ? ` · best = #${champ.id}` : ''}</div>
-    <table className="tbl"><thead><tr><th>metric</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
+    <DataTable caption="Node metric comparison" card={false}><table className="tbl"><thead><tr><th>metric</th><th>this node</th>{showChamp && <th>best #{champ.id}</th>}</tr></thead>
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
         <td>{r.star ? '★ ' : ''}{r.k}</td><td>{fmt(r.mine)}</td>
-        {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table>
+        {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
     {n.confirmed_mean != null && <div className="kv" style={{ marginTop: 8 }}>
       <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${n.confirmed_seeds || vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
-      <table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
-        <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table>
+      <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
+        <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table></DataTable>
     </>}
     <div className="section-h" style={{ marginTop: 12 }}>Metric curves
       <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>· live, every logged scalar — collapsible by group</span></div>
@@ -971,7 +1027,11 @@ function Trials({ n, detail, state }) {
   const scatter = params.length
     ? trials.map((t, i) => ({ x: t.params?.[params[0]] ?? i, y: t.metric, feasible: t.metric != null, id: i })).filter(d => d.y != null)
     : []
-  const Th = ({ k, children }) => <th style={{ cursor: 'pointer' }} onClick={() => setSort(k)}>{children}{sortKey === k ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ''}</th>
+  const Th = ({ k, children }) => <th aria-sort={sortKey === k ? (sortDir === 'asc' ? 'ascending' : 'descending') : undefined}>
+    <button type="button" className="table-sort" onClick={() => setSort(k)}>
+      {children}{sortKey === k && <span aria-hidden="true">{sortDir === 'asc' ? ' ▲' : ' ▼'}</span>}
+    </button>
+  </th>
   return <>
     <div className="kv">
       <KV k="trials" v={trials.length} />
@@ -988,7 +1048,7 @@ function Trials({ n, detail, state }) {
       <Scatter data={scatter} xlab={params[0]} ylab="metric" height={220} />
     </>}
     <div className="section-h">Trials <span className="pill">{trials.length}</span></div>
-    <table className="tbl">
+    <DataTable caption="Hyperparameter sweep trial results" card={false}><table className="tbl">
       <thead><tr><Th k="idx">#</Th>{params.map(p => <Th key={p} k={p}>{p}</Th>)}<Th k="metric">metric</Th><Th k="seconds">s</Th></tr></thead>
       <tbody>{rows.map(t => <tr key={t._i}
         className={t._i === bestIdx ? 'best-row' : ''}>
@@ -996,7 +1056,7 @@ function Trials({ n, detail, state }) {
         {params.map(p => <td key={p}>{t.params?.[p] != null ? fmt(t.params[p]) : '—'}</td>)}
         <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>
         <td className="muted">{fmt(t.seconds)}</td></tr>)}</tbody>
-    </table>
+    </table></DataTable>
     {rowsAll.length > CAP && <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setShowAll(s => !s)}>
       {showAll ? 'show fewer' : `show all ${rowsAll.length}`}</button>}
   </>
@@ -1021,13 +1081,15 @@ function Trust({ n, drifts = [] }) {
     <div className="section-h">Feasibility</div>
     <State {...feasibility} />
     {n.violations?.length
-      ? <table className="tbl"><thead><tr><th>constraint</th><th>value</th><th>bound</th></tr></thead>
+      ? <DataTable caption="Constraint violations" card={false}><table className="tbl"><thead><tr><th>constraint</th><th>value</th><th>bound</th></tr></thead>
         <tbody>{n.violations.map((v, i) => <tr key={i}><td className="flag">{v.name}</td><td>{fmt(v.value)}</td><td>{v.max != null ? `≤ ${fmt(v.max)}` : `≥ ${fmt(v.min)}`}</td></tr>)}</tbody></table>
+      </DataTable>
       : null}
     <div className="section-h">Metric drift</div>
     {drifts.length
-      ? <><State tone="alarm" label={`${drifts.length} divergence${drifts.length === 1 ? '' : 's'} recorded`} detail="The independent metric reader disagreed with the primary metric." /><table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
+      ? <><State tone="alarm" label={`${drifts.length} divergence${drifts.length === 1 ? '' : 's'} recorded`} detail="The independent metric reader disagreed with the primary metric." /><DataTable caption="Metric drift cross-checks" card={false}><table className="tbl"><thead><tr><th>seed</th><th>primary</th><th>cross-check</th><th>tol</th></tr></thead>
         <tbody>{drifts.map((d, i) => <tr key={i}><td>{d.seed ?? '—'}</td><td className="flag">{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td className="muted">{fmt(d.tolerance)}</td></tr>)}</tbody></table>
+        </DataTable>
       </>
       : <State tone="unknown" label="No drift flag recorded" detail="This does not prove that an independent cross-check ran for this node." />}
     {n.status === 'failed' && <><div className="section-h">Failure</div><span className="badge reason">{n.error_reason}</span><pre className="code">{n.error}</pre></>}
@@ -1045,10 +1107,10 @@ function Agent({ n }) {
       <KV k="shipped ok" v={String(r.shipped_ok)} />
     </div>
     <div className="section-h">Validation checks</div>
-    <table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
+    <DataTable caption="Implementation validation checks" card={false}><table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
       <tbody>{(r.checks || []).map((c, i) => <tr key={i}>
         <td>{c.name}</td><td style={{ color: c.ok ? 'var(--ok)' : 'var(--fail)' }}>{c.ok ? '✓' : '✗'}</td>
-        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table>
+        <td className="muted">{c.detail || c.severity || ''}</td></tr>)}</tbody></table></DataTable>
   </>
 }
 

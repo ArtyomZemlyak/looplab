@@ -1,11 +1,12 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { authStatus, clearOwnerToken, verifyOwnerToken } from './api.js'
 
-export default function OwnerAuth({ children }) {
+export default function OwnerAuth({ children, label = 'LoopLab' }) {
   const [resource, setResource] = useState({ status: 'loading', error: '' })
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
   const inputRef = useRef(null)
+  const gateRef = useRef(null)
 
   const check = () => {
     setResource({ status: 'loading', error: '' })
@@ -16,7 +17,13 @@ export default function OwnerAuth({ children }) {
       .catch(error => setResource({ status: 'error', error: error.message || 'Could not reach LoopLab' }))
   }
   useEffect(check, [])
-  useEffect(() => { if (resource.status === 'locked') inputRef.current?.focus() }, [resource.status])
+  useEffect(() => {
+    document.title = `${label} · LoopLab`
+  }, [label])
+  useEffect(() => {
+    if (resource.status === 'locked') inputRef.current?.focus({ preventScroll: true })
+    else gateRef.current?.focus({ preventScroll: true })
+  }, [resource.status])
 
   const unlock = async event => {
     event.preventDefault()
@@ -34,7 +41,7 @@ export default function OwnerAuth({ children }) {
   }
 
   if (resource.status === 'ready') return children
-  return <main className="auth-gate" aria-live="polite">
+  return <main ref={gateRef} className="auth-gate" data-route-main tabIndex={-1} aria-live="polite">
     <div className="auth-card">
       <div className="auth-mark" aria-hidden="true">◉</div>
       <h1>{resource.status === 'locked' ? 'Unlock LoopLab controls' : 'Connecting to LoopLab'}</h1>

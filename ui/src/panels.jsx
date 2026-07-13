@@ -17,6 +17,7 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import { hashWithRunRouteState, reviewRouteStateForScope } from './runRouteState.js'
+import { DataTable } from './accessibility.jsx'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   const dialogRef = useRef(null)
@@ -65,8 +66,9 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
         <ul className="ov-hints">{hints.map((h, i) => <li key={(h.text || '') + i}>{h.text || JSON.stringify(h)}</li>)}</ul></div>}
       {(state.novelty_events?.length > 0 || state.reward_hacks?.length > 0) && <div className="ov-row ov-alerts">
         {state.novelty_events?.length > 0 && <span className="chip" title="near-duplicate proposals nudged to diversify (E1)"><OpIcon name="replay" className="t-ic" /> dedup {state.novelty_events.length}</span>}
-        {state.reward_hacks?.length > 0 && <span className="chip alarm" style={{ cursor: 'pointer' }}
-          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel && onOpenPanel('trust')}><OpIcon name="alert" size={11} /> hack? {state.reward_hacks.length}</span>}
+        {state.reward_hacks?.length > 0 && <button type="button" className="chip alarm run-metric-chip"
+          title="suspicious wins flagged (B5)" onClick={() => onOpenPanel?.('trust')}>
+          <OpIcon name="alert" size={11} /> hack? {state.reward_hacks.length}</button>}
       </div>}
     </Panel>
   )
@@ -205,17 +207,17 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
       <div className="section-h">Leakage scan {leak && leak.leak && <span className="chip alarm">LEAK — run refused</span>}</div>
       <TrustState value={leakState} />
       {(leak?.verdicts || []).length > 0 &&
-        <table className="tbl"><thead><tr><th>detector</th><th>result</th><th>detail</th></tr></thead><tbody>
+        <DataTable caption="Leakage detector verdicts" card={false}><table className="tbl"><thead><tr><th>detector</th><th>result</th><th>detail</th></tr></thead><tbody>
           {(leak.verdicts || []).map((v, i) => <tr key={i}>
             <td>{v.detector || 'unnamed detector'}</td><td className={`trust-result ${v.leak ? 'fail' : 'pass'}`}>{v.leak ? 'Flagged' : 'Passed'}</td>
             <td className="muted">{Object.entries(v).filter(([k]) => !['detector', 'leak'].includes(k)).map(([k, val]) => `${k}=${typeof val === 'object' ? JSON.stringify(val) : val}`).join('  ') || '—'}</td>
-          </tr>)}</tbody></table>}
+          </tr>)}</tbody></table></DataTable>}
 
       <div className="section-h">Drift cross-check</div>
       <TrustState value={driftState} />
       {(state.drifts || []).length
-        ? <table className="tbl"><thead><tr><th>node</th><th>primary</th><th>cross</th><th>tolerance</th></tr></thead><tbody>
-          {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table>
+        ? <DataTable caption="Run metric drift comparisons" card={false}><table className="tbl"><thead><tr><th>node</th><th>primary</th><th>cross</th><th>tolerance</th></tr></thead><tbody>
+          {state.drifts.map((d, i) => <tr key={i}><td className="flag">#{d.node_id}</td><td>{fmt(d.primary)}</td><td>{fmt(d.cross)}</td><td>{fmt(d.tolerance)}</td></tr>)}</tbody></table></DataTable>
         : null}
 
       <div className="section-h">Reward-hacking monitor (B5) {(state.reward_hacks || []).length > 0 && <span className="chip alarm">{state.reward_hacks.length} flagged</span>}</div>
@@ -227,14 +229,14 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           ? ' — flags are logged only; set trust_gate=gate/block (or the thorough profile) to keep a flagged node from winning.'
           : ' — a flagged node is excluded from best-selection.'}</div>}
       {(state.reward_hacks || []).length
-        ? <table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th><th /></tr></thead><tbody>
+        ? <DataTable caption="Reward-hacking signals" card={false}><table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th><th>action</th></tr></thead><tbody>
           {state.reward_hacks.map((h, i) => <tr key={i}>
             <td className="flag"><button className="btn xs ghost" onClick={() => { onSelect && onSelect(h.node_id); onClose() }}>#{h.node_id}</button></td>
             <td>{(h.signals || []).map(s => s.signal).join(', ')}</td>
             <td className="muted">{(h.signals || []).map(s => s.detail).filter(Boolean).join(' · ')}</td>
             <td>{!readOnly && <button className="btn xs ghost" title="quarantine: abort this node so it can't be selected"
               onClick={() => quarantine(h.node_id)}>quarantine</button>}</td>
-          </tr>)}</tbody></table>
+          </tr>)}</tbody></table></DataTable>
         : null}
       </div>
     </Panel>
@@ -267,10 +269,11 @@ export function FailuresPanel({ state, onClose, onSelect }) {
         {Object.entries(byReason).map(([r, ns]) => <Stat key={r} n={ns.length} l={r} />)}
         {!failed.length && <Stat n={0} l="no failures" />}
       </div>
-      <table className="tbl"><thead><tr><th>node</th><th>reason</th><th>error</th></tr></thead><tbody>
-        {failed.map(n => <tr key={n.id} style={{ cursor: 'pointer' }} onClick={() => { onSelect(n.id); onClose() }}>
-          <td>#{n.id}</td><td className="flag">{n.error_reason}</td><td className="muted">{(n.error || '').slice(0, 80)}</td></tr>)}
-      </tbody></table>
+      <DataTable caption="Failed nodes and errors" card={false}><table className="tbl"><thead><tr><th>node</th><th>reason</th><th>error</th></tr></thead><tbody>
+        {failed.map(n => <tr key={n.id}>
+          <td><button type="button" className="btn xs ghost" onClick={() => { onSelect?.(n.id); onClose?.() }}>#{n.id}</button></td>
+          <td className="flag">{n.error_reason}</td><td className="muted">{(n.error || '').slice(0, 80)}</td></tr>)}
+      </tbody></table></DataTable>
     </Panel>
   )
 }
@@ -304,15 +307,16 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
       </div>
       <div className="section-h">Pending experiments {pending.length > 0 && <span className="pill">{pending.length}</span>}</div>
       {pending.length
-        ? <table className="tbl"><thead><tr><th>node</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th /></tr></thead><tbody>
+        ? <DataTable caption="Pending experiment queue" card={false}><table className="tbl"><thead><tr><th>node</th><th>op</th><th>parents</th><th>hypothesis / rationale</th><th>action</th></tr></thead><tbody>
           {pending.map(n => <tr key={n.id}>
             <td><button className="btn xs ghost" onClick={() => { onSelect && onSelect(n.id); onClose() }}>#{n.id}</button></td>
             <td><span className="op-icon"><OpIcon name={operatorMeta(n.operator).icon} size={12} /></span> {n.operator}</td>
             <td className="muted">{(n.parent_ids || []).map(p => '#' + p).join(', ') || '—'}</td>
             <td className="muted">{(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
-            <td><button className="btn xs ghost" title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button></td>
+            <td><button className="btn xs ghost" aria-label={`Cancel experiment ${n.id}`}
+              title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button></td>
           </tr>)}
-        </tbody></table>
+        </tbody></table></DataTable>
         : <div className="muted">No experiment is queued right now — the loop is idle or between picks.</div>}
       {(injects.length + forks.length + confirmReq.length + ablateReq.length) > 0 && <>
         <div className="section-h">Queued control requests</div>
@@ -356,12 +360,15 @@ export function WhyStrip({ state, onSelect }) {
   if (!items.length) return null
   return (
     <div className="why-strip" title="why the loop is doing what it's doing (live)">
-      {items.slice(0, 3).map((it, i) => <span key={i} className="why-item"
-        onClick={() => it.node != null && onSelect && onSelect(it.node)}
-        style={{ cursor: it.node != null ? 'pointer' : 'default' }}>
-        <OpIcon name={it.icon} size={12} className="why-ic" />
-        <b>{it.label}</b> {it.text}{it.at != null ? <span className="muted"> @{it.at}</span> : null}
-      </span>)}
+      {items.slice(0, 3).map((it, i) => {
+        const Item = it.node != null ? 'button' : 'span'
+        return <Item key={i} type={it.node != null ? 'button' : undefined}
+          className={'why-item' + (it.node != null ? ' disclosure-button' : '')}
+          onClick={it.node != null ? () => onSelect?.(it.node) : undefined}>
+          <OpIcon name={it.icon} size={12} className="why-ic" />
+          <b>{it.label}</b> {it.text}{it.at != null ? <span className="muted"> @{it.at}</span> : null}
+        </Item>
+      })}
     </div>
   )
 }
@@ -401,11 +408,11 @@ export function ParetoPanel({ state, onClose, onSelect }) {
         return <>
           <div className="section-h">Pareto-optimal set (I5) {keys.length ? <span className="pill">{keys.length + 1} objectives</span> : <span className="pill">metric only</span>}</div>
           {keys.length
-            ? <table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
+            ? <DataTable caption="Pareto-optimal node metrics" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th>{keys.map(k => <th key={k}>{k}</th>)}</tr></thead><tbody>
                 {front.sort((a, b) => (state.direction === 'min' ? a.metric - b.metric : b.metric - a.metric)).map(n =>
                   <tr key={n.id}><td>#{n.id}{n.id === state.best_node_id ? <OpIcon name="crown" size={10} /> : ''}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td>
                     {keys.map(k => <td key={k} className="muted">{fmt(n.extra_metrics?.[k])}</td>)}</tr>)}
-              </tbody></table>
+              </tbody></table></DataTable>
             : <div className="muted">Single-objective task — the Pareto front is just the best node (#{state.best_node_id ?? '—'}). Add extra_metrics (e.g. latency, size) to trade off.</div>}
         </>
       })()}
@@ -413,12 +420,12 @@ export function ParetoPanel({ state, onClose, onSelect }) {
       {scatter || <div className="muted">No constraints/aux metrics in this task.</div>}
       <div className="section-h">Diversity archive {archive && <span className="pill">{archive.niches} niches</span>}</div>
       {archive?.elites?.length
-        ? <table className="tbl"><thead><tr><th>node</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {archive.elites.map((e, i) => <tr key={i}><td>#{e.node_id}</td><td>{fmt(e.metric)}</td><td className="muted">{JSON.stringify(e.params)}</td></tr>)}</tbody></table>
+        ? <DataTable caption="Diversity archive elite nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>metric</th><th>params</th></tr></thead><tbody>
+          {archive.elites.map((e, i) => <tr key={i}><td>#{e.node_id}</td><td>{fmt(e.metric)}</td><td className="muted">{JSON.stringify(e.params)}</td></tr>)}</tbody></table></DataTable>
         : <div className="muted">No archive (run not finished).</div>}
       <div className="section-h">Operator productivity</div>
-      <table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>evaluated</th></tr></thead><tbody>
-        {Object.entries(ops).map(([o, s]) => <tr key={o}><td>{o}</td><td>{s.n}</td><td>{s.ev}</td></tr>)}</tbody></table>
+      <DataTable caption="Operator productivity summary" card={false}><table className="tbl"><thead><tr><th>operator</th><th>nodes</th><th>evaluated</th></tr></thead><tbody>
+        {Object.entries(ops).map(([o, s]) => <tr key={o}><td>{o}</td><td>{s.n}</td><td>{s.ev}</td></tr>)}</tbody></table></DataTable>
     </Panel>
   )
 }
@@ -429,12 +436,12 @@ export function DataQualityPanel({ state, onClose }) {
   const cols = Object.entries(prof)
   return (
     <Panel title="Data quality" sub={`${cols.length} columns`} onClose={onClose} wide>
-      <table className="tbl"><thead><tr><th>column</th><th>dtype</th><th>missing%</th><th>unique</th><th>min</th><th>max</th><th>mean</th><th>flags</th></tr></thead><tbody>
+      <DataTable caption="Dataset column quality profile" card={false}><table className="tbl"><thead><tr><th>column</th><th>dtype</th><th>missing%</th><th>unique</th><th>min</th><th>max</th><th>mean</th><th>flags</th></tr></thead><tbody>
         {cols.map(([c, s]) => <tr key={c}>
           <td>{c}</td><td>{s.dtype}</td><td>{fmt((s.missing_frac || 0) * 100, 3)}</td><td>{fmtInt(s.n_unique)}</td>
           <td>{fmt(s.min)}</td><td>{fmt(s.max)}</td><td>{fmt(s.mean)}</td>
           <td>{s.constant && <span className="flag">constant </span>}{s.high_missing && <span className="flag">high-missing</span>}</td></tr>)}
-      </tbody></table>
+      </tbody></table></DataTable>
     </Panel>
   )
 }
@@ -568,14 +575,15 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     finally { setBusy(false) }
   }
 
-  const rawTable = <table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
-    <tr key={k}><td className="muted">{k}</td><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table>
+  const rawTable = <DataTable caption="Raw run configuration" card={false}><table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
+    <tr key={k}><th scope="row" className="muted">{k}</th><td>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</td></tr>)}</tbody></table></DataTable>
 
   return (
     <Panel title="Run settings" sub={engineLive ? 'live · applies on restart' : 'edit · applies on resume'} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 12 }}>
         <span className="muted">extend eval budget:</span>
-        <input className="text" style={{ width: 120 }} placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
+        <input className="text" style={{ width: 120 }} aria-label="Additional evaluation budget in seconds"
+          placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
         <button className="btn sm primary" disabled={!sec || controlBusy} onClick={extendBudget}>apply</button>
       </div>
       {!form ? <div className="muted">…</div> : <>
@@ -619,14 +627,16 @@ export function AuthoringPanel({ onClose, onToast }) {
         {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')} onClick={() => setKind(k)}>{k}</button>)}
         <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>
       </div>
-      <div style={{ display: 'flex', gap: 12 }}>
-        <div style={{ width: 200 }}>
-          {data.files.map(f => <div key={f.name} className={'run-card' + (sel === f.name ? ' sel' : '')} style={{ padding: 8 }} onClick={() => { setSel(f.name); setText(f.text) }}>{f.name}</div>)}
+      <div className="authoring-layout">
+        <div className="authoring-list">
+          {data.files.map(f => <button type="button" key={f.name}
+            className={'run-card authoring-file' + (sel === f.name ? ' sel' : '')}
+            onClick={() => { setSel(f.name); setText(f.text) }}>{f.name}</button>)}
           {!data.files.length && <div className="muted">no files</div>}
         </div>
-        <div style={{ flex: 1 }}>
+        <div className="authoring-editor">
           {sel ? <>
-            <textarea className="text" value={text} onChange={e => setText(e.target.value)} />
+            <textarea className="text" aria-label={`Edit ${sel}`} value={text} onChange={e => setText(e.target.value)} />
             <button className="btn sm primary" style={{ marginTop: 8 }} onClick={async () => { await putText(`/api/${kind}/${sel}`, text); onToast('saved ' + sel) }}>Save</button>
           </> : <div className="muted">select a file to edit</div>}
         </div>
@@ -638,8 +648,9 @@ export function AuthoringPanel({ onClose, onToast }) {
 function KbNote({ note }) {
   const [open, setOpen] = useState(false)
   return <div className="mem-card">
-    <div style={{ cursor: 'pointer', fontWeight: 600 }} onClick={() => setOpen(o => !o)}>
-      <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</div>
+    <button type="button" className="memory-note-toggle disclosure-button" aria-expanded={open}
+      onClick={() => setOpen(o => !o)}>
+      <span style={{ opacity: 0.6, fontSize: 10, marginRight: 4 }}>{open ? '▾' : '▸'}</span>{note.name}</button>
     {open && <div style={{ marginTop: 6 }}><Markdown text={note.text || note.content || ''} /></div>}
   </div>
 }
@@ -661,7 +672,7 @@ export function MemoryPanel({ onClose }) {
   return (
     <Panel title="Memory & knowledge — what the runs have learned" sub={mem.dir || 'no memory dir'} onClose={onClose} wide>
       <div className="conv-toggle" style={{ marginBottom: 12 }}>
-        {tabs.map(([k, label, n]) => <button key={k} className={'seg' + (tab === k ? ' on' : '')}
+        {tabs.map(([k, label, n]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
           onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
       </div>
       {/* General orientation shown on every tab; the role-split detail (§role-split) is lessons-only. */}
@@ -675,7 +686,7 @@ export function MemoryPanel({ onClose }) {
       </div>}
       {tab === 'lessons' && <div className="conv-toggle" style={{ marginBottom: 8 }}>
         {[['all', 'All'], ['researcher', 'Researcher'], ['developer', 'Developer']].map(([r, label]) =>
-          <button key={r} className={'seg' + (lessonRole === r ? ' on' : '')}
+          <button key={r} aria-pressed={lessonRole === r} className={'seg' + (lessonRole === r ? ' on' : '')}
             onClick={() => setLessonRole(r)}>{label}</button>)}
       </div>}
       {tab === 'lessons' && (() => {
@@ -698,8 +709,8 @@ export function MemoryPanel({ onClose }) {
           : <div className="muted">No {lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).</div>
       })()}
       {tab === 'cases' && (mem.cases.length
-        ? <table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
-          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table>
+        ? <DataTable caption="Stored memory cases" card={false}><table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
+          {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table></DataTable>
         : <div className="muted">No cases stored.</div>)}
       {tab === 'notes' && (mem.notes.length
         ? mem.notes.map((n, i) => <div key={i} className="mem-card">
@@ -733,13 +744,13 @@ export function RegistryPanel({ state, onClose }) {
       </div>
       <div className="section-h">Promotions</div>
       {(state.promotions || []).length
-        ? <table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table>
+        ? <DataTable caption="Promoted solution nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table></DataTable>
         : <div className="muted">none — use Promote on a node</div>}
       <div className="section-h">Cross-run leaderboard</div>
-      <table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
+      <DataTable caption="Cross-run solution leaderboard" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
         {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
           .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
-      </tbody></table>
+      </tbody></table></DataTable>
     </Panel>
   )
 }
@@ -781,14 +792,15 @@ export function MemoCard({ memo, idx, open, onToggle }) {
   const [think, setThink] = useState(false)
   return (
     <div className="memo-card">
-      <div className="memo-head" onClick={() => onToggle(idx)}>
+      <button type="button" className="memo-head disclosure-button" aria-expanded={open}
+        onClick={() => onToggle(idx)}>
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         <b><OpIcon name="search" className="t-ic" /> memo #{idx + 1}</b>
         {memo.trigger && <span className="pill">{memo.trigger}</span>}
         {memo.at_node != null && <span className="muted"> @{memo.at_node} nodes</span>}
         <span className="spacer" style={{ flex: 1 }} />
         <span className="muted">{(memo.sources || []).length} source{(memo.sources || []).length === 1 ? '' : 's'}</span>
-      </div>
+      </button>
       {open && <div className="memo-body">
         <div className="section-h">Conclusion</div>
         <div className="v">{memo.summary || '—'}</div>
@@ -804,8 +816,9 @@ export function MemoCard({ memo, idx, open, onToggle }) {
             {s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || '—')}
             {s.snippet && <span className="muted"> — {String(s.snippet).slice(0, 120)}</span>}</li>)}</ul></>}
         {memo.reasoning && <div className="think-debug" style={{ marginTop: 8 }}>
-          <div className="role-think" onClick={() => setThink(v => !v)} style={{ cursor: 'pointer', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
-            {think ? '▾' : '▸'} reasoning (debug)</div>
+          <button type="button" className="role-think disclosure-button" aria-expanded={think}
+            onClick={() => setThink(v => !v)} style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
+            {think ? '▾' : '▸'} reasoning (debug)</button>
           {think && <Markdown className="think-body" text={memo.reasoning} />}
         </div>}
       </div>}
@@ -826,13 +839,13 @@ export function HyperImportancePanel({ state, onClose }) {
     <Panel title="Hyperparameter importance" sub={`${nodes.length} evaluated`} onClose={onClose}>
       {rows.length
         ? <><div className="section-h">|correlation| of each param with the metric (run-wide)</div>
-            <table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th><th></th></tr></thead><tbody>
+            <DataTable caption="Run-wide hyperparameter importance" card={false}><table className="tbl"><thead><tr><th>param</th><th>importance</th><th>r</th><th>n</th><th>relative importance</th></tr></thead><tbody>
               {rows.map(row => <tr key={row.k}>
                 <td>{row.k}</td><td>{fmt(row.imp, 3)}</td>
                 <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td>
                 <td style={{ width: 160 }}><div className="bar" style={{ height: 8 }}>
                   <div className="fill" style={{ width: Math.min(100, row.imp / top * 100) + '%' }} /></div></td></tr>)}
-            </tbody></table>
+            </tbody></table></DataTable>
             <div className="muted" style={{ marginTop: 8 }}>Sign of r shows direction: with a {state.direction === 'min' ? 'minimize' : 'maximize'} objective,
               a {state.direction === 'min' ? 'negative' : 'positive'} r means a larger value tends to help. Needs ≥3 evaluated nodes per param.</div></>
         : <div className="muted">Not enough numeric-param data yet — run more experiments (≥3 evaluated nodes that share a numeric param).</div>}
@@ -876,23 +889,23 @@ export function CrossRunPanel({ state, onClose }) {
     <Panel title="Cross-run sweep" sub={`${runs.length} runs · ${tasks.length} tasks`} onClose={onClose} wide>
       <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
         <span className="muted">task:</span>
-        <select className="inp sm" value={task} onChange={e => setTask(e.target.value)}>
+        <select className="inp sm" aria-label="Comparable task" value={task} onChange={e => setTask(e.target.value)}>
           {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
         <span className="muted">{rows.length} comparable run(s) · {dir}</span>
         <span className="spacer" style={{ flex: 1 }} />
-        {rows.length > 0 && <button className={'btn sm' + (overlay ? ' primary' : '')}
+        {rows.length > 0 && <button aria-pressed={overlay} className={'btn sm' + (overlay ? ' primary' : '')}
           onClick={() => setOverlay(o => !o)} title="overlay each run's running-best trajectory on one axis">overlay trajectories</button>}
       </div>
       {overlay && <div style={{ marginBottom: 12 }}><MultiTrajectory runs={traj} /></div>}
       {rows.length
-        ? <table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th></th></tr></thead><tbody>
+        ? <DataTable caption="Comparable run results" card={false}><table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th>relative score</th></tr></thead><tbody>
             {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
               <td>{r.label || r.run_id}{i === 0 ? <OpIcon name="crown" size={10} /> : ''}</td>
               <td>{fmt(r.m)}{r.best_confirmed != null ? ' (conf)' : ''}</td>
               <td className="muted">{r.nodes}</td><td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td>
               <td style={{ width: 180 }}><div className="bar" style={{ height: 8 }}>
                 <div className="fill" style={{ width: Math.max(4, 100 - Math.abs(r.m - top) / span * 100) + '%' }} /></div></td></tr>)}
-          </tbody></table>
+          </tbody></table></DataTable>
         : <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
       <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>
     </Panel>
@@ -1081,7 +1094,8 @@ export function HypothesisBoard({ state, runId, onSelect, onClose, onToast }) {
   return (
     <Panel title="Hypotheses" sub={`${hyps.length} tracked — what the run is trying to learn`} onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10, gap: 6 }}>
-        <input className="text" style={{ flex: 1 }} placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
+        <input className="text" style={{ flex: 1 }} aria-label="New hypothesis"
+          placeholder="Pose a hypothesis to test (e.g. “target is right-skewed; a log transform helps”)"
           value={draft} onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') add() }} />
         <button className="btn sm primary" onClick={add} disabled={!draft.trim()}>+ Add</button>
@@ -1337,7 +1351,7 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
       {!roots ? <div className="muted">Loading…</div> :
         <div className="art-wrap">
           <div className="art-list">
-            <input className="text art-filter" placeholder="filter files…" value={filter}
+            <input className="text art-filter" aria-label="Filter artifact files" placeholder="filter files…" value={filter}
                    onChange={e => setFilter(e.target.value)} />
             {roots.length === 0 && <div className="muted">No artifacts found for this run.</div>}
             {roots.map(r => {
@@ -1347,24 +1361,25 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
               const files = isOpen ? (ql ? r.files.filter(f => f.path.toLowerCase().includes(ql)) : r.files) : null
               return (
                 <div className="art-root" key={r.id}>
-                  <div className="art-root-h" title={r.path}
-                       onClick={() => setOpen(o => ({ ...o, [r.id]: !isOpen }))}>
+                  <button type="button" className="art-root-h disclosure-button" title={r.path}
+                       aria-expanded={isOpen} onClick={() => setOpen(o => ({ ...o, [r.id]: !isOpen }))}>
                     <span className="art-chev">{isOpen ? '▾' : '▸'}</span>
                     <b>{r.label}</b>
                     <span className="muted art-root-n">
                       {isOpen && ql ? `${files.length}/${r.n_files}` : `${r.n_files}${r.truncated ? '+' : ''}`}</span>
                     {!r.is_run_dir && <span className="pill art-tag" title={r.path}>repo path</span>}
-                  </div>
+                  </button>
                   {isOpen && <div className="art-files">
                     {files.length === 0 ? <div className="muted art-empty">{ql ? 'no match' : 'empty'}</div>
                       : files.map(f => (
-                        <div key={f.path} title={f.path + (f.is_text ? '' : ' · looks binary')}
-                             className={'art-file' + (sel && sel.root === r.id && sel.path === f.path ? ' sel' : '')
+                        <button type="button" key={f.path} title={f.path + (f.is_text ? '' : ' · looks binary')}
+                             aria-pressed={!!(sel && sel.root === r.id && sel.path === f.path)}
+                             className={'art-file disclosure-button' + (sel && sel.root === r.id && sel.path === f.path ? ' sel' : '')
                                + (f.is_text ? '' : ' bin')}
                              onClick={() => view(r.id, f)}>
                           <span className="art-name">{f.path}</span>
                           <span className="art-size">{fmtBytes(f.size)}</span>
-                        </div>))}
+                        </button>))}
                     {r.truncated && !ql && <div className="muted art-empty">… listing capped at {r.n_files} files</div>}
                   </div>}
                 </div>
@@ -1381,7 +1396,7 @@ export function ArtifactsPanel({ runId, onToast, onClose }) {
                 : binary ? <div className="notice">Binary file — not shown inline ({fmtBytes(content.size)}).</div>
                 : content ? <>
                     {content.truncated && <div className="notice art-trunc">Showing the first {fmtBytes(_MAX_VIEW)} — the file is larger.</div>}
-                    <pre className="art-pre">{content.content}</pre>
+                    <pre className="art-pre" role="region" aria-label={`Artifact ${sel.path} contents`} tabIndex={0}>{content.content}</pre>
                   </> : <div className="muted art-hint">Could not load this file.</div>}
             </>}
           </div>

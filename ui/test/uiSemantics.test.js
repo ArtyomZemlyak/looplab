@@ -41,6 +41,112 @@ test('compact Inspector dialog has an explicit close or collapse accessible name
     /aria-label=\{`\$\{compactWorkspace \? 'Close' : 'Collapse'\} \$\{selectedGroup != null \? 'group details' : 'experiment inspector'\}`\}/)
 })
 
+test('run view modes are truthful toggles and merge has a native keyboard destination', async () => {
+  const runView = await source('RunView.jsx')
+  assert.match(runView, /className="view-toggle" role="group" aria-label="Run workspace views"/)
+  assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
+  assert.match(runView, /aria-pressed=\{view === 'report'\}/)
+  assert.match(runView, /<form className="merge-destination-bar"/)
+  assert.match(runView, /<label htmlFor="merge-destination-select">/)
+  assert.match(runView, /<select id="merge-destination-select"[\s\S]*?autoFocus>/)
+  assert.match(runView, /onSubmit=\{submitMergeTarget\}/)
+  assert.match(runView, /You can also choose the destination directly on the graph/)
+})
+
+test('reset and merge workflows restore focus after temporary controls close', async () => {
+  const [inspector, runView, dag] = await Promise.all([
+    source('Inspector.jsx'), source('RunView.jsx'), source('Dag.jsx'),
+  ])
+  assert.match(inspector, /requestAnimationFrame\(\(\) => triggerRef\.current\?\.focus\(\{ preventScroll: true \}\)\)/)
+  assert.match(inspector, /document\.addEventListener\('pointerdown', dismiss, true\)/)
+  assert.match(inspector, /if \(event\.key === 'Tab'\) \{ setOpen\(false\); return \}/)
+  assert.match(inspector, /event\.relatedTarget !== triggerRef\.current && !event\.currentTarget\.contains\(event\.relatedTarget\)/)
+  assert.match(dag, /closeMenu\(action !== 'merge'\)[\s\S]*?onNodeAction\(action, id, \{ returnFocus \}\)/)
+  assert.match(runView, /const closeMergeChooser = \(restoreFocus = true\) => \{[\s\S]*?data-node-action-id/)
+  assert.match(runView, /onClick=\{\(\) => closeMergeChooser\(true\)\}>Cancel<\/button>/)
+})
+
+test('popup menus use one roving tab stop and restore the invoking control', async () => {
+  const [runView, runList, dag] = await Promise.all([
+    source('RunView.jsx'), source('RunList.jsx'), source('Dag.jsx'),
+  ])
+  assert.match(runView, /aria-haspopup="menu" aria-expanded=\{openHub === label\} aria-controls=\{hubMenuId\(label\)\}/)
+  assert.match(runView, /role="menu"[\s\S]*?aria-label=\{`\$\{label\} panels`\}/)
+  assert.match(runView, /type="button" role="menuitem" tabIndex=\{-1\}/)
+  assert.match(runView, /event\.key === 'Escape'[\s\S]*?closeHub\(true\)/)
+  assert.match(runList, /const restoreRunModalFocus = \(\) => requestAnimationFrame/)
+  assert.match(runList, /onRename=\{openRunRename\}/)
+  assert.match(runList, /onClose=\{closeRunRename\}/)
+  assert.equal((dag.match(/type="button" role="menuitem" tabIndex=\{-1\}/g) || []).length, 9)
+})
+
+test('compact drawers and nested popups expose only the active modal layer', async () => {
+  const [runList, dialogFocus] = await Promise.all([source('RunList.jsx'), source('useDialogFocus.js')])
+  assert.match(runList, /role=\{compactNav && projectsOpen && !projModal \? 'dialog' : undefined\}/)
+  assert.match(runList, /aria-modal=\{compactNav && projectsOpen && !projModal \? 'true' : undefined\}/)
+  assert.match(runList, /aria-hidden=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? 'true' : undefined\}/)
+  assert.match(runList, /inert=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? '' : undefined\}/)
+  assert.match(runList, /useDialogFocus\(projectsDialogRef, \(\) => setProjectsOpen\(false\), compactNav && projectsOpen\)/)
+  assert.match(dialogFocus, /if \(event\.defaultPrevented\) return/)
+})
+
+test('route changes update title and move focus to a named main landmark', async () => {
+  const [app, auth, list, runView, settings, shared] = await Promise.all([
+    source('App.jsx'), source('OwnerAuth.jsx'), source('RunList.jsx'),
+    source('RunView.jsx'), source('Settings.jsx'), source('SharedAssistant.jsx'),
+  ])
+  assert.match(app, /document\.title = `\$\{label\} · LoopLab`/)
+  assert.match(app, /document\.querySelector\('\[data-route-main\]'\)\?\.focus\(\)/)
+  assert.match(auth, /data-route-main tabIndex=\{-1\}/)
+  assert.match(auth, /gateRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  for (const [name, text] of [['RunList', list], ['RunView', runView], ['Settings', settings], ['SharedAssistant', shared]]) {
+    assert.match(text, /data-route-main[^>]*tabIndex=\{-1\}/, `${name} needs a focusable main landmark`)
+  }
+})
+
+test('compact Assistant blocks background pointers and traps focus in the side drawer', async () => {
+  const [assistant, css] = await Promise.all([source('AssistantBar.jsx'), source('styles.css')])
+  assert.match(assistant, /useMediaQuery\('\(max-width: 1279px\)'\)/)
+  assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden\)/)
+  assert.match(assistant, /className="asst-side-backdrop" aria-hidden="true"[\s\S]*?onPointerDown=\{collapseToBar\}/)
+  assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
+  assert.match(assistant, /if \(next === 'side'\) requestAnimationFrame\(\(\) => inputRef\.current\?\.focus/)
+  assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 57;/)
+})
+
+test('temporary create and delete workflows retain a connected focus destination', async () => {
+  const runList = await source('RunList.jsx')
+  assert.match(runList, /const projectModalReturnRef = useRef\(null\)/)
+  assert.match(runList, /const closeProjectModal = \(\) => \{ setProjModal\(null\); restoreProjectModalFocus\(\) \}/)
+  assert.match(runList, /fallbackFocus\?\.isConnected \? fallbackFocus : runsMainRef\.current/)
+  assert.match(runList, /requestAnimationFrame\(\(\) => projectsAllRef\.current\?\.focus/)
+  assert.match(runList, /if \(restoreFocus\) requestAnimationFrame/)
+})
+
+test('theme and energy menus restore focus and synchronize across tabs', async () => {
+  const [theme, energy] = await Promise.all([source('ThemeSwitcher.jsx'), source('EnergyToggle.jsx')])
+  for (const text of [theme, energy]) {
+    assert.match(text, /aria-haspopup="menu"/)
+    assert.match(text, /role="menuitemradio" aria-checked=/)
+    assert.match(text, /className="th-backdrop" aria-hidden="true" onClick=\{\(\) => close\(true\)\}/)
+    assert.match(text, /window\.addEventListener\('storage'/)
+  }
+})
+
+test('splitters support visible keyboard focus and cancelled pointer gestures', async () => {
+  const [runView, css] = await Promise.all([source('RunView.jsx'), source('styles.css')])
+  assert.match(runView, /window\.addEventListener\('pointercancel', onUp\)/)
+  assert.match(runView, /target\.setPointerCapture\?\.\(pointerId\)/)
+  assert.match(css, /\.splitter \{[^}]*touch-action: none;/)
+  assert.match(css, /\.splitter:focus-visible \{[^}]*outline: 2px solid var\(--accent\);/)
+})
+
+test('run header drill-down metrics are native buttons', async () => {
+  const runView = await source('RunView.jsx')
+  assert.equal((runView.match(/<button type="button" className="chip(?: alarm)? run-metric-chip"/g) || []).length, 3)
+  assert.doesNotMatch(runView, /<span className="chip(?: alarm)?"[^>]*onClick=/)
+})
+
 test('reduced-motion disables every live CTRL activity indicator', async () => {
   const css = await source('styles.css')
   const reduced = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'))

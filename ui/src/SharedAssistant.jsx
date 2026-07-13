@@ -10,18 +10,18 @@ export default function SharedAssistant({ sid, onBack }) {
   useEffect(() => {
     get(`/api/assistant/shared/${encodeURIComponent(sid)}`).then(setSess).catch(e => setErr(e.message))
   }, [sid])
-  return <div className="asst-view">
+  return <main className="asst-view" data-route-main tabIndex={-1}>
     <div className="asst-main">
       <div className="asst-main-h">
-        <button className="btn sm" onClick={onBack} title="back">←</button>
-        <span className="ttl" style={{ flex: 1 }}>{sess?.meta?.title || 'Shared chat'}</span>
+        <button className="btn sm" onClick={onBack} aria-label="Back to runs">←</button>
+        <h1 className="ttl" style={{ flex: 1 }}>{sess?.meta?.title || 'Shared chat'}</h1>
         <span className="pill">read-only</span>
       </div>
-      <div className="asst-feed">
-        {err && <div className="notice" style={{ borderColor: 'var(--fail)', color: '#ffd3d3' }}>{err}</div>}
+      <div className="asst-feed" role="log" aria-label="Shared Assistant transcript" tabIndex={0}>
+        {err && <div className="notice" role="alert" style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>{err}</div>}
         {sess && (sess.messages || []).map((m, i) => <Turn key={i} m={m} readOnly />)}
         {sess && (sess.messages || []).length === 0 && <div className="muted">Empty chat.</div>}
       </div>
     </div>
-  </div>
+  </main>
 }

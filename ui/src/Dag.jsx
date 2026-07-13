@@ -78,6 +78,7 @@ function Bolts() {
 
 function NodeActionTrigger({ nodeId, expanded, onOpen }) {
   return <button type="button" className="node-action-trigger nodrag nopan"
+    data-node-action-id={nodeId}
     aria-label={`Open actions for experiment #${nodeId}`} aria-haspopup="menu" aria-expanded={expanded}
     title={`Actions for experiment #${nodeId}`}
     onPointerDown={e => e.stopPropagation()}
@@ -114,7 +115,15 @@ function ExpNode({ data }) {
     : node.status === 'evaluated' ? 0.55 : node.status === 'failed' ? 0.45 : 0.3
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')
-  const selectionLabel = `Experiment #${node.id}, ${op.label}. Select to inspect`
+  const selectionLabel = [
+    `Experiment #${node.id}`, op.label, node.status || 'unknown status',
+    m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
+    node.feasible === false ? 'infeasible' : 'feasible',
+    node.id === state.best_node_id ? 'current champion' : null,
+    node.id === workId ? 'currently working' : null,
+    node.idea?.theme ? `theme ${node.idea.theme}` : null,
+    'Select to inspect',
+  ].filter(Boolean).join(', ')
   // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
   // SVG). Collapse to a glyph — the status-coloured body does the talking, plus the operator icon + id,
   // so the forest reads as a field of green/red blocks at overview (Blender/ELK level-of-detail pattern).
@@ -197,10 +206,12 @@ function GroupLane({ data }) {
 function GroupSuper({ data }) {
   const { label, count, best, series, status, tint, selected, onExpand, onSelect } = data
   return (
-    <SuperShell tint={tint} selected={selected} onClick={() => onSelect(label)}>
+    <SuperShell tint={tint} selected={selected} onClick={() => onSelect(label)}
+      title={`Select collapsed group ${label}, ${count} experiments, best ${fmt(best)}`}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
-        <button className="grp-chev btn-chev" title="expand group" onClick={(e) => { e.stopPropagation(); onExpand(label) }}>▸</button>
+        <button className="grp-chev btn-chev" aria-label={`Expand group ${label}`}
+          onClick={(e) => { e.stopPropagation(); onExpand(label) }}>▸</button>
         <b className="grp-name">{label}</b>
         <span className="spacer" style={{ flex: 1 }} />
         <span className="grp-n">{count}</span>
@@ -271,13 +282,15 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   }, [openMenu])
   const act = (action) => {
     const id = menu?.nodeId
-    closeMenu(true)
-    if (id != null && onNodeAction) onNodeAction(action, id)
+    const returnFocus = menu?.returnFocus || null
+    closeMenu(action !== 'merge')
+    if (id != null && onNodeAction) onNodeAction(action, id, { returnFocus })
   }
   const onMenuKeyDown = (event) => {
     const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
     if (!items.length) return
     const current = Math.max(0, items.indexOf(document.activeElement))
+    if (event.key === 'Tab') { closeMenu(false); return }
     let next = null
     if (event.key === 'ArrowDown') next = (current + 1) % items.length
     else if (event.key === 'ArrowUp') next = (current - 1 + items.length) % items.length
@@ -517,7 +530,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
         <span className="muted">group by</span>
-        <select className="text" value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
+        <select className="text" aria-label="Group experiments by" value={groupMode} onChange={e => onSetMode && onSetMode(e.target.value)}>
           {GROUP_MODES.map(([v, l]) => <option key={v} value={v}>{l}</option>)}
         </select>
         {groupMode !== 'none' && groupKeys.length > 0 && <>
@@ -531,9 +544,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       {/* lift the toggles above the overview map when it's open — otherwise the minimap (also
           bottom-right) covers this row and you can't click 🗺 again to hide it. */}
       <Panel position="bottom-right" className="map-toggles" style={{ marginBottom: showMap ? 152 : 0 }}>
-        <button className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
+        <button aria-pressed={showLegend} className={'btn sm ghost' + (showLegend ? ' primary' : '')} title="operator legend"
                 onClick={() => setShowLegend(v => !v)}>ⓘ ops</button>
-        <button className={'btn sm ghost' + (showMap ? ' primary' : '')} title={showMap ? 'hide overview map' : 'show overview map'}
+        <button aria-pressed={showMap} className={'btn sm ghost' + (showMap ? ' primary' : '')} title={showMap ? 'hide overview map' : 'show overview map'}
                 onClick={toggleMap}><OpIcon name="map" className="t-ic" /> map{showMap ? ' ✕' : ''}</button>
       </Panel>
       {showLegend && <Panel position="top-left" className="op-legend">
@@ -559,16 +572,16 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
            onClick={e => e.stopPropagation()} onKeyDown={onMenuKeyDown}
            onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) closeMenu(false) }}>
         <div className="nm-h" role="presentation">experiment #{menu.nodeId}</div>
-        <button role="menuitem" className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('explore')}><OpIcon name="gitbranch" size={13} /> Explore from here</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('merge')}><OpIcon name="confluence" size={13} /> Merge with…</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('ablate')}><OpIcon name="target" size={13} /> Ablate</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('diff')}><OpIcon name="doc" size={13} /> Diff vs champion</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('inspect')}><OpIcon name="search" size={13} /> Inspect</button>
         <div className="nm-h" role="presentation" style={{ marginTop: 4 }}>re-run in place (same #, no new node)</div>
-        <button role="menuitem" className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
-        <button role="menuitem" className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
-        <button role="menuitem" className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:eval')}><OpIcon name="play" size={13} /> Re-run · re-score (keep code)</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:implement')}><OpIcon name="play" size={13} /> Re-run · re-code (keep idea)</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item" onClick={() => act('reset:propose')}><OpIcon name="play" size={13} /> Re-run · full redo</button>
+        <button type="button" role="menuitem" tabIndex={-1} className="nm-item danger" onClick={() => act('kill')}><OpIcon name="cross" size={13} /> Kill branch</button>
       </div>
     </>}
     </div>
