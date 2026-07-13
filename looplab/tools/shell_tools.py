@@ -17,13 +17,15 @@ trust_mode's `docker run --network none` wrap, not the secret gate.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import sys
 from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core import _pathsafe
 from looplab.tools._base import RESULT_CAP, fn_spec
-from looplab.tools.perm_modes import decide, default_approver
+from looplab.tools.perm_modes import approval_allows, decide_action, default_approver
 
 _MAX_OUTPUT = 64_000
 _MAX_TIMEOUT = 600.0
@@ -129,11 +131,11 @@ class ShellTools:
         try:
             if name == "run_command":
                 return self._run(args.get("command"), args.get("cwd"), args.get("timeout"),
-                                 background=bool(args.get("background")))
+                                 background=bool(args.get("background")), action_id="run_command")
             if name == "run_tests":
                 path = args.get("path") or ""
                 argv = [sys.executable, "-m", "pytest", "-q"] + ([path] if path else [])
-                return self._run(argv, None, None)
+                return self._run(argv, None, None, action_id="run_tests")
             if name == "read_output":
                 from looplab.runtime.bg_tasks import MANAGER
                 r = MANAGER.read(str(args.get("task_id") or ""))
@@ -157,14 +159,14 @@ class ShellTools:
                 # (arch-review §3 P0-6: plan-mode deny does not satisfy ask-mode approval semantics).
                 from looplab.runtime.bg_tasks import MANAGER
                 tid = str(args.get("task_id") or "")
-                d = decide(self.mode, "shell")
+                action = {"tool": "kill_background", "tool_kind": "shell",
+                          "label": f"kill background task {tid}",
+                          "verb": f"kill background task `{tid}`", "preview": tid, "cwd": ""}
+                d = decide_action(self.mode, action)
                 if d == "deny":
                     return "(kill_background is disabled in plan mode. Switch to default/acceptEdits/auto.)"
                 if d == "ask":
-                    action = {"tool": "kill_background", "tool_kind": "shell",
-                              "label": f"kill background task {tid}",
-                              "verb": f"kill background task `{tid}`", "preview": tid, "cwd": ""}
-                    if not str(self.approver(action) or "deny").startswith("allow"):
+                    if not approval_allows(self.approver(action) or "deny"):
                         return f"(declined by the user: kill background {tid})"
                 r = MANAGER.kill(tid)
                 return f"[{r['task_id']}] killed" if r.get("ok") else f"({r.get('error')})"
@@ -177,15 +179,18 @@ class ShellTools:
             return self._default_cwd or (self._roots[0] if self._roots else Path.cwd())
         return _pathsafe.resolve_within(self._roots, cwd)
 
-    def _run(self, command, cwd, timeout, background=False) -> str:
+    def _run(self, command, cwd, timeout, background=False, action_id="run_command") -> str:
         if not isinstance(command, (list, tuple)) or not command or not all(isinstance(x, str) for x in command):
             return "(run_command needs a non-empty argv LIST of strings, e.g. [\"ls\",\"-la\"])"
         argv = [str(x) for x in command]
         pretty = " ".join(argv)
-        label = ("bg run: " if background else "run: ") + pretty[:80]
-        return self.exec_argv(argv, cwd, "shell", label, timeout, background=background)
+        label = (("bg run: " if background else "run: ")
+                 + (pretty[:79] + "…" if len(pretty) > 80 else pretty))
+        return self.exec_argv(
+            argv, cwd, "shell", label, timeout, background=background, action_id=action_id)
 
-    def exec_argv(self, argv, cwd, tool_kind: str, label: str, timeout=None, background=False) -> str:
+    def exec_argv(self, argv, cwd, tool_kind: str, label: str, timeout=None, background=False,
+                  action_id=None) -> str:
         """Shared gated exec used by run_command AND the git provider (so cwd-confinement, the docker
         wrap and the permission mode are enforced in ONE place). `tool_kind` picks the mode rule
         (shell / git_ro / git_mut)."""
@@ -196,15 +201,21 @@ class ShellTools:
         # communicate(timeout<=0) and kill the child instantly.
         to = max(1.0, min(float(timeout or self.timeout), _MAX_TIMEOUT))
         pretty = " ".join(argv)
-        action = {"tool": argv[0] if argv else "", "tool_kind": tool_kind, "label": label,
-                  "verb": f"run `{pretty[:80]}`", "preview": pretty, "cwd": str(wd)}
-        d = decide(self.mode, tool_kind)
+        structured_preview = json.dumps(argv, ensure_ascii=False)
+        argv_digest = hashlib.sha256(json.dumps(
+            argv, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+        action = {"tool": str(action_id or (argv[0] if argv else "")),
+                  "tool_kind": tool_kind, "label": label,
+                  "verb": f"run `{pretty[:80]}`", "preview": structured_preview, "cwd": str(wd),
+                  "scope": {"cwd": str(wd), "argv_digest": argv_digest,
+                            "background": bool(background), "timeout_seconds": to}}
+        d = decide_action(self.mode, action)
         if d == "deny":
             return ("(shell is disabled in plan mode. Switch to default/acceptEdits/auto to run "
                     "commands.)")
         if d == "ask":
-            verdict = str(self.approver(action) or "deny")
-            if not verdict.startswith("allow"):
+            verdict = self.approver(action) or "deny"
+            if not approval_allows(verdict):
                 return f"(declined by the user: {pretty[:80]})"
         # Under a non-trusted tier, run inside docker (--network none). Built once; loud if unavailable.
         if self.trust_mode and self.trust_mode != "trusted_local" and self._wrap is None:

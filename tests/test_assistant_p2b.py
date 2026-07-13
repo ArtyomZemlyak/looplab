@@ -40,7 +40,9 @@ def test_file_backups_restore_and_delete(tmp_path):
 
 def test_write_tool_revert(tmp_path):
     f = tmp_path / "a.txt"; f.write_text("original\n")
-    w = WriteTools([tmp_path], mode="auto", backup_dir=tmp_path / "bak")
+    w = WriteTools(
+        [tmp_path], mode="auto", approver=lambda _action: "allow_once",
+        backup_dir=tmp_path / "bak")
     w.execute("edit_file", {"path": str(f), "old_str": "original", "new_str": "changed"})
     assert f.read_text() == "changed\n"
     assert w.applied[0].get("abs_path")

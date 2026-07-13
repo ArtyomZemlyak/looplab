@@ -12,6 +12,20 @@ test('ephemeral command results use polite atomic live regions', async () => {
   assert.match(assistant, /setTimeout\(\(\) => mountedRef\.current && setToast\(null\), 5000\)/)
 })
 
+test('permission cards expose an accessible pending decision and safe default focus', async () => {
+  const [chat, bar] = await Promise.all([source('AssistantChat.jsx'), source('AssistantBar.jsx')])
+  assert.match(chat, /role="alertdialog" aria-modal="false" aria-labelledby=\{titleId\} aria-describedby=\{detailsId\}/)
+  assert.match(chat, /rejectRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(chat, /permission\.canAlways && <button/)
+  assert.match(chat, /Approve once/)
+  assert.match(bar, /className="asst-perm-region" role="region"/)
+  assert.match(bar, /aria-live="assertive" aria-atomic="false"/)
+  assert.match(bar, /pending\.length > 0 && view === 'bar'[\s\S]*?setView\('side'\)/)
+  const resolve = bar.slice(bar.indexOf('const resolvePerm = async'), bar.indexOf('const onRevert = async'))
+  assert.ok(resolve.indexOf('await assistantResolve') < resolve.indexOf('setPending(current =>'),
+    'the card must remain visible until the resolve POST succeeds')
+})
+
 test('timeline reveal exposes its state and a mobile touch-sized target', async () => {
   const [dock, css] = await Promise.all([source('Dock.jsx'), source('styles.css')])
   assert.match(dock, /aria-label=\{collapsed \? 'Expand events and timeline' : 'Collapse events and timeline'\}/)
@@ -31,7 +45,13 @@ test('reduced-motion disables every live CTRL activity indicator', async () => {
 test('Dock exposes accepted command records immediately instead of waiting in submitting copy', async () => {
   const dock = await source('Dock.jsx')
   assert.match(dock, /onRecord: next => \{[\s\S]*?persistTransport\(visible\)[\s\S]*?setTransportPending/)
-  assert.match(dock, /idempotencyKey, waitMs: 0/)
+  assert.match(dock, /idempotencyKey, expectedGeneration: generation, waitMs: 0/)
+})
+
+test('displayed run generation participates in state dedupe and is published only after commit', async () => {
+  const hooks = await source('hooks.js')
+  assert.match(hooks, /p\.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration/)
+  assert.match(hooks, /useLayoutEffect\(\(\) => \{ observeRunGeneration\(runId, generation\) \}/)
 })
 
 test('Config restart tracks both accepted/executing and terminates authoritative read failures', async () => {
@@ -42,8 +62,8 @@ test('Config restart tracks both accepted/executing and terminates authoritative
 
 test('both command surfaces fail before POST when durable intent persistence fails', async () => {
   const [assistant, dock] = await Promise.all([source('AssistantBar.jsx'), source('Dock.jsx')])
-  assert.match(assistant, /if \(!persistDirect\(submitting\)\) \{ localStorageFailure\(entry\); return \}[\s\S]*?submitAssistantDirect/)
-  assert.match(dock, /if \(!persistTransport\(start\)\) \{ storageTransportFailure\(action, idempotencyKey\); return \}[\s\S]*?runCommand/)
+  assert.match(assistant, /if \(!persistDirect\(submitting\)\) \{ localStorageFailure\(bound\); return \}[\s\S]*?submitAssistantDirect/)
+  assert.match(dock, /if \(!persistTransport\(start\)\) \{ storageTransportFailure\(action, idempotencyKey, generation\); return \}[\s\S]*?runCommand/)
 })
 
 test('Assistant renders durable Retry-same-command and actionable Dismiss states', async () => {

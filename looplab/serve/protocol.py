@@ -6,6 +6,11 @@ rename here is a BREAKING protocol change for both (the React side keeps its own
 
 Protocols named here:
 
+* Run command generations — ``GET /api/runs/{id}/state`` exposes RUN_GENERATION_FIELD and every
+  brand-new durable command echoes it as EXPECTED_RUN_GENERATION_FIELD. This binds delayed first
+  submissions to the event log the operator actually reviewed; idempotent replay of an existing
+  record remains observable after an in-place reset.
+
 * Background jobs — a slow endpoint (genesis boss, action-router, report regen) returns
   ``{"status": JOB_RUNNING, "job_id": ...}`` when the work outlasts its inline wait; clients poll
   ``GET /api/jobs/{id}`` (or ``/api/genesis/{id}``) which answers ``{"status": JOB_RUNNING, ...}``
@@ -37,6 +42,14 @@ from looplab.events.types import (
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+
+# ---- run-generation command precondition ---------------------------------------------------------
+# The read model exposes the generation currently occupying a reusable run id. A brand-new durable
+# command echoes that exact token so a request formed before an in-place reset cannot mutate the
+# replacement run when its first POST arrives late. Keep these names centralized: HTTP/TUI/Web/tool
+# adapters all share them even though their transport mechanics differ.
+RUN_GENERATION_FIELD = "generation"
+EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
 CONTROL_EVENTS = {

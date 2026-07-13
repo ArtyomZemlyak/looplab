@@ -11,6 +11,7 @@ import pytest
 
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+from looplab.serve.run_commands import run_generation_token
 from looplab.tools.machine_runs_tools import RunControlTools
 
 
@@ -24,8 +25,11 @@ class _RecordingCommands:
         self.append = append
         self.calls = []
 
-    def submit(self, rd, idempotency_key, event_type, data):
-        self.calls.append((rd.name, event_type, data, idempotency_key))
+    def run_generation(self, rd):
+        return run_generation_token(EventStore(rd / "events.jsonl").read_all())
+
+    def submit(self, rd, idempotency_key, event_type, data, *, expected_generation):
+        self.calls.append((rd.name, event_type, data, idempotency_key, expected_generation))
         if self.append and self.status in {"succeeded", "noop"}:
             EventStore(rd / "events.jsonl").append(event_type, data)
         return {"id": f"cmd-{len(self.calls)}", "status": self.status,
@@ -55,6 +59,7 @@ def test_finalize_appends_run_abort_auto_mode(tmp_path):
     assert "completed" in out
     assert commands.calls[0][0:3] == ("r1", "run_abort", {"reason": "finalized"})
     assert uuid.UUID(commands.calls[0][3])
+    assert commands.calls[0][4] == commands.run_generation(rd)
     types = [e.type for e in EventStore(rd / "events.jsonl").read_all()]
     assert "run_abort" in types
 
@@ -95,6 +100,16 @@ def test_recovered_turn_reuses_journaled_intent_and_fences_changed_payload(tmp_p
     assert "completed" in original.execute(
         "extend_budget", {"run_id": "stable", "add_nodes": 10})
     assert len(first.calls) == 1 and journal.exists()
+    first_generation = first.calls[0][4]
+    journal_payload = __import__("json").loads(journal.read_text(encoding="utf-8"))
+    assert journal_payload["version"] == 2
+    assert journal_payload["entries"][0]["expected_generation"] == first_generation
+
+    # Recovery must not recapture the replacement generation: the unchanged old precondition lets
+    # the service resolve a previously accepted key, or reject retargeting if it never arrived.
+    (tmp_path / "stable" / "events.jsonl").unlink()
+    _run(tmp_path / "stable")
+    assert _RecordingCommands(tmp_path).run_generation(tmp_path / "stable") != first_generation
 
     exact = _RecordingCommands(tmp_path, append=False)
     exact_recovery = RunControlTools(
@@ -105,6 +120,7 @@ def test_recovered_turn_reuses_journaled_intent_and_fences_changed_payload(tmp_p
         "extend_budget", {"run_id": "stable", "add_nodes": 10})
     assert len(exact.calls) == 1
     assert exact.calls[0][3] == first.calls[0][3]
+    assert exact.calls[0][4] == first_generation
 
     changed = _RecordingCommands(tmp_path, append=False)
     changed_recovery = RunControlTools(
@@ -143,10 +159,28 @@ def test_plan_mode_denies(tmp_path):
     assert "plan mode" in t.execute("finalize_run", {"run_id": "r2"})
 
 
+@pytest.mark.parametrize("generation", [None, "A" * 64, "a" * 63, 123])
+def test_missing_or_noncanonical_generation_fails_before_mutation_journal(
+        tmp_path, generation):
+    _run(tmp_path / "bad-generation")
+    journal = tmp_path / "bad-generation-journal.json"
+    commands = _RecordingCommands(tmp_path, append=False)
+    commands.run_generation = lambda _rd: generation
+    tool = RunControlTools(
+        tmp_path, mode="auto", command_service=commands,
+        command_key_namespace="session:bad-generation", mutation_journal_path=journal)
+
+    out = tool.execute("stop_run", {"run_id": "bad-generation"})
+
+    assert "run_generation_unavailable" in out
+    assert commands.calls == [] and not journal.exists()
+
+
 def test_delete_node_takes_subtree_and_heals_best(tmp_path):
     rd = tmp_path / "r3"
     _run(rd, nodes=(0, 1, 2)).append("pause", {})   # settled → the fresh-write live backstop stands down
     t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                        approver=lambda _action: "allow_once",
                         command_service=_RecordingCommands(tmp_path))
     out = t.execute("delete_node", {"run_id": "r3", "node_id": 1})   # deletes 1 AND its descendant 2
     assert "deleted node(s) [1, 2]" in out
@@ -176,7 +210,10 @@ def test_reset_node_spec_accepts_any_stage_name(tmp_path):
 
 def test_destructive_refuses_live_engine(tmp_path):
     _run(tmp_path / "r4")
-    t = RunControlTools(tmp_path, alive_fn=lambda _rd: True, mode="auto")   # engine "live"
+    t = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: True, mode="auto",
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path))   # engine "live"
     assert "LIVE" in t.execute("delete_run", {"run_id": "r4"})
     assert (tmp_path / "r4").exists()                               # not deleted
 
@@ -211,7 +248,7 @@ def test_lifecycle_and_engine_controls_only_submit_commands(tmp_path):
 
     unavailable = RunControlTools(tmp_path, mode="auto")
     out = unavailable.execute("stop_run", {"run_id": "svc"})
-    assert "command_service_unavailable" in out
+    assert "run_generation_unavailable" in out
     assert (rd / "events.jsonl").read_bytes() == before
 
 
@@ -227,6 +264,63 @@ def test_permission_card_precedes_command_submission(tmp_path):
                               command_service=commands)
     assert "completed" in allowed.execute("finalize_run", {"run_id": "ask"})
     assert len(commands.calls) == 1
+
+
+def test_command_approval_cannot_retarget_replacement_generation(tmp_path):
+    rd = tmp_path / "approval-swap"
+    _run(rd)
+
+    class Commands(_RecordingCommands):
+        def submit(self, rd, idempotency_key, event_type, data, *, expected_generation):
+            self.calls.append((rd.name, event_type, data, idempotency_key, expected_generation))
+            if expected_generation != self.run_generation(rd):
+                return {"id": "cmd-generation-rejected", "status": "rejected",
+                        "event_type": event_type, "error": {
+                            "code": "run_generation_changed",
+                            "message": "run replaced after approval opened",
+                            "retryable": False,
+                            "remediation": "review the replacement run",
+                        }}
+            raise AssertionError("replacement must not receive the old approved command")
+
+    commands = Commands(tmp_path, append=False)
+    generation_a = commands.run_generation(rd)
+
+    def approve(_action):
+        (rd / "events.jsonl").unlink()
+        _run(rd)
+        assert commands.run_generation(rd) != generation_a
+        return "allow_once"
+
+    tool = RunControlTools(
+        tmp_path, mode="default", approver=approve, command_service=commands)
+    out = tool.execute("stop_run", {"run_id": "approval-swap"})
+
+    assert "run_generation_changed" in out
+    assert len(commands.calls) == 1 and commands.calls[0][4] == generation_a
+    assert not [event for event in EventStore(rd / "events.jsonl").read_all()
+                if event.type == "pause"]
+
+
+def test_direct_mutation_rechecks_formed_generation_inside_guard(tmp_path):
+    rd = tmp_path / "direct-approval-swap"
+    _run(rd).append("pause", {})
+    commands = _RecordingCommands(tmp_path, append=False)
+    generation_a = commands.run_generation(rd)
+
+    def approve(_action):
+        (rd / "events.jsonl").unlink()
+        _run(rd).append("pause", {})
+        assert commands.run_generation(rd) != generation_a
+        return "allow_once"
+
+    tool = RunControlTools(
+        tmp_path, mode="default", approver=approve, command_service=commands)
+    out = tool.execute(
+        "set_trust_gate", {"run_id": "direct-approval-swap", "trust_gate": "block"})
+
+    assert "run_generation_changed" in out
+    assert fold(EventStore(rd / "events.jsonl").read_all()).trust_gate != "block"
 
 
 def test_pending_and_terminal_failure_are_reported_honestly(tmp_path):
@@ -255,8 +349,11 @@ def test_command_adapter_uses_exact_service_signature_without_duplicate_retry(tm
         def __init__(self):
             self.calls = []
 
-        def submit(self, rd, key, event_type, data, /):
-            self.calls.append((rd.name, event_type, data, key))
+        def run_generation(self, rd):
+            return run_generation_token(EventStore(rd / "events.jsonl").read_all())
+
+        def submit(self, rd, key, event_type, data, /, *, expected_generation):
+            self.calls.append((rd.name, event_type, data, key, expected_generation))
             return {"id": "pos-1", "status": "succeeded", "event_type": event_type}
 
     positional = PositionalCommands()
@@ -269,7 +366,10 @@ def test_command_adapter_uses_exact_service_signature_without_duplicate_retry(tm
         def __init__(self):
             self.calls = 0
 
-        def submit(self, rd, idempotency_key, event_type, data):
+        def run_generation(self, rd):
+            return run_generation_token(EventStore(rd / "events.jsonl").read_all())
+
+        def submit(self, rd, idempotency_key, event_type, data, *, expected_generation):
             self.calls += 1
             raise TypeError("SECRET internal bug")
 
@@ -295,11 +395,13 @@ def test_pending_or_ambiguous_command_blocks_later_controls_in_same_turn(tmp_pat
         def __init__(self):
             self.calls = 0
 
-        def submit(self, *_args):
+        def submit(self, *_args, **_kwargs):
             self.calls += 1
             raise TimeoutError("SECRET maybe accepted")
 
     broken = BrokenCommands()
+    broken.run_generation = lambda rd: run_generation_token(
+        EventStore(rd / "events.jsonl").read_all())
     uncertain = RunControlTools(tmp_path, mode="auto", command_service=broken)
     first = uncertain.execute("resume_run", {"run_id": "guarded"})
     second = uncertain.execute("stop_run", {"run_id": "guarded"})
@@ -322,7 +424,7 @@ def test_structured_existing_command_conflict_keeps_id_and_remediation(tmp_path)
         def __init__(self):
             self.calls = 0
 
-        def submit(self, *_args):
+        def submit(self, *_args, **_kwargs):
             self.calls += 1
             raise Conflict()
 
@@ -334,6 +436,8 @@ def test_structured_existing_command_conflict_keeps_id_and_remediation(tmp_path)
             }}
 
     commands = Commands()
+    commands.run_generation = lambda rd: run_generation_token(
+        EventStore(rd / "events.jsonl").read_all())
     out = RunControlTools(tmp_path, mode="auto", command_service=commands).execute(
         "stop_run", {"run_id": "conflict"})
     assert existing_id in out and "spawn_failed" in out and "/retry" in out
@@ -351,7 +455,10 @@ def test_different_active_command_can_never_be_reported_as_requested_action_succ
                            "remediation": f"GET /commands/{existing_id}"}
 
     class Commands:
-        def submit(self, *_args):
+        def run_generation(self, rd):
+            return run_generation_token(EventStore(rd / "events.jsonl").read_all())
+
+        def submit(self, *_args, **_kwargs):
             raise Conflict()
 
         def get(self, _rd, command_id):
@@ -361,7 +468,9 @@ def test_different_active_command_can_never_be_reported_as_requested_action_succ
             return {"id": existing_id, "status": "succeeded", "event_type": "resume", "error": None}
 
     tool = RunControlTools(tmp_path, mode="auto", command_service=Commands())
-    record = tool._commands.submit(tmp_path / "different", "pause", {})
+    generation = tool._commands.run_generation(tmp_path / "different")
+    record = tool._commands.submit(
+        tmp_path / "different", "pause", {}, expected_generation=generation)
     assert record["status"] == "rejected" and "id" not in record
     assert record["error"]["retryable"] is False
     assert existing_id in record["error"]["remediation"]
@@ -446,7 +555,10 @@ def test_delete_refuses_fresh_write_even_when_flock_says_dead(tmp_path):
     # security backstop: on a FUSE mount flock (alive_fn) can wrongly say "dead"; a fresh events.jsonl
     # write on a non-settled run must still be treated as LIVE so the log isn't rewritten under it.
     _run(tmp_path / "r5", nodes=(0, 1))     # just written, not paused/finished
-    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto")   # flock lies: "dead"
+    t = RunControlTools(
+        tmp_path, alive_fn=lambda _rd: False, mode="auto",
+        approver=lambda _action: "allow_once",
+        command_service=_RecordingCommands(tmp_path))   # flock lies: "dead"
     assert "LIVE" in t.execute("delete_node", {"run_id": "r5", "node_id": 1})
     assert not (tmp_path / "r5" / "events.jsonl.bak-del1").exists()          # never rewrote the log
 
@@ -455,6 +567,7 @@ def test_delete_refuses_fresh_write_even_when_flock_says_dead(tmp_path):
 
 def _tools(tmp_path):
     return RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto",
+                           approver=lambda _action: "allow_once",
                            command_service=_RecordingCommands(tmp_path))
 
 

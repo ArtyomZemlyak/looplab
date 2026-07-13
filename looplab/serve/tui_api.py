@@ -6,6 +6,7 @@ from __future__ import annotations
 import http.client
 import json
 import os
+import re
 import socket
 import time
 import urllib.error
@@ -16,11 +17,27 @@ from typing import Any, Optional
 
 # The one looplab import this module allows itself: the wire-protocol vocabulary it shares with the
 # server (job statuses). Everything else stays stdlib so the TUI adds no dependencies.
-from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
+from looplab.serve.protocol import (
+    EXPECTED_RUN_GENERATION_FIELD,
+    JOB_DONE,
+    JOB_RUNNING,
+    JOB_UNKNOWN,
+    RUN_GENERATION_FIELD,
+)
 
 
 _COMMAND_TERMINAL = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
 _COMMAND_PENDING = frozenset({"accepted", "executing"})
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def normalize_run_generation(value: object) -> str:
+    """Require the exact lowercase token emitted by GET /state; never trim/coerce stale input."""
+    if not isinstance(value, str) or _RUN_GENERATION_RE.fullmatch(value) is None:
+        raise ApiError(
+            "run generation is missing or invalid; refresh the run before submitting a command",
+            status=400)
+    return value
 
 
 def command_error_transient(error: "ApiError") -> bool:
@@ -124,7 +141,8 @@ class Api:
 
     def run_command(self, run_id: str, event_type: str, data: Optional[dict] = None,
                     wait_s: float = 8.0, submit_retries: int = 1,
-                    idempotency_key: Optional[str] = None) -> dict:
+                    idempotency_key: Optional[str] = None,
+                    expected_generation: Optional[str] = None) -> dict:
         """Submit one authoritative run command and briefly follow its observable lifecycle.
 
         The idempotency key belongs to this logical submission. A lost response or 5xx may replay the
@@ -135,11 +153,13 @@ class Api:
         """
         path = f"/api/runs/{_path_segment(run_id)}/commands"
         key = str(idempotency_key or uuid.uuid4())
+        generation = normalize_run_generation(expected_generation)
         record = None
         for attempt in range(max(0, int(submit_retries)) + 1):
             try:
                 record = self._request(
-                    "POST", path, body={"type": event_type, "data": data or {}},
+                    "POST", path, body={"type": event_type, "data": data or {},
+                                        EXPECTED_RUN_GENERATION_FIELD: generation},
                     headers={"Idempotency-Key": key})
                 break
             except ApiError as exc:
@@ -181,6 +201,14 @@ class Api:
             # Ctrl-C stops only the local wait, never an accepted server command.
             pass
         return {**last, "status": "executing"}
+
+    def run_generation(self, run_id: str) -> str:
+        """Capture one durable generation before the caller stages a fresh command intent."""
+        path = f"/api/runs/{_path_segment(run_id)}/state"
+        payload = self.get(path)
+        if not isinstance(payload, dict):
+            raise ApiError(f"{path}: invalid state response", status=200)
+        return normalize_run_generation(payload.get(RUN_GENERATION_FIELD))
 
     def get_run_command(self, run_id: str, command_id: str) -> dict:
         """Fetch one durable command record using URL-safe opaque identifiers."""

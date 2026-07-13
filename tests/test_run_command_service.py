@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 pytest.importorskip("fastapi")
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from looplab.events.eventstore import EventStore  # noqa: E402
@@ -91,9 +92,17 @@ def _client(root, driver, *, startup=0.08, timeout=0.25, observation=None):
     return TestClient(app), srv
 
 
-def _post(client, event_type, data=None, key="key-1"):
+def _generation(client, run_id="demo"):
+    generation = client.get(f"/api/runs/{run_id}/state").json()["generation"]
+    assert isinstance(generation, str) and len(generation) == 64
+    return generation
+
+
+def _post(client, event_type, data=None, key="key-1", *, generation=None):
+    expected_generation = generation if generation is not None else _generation(client)
     return client.post("/api/runs/demo/commands", headers={"Idempotency-Key": key},
-                       json={"type": event_type, "data": data or {}})
+                       json={"type": event_type, "data": data or {},
+                             "expected_generation": expected_generation})
 
 
 def _terminal(client, record, timeout=1.0, run_id="demo"):
@@ -152,7 +161,8 @@ def test_idempotency_is_durable_one_event_and_key_digest_only(tmp_path):
     rd = _seed(tmp_path)
     client, _srv = _client(tmp_path, _Driver())
     raw_key = "do-not-store-this-idempotency-key"
-    body = {"type": "hint", "data": {"text": "try robust scaling"}}
+    body = {"type": "hint", "data": {"text": "try robust scaling"},
+            "expected_generation": _generation(client)}
 
     missing = client.post("/api/runs/demo/commands", json=body)
     assert missing.status_code == 400
@@ -163,7 +173,8 @@ def test_idempotency_is_durable_one_event_and_key_digest_only(tmp_path):
     assert _types(rd).count("hint") == 1
 
     conflict = client.post("/api/runs/demo/commands", headers={"Idempotency-Key": raw_key},
-                           json={"type": "hint", "data": {"text": "different"}})
+                           json={"type": "hint", "data": {"text": "different"},
+                                 "expected_generation": body["expected_generation"]})
     assert conflict.status_code == 409
     record_file = next((rd / ".commands").glob("cmd_*.json"))
     raw = record_file.read_text(encoding="utf-8")
@@ -172,6 +183,120 @@ def test_idempotency_is_durable_one_event_and_key_digest_only(tmp_path):
     public = first.json()
     assert {"id", "status", "event_type", "error"}.issubset(public)
     assert "data" not in public and "idempotency_key_digest" not in public and "payload_digest" not in public
+
+
+def test_new_command_requires_a_strict_observed_generation_but_normalizes_hex_case(tmp_path):
+    rd = _seed(tmp_path)
+    client, _srv = _client(tmp_path, _Driver())
+    generation = _generation(client)
+
+    for value in (None, 123, generation[:-1], f" {generation}", "g" * 64):
+        response = client.post(
+            "/api/runs/demo/commands", headers={"Idempotency-Key": f"invalid-{value!r}"},
+            json={"type": "hint", "data": {"text": "must not append"},
+                  "expected_generation": value})
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "invalid_run_generation"
+
+    accepted = client.post(
+        "/api/runs/demo/commands", headers={"Idempotency-Key": "uppercase-generation"},
+        json={"type": "hint", "data": {"text": "normalized"},
+              "expected_generation": generation.upper()})
+    assert accepted.status_code == 200 and accepted.json()["status"] == "succeeded"
+    record = json.loads(next((rd / ".commands").glob("cmd_*.json")).read_text(encoding="utf-8"))
+    assert record["run_generation"] == generation
+
+
+def test_empty_event_log_exposes_no_generation_and_rejects_new_commands(tmp_path):
+    rd = tmp_path / "empty"
+    rd.mkdir()
+    (rd / "events.jsonl").write_bytes(b"")
+    client, _srv = _client(tmp_path, _Driver())
+
+    state = client.get("/api/runs/empty/state")
+    assert state.status_code == 200 and state.json()["generation"] is None
+    response = client.post(
+        "/api/runs/empty/commands", headers={"Idempotency-Key": "before-run-started"},
+        json={"type": "hint", "data": {"text": "too early"},
+              "expected_generation": "a" * 64})
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "run_generation_unavailable"
+    assert not (rd / ".commands").exists()
+
+
+def test_delayed_first_submit_is_rejected_after_generation_replacement(monkeypatch, tmp_path):
+    rd = _seed(tmp_path)
+    driver = _Driver()
+    _client_unused, srv = _client(tmp_path, driver)
+    generation_a = srv.commands.run_generation(rd)
+    path_resolved = threading.Event()
+    result = []
+    original_path = srv.commands._path
+
+    def signal_after_path_validation(*args, **kwargs):
+        path = original_path(*args, **kwargs)
+        path_resolved.set()
+        return path
+
+    monkeypatch.setattr(srv.commands, "_path", signal_after_path_validation)
+
+    def delayed_submit():
+        try:
+            srv.commands.submit(
+                rd, "delayed-first-key", "hint", {"text": "must stay in A"},
+                expected_generation=generation_a)
+        except HTTPException as exc:
+            result.append(exc)
+
+    # Formed for A, but its first sequenced admission occurs only after B replaces the log.
+    with srv.commands.sequence(rd):
+        worker = threading.Thread(target=delayed_submit)
+        worker.start()
+        assert path_resolved.wait(1.0)
+        (rd / "events.jsonl").rename(rd / "events.jsonl.generation-a")
+        EventStore(rd / "events.jsonl").append(
+            "run_started", {"run_id": "demo", "task_id": "task-b", "goal": "b",
+                            "direction": "min"})
+    worker.join(1.0)
+
+    assert len(result) == 1 and result[0].status_code == 409
+    assert result[0].detail["code"] == "run_generation_changed"
+    assert result[0].detail["expected_generation"] == generation_a
+    assert result[0].detail["current_generation"] == srv.commands.run_generation(rd)
+    assert not list((rd / ".commands").glob("cmd_*.json"))
+    assert _types(rd) == ["run_started"]
+    assert driver.calls == []
+
+
+def test_state_cache_changes_generation_when_replacement_reuses_seq_size_and_mtime(tmp_path):
+    rd = _seed(tmp_path)
+    client, _srv = _client(tmp_path, _Driver())
+    first = client.get("/api/runs/demo/state").json()
+    old_path = rd / "events.jsonl"
+    old_bytes = old_path.read_bytes()
+    old_stat = old_path.stat()
+
+    # Keep the log byte length, seq range and mtime identical while changing its first durable event.
+    # The file identity/ctime portion of the cache key must still separate generation B from A.
+    marker = b'"goal":"g"'
+    assert marker in old_bytes
+    replacement = old_bytes.replace(marker, b'"goal":"b"', 1)
+    ts_start = replacement.index(b'"ts":') + len(b'"ts":')
+    ts_end = replacement.index(b",", ts_start)
+    timestamp = bytearray(replacement[ts_start:ts_end])
+    assert timestamp[-1] in b"0123456789"
+    timestamp[-1] = ord("1") if timestamp[-1] != ord("1") else ord("2")
+    replacement = replacement[:ts_start] + bytes(timestamp) + replacement[ts_end:]
+    old_path.rename(rd / "events.jsonl.generation-a")
+    old_path.write_bytes(replacement)
+    os.utime(old_path, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    new_stat = old_path.stat()
+    assert new_stat.st_size == old_stat.st_size and new_stat.st_mtime_ns == old_stat.st_mtime_ns
+
+    second = client.get("/api/runs/demo/state").json()
+    assert second["seq"] == first["seq"] and second["max_seq"] == first["max_seq"]
+    assert second["state"]["goal"] == "b"
+    assert second["generation"] != first["generation"]
 
 
 def test_resume_running_is_noop_without_event_or_spawn(tmp_path):
@@ -373,7 +498,8 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
         max_observation_timeout=0.25)
     client2 = TestClient(app)
     response = client2.post("/api/runs/other/commands", headers={"Idempotency-Key": "silent"},
-                            json={"type": "budget_extend", "data": {"add_nodes": 1}})
+                            json={"type": "budget_extend", "data": {"add_nodes": 1},
+                                  "expected_generation": _generation(client2, "other")})
     record = response.json()
     deadline = time.time() + 1
     while record.get("status") not in TERMINAL_STATUSES and time.time() < deadline:
@@ -393,7 +519,8 @@ def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_pat
     assert blocked_retry.json()["detail"]["code"] == "engine_start_uncertain"
     blocked_new = client2.post(
         "/api/runs/other/commands", headers={"Idempotency-Key": "another-command"},
-        json={"type": "hint", "data": {"text": "do not race the cold child"}})
+        json={"type": "hint", "data": {"text": "do not race the cold child"},
+              "expected_generation": _generation(client2, "other")})
     assert blocked_new.status_code == 409
     assert blocked_new.json()["detail"]["code"] == "engine_start_uncertain"
     assert len(silent.calls) == 1
@@ -1391,6 +1518,103 @@ def test_reset_active_guard_and_external_spawn_lease_prevent_second_popen(monkey
     assert _terminal(client, command)["status"] == "succeeded"
 
 
+def test_reset_rejects_delayed_first_post_but_same_key_replays_old_terminal_record(
+        monkeypatch, tmp_path):
+    rd = _seed(tmp_path, finished=True)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver)
+    generation_a = _generation(client)
+    body = {"type": "hint", "data": {"text": "belongs to A"},
+            "expected_generation": generation_a}
+    first = client.post(
+        "/api/runs/demo/commands", headers={"Idempotency-Key": "accepted-in-a"}, json=body)
+    assert first.status_code == 200 and first.json()["status"] == "succeeded"
+    original_record = first.json()
+
+    from looplab.serve.routers import control as control_router
+
+    def reset_spawn(_args, **_kwargs):
+        EventStore(rd / "events.jsonl").append(
+            "run_started", {"run_id": "demo", "task_id": "task-b", "goal": "b",
+                            "direction": "min"})
+        return 9002
+
+    monkeypatch.setattr(control_router, "_spawn_engine", reset_spawn)
+    reset = client.post("/api/runs/demo/reset")
+    assert reset.status_code == 200
+    generation_b = _generation(client)
+    assert generation_b != generation_a
+
+    delayed = client.post(
+        "/api/runs/demo/commands", headers={"Idempotency-Key": "first-arrives-after-reset"},
+        json={"type": "hint", "data": {"text": "must not cross"},
+              "expected_generation": generation_a})
+    assert delayed.status_code == 409
+    assert delayed.json()["detail"] == {
+        "code": "run_generation_changed",
+        "expected_generation": generation_a,
+        "current_generation": generation_b,
+        "message": "The run was reset or replaced after this command was formed.",
+        "remediation": (
+            "Refresh the run, review its current state, and form a new command with a new "
+            "idempotency key and current generation."),
+    }
+
+    # Lost-response recovery uses the exact old, valid token. Idempotency lookup wins over equality
+    # with B, so the terminal A record remains unchanged and no B event/worker is created.
+    replay = client.post(
+        "/api/runs/demo/commands", headers={"Idempotency-Key": "accepted-in-a"}, json=body)
+    assert replay.status_code == 200 and replay.json() == original_record
+    assert _types(rd) == ["run_started"]
+    assert len(list((rd / ".commands").glob("cmd_*.json"))) == 1
+    assert driver.calls == []
+
+    # Syntax remains mandatory even for an idempotent key; only a valid stale token gets recovery.
+    for invalid in (None, "not-a-generation"):
+        invalid_replay = client.post(
+            "/api/runs/demo/commands", headers={"Idempotency-Key": "accepted-in-a"},
+            json={"type": "hint", "data": {"text": "belongs to A"},
+                  "expected_generation": invalid})
+        assert invalid_replay.status_code == 400
+        assert invalid_replay.json()["detail"]["code"] == "invalid_run_generation"
+
+    retry = client.post(f"/api/runs/demo/commands/{original_record['id']}/retry")
+    assert retry.status_code == 409
+    assert retry.json()["detail"]["code"] == "run_generation_changed"
+
+
+def test_get_quarantines_stale_or_unbound_nonterminal_records_without_starting_worker(tmp_path):
+    rd = _seed(tmp_path)
+    driver = _Driver()
+    client, srv = _client(tmp_path, driver)
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+    pending = _post(
+        client, "budget_extend", {"add_nodes": 1}, key="pending-generation-a").json()
+    assert pending["status"] == "accepted"
+
+    (rd / "events.jsonl").rename(rd / "events.jsonl.generation-a")
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task-b", "goal": "b",
+                        "direction": "min"})
+    stale = client.get(f"/api/runs/demo/commands/{pending['id']}").json()
+    assert stale["status"] == "failed"
+    assert stale["error"]["code"] == "run_generation_changed"
+    assert stale["error"]["retryable"] is False
+    assert driver.calls == [] and _types(rd) == ["run_started"]
+
+    # Pre-upgrade accepted records have no generation proof. They are observable but equally inert.
+    path = rd / ".commands" / f"{pending['id']}.json"
+    row = json.loads(path.read_text(encoding="utf-8"))
+    row.pop("run_generation", None)
+    row["status"] = "accepted"
+    row["error"] = None
+    path.write_text(json.dumps(row), encoding="utf-8")
+    legacy = client.get(f"/api/runs/demo/commands/{pending['id']}").json()
+    assert legacy["status"] == "failed"
+    assert legacy["error"]["code"] == "run_generation_unavailable"
+    assert driver.calls == [] and _types(rd) == ["run_started"]
+
+
 def test_reset_archive_failure_rolls_back_and_never_spawns(monkeypatch, tmp_path):
     rd = _seed(tmp_path, finished=True)
     (rd / "spans.jsonl").write_text('{"name":"keep"}\n', encoding="utf-8")
@@ -1648,7 +1872,8 @@ def test_thread_start_failure_releases_execution_claim(monkeypatch, tmp_path):
 
     monkeypatch.setattr(threading.Thread, "start", fail_start)
     with pytest.raises(RuntimeError, match="thread creation failed"):
-        srv.commands.submit(rd, key, "pause", {})
+        srv.commands.submit(
+            rd, key, "pause", {}, expected_generation=srv.commands.run_generation(rd))
 
     assert not srv.commands._exec_path(rd, command_id).exists()
 

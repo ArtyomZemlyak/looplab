@@ -14,6 +14,7 @@ from the live transport so they are unit-testable with a fake server handle.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
@@ -147,14 +148,23 @@ class GatedMcpTools:
         return None
 
     def execute(self, name: str, args: dict) -> str:
-        from looplab.tools.perm_modes import decide
-        d = decide(self._mode, "shell")          # an MCP tool is an untyped external side effect
+        from looplab.tools.perm_modes import approval_allows, decide_action
+        try:
+            args_json = json.dumps(args or {}, sort_keys=True, separators=(",", ":"),
+                                   ensure_ascii=False, allow_nan=False)
+        except (TypeError, ValueError):
+            args_json = "<invalid arguments>"
+        from looplab.trust.redact import redact_secrets
+        args_digest = hashlib.sha256(args_json.encode("utf-8")).hexdigest()
+        action = {"tool": name, "tool_kind": "mcp", "label": f"MCP tool {name}",
+                  "verb": f"call MCP tool `{name}`",
+                  "preview": redact_secrets(args_json)[:2000], "cwd": "",
+                  "scope": {"tool": name, "arguments_digest": args_digest}}
+        d = decide_action(self._mode, action)
         if d == "deny":
             return f"(MCP tool {name} is disabled in plan mode. Switch to default/acceptEdits/auto.)"
         if d == "ask":
-            action = {"tool": name, "tool_kind": "shell", "label": f"MCP tool {name}",
-                      "verb": f"call MCP tool `{name}`", "preview": name, "cwd": ""}
-            if not str(self._approver(action) or "deny").startswith("allow"):
+            if not approval_allows(self._approver(action) or "deny"):
                 return f"(declined by the user: MCP tool {name})"
         return self._inner.execute(name, args)
 

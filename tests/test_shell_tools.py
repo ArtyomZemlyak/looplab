@@ -16,7 +16,7 @@ def test_plan_mode_disables_shell(tmp_path):
 
 
 def test_auto_runs_and_captures_output(tmp_path):
-    r = ShellTools([tmp_path], mode="auto").execute(
+    r = ShellTools([tmp_path], mode="auto", approver=ALLOW).execute(
         "run_command", {"command": [sys.executable, "-c", "print('hello123')"]})
     assert "exit=0" in r and "hello123" in r
 
@@ -27,7 +27,7 @@ def test_requires_argv_list(tmp_path):
 
 
 def test_cwd_confined_to_roots(tmp_path):
-    r = ShellTools([tmp_path], mode="auto").execute(
+    r = ShellTools([tmp_path], mode="auto", approver=ALLOW).execute(
         "run_command", {"command": ["echo", "hi"], "cwd": "/etc"})
     assert "outside" in r
 
@@ -49,7 +49,7 @@ def test_long_stdout_does_not_crowd_out_stderr(tmp_path):
             "sys.stdout.write('o' * 20000)\n"
             "sys.stderr.write('e' * 5000 + ' THE_REAL_ERROR')\n"
             "sys.exit(3)\n")
-    r = ShellTools([tmp_path], mode="auto").execute(
+    r = ShellTools([tmp_path], mode="auto", approver=ALLOW).execute(
         "run_command", {"command": [sys.executable, "-c", code]})
     assert "exit=3" in r and "stdout:" in r and "stderr:" in r   # both sections present
     assert "THE_REAL_ERROR" in r                # the stderr TAIL (where the exception line lives) survives
@@ -59,7 +59,7 @@ def test_long_stdout_does_not_crowd_out_stderr(tmp_path):
 def test_secret_env_not_leaked(tmp_path, monkeypatch):
     # A secret-named env var must not reach the child's stdout (sandbox._run_argv scrubs it).
     monkeypatch.setenv("MY_API_KEY", "supersecret-xyz")
-    r = ShellTools([tmp_path], mode="auto").execute(
+    r = ShellTools([tmp_path], mode="auto", approver=ALLOW).execute(
         "run_command", {"command": [sys.executable, "-c",
                                     "import os;print(os.environ.get('MY_API_KEY','<absent>'))"]})
     assert "supersecret-xyz" not in r and "<absent>" in r

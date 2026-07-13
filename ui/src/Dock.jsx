@@ -478,6 +478,7 @@ const recoveryForRun = (runId) => {
   if (!saved) return { pending: null, failure: null }
   if (saved.protocolInvalid) return { pending: {
     action: saved.action, idempotencyKey: saved.idempotencyKey, record: saved.record,
+    expectedGeneration: saved.expectedGeneration,
     statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
     canResubmit: false, lastError: 'Stored command recovery data is invalid.',
   }, failure: null }
@@ -494,6 +495,7 @@ const recoveryForRun = (runId) => {
   const needsObservation = !knownStatus || !record.id || !!saved.retrying || !!saved.checking
   const entry = {
     action: saved.action, idempotencyKey: saved.idempotencyKey, record,
+    expectedGeneration: saved.expectedGeneration,
     statusUnavailable: !!saved.statusUnavailable || needsObservation,
     observationKind: saved.observationKind || (!knownStatus && record.id ? 'protocol'
       : (needsObservation ? 'transport' : null)),
@@ -515,7 +517,7 @@ const observationKind = error => {
 
 // Round-9: the per-run "boss" chat moved to the single persistent assistant, so the Dock is purely
 // the run's EVENTS window — the timeline feed + scrubber + filters + transport.
-export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false }) {
+export default function Dock({ runId, live, liveSeq, expectedGeneration, viewSeq, setViewSeq, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false }) {
   const [log, setLog] = useState([])
   const [logStatus, setLogStatus] = useState('loading')
   const [logNonce, setLogNonce] = useState(0)
@@ -543,6 +545,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       const entry = restored.pending || restored.failure
       const lockMismatch = lock?.source === 'dock' && entry && (
         lock.idempotencyKey !== entry.idempotencyKey || lock.action !== entry.action
+        || lock.expectedGeneration !== entry.expectedGeneration
         || (lock.commandId && entry.record?.id && lock.commandId !== entry.record.id)
       )
       if (lockMismatch) pending = { ...entry, statusUnavailable: true, observationKind: 'protocol',
@@ -554,7 +557,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       } else if (pending) saveRunTransport(runId, pending)
       else if (!restored.failure && lock?.source === 'dock') {
         clearRunCommandLock(runId, { source: 'dock', idempotencyKey: lock.idempotencyKey,
-          action: lock.action, commandId: lock.commandId })
+          action: lock.action, expectedGeneration: lock.expectedGeneration,
+          commandId: lock.commandId })
       }
     }
   }, [runId])
@@ -679,9 +683,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     return actual && TRANSPORT_INTENTS[actual] && commandRecordMatchesAction(record, actual, 'dock')
       ? actual : null
   }
-  const protocolTransportState = (action, idempotencyKey, record, message, lockIdentity = null) => {
+  const protocolTransportState = (action, idempotencyKey, record, message, lockIdentity = null,
+    boundGeneration = transportPending?.expectedGeneration || lockIdentity?.expectedGeneration || '') => {
     const commandId = /^cmd_[0-9a-f]{32}$/.test(String(record?.id || '')) ? String(record.id) : ''
     const entry = { action: action || 'unknown', idempotencyKey,
+      expectedGeneration: boundGeneration,
       record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
       statusUnavailable: true, observationKind: 'protocol', protocolInvalid: true,
       canResubmit: false, lastError: message, lockIdentity }
@@ -689,43 +695,47 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     setTransportPending(entry); setTransportFailure(null)
     return entry
   }
-  const storageTransportFailure = (action, idempotencyKey) => {
+  const storageTransportFailure = (action, idempotencyKey, boundGeneration) => {
     const record = { status: 'rejected', error: {
       code: 'command_storage_unavailable',
       message: 'The command was not sent because durable tab storage is unavailable.',
       remediation: 'Enable session storage or free browser storage, then try again.', retryable: false,
     } }
-    const entry = { action, idempotencyKey, record }
+    const entry = { action, idempotencyKey, expectedGeneration: boundGeneration, record }
     setTransportPending(null); setTransportFailure(entry)
     onToast?.('Command not sent — durable recovery storage is unavailable')
     return entry
   }
-  const acceptTransportRecord = (action, record, idempotencyKey) => {
+  const acceptTransportRecord = (action, record, idempotencyKey, boundGeneration) => {
     const pendingState = transportPending
     const actualAction = verifiedTransportAction(action, record, pendingState?.protocolInvalid)
     if (!actualAction) return protocolTransportState(action, idempotencyKey, record,
-      'Command identity does not match the requested action', pendingState?.lockIdentity)
+      'Command identity does not match the requested action', pendingState?.lockIdentity,
+      boundGeneration)
     if (pendingState?.protocolInvalid) {
       const identity = pendingState.lockIdentity || {
         source: 'dock', idempotencyKey: pendingState.idempotencyKey,
-        action: pendingState.action, commandId: pendingState.record?.id || '',
+        action: pendingState.action, expectedGeneration: pendingState.expectedGeneration,
+        commandId: pendingState.record?.id || '',
       }
       clearRunCommandLock(runId, identity)
     }
     const feedback = commandFeedback(record, transportLabels(actualAction))
     onToast?.(feedback.message)
     if (feedback.kind === 'pending') {
-      const entry = { action: actualAction, idempotencyKey, record, statusUnavailable: false }
+      const entry = { action: actualAction, idempotencyKey, expectedGeneration: boundGeneration,
+        record, statusUnavailable: false }
       if (!persistTransport(entry)) {
         return protocolTransportState(actualAction, idempotencyKey, record,
-          'Command accepted, but its updated durable status could not be stored')
+          'Command accepted, but its updated durable status could not be stored', null,
+          boundGeneration)
       }
       setTransportPending(entry)
       setTransportFailure(null)
     } else {
       setTransportPending(null)
       if (feedback.kind === 'error') {
-        const entry = { action: actualAction, idempotencyKey, record }
+        const entry = { action: actualAction, idempotencyKey, expectedGeneration: boundGeneration, record }
         if (!persistTransport(entry)) clearRunTransport(runId)
         setTransportFailure(entry)
       } else {
@@ -733,14 +743,14 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       }
     }
   }
-  const unavailableTransport = (action, idempotencyKey, record, error, extra = {}) => {
+  const unavailableTransport = (action, idempotencyKey, boundGeneration, record, error, extra = {}) => {
     const kind = observationKind(error)
     let recoveryRecord = record || { status: 'submitting' }
     if (recoveryRecord.id && !recoveryRecord.event_type && TRANSPORT_INTENTS[action]) {
       recoveryRecord = { ...recoveryRecord, event_type: commandEventForAction(action, 'dock') }
     }
     const entry = {
-      action, idempotencyKey, record: recoveryRecord,
+      action, idempotencyKey, expectedGeneration: boundGeneration, record: recoveryRecord,
       statusUnavailable: true, observationKind: kind,
       lastError: error?.message || String(error), ...extra,
     }
@@ -748,14 +758,16 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     setTransportPending(entry); setTransportFailure(null)
     return entry
   }
-  const failTransport = (action, idempotencyKey, error, previous = null) => {
+  const failTransport = (action, idempotencyKey, boundGeneration, error, previous = null) => {
     const record = commandFailureRecord(error, previous)
-    const entry = { action, idempotencyKey, record }
+    const entry = { action, idempotencyKey, expectedGeneration: boundGeneration, record }
     if (!persistTransport(entry)) clearRunTransport(runId)
     setTransportPending(null); setTransportFailure(entry)
     onToast?.(commandFeedback(record, transportLabels(action)).message)
   }
-  const runTransport = async (action, idempotencyKey = createIdempotencyKey(), { allowPending = false } = {}) => {
+  const runTransport = async (action, idempotencyKey = createIdempotencyKey(), {
+    allowPending = false, boundGeneration = null,
+  } = {}) => {
     if (!allowPending && (transportPending || loadRunCommandLock(runId))) return
     const intent = TRANSPORT_INTENTS[action]
     if (!intent) {
@@ -763,29 +775,39 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         'Stored command identity cannot be safely replayed', transportPending?.lockIdentity)
       return
     }
-    const start = { action, idempotencyKey, record: { status: 'submitting' } }
-    if (!persistTransport(start)) { storageTransportFailure(action, idempotencyKey); return }
+    const generation = allowPending ? boundGeneration : expectedGeneration
+    if (!/^[0-9a-f]{64}$/.test(generation || '')) {
+      const error = new Error('The displayed run generation is unavailable.')
+      error.code = 'run_generation_unavailable'
+      error.remediation = 'Refresh the run and wait for its current state before submitting another action.'
+      failTransport(action, idempotencyKey, generation || '', error)
+      return
+    }
+    const start = { action, idempotencyKey, expectedGeneration: generation,
+      record: { status: 'submitting' } }
+    if (!persistTransport(start)) { storageTransportFailure(action, idempotencyKey, generation); return }
     setTransportPending(start)
     setTransportFailure(null)
     try {
       const record = await runCommand(runId, intent.type, intent.data, {
-        idempotencyKey, waitMs: 0,
+        idempotencyKey, expectedGeneration: generation, waitMs: 0,
         onRecord: next => {
-          const visible = { action, idempotencyKey, record: next, statusUnavailable: false }
+          const visible = { action, idempotencyKey, expectedGeneration: generation,
+            record: next, statusUnavailable: false }
           if (!persistTransport(visible)) return
           setTransportPending(current => current?.action === action && current?.idempotencyKey === idempotencyKey
             ? visible : current)
         },
       })
-      acceptTransportRecord(action, record, idempotencyKey)
+      acceptTransportRecord(action, record, idempotencyKey, generation)
     } catch (error) {
       const record = error?.commandRecord || (error?.commandId
         ? { id: error.commandId, status: 'accepted' } : null)
       const kind = observationKind(error)
       if (error?.commandUnknown || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
-        unavailableTransport(action, idempotencyKey, record, error)
+        unavailableTransport(action, idempotencyKey, generation, record, error)
         onToast?.(`${transportLabels(action).failure}: command status unavailable; the same intent was preserved`)
-      } else failTransport(action, idempotencyKey, error, record)
+      } else failTransport(action, idempotencyKey, generation, error, record)
     }
   }
   const onStop = () => runTransport('stop')
@@ -794,8 +816,9 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
   const onRetryTransport = async () => {
     const failure = transportFailure
     if (transportBusy || loadRunCommandLock(runId) || !commandCanRetry(failure?.record)) return
-    const { action, record, idempotencyKey } = failure
-    const retrying = { action, idempotencyKey, record, retrying: true }
+    const { action, record, idempotencyKey, expectedGeneration: boundGeneration } = failure
+    const retrying = { action, idempotencyKey, expectedGeneration: boundGeneration,
+      record, retrying: true }
     if (!persistTransport(retrying)) {
       onToast?.('Retry not sent — durable recovery storage is unavailable')
       return
@@ -806,18 +829,21 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       const next = await retryRunCommand(runId, record.id, {
         waitMs: 0,
         onRecord: value => {
-          const visible = { action, idempotencyKey, record: value, retrying: true }
+          const visible = { action, idempotencyKey, expectedGeneration: boundGeneration,
+            record: value, retrying: true }
           persistTransport(visible)
           setTransportPending(current => current?.action === action && current?.idempotencyKey === idempotencyKey
             ? visible : current)
         },
       })
-      acceptTransportRecord(action, next, idempotencyKey)
+      acceptTransportRecord(action, next, idempotencyKey, boundGeneration)
     } catch (error) {
       const kind = observationKind(error)
       if (['transport', 'access', 'protocol'].includes(kind)) {
-        unavailableTransport(action, idempotencyKey, error?.commandRecord || record, error)
-      } else failTransport(action, idempotencyKey, error, error?.commandRecord || record)
+        unavailableTransport(action, idempotencyKey, boundGeneration,
+          error?.commandRecord || record, error)
+      } else failTransport(action, idempotencyKey, boundGeneration,
+        error, error?.commandRecord || record)
     }
   }
   const onCheckTransport = async () => {
@@ -834,20 +860,26 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
       }
       // The POST response was lost before the command id arrived. Re-submit the exact stored key and
       // deterministic action payload; the server returns the same command record.
-      await runTransport(pending.action, pending.idempotencyKey, { allowPending: true })
+      await runTransport(pending.action, pending.idempotencyKey, {
+        allowPending: true, boundGeneration: pending.expectedGeneration,
+      })
       return
     }
     try {
       const record = await getRunCommand(runId, pending.record.id)
-      acceptTransportRecord(pending.action, record, pending.idempotencyKey)
+      acceptTransportRecord(pending.action, record, pending.idempotencyKey,
+        pending.expectedGeneration)
     } catch (error) {
       const kind = observationKind(error)
       if (pending.protocolInvalid) {
         protocolTransportState(pending.action, pending.idempotencyKey, pending.record,
-          error?.message || 'Stored command could not be verified', pending.lockIdentity)
+          error?.message || 'Stored command could not be verified', pending.lockIdentity,
+          pending.expectedGeneration)
       } else if (['transport', 'access', 'protocol'].includes(kind)) {
-        unavailableTransport(pending.action, pending.idempotencyKey, pending.record, error)
-      } else failTransport(pending.action, pending.idempotencyKey, error, pending.record)
+        unavailableTransport(pending.action, pending.idempotencyKey, pending.expectedGeneration,
+          pending.record, error)
+      } else failTransport(pending.action, pending.idempotencyKey, pending.expectedGeneration,
+        error, pending.record)
     }
   }
   useEffect(() => {
@@ -856,7 +888,7 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         || !command?.id || (command.status !== 'accepted' && command.status !== 'executing')) return
     let active = true, timer = null
     let transientFailures = 0
-    const { action, idempotencyKey } = transportPending
+    const { action, idempotencyKey, expectedGeneration: boundGeneration } = transportPending
     const schedule = delay => { if (active) timer = setTimeout(poll, delay) }
     const poll = async () => {
       try {
@@ -864,10 +896,11 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
         if (!active) return
         transientFailures = 0
         if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
-          acceptTransportRecord(action, record, idempotencyKey)
+          acceptTransportRecord(action, record, idempotencyKey, boundGeneration)
           return
         }
-        const entry = { action, idempotencyKey, record, statusUnavailable: false }
+        const entry = { action, idempotencyKey, expectedGeneration: boundGeneration,
+          record, statusUnavailable: false }
         persistTransport(entry); setTransportPending(entry)
         schedule(1500)
         return
@@ -880,13 +913,13 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
             schedule(Math.max(Number(error.retryAfterMs) || 0, Math.min(6000, 750 * (2 ** transientFailures))))
             return
           }
-          unavailableTransport(action, idempotencyKey, command, error)
+          unavailableTransport(action, idempotencyKey, boundGeneration, command, error)
           return
         }
         if (kind === 'access' || kind === 'protocol') {
-          unavailableTransport(action, idempotencyKey, command, error); return
+          unavailableTransport(action, idempotencyKey, boundGeneration, command, error); return
         }
-        failTransport(action, idempotencyKey, error, command); return
+        failTransport(action, idempotencyKey, boundGeneration, error, command); return
       }
     }
     timer = setTimeout(poll, 1000)
@@ -912,7 +945,8 @@ export default function Dock({ runId, live, liveSeq, viewSeq, setViewSeq, onFocu
     clearRunTransport(runId)
     const identity = pending.lockIdentity || {
       source: 'dock', idempotencyKey: pending.idempotencyKey,
-      action: pending.action, commandId: pending.record?.id || '',
+      action: pending.action, expectedGeneration: pending.expectedGeneration,
+      commandId: pending.record?.id || '',
     }
     clearRunCommandLock(runId, identity)
     setTransportPending(null)

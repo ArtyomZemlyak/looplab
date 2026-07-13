@@ -103,14 +103,23 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   user bubble. A changed/corrupt identity is blocked instead of retried with rebuilt context. Retry of
   a completed persisted turn is a new turn, but it also reuses that durable raw/display/mode exactly.
   Reset preserves terminal command records and run-scoped background LLM/report work holds a
-  generation lease. A brand-new command request formed before reset but delivered for the first time
-  after reset does not yet carry an expected-generation token; avoid keeping an unsent stale control
-  request across Replay (tracked P1).
+  generation lease. State/SSE supplies a stable generation token that Web, Assistant, and TUI persist
+  with each fresh command before POST. If a request formed on generation A first arrives after Replay
+  created B, the server returns `409 run_generation_changed` before any command record, event, or
+  process side effect. Same-key recovery of an already-accepted A command remains observational.
   Natural finish reports use a durable planned/attempt/result boundary. A restart safely performs a
   report only when no attempt marker exists, reuses a scoped durable report, and records an ambiguous
   paid attempt as incomplete instead of issuing a second provider call.
   Standalone legacy CLI `stop`/`finalize`/`resume`/`approve` commands are still outside this server
   sequencer and should not be run concurrently with an active server-owned command.
+- **Review Assistant actions before they run** — permission cards show the server-derived risk,
+  exact scope, consequence, active mode, and request expiry. The newest card opens the Assistant and
+  focuses **Reject**; resolve buttons remain locked until the server answers. A short remembered grant
+  applies only to the same session, mode, current turn, action, and scope. It is never offered for
+  high-risk or unclassified actions, and `Auto` still asks before arbitrary shell/test execution,
+  destructive operations, external MCP calls, and unknown capabilities. Plan remains read-only and
+  does not expose shared-memory writes. Direct mutation APIs and non-Assistant browser confirms are
+  not yet all unified under this card contract; keep the UI on a private/authenticated control plane.
 - **Reset a node in place** — the node inspector's **↻ Reset** button (or `reset(node_id, stage)` in
   chat) re-runs an EXISTING node from a chosen stage instead of spawning a new one: `eval` re-scores it
   (keep the idea + code — for an infra/API-key blip), `implement` re-runs only the Developer (keep the

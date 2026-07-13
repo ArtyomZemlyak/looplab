@@ -14,6 +14,8 @@ from pathlib import Path
 from looplab.core import _pathsafe
 from looplab.events.eventstore import read_jsonl_lenient
 from looplab.tools._base import fn_spec
+from looplab.tools.perm_modes import (
+    DEFAULT_MODE, approval_allows, decide_action, default_approver)
 from looplab.tools.retrieval import glob_files, grep, read_file
 from looplab.tools.vectorstore import InMemoryVectorStore, Item, cosine, hash_embed
 
@@ -137,15 +139,19 @@ class RepoTools:
 class KnowledgeWriteTools:
     """Lets an agent SAVE a distilled note into the shared knowledge base (`knowledge_dir`) so FUTURE
     runs' Researchers find it via `kb_search`. Deliberately narrow + benign — it only appends a single
-    markdown file under the KB dir (no arbitrary path, no shell, no git) — so it's safe to expose even
-    in the assistant's read-only 'plan' mode, unlike the general write tools. This is the write half of
-    the knowledge base whose read half is `KnowledgeTools`."""
+    markdown file under the KB dir (no arbitrary path, no shell, no git). It still mutates shared
+    cross-run state: plan mode omits/denies it and other
+    modes apply the centralized permission policy. This is the write half of the knowledge base whose
+    read half is `KnowledgeTools`."""
 
-    def __init__(self, knowledge_dir: str | None = None):
+    def __init__(self, knowledge_dir: str | None = None, *, mode: str = DEFAULT_MODE,
+                 approver=None):
         self.dir = Path(knowledge_dir).resolve() if knowledge_dir else None
+        self.mode = mode
+        self.approver = approver or default_approver
 
     def specs(self) -> list[dict]:
-        if not self.dir:
+        if not self.dir or self.mode == "plan":
             return []
         return [fn_spec(
             "remember",
@@ -174,6 +180,23 @@ class KnowledgeWriteTools:
             if not isinstance(raw_tags, (list, tuple)):   # a junk model may pass a scalar
                 raw_tags = [raw_tags]
             tags = [str(t) for t in raw_tags if str(t).strip()]
+            action = {
+                "tool": "remember", "tool_kind": "knowledge_write",
+                "label": f"remember {title[:80]}", "verb": "save a shared knowledge note",
+                "path": str(self.dir), "preview": title[:4000],
+                "scope": {
+                    "knowledge_dir": str(self.dir),
+                    "note_digest": hashlib.sha256(json.dumps(
+                        {"title": title, "note": note, "tags": tags}, sort_keys=True,
+                        ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest(),
+                },
+            }
+            decision = decide_action(self.mode, action)
+            if decision == "deny":
+                return ("(remember is disabled in read-only plan mode. Switch to "
+                        "default/acceptEdits/auto to save shared knowledge.)")
+            if decision == "ask" and not approval_allows(self.approver(action) or "deny"):
+                return f"(declined by the user: remember {title[:80]})"
             self.dir.mkdir(parents=True, exist_ok=True)
             slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:48] or "note"
             # content-hash id: re-saving the same note overwrites (idempotent) instead of piling duplicates.

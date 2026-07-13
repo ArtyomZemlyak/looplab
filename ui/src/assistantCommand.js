@@ -23,14 +23,14 @@ export function assistantDirectIntent(action, arg = null) {
 // The Assistant owns polling so its visible state changes as soon as the POST returns accepted; it
 // does not sit in a bounded API wait while rendering a misleading "submitting" state.
 export function submitAssistantDirect(runId, action, arg, idempotencyKey, {
-  execute = runCommand, onRecord = null,
+  expectedGeneration, execute = runCommand, onRecord = null,
 } = {}) {
   const intent = assistantDirectIntent(action, arg)
-  const key = `${String(runId)}\u0000${String(idempotencyKey)}`
+  const key = `${String(runId)}\u0000${String(idempotencyKey)}\u0000${String(expectedGeneration)}`
   const active = activeSubmissions.get(key)
   if (active) return active
   const request = Promise.resolve().then(() => execute(runId, intent.type, intent.data, {
-    idempotencyKey, waitMs: 0, submitRetries: 0, onRecord,
+    idempotencyKey, expectedGeneration, waitMs: 0, submitRetries: 0, onRecord,
   }))
   activeSubmissions.set(key, request)
   request.finally(() => { if (activeSubmissions.get(key) === request) activeSubmissions.delete(key) })
@@ -81,4 +81,5 @@ export function assistantStorageFailureOwnsLock(failure, lock) {
     && String(failure?.runId ?? '') === String(lock?.runId ?? '')
     && failure?.name === lock?.action
     && failure?.idempotencyKey === lock?.idempotencyKey
+    && failure?.expectedGeneration === lock?.expectedGeneration
 }

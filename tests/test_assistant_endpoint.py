@@ -150,6 +150,8 @@ def test_run_turn_write_declined(tmp_path):
 def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
     """The Assistant tool loop submits lifecycle work and never appends the intent itself."""
     import uuid
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.run_commands import run_generation_token
 
     rd = tmp_path / "demo"; rd.mkdir()
     events = rd / "events.jsonl"
@@ -162,8 +164,12 @@ def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
         def __init__(self):
             self.calls = []
 
-        def submit(self, rd, idempotency_key, event_type, data):
-            self.calls.append((rd.name, event_type, data, idempotency_key))
+        def run_generation(self, rd):
+            return run_generation_token(EventStore(rd / "events.jsonl").read_all())
+
+        def submit(self, rd, idempotency_key, event_type, data, *, expected_generation):
+            self.calls.append(
+                (rd.name, event_type, data, idempotency_key, expected_generation))
             return {"id": "assistant-cmd", "status": "executing", "event_type": event_type}
 
     commands = Commands()
@@ -174,6 +180,7 @@ def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
     assert res["ok"] and commands.calls[0][0:3] == (
         "demo", "run_abort", {"reason": "finalized"})
     assert uuid.UUID(commands.calls[0][3])
+    assert commands.calls[0][4] == commands.run_generation(rd)
     assert events.read_bytes() == before
     tool_messages = [m for turn in client.turns for m in turn if m.get("role") == "tool"]
     result = "\n".join(m.get("content") or "" for m in tool_messages)
@@ -528,6 +535,157 @@ def test_stale_permission_resolve_is_rejected(tmp_path, monkeypatch):
     # a second (stale) resolve is rejected — the decision is already committed
     assert client.post(f"/api/assistant/permissions/{req['id']}",
                        json={"decision": "deny"}).status_code == 409
+
+
+def test_allow_always_is_exact_scope_mode_and_current_turn_only(tmp_path, monkeypatch):
+    """A remembered grant bypasses only the same action/scope; a new target asks again."""
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    first = tmp_path / "same.txt"
+    second = tmp_path / "other.txt"
+    first.write_text("same", encoding="utf-8")
+    second.write_text("same", encoding="utf-8")
+    scripted = [
+        _call("write_file", {"path": str(first), "content": "same"}),
+        _call("write_file", {"path": str(first), "content": "same"}),
+        _call("write_file", {"path": str(second), "content": "same"}),
+        _final("done"),
+    ]
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient(scripted))
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "default"}).json()["id"]
+    submitted = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": "write twice then another", "mode": "default"}).json()
+    assert submitted["status"] == "running"
+
+    first_req = None
+    for _ in range(100):
+        pending = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pending:
+            first_req = pending[0]
+            break
+        time.sleep(0.02)
+    assert first_req
+    action = first_req["action"]
+    assert action["risk"] == "REVERSIBLE" and action["rememberable"] is True
+    assert len(action["scope_digest"]) == 64 and action["scope"]["path"]
+    assert first_req["mode"] == "default" and len(first_req["epoch"]) == 16
+    assert first_req["expires_at"] > first_req["created"]
+    assert first_req["grant_ttl_seconds"] == 600
+    assert client.post(
+        f"/api/assistant/permissions/{first_req['id']}",
+        json={"decision": "allow_always"}).status_code == 200
+
+    # The exact second call consumes the grant without a card. The different path must surface one.
+    mismatch = None
+    for _ in range(100):
+        pending = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pending and pending[0]["id"] != first_req["id"]:
+            mismatch = pending[0]
+            break
+        time.sleep(0.02)
+    assert mismatch and mismatch["action"]["scope_digest"] != action["scope_digest"]
+    assert client.post(
+        f"/api/assistant/permissions/{mismatch['id']}",
+        json={"decision": "deny"}).status_code == 200
+
+    for _ in range(100):
+        result = client.get(f"/api/jobs/{submitted['job_id']}").json()
+        if result.get("status") == "done":
+            break
+        time.sleep(0.02)
+    assert result.get("status") == "done"
+
+
+def test_high_action_asks_in_auto_and_cannot_be_remembered(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    target = tmp_path / "delete-me.txt"
+    target.write_text("x", encoding="utf-8")
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda _s: _FakeChatClient([
+            _call("delete_file", {"path": str(target)}), _final("deleted")]))
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    submitted = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": "delete it", "mode": "auto"}).json()
+    assert submitted["status"] == "running"
+
+    req = None
+    for _ in range(100):
+        pending = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pending:
+            req = pending[0]
+            break
+        time.sleep(0.02)
+    assert req and req["action"]["risk"] == "HIGH"
+    assert req["action"]["rememberable"] is False
+    forbidden = client.post(
+        f"/api/assistant/permissions/{req['id']}", json={"decision": "allow_always"})
+    assert forbidden.status_code == 400
+    assert forbidden.json()["detail"]["code"] == "permission_not_rememberable"
+    assert client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+    assert client.post(
+        f"/api/assistant/permissions/{req['id']}",
+        json={"decision": "allow_once"}).status_code == 200
+
+    for _ in range(100):
+        result = client.get(f"/api/jobs/{submitted['job_id']}").json()
+        if result.get("status") == "done":
+            break
+        time.sleep(0.02)
+    assert result.get("status") == "done" and not target.exists()
+
+
+def test_unknown_action_cannot_be_remembered_and_malformed_resolve_is_400(tmp_path, monkeypatch):
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0.01")
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _s: _FakeChatClient([]))
+
+    def fake_run_turn(_client, _root, _history, _instruction, mode, **kwargs):
+        verdict = kwargs["approver"]({
+            "tool": "future_action", "tool_kind": "unregistered_provider",
+            "label": "unknown action", "preview": "opaque capability",
+            "scope": {"target": "external-service", "api_key": "sk-abcdefghijklmnopq"}})
+        return {"ok": True, "reply": verdict, "steps": [], "applied": [], "proposals": [],
+                "todos": [], "refs": [], "mode": mode}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_run_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    submitted = client.post(
+        f"/api/assistant/sessions/{sid}/message",
+        json={"instruction": "try future action", "mode": "auto"}).json()
+    assert submitted["status"] == "running"
+
+    req = None
+    for _ in range(100):
+        pending = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
+        if pending:
+            req = pending[0]
+            break
+        time.sleep(0.02)
+    assert req and req["action"]["risk"] == "UNKNOWN"
+    assert req["action"]["scope"]["target"] == "external-service"
+    assert "api_key" not in req["action"]["scope"]
+    assert "sk-abcdefghijklmnopq" not in json.dumps(req)
+    malformed = client.post(
+        f"/api/assistant/permissions/{req['id']}",
+        content="[]", headers={"Content-Type": "application/json"})
+    assert malformed.status_code == 400
+    forbidden = client.post(
+        f"/api/assistant/permissions/{req['id']}", json={"decision": "allow_always"})
+    assert forbidden.status_code == 400
+    assert client.post(
+        f"/api/assistant/permissions/{req['id']}",
+        json={"decision": "allow_once"}).status_code == 200
 
 
 def test_assistant_message_soft_fails_offline(tmp_path, monkeypatch):

@@ -242,7 +242,9 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
                    "and runs only if the user approves it.",
         "acceptEdits": "MODE=acceptEdits: file edits apply immediately; commands, git and launching a "
                        "run are still proposed for approval.",
-        "auto": "MODE=auto: you may write files and run commands directly without asking. Be careful.",
+        "auto": "MODE=auto: reversible edits and ordinary lifecycle actions may run directly. "
+                "Shell, destructive, external, and unclassified actions still require explicit "
+                "approval; do not claim they ran until the tool returns.",
     }[mode]
     return (
         "You are the LoopLab assistant — a capable coding/research agent embedded in the LoopLab Web "
@@ -272,8 +274,9 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
            "run's Researcher searches (via kb_search) to reuse past findings. When the user shares "
            "experiment results, lessons, recipes, or domain facts worth keeping across runs (e.g. an "
            "attached file describing past experiments and their metrics), DISTILL the essentials and "
-           "save them with the `remember` tool so future runs benefit. `remember` works in EVERY mode "
-           "(it's a safe, scoped append to the KB) — you don't need write mode for it.\n"
+           "save them with the `remember` tool so future runs benefit. `remember` changes the shared "
+           "knowledge base, so it is unavailable in read-only plan mode and follows the active "
+           "permission policy in mutating modes.\n"
            if knowledge_dir else "")
         + "Be concise and concrete; use Markdown. When you have the answer, call `final_answer` exactly "
         "once with your reply.")
@@ -360,9 +363,9 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
 
     providers.append(RunLauncherTools())
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
-    if kdir:                                            # write half of the KB — safe (scoped .md append) in EVERY mode
+    if kdir and mode != "plan":                         # shared KB append is a real mutation
         from looplab.tools.knowledge_tools import KnowledgeWriteTools
-        providers.append(KnowledgeWriteTools(kdir))
+        providers.append(KnowledgeWriteTools(kdir, mode=mode, approver=approver))
     if mode != "plan":
         from looplab.tools.write_tools import WriteTools
         from looplab.tools.shell_tools import ShellTools

@@ -53,7 +53,7 @@ class GitTools:
                 if nm:
                     if nm.startswith("-"):   # a leading dash would be parsed as a git OPTION, not a name
                         return f"(refused: {nm!r} is not a valid branch name)"
-                    return self._mut(["git", "branch", nm], f"git branch {nm}")
+                    return self._mut(["git", "branch", nm], f"git branch {nm}", "git_branch")
                 return self._ro(["git", "branch", "--list"], "git branch")
             if name == "git_add":
                 paths = [str(p) for p in (args.get("paths") or []) if p]
@@ -61,7 +61,8 @@ class GitTools:
                     return "(git_add needs a non-empty list of paths)"
                 # `--` stops git from parsing a path that starts with '-' as an option (git option
                 # injection from a model-supplied path).
-                return self._mut(["git", "add", "--", *paths], f"git add {' '.join(paths)[:60]}")
+                return self._mut(
+                    ["git", "add", "--", *paths], f"git add {' '.join(paths)[:60]}", "git_add")
             if name == "git_commit":
                 msg = str(args.get("message") or "").strip()
                 if not msg:
@@ -72,7 +73,7 @@ class GitTools:
                 # `-c` only sets a default for this one invocation.
                 return self._mut(["git", "-c", "user.name=LoopLab",
                                   "-c", "user.email=looplab@localhost", "commit", "-m", msg],
-                                 f"git commit -m {msg[:50]}")
+                                 f"git commit -m {msg[:50]}", "git_commit")
             if name == "git_checkout":
                 ref = str(args.get("ref") or "").strip()
                 if not ref:
@@ -82,7 +83,8 @@ class GitTools:
                 # uncommitted changes. Refuse dash-refs outright; no real ref starts with '-'.
                 if ref.startswith("-"):
                     return f"(refused: {ref!r} is not a valid ref)"
-                return self._mut(["git", "checkout", ref, "--"], f"git checkout {ref}")
+                return self._mut(
+                    ["git", "checkout", ref, "--"], f"git checkout {ref}", "git_checkout")
             return f"(unknown tool: {name})"
         except Exception as e:  # noqa: BLE001 - never crash the loop
             return f"(error: {e})"
@@ -90,5 +92,6 @@ class GitTools:
     def _ro(self, argv, label) -> str:
         return self.shell.exec_argv(argv, self.cwd, "git_ro", label)
 
-    def _mut(self, argv, label) -> str:
-        return self.shell.exec_argv(argv, self.cwd, "git_mut", label)
+    def _mut(self, argv, label, action_id) -> str:
+        return self.shell.exec_argv(
+            argv, self.cwd, "git_mut", label, action_id=action_id)

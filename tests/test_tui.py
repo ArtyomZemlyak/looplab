@@ -12,6 +12,8 @@ import pytest
 from looplab.serve import tui
 
 
+GENERATION = "a" * 64
+
 # ----------------------------------------------------------------------------- pure helpers
 
 def test_fmt_metric():
@@ -285,6 +287,36 @@ def test_await_job_tolerates_5xx_then_done(monkeypatch):
 
 # ----------------------------------------------------------------------------- authoritative run commands
 
+def test_run_generation_reads_exact_lowercase_state_token(monkeypatch):
+    api = tui.Api("http://x")
+    calls = []
+    monkeypatch.setattr(
+        api, "_request",
+        lambda method, path, **_kwargs: calls.append((method, path)) or {
+            "state": {}, "generation": GENERATION})
+
+    assert api.run_generation("run/with space?") == GENERATION
+    assert calls == [("GET", "/api/runs/run%2Fwith%20space%3F/state")]
+
+
+@pytest.mark.parametrize("generation", [None, "A" * 64, "a" * 63, 123])
+def test_run_generation_and_submission_fail_closed_on_noncanonical_token(
+        monkeypatch, generation):
+    api = tui.Api("http://x")
+    requests = []
+    monkeypatch.setattr(
+        api, "_request",
+        lambda method, path, **_kwargs: requests.append((method, path)) or {
+            "state": {}, "generation": generation})
+
+    with pytest.raises(tui.ApiError, match="generation"):
+        api.run_generation("demo")
+    assert requests == [("GET", "/api/runs/demo/state")]
+    requests.clear()
+    with pytest.raises(tui.ApiError, match="generation"):
+        api.run_command("demo", "resume", {}, expected_generation=generation)
+    assert requests == []
+
 def test_run_command_posts_idempotently_and_polls_terminal(monkeypatch):
     """One logical TUI command is one POST with an idempotency key; status refreshes are GET-only."""
     import uuid
@@ -300,9 +332,12 @@ def test_run_command_posts_idempotently_and_polls_terminal(monkeypatch):
 
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
-    out = api.run_command("demo", "resume", {}, wait_s=1)
+    out = api.run_command(
+        "demo", "resume", {}, wait_s=1, expected_generation=GENERATION)
     assert out["status"] == "succeeded"
-    assert calls[0][0:3] == ("POST", "/api/runs/demo/commands", {"type": "resume", "data": {}})
+    assert calls[0][0:3] == (
+        "POST", "/api/runs/demo/commands",
+        {"type": "resume", "data": {}, "expected_generation": GENERATION})
     assert uuid.UUID(calls[0][3]["Idempotency-Key"])
     assert calls[1][0:2] == ("GET", "/api/runs/demo/commands/cmd-1")
     assert "Idempotency-Key" not in calls[1][3]
@@ -318,7 +353,9 @@ def test_run_command_honors_caller_supplied_idempotency_key(monkeypatch):
         return {"id": "cmd-staged", "status": "succeeded", "event_type": "resume"}
 
     monkeypatch.setattr(api, "_request", request)
-    out = api.run_command("demo", "resume", {}, idempotency_key="durable-tui-key")
+    out = api.run_command(
+        "demo", "resume", {}, idempotency_key="durable-tui-key",
+        expected_generation=GENERATION)
 
     assert out["status"] == "succeeded"
     assert len(calls) == 1
@@ -342,7 +379,9 @@ def test_run_command_retry_existing_conflict_observes_without_reposting(monkeypa
         return {"id": command_id, "status": "succeeded", "event_type": "resume"}
 
     monkeypatch.setattr(api, "_request", request)
-    out = api.run_command("demo", "resume", {}, idempotency_key="staged-key")
+    out = api.run_command(
+        "demo", "resume", {}, idempotency_key="staged-key",
+        expected_generation=GENERATION)
 
     assert out == {"id": command_id, "status": "succeeded", "event_type": "resume"}
     assert [(method, path) for method, path, _body, _headers in calls] == [
@@ -366,7 +405,7 @@ def test_run_command_retries_transport_with_same_idempotency_key(monkeypatch, st
 
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
-    out = api.run_command("demo", "resume", {})
+    out = api.run_command("demo", "resume", {}, expected_generation=GENERATION)
     assert out["status"] == "succeeded"
     assert len(calls) == 2
     assert calls[0][3]["Idempotency-Key"] == calls[1][3]["Idempotency-Key"]
@@ -382,7 +421,7 @@ def test_run_command_does_not_retry_authoritative_4xx(monkeypatch):
 
     monkeypatch.setattr(api, "_request", request)
     with pytest.raises(tui.ApiError, match="bad command"):
-        api.run_command("demo", "resume", {})
+        api.run_command("demo", "resume", {}, expected_generation=GENERATION)
     assert len(calls) == 1
 
 
@@ -399,7 +438,8 @@ def test_run_command_poll_surfaces_authoritative_error(monkeypatch, status):
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
     with pytest.raises(tui.ApiError, match="authoritative poll failure") as exc:
-        api.run_command("demo", "resume", {}, wait_s=1)
+        api.run_command(
+            "demo", "resume", {}, wait_s=1, expected_generation=GENERATION)
     assert exc.value.status == status
 
 
@@ -415,7 +455,9 @@ def test_run_command_url_encodes_run_and_command_ids(monkeypatch):
 
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
-    assert api.run_command("run/with space?", "resume", {}, wait_s=1)["status"] == "succeeded"
+    assert api.run_command(
+        "run/with space?", "resume", {}, wait_s=1,
+        expected_generation=GENERATION)["status"] == "succeeded"
     assert calls == [
         ("POST", "/api/runs/run%2Fwith%20space%3F/commands"),
         ("GET", "/api/runs/run%2Fwith%20space%3F/commands/cmd%2Fwith%20space%3F"),
@@ -437,7 +479,9 @@ def test_run_command_poll_tolerates_transient_failure(monkeypatch, status):
 
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
-    assert api.run_command("demo", "resume", {}, wait_s=1)["status"] == "succeeded"
+    assert api.run_command(
+        "demo", "resume", {}, wait_s=1,
+        expected_generation=GENERATION)["status"] == "succeeded"
     assert polls["n"] == 2
 
 
@@ -445,7 +489,9 @@ def test_run_command_wait_expiry_is_executing_not_success(monkeypatch):
     api = tui.Api("http://x")
     monkeypatch.setattr(api, "_request", lambda *a, **k: {
         "id": "cmd-slow", "status": "accepted", "event_type": "run_abort"})
-    out = api.run_command("demo", "run_abort", {"reason": "finalized"}, wait_s=0)
+    out = api.run_command(
+        "demo", "run_abort", {"reason": "finalized"}, wait_s=0,
+        expected_generation=GENERATION)
     assert out == {"id": "cmd-slow", "status": "executing", "event_type": "run_abort"}
 
 
@@ -457,7 +503,8 @@ def test_run_command_rejects_malformed_envelope_instead_of_false_success(monkeyp
     api = tui.Api("http://x")
     monkeypatch.setattr(api, "_request", lambda *a, **k: record)
     with pytest.raises(tui.ApiError):
-        api.run_command("demo", "resume", {}, wait_s=0)
+        api.run_command(
+            "demo", "resume", {}, wait_s=0, expected_generation=GENERATION)
 
 
 def test_run_command_rejects_poll_record_for_different_command(monkeypatch):
@@ -471,7 +518,8 @@ def test_run_command_rejects_poll_record_for_different_command(monkeypatch):
     monkeypatch.setattr(api, "_request", request)
     monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _s: None)
     with pytest.raises(tui.ApiError, match="does not match"):
-        api.run_command("demo", "resume", {}, wait_s=1)
+        api.run_command(
+            "demo", "resume", {}, wait_s=1, expected_generation=GENERATION)
 
 
 def _command_tui(fake_api):
@@ -480,6 +528,8 @@ def _command_tui(fake_api):
     from rich.console import Console
 
     app = tui.Tui.__new__(tui.Tui)
+    if not callable(getattr(fake_api, "run_generation", None)):
+        fake_api.run_generation = lambda _run_id: GENERATION
     app.api = fake_api
     app.console = Console(file=io.StringIO(), force_terminal=False, color_system=None)
     app._persist = lambda *_a, **_k: None
@@ -489,10 +539,11 @@ def _command_tui(fake_api):
 def test_staged_command_deep_snapshots_nested_intent_and_detects_later_mutation():
     key = "4e7e14ec-1959-4d67-bb55-643a2354c808"
     data = {"strategy": {"policy": "asha", "params": {"grace": 2}}}
-    command = tui._staged_command("set_strategy", data, key)
+    command = tui._staged_command("set_strategy", data, key, GENERATION)
     turn = {"action": {"type": "set_strategy", "data": data}, "command": command}
 
-    assert tui._staged_replay(turn) == (key, "set_strategy", command["intent"]["data"])
+    assert tui._staged_replay(turn) == (
+        key, "set_strategy", command["intent"]["data"], GENERATION)
     data["strategy"]["params"]["grace"] = 99
     assert command["intent"]["data"]["strategy"]["params"]["grace"] == 2
     assert tui._staged_replay(turn) is None
@@ -508,6 +559,10 @@ def test_apply_plan_durably_stages_deterministic_command_before_submit(monkeypat
     timeline = []
 
     class FakeApi:
+        def run_generation(self, run_id):
+            timeline.append(("generation", run_id))
+            return GENERATION
+
         def run_command(self, run_id, event_type, data, wait_s=8.0, **kwargs):
             timeline.append(("submit", run_id, event_type, copy.deepcopy(data), dict(kwargs)))
             return {"id": expected_id, "status": "succeeded", "event_type": event_type}
@@ -522,20 +577,23 @@ def test_apply_plan_durably_stages_deterministic_command_before_submit(monkeypat
         "type": "budget_extend", "data": {"add_nodes": 2}, "label": "extend",
     }])
 
-    assert timeline[0] == ("persist", "demo", {
+    assert timeline[0] == ("generation", "demo")
+    assert timeline[1] == ("persist", "demo", {
         "role": "action",
         "action": {"type": "budget_extend", "data": {"add_nodes": 2}, "label": "extend"},
         "status": "pending",
         "command": {
             "id": expected_id, "status": "accepted", "event_type": "budget_extend",
             "idempotency_key": key,
+            "expected_generation": GENERATION,
             "intent": {"type": "budget_extend", "data": {"add_nodes": 2}},
             "submit_unconfirmed": True,
         },
     })
-    assert timeline[1] == (
-        "submit", "demo", "budget_extend", {"add_nodes": 2}, {"idempotency_key": key})
-    assert timeline[2][0] == "persist" and timeline[2][2]["role"] == "command_status"
+    assert timeline[2] == (
+        "submit", "demo", "budget_extend", {"add_nodes": 2},
+        {"idempotency_key": key, "expected_generation": GENERATION})
+    assert timeline[3][0] == "persist" and timeline[3][2]["role"] == "command_status"
 
 
 def test_control_durably_stages_deterministic_command_before_submit(monkeypatch):
@@ -548,6 +606,10 @@ def test_control_durably_stages_deterministic_command_before_submit(monkeypatch)
     timeline = []
 
     class FakeApi:
+        def run_generation(self, run_id):
+            timeline.append(("generation", run_id))
+            return GENERATION
+
         def run_command(self, run_id, event_type, data, wait_s=8.0, **kwargs):
             timeline.append(("submit", run_id, event_type, copy.deepcopy(data), dict(kwargs)))
             return {"id": expected_id, "status": "executing", "event_type": event_type}
@@ -561,19 +623,23 @@ def test_control_durably_stages_deterministic_command_before_submit(monkeypatch)
     result = app._control("demo", "resume", {}, history=history, label="resume")
 
     assert result["status"] == "executing"
-    assert timeline[0] == ("persist", "demo", {
+    assert timeline[0] == ("generation", "demo")
+    assert timeline[1] == ("persist", "demo", {
         "role": "action",
         "action": {"type": "resume", "data": {}, "label": "resume"},
         "status": "pending",
         "command": {
             "id": expected_id, "status": "accepted", "event_type": "resume",
             "idempotency_key": key,
+            "expected_generation": GENERATION,
             "intent": {"type": "resume", "data": {}},
             "submit_unconfirmed": True,
         },
     })
-    assert timeline[1] == ("submit", "demo", "resume", {}, {"idempotency_key": key})
-    assert timeline[2][0] == "persist" and timeline[2][2]["role"] == "command_status"
+    assert timeline[2] == (
+        "submit", "demo", "resume", {},
+        {"idempotency_key": key, "expected_generation": GENERATION})
+    assert timeline[3][0] == "persist" and timeline[3][2]["role"] == "command_status"
 
 
 def test_apply_plan_does_not_submit_when_durable_staging_fails():
@@ -632,6 +698,7 @@ def test_new_tui_reconciles_staged_id_after_response_is_lost(monkeypatch):
 
         def run_command(self, run_id, event_type, data, wait_s=8.0, **kwargs):
             assert kwargs["idempotency_key"] == key
+            assert kwargs["expected_generation"] == GENERATION
             self.record = {"id": expected_id, "status": "succeeded", "event_type": event_type}
             raise SystemExit("client process died after the server accepted the POST")
 
@@ -675,6 +742,11 @@ def test_uncertain_staged_404_resubmits_same_key_and_dedupes_delayed_first_arriv
             self.record = None
             self.arrivals = []
             self.events = 0
+            self.generation_reads = 0
+
+        def run_generation(self, _run_id):
+            self.generation_reads += 1
+            return "b" * 64
 
         def get_run_command(self, run_id, command_id):
             assert (run_id, command_id) == ("demo", expected_id)
@@ -692,6 +764,7 @@ def test_uncertain_staged_404_resubmits_same_key_and_dedupes_delayed_first_arriv
         def run_command(self, run_id, event_type, data, wait_s=8.0, **kwargs):
             assert (run_id, event_type, data) == ("demo", "budget_extend", {"add_nodes": 2})
             assert wait_s == 2.0 and kwargs["idempotency_key"] == key
+            assert kwargs["expected_generation"] == GENERATION
             # The timed-out original reaches the backend immediately before recovery's same-key POST.
             self._arrive(key, event_type)
             return self._arrive(kwargs["idempotency_key"], event_type)
@@ -704,11 +777,13 @@ def test_uncertain_staged_404_resubmits_same_key_and_dedupes_delayed_first_arriv
         "role": "action",
         "action": {"type": "budget_extend", "data": {"add_nodes": 2}, "label": "extend"},
         "status": "pending",
-        "command": tui._staged_command("budget_extend", {"add_nodes": 2}, key),
+        "command": tui._staged_command(
+            "budget_extend", {"add_nodes": 2}, key, GENERATION),
     }]
 
     assert app._reconcile_pending("demo", history) is True
     assert api.arrivals == [key, key] and api.events == 1
+    assert api.generation_reads == 0
     assert history[0]["status"] == "done"
     assert history[0]["command"] == api.record
     assert updates[-1]["status"] == "done"

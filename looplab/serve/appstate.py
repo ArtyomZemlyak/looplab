@@ -27,9 +27,9 @@ from looplab.serve.llm_context import llm_settings
 from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
-    PHASE_SEARCH, PHASE_SPEC_APPROVAL)
+    PHASE_SEARCH, PHASE_SPEC_APPROVAL, RUN_GENERATION_FIELD)
 from looplab.serve.reviews import ReviewStore
-from looplab.serve.run_commands import RunCommandService
+from looplab.serve.run_commands import RunCommandService, run_generation_token
 from looplab.serve.settings_store import SettingsStore
 
 # run-root subdirectories that are NOT runs and must never be used as a run_id (would collide with the
@@ -87,19 +87,24 @@ class AppState:
         # log). Bounds the SSE hot path from O(events) per tick to a stat() + a dict copy.
         try:
             stt = (rd / "events.jsonl").stat()
-            ckey = (str(rd), stt.st_size, stt.st_mtime_ns, upto_seq)
+            # Include file identity/creation time, not only mutable content metadata. Reset archives
+            # events.jsonl and creates a replacement that can reuse seq numbers and even the same
+            # size/mtime; it must never hit generation A's cached payload for generation B.
+            ckey = (str(rd), stt.st_ino, stt.st_ctime_ns, stt.st_size, stt.st_mtime_ns, upto_seq)
         except OSError:
             ckey = None
         if ckey is not None:
             hit = self._state_cache.get(ckey)
             if hit is not None:
-                d, last_seq, max_seq = hit
+                d, last_seq, max_seq, generation = hit
                 out = dict(d)
                 # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
                 # hybrid object that is neither historical nor live.
                 out["engine_running"] = _engine_alive(rd) if upto_seq is None else None
-                return {"state": out, "seq": last_seq, "max_seq": max_seq}
+                return {"state": out, "seq": last_seq, "max_seq": max_seq,
+                        RUN_GENERATION_FIELD: generation or None}
         all_evs = self.events(rd)
+        generation = run_generation_token(all_evs)
         max_seq = all_evs[-1].seq if all_evs else -1
         evs = all_evs if upto_seq is None else [e for e in all_evs if e.seq <= upto_seq]
         st = fold(evs)
@@ -140,10 +145,11 @@ class AppState:
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
         d["engine_running"] = _engine_alive(rd) if upto_seq is None else None
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
-            self._state_cache[ckey] = (d, last_seq, max_seq)
+            self._state_cache[ckey] = (d, last_seq, max_seq, generation)
             if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)
                 self._state_cache.pop(next(iter(self._state_cache)))
-        return {"state": d, "seq": last_seq, "max_seq": max_seq}
+        return {"state": d, "seq": last_seq, "max_seq": max_seq,
+                RUN_GENERATION_FIELD: generation or None}
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

@@ -45,6 +45,9 @@ const ASSISTANT_TRANSPORT_ACTIONS = new Set(['stop', 'finalize', 'resume', 'paus
 const RUN_COMMAND_LOCK_PREFIX = 'll.command-lock.'
 const RUN_COMMAND_LOCK_EVENT = 'll:command-lock'
 const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
+const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
+const validRunGeneration = value => typeof value === 'string' && RUN_GENERATION_RE.test(value)
+const observedRunGenerations = new Map()
 const STORED_COMMAND_STATUSES = new Set(['submitting', ...COMMAND_STATUSES])
 const OBSERVATION_KINDS = new Set([null, 'transport', 'access', 'protocol', 'missing', 'request'])
 const TRANSPORT_EVENT_BY_ACTION = Object.freeze({ stop: 'pause', finalize: 'run_abort', resume: 'resume' })
@@ -70,6 +73,7 @@ const STORED_ERROR_CODES = new Set([
   'engine_start_uncertain', 'spawn_claim_confirmation_required', 'engine_failed',
   'spawn_failed', 'command_worker_failed', 'approval_not_requested',
   'ratification_not_requested', 'invalid_transition',
+  'invalid_run_generation', 'run_generation_changed', 'run_generation_unavailable',
 ])
 const STORED_ERROR_COPY = Object.freeze({
   command_failed: ['Command failed', 'Refresh run state before acting again.'],
@@ -98,20 +102,42 @@ const STORED_ERROR_COPY = Object.freeze({
   approval_not_requested: ['The run is not awaiting approval', 'Approve only while approval is requested.'],
   ratification_not_requested: ['The run is not awaiting ratification', 'Ratify only while specification approval is requested.'],
   invalid_transition: ['The run cannot perform that transition now', 'Refresh run state and choose an available action.'],
+  invalid_run_generation: ['The run generation could not be verified', 'Refresh the run before submitting another action.'],
+  run_generation_changed: ['This run was reset or replaced before the command arrived', 'Refresh the run, review its current state, then submit a new command.'],
+  run_generation_unavailable: ['The current run generation is temporarily unavailable', 'Refresh the run and wait for its initial event before submitting another action.'],
 })
 const STORED_RECORD_KEYS = new Set(['id', 'status', 'event_type', 'error'])
 const RUN_ENVELOPE_KEYS = new Set([
-  'runId', 'action', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
+  'runId', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'record', 'statusUnavailable',
   'observationKind', 'retrying', 'checking', 'updatedAt', 'committed',
 ])
 const ASSISTANT_ENVELOPE_KEYS = new Set([...RUN_ENVELOPE_KEYS, 'arg'])
 const LOCK_KEYS = new Set([
-  'runId', 'source', 'action', 'idempotencyKey', 'commandId', 'status', 'statusUnavailable', 'updatedAt',
+  'runId', 'source', 'action', 'expectedGeneration', 'idempotencyKey', 'commandId', 'status', 'statusUnavailable', 'updatedAt',
 ])
 
 export const commandEventForAction = (action, source = 'assistant') =>
   (source === 'dock' ? TRANSPORT_EVENT_BY_ACTION : ASSISTANT_EVENT_BY_ACTION)[action] || null
 export const commandActionForEvent = eventType => CANONICAL_ACTION_BY_EVENT[eventType] || null
+export const normalizeRunGeneration = generation => validRunGeneration(generation) ? generation : null
+
+// The token last rendered by useRunState. Mutation controls bind to this displayed snapshot rather
+// than silently fetching a replacement generation after an in-place reset the user has not seen yet.
+export function observeRunGeneration(runId, generation) {
+  const key = String(runId || '')
+  if (!key) return null
+  const normalized = normalizeRunGeneration(generation)
+  if (normalized) {
+    observedRunGenerations.set(key, normalized)
+    return normalized
+  }
+  observedRunGenerations.delete(key)
+  return null
+}
+
+export function getObservedRunGeneration(runId) {
+  return observedRunGenerations.get(String(runId || '')) || null
+}
 
 const hasOnlyKeys = (value, allowed) => Object.keys(value).every(key => allowed.has(key))
 const safeIdentityText = value => typeof value === 'string' && value.length > 0 && value.length <= 200
@@ -170,8 +196,10 @@ const protocolTransport = (runId, source, payload = null) => {
   const topId = COMMAND_ID_RE.test(String(payload?.commandId || '')) ? String(payload.commandId) : ''
   const recordId = COMMAND_ID_RE.test(String(payload?.record?.id || '')) ? String(payload.record.id) : ''
   const commandId = topId && recordId && topId !== recordId ? '' : (topId || recordId)
+  const expectedGeneration = validRunGeneration(payload?.expectedGeneration)
+    ? String(payload.expectedGeneration) : ''
   return {
-    runId: String(runId), action, arg: null, idempotencyKey, commandId,
+    runId: String(runId), action, arg: null, expectedGeneration, idempotencyKey, commandId,
     record: commandId ? { id: commandId, status: 'accepted' } : { status: 'submitting' },
     statusUnavailable: true, observationKind: 'protocol', retrying: false, checking: false,
     protocolInvalid: true, canResubmit: false,
@@ -235,6 +263,7 @@ const compatibleCommandLock = (current, next) => !current || (
   current.source === next.source
   && current.idempotencyKey === next.idempotencyKey
   && current.action === next.action
+  && current.expectedGeneration === next.expectedGeneration
   && (!current.commandId || !next.commandId || current.commandId === next.commandId)
 )
 
@@ -244,14 +273,16 @@ export function saveRunCommandLock(runId, state, storage = undefined) {
   const target = transportStorage(storage)
   const source = state?.source
   const action = String(state?.action || '')
+  const expectedGeneration = state?.expectedGeneration
   const idempotencyKey = String(state?.idempotencyKey || '')
   const commandId = String(state?.commandId || state?.record?.id || '')
   const status = String(state?.record?.status || 'submitting')
   if (!target || !runId || (source !== 'dock' && source !== 'assistant')
       || !safeIdentityText(action) || !safeIdentityText(idempotencyKey)
+      || !validRunGeneration(expectedGeneration)
       || (commandId && !COMMAND_ID_RE.test(commandId)) || !STORED_COMMAND_STATUSES.has(status)) return false
   const payload = {
-    runId: String(runId), source, action, idempotencyKey, commandId,
+    runId: String(runId), source, action, expectedGeneration, idempotencyKey, commandId,
     status, statusUnavailable: !!state.statusUnavailable,
     updatedAt: Date.now(),
   }
@@ -273,6 +304,7 @@ export function loadRunCommandLock(runId, storage = undefined) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !hasOnlyKeys(payload, LOCK_KEYS)
         || payload.runId !== String(runId)
         || (payload.source !== 'dock' && payload.source !== 'assistant')
+        || !validRunGeneration(payload.expectedGeneration)
         || !safeIdentityText(payload.action) || !safeIdentityText(payload.idempotencyKey)
         || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
         || !STORED_COMMAND_STATUSES.has(payload.status)
@@ -290,6 +322,8 @@ export function clearRunCommandLock(runId, expected = {}, storage = undefined) {
     if (current && ((expected.source && current.source !== expected.source)
         || (expected.idempotencyKey && current.idempotencyKey !== expected.idempotencyKey)
         || (expected.action && current.action !== expected.action)
+        || (expected.expectedGeneration
+          && current.expectedGeneration !== expected.expectedGeneration)
         // Once the lock learned a durable id, an id-less/stale cleanup must not remove it. Requiring
         // exact identity here prevents an older render from unlocking a newer accepted command.
         || (current.commandId && current.commandId !== String(expected.commandId || '')))) return false
@@ -320,8 +354,11 @@ export function saveRunTransport(runId, state, storage = undefined) {
   if ((explicitId && !COMMAND_ID_RE.test(explicitId))
       || (explicitId && record.id && explicitId !== record.id)) return false
   const commandId = explicitId || record.id || ''
+  const expectedGeneration = state.expectedGeneration
+  if (!validRunGeneration(expectedGeneration)) return false
   const payload = {
-    runId: String(runId), action: state.action, idempotencyKey: String(state.idempotencyKey),
+    runId: String(runId), action: state.action, expectedGeneration,
+    idempotencyKey: String(state.idempotencyKey),
     commandId, record,
     statusUnavailable: !!state.statusUnavailable,
     observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
@@ -335,7 +372,7 @@ export function saveRunTransport(runId, state, storage = undefined) {
   const currentLock = loadRunCommandLock(runId, target)
   const prospectiveLock = {
     source: 'dock', action: payload.action, idempotencyKey: payload.idempotencyKey,
-    commandId, status: record.status,
+    expectedGeneration, commandId, status: record.status,
   }
   if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
   if (pending && currentLock?.commandId && !commandId) return false
@@ -353,7 +390,8 @@ export function saveRunTransport(runId, state, storage = undefined) {
     }
     target.setItem(key, JSON.stringify(payload))
     if (!pending) clearRunCommandLock(runId, {
-      source: 'dock', idempotencyKey: payload.idempotencyKey, action: payload.action, commandId,
+      source: 'dock', idempotencyKey: payload.idempotencyKey, action: payload.action,
+      expectedGeneration, commandId,
     }, storage)
     return true
   } catch { return false }
@@ -370,6 +408,7 @@ export function loadRunTransport(runId, storage = undefined) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
         || !hasOnlyKeys(payload, RUN_ENVELOPE_KEYS)
         || payload.runId !== String(runId) || !TRANSPORT_ACTIONS.has(payload.action)
+        || !validRunGeneration(payload.expectedGeneration)
         || !safeIdentityText(payload.idempotencyKey)
         || typeof payload.commandId !== 'string'
         || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
@@ -394,7 +433,8 @@ export function clearRunTransport(runId, storage = undefined) {
     target.removeItem(transportStorageKey(runId))
     clearRunCommandLock(runId, {
       source: 'dock', idempotencyKey: saved?.idempotencyKey,
-      action: saved?.action, commandId: saved?.commandId,
+      action: saved?.action, expectedGeneration: saved?.expectedGeneration,
+      commandId: saved?.commandId,
     }, storage)
     return true
   } catch { return false }
@@ -411,11 +451,14 @@ export function saveAssistantRunTransport(runId, state, storage = undefined) {
   if ((explicitId && !COMMAND_ID_RE.test(explicitId))
       || (explicitId && record.id && explicitId !== record.id)) return false
   const commandId = explicitId || record.id || ''
+  const expectedGeneration = state.expectedGeneration
+  if (!validRunGeneration(expectedGeneration)) return false
   const numericArg = state.arg == null ? null : Number(state.arg)
   if (state.action === 'approve' && !commandId
       && (!Number.isSafeInteger(numericArg) || numericArg < 0)) return false
   const payload = {
     runId: String(runId), action: state.action, arg: state.action === 'approve' ? numericArg : null,
+    expectedGeneration,
     idempotencyKey: String(state.idempotencyKey), commandId, record,
     statusUnavailable: !!state.statusUnavailable,
     observationKind: OBSERVATION_KINDS.has(state.observationKind || null) ? state.observationKind || null : 'protocol',
@@ -428,7 +471,7 @@ export function saveAssistantRunTransport(runId, state, storage = undefined) {
   const currentLock = loadRunCommandLock(runId, target)
   const prospectiveLock = {
     source: 'assistant', action: payload.action, idempotencyKey: payload.idempotencyKey,
-    commandId, status: record.status,
+    expectedGeneration, commandId, status: record.status,
   }
   if (pending && !compatibleCommandLock(currentLock, prospectiveLock)) return false
   if (pending && currentLock?.commandId && !commandId) return false
@@ -444,7 +487,8 @@ export function saveAssistantRunTransport(runId, state, storage = undefined) {
     }
     target.setItem(key, JSON.stringify(payload))
     if (!pending) clearRunCommandLock(runId, {
-      source: 'assistant', idempotencyKey: payload.idempotencyKey, action: payload.action, commandId,
+      source: 'assistant', idempotencyKey: payload.idempotencyKey, action: payload.action,
+      expectedGeneration, commandId,
     }, storage)
     return true
   } catch { return false }
@@ -461,6 +505,7 @@ export function loadAssistantRunTransport(runId, storage = undefined) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)
         || !hasOnlyKeys(payload, ASSISTANT_ENVELOPE_KEYS)
         || payload.runId !== String(runId) || !ASSISTANT_TRANSPORT_ACTIONS.has(payload.action)
+        || !validRunGeneration(payload.expectedGeneration)
         || !safeIdentityText(payload.idempotencyKey)
         || typeof payload.commandId !== 'string'
         || (payload.commandId && !COMMAND_ID_RE.test(payload.commandId))
@@ -490,7 +535,8 @@ export function clearAssistantRunTransport(runId, storage = undefined, expected 
     target.removeItem(assistantTransportStorageKey(runId))
     clearRunCommandLock(runId, {
       source: 'assistant', idempotencyKey: saved?.idempotencyKey,
-      action: saved?.action, commandId: saved?.commandId,
+      action: saved?.action, expectedGeneration: saved?.expectedGeneration,
+      commandId: saved?.commandId,
     }, storage)
     return true
   } catch { return false }
@@ -558,6 +604,33 @@ function commandProtocolError(path, message, record = null) {
   error.code = 'COMMAND_PROTOCOL_ERROR'
   if (record && typeof record === 'object') error.commandRecord = record
   return error
+}
+
+function runGenerationError(code, message, remediation) {
+  const error = new Error(message)
+  error.code = code
+  error.remediation = remediation
+  return error
+}
+
+export async function getRunGeneration(runId) {
+  const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
+  if (payload?.generation == null) {
+    throw runGenerationError(
+      'run_generation_unavailable',
+      'The current run generation is not available yet.',
+      'Refresh the run and wait for its initial event before submitting another action.',
+    )
+  }
+  if (!validRunGeneration(payload.generation)) {
+    throw runGenerationError(
+      'invalid_run_generation',
+      'The server returned an invalid run generation.',
+      'Refresh the run before submitting another action.',
+    )
+  }
+  observeRunGeneration(runId, payload.generation)
+  return payload.generation
 }
 
 function validatedCommandRecord(record, path, expectedId = null) {
@@ -630,16 +703,24 @@ const notifyCommandRecord = (callback, record) => {
 }
 
 export async function submitRunCommand(runId, type, data = {}, {
-  idempotencyKey = createIdempotencyKey(), requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+  idempotencyKey = createIdempotencyKey(), expectedGeneration,
+  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
 } = {}) {
   const path = `/api/runs/${encodeURIComponent(runId)}/commands`
   assertNotReviewMutation(path)
   assertRunMutationAllowed(path)
+  if (!validRunGeneration(expectedGeneration)) {
+    throw runGenerationError(
+      'invalid_run_generation',
+      'A verified run generation is required before submitting a command.',
+      'Refresh the run before submitting another action.',
+    )
+  }
   try {
     return await commandFetch(path, {
       method: 'POST',
       headers: _authHeaders({ 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }),
-      body: JSON.stringify({ type, data: data || {} }),
+      body: JSON.stringify({ type, data: data || {}, expected_generation: expectedGeneration }),
     }, requestTimeoutMs, async response => {
       if (!response.ok) await _throw(response, path)
       return validatedCommandRecord(await commandResponseJson(response, path, { submission: true }), path)
@@ -738,12 +819,27 @@ export async function retryRunCommand(runId, commandId, {
 export async function runCommand(runId, type, data = {}, {
   waitMs = 8000, pollMs = 250, idempotencyKey = createIdempotencyKey(), submitRetries = 1,
   retryMs = 150, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, onRecord = null,
+  expectedGeneration = undefined,
 } = {}) {
+  // New intent: bind once to the current event-log generation. Transport retries and id-less
+  // recovery pass this exact token back; they never silently substitute a generation observed later.
+  const generation = expectedGeneration === undefined
+    ? (getObservedRunGeneration(runId) || await getRunGeneration(runId))
+    : expectedGeneration
+  if (!validRunGeneration(generation)) {
+    throw runGenerationError(
+      'invalid_run_generation',
+      'A verified run generation is required before submitting a command.',
+      'Refresh the run before submitting another action.',
+    )
+  }
   let record
   const retries = Math.max(0, Math.trunc(Number(submitRetries) || 0))
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      record = await submitRunCommand(runId, type, data, { idempotencyKey, requestTimeoutMs })
+      record = await submitRunCommand(runId, type, data, {
+        idempotencyKey, expectedGeneration: generation, requestTimeoutMs,
+      })
       notifyCommandRecord(onRecord, record)
       break
     } catch (error) {

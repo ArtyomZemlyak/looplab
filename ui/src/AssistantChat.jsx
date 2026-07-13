@@ -1,7 +1,8 @@
-import React, { useState } from 'react'
+import React, { useEffect, useId, useRef, useState } from 'react'
 import Markdown from './markdown.jsx'
 import { fmt, startRun } from './util.js'
 import { assistantErrorInfo } from './assistantErrors.js'
+import { permissionPresentation } from './assistantPermission.js'
 
 const RUN_MENTION = /@run:([^\s.,;:!?)]+)/g
 const runMentions = (s) => [...new Set([...(s || '').matchAll(RUN_MENTION)].map(m => m[1]))]
@@ -105,17 +106,58 @@ function Todos({ items }) {
 
 // A human-in-the-loop confirm card: the turn paused to ask before a mutating action. Approve/Reject
 // resolves it server-side and the turn resumes.
-export function PermCard({ req, onResolve }) {
-  const a = req.action || {}
+export function PermCard({ req, onResolve, busy = false, autoFocus = false }) {
+  const titleId = useId()
+  const detailsId = useId()
+  const rejectRef = useRef(null)
+  const permission = permissionPresentation(req)
+  const a = permission.action
   const isDiff = a.tool === 'write_file' || a.tool === 'edit_file' || a.tool === 'apply_patch'
-  return <div className="asst-perm">
-    <div className="asst-perm-h"><span className="asst-perm-badge">approve?</span>
-      <b>{a.label || a.tool}</b>{a.cwd && <span className="muted"> · {a.cwd}</span>}</div>
-    {a.preview && <pre className={'asst-perm-pre' + (isDiff ? ' diff' : '')}>{a.preview}</pre>}
+  const requiresCaution = permission.risk === 'HIGH' || permission.risk === 'UNKNOWN'
+  useEffect(() => {
+    if (autoFocus && !busy) rejectRef.current?.focus({ preventScroll: true })
+  }, [autoFocus, busy])
+  return <div className={'asst-perm risk-' + permission.risk.toLowerCase()}
+    role="alertdialog" aria-modal="false" aria-labelledby={titleId} aria-describedby={detailsId}
+    aria-busy={busy ? 'true' : 'false'}>
+    <div className="asst-perm-h" id={titleId}>
+      <span className="asst-perm-badge">approval required</span>
+      <b>{a.label || a.tool || 'Unknown mutation'}</b>
+      <span className={'asst-perm-risk ' + permission.risk.toLowerCase()}>
+        {permission.risk} risk</span>
+    </div>
+    <dl className="asst-perm-details" id={detailsId}>
+      <div><dt>Scope</dt><dd>{permission.scope}{permission.scopeDigest
+        ? <span className="asst-perm-digest" title={permission.scopeDigest}>
+            {' · ID '}{permission.scopeDigest.slice(0, 12)}…</span> : null}</dd></div>
+      <div><dt>Consequence</dt><dd>{permission.consequence}</dd></div>
+      <div><dt>Mode</dt><dd>{permission.mode}</dd></div>
+      <div><dt>Expiry</dt><dd>{permission.expiresIso
+        ? <time dateTime={permission.expiresIso}>{permission.expiryLabel}</time>
+        : permission.expiryLabel}</dd></div>
+      {permission.canAlways && <div><dt>Remembered grant</dt><dd>
+        This exact action and scope · current turn · {permission.mode} mode · {permission.grantDurationLabel}
+      </dd></div>}
+    </dl>
+    {a.preview && <pre className={'asst-perm-pre' + (isDiff ? ' diff' : '')}
+      aria-label="Proposed action preview">{a.preview}</pre>}
+    {permission.expired && <div className="asst-perm-state" role="status">
+      This approval has expired; waiting for the server to close it.</div>}
+    {requiresCaution &&
+      <div className="asst-perm-state warning">
+        Persistent approval is unavailable for {permission.risk === 'HIGH'
+          ? 'high-risk actions' : 'actions without a verified risk classification'}.</div>}
+    {busy && <div className="asst-perm-state" role="status">Submitting your decision…</div>}
     <div className="asst-perm-actions">
-      <button className="btn xs ghost" onClick={() => onResolve(req.id, 'deny')}>Reject</button>
-      <button className="btn xs" onClick={() => onResolve(req.id, 'allow_always')} title="allow this kind for the session">Always</button>
-      <button className="btn xs primary" onClick={() => onResolve(req.id, 'allow_once')}>Approve</button>
+      <button ref={rejectRef} className={'btn xs ' + (requiresCaution ? 'primary' : 'ghost')} disabled={busy}
+        onClick={() => onResolve(req.id, 'deny')}>Reject</button>
+      {permission.canAlways && <button className="btn xs" disabled={busy || permission.expired}
+        onClick={() => onResolve(req.id, 'allow_always')}
+        title={`Remember only this exact action and security scope for the current turn and ${permission.mode} mode (${permission.grantDurationLabel})`}>
+        Allow exact scope · {permission.grantDurationLabel}</button>}
+      <button className={'btn xs ' + (requiresCaution ? 'danger' : 'primary')}
+        disabled={busy || permission.expired}
+        onClick={() => onResolve(req.id, 'allow_once')}>Approve once</button>
     </div>
   </div>
 }

@@ -43,7 +43,7 @@ const REVIEW_SAFE_PANELS = new Set([
 ])
 
 export default function RunView({ runId, onBack, reviewMode = false, reviewMeta = null }) {
-  const { live, seq, connected, status: runStatus, error: runError, retry: retryRun } =
+  const { live, seq, generation, connected, status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [viewSeq, setViewSeq] = useState(null)
@@ -561,7 +561,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {!reviewMode && !compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
         role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
         aria-valuemin={90} aria-valuemax={Math.max(140, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
-      {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
+      {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
+            viewSeq={viewSeq} setViewSeq={changeViewSeq} onFocus={focusNode}
             onToast={showToast}
             readOnly={historyActive}
             collapsed={timelineCollapsed}

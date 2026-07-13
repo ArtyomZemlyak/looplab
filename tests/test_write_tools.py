@@ -20,6 +20,53 @@ def test_auto_writes_inline(tmp_path):
     assert w.applied and w.applied[0]["tool"] == "write_file"
 
 
+def test_write_grant_scope_hashes_full_payload_beyond_preview(tmp_path):
+    from looplab.tools.perm_modes import classify_action
+
+    actions = []
+    tool = WriteTools(
+        [tmp_path], mode="default", approver=lambda action: actions.append(action) or "deny")
+    prefix = "x" * 5000
+    tool.execute("write_file", {"path": str(tmp_path / "long.txt"), "content": prefix + "a"})
+    tool.execute("write_file", {"path": str(tmp_path / "long.txt"), "content": prefix + "b"})
+
+    assert len(actions) == 2 and actions[0]["preview"] == actions[1]["preview"]
+    assert (classify_action(actions[0]).scope_digest
+            != classify_action(actions[1]).scope_digest)
+
+
+def test_write_grant_scope_binds_the_current_file_preimage(tmp_path):
+    from looplab.tools.perm_modes import classify_action
+
+    target = tmp_path / "preimage.txt"
+    target.write_text("first", encoding="utf-8")
+    actions = []
+    tool = WriteTools(
+        [tmp_path], mode="default", backup_dir=tmp_path / "backups",
+        approver=lambda action: actions.append(action) or "deny")
+    tool.execute("write_file", {"path": str(target), "content": "desired"})
+    target.write_text("changed elsewhere", encoding="utf-8")
+    tool.execute("write_file", {"path": str(target), "content": "desired"})
+
+    assert len(actions) == 2
+    assert (classify_action(actions[0]).scope_digest
+            != classify_action(actions[1]).scope_digest)
+
+
+def test_reversible_write_aborts_when_recovery_snapshot_fails(tmp_path):
+    target = tmp_path / "protected-by-receipt.txt"
+    target.write_text("before", encoding="utf-8")
+    blocked = tmp_path / "backup-path-is-a-file"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    result = WriteTools(
+        [tmp_path], mode="auto", backup_dir=blocked).execute(
+            "write_file", {"path": str(target), "content": "after"})
+
+    assert "could not create a recovery snapshot" in result
+    assert target.read_text(encoding="utf-8") == "before"
+
+
 def test_ask_allow_writes_ask_deny_does_not(tmp_path):
     WriteTools([tmp_path], mode="default", approver=ALLOW).execute(
         "write_file", {"path": str(tmp_path / "y.txt"), "content": "1"})
@@ -57,7 +104,8 @@ def test_delete_gated(tmp_path):
     assert "declined" in WriteTools([tmp_path], mode="default", approver=DENY).execute(
         "delete_file", {"path": str(f)})
     assert f.exists()
-    assert "deleted" in WriteTools([tmp_path], mode="auto").execute("delete_file", {"path": str(f)})
+    assert "deleted" in WriteTools(
+        [tmp_path], mode="auto", approver=ALLOW).execute("delete_file", {"path": str(f)})
     assert not f.exists()
 
 

@@ -12,7 +12,10 @@ best-effort vs. strict reply persistence) — parameterized, not normalized."""
 from __future__ import annotations
 
 import json
+import hashlib
+import math
 import os
+import re
 import secrets
 import threading
 import time
@@ -32,6 +35,9 @@ from looplab.serve.llm_context import _client_tokens
 from looplab.serve.protocol import (
     ASSISTANT_STREAM_END_SENTINEL, PERM_ALLOW_ALWAYS, PERM_ALLOW_ONCE, PERM_DENY,
     SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
+from looplab.tools.perm_modes import (
+    GRANT_TTL_SECONDS, RememberedGrantStore, classify_action, normalize_mode)
+from looplab.trust.redact import redact_secrets
 
 
 def build_router(srv) -> APIRouter:
@@ -47,33 +53,91 @@ def build_router(srv) -> APIRouter:
     # and BLOCKS the (background) turn thread on an Event; the UI polls GET .../permissions, shows a
     # confirm-card, and POST .../permissions/{id} sets the decision + unblocks the thread. This keeps
     # the synchronous drive_tool_loop unchanged while giving true mid-loop approval (the tool sees the
-    # REAL result). "allow_always" remembers the tool kind for the session so it stops asking.
+    # REAL result). "allow_always" is exact-action/scope, mode, and turn-epoch bound — never a broad
+    # session→tool-kind bypass.
     _perm_lock = threading.Lock()
     _perm_reqs: dict = {}
-    _perm_always: dict = {}
+    _perm_always = RememberedGrantStore()
     _asst_progress: dict = {}      # sid -> {steps:[label,…], updated} — live tool steps during a turn
     _asst_cancel: dict = {}        # sid -> threading.Event — set by /cancel to stop an in-flight turn
-    _PERM_TIMEOUT = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
+    _asst_epoch: dict = {}         # sid -> opaque random epoch owned by the active cancel event
+    try:
+        _configured_perm_timeout = float(os.environ.get("LOOPLAB_ASSISTANT_PERM_TIMEOUT", "900"))
+    except (TypeError, ValueError):
+        _configured_perm_timeout = 900.0
+    _PERM_TIMEOUT = (_configured_perm_timeout
+                     if math.isfinite(_configured_perm_timeout) and _configured_perm_timeout > 0
+                     else 900.0)
+    _PERM_TIMEOUT = min(3600.0, max(1.0, _PERM_TIMEOUT))
+    _SENSITIVE_SCOPE_KEY = re.compile(
+        r"token|secret|credential|password|passwd|api[_-]?key|content|preview", re.I)
 
-    def _make_approver(sid: str, cancel_ev: "Optional[threading.Event]" = None):
+    def _public_scope(scope: object) -> dict:
+        """Keep the exact digest private while exposing only bounded, redacted review metadata."""
+        if not isinstance(scope, dict):
+            return {}
+        public = {}
+        for key, value in list(scope.items())[:32]:
+            if not isinstance(key, str):
+                continue
+            safe_key = key[:80]
+            if _SENSITIVE_SCOPE_KEY.search(safe_key) and not safe_key.lower().endswith("_digest"):
+                continue
+            if isinstance(value, str):
+                public[safe_key] = redact_secrets(value[:4000], entropy=False)
+            elif value is None or isinstance(value, (bool, int)):
+                public[safe_key] = value
+            elif isinstance(value, float) and math.isfinite(value):
+                public[safe_key] = value
+            elif isinstance(value, list):
+                public[safe_key] = [
+                    redact_secrets(str(item)[:1000], entropy=False)
+                    for item in value[:200] if isinstance(item, (str, bool, int, float))]
+        return public
+
+    def _make_approver(sid: str, mode: str, epoch: str,
+                       cancel_ev: "Optional[threading.Event]" = None):
         def approver(action: dict) -> str:
             # A confirm raised AFTER the user hit Stop (the in-flight model response's tools still
             # execute once) must not park the worker for _PERM_TIMEOUT on a card nobody will see —
             # deny immediately, so the loop's next cancel_check ends the turn.
             if cancel_ev is not None and cancel_ev.is_set():
                 return PERM_DENY
-            kind = (action or {}).get("tool_kind", "")
+            policy = classify_action(action)
             with _perm_lock:
-                if kind and kind in _perm_always.get(sid, set()):
+                if cancel_ev is not None and cancel_ev.is_set():
+                    return PERM_DENY
+                if _perm_always.allows(sid, mode, epoch, policy):
                     return PERM_ALLOW_ALWAYS
             req_id = secrets.token_hex(8)
             ev = threading.Event()
-            safe_action = {k: v for k, v in (action or {}).items()
-                           if k in ("tool", "tool_kind", "label", "verb", "path", "preview", "cwd")}
+            safe_action = {}
+            public_limits = {
+                "tool": 160, "tool_kind": 80, "label": 500, "verb": 1000,
+                "path": 1000, "preview": 4000, "cwd": 1000,
+            }
+            for key, limit in public_limits.items():
+                value = (action or {}).get(key)
+                if isinstance(value, str):
+                    safe_action[key] = value[:limit]
+            safe_action.update({
+                "risk": policy.risk,
+                "action_id": policy.action_id,
+                "scope": _public_scope(policy.scope),
+                "scope_digest": policy.scope_digest,
+                "consequence": policy.consequence,
+                "rememberable": policy.rememberable,
+            })
+            created = time.time()
+            public_epoch = hashlib.sha256(epoch.encode("utf-8")).hexdigest()[:16]
             with _perm_lock:
                 _perm_reqs[req_id] = {"id": req_id, "session": sid, "action": safe_action,
                                       "status": "pending", "decision": None, "event": ev,
-                                      "created": time.time()}
+                                      "created": created,
+                                      "expires_at": created + _PERM_TIMEOUT,
+                                      "grant_ttl_seconds": int(GRANT_TTL_SECONDS),
+                                      "mode": normalize_mode(mode), "epoch": public_epoch,
+                                      "policy": policy}
                 if len(_perm_reqs) > 128:      # evict oldest RESOLVED beyond 128 — NEVER a pending
                     # request (its approver thread is blocked on that entry's Event; evicting it would
                     # 404 the resolve and hang the worker for the whole _PERM_TIMEOUT).
@@ -93,12 +157,20 @@ def build_router(srv) -> APIRouter:
                 req = _perm_reqs.get(req_id) or {}
                 dec = (req.get("decision") if got else PERM_DENY) or PERM_DENY
                 req["status"] = "resolved"
-                if dec == PERM_ALLOW_ALWAYS and kind:
-                    _perm_always.setdefault(sid, set()).add(kind)
+                if cancel_ev is not None and cancel_ev.is_set():
+                    dec = PERM_DENY
+                    req["decision"] = PERM_DENY
+                    _perm_always.invalidate(sid, epoch=epoch)
+                elif dec == PERM_ALLOW_ALWAYS:
+                    # The resolver rejects this for HIGH/UNKNOWN; retain defense in depth if an
+                    # in-process caller tampers with the request.
+                    if not _perm_always.remember(sid, mode, epoch, policy):
+                        dec = PERM_DENY
+                        req["decision"] = PERM_DENY
             return dec
         return approver
 
-    def _acquire_turn(sid: str, cancel_ev: "threading.Event"):
+    def _acquire_turn(sid: str, cancel_ev: "threading.Event", epoch: str):
         """Claim the SINGLE active-turn slot for a session. Two concurrent turns on one session (two
         tabs, or the stream + non-stream endpoints) otherwise interleave: the second reads a `history`
         missing the first's reply, `_asst_cancel[sid]` gets clobbered so Stop hits the wrong turn, and
@@ -113,18 +185,30 @@ def build_router(srv) -> APIRouter:
             if existing is not None:
                 raise HTTPException(409, "a turn is already running for this session")
             _asst_cancel[sid] = cancel_ev
+            _asst_epoch[sid] = epoch
             _asst_progress[sid] = {"steps": [], "todos": [], "text": "", "updated": time.time(),
-                                   "owner": cancel_ev}
+                                   "owner": cancel_ev, "epoch": epoch}
 
-    def _release_turn(sid: str, cancel_ev: "threading.Event") -> None:
+    def _release_turn(sid: str, cancel_ev: "threading.Event", epoch: str) -> None:
         """Tear down ONLY this turn's registry entries (a newer turn may have replaced them): pop the
         cancel event and progress entry only when `cancel_ev` still owns them."""
         with _perm_lock:
             if _asst_cancel.get(sid) is cancel_ev:
                 _asst_cancel.pop(sid, None)
+                _asst_epoch.pop(sid, None)
+                _perm_always.invalidate(sid, epoch=epoch)
             p = _asst_progress.get(sid)
             if p is not None and p.get("owner") is cancel_ev:
                 _asst_progress.pop(sid, None)
+
+    def _deny_session_perms_locked(sid: str) -> None:
+        """Deny a session's pending cards while `_perm_lock` is held by the caller."""
+        _perm_always.invalidate(sid)
+        for r in _perm_reqs.values():
+            if r.get("session") == sid and r.get("status") == "pending":
+                r["decision"] = PERM_DENY
+                r["status"] = "resolved"
+                r["event"].set()
 
     def _deny_session_perms(sid: str) -> None:
         """Auto-deny + UNBLOCK every pending permission request for a session. Called on cancel/delete
@@ -133,24 +217,27 @@ def build_router(srv) -> APIRouter:
         _PERM_TIMEOUT. Also flips the request to resolved so a stopped turn's confirm can't be
         re-surfaced and approved later to fire a mutation the user already cancelled."""
         with _perm_lock:
-            for r in _perm_reqs.values():
-                if r.get("session") == sid and r.get("status") == "pending":
-                    r["decision"] = PERM_DENY
-                    r["status"] = "resolved"
-                    r["event"].set()
+            _deny_session_perms_locked(sid)
 
     @router.get("/api/assistant/permissions")
     def assistant_permissions(session: Optional[str] = None):
         with _perm_lock:
             out = [{"id": r["id"], "session": r["session"], "action": r["action"],
-                    "created": r["created"]}
+                    "created": r["created"], "expires_at": r["expires_at"],
+                    "grant_ttl_seconds": r["grant_ttl_seconds"],
+                    "mode": r["mode"], "epoch": r["epoch"]}
                    for r in _perm_reqs.values()
                    if r["status"] == "pending" and (not session or r["session"] == session)]
         return {"pending": out}
 
     @router.post("/api/assistant/permissions/{req_id}")
     async def assistant_resolve(req_id: str, request: Request):
-        body = await request.json()
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "permission body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "permission body must be a JSON object")
         dec = body.get("decision", PERM_DENY)
         with _perm_lock:
             r = _perm_reqs.get(req_id)
@@ -163,6 +250,21 @@ def build_router(srv) -> APIRouter:
             # write-after-cancel). A stale/duplicate resolve now returns 409 instead of clobbering.
             if r.get("status") != "pending":
                 raise HTTPException(409, "permission request already resolved")
+            if time.time() >= float(r.get("expires_at") or 0):
+                r["decision"] = PERM_DENY
+                r["status"] = "resolved"
+                r["event"].set()
+                raise HTTPException(409, {
+                    "code": "permission_request_expired",
+                    "message": "This approval request expired; run the action again to review it.",
+                })
+            policy = r.get("policy")
+            if dec == PERM_ALLOW_ALWAYS and not bool(getattr(policy, "rememberable", False)):
+                raise HTTPException(400, {
+                    "code": "permission_not_rememberable",
+                    "risk": getattr(policy, "risk", "UNKNOWN"),
+                    "message": "This action requires an explicit approval every time.",
+                })
             r["decision"] = dec if dec in (PERM_ALLOW_ONCE, PERM_ALLOW_ALWAYS, PERM_DENY) else PERM_DENY
             r["status"] = "resolved"
             r["event"].set()
@@ -201,9 +303,16 @@ def build_router(srv) -> APIRouter:
         since the turn + flag live server-side, keyed by session id)."""
         with _perm_lock:
             ev = _asst_cancel.get(sid)
-        _deny_session_perms(sid)   # un-park a worker waiting on a confirm; kill the stale request
+            if ev is not None:
+                # Publish cancellation and deny/invalidate THIS currently-owned turn atomically. If
+                # the worker released and a new turn acquired between two lock sections, a stale
+                # Cancel could otherwise deny the new turn's card.
+                ev.set()
+            _deny_session_perms_locked(sid)
         if ev is not None:
-            ev.set()
+            # Publish cancellation BEFORE grant invalidation/pending denial. A repeated action racing
+            # this endpoint must see the set flag and cannot consume an exact remembered grant in the
+            # same registry transaction.
             return {"ok": True, "cancelling": True}
         return {"ok": True, "cancelling": False}   # nothing running for this session
 
@@ -240,13 +349,14 @@ def build_router(srv) -> APIRouter:
         # a worker parked on a confirm — else it runs against a now-deleted session for up to 900s.
         with _perm_lock:
             cev = _asst_cancel.get(sid)
-        if cev is not None:
-            cev.set()
-        _deny_session_perms(sid)
+            if cev is not None:
+                cev.set()
+            _deny_session_perms_locked(sid)
         if d.exists():
             shutil.rmtree(d, ignore_errors=True)
         with _perm_lock:      # drop the deleted session's in-memory grants/progress (no slow leak)
-            _perm_always.pop(sid, None)
+            _perm_always.invalidate(sid)
+            _asst_epoch.pop(sid, None)
             _asst_progress.pop(sid, None)
             for k in [k for k, r in _perm_reqs.items()
                       if r.get("session") == sid and r.get("status") != "pending"]:
@@ -311,7 +421,8 @@ def build_router(srv) -> APIRouter:
         # transcript, so a rejected concurrent turn leaves no dangling user message — one running turn
         # per session across BOTH endpoints. The cancel event makes the turn interruptible (Stop).
         cancel_ev = threading.Event()
-        _acquire_turn(sid, cancel_ev)
+        turn_epoch = secrets.token_hex(16)
+        _acquire_turn(sid, cancel_ev, turn_epoch)
         # Own the slot from here: any failure BEFORE the background work takes over must release it, or
         # the session wedges at 409 forever. `_asst.append` raises ValueError if a concurrent DELETE
         # rmtree'd the session dir between `_asst.get` above and here; `_llm_settings` can also raise.
@@ -366,9 +477,9 @@ def build_router(srv) -> APIRouter:
             _asst.update_meta(sid, mode=eff_mode)   # remember the chosen mode so a reload/switch keeps it
             s = _llm_settings()
         except Exception:
-            _release_turn(sid, cancel_ev)
+            _release_turn(sid, cancel_ev, turn_epoch)
             raise
-        return instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn
+        return instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn, turn_epoch
 
     def _make_progress_hooks(sid: str, cancel_ev: "threading.Event", q=None):
         """The per-turn `on_step`/`on_todos` callbacks. `q` (stream endpoint only) additionally mirrors
@@ -448,17 +559,19 @@ def build_router(srv) -> APIRouter:
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
         504ing), then persists the assistant reply. Soft-fails offline."""
         body = await request.json()
-        instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn = _begin_turn(sid, body)
+        (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
+         turn_epoch) = _begin_turn(sid, body)
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
-            _release_turn(sid, cancel_ev)
+            _release_turn(sid, cancel_ev, turn_epoch)
             failure = _safe_assistant_failure(e)
             _asst.append(sid, {"role": "assistant", "content": failure["reply"],
                                "error_kind": failure["error_kind"]})
             return {"ok": False, **failure, "mode": eff_mode}
 
-        approver = _make_approver(sid, cancel_ev)   # a confirm raised after Stop denies instantly
+        approver = _make_approver(
+            sid, eff_mode, turn_epoch, cancel_ev)   # a confirm after Stop denies instantly
         _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev)
 
         def _compute() -> dict:
@@ -474,7 +587,7 @@ def build_router(srv) -> APIRouter:
                 return _finish_turn(sid, history, instruction, client, res,
                                     best_effort_persist=True)
             finally:
-                _release_turn(sid, cancel_ev)
+                _release_turn(sid, cancel_ev, turn_epoch)
 
         return await srv.jobs.run_as_job(_compute)
 
@@ -485,12 +598,13 @@ def build_router(srv) -> APIRouter:
         action pauses the worker on the permission registry while the client polls /permissions."""
         import queue as _queue
         body = await request.json()
-        instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn = _begin_turn(sid, body)
+        (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
+         turn_epoch) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()
         try:
             client = srv.make_llm_client(s)
         except Exception as e:  # noqa: BLE001 - offline -> stream a single error event
-            _release_turn(sid, cancel_ev)
+            _release_turn(sid, cancel_ev, turn_epoch)
             # Persist an assistant error bubble too (mirror the non-stream endpoint) so a page reload
             # shows the failure instead of a DANGLING user turn — the user's message with no reply,
             # since _begin_turn already appended the user turn before make_llm_client.
@@ -505,7 +619,8 @@ def build_router(srv) -> APIRouter:
             async def _err_gen():
                 yield f"event: {SSE_ERROR}\ndata: {json.dumps(err_msg)}\n\n"
             return StreamingResponse(_err_gen(), media_type="text/event-stream")
-        approver = _make_approver(sid, cancel_ev)   # a confirm raised AFTER Stop denies instantly
+        approver = _make_approver(
+            sid, eff_mode, turn_epoch, cancel_ev)   # a confirm after Stop denies instantly
         _on_step, _on_todos = _make_progress_hooks(sid, cancel_ev, q)
 
         def _progress_text(piece):
@@ -548,7 +663,7 @@ def build_router(srv) -> APIRouter:
             finally:
                 # Tear down ONLY OUR turn's registry entries (owner-guarded): a newer turn may have
                 # replaced them, and popping unconditionally would orphan it.
-                _release_turn(sid, cancel_ev)
+                _release_turn(sid, cancel_ev, turn_epoch)
                 q.put((ASSISTANT_STREAM_END_SENTINEL, None))
         threading.Thread(target=_worker, daemon=True).start()
 

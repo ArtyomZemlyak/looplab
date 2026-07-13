@@ -21,6 +21,7 @@ import {
   assistantFork, assistantShare, commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction,
   commandFailureRecord, commandFeedback, commandRecordMatchesAction, getRunCommand, retryRunCommand,
+  getObservedRunGeneration,
   COMMAND_SUCCEEDED, COMMAND_FAILED,
   createIdempotencyKey, saveAssistantRunTransport, loadAssistantRunTransport,
   clearAssistantRunTransport, clearRunCommandLock, loadRunCommandLock, saveRunCommandLock,
@@ -161,16 +162,27 @@ export default function AssistantBar({ runId, hidden = false }) {
   const [suggestionsDismissed, setSuggestionsDismissed] = useState(false)
   const [runs, setRuns] = useState([])
   const [pending, setPending] = useState([])      // live HITL confirm requests
+  const [resolvingPerms, setResolvingPerms] = useState(() => new Set())
+  const resolvingPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [files, setFiles] = useState([])          // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => Math.min(
     Math.max(+storageGet('ll.asstW', 440) || 440, 320), window.innerWidth - 120))
+
+  // A permission card cannot render in the collapsed composer bar. Reveal the side thread as soon as
+  // one arrives so the safe Reject-first focus and assertive pending announcement are actually usable.
+  useEffect(() => {
+    if (!hidden && !historical && pending.length > 0 && view === 'bar') {
+      setView('side'); setHasNew(false)
+    }
+  }, [hidden, historical, pending.length, view])
 
   const mountedRef = useRef(true)
   const currentRunIdRef = useRef(runId)
   currentRunIdRef.current = runId
   const abortRef = useRef(null)
   const runningRef = useRef(false)   // a turn is live (stream OR reattach poll); stop clears it to halt both
+  const directCaptureRef = useRef(false) // closes the pre-storage generation-read window to double clicks
   const cancelReqRef = useRef(null)  // in-flight server-cancel POST; the next send awaits it so a late
                                      // cancel can't land on (and instantly kill) the NEW turn's event
   const sidRef = useRef(null)   // session the stream callbacks belong to (guards cross-session bleed)
@@ -429,8 +441,31 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   const resolvePerm = async (reqId, decision) => {
     if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to resolve actions`); return }
-    setPending(p => p.filter(x => x.id !== reqId))
-    try { await assistantResolve(reqId, decision) } catch (e) { flash(e.message) }
+    if (resolvingPermsRef.current.has(reqId)) return
+    const requestSession = pending.find(req => req.id === reqId)?.session || sidRef.current
+    resolvingPermsRef.current.add(reqId)
+    setResolvingPerms(current => new Set(current).add(reqId))
+    try {
+      await assistantResolve(reqId, decision)
+      if (sidRef.current === requestSession) setPending(current => {
+        const next = current.filter(req => req.id !== reqId)
+        if (!next.length) requestAnimationFrame(() => inputRef.current?.focus())
+        return next
+      })
+    } catch (error) {
+      flash(error?.message || 'Could not submit the permission decision')
+      // The POST response may have been lost after the server committed the decision. Re-read the
+      // registry before offering another click; on a true network outage the original card remains.
+      try {
+        const latest = requestSession ? await assistantPermissions(requestSession) : null
+        if (latest && sidRef.current === requestSession) setPending(latest.pending || [])
+      } catch { /* retain the exact pending request for a later retry */ }
+    } finally {
+      resolvingPermsRef.current.delete(reqId)
+      setResolvingPerms(current => {
+        const next = new Set(current); next.delete(reqId); return next
+      })
+    }
   }
   const onRevert = async (absPath) => {
     if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to undo edits`); return }
@@ -448,6 +483,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     currentRunIdRef.current, entry.runId, () => flash(message))
   const persistDirect = entry => saveAssistantRunTransport(entry.runId, {
     action: entry.name, arg: entry.arg, idempotencyKey: entry.idempotencyKey,
+    expectedGeneration: entry.expectedGeneration,
     commandId: entry.record?.id || '', record: entry.record,
     statusUnavailable: entry.statusUnavailable, observationKind: entry.observationKind,
     retrying: entry.retrying, checking: entry.checking,
@@ -460,7 +496,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   const clearUnsentDirectRecovery = entry => {
     const expected = {
       source: 'assistant', idempotencyKey: entry.idempotencyKey,
-      action: entry.name, commandId: '',
+      action: entry.name, expectedGeneration: entry.expectedGeneration, commandId: '',
     }
     const transportCleared = clearAssistantRunTransport(entry.runId, undefined, {
       idempotencyKey: entry.idempotencyKey,
@@ -501,6 +537,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       protocolInvalid: true, canResubmit: false, lastError: message }
     saveRunCommandLock(entry.runId, {
       source: 'assistant', action: next.name || 'unknown', idempotencyKey: next.idempotencyKey,
+      expectedGeneration: next.expectedGeneration,
       commandId, record: next.record, statusUnavailable: true,
     })
     if (mountedRef.current) {
@@ -516,7 +553,8 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (entry.protocolInvalid) {
       const identity = entry.lockIdentity || {
         source: 'assistant', idempotencyKey: entry.idempotencyKey,
-        action: entry.name || 'unknown', commandId: entry.record?.id || '',
+        action: entry.name || 'unknown', expectedGeneration: entry.expectedGeneration,
+        commandId: entry.record?.id || '',
       }
       clearRunCommandLock(entry.runId, identity)
     }
@@ -579,36 +617,51 @@ export default function AssistantBar({ runId, hidden = false }) {
     flashDirect(entry, commandFeedback(record, directLabels(entry)).message)
   }
   const executeDirect = async (entry, { recovery = false } = {}) => {
-    const submitting = { ...entry, record: { status: 'submitting' }, statusUnavailable: false,
+    let bound = entry
+    if (!bound.expectedGeneration) {
+      const error = new Error('The displayed run generation is unavailable.')
+      error.code = 'run_generation_unavailable'
+      error.remediation = 'Refresh the run and wait for its current state before submitting another action.'
+      failDirectObservation(bound, error)
+      return
+    }
+    const submitting = { ...bound, record: { status: 'submitting' }, statusUnavailable: false,
       observationKind: null, checking: false, retrying: false, lastError: '' }
-    if (!persistDirect(submitting)) { localStorageFailure(entry); return }
-    if (mountedRef.current) { setCurrentDirect(entry, submitting); setCurrentFailure(entry, null) }
+    if (!persistDirect(submitting)) { localStorageFailure(bound); return }
+    if (mountedRef.current) { setCurrentDirect(bound, submitting); setCurrentFailure(bound, null) }
     try {
-      const record = await submitAssistantDirect(entry.runId, entry.name, entry.arg,
-        entry.idempotencyKey, {
+      const record = await submitAssistantDirect(bound.runId, bound.name, bound.arg,
+        bound.idempotencyKey, {
+          expectedGeneration: bound.expectedGeneration,
           onRecord: next => {
-            const verified = verifiedDirectEntry(entry, next)
+            const verified = verifiedDirectEntry(bound, next)
             if (verified) persistDirect({ ...verified, statusUnavailable: false })
           },
         })
-      acceptDirectRecord(entry, record, { announce: !recovery || COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status) })
+      acceptDirectRecord(bound, record, { announce: !recovery || COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status) })
     } catch (error) {
       const record = error?.commandRecord || (error?.commandId
         ? { id: error.commandId, status: 'accepted' } : null)
       const kind = assistantDirectObservationKind(error)
       if (error?.commandUnknown || error?.submissionMayHaveSucceeded
           || (record?.id && ['transport', 'access', 'protocol'].includes(kind))) {
-        unavailableDirect(entry, error, record)
-        flashDirect(entry, `/${entry.name}: command status unavailable — the same intent was preserved`)
+        unavailableDirect(bound, error, record)
+        flashDirect(bound, `/${bound.name}: command status unavailable — the same intent was preserved`)
+      } else if (error?.code === 'run_generation_changed'
+          || error?.code === 'invalid_run_generation'
+          || error?.code === 'run_generation_unavailable') {
+        // This is an authoritative precondition failure, not an ambiguous transport result. Keep the
+        // exact bound token in the settled envelope so reload cannot turn it into a fresh command.
+        failDirectObservation(bound, error)
       } else {
         // A cross-action 409 may reference another command. It is remediation context only, never the
         // durable id of this requested action.
-        clearAssistantRunTransport(entry.runId, undefined, { idempotencyKey: entry.idempotencyKey })
-        if (mountedRef.current) setCurrentDirect(entry, null)
+        clearAssistantRunTransport(bound.runId, undefined, { idempotencyKey: bound.idempotencyKey })
+        if (mountedRef.current) setCurrentDirect(bound, null)
         const conflict = error?.existingCommandId ? ` (active command ${String(error.existingCommandId).slice(0, 12)}…)` : ''
-        const failure = { ...entry, record: commandFailureRecord(error), retrying: false }
-        if (mountedRef.current) setCurrentFailure(entry, failure)
-        flashDirect(entry, `/${entry.name} failed: ${error?.message || error}${conflict}`)
+        const failure = { ...bound, record: commandFailureRecord(error), retrying: false }
+        if (mountedRef.current) setCurrentFailure(bound, failure)
+        flashDirect(bound, `/${bound.name} failed: ${error?.message || error}${conflict}`)
       }
     }
   }
@@ -617,17 +670,19 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (historical) { flash(`History seq ${runAccess.seq} is read-only — return live to act`); return }
     // Read synchronously as well as using React state: two rapid clicks in one batch must not create
     // competing intents before the lock event has caused a render.
-    if (loadRunCommandLock(runId) || (loadAssistantRunTransport(runId) && !directFailure)) {
+    if (directCaptureRef.current || loadRunCommandLock(runId) || (loadAssistantRunTransport(runId) && !directFailure)) {
       flash('A stored run command must be recovered before starting another action'); return
     }
     if (directFailure) clearAssistantRunTransport(directFailure.runId, undefined, {
       idempotencyKey: directFailure.idempotencyKey,
     })
-    const entry = { ...d, runId, idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
+    const entry = { ...d, runId, expectedGeneration: getObservedRunGeneration(runId),
+      idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
     commandFocusRequestedRef.current = true
     setCurrentFailure(entry, null)
     setDirectPending(entry)
-    executeDirect(entry)
+    directCaptureRef.current = true
+    executeDirect(entry).finally(() => { directCaptureRef.current = false })
   }
   const checkDirect = async () => {
     const entry = directPending
@@ -721,7 +776,8 @@ export default function AssistantBar({ runId, hidden = false }) {
     clearAssistantRunTransport(pending.runId, undefined, { idempotencyKey: pending.idempotencyKey })
     const identity = pending.lockIdentity || {
       source: 'assistant', idempotencyKey: pending.idempotencyKey,
-      action: pending.name || 'unknown', commandId: pending.record?.id || '',
+      action: pending.name || 'unknown', expectedGeneration: pending.expectedGeneration,
+      commandId: pending.record?.id || '',
     }
     clearRunCommandLock(pending.runId, identity)
     setDirectPending(null)
@@ -734,7 +790,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (!saved) {
       if (lock?.source === 'assistant') clearRunCommandLock(runId, {
         source: 'assistant', idempotencyKey: lock.idempotencyKey,
-        action: lock.action, commandId: lock.commandId,
+        action: lock.action, expectedGeneration: lock.expectedGeneration, commandId: lock.commandId,
       })
       return
     }
@@ -745,10 +801,12 @@ export default function AssistantBar({ runId, hidden = false }) {
     const spec = DIRECT[saved.action] || UNKNOWN_DIRECT_SPEC
     const lockMismatch = lock?.source === 'assistant' && (
       lock.idempotencyKey !== saved.idempotencyKey || lock.action !== saved.action
+      || lock.expectedGeneration !== saved.expectedGeneration
       || (lock.commandId && saved.commandId && lock.commandId !== saved.commandId)
     )
     if (saved.protocolInvalid || lockMismatch) {
       const restored = { name: saved.action, spec, arg: saved.arg, runId,
+        expectedGeneration: saved.expectedGeneration,
         idempotencyKey: saved.idempotencyKey, record: saved.record,
         statusUnavailable: true, observationKind: 'protocol', checking: false, retrying: false,
         protocolInvalid: true, canResubmit: false, lockIdentity: lock?.source === 'assistant' ? lock : null }
@@ -761,7 +819,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       return
     }
     const restored = { name: saved.action, spec, arg: saved.arg, runId,
-      idempotencyKey: saved.idempotencyKey,
+      expectedGeneration: saved.expectedGeneration, idempotencyKey: saved.idempotencyKey,
       record: saved.record || (saved.commandId ? { id: saved.commandId, status: 'accepted' } : { status: 'submitting' }),
       statusUnavailable: !!saved.statusUnavailable, observationKind: saved.observationKind,
       checking: false, retrying: !!saved.retrying, lastError: '' }
@@ -769,7 +827,8 @@ export default function AssistantBar({ runId, hidden = false }) {
         && !saved.retrying && !saved.checking) {
       clearRunCommandLock(runId, {
         source: 'assistant', idempotencyKey: saved.idempotencyKey,
-        action: saved.action, commandId: saved.commandId,
+        action: saved.action, expectedGeneration: saved.expectedGeneration,
+        commandId: saved.commandId,
       })
       setDirectFailure(restored)
       return
@@ -1225,7 +1284,12 @@ export default function AssistantBar({ runId, hidden = false }) {
         onRetry={retryHandlerFor(i)}
         onOpenSettings={openAssistantSettings} />
     </React.Fragment>)}
-    {!historical && pending.map(req => <PermCard key={req.id} req={req} onResolve={resolvePerm} />)}
+    {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
+      aria-label={`${pending.length} pending Assistant approval${pending.length === 1 ? '' : 's'}`}
+      aria-live="assertive" aria-atomic="false">
+      {pending.map((req, index) => <PermCard key={req.id} req={req} onResolve={resolvePerm}
+        busy={resolvingPerms.has(req.id)} autoFocus={index === pending.length - 1} />)}
+    </div>}
     {/* The streaming placeholder is itself in `msgs`; its Turn renders the activity timeline +
         the "thinking" indicator — no separate block here (which would double the label). */}
   </>

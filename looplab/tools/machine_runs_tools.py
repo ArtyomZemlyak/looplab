@@ -35,6 +35,15 @@ _TRACE_CHARS = RESULT_CAP - 400
 
 _COMMAND_PENDING = frozenset({"accepted", "executing"})
 _COMMAND_FAILED = frozenset({"failed", "rejected", "timed_out"})
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _exact_run_generation(value: object) -> str:
+    if not isinstance(value, str) or _RUN_GENERATION_RE.fullmatch(value) is None:
+        raise _MutationRecoveryBlocked(
+            "run_generation_unavailable",
+            "The run generation is missing or invalid; no run mutation was attempted.")
+    return value
 
 
 class _MutationRecoveryBlocked(RuntimeError):
@@ -56,7 +65,7 @@ class _TurnMutationFence:
     storage mutations are not replayed because their crash point cannot be proven from this journal.
     """
 
-    _VERSION = 1
+    _VERSION = 2
 
     def __init__(self, path: Path, namespace: str, *, recovering: bool):
         self.path = Path(path)
@@ -77,8 +86,8 @@ class _TurnMutationFence:
         return json.dumps(intent, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                           allow_nan=False)
 
-    def _key(self, index: int, raw: str) -> str:
-        material = f"{self.namespace}\0mutation\0{index}\0{raw}"
+    def _key(self, index: int, raw: str, expected_generation: str) -> str:
+        material = f"{self.namespace}\0mutation\0{index}\0{expected_generation}\0{raw}"
         return "asst_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
 
     def _load(self) -> None:
@@ -100,9 +109,13 @@ class _TurnMutationFence:
                 intent = entry.get("intent")
                 if not isinstance(intent, dict) or not isinstance(entry.get("command_backed"), bool):
                     raise ValueError("mutation journal intent is malformed")
+                generation = entry.get("expected_generation")
+                if not isinstance(generation, str) or _RUN_GENERATION_RE.fullmatch(generation) is None:
+                    raise ValueError("mutation journal generation is malformed")
                 raw = self._canonical(intent)
                 digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-                if entry.get("intent_digest") != digest or entry.get("idempotency_key") != self._key(index, raw):
+                if (entry.get("intent_digest") != digest
+                        or entry.get("idempotency_key") != self._key(index, raw, generation)):
                     raise ValueError("mutation journal integrity check failed")
                 checked.append(dict(entry))
             self._entries = checked
@@ -116,7 +129,8 @@ class _TurnMutationFence:
                    "entries": self._entries}
         atomic_write_text(self.path, json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
 
-    def claim(self, intent: dict, *, command_backed: bool) -> str:
+    def claim(self, intent: dict, *, command_backed: bool,
+              expected_generation: Optional[str] = None) -> tuple[str, str]:
         if self._invalid:
             raise _MutationRecoveryBlocked(
                 "assistant_turn_journal_unavailable",
@@ -145,15 +159,17 @@ class _TurnMutationFence:
                 raise _MutationRecoveryBlocked(
                     "assistant_turn_direct_mutation_uncertain",
                     "The original direct mutation may already have completed; inspect its state before a new turn.")
-            return str(entry["idempotency_key"])
+            return str(entry["idempotency_key"]), str(entry["expected_generation"])
 
+        generation = _exact_run_generation(expected_generation)
         index = len(self._entries)
-        key = self._key(index, raw)
+        key = self._key(index, raw, generation)
         entry = {
             "index": index,
             "intent": intent,
             "intent_digest": hashlib.sha256(raw.encode("utf-8")).hexdigest(),
             "idempotency_key": key,
+            "expected_generation": generation,
             "command_backed": bool(command_backed),
         }
         self._entries.append(entry)
@@ -164,7 +180,7 @@ class _TurnMutationFence:
             raise _MutationRecoveryBlocked(
                 "assistant_turn_journal_unavailable",
                 "The mutation could not be staged durably; no run mutation was attempted.")
-        return key
+        return key, generation
 
 
 def _command_record(value) -> dict:
@@ -232,7 +248,21 @@ class _RunCommandAdapter:
         observed = _command_record(value)
         return observed or record
 
-    def submit(self, rd: Path, event_type: str, data: dict, *, idempotency_key: str = "") -> dict:
+    def run_generation(self, rd: Path) -> str:
+        """Capture the service's current durable generation before fresh intent staging."""
+        getter = getattr(self.service, "run_generation", None)
+        if not callable(getter):
+            return _exact_run_generation(None)
+        try:
+            value = getter(rd)
+        except Exception as exc:
+            raise _MutationRecoveryBlocked(
+                "run_generation_unavailable",
+                "The run generation could not be read; no run mutation was attempted.") from exc
+        return _exact_run_generation(value)
+
+    def submit(self, rd: Path, event_type: str, data: dict, *, idempotency_key: str = "",
+               expected_generation: str = "") -> dict:
         if self.service is None or not callable(getattr(self.service, "submit", None)):
             return {"status": "failed", "event_type": event_type, "error": {
                 "code": "command_service_unavailable",
@@ -271,9 +301,11 @@ class _RunCommandAdapter:
             key = "asst_" + hashlib.sha256(material.encode("utf-8")).hexdigest()
         else:
             key = str(uuid.uuid4())          # compatibility for direct/test construction
+        generation = _exact_run_generation(expected_generation)
         predicted_id = "cmd_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
         try:
-            record = _command_record(self.service.submit(rd, key, event_type, data))
+            record = _command_record(self.service.submit(
+                rd, key, event_type, data, expected_generation=generation))
         except Exception as exc:  # never expose internals or retry a possibly accepted submission
             # HTTP 409 from the service names the already-authoritative command. A transport failure
             # may have happened after acceptance, in which case the id is deterministic from our key.
@@ -330,20 +362,30 @@ class _RunCommandAdapter:
             self._pending_by_run.pop(run_key, None)
         return record
 
+    def _require_generation(self, rd: Path, expected_generation: str) -> None:
+        expected = _exact_run_generation(expected_generation)
+        current = self.run_generation(rd)
+        if current != expected:
+            raise _MutationRecoveryBlocked(
+                "run_generation_changed",
+                "The run was reset or replaced after this mutation was formed; no mutation was applied.")
+
     @contextmanager
-    def destructive_guard(self, rd: Path, operation: str):
+    def destructive_guard(self, rd: Path, operation: str, *, expected_generation: str):
         """Use the server's per-run command sequencer when this provider runs in the UI server."""
         guard = getattr(self.service, "destructive_guard", None)
         if callable(guard):
             with guard(rd, operation) as canonical:
+                self._require_generation(canonical, expected_generation)
                 yield canonical
             return
         # Standalone/unit-tool use has no AppState command coordinator. Preserve the historical tool
         # surface there; the live check below remains mandatory and is re-run immediately before I/O.
+        self._require_generation(rd, expected_generation)
         yield rd
 
     @contextmanager
-    def mutation_guard(self, rd: Path, operation: str):
+    def mutation_guard(self, rd: Path, operation: str, *, expected_generation: str):
         """Serialize a direct non-registry event/snapshot mutation with run commands and deletion."""
         sequence = getattr(self.service, "sequence", None)
         validate = getattr(self.service, "validate_paths", None)
@@ -353,12 +395,14 @@ class _RunCommandAdapter:
                 canonical = validate(rd)
                 if callable(reject):
                     reject(canonical, operation)
+                self._require_generation(canonical, expected_generation)
                 yield canonical
             return
         # Standalone compatibility: at least re-check existence immediately before the write. The UI
         # server always supplies the real sequencer above.
         if not (rd / "events.jsonl").exists():
             raise RuntimeError("run disappeared before mutation")
+        self._require_generation(rd, expected_generation)
         yield rd
 
 
@@ -858,19 +902,24 @@ class RunControlTools:
             return None
         return rd
 
-    def _gate(self, name: str, rid: str, verb: str) -> Optional[str]:
+    def _gate(self, name: str, rid: str, rd: Path, verb: str, *,
+              scope: Optional[dict] = None) -> tuple[Optional[str], Optional[str]]:
         # Returns a "declined/disabled" string to short-circuit, or None to proceed.
-        from looplab.tools.perm_modes import decide
-        d = decide(self.mode, "run_control")
+        from looplab.tools.perm_modes import approval_allows, decide_action
+        action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
+                  "verb": verb, "preview": f"{name}({rid})", "run_id": rid,
+                  "scope": dict(scope or {"run_id": rid})}
+        d = decide_action(self.mode, action)
         if d == "deny":
-            return "(run control is disabled in read-only plan mode — switch to default/acceptEdits/auto.)"
+            return ("(run control is disabled in read-only plan mode — switch to "
+                    "default/acceptEdits/auto.)", None)
+        generation = (None if self._mutation_fence is not None and self._mutation_fence.recovering
+                      else self._commands.run_generation(rd))
         if d == "ask":
-            action = {"tool": name, "tool_kind": "run_control", "label": f"{name} {rid}",
-                      "verb": verb, "preview": f"{name}({rid})"}
-            verdict = str(self.approver(action) or "deny") if self.approver else "deny"
-            if not verdict.startswith("allow"):
-                return f"(declined by the user: {name} {rid})"
-        return None
+            verdict = self.approver(action) or "deny" if self.approver else "deny"
+            if not approval_allows(verdict):
+                return f"(declined by the user: {name} {rid})", generation
+        return None, generation
 
     def _live(self, rd: Path) -> bool:
         """Is a run's engine actively writing its log? The flock probe is primary, but on FUSE / NFS / S3
@@ -897,13 +946,18 @@ class RunControlTools:
             return False
 
     @contextmanager
-    def _mutation_intent(self, name: str, rid: str, data: dict, *, command_backed: bool):
+    def _mutation_intent(self, name: str, rid: str, rd: Path, data: dict, *, command_backed: bool,
+                         expected_generation: Optional[str]):
         """Stage one canonical run mutation before any command/event/storage side effect."""
         key = ""
+        generation = ""
         if self._mutation_fence is not None:
-            key = self._mutation_fence.claim(
-                {"tool": name, "run_id": rid, "data": data}, command_backed=command_backed)
-        yield key
+            key, generation = self._mutation_fence.claim(
+                {"tool": name, "run_id": rid, "data": data}, command_backed=command_backed,
+                expected_generation=expected_generation)
+        else:
+            generation = _exact_run_generation(expected_generation)
+        yield key, generation
 
     # ------------------------------------------------------------------ dispatch
     def execute(self, name: str, args: dict) -> str:
@@ -936,12 +990,14 @@ class RunControlTools:
             "stop_run": (EV_PAUSE, {}, f"stop (freeze) run {rid}"),
             "resume_run": (EV_RESUME, {}, f"resume run {rid}"),
         }[name]
-        blocked = self._gate(name, rid, verb)
+        blocked, formed_generation = self._gate(name, rid, rd, verb, scope={"run_id": rid})
         if blocked:
             return blocked
         with self._mutation_intent(
-                name, rid, {"event_type": etype, "data": data}, command_backed=True) as key:
-            record = self._commands.submit(rd, etype, data, idempotency_key=key)
+                name, rid, rd, {"event_type": etype, "data": data},
+                command_backed=True, expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, etype, data, idempotency_key=key, expected_generation=generation)
         return _render_command_result(record, name=name, run_id=rid, completed=verb)
 
     def _settings(self, name: str, rid: str, rd: Path, args: dict) -> str:
@@ -968,39 +1024,55 @@ class RunControlTools:
                 return "(extend_budget needs at least one of add_nodes / max_seconds / max_eval_seconds)"
             if data.get("add_nodes", 1) <= 0:      # a negative/zero delta SHRINKS the budget, not extends
                 return "(add_nodes must be a positive count of MORE experiment nodes)"
-            blocked = self._gate(name, rid, f"extend budget of {rid}: {data}")
+            blocked, formed_generation = self._gate(
+                name, rid, rd, f"extend budget of {rid}: {data}",
+                scope={"run_id": rid, **data})
             if blocked:
                 return blocked
             with self._mutation_intent(
-                    name, rid, {"event_type": EV_BUDGET_EXTEND, "data": data},
-                    command_backed=True) as key:
+                    name, rid, rd, {"event_type": EV_BUDGET_EXTEND, "data": data},
+                    command_backed=True,
+                    expected_generation=formed_generation) as (key, generation):
                 record = self._commands.submit(
-                    rd, EV_BUDGET_EXTEND, data, idempotency_key=key)
+                    rd, EV_BUDGET_EXTEND, data, idempotency_key=key,
+                    expected_generation=generation)
             return _render_command_result(
                 record, name=name, run_id=rid, completed=f"budget extended for {rid}: {data}")
         if name == "set_directive":
             text = " ".join(str(args.get("text") or "").split())
             if not text:
                 return "(set_directive needs a non-empty text)"
-            blocked = self._gate(name, rid, f"directive for {rid}: {text[:60]}")
+            blocked, formed_generation = self._gate(
+                name, rid, rd, f"directive for {rid}: {text[:60]}",
+                scope={"run_id": rid,
+                       "text_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                       "replace": bool(args.get("replace"))})
             if blocked:
                 return blocked
             data = {"text": text, "replace": bool(args.get("replace"))}
             with self._mutation_intent(
-                    name, rid, {"event_type": EV_HINT, "data": data}, command_backed=True) as key:
-                record = self._commands.submit(rd, EV_HINT, data, idempotency_key=key)
+                    name, rid, rd, {"event_type": EV_HINT, "data": data},
+                    command_backed=True,
+                    expected_generation=formed_generation) as (key, generation):
+                record = self._commands.submit(
+                    rd, EV_HINT, data, idempotency_key=key,
+                    expected_generation=generation)
             return _render_command_result(
                 record, name=name, run_id=rid, completed=f"directive recorded for {rid}: {text[:80]!r}")
         if name == "set_trust_gate":
             tg = str(args.get("trust_gate") or "").strip().lower()
             if tg not in ("audit", "gate", "block"):
                 return "(trust_gate must be audit | gate | block)"
-            blocked = self._gate(name, rid, f"set trust_gate={tg} for {rid}")
+            blocked, formed_generation = self._gate(
+                name, rid, rd, f"set trust_gate={tg} for {rid}",
+                scope={"run_id": rid, "trust_gate": tg})
             if blocked:
                 return blocked
             with self._mutation_intent(
-                    name, rid, {"trust_gate": tg}, command_backed=False):
-                with self._commands.mutation_guard(rd, "set the trust gate") as rd:
+                    name, rid, rd, {"trust_gate": tg}, command_backed=False,
+                    expected_generation=formed_generation) as (_key, generation):
+                with self._commands.mutation_guard(
+                        rd, "set the trust gate", expected_generation=generation) as rd:
                     store = EventStore(rd / "events.jsonl")
                     store.append(EV_TRUST_GATE_CHANGED, {"trust_gate": tg, "source": "assistant"})
                     # Mirror the UI PUT /config path: the fold already applies the event, but also update
@@ -1032,14 +1104,18 @@ class RunControlTools:
             return "(stage must be a non-empty stage name)"
         if nid not in fold(EventStore(rd / "events.jsonl").read_all()).nodes:
             return f"(no node #{nid} in {rid})"
-        blocked = self._gate("reset_node", rid, f"reset node #{nid} of {rid} from {stage}")
+        blocked, formed_generation = self._gate(
+            "reset_node", rid, rd, f"reset node #{nid} of {rid} from {stage}",
+            scope={"run_id": rid, "node_id": nid, "stage": stage})
         if blocked:
             return blocked
         data = {"node_id": nid, "from_stage": stage}
         with self._mutation_intent(
-                "reset_node", rid, {"event_type": EV_NODE_RESET, "data": data},
-                command_backed=True) as key:
-            record = self._commands.submit(rd, EV_NODE_RESET, data, idempotency_key=key)
+                "reset_node", rid, rd, {"event_type": EV_NODE_RESET, "data": data},
+                command_backed=True, expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_NODE_RESET, data, idempotency_key=key,
+                expected_generation=generation)
         return _render_command_result(
             record, name="reset_node", run_id=rid,
             completed=f"node #{nid} of {rid} re-run from {stage}")
@@ -1070,15 +1146,18 @@ class RunControlTools:
             return out
 
         approved_subtree = _subtree(preview)
-        blocked = self._gate(
-            "delete_node", rid, f"delete node(s) {sorted(approved_subtree)} of {rid}")
+        blocked, formed_generation = self._gate(
+            "delete_node", rid, rd, f"delete node(s) {sorted(approved_subtree)} of {rid}",
+            scope={"run_id": rid, "node_id": nid, "subtree": sorted(approved_subtree)})
         if blocked:
             return blocked
         with self._mutation_intent(
-                "delete_node", rid,
-                {"node_id": nid, "subtree": sorted(approved_subtree)}, command_backed=False):
+                "delete_node", rid, rd,
+                {"node_id": nid, "subtree": sorted(approved_subtree)}, command_backed=False,
+                expected_generation=formed_generation) as (_key, generation):
             pass
-        with self._commands.destructive_guard(rd, "delete node") as rd:
+        with self._commands.destructive_guard(
+                rd, "delete node", expected_generation=generation) as rd:
             # The authoritative liveness/state checks belong after approval and inside the command
             # sequencer. A command accepted while the confirm card was open cannot spawn under us.
             if self._live(rd):
@@ -1124,12 +1203,17 @@ class RunControlTools:
 
     def _delete_run(self, rid: str, rd: Path) -> str:
         import shutil
-        blocked = self._gate("delete_run", rid, f"DELETE the entire run {rid} (irreversible)")
+        blocked, formed_generation = self._gate(
+            "delete_run", rid, rd, f"DELETE the entire run {rid} (irreversible)",
+            scope={"run_id": rid})
         if blocked:
             return blocked
-        with self._mutation_intent("delete_run", rid, {}, command_backed=False):
+        with self._mutation_intent(
+                "delete_run", rid, rd, {}, command_backed=False,
+                expected_generation=formed_generation) as (_key, generation):
             pass
-        with self._commands.destructive_guard(rd, "delete run") as rd:
+        with self._commands.destructive_guard(
+                rd, "delete run", expected_generation=generation) as rd:
             if self._live(rd):
                 return f"(run {rid} is LIVE — stop it first before deleting)"
             shutil.rmtree(rd, ignore_errors=True)

@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { apiUrl, get } from './api.js'   // join the served path prefix so SSE works behind a proxy subpath
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { apiUrl, get, normalizeRunGeneration, observeRunGeneration } from './api.js'   // join the served path prefix so SSE works behind a proxy subpath
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -70,6 +70,8 @@ function withBuilding(state) {
 export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   const [live, setLive] = useState(null)
   const [seq, setSeq] = useState(-1)
+  const [generationState, setGenerationState] = useState({ runId, value: null })
+  const generation = generationState.runId === runId ? generationState.value : null
   const [connected, setConnected] = useState(false)
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
@@ -81,9 +83,10 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let stopped = false
     let timer = null
     let pollTimer = null
-    let lastSeq = -2, lastAlive
+    let lastSeq = -2, lastAlive, lastGeneration = null
     setLive(null)
     setSeq(-1)
+    setGenerationState({ runId, value: null })
     setConnected(false)
     setStatus('loading')
     setError(null)
@@ -104,8 +107,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
         // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
         const alive = p.state && p.state.engine_running
-        if (p.seq === lastSeq && alive === lastAlive) return
-        lastSeq = p.seq; lastAlive = alive
+        const nextGeneration = normalizeRunGeneration(p.generation)
+        if (p.generation != null && !nextGeneration) return
+        if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration) return
+        lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration
+        setGenerationState({ runId, value: nextGeneration })
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
       })
       // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
@@ -126,6 +132,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         if (stopped) return
         lastSeq = p.seq
         lastAlive = p.state && p.state.engine_running
+        lastGeneration = normalizeRunGeneration(p.generation)
+        if (p.generation != null && !lastGeneration) {
+          throw new Error('The server returned an invalid run generation.')
+        }
+        setGenerationState({ runId, value: lastGeneration })
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
         if (!pollOnly) connect()
         else {
@@ -136,8 +147,13 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
                 if (stopped) return
                 setConnected(true); setStatus('ready'); setError(null)
                 const alive = next.state && next.state.engine_running
-                if (next.seq !== lastSeq || alive !== lastAlive) {
-                  lastSeq = next.seq; lastAlive = alive
+                const nextGeneration = normalizeRunGeneration(next.generation)
+                if (next.generation != null && !nextGeneration) {
+                  throw new Error('The server returned an invalid run generation.')
+                }
+                if (next.seq !== lastSeq || alive !== lastAlive || nextGeneration !== lastGeneration) {
+                  lastSeq = next.seq; lastAlive = alive; lastGeneration = nextGeneration
+                  setGenerationState({ runId, value: nextGeneration })
                   setLive(withBuilding(next.state)); setSeq(next.seq)
                 }
                 pollTimer = setTimeout(poll, pollMs)
@@ -171,7 +187,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     }
   }, [runId, retryToken, pollOnly, pollMs])
 
-  return { live, seq, connected, status, error, retry: () => setRetryToken(n => n + 1) }
+  // Publish only after React committed the snapshot. Updating this registry in the SSE callback would
+  // create a small pre-render window where a click on visible generation A could be rebound to B.
+  useLayoutEffect(() => { observeRunGeneration(runId, generation) }, [runId, generation])
+
+  return { live, seq, generation, connected, status, error, retry: () => setRetryToken(n => n + 1) }
 }
 
 // Browser notifications for finish / approval / failure-spike.

@@ -153,7 +153,7 @@ def test_shell_read_output_reports_more_pending(tmp_path):
     the model polls again instead of assuming it saw everything."""
     from looplab.runtime.bg_tasks import MANAGER
     from looplab.tools._base import RESULT_CAP
-    s = ShellTools([tmp_path], mode="auto")
+    s = ShellTools([tmp_path], mode="auto", approver=lambda _action: "allow_once")
     code = "import sys; sys.stdout.write(''.join('<%05d>' % i for i in range(2000)))"   # 14KB, positional
     r = s.execute("run_command", {"command": [sys.executable, "-c", code], "background": True})
     tid = r.split("task ")[1].split(" ")[0]
@@ -170,7 +170,7 @@ def test_shell_read_output_reports_more_pending(tmp_path):
 
 
 def test_shell_background_tool(tmp_path):
-    s = ShellTools([tmp_path], mode="auto")
+    s = ShellTools([tmp_path], mode="auto", approver=lambda _action: "allow_once")
     r = s.execute("run_command", {"command": [sys.executable, "-c", "print('hi')"], "background": True})
     assert "background task" in r
     tid = r.split("task ")[1].split(" ")[0]
@@ -224,7 +224,7 @@ def test_kill_background_stops_a_running_task(tmp_path):
 
 
 def test_shell_kill_background_tool(tmp_path):
-    s = ShellTools([tmp_path], mode="auto")
+    s = ShellTools([tmp_path], mode="auto", approver=lambda _action: "allow_once")
     r = s.execute("run_command",
                   {"command": [sys.executable, "-c", "import time; time.sleep(30)"], "background": True})
     tid = r.split("task ")[1].split(" ")[0]
@@ -235,7 +235,8 @@ def test_shell_kill_background_tool(tmp_path):
 def test_kill_background_goes_through_ask_mode_approver(tmp_path):
     """arch-review §3 P0-6: kill_background is a side effect, so in the DEFAULT (ask) mode it must ask
     the approver — the old code checked only plan-mode `deny` and killed with no approval."""
-    launcher = ShellTools([tmp_path], mode="auto")     # launch in auto (MANAGER is process-global)
+    launcher = ShellTools(
+        [tmp_path], mode="auto", approver=lambda _action: "allow_once")
     r = launcher.execute("run_command",
                          {"command": [sys.executable, "-c", "import time; time.sleep(30)"], "background": True})
     tid = r.split("task ")[1].split(" ")[0]

@@ -102,12 +102,29 @@ def test_git_dash_refs_are_refused(tmp_path):
 
 # ---- remember never crashes the turn -----------------------------------------------------------
 def test_remember_tolerates_junk_tags_and_fs_errors(tmp_path):
-    k = KnowledgeWriteTools(str(tmp_path / "kb"))
+    k = KnowledgeWriteTools(str(tmp_path / "kb"), mode="auto")
     assert "saved" in k.execute("remember", {"title": "t", "note": "n", "tags": 5})
-    blocked = KnowledgeWriteTools(str(tmp_path / "file-not-dir" / "kb"))
+    blocked = KnowledgeWriteTools(str(tmp_path / "file-not-dir" / "kb"), mode="auto")
     (tmp_path / "file-not-dir").write_text("x")                  # mkdir will fail
     out = blocked.execute("remember", {"title": "t", "note": "n"})
     assert out.startswith("(error")                              # error string, not an exception
+
+
+def test_remember_is_absent_and_denied_in_read_only_plan(tmp_path):
+    from types import SimpleNamespace
+
+    from looplab.serve.assistant import build_tools
+
+    kb = tmp_path / "kb"
+    direct = KnowledgeWriteTools(str(kb), mode="plan")
+    assert direct.specs() == []
+    assert "read-only plan mode" in direct.execute(
+        "remember", {"title": "t", "note": "must not persist"})
+    assert not kb.exists()
+
+    tools = build_tools(
+        tmp_path, mode="plan", settings=SimpleNamespace(knowledge_dir=str(kb)))
+    assert "remember" not in {spec["function"]["name"] for spec in tools.specs()}
 
 
 # ---- cancel mid-turn skips the remaining tool calls ---------------------------------------------
@@ -180,6 +197,6 @@ def test_complete_text_stream_bails_on_a_keepalive_stall(monkeypatch):
 def test_shell_default_cwd_is_honored(tmp_path):
     sub = tmp_path / "repo"
     sub.mkdir()
-    sh = ShellTools([tmp_path], mode="auto", default_cwd=sub)
+    sh = ShellTools([tmp_path], mode="auto", approver=ALLOW, default_cwd=sub)
     out = sh.execute("run_command", {"command": [sys.executable, "-c", "import os; print(os.getcwd())"]})
     assert str(sub) in out

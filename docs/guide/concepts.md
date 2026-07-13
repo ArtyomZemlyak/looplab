@@ -256,9 +256,25 @@ but that retry still carries its durable raw instruction, clean display, and ori
 Reset and delete coordinate with the run sequencer and refuse active command, execution, finalization,
 or run-generation activity claims. Run-scoped LLM/report/chat work holds such an activity lease, so a
 reset cannot redirect an old callback into the new event log. Terminal `.commands` records survive an
-in-place reset, preserving accepted same-key idempotency across generations. A fresh request created
-for generation A but delivered for the first time after reset to B still lacks a client/server
-generation precondition; this is an explicit remaining P1 rather than an exact cross-generation claim.
+in-place reset, preserving accepted same-key idempotency across generations. State/SSE also exposes a
+stable generation token. Web, Assistant, and TUI bind a fresh command to the generation they observed
+before durable staging; the server checks it under the per-run sequencer before creating a record,
+appending an event, or starting work. A valid delayed A request first arriving in B receives
+`409 run_generation_changed` with zero effect, while a same-key A recovery still observes its old
+record and never reapplies it.
+
+Assistant tool approval is a separate server-owned safety boundary. A central action registry
+classifies each concrete tool call as `READ`, `REVERSIBLE`, `CONSEQUENTIAL`, `HIGH`, or `UNKNOWN`;
+missing/unregistered identities fail closed as `UNKNOWN`. Plan denies all mutation and does not expose
+the shared-knowledge `remember` tool. Default asks for every mutation, Accept edits applies only
+reversible edits inline, and Auto applies reversible/consequential actions inline but still asks for
+arbitrary shell/test execution, destructive actions, external MCP, and unknown capabilities. A
+remembered approval is never a broad tool-kind bypass: it is bound to the exact session, mode,
+current turn/cancel epoch, action identity, and canonical scope digest for at most ten minutes.
+`HIGH` and `UNKNOWN` actions cannot be remembered. Cancel, turn release, and session deletion
+invalidate the matching grants. The permission card displays the server-derived risk, scope,
+consequence, mode, expiry, and exact grant duration; legacy/incomplete metadata remains approvable
+once or rejectable but cannot expose persistent approval.
 
 The older `POST .../control` and `POST .../resume` routes remain compatibility surfaces. Legacy
 mutation events cannot overtake an active/retryable command or incomplete finalize; the mutation-free,

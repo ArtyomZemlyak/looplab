@@ -18,7 +18,7 @@ from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, write_jsonl_atomic
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import _engine_alive, _spawn_engine
-from looplab.serve.protocol import GENESIS_CHAT_SEQ_BASE
+from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.run_commands import normalize_control, task_file_for
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
@@ -114,7 +114,8 @@ def build_router(srv) -> APIRouter:
         if not isinstance(body, dict):
             raise HTTPException(400, "command body must be a JSON object")
         return srv.commands.submit(
-            rd, request.headers.get("Idempotency-Key", ""), body.get("type"), body.get("data"))
+            rd, request.headers.get("Idempotency-Key", ""), body.get("type"), body.get("data"),
+            expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD))
 
     @router.get("/api/runs/{run_id}/commands/{command_id}")
     def get_command(run_id: str, command_id: str, response: Response):

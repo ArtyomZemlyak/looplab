@@ -4,9 +4,11 @@ import assert from 'node:assert/strict'
 import {
   CONTROL, clearAssistantRunTransport, clearRunCommandLock, clearRunTransport, commandCanRetry, commandFailureRecord, commandFeedback,
   commandEventForAction, commandRecordMatchesAction, createIdempotencyKey, isTransientCommandReadError,
-  getRunCommand, loadAssistantRunTransport,
+  getRunCommand, loadAssistantRunTransport, observeRunGeneration,
   loadRunCommandLock, loadRunTransport, retryRunCommand, runCommand,
-  saveAssistantRunTransport, saveRunCommandLock, saveRunTransport, submitRunCommand, subscribeRunCommandLock,
+  saveAssistantRunTransport as saveAssistantRunTransportRaw,
+  saveRunCommandLock as saveRunCommandLockRaw, saveRunTransport as saveRunTransportRaw,
+  submitRunCommand, subscribeRunCommandLock,
 } from '../src/api.js'
 import {
   assistantDirectIntent, assistantRunChanged, assistantStorageFailureOwnsLock,
@@ -16,6 +18,14 @@ import {
 const CMD_A = `cmd_${'a'.repeat(32)}`
 const CMD_B = `cmd_${'b'.repeat(32)}`
 const CMD_C = `cmd_${'c'.repeat(32)}`
+const GEN_A = 'a'.repeat(64)
+const GEN_B = 'b'.repeat(64)
+const saveRunTransport = (runId, state, storage) =>
+  saveRunTransportRaw(runId, { expectedGeneration: GEN_A, ...state }, storage)
+const saveAssistantRunTransport = (runId, state, storage) =>
+  saveAssistantRunTransportRaw(runId, { expectedGeneration: GEN_A, ...state }, storage)
+const saveRunCommandLock = (runId, state, storage) =>
+  saveRunCommandLockRaw(runId, { expectedGeneration: GEN_A, ...state }, storage)
 
 const jsonResponse = (body, status = 200, headers = {}) => ({
   ok: status >= 200 && status < 300,
@@ -35,7 +45,9 @@ const withHttpGlobals = async (fetchImpl, fn) => {
   const previous = { location: globalThis.location, fetch: globalThis.fetch, sessionStorage: globalThis.sessionStorage }
   globalThis.location = { pathname: '/proxy/app/', hash: '' }
   globalThis.sessionStorage = { getItem: () => '' }
-  globalThis.fetch = fetchImpl
+  globalThis.fetch = (url, options = {}) => String(url).endsWith('/state') && options.method == null
+    ? Promise.resolve(jsonResponse({ state: {}, seq: 0, generation: GEN_A }))
+    : fetchImpl(url, options)
   try { return await fn() }
   finally {
     for (const [name, value] of Object.entries(previous)) {
@@ -59,11 +71,60 @@ test('run command posts once with an idempotency key and polls by command id', a
 
   assert.equal(calls[0].url, '/proxy/app/api/runs/demo%20run/commands')
   assert.equal(calls[0].options.method, 'POST')
-  assert.deepEqual(JSON.parse(calls[0].options.body), { type: 'resume', data: {} })
+  assert.deepEqual(JSON.parse(calls[0].options.body), {
+    type: 'resume', data: {}, expected_generation: GEN_A,
+  })
   assert.match(calls[0].options.headers['Idempotency-Key'], /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
   assert.equal(calls[1].url, '/proxy/app/api/runs/demo%20run/commands/cmd-1')
   assert.equal(calls[1].options.headers['Idempotency-Key'], undefined)
   assert.equal(calls[1].options.cache, 'no-store')
+})
+
+test('a command binds to the displayed generation and never substitutes a newer server generation', async () => {
+  const calls = []
+  observeRunGeneration('stale-visible-run', GEN_A)
+  await withHttpGlobals(async (url, options = {}) => {
+    calls.push({ url, options })
+    return jsonResponse({ detail: {
+      code: 'run_generation_changed',
+      message: 'the run was reset',
+      remediation: 'refresh before acting',
+      expected_generation: GEN_A,
+      current_generation: GEN_B,
+    } }, 409)
+  }, async () => {
+    await assert.rejects(
+      runCommand('stale-visible-run', 'resume', {}, { submitRetries: 0 }),
+      error => error.status === 409 && error.code === 'run_generation_changed'
+        && error.remediation === 'refresh before acting',
+    )
+  })
+  assert.equal(calls.length, 1, 'the displayed token prevents a fresh state read from rebinding intent')
+  assert.equal(calls[0].options.method, 'POST')
+  assert.equal(JSON.parse(calls[0].options.body).expected_generation, GEN_A)
+})
+
+test('durable command envelopes require and preserve an exact lowercase run generation', () => {
+  const values = new Map()
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+    removeItem: key => values.delete(key),
+  }
+  const state = { action: 'resume', idempotencyKey: 'generation-envelope',
+    record: { status: 'submitting' } }
+  assert.equal(saveRunTransportRaw('demo', state, storage), false)
+  assert.equal(saveRunTransportRaw('demo', { ...state, expectedGeneration: GEN_A.toUpperCase() }, storage), false)
+  assert.equal(saveRunTransportRaw('demo', {
+    ...state, expectedGeneration: { toString: () => GEN_A },
+  }, storage), false)
+  assert.equal(saveRunTransportRaw('demo', { ...state, expectedGeneration: GEN_A }, storage), true)
+  assert.equal(loadRunTransport('demo', storage).expectedGeneration, GEN_A)
+  assert.equal(loadRunCommandLock('demo', storage).expectedGeneration, GEN_A)
+  assert.equal(saveRunCommandLockRaw('demo', {
+    source: 'dock', action: 'resume', idempotencyKey: 'generation-envelope',
+    expectedGeneration: GEN_B, record: { status: 'submitting' },
+  }, storage), false, 'a lock cannot be rebound to another generation')
 })
 
 test('command status errors distinguish transient reads from authoritative 4xx responses', () => {
@@ -174,7 +235,9 @@ test('submit deadline covers a stalled response body and preserves ambiguous rec
   const idempotencyKey = '11111111-aaaa-4bbb-8ccc-222222222222'
   await withHttpGlobals(async () => stalledJsonResponse(202), async () => {
     await assert.rejects(
-      submitRunCommand('demo', 'resume', {}, { idempotencyKey, requestTimeoutMs: 5 }),
+      submitRunCommand('demo', 'resume', {}, {
+        idempotencyKey, expectedGeneration: GEN_A, requestTimeoutMs: 5,
+      }),
       error => error.code === 'COMMAND_REQUEST_TIMEOUT'
         && error.submissionMayHaveSucceeded === true,
     )
@@ -449,7 +512,8 @@ test('transport recovery persists the same key before command id and restores it
     action: 'finalize', idempotencyKey, record: { status: 'submitting' }, statusUnavailable: true,
   }, storage), true)
   assert.deepEqual(loadRunTransport('demo run', storage), {
-    runId: 'demo run', action: 'finalize', idempotencyKey, commandId: '',
+    runId: 'demo run', action: 'finalize', expectedGeneration: GEN_A,
+    idempotencyKey, commandId: '',
     record: { status: 'submitting' }, statusUnavailable: true, observationKind: null,
     retrying: false, checking: false, lastError: '', updatedAt: loadRunTransport('demo run', storage).updatedAt,
   })
@@ -482,7 +546,8 @@ test('assistant direct recovery stores the key before POST, a safe numeric arg, 
   assert.equal('data' in saved, false)
   assert.equal('token' in saved, false)
   assert.deepEqual(loadRunCommandLock('demo', storage), {
-    runId: 'demo', source: 'assistant', action: 'approve', idempotencyKey,
+    runId: 'demo', source: 'assistant', action: 'approve', expectedGeneration: GEN_A,
+    idempotencyKey,
     commandId: '', status: 'submitting', statusUnavailable: false,
     updatedAt: loadRunCommandLock('demo', storage).updatedAt,
   })
@@ -507,17 +572,39 @@ test('lost-response remount recovers one logical assistant intent with the store
   const response = new Promise(resolve => { release = resolve })
   const execute = (...args) => { calls.push(args); return response }
   const key = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
-  const first = submitAssistantDirect('demo', 'approve', 7, key, { execute })
-  const remount = submitAssistantDirect('demo', 'approve', 7, key, { execute })
+  const first = submitAssistantDirect('demo', 'approve', 7, key, {
+    expectedGeneration: GEN_A, execute,
+  })
+  const remount = submitAssistantDirect('demo', 'approve', 7, key, {
+    expectedGeneration: GEN_A, execute,
+  })
   assert.equal(calls.length, 0, 'submission starts in a microtask so simultaneous remounts can join it')
   await Promise.resolve()
   assert.equal(calls.length, 1)
   assert.deepEqual(calls[0].slice(0, 3), ['demo', 'approval_granted', { node_id: 7 }])
   assert.equal(calls[0][3].idempotencyKey, key)
+  assert.equal(calls[0][3].expectedGeneration, GEN_A)
   assert.equal(calls[0][3].waitMs, 0)
   assert.equal(calls[0][3].submitRetries, 0)
   release({ id: 'cmd-same', status: 'accepted' })
   assert.deepEqual(await first, await remount)
+})
+
+test('Assistant id-less recovery keeps its persisted generation after a newer one is observed', async () => {
+  const calls = []
+  observeRunGeneration('assistant-recovery-generation', GEN_B)
+  const result = await submitAssistantDirect(
+    'assistant-recovery-generation', 'resume', null, 'persisted-generation-key', {
+      expectedGeneration: GEN_A,
+      execute: async (...args) => {
+        calls.push(args)
+        return { id: CMD_A, status: 'accepted', event_type: 'resume' }
+      },
+    },
+  )
+  assert.equal(result.id, CMD_A)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0][3].expectedGeneration, GEN_A)
 })
 
 test('terminal assistant result cleanup removes both recovery record and shared pending lock', () => {
@@ -646,8 +733,10 @@ test('malformed, unknown, extra-field, cross-wired, and mismatched stored envelo
   const envelopeKey = [...values.keys()].find(key => key.startsWith('ll.assistant-command-transport.'))
   const base = {
     runId: 'demo', action: 'resume', arg: null, idempotencyKey: 'seed-key', commandId: CMD_A,
+    expectedGeneration: GEN_A,
     record: { id: CMD_A, status: 'accepted', event_type: 'resume' },
-    statusUnavailable: false, observationKind: null, retrying: false, checking: false, updatedAt: 1,
+    statusUnavailable: false, observationKind: null, retrying: false, checking: false,
+    updatedAt: 1, committed: true,
   }
   const cases = [
     '{not-json',
@@ -680,8 +769,10 @@ test('Dock uses the same fail-closed envelope contract', () => {
   const key = [...values.keys()].find(value => value.startsWith('ll.command-transport.'))
   values.set(key, JSON.stringify({
     runId: 'demo', action: 'stop', idempotencyKey: 'dock-envelope', commandId: CMD_A,
+    expectedGeneration: GEN_A,
     record: { id: CMD_A, status: 'accepted', event_type: 'resume' },
-    statusUnavailable: false, observationKind: null, retrying: false, checking: false, updatedAt: 1,
+    statusUnavailable: false, observationKind: null, retrying: false, checking: false,
+    updatedAt: 1, committed: true,
   }))
   const recovered = loadRunTransport('demo', storage)
   assert.equal(recovered.protocolInvalid, true)
@@ -820,12 +911,14 @@ test('deferred command A cleans up without presenting its result after navigatio
 
 test('only an exact id-less own lock is treated as an unsent Assistant storage quarantine', () => {
   const failure = { runId: 'demo', name: 'resume', idempotencyKey: 'storage-key',
+    expectedGeneration: GEN_A,
     record: { status: 'rejected', error: { code: 'command_storage_unavailable', retryable: false } } }
   const lock = { runId: 'demo', source: 'assistant', action: 'resume',
-    idempotencyKey: 'storage-key', commandId: '' }
+    expectedGeneration: GEN_A, idempotencyKey: 'storage-key', commandId: '' }
   assert.equal(assistantStorageFailureOwnsLock(failure, lock), true)
   assert.equal(assistantStorageFailureOwnsLock(failure, { ...lock, source: 'dock' }), false)
   assert.equal(assistantStorageFailureOwnsLock(failure, { ...lock, idempotencyKey: 'other-key' }), false)
+  assert.equal(assistantStorageFailureOwnsLock(failure, { ...lock, expectedGeneration: GEN_B }), false)
   assert.equal(assistantStorageFailureOwnsLock(failure, { ...lock, commandId: CMD_A }), false,
     'a durable accepted command must never be ignored')
   assert.equal(assistantStorageFailureOwnsLock({ ...failure, record: { status: 'failed', error: {

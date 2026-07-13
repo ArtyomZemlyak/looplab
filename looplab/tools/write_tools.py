@@ -21,7 +21,8 @@ from typing import Callable, Optional
 from looplab.core import _pathsafe
 from looplab.tools._base import fn_spec
 from looplab.tools.patch import SurfacePolicy, apply_patch as _apply_patch, gate as _gate
-from looplab.tools.perm_modes import DEFAULT_PROTECT, decide, default_approver
+from looplab.tools.perm_modes import (
+    DEFAULT_PROTECT, approval_allows, decide_action, default_approver)
 
 _MAX_PREVIEW = 4000
 
@@ -29,7 +30,8 @@ _MAX_PREVIEW = 4000
 class FileBackups:
     """Pre-mutation snapshots so a file edit can be reverted (undo). Each mutated path gets a stack of
     `.bak` snapshots under `<dir>/<hash(path)>/`; `revert` restores (or deletes, if the file was newly
-    created) the most recent one and pops it. Best-effort — a backup failure never blocks the edit."""
+    created) the most recent one and pops it. A reversible Assistant edit must abort if this receipt
+    cannot be created, rather than claim recoverability and mutate anyway."""
 
     def __init__(self, directory):
         self.dir = Path(directory)
@@ -37,7 +39,7 @@ class FileBackups:
     def _key(self, path) -> Path:
         return self.dir / hashlib.sha1(str(Path(path).resolve()).encode()).hexdigest()[:16]
 
-    def save(self, path) -> None:
+    def save(self, path) -> bool:
         try:
             p = Path(path)
             d = self._key(p)
@@ -48,8 +50,9 @@ class FileBackups:
             n = (max(existing) + 1) if existing else 0
             (d / f"{n}.bak").write_bytes(p.read_bytes() if p.is_file() else b"")
             (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": p.is_file()}))
+            return True
         except OSError:
-            pass
+            return False
 
     def revert(self, path) -> bool:
         p = Path(path)
@@ -171,7 +174,7 @@ class WriteTools:
 
     def _authorize(self, tool_kind: str, action: dict) -> Optional[str]:
         """None => proceed; a string => the refusal/declined message to return to the model."""
-        d = decide(self.mode, tool_kind)
+        d = decide_action(self.mode, action)
         if d == "deny":
             return (f"(plan mode is read-only — I can't {action.get('verb', 'do that')}. "
                     "Switch the assistant to default/acceptEdits/auto to apply changes.)")
@@ -179,8 +182,8 @@ class WriteTools:
             # The approver's verdict vocabulary ("allow_once"/"allow_always"/"deny") is the permission-
             # decision wire protocol named in looplab/serve/protocol.py (PERM_*). It is string-matched
             # here rather than imported because tools must never import serve (layering).
-            verdict = str(self.approver(action) or "deny")
-            if not verdict.startswith("allow"):
+            verdict = self.approver(action) or "deny"
+            if not approval_allows(verdict):
                 return f"(declined by the user: {action.get('label', 'change')})"
         return None
 
@@ -194,12 +197,18 @@ class WriteTools:
         old = p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
         preview = _diff(rel, old, content)
         action = {"tool": "write_file", "tool_kind": "write", "path": rel, "verb": f"write {rel}",
-                  "label": f"{'overwrite' if old else 'create'} {rel}", "preview": preview, "abs_path": str(p)}
+                  "label": f"{'overwrite' if old else 'create'} {rel}", "preview": preview,
+                  "abs_path": str(p), "recovery_available": self.backups is not None, "scope": {
+                      "path": rel, "existed": p.exists(),
+                      "preimage_digest": hashlib.sha256(old.encode("utf-8")).hexdigest(),
+                      "content_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                      "recovery_available": self.backups is not None,
+                  }}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
-        if self.backups:
-            self.backups.save(p)
+        if self.backups and not self.backups.save(p):
+            return "(refused: could not create a recovery snapshot; no file change was applied)"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
         self.applied.append(action)
@@ -226,12 +235,20 @@ class WriteTools:
         new_text = text.replace(old_str, new_str, 1)
         preview = _diff(rel, text, new_text)
         action = {"tool": "edit_file", "tool_kind": "write", "path": rel, "verb": f"edit {rel}",
-                  "label": f"edit {rel}", "preview": preview, "abs_path": str(p)}
+                  "label": f"edit {rel}", "preview": preview, "abs_path": str(p),
+                  "recovery_available": self.backups is not None, "scope": {
+                      "path": rel,
+                      "preimage_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                      "old_digest": hashlib.sha256(old_str.encode("utf-8")).hexdigest(),
+                      "new_digest": hashlib.sha256(new_str.encode("utf-8")).hexdigest(),
+                      "result_digest": hashlib.sha256(new_text.encode("utf-8")).hexdigest(),
+                      "recovery_available": self.backups is not None,
+                  }}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
-        if self.backups:
-            self.backups.save(p)
+        if self.backups and not self.backups.save(p):
+            return "(refused: could not create a recovery snapshot; no file change was applied)"
         p.write_text(new_text, encoding="utf-8")
         self.applied.append(action)
         return f"(edited {rel})"
@@ -251,15 +268,30 @@ class WriteTools:
         secret = [rp for rp in g["paths"] if _pathsafe.looks_secret(Path(rp))]
         if secret:
             return f"(refused: patch touches secret/credential paths: {', '.join(secret)})"
+        preimages = []
+        for rp in sorted(g["paths"]):
+            target = self.repo_root / rp
+            payload = target.read_bytes() if target.is_file() else b""
+            preimages.append({"path": rp, "existed": target.is_file(),
+                              "digest": hashlib.sha256(payload).hexdigest()})
+        preimage_digest = hashlib.sha256(json.dumps(
+            preimages, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
         action = {"tool": "apply_patch", "tool_kind": "write",
                   "label": f"apply patch ({len(g['paths'])} file(s))", "verb": "apply this patch",
-                  "preview": diff[:_MAX_PREVIEW], "paths": g["paths"]}
+                  "preview": diff[:_MAX_PREVIEW], "paths": g["paths"],
+                  "recovery_available": self.backups is not None, "scope": {
+                      "paths": g["paths"],
+                      "preimage_digest": preimage_digest,
+                      "diff_digest": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+                      "recovery_available": self.backups is not None,
+                  }}
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
         if self.backups:
             for rp in g["paths"]:
-                self.backups.save(self.repo_root / rp)
+                if not self.backups.save(self.repo_root / rp):
+                    return "(refused: could not create every recovery snapshot; no patch was applied)"
         res = _apply_patch(diff, str(self.repo_root), allow, self.protect)
         if not res.get("applied"):
             return f"(patch failed: {res.get('error', 'unknown')})"

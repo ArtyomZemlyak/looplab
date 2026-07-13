@@ -36,7 +36,12 @@ from urllib.parse import quote
 # pure helpers + server autostart in serve/tui_format.py, but this module remains the public face —
 # tests (tests/test_tui.py, tests/test_stop_finalize_resume.py) and external callers import every
 # one of these names from `looplab.serve.tui`, so each moved name is re-exported verbatim.
-from looplab.serve.tui_api import Api, ApiError, command_error_transient  # noqa: F401
+from looplab.serve.tui_api import (  # noqa: F401
+    Api,
+    ApiError,
+    command_error_transient,
+    normalize_run_generation,
+)
 from looplab.serve.tui_format import (  # noqa: F401 — re-exported for the import-compat note above
     _free_port, _stop_child, dashboard_sig, ensure_server, fmt_ago, fmt_metric, history_for_boss,
     is_critical, parse_pick, phase_meta, run_sig, slug, sort_runs, spec_lines, spec_ready)
@@ -59,7 +64,8 @@ def _command_error(record: dict) -> str:
     return str(err or "command failed")
 
 
-def _staged_command(event_type: str, data: dict, idempotency_key: str) -> dict:
+def _staged_command(event_type: str, data: dict, idempotency_key: str,
+                    expected_generation: str) -> dict:
     """Build the durable pre-POST envelope used to recover an unconfirmed submission.
 
     The command id alone is insufficient after an early 404: the original POST may still be queued
@@ -68,6 +74,7 @@ def _staged_command(event_type: str, data: dict, idempotency_key: str) -> dict:
     additive budget/fork intent.
     """
     key = str(idempotency_key)
+    generation = normalize_run_generation(expected_generation)
     # Detach nested dictionaries/lists from the visible boss action. Otherwise a later in-memory
     # mutation could rewrite both copies and make the recovery equality check bless a different POST.
     payload = copy.deepcopy(data or {})
@@ -76,18 +83,23 @@ def _staged_command(event_type: str, data: dict, idempotency_key: str) -> dict:
         "status": "accepted",
         "event_type": str(event_type),
         "idempotency_key": key,
+        "expected_generation": generation,
         "intent": {"type": str(event_type), "data": payload},
         "submit_unconfirmed": True,
     }
 
 
-def _staged_replay(turn: dict) -> Optional[tuple[str, str, dict]]:
+def _staged_replay(turn: dict) -> Optional[tuple[str, str, dict, str]]:
     """Validate and return the exact staged submission, or refuse unsafe/corrupt recovery data."""
     command = turn.get("command") if isinstance(turn, dict) else None
     action = turn.get("action") if isinstance(turn, dict) else None
     if not isinstance(command, dict) or command.get("submit_unconfirmed") is not True:
         return None
     key = command.get("idempotency_key")
+    try:
+        generation = normalize_run_generation(command.get("expected_generation"))
+    except ApiError:
+        return None
     intent = command.get("intent")
     if not isinstance(key, str) or not key or len(key) > 512 or not isinstance(intent, dict):
         return None
@@ -102,7 +114,7 @@ def _staged_replay(turn: dict) -> Optional[tuple[str, str, dict]]:
     if (not isinstance(action, dict) or action.get("type") != event_type
             or (action.get("data") or {}) != data):
         return None
-    return key, event_type, dict(data)
+    return key, event_type, dict(data), generation
 
 
 def _observed_command(record: dict, staged: Optional[dict] = None) -> dict:
@@ -567,9 +579,11 @@ class Tui:
                         self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]")
                 else:
                     key = str(uuid.uuid4())
+                    expected_generation = self.api.run_generation(run_id)
                     turn["status"] = "pending"
                     turn["command"] = _staged_command(
-                        str(action.get("type") or ""), action.get("data") or {}, key)
+                        str(action.get("type") or ""), action.get("data") or {}, key,
+                        expected_generation)
                     history.append(turn)
                     staged_index = len(history) - 1
                     if self._persist(run_id, turn) is False:
@@ -579,7 +593,7 @@ class Tui:
                         return
                     result = self.api.run_command(
                         run_id, str(action.get("type") or ""), action.get("data") or {},
-                        idempotency_key=key)
+                        idempotency_key=key, expected_generation=expected_generation)
                     turn["command"] = _observed_command(result, turn.get("command"))
                     status = result.get("status")
                     if status in _COMMAND_DONE:
@@ -634,14 +648,20 @@ class Tui:
             self.console.print("[yellow]another run command is still pending.[/yellow]")
             return {"status": "executing", "error": "another command is pending", "event_type": etype}
         key = None
+        expected_generation = None
         staged_turn = None
         staged_index = None
+        try:
+            expected_generation = self.api.run_generation(run_id)
+        except ApiError as e:
+            self.console.print(f"[red]{etype} failed: {e}[/red]")
+            return {"status": "failed", "error": str(e), "event_type": etype}
         if history is not None:
             key = str(uuid.uuid4())
             staged_turn = {
                 "role": "action", "action": {"type": etype, "data": data, "label": label or etype},
                 "status": "pending",
-                "command": _staged_command(etype, data, key),
+                "command": _staged_command(etype, data, key, expected_generation),
             }
             history.append(staged_turn)
             staged_index = len(history) - 1
@@ -651,7 +671,9 @@ class Tui:
                 self.console.print(f"[red]{etype} failed: {staged_turn['error']}[/red]")
                 return {"status": "failed", "error": staged_turn["error"], "event_type": etype}
         try:
-            result = self.api.run_command(run_id, etype, data, idempotency_key=key)
+            result = self.api.run_command(
+                run_id, etype, data, idempotency_key=key,
+                expected_generation=expected_generation)
             status = result.get("status")
             if staged_turn is not None:
                 staged_turn["command"] = _observed_command(result, staged_turn.get("command"))
@@ -720,12 +742,13 @@ class Tui:
                 # transient outage: keeping it pending would block every later control forever.
                 replay = _staged_replay(turn) if exc.status == 404 else None
                 if replay is not None:
-                    key, event_type, data = replay
+                    key, event_type, data, expected_generation = replay
                     try:
                         # GET may race a still-queued first POST. Re-submit the exact durable key and
                         # payload; server idempotency serializes both arrivals into one command/event.
                         record = self.api.run_command(
-                            run_id, event_type, data, wait_s=2.0, idempotency_key=key)
+                            run_id, event_type, data, wait_s=2.0, idempotency_key=key,
+                            expected_generation=expected_generation)
                     except ApiError as retry_exc:
                         if command_error_transient(retry_exc) or retry_exc.status in (401, 403):
                             unresolved = True

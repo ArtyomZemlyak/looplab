@@ -124,6 +124,37 @@ assert set(CONTROL_DATA_FIELDS) == set(CONTROL_SPECS), "every control event need
 TERMINAL_STATUSES = frozenset({"succeeded", "noop", "failed", "rejected", "timed_out"})
 _RETRY_GUARDED_EVENTS = frozenset(CONTROL_EVENTS)
 _COMMAND_ID_RE = re.compile(r"^cmd_[0-9a-f]{32}$")
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+def run_generation_token(events) -> str:
+    """Return the stable lowercase token for one non-empty event-log generation.
+
+    An in-place reset archives the entire log and a replacement engine writes a new first event.
+    Basing the token on that durable event keeps it stable as the same run grows, while making the
+    old and replacement logs distinct without a mutable sidecar that could drift from events.jsonl.
+    Empty/startup logs deliberately have no token: accepting a mutation before there is durable
+    generation identity would re-open the exact reset race this precondition closes.
+    """
+    if not events:
+        return ""
+    first = events[0]
+    raw = json.dumps({
+        "seq": first.seq, "ts": first.ts, "type": first.type,
+        "run_id": (first.data or {}).get("run_id"),
+    }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _normalize_expected_generation(value: object) -> str:
+    """Normalize a wire generation token without coercing or trimming ambiguous input."""
+    if not isinstance(value, str) or _RUN_GENERATION_RE.fullmatch(value) is None:
+        raise HTTPException(400, {
+            "code": "invalid_run_generation",
+            "message": "expected_generation must be an exact 64-character hexadecimal string.",
+            "remediation": "Refresh GET /state and submit its generation with this new command.",
+        })
+    return value.lower()
 
 
 def _process_alive(pid: Optional[int]) -> Optional[bool]:
@@ -669,15 +700,7 @@ class RunCommandService:
 
     def run_generation(self, rd: Path) -> str:
         """Stable identity of the event-log generation currently occupying a run id."""
-        events = self._events(rd)
-        if not events:
-            return ""
-        first = events[0]
-        raw = json.dumps({
-            "seq": first.seq, "ts": first.ts, "type": first.type,
-            "run_id": (first.data or {}).get("run_id"),
-        }, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
-        return hashlib.sha256(raw).hexdigest()
+        return run_generation_token(self._events(rd))
 
     @contextmanager
     def run_activity(self, rd: Path, kind: str, *, generation: str):
@@ -1580,6 +1603,42 @@ class RunCommandService:
             raise HTTPException(409, "Idempotency-Key was already used with a different command payload")
         return record
 
+    def _record_generation_match(self, rd: Path, record: dict) -> tuple[Optional[bool], str]:
+        """Return True/False for a comparable record token, None for unbound legacy evidence."""
+        stored = record.get("run_generation")
+        if not isinstance(stored, str) or _RUN_GENERATION_RE.fullmatch(stored) is None:
+            return None, self.run_generation(rd)
+        current = self.run_generation(rd)
+        return stored.lower() == current, current
+
+    @staticmethod
+    def _generation_changed_error(record: dict, current: str) -> dict:
+        error = _error(
+            "run_generation_changed",
+            "The command belongs to an event-log generation that no longer occupies this run id.",
+            "Observe this record only; refresh the run and form a new command for its current generation.",
+            retryable=False,
+        )
+        error["expected_generation"] = record.get("run_generation")
+        error["current_generation"] = current or None
+        return error
+
+    @staticmethod
+    def _generation_unavailable_error(current: str) -> dict:
+        error = _error(
+            "run_generation_unavailable",
+            "The legacy command record has no trustworthy event-log generation binding.",
+            "Observe this record only; refresh the run and form a new generation-bound command.",
+            retryable=False,
+        )
+        error["current_generation"] = current or None
+        return error
+
+    def _record_generation_error(self, record: dict, match: Optional[bool], current: str) -> dict:
+        if match is False:
+            return self._generation_changed_error(record, current)
+        return self._generation_unavailable_error(current)
+
     def _terminal(self, path: Path, record: dict, status: str, *, error: Optional[dict] = None) -> dict:
         record = dict(record)
         record["status"] = status
@@ -1725,7 +1784,8 @@ class RunCommandService:
                 "retry after engine_running becomes false", retryable=True)
         return "append", None
 
-    def submit(self, rd: Path, idempotency_key: str, event_type: str, data) -> dict:
+    def submit(self, rd: Path, idempotency_key: str, event_type: str, data,
+               *, expected_generation: object = None) -> dict:
         key = str(idempotency_key or "")
         if not key or len(key) > 512:
             raise HTTPException(400, "Idempotency-Key is required and must be at most 512 characters")
@@ -1735,6 +1795,10 @@ class RunCommandService:
         if not isinstance(raw_data, dict):
             raise HTTPException(400, "command data must be a JSON object")
         _raw, payload_digest = self._payload(event_type, raw_data)
+        # The precondition itself is a strict wire contract even for an idempotent replay. A valid
+        # stale token may resolve an existing same-key record below, but missing/malformed input must
+        # never be silently accepted just because a record happens to exist.
+        expected = _normalize_expected_generation(expected_generation)
         key_digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
         command_id = "cmd_" + key_digest[:32]
         path = self._path(rd, command_id)
@@ -1745,8 +1809,45 @@ class RunCommandService:
             existing = self._read_existing(path)
             if existing is not None:
                 record = self._check_duplicate(existing, key_digest, payload_digest)
-                record = self._reconcile_observation(rd, path, record)
+                generation_match, current_generation = self._record_generation_match(rd, record)
+                if generation_match is not True:
+                    if record.get("status") not in TERMINAL_STATUSES:
+                        # An externally replaced log or crash-recovery edge can leave an old
+                        # nonterminal record even though normal reset guards exclude it. Make it
+                        # observable but inert; GET/same-key POST must never wake a worker in B.
+                        record = self._terminal(
+                            path, record, "failed",
+                            error=self._record_generation_error(
+                                record, generation_match, current_generation))
+                    # A terminal A record remains byte-for-byte semantic history. Do not reconcile
+                    # its intent/postcondition against B and rewrite a successful lost-response
+                    # replay as command_intent_missing.
+                else:
+                    record = self._reconcile_observation(rd, path, record)
             else:
+                # Idempotency lookup intentionally wins over this precondition: after an in-place
+                # reset, replaying a lost response with the SAME key/payload must resolve the old
+                # durable record, never reject it or apply it to the replacement generation. Only a
+                # genuinely brand-new record is bound to the generation observed by its caller.
+                current_generation = self.run_generation(rd)
+                if not current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_unavailable",
+                        "message": "The run has no durable generation identity yet.",
+                        "remediation": (
+                            "Wait for run_started, refresh GET /state, and submit a new command with "
+                            "the returned generation."),
+                    })
+                if expected != current_generation:
+                    raise HTTPException(409, {
+                        "code": "run_generation_changed",
+                        "expected_generation": expected,
+                        "current_generation": current_generation,
+                        "message": "The run was reset or replaced after this command was formed.",
+                        "remediation": (
+                            "Refresh the run, review its current state, and form a new command with "
+                            "a new idempotency key and current generation."),
+                    })
                 normalized_candidate = None
                 semantic_candidate = None
                 normalization_error = None
@@ -1825,6 +1926,7 @@ class RunCommandService:
                         "data": {},
                         "idempotency_key_digest": key_digest,
                         "payload_digest": payload_digest,
+                        "run_generation": current_generation,
                         "created_at": now,
                         "updated_at": now,
                         "deadline_at": now + self.command_timeout,
@@ -1896,6 +1998,14 @@ class RunCommandService:
             record = self._read_existing(path)
             if record is None:
                 raise HTTPException(404, "no such command")
+            generation_match, current_generation = self._record_generation_match(rd, record)
+            if generation_match is not True:
+                detail = self._record_generation_error(record, generation_match, current_generation)
+                detail.update({
+                    "existing_command_id": command_id,
+                    "current_status": record.get("status"),
+                })
+                raise HTTPException(409, detail)
             record = self._reconcile_observation(rd, path, record)
             if record.get("status") == "succeeded":
                 return self._public(record)
@@ -1937,7 +2047,16 @@ class RunCommandService:
             record = self._read_existing(path)
             if record is None:
                 raise HTTPException(404, "no such command")
-            record = self._reconcile_observation(rd, path, record)
+            generation_match, current_generation = self._record_generation_match(rd, record)
+            if generation_match is not True:
+                if record.get("status") not in TERMINAL_STATUSES:
+                    record = self._terminal(
+                        path, record, "failed",
+                        error=self._record_generation_error(
+                            record, generation_match, current_generation))
+                # Terminal cross-generation/legacy records are observation-only history.
+            else:
+                record = self._reconcile_observation(rd, path, record)
         if record.get("status") not in TERMINAL_STATUSES:
             self._start_worker(rd, path, record)
             record = self._load(path) or record

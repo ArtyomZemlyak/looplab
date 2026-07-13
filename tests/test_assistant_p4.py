@@ -74,9 +74,11 @@ def test_gated_mcp_enforces_permission_policy():
     assert "declined" in denied.execute("mcp__fs__echo", {"x": "hi"})
     allowed = GatedMcpTools(inner, mode="default", approver=lambda a: "allow_once")
     assert allowed.execute("mcp__fs__echo", {"x": "hi"}) == "echoed:hi"
-    # auto mode: inline (no approver call needed)
-    auto = GatedMcpTools(inner, mode="auto", approver=lambda a: "deny")   # approver would deny, but auto is inline
-    assert auto.execute("mcp__fs__echo", {"x": "hi"}) == "echoed:hi"
+    # MCP is untyped/UNKNOWN, so even Auto requires an explicit one-shot approval.
+    auto_denied = GatedMcpTools(inner, mode="auto", approver=lambda a: "deny")
+    assert "declined" in auto_denied.execute("mcp__fs__echo", {"x": "hi"})
+    auto_allowed = GatedMcpTools(inner, mode="auto", approver=lambda a: "allow_once")
+    assert auto_allowed.execute("mcp__fs__echo", {"x": "hi"}) == "echoed:hi"
     # specs pass through unchanged
     assert [s["function"]["name"] for s in denied.specs()] == ["mcp__fs__echo"]
 
