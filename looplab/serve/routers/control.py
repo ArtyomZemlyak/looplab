@@ -470,6 +470,11 @@ def build_router(srv) -> APIRouter:
         if removed:
             # Atomic temp+rename so a crash mid-write can't truncate spans.jsonl to a partial trace.
             write_jsonl_atomic(sp, kept)
+            for suffix in (".index.sqlite", ".index.sqlite-wal", ".index.sqlite-shm", ".idx"):
+                try:
+                    sp.with_name(sp.name + suffix).unlink()
+                except OSError:
+                    pass
         return {"ok": True, "removed": removed, "kept": len(kept)}
 
     @router.post("/api/start")

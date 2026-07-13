@@ -1,4 +1,4 @@
-﻿"""Observability (I14, ADR-17): full tracing that stays files-as-truth by default and bridges
+"""Observability (I14, ADR-17): full tracing that stays files-as-truth by default and bridges
 to real OpenTelemetry when the SDK is installed.
 
 Design (see 08-tracing-architecture.md):
