@@ -9,6 +9,9 @@ compares against must be registered too.
 from __future__ import annotations
 
 import ast
+import subprocess
+import sys
+import textwrap
 from pathlib import Path
 
 from looplab.events import types as event_types
@@ -121,3 +124,38 @@ def test_control_events_subset_of_registry():
     """The UI's allowed control-event vocabulary must be registered event types."""
     from looplab.serve.server import CONTROL_EVENTS
     assert CONTROL_EVENTS <= ALL_EVENT_TYPES
+
+
+def test_server_reexports_and_cli_stay_friendly_without_ui_extra():
+    """Exercise the no-FastAPI path even in dev/CI, where the dependency is installed. Importing pure
+    server models/constants must work, while actually launching the UI gets a friendly CLI error."""
+    script = textwrap.dedent(r"""
+        import builtins
+        from typer.testing import CliRunner
+
+        real_import = builtins.__import__
+        def blocked(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "fastapi" or name.startswith("fastapi."):
+                raise ModuleNotFoundError("No module named 'fastapi'", name="fastapi")
+            return real_import(name, globals, locals, fromlist, level)
+        builtins.__import__ = blocked
+
+        from looplab.events.types import ALL_EVENT_TYPES
+        from looplab.serve.server import CONTROL_EVENTS, _GenesisSpec, make_app
+        assert CONTROL_EVENTS <= ALL_EVENT_TYPES
+        assert _GenesisSpec(run_id="offline").run_id == "offline"
+        try:
+            make_app("missing-ui")
+        except ModuleNotFoundError as exc:
+            assert exc.name == "fastapi" and "looplab[ui]" in str(exc)
+        else:
+            raise AssertionError("make_app unexpectedly worked without FastAPI")
+
+        from looplab.cli import app
+        result = CliRunner().invoke(app, ["ui", "--no-build", "--run-root", "missing-ui"])
+        assert result.exit_code == 1, (result.exit_code, result.output, result.exception)
+        assert "UI extra not installed" in result.output and "looplab[ui]" in result.output
+    """)
+    result = subprocess.run([sys.executable, "-c", script], cwd=LOOPLAB.parent,
+                            text=True, capture_output=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr

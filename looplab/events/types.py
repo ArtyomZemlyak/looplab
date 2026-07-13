@@ -94,6 +94,10 @@ EV_NOVELTY_REJECTED = "novelty_rejected"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"
+# Durable completion of the post-run wrap-up for one accepted run_finished sequence. A process may
+# crash after run_finished but before budget/archive/case/reflection; resume retries until this marker
+# names the current finish seq. A reopened/new finish gets a new seq and therefore a fresh wrap-up.
+EV_FINALIZATION_FINISHED = "finalization_finished"
 EV_FORK_DONE = "fork_done"               # fulfillment gate for `fork` requests
 EV_INJECT_DONE = "inject_done"           # fulfillment gate for `inject_node` requests
 EV_RESEARCH_COMPLETED = "research_completed"   # memo sidecar + gate for `deep_research`

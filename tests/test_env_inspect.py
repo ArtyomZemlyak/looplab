@@ -41,7 +41,7 @@ def test_py_api_unresolvable_is_reported_not_raised():
 
 def test_read_installed_returns_module_source():
     out = _t().execute("read_installed", {"module": "json.decoder", "max_lines": 20})
-    assert "json/decoder.py" in out and "of " in out   # header with path + total line count
+    assert "json/decoder.py" in out.replace("\\", "/") and "of " in out  # portable path + line count
 
 
 def test_grep_installed_finds_a_symbol_in_package_source():

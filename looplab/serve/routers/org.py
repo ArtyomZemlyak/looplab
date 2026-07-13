@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Request
 
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import (
+    _engine_alive, _fresh_resume_launch_pending, _run_lifecycle_lock)
 from looplab.serve.projects import ProjectError
 
 
@@ -108,22 +109,27 @@ def build_router(srv) -> APIRouter:
         property of that environment, not of delete. The UI confirms the delete with the operator."""
         import shutil
         rd = _run_dir(run_id)
-        if _engine_alive(rd):
-            raise HTTPException(409, "run is live (engine running) — pause/stop it before deleting")
-        # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) — that
-        # would leave a ghost run the UI thinks is gone. Retry once: an S3-backed FUSE mount (geesefs)
-        # can transiently leave entries on the first rmtree pass. Only forget it if the dir is actually
-        # gone; otherwise surface the failure with the leftover that blocked it.
-        for _ in range(2):
-            shutil.rmtree(rd, ignore_errors=True)
-            if not rd.exists():
-                break
-        if rd.exists():
-            leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
-            raise HTTPException(500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
-                                     "may be open or the storage is read-only); retry once nothing holds it")
-        projects.forget(run_id)
-        srv.summary_cache.pop(run_id, None)
+        with _run_lifecycle_lock(rd):
+            # The OS engine lock starts in the child, leaving a real claim -> Popen -> child-lock gap.
+            # A fresh durable request/claim fences that gap, while an abandoned intent expires so a
+            # genuine zombie remains deletable.
+            if _engine_alive(rd) or _fresh_resume_launch_pending(rd):
+                raise HTTPException(
+                    409, "run is live or launching — pause/stop it before deleting")
+            # Don't report success on a partial delete (e.g. a Windows open handle on a node dir) —
+            # retry once for transient FUSE directory visibility, and forget metadata only after the
+            # directory is really gone.
+            for _ in range(2):
+                shutil.rmtree(rd, ignore_errors=True)
+                if not rd.exists():
+                    break
+            if rd.exists():
+                leftover = next((str(p.relative_to(rd)) for p in rd.rglob("*")), "(dir)")
+                raise HTTPException(
+                    500, f"run dir could not be fully removed (e.g. {leftover!r} — a file may be "
+                         "open or the storage is read-only); retry once nothing holds it")
+            projects.forget(run_id)
+            srv.summary_cache.pop(run_id, None)
         return {"ok": True}
 
     return router

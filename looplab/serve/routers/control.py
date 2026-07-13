@@ -14,11 +14,44 @@ from fastapi import APIRouter, HTTPException, Request
 from looplab.core.atomicio import best_effort_fsync
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, write_jsonl_atomic
-from looplab.events.types import EV_INJECT_NODE, EV_NODE_RESET, EV_RESUME_REQUESTED
+from looplab.events.replay import fold
+from looplab.events.types import (
+    EV_APPROVAL_GRANTED, EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_INJECT_NODE,
+    EV_NODE_ABORT, EV_NODE_RESET, EV_PROMOTE, EV_RESUME_REQUESTED,
+)
 from looplab.serve.appstate import _RESERVED_RUN_IDS
-from looplab.serve.engine_proc import _engine_alive, _spawn_engine
+from looplab.serve.engine_proc import (
+    _claim_and_spawn_resume, _engine_alive, _fresh_resume_launch_pending,
+    _resolve_task_file, _run_lifecycle_lock, _spawn_engine)
 from looplab.serve.protocol import CONTROL_EVENTS, GENESIS_CHAT_SEQ_BASE
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+
+
+# Node-scoped operator intents are compare-and-set operations. The generation is the version the
+# operator actually inspected; accepting an id-only delayed click after node_reset would apply it to
+# different code/results that merely reused the same node id (an ABA race).
+_LIFECYCLE_CONTROL_TARGETS = {
+    EV_NODE_ABORT: "node_id",
+    EV_NODE_RESET: "node_id",
+    EV_APPROVAL_GRANTED: "node_id",
+    EV_FORCE_CONFIRM: "node_id",
+    EV_FORCE_ABLATE: "node_id",
+    EV_FORK: "from_node_id",
+    EV_PROMOTE: "node_id",
+}
+_ABSENT = object()
+
+
+def _strict_nonnegative_int(raw, field: str) -> int:
+    if isinstance(raw, bool) or (isinstance(raw, float) and not raw.is_integer()):
+        raise HTTPException(400, f"{field} must be an integer")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError, OverflowError):
+        raise HTTPException(400, f"{field} must be an integer")
+    if value < 0:
+        raise HTTPException(400, f"{field} must be non-negative")
+    return value
 
 
 def _defaults_backend_llm(task_spec: Optional[dict], task_file: Optional[str],
@@ -80,26 +113,116 @@ def build_router(srv) -> APIRouter:
     async def control(run_id: str, request: Request):
         rd = _run_dir(run_id)
         body = await request.json()
+        if not isinstance(body, dict):
+            raise HTTPException(400, "control body must be an object")
         etype = body.get("type")
         if etype not in CONTROL_EVENTS:
             raise HTTPException(400, f"unknown control event: {etype!r}")
-        data = body.get("data") or {}
+        raw_data = body.get("data")
+        if raw_data is not None and not isinstance(raw_data, dict):
+            raise HTTPException(400, "control data must be an object")
+        data = dict(raw_data or {})
         # node_reset: re-run an existing node in place — validate the target + stage so a typo can't
         # append a no-op reset (the fold would silently ignore an unknown node_id).
         if etype == EV_NODE_RESET:
-            try:
-                nid = int(data.get("node_id"))
-            except (TypeError, ValueError):
-                raise HTTPException(400, "node_id must be an integer")
             # propose|implement are the lifecycle stages; anything else is an eval-PIPELINE stage name
             # to restart from (train / eval / data_prep / …) — those are per-node, so accept any sane
             # non-empty name rather than a fixed allow-list.
             stage = str(data.get("from_stage", "eval")).strip()
             if not stage or len(stage) > 64:
                 raise HTTPException(400, "from_stage must be a non-empty stage name")
-            if nid not in srv.state(rd).nodes:
+            data["from_stage"] = stage
+
+        target_key = _LIFECYCLE_CONTROL_TARGETS.get(etype)
+        if target_key is not None:
+            # Bind the decision to the exact lifecycle the UI/agent inspected. The generation must be
+            # carried by the producer, not filled from current state on receipt: filling it here would
+            # turn a delayed generation-0 click into a valid generation-1 action.
+            st = srv.state(rd)
+            raw_nid = data.get(target_key)
+            if etype == EV_APPROVAL_GRANTED and raw_nid is None:
+                best = st.best()
+                if best is None:
+                    raise HTTPException(400, "run has no evaluated node to approve")
+                nid = best.id
+            else:
+                nid = _strict_nonnegative_int(raw_nid, target_key)
+            node = st.nodes.get(nid)
+            if node is None:
                 raise HTTPException(404, f"no node #{nid} in this run")
-            data = {"node_id": nid, "from_stage": stage}
+            if node.tombstoned:
+                raise HTTPException(409, f"node #{nid} is tombstoned and cannot be controlled")
+            if nid in st.aborted_nodes and etype not in (EV_NODE_ABORT, EV_NODE_RESET):
+                raise HTTPException(409, f"node #{nid} is aborted; reset it before {etype}")
+            raw_generation = data.get("generation", _ABSENT)
+            if raw_generation is _ABSENT:
+                # Backward-compatible for generation-0 clients/logs. After a reset ambiguity is
+                # destructive, so fail closed and make the caller refresh the node snapshot.
+                if node.attempt != 0:
+                    raise HTTPException(
+                        409, f"stale {etype}: generation is required (current generation is "
+                             f"{node.attempt})")
+                generation = 0
+            else:
+                generation = _strict_nonnegative_int(raw_generation, "generation")
+            if generation != node.attempt:
+                raise HTTPException(
+                    409, f"stale {etype}: node #{nid} is generation {node.attempt}, not {generation}")
+            data[target_key] = nid
+            data["generation"] = generation
+
+        if etype == EV_INJECT_NODE and (data.get("parent_id") is not None
+                                        or data.get("parent_ids") is not None
+                                        or "parent_generations" in data):
+            # Manual inject/merge actions also carry the parent snapshot they were designed against.
+            # Validate it now; node_created repeats the check in replay to close reset-during-build.
+            raw_snapshot = data.get("parent_generations", _ABSENT)
+            if raw_snapshot is not _ABSENT and not isinstance(raw_snapshot, dict):
+                raise HTTPException(400, "parent_generations must be an object")
+            if ("parent_ids" in data and data.get("parent_ids") is not None
+                    and not isinstance(data.get("parent_ids"), list)):
+                raise HTTPException(400, "parent_ids must be an array")
+            if isinstance(data.get("parent_ids"), list):
+                parents = [_strict_nonnegative_int(pid, "parent_id")
+                           for pid in data["parent_ids"]]
+                data["parent_ids"] = parents
+            elif data.get("parent_id") is not None:
+                parents = [_strict_nonnegative_int(data.get("parent_id"), "parent_id")]
+                data["parent_id"] = parents[0]
+            else:
+                parents = []
+            if len(set(parents)) != len(parents):
+                raise HTTPException(400, "parent ids must be unique")
+            st = srv.state(rd)
+            if raw_snapshot is _ABSENT:
+                # Old generation-0 web clients remain valid. Once any parent was reset, however, an
+                # id-only delayed inject is ambiguous and must refresh instead of rebinding silently.
+                missing = [pid for pid in parents if pid not in st.nodes]
+                if missing:
+                    raise HTTPException(404, f"no node #{missing[0]} in this run")
+                if any(st.nodes[pid].attempt != 0 for pid in parents):
+                    raise HTTPException(409, "parent generation is required after node reset")
+                raw_snapshot = {str(pid): 0 for pid in parents}
+            if len(raw_snapshot) != len(parents):
+                raise HTTPException(400, "parent generation snapshot does not match parents")
+            normalized_snapshot: dict[str, int] = {}
+            for pid in parents:
+                node = st.nodes.get(pid)
+                if node is None:
+                    raise HTTPException(404, f"no node #{pid} in this run")
+                if node.tombstoned:
+                    raise HTTPException(409, f"parent #{pid} is tombstoned")
+                if pid in st.aborted_nodes:
+                    raise HTTPException(409, f"parent #{pid} is aborted")
+                raw_generation = raw_snapshot.get(str(pid), raw_snapshot.get(pid, _ABSENT))
+                if raw_generation is _ABSENT:
+                    raise HTTPException(400, f"missing generation for parent #{pid}")
+                generation = _strict_nonnegative_int(raw_generation, "parent generation")
+                if generation != node.attempt:
+                    raise HTTPException(
+                        409, f"stale parent #{pid}: current generation is {node.attempt}")
+                normalized_snapshot[str(pid)] = generation
+            data["parent_generations"] = normalized_snapshot
         # Cross-run import: an inject seeded from a sibling run. Resolve the source experiment from disk
         # NOW and bake its code + `origin` provenance into the inject_node, so the engine reproduces it
         # faithfully and the lineage is recorded. (_run_dir guards path traversal on the sibling id.)
@@ -113,6 +236,10 @@ def build_router(srv) -> APIRouter:
             snode = sst.nodes.get(sn)
             if snode is None:
                 raise HTTPException(404, f"no experiment #{sn} in run {sr}")
+            if snode.tombstoned:
+                raise HTTPException(409, f"source experiment #{sn} in run {sr} is tombstoned")
+            if sn in sst.aborted_nodes:
+                raise HTTPException(409, f"source experiment #{sn} in run {sr} is aborted")
             sidea = snode.idea.model_dump(mode="json")
             note = f"imported from run {sr} #{sn}"
             base = (sidea.get("rationale") or "").strip()
@@ -144,35 +271,53 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ spawn / resume
     def _task_file_for(rd: Path) -> Optional[str]:
-        # Prefer the UI's recorded task_file; fall back to the verbatim task.snapshot.json that
-        # `run` now writes into every run dir, so even a CLI-started run can be resumed/continued.
-        task_file: Optional[str] = None
-        meta = rd / "ui_meta.json"
-        if meta.exists():
-            task_file = json.loads(meta.read_text(encoding="utf-8")).get("task_file")
-        if not task_file and (rd / "task.snapshot.json").exists():
-            task_file = str(rd / "task.snapshot.json")
-        return task_file
+        # The resolved immutable snapshot is authoritative. The shared helper tolerates malformed
+        # legacy ui_meta and only accepts its task_file when no snapshot exists and the target exists.
+        return _resolve_task_file(rd)
+
+    def _append_resume_request(rd: Path) -> str:
+        """Classify and durably append one handoff against the exact folded tail."""
+        store = EventStore(rd / "events.jsonl")
+        for _attempt in range(8):
+            events = store.read_all()
+            state = fold(events)
+            last_seq = events[-1].seq if events else -1
+            last_stop = state.last_stop_request_seq
+            last_finish = state.last_finish_seq
+            mode = ("finalize" if state.stop_requested and last_stop > last_finish else "resume")
+            try:
+                store.append(EV_RESUME_REQUESTED, {"mode": mode}, expected_last_seq=last_seq)
+                return mode
+            except EventStoreConcurrencyError:
+                continue
+        raise HTTPException(409, "run state changed repeatedly; retry resume")
 
     @router.post("/api/runs/{run_id}/resume")
     def resume_run(run_id: str):
         rd = _run_dir(run_id)
-        # Don't spawn a second engine when one is already alive: the engine-singleton lock would make it
-        # no-op anyway, but skipping the detached Popen keeps the signal honest (and avoids a phantom
-        # process flash). The UI's auto-resume already gates on engine_running; this is the backstop.
-        if _engine_alive(rd):
-            return {"ok": True, "already_running": True}
-        task_file = _task_file_for(rd)
-        if not task_file:
-            raise HTTPException(400, "run is not resumable — no task.snapshot.json or ui_meta.json "
-                                     "(it predates self-describing runs; start it via the UI to enable resume)")
-        # P1-1 recoverable-intent: record a DURABLE resume intent BEFORE the detached spawn. If that
-        # spawn dies before the engine acquires the lock (import error, unreachable LLM, OOM), the
-        # intent survives and the on-load reconciler re-spawns it — instead of a silent zombie. The
-        # engine appends resume_served once it holds the lock, fulfilling the intent.
-        EventStore(rd / "events.jsonl").append(EV_RESUME_REQUESTED, {})
-        _spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
-        return {"ok": True}
+        # Serialize task resolution + intent append against reset/delete. Once the append lands, the
+        # fresh-pending fence protects the short interval before `_claim_and_spawn_resume` acquires
+        # this lifecycle lock itself; there is no unprotected delete -> ghost-directory recreation.
+        with _run_lifecycle_lock(rd):
+            task_file = _task_file_for(rd)
+            if not task_file:
+                raise HTTPException(
+                    400, "run is not resumable - no task.snapshot.json or ui_meta.json "
+                         "(it predates self-describing runs; start it via the UI to enable resume)")
+            # Durable before every liveness branch: if the current owner is already past
+            # run_finished, or a detached spawn dies before taking the lock, recovery retains it.
+            mode = _append_resume_request(rd)
+        cli_args = (["finalize", str(rd), "--task-file", str(task_file)] if mode == "finalize" else
+                    ["resume", str(rd), "--task-file", str(task_file)])
+        # Claim does its own liveness checks under the lifecycle fence. `wait_on_alive` closes both
+        # the obvious live-owner path and the dead-probe -> claim live flip; cancellation is shared
+        # with the ASGI shutdown handler so no resume child appears after the reaper's snapshot.
+        was_alive = _engine_alive(rd)
+        spawned = _claim_and_spawn_resume(
+            rd, cli_args, cancel_event=srv.resume_cancel, wait_on_alive=True)
+        if was_alive and not spawned:
+            return {"ok": True, "already_running": True, "resume_after_exit": True}
+        return {"ok": True, "launch_pending": not spawned}
 
     @router.post("/api/runs/{run_id}/reset")
     def reset_run(run_id: str):
@@ -180,46 +325,114 @@ def build_router(srv) -> APIRouter:
         re-spawn a fresh run on the same run-id. The prior artifacts are RENAMED (not deleted) so the
         history is recoverable."""
         rd = _run_dir(run_id)
-        # Guard the invariant the UI relies on (it only offers Replay on a finished run): never reset an
-        # ACTIVE run. A running engine is the SOLE writer of events.jsonl — archiving it out from under
-        # one and spawning a second engine would corrupt the log. (A sub-second window remains right
-        # after run_finished while the engine appends llm_cost + builds the readmodel; that's narrow and
-        # a re-reset heals it. This guard is what makes a direct/stale API call safe.)
-        # Also gate on the race-free liveness probe (the engine still holds engine.lock through its
-        # sub-second post-finish tail: llm_cost append + readmodel build). fold().finished alone has a
-        # window where st.finished is True but the engine is still the sole writer; _engine_alive closes
-        # it, matching resume_run. Archiving events.jsonl out from under a live engine corrupts the log.
-        if _engine_alive(rd) or not srv.state(rd).finished:
-            raise HTTPException(409, "run is still active — stop it first (Replay resets a finished run)")
-        task_file = _task_file_for(rd)
-        if not task_file:
-            raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
-        stamp = int(time.time() * 1000)   # ms granularity so two resets in the same second don't collide
-        # Archive the event log, spans, the read model, the node workspaces, AND the chat transcript.
-        # The fresh run reuses node_<id> dirs with mkdir(exist_ok=True)/copytree(dirs_exist_ok=True),
-        # so a leftover nodes/ would let stale files from the prior same-numbered node contaminate the
-        # replay's eval; the prior chat.jsonl belongs to the old attempt, so the replay starts with a
-        # clean conversation (the archived copy stays recoverable alongside events.jsonl.reset-*).
-        for name in ("events.jsonl", "spans.jsonl", "readmodel.sqlite", "nodes", "chat.jsonl"):
-            p = rd / name
-            if p.exists():
-                try:
-                    p.rename(rd / f"{name}.reset-{stamp}")
-                except OSError:
-                    pass        # a Windows lock shouldn't block the replay; a fresh `run` recreates it
-        # Reuse the run's OWN resolved settings (minus secrets) so the replay matches the original;
-        # the API key still comes from the spawned process's inherited env.
-        env: Optional[dict] = None
-        snap = rd / "config.snapshot.json"
-        if snap.exists():
+        # Never reset an ACTIVE or LAUNCHING run. The engine is the sole event-log writer: OS liveness
+        # covers its full post-finish tail, while the lifecycle + fresh-claim fence covers the earlier
+        # request/claim/Popen interval before a detached child has acquired engine.lock.
+        with _run_lifecycle_lock(rd):
+            if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                    or not srv.state(rd).finished):
+                raise HTTPException(
+                    409, "run is still active or launching — stop it first "
+                         "(Replay resets a finished run)")
+            task_file = _task_file_for(rd)
+            if not task_file:
+                raise HTTPException(400, "run is not resettable — no task.snapshot.json or ui_meta.json")
+            stamp = int(time.time() * 1000)  # ms granularity, plus collision check below
+            # Archive auxiliaries first and the source-of-truth event log LAST. A rename is a
+            # transaction: on any failure restore every completed move and do not start a writer on
+            # a mixed old/new directory. The old best-effort `except: pass` could leave events.jsonl
+            # in place, partially archive nodes, then launch a second writer into the old history.
+            names = ("spans.jsonl", "readmodel.sqlite-wal", "readmodel.sqlite-shm",
+                     "readmodel.sqlite", "nodes", "chat.jsonl", "events.jsonl")
+            def _present(path: Path) -> bool:
+                return path.exists() or path.is_symlink()
+
+            def _archive_temp(archived: Path) -> Path:
+                return archived.with_name(f"{archived.name.upper()}.tmp")
+
+            while any(
+                    _present(candidate)
+                    for name in names
+                    for candidate in (
+                        rd / f"{name}.reset-{stamp}",
+                        _archive_temp(rd / f"{name}.reset-{stamp}"))):
+                stamp += 1
+            moved: list[tuple[Path, Path]] = []
+
+            def _rollback_reset_archive() -> list[str]:
+                failures: list[str] = []
+                restored: list[tuple[Path, Path]] = []
+                for src, archived in reversed(moved):
+                    try:
+                        if _present(archived):
+                            # The lifecycle fence guarantees no legitimate newer writer can recreate
+                            # `src` during this transaction. Atomic replace also bypasses the forward
+                            # Path.rename fault surface and tolerates an already-created destination.
+                            # Only this transaction's exact archive is restored; older approved
+                            # `.reset-*` archives are never enumerated or deleted.
+                            archived.replace(src)
+                        elif not _present(src):
+                            failures.append(src.name)
+                        if _present(src) and not _present(archived):
+                            restored.append((src, archived))
+                    except OSError:
+                        failures.append(src.name)
+                # On Windows the filesystem may publish this case-variant shadow just after replace
+                # returns, then reap it asynchronously. Stamp collision checks prove it did not exist
+                # before this transaction. Poll a short bounded window and remove only candidates
+                # derived from successfully restored entries in `moved`; never glob suffix-less
+                # approved archives or recursively remove anything.
+                deadline = time.monotonic() + 0.1
+                while restored and time.monotonic() < deadline:
+                    for _src, archived in restored:
+                        temp = _archive_temp(archived)
+                        if _present(temp):
+                            try:
+                                temp.unlink()  # file/symlink only; directories fail closed below
+                            except OSError:
+                                pass
+                    time.sleep(0.01)
+                for src, archived in restored:
+                    if _present(_archive_temp(archived)):
+                        failures.append(f"{src.name}.tmp")
+                return failures
+
             try:
-                cfg = json.loads(snap.read_text(encoding="utf-8"))
-                env = srv.settings.settings_env({k: v for k, v in cfg.items()
-                                                 if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS
-                                                 and v is not None})
-            except (OSError, json.JSONDecodeError, ValueError):
-                env = None
-        _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+                for name in names:
+                    src = rd / name
+                    if _present(src):
+                        archived = rd / f"{name}.reset-{stamp}"
+                        src.rename(archived)
+                        moved.append((src, archived))
+            except OSError as exc:
+                rollback_failures = _rollback_reset_archive()
+                suffix = (f"; rollback also failed for {rollback_failures}"
+                          if rollback_failures else "")
+                raise HTTPException(
+                    500, f"could not archive run for Replay: {exc}{suffix}") from exc
+            try:
+                # Reuse the run's resolved settings (minus secrets); the API key remains inherited.
+                # Keep preparation inside the transaction too: a malformed/non-object snapshot or
+                # environment conversion failure must restore the archived run just like Popen does.
+                env: Optional[dict] = None
+                snap = rd / "config.snapshot.json"
+                if snap.exists():
+                    try:
+                        cfg = json.loads(snap.read_text(encoding="utf-8"))
+                        if isinstance(cfg, dict):
+                            env = srv.settings.settings_env({
+                                k: v for k, v in cfg.items()
+                                if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS and v is not None
+                            })
+                    except (OSError, json.JSONDecodeError, ValueError):
+                        env = None
+                _spawn_engine(["run", str(task_file), "--out", str(rd)], env=env, run_dir=rd)
+            except Exception as exc:  # noqa: BLE001 - failed Popen must restore the old runnable run
+                rollback_failures = _rollback_reset_archive()
+                suffix = (f"; rollback also failed for {rollback_failures}"
+                          if rollback_failures else "")
+                raise HTTPException(
+                    500, f"could not launch Replay: {exc}{suffix}") from exc
         return {"ok": True}
 
     @router.post("/api/runs/{run_id}/nodes/{nid}/clear_trace")

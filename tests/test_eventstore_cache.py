@@ -11,6 +11,8 @@ import json
 import threading
 from pathlib import Path
 
+import pytest
+
 from looplab.events.eventstore import EventStore, iter_jsonl
 
 
@@ -51,6 +53,96 @@ def test_heal_truncation_rebuilds_cache(tmp_path):
     p.write_bytes(data[: newline + 1])
     got = s.read_all()                                     # size shrank => cache must rebuild
     assert [e.seq for e in got] == _fresh_seqs(p)
+
+
+def test_complete_corrupt_tail_fails_closed_before_next_append(tmp_path):
+    """A newline-terminated bad last record is not a torn write. If append accepts it, that append
+    immediately becomes an invisible tail behind the reader's stop boundary."""
+    from looplab.events.eventstore import EventLogCorruptionError, log_divergence
+
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("ok", {})
+    with p.open("ab") as f:
+        f.write(b"{bad json}\n")
+
+    detail = log_divergence(p)
+    assert detail and detail["dropped_lines"] == 0
+    reopened = EventStore(p)
+    with pytest.raises(EventLogCorruptionError):
+        reopened.append("must_not_be_hidden", {})
+    assert b"must_not_be_hidden" not in p.read_bytes()
+
+
+def test_cache_revalidates_same_size_mid_run_rewrite(tmp_path):
+    """A same-size in-place rewrite must invalidate the incremental cache instead of returning an
+    Event sequence that no longer exists on disk."""
+    import os
+    import time
+
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("aaaa", {})
+    assert s.read_all()[0].type == "aaaa"                   # warm cache
+    raw = p.read_bytes()
+    p.write_bytes(raw.replace(b'"aaaa"', b'"bbbb"'))      # exactly the same byte length
+    future = time.time_ns() + 2_000_000_000
+    os.utime(p, ns=(future, future))                         # deterministic mtime change on coarse FS
+
+    assert s.read_all()[0].type == "bbbb"
+
+
+def test_shrink_rebases_seq_and_rejects_pre_reset_cas(tmp_path):
+    """An EventStore object may outlive an in-place run reset. Its old high-water mark must not make
+    the OLD expected tail valid against the replacement history."""
+    from looplab.events.eventstore import EventStoreConcurrencyError
+
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    for i in range(3):
+        s.append("before", {"i": i})
+    first = p.read_bytes().splitlines(keepends=True)[0]
+    p.write_bytes(first)                                 # replacement tail is seq=0
+
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append("stale", {}, expected_last_seq=2)
+    assert s.append("current", {}, expected_last_seq=0).seq == 1
+
+
+def test_same_size_rewrite_rebases_seq_for_cas(tmp_path):
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    import os
+    import time
+
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("before", {})
+    s.append("before", {})
+    raw = p.read_bytes()
+    p.write_bytes(raw.replace(b'"seq":1', b'"seq":7'))  # exact byte length, new disk tail=7
+    future = time.time_ns() + 2_000_000_000
+    os.utime(p, ns=(future, future))
+
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append("stale", {}, expected_last_seq=1)
+    assert s.append("current", {}, expected_last_seq=7).seq == 8
+
+
+def test_atomic_file_replacement_rebases_seq_for_cas(tmp_path):
+    from looplab.events.eventstore import EventStoreConcurrencyError
+    import os
+
+    p = tmp_path / "events.jsonl"
+    s = EventStore(p)
+    s.append("old", {})
+    s.append("old", {})
+    replacement = tmp_path / "replacement.jsonl"
+    EventStore(replacement).append("new", {})             # replacement tail is seq=0
+    os.replace(replacement, p)
+
+    with pytest.raises(EventStoreConcurrencyError):
+        s.append("stale", {}, expected_last_seq=1)
+    assert s.append("current", {}, expected_last_seq=0).seq == 1
 
 
 def test_concurrent_readers_are_race_free(tmp_path):

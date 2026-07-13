@@ -70,7 +70,9 @@ artifacts land in `./runs`, shared with the host and the UI.
   models) — set it to `1` in `.env` only if a weaker model needs constrained decoding.
 - **Exposure:** both ports publish to `127.0.0.1` only by default. The UI control plane is
   unauthenticated unless `LOOPLAB_UI_TOKEN` is set, so it is not put on the LAN implicitly. To serve
-  it beyond localhost, set a token and `UI_BIND=0.0.0.0` in `.env`.
+  it beyond localhost, set a token, `UI_BIND=0.0.0.0`, and list the public hostname in
+  `LOOPLAB_UI_HOSTS` (comma-separated). Host validation prevents DNS-rebinding a browser into the
+  local control plane.
 
 ## Run as a JupyterHub app (jupyter-server-proxy)
 
@@ -90,6 +92,7 @@ matter on a hub:
 | `LOOPLAB_RUN_ROOT` | Where runs persist. Defaults to `~/looplab-runs` (the user's home volume) so runs survive a hub idle-cull + pod restart instead of landing in an ephemeral CWD. **Don't** point it at an S3/geesefs FUSE mount — the append-only event log needs atomic rename. |
 | `LOOPLAB_ALLOW_UNLOCKED_WRITER` | Safety override. The engine holds an exclusive `engine.lock` so only one writer touches a run's `events.jsonl`. On a FUSE/S3 mount where OS file locking is unavailable that lock can't be enforced, so startup **fails closed** with an actionable error (two writers could corrupt the log). Set this to `1` **only** if you guarantee a single engine per run dir; it degrades to a best-effort no-op and runs anyway. Prefer a lock-capable local disk (`LOOPLAB_RUN_ROOT`). |
 | `LOOPLAB_UI_DIST` | A prebuilt React bundle. Set it (the image bakes one) so `looplab ui --no-build` serves instantly and never attempts an `npm build` on the noexec/FUSE home. |
+| `LOOPLAB_UI_HOSTS` | Public hostname(s), comma-separated, that may reach the UI (for example `hub.example.org`). `localhost`, `127.0.0.1`, and `::1` are always allowed; every other Host is rejected to prevent DNS rebinding. |
 | `LOOPLAB_LLM_BASE_URL` | The cluster LLM endpoint (the default is localhost Ollama). A wrong/unreachable endpoint now surfaces as a terminal `run_finished{reason:error}` event rather than a silent stuck run. |
 
 **Behind a non-stripping proxy** `looplab ui` auto-derives `root_path` from `JUPYTERHUB_SERVICE_PREFIX`

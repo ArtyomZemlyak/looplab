@@ -32,6 +32,55 @@ from looplab.serve.protocol import (
     SSE_DONE, SSE_ERROR, SSE_STEP, SSE_TEXT, SSE_TODOS, SSE_TOKEN)
 
 
+def _shared_text(value) -> str:
+    from looplab.trust.redact import redact_secrets
+    return redact_secrets(str(value or ""))
+
+
+def _shared_message(message: dict) -> dict:
+    """Allow-list the fields rendered by the read-only shared transcript. Persisted assistant turns
+    also contain mutation internals (absolute paths and full diff previews); merely dropping `raw`
+    exposes those through the intentionally untokened share URL."""
+    out = {
+        "role": str(message.get("role") or "assistant"),
+        "content": _shared_text(message.get("content")),
+    }
+    if isinstance(message.get("ts"), (int, float)):
+        out["ts"] = message["ts"]
+    if isinstance(message.get("mode"), str):
+        out["mode"] = message["mode"]
+
+    def _labels(items):
+        return [{k: _shared_text(item.get(k)) for k in ("label", "tool") if item.get(k)}
+                for item in (items or []) if isinstance(item, dict)]
+
+    if isinstance(message.get("steps"), list):
+        out["steps"] = _labels(message["steps"])
+    if isinstance(message.get("applied"), list):
+        out["applied"] = _labels(message["applied"])
+    if isinstance(message.get("todos"), list):
+        out["todos"] = [
+            {"content": _shared_text(t.get("content")),
+             "status": str(t.get("status") or "pending")}
+            for t in message["todos"] if isinstance(t, dict)
+        ]
+    if isinstance(message.get("tokens"), dict):
+        out["tokens"] = {str(k): v for k, v in message["tokens"].items()
+                         if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    if isinstance(message.get("activity"), list):
+        activity = []
+        for item in message["activity"]:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "text":
+                activity.append({"type": "text", "content": _shared_text(item.get("content"))})
+            elif item.get("type") == "tools":
+                activity.append({"type": "tools",
+                                 "labels": [_shared_text(v) for v in (item.get("labels") or [])]})
+        out["activity"] = activity
+    return out
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     root = srv.root
@@ -262,10 +311,10 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "no such session")
         if sess is None or not sess["meta"].get("shared"):
             raise HTTPException(404, "not shared")
-        # Strip `raw` (the full model-facing instruction: attached-file contents, UI-context preamble)
-        # from the read-only share — a shared link shows the clean bubbles, not the injected context.
-        return {"meta": sess["meta"],
-                "messages": [{k: v for k, v in m.items() if k != "raw"} for m in sess["messages"]]}
+        # The shared route is intentionally untokened. Return only what the read-only transcript
+        # renders; never expose raw prompts, diff previews, absolute paths, refs, or launch proposals.
+        meta = {"shared": True, "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
+        return {"meta": meta, "messages": [_shared_message(m) for m in sess["messages"]]}
 
     @router.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):

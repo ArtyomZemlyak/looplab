@@ -3,10 +3,10 @@ import { Turn, PermCard } from './AssistantChat.jsx'
 import { OpIcon } from './icons.jsx'
 import { usePoll } from './hooks.js'
 import {
-  CONTROL, get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
+  get, fmtAgo, ASSISTANT_MODES as MODES, tokText, assistantCreate, assistantMessageStream,
   assistantCommands, assistantRevert, assistantSessions, assistantGet, assistantDelete,
   assistantPermissions, assistantResolve, assistantCancel, assistantProgress,
-  assistantFork, assistantShare,
+  assistantFork, assistantShare, applyAction,
 } from './util.js'
 
 // ── ONE assistant, three flowing views: bar ⇄ side(right) ⇄ full ───────────────────────────────
@@ -31,13 +31,26 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms))
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const DIRECT = {
-  stop:     { run: (rid) => CONTROL.stop(rid),     ok: '⏸ run stopped (frozen — not finalized)' },
-  finalize: { run: (rid) => CONTROL.finalize(rid), ok: '⏹ run finalizing (wrapping up)' },
-  resume:   { run: (rid) => CONTROL.resume(rid),   ok: '▶ run resumed' },
-  pause:    { run: (rid) => CONTROL.stop(rid),     ok: '⏸ run stopped (frozen)' },     // alias of /stop
-  abort:    { run: (rid) => CONTROL.finalize(rid), ok: '⏹ run finalizing' },           // alias of /finalize
-  ratify:  { run: (rid) => CONTROL.ratify(rid),  ok: '✓ eval spec ratified' },
-  approve: { arg: true, run: (rid, id) => CONTROL.approve(rid, id), ok: (id) => `✓ approved #${id}` },
+  stop:     { run: (rid) => applyAction(rid, { type: 'pause', data: {} }),
+              ok: '⏸ run stopped (frozen — not finalized)' },
+  finalize: { run: (rid) => applyAction(rid, { type: 'run_abort', data: { reason: 'finalized' } }),
+              ok: '⏹ run finalizing (wrapping up)' },
+  resume:   { run: (rid) => applyAction(rid, { type: 'resume', data: {} }), ok: '▶ run resumed' },
+  pause:    { run: (rid) => applyAction(rid, { type: 'pause', data: {} }),
+              ok: '⏸ run stopped (frozen)' },                                      // alias of /stop
+  abort:    { run: (rid) => applyAction(rid, { type: 'run_abort', data: { reason: 'finalized' } }),
+              ok: '⏹ run finalizing' },                                            // alias of /finalize
+  ratify:   { run: (rid) => applyAction(rid, { type: 'spec_approved', data: {} }),
+              ok: '✓ eval spec ratified' },
+  approve:  { arg: true,
+              run: async (rid, id) => {
+                const payload = await get(`/api/runs/${encodeURIComponent(rid)}/state`)
+                const node = payload?.state?.nodes?.[id]
+                if (!node) throw new Error(`no node #${id}`)
+                return applyAction(rid, { type: 'approval_granted',
+                  data: { node_id: id, generation: node.attempt } })
+              },
+              ok: (id) => `✓ approved #${id}` },
 }
 // Unambiguous = a lone /name optionally + a single #id token, and NOTHING else. Trailing prose → LLM.
 function parseDirect(t) {

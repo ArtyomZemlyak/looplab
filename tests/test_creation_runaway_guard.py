@@ -38,7 +38,14 @@ def test_creation_runaway_guard_terminates(tmp_path, monkeypatch):
     the loop would re-mint node 0 forever. The guard must FINISH the run (bounded), not hang."""
     import looplab.engine.orchestrator as orch
 
+    fold_calls = 0
+
     def _empty_fold(evs):
+        nonlocal fold_calls
+        fold_calls += 1
+        # A wall-clock cancel scope cannot interrupt a synchronous no-await busy loop. This explicit
+        # deterministic ceiling turns the original infinite regression into an immediate failure.
+        assert fold_calls < 500, "creation-runaway guard kept re-folding after its terminal append"
         st = RunState()
         st.run_id, st.direction = "r", "min"      # nodes = {}, finished = False -> the spin state
         return st
@@ -47,14 +54,10 @@ def test_creation_runaway_guard_terminates(tmp_path, monkeypatch):
     eng = Engine(tmp_path / "run", task=ToyTask.load(TASK), researcher=_Stub(), developer=_Dev(),
                  sandbox=SubprocessSandbox(), policy=GreedyTree(n_seeds=1, max_nodes=4),
                  auto_install_deps=False)
-    # MUST terminate — without the guard this loops forever writing node_created(0). The move_on_after
-    # is only a TEST safety net (so a regression fails instead of hanging the suite).
-    async def _driven():
-        with anyio.move_on_after(30) as scope:
-            await eng.run()
-        return scope.cancel_called
-
-    assert not anyio.run(_driven), "creation-runaway guard did not terminate the loop"
+    # MUST terminate. The fold-call ceiling above is the test safety net; unlike move_on_after it also
+    # bounds regressions that never reach an await checkpoint.
+    anyio.run(eng.run)
+    assert fold_calls < 500
 
     raw = EventStore(tmp_path / "run" / "events.jsonl").read_all()
     stuck = [e for e in raw if e.type == "run_finished" and "stuck" in str(e.data.get("reason", ""))]

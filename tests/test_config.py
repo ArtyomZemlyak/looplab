@@ -17,6 +17,19 @@ def test_config_lower_bounds():
     assert Settings().max_parallel == 1  # default still valid
 
 
+def test_nonfinite_time_budgets_are_rejected_at_model_boundary():
+    from pydantic import ValidationError
+    from looplab.core.models import Idea
+
+    for bad in (float("inf"), float("-inf"), float("nan")):
+        with pytest.raises(ValidationError):
+            Settings(timeout=bad)
+        with pytest.raises(ValidationError):
+            Settings(max_eval_seconds=bad)
+        with pytest.raises(ValidationError):
+            Idea(operator="draft", eval_timeout=bad)
+
+
 # C1 — resume reconstructs run-only settings from the snapshot
 def test_settings_roundtrip_through_snapshot():
     s = Settings()

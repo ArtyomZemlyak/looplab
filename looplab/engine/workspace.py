@@ -287,6 +287,17 @@ class WorkspaceSeeder:
         before the extraction. Order is load-bearing (see `_write_node_files`): node edits go on
         top of the seeded tree, and task assets win any name collision, last. Routed through the
         Engine's delegators so an instance-level monkeypatch of any step still intercepts it."""
-        self._e._seed_workspace(workdir)           # RepoTask: editable repo tree (ADR-7) …
-        self._e._write_node_files(node, workdir)   # … agent edits on top …
-        self._e._write_assets(workdir)             # … task assets win any name collision
+        import shutil
+
+        wd = Path(workdir).resolve()
+        run_dir = Path(self._e.run_dir).resolve()
+        if wd == run_dir or run_dir not in wd.parents:
+            raise ValueError(f"refusing to materialize outside the run directory: {wd}")
+        # A fresh lifecycle must start from the canonical seed + current node manifest, not an overlay
+        # on files left by a previous generation. Stage-scoped reuse deliberately bypasses this method
+        # in EvaluateMixin; every actual materialization is therefore safe to rebuild from scratch.
+        if wd.exists():
+            shutil.rmtree(wd)
+        self._e._seed_workspace(wd)                # RepoTask: editable repo tree (ADR-7) …
+        self._e._write_node_files(node, wd)         # … agent edits on top …
+        self._e._write_assets(wd)                   # … task assets win any name collision

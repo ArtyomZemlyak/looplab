@@ -8,6 +8,7 @@ import { OpIcon } from './icons.jsx'
 import { diffLines } from './Inspector.jsx'
 import SettingsForm from './SettingsForm.jsx'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
+import { queuedGenerationControls } from './queue.js'
 
 export function Panel({ title, sub, onClose, children, wide }) {
   return (
@@ -119,7 +120,7 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast }) {
   const [cfg, setCfg] = useState(null)
   useEffect(() => { get(`/api/runs/${runId}/config`).then(setCfg).catch(() => {}) }, [runId])
   const quarantine = async (id) => {   // U6: act on a flagged node — remove it from the search
-    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`quarantined #${id} (aborted)`) }
+    try { await CONTROL.nodeAbort(runId, id, state.nodes[id]?.attempt); onToast && onToast(`quarantined #${id} (aborted)`) }
     catch { onToast && onToast('could not quarantine (run not live?)') }
   }
   const nodes = Object.values(state.nodes)
@@ -231,10 +232,9 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
   const working = nodes.filter(n => n.status === 'running')   // (if the fold ever exposes it)
   const injects = (state.inject_requests || []).slice(state.injects_done || 0)
   const forks = (state.fork_requests || []).slice(state.forks_done || 0)
-  const confirmReq = (state.confirm_requests || []).filter(id => !(state.confirmed_forced || []).includes(id))
-  const ablateReq = state.ablate_requests || []
+  const { confirms: confirmReq, ablates: ablateReq } = queuedGenerationControls(state)
   const cancel = async (id) => {
-    try { await CONTROL.nodeAbort(runId, id); onToast && onToast(`cancelled #${id}`) }
+    try { await CONTROL.nodeAbort(runId, id, state.nodes[id]?.attempt); onToast && onToast(`cancelled #${id}`) }
     catch { onToast && onToast('could not cancel (run not live?)') }
   }
   const queuedCount = pending.length + injects.length + forks.length + confirmReq.length + ablateReq.length
@@ -261,8 +261,8 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
         <div className="chips">
           {injects.map((q, i) => <span key={'i' + i} className="chip sm" title="operator-injected experiment awaiting materialization">inject: {(q.idea?.operator || 'experiment')}</span>)}
           {forks.map((q, i) => <span key={'f' + i} className="chip sm" title="fork awaiting materialization">fork #{q.from_node_id ?? q.parent_id ?? '?'}</span>)}
-          {confirmReq.map((id, i) => <span key={'c' + i} className="chip sm">confirm #{id}</span>)}
-          {ablateReq.map((id, i) => <span key={'a' + i} className="chip sm">ablate #{id}</span>)}
+          {confirmReq.map(r => <span key={`c:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>confirm #{r.node_id}</span>)}
+          {ablateReq.map(r => <span key={`a:${r.node_id}:${r.generation ?? 'legacy'}`} className="chip sm" title={r.generation == null ? undefined : `node generation ${r.generation}`}>ablate #{r.node_id}</span>)}
         </div>
       </>}
     </Panel>

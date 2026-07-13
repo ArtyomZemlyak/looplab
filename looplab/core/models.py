@@ -26,7 +26,7 @@ class Idea(BaseModel):
     # Honored by the engine ONLY when the governance matrix grants the researcher the "timeout" setting
     # (Settings.agent_control); otherwise ignored. None => use the run-wide timeout. Flows through the
     # event log on the Idea automatically (no new event), so it's replay-safe.
-    eval_timeout: Optional[float] = None
+    eval_timeout: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     # Semantic grouping (UI #7): a short, reusable slug the Researcher assigns to cluster related
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
@@ -164,11 +164,12 @@ class Node(BaseModel):
     # Phase 2 stage-scoped re-run: the pipeline stage a reset asked to RESTART from (skip earlier stages,
     # reuse their artifacts). Transient — set by node_reset, cleared on the next terminal.
     rerun_stage: Optional[str] = None
-    # Attempt generation (arch-review §3 P0-1): bumped by every `node_reset`. The engine stamps the
-    # attempt it is evaluating onto the node's terminal event; the fold REJECTS a terminal whose attempt
-    # no longer matches — so a LATE node_evaluated/node_failed from an abandoned attempt (its eval was
-    # in flight when a reset bumped the generation) can't land as the first-terminal-after-reset and
-    # accept a metric/cost from discarded code. Absent in old logs -> 0 on both sides -> always matches.
+    # Immutable lifecycle generation (arch-review §3 P0-1): bumped by every `node_reset`. Every effect
+    # derived from work on the node (repair/stage/terminal/confirm/holdout/trust) is stamped with this
+    # value and rejected after a newer reset, so an abandoned worker can never adopt or mutate the next
+    # lifecycle. The field keeps its original `attempt` name for projection/backward compatibility;
+    # new event payloads call the same value `generation` to avoid colliding with node_repaired's
+    # pre-existing inline-repair attempt counter. Absent in old logs -> 0.
     attempt: int = 0
     # External-agent audit (ADR-7): set by an `agent_validated` event when the code was
     # produced by a validated CLI-agent Developer. {"ok": bool, "checks": [...]}.
@@ -350,6 +351,12 @@ class RunState(BaseModel):
     # diversity/audit) but are excluded from `breedable_nodes()`; empty under `audit` / old logs.
     breed_excluded: set[int] = Field(default_factory=set)
     finished: bool = False
+    # Durable, opt-in finalization handshake. `last_finish_seq` is the currently accepted
+    # run_finished. Modern engine finishes carry `finalization_required=true`; only their matching
+    # finalization_finished marker advances `finalized_finish_seq`. Legacy markerless finishes are
+    # treated as finalized by replay so old persisted runs never become synthetic recovery work.
+    last_finish_seq: int = -1
+    finalized_finish_seq: int = -1
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)
     leakage: Optional[dict] = None        # set by the grounding leakage scan (I9)
     data_provenance: Optional[dict] = None  # D4: pinned content hashes of task assets/data
@@ -374,6 +381,16 @@ class RunState(BaseModel):
     last_resume_request_seq: int = 0
     last_resume_served_seq: int = 0
     last_resume_request_ts: float = 0.0
+    # Which command a pending durable launch must run. A finalize request that arrives in the narrow
+    # post-run_finished lock tail must remain a finalize hand-off, not be replayed as a normal resume
+    # (which would reopen the search). Launch-claim records preserve this mode.
+    last_resume_request_mode: str = "resume"
+    # A `resume_requested` carrying launch_claim=True is the durable cross-process claim made
+    # immediately before Popen. It prevents two uvicorn workers (or a post-exit waiter racing a new
+    # request) from launching duplicate detached CLIs during the gap before engine.lock is acquired.
+    # If the claimant itself dies, the timestamp expires and the reconciler may safely claim again.
+    last_resume_launch_seq: int = 0
+    last_resume_launch_ts: float = 0.0
     awaiting_approval: bool = False       # HITL: approval requested, not yet granted (I21)
     approved: bool = False                # HITL: a human approved the result (I21)
     # P0-2: the node id the pending approval request was raised for (folded from `approval_requested`),
@@ -382,6 +399,8 @@ class RunState(BaseModel):
     # operator may `approve --node-id N` a non-best node) and rejects a forged/unhashable/non-existent id.
     # None when no request is pending.
     approval_subject: Optional[int] = None
+    approval_generation: Optional[int] = None   # lifecycle generation the pending request names
+    approved_node_id: Optional[int] = None      # explicit human choice; overrides algorithmic best
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
     # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,
     # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each
@@ -435,13 +454,23 @@ class RunState(BaseModel):
     # node_failed reason="aborted"). All deterministic under replay; audit-only fields never
     # change best-selection.
     paused: bool = False                       # `pause`/`resume`: resumable break (not finished)
+    pause_node_id: Optional[int] = None         # scoped auto-pause owner (None = explicit operator pause)
+    pause_generation: Optional[int] = None
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
+    # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new
+    # finish/finalization boundary; an older one was already consumed by that finish.
+    last_stop_request_seq: int = -1
     aborted_nodes: list[int] = Field(default_factory=list)   # `node_abort`: skip/kill these nodes
     budget_overrides: dict = Field(default_factory=dict)     # `budget_extend`: max_seconds/eval
     pending_hints: list[dict] = Field(default_factory=list)  # `hint`: operator directives to steer
     confirm_requests: list[int] = Field(default_factory=list)  # `force_confirm`: operator robustness ask
     confirmed_forced: list[int] = Field(default_factory=list)   # nodes a forced confirm finished (gate)
+    # Generation-aware twins keep reset lifecycles distinct while the id-only lists above preserve the
+    # existing UI projection/backward-compatible surface.
+    confirm_request_generations: list[dict] = Field(default_factory=list)
+    confirmed_forced_generations: list[dict] = Field(default_factory=list)
     ablate_requests: list[int] = Field(default_factory=list)    # `force_ablate` (wired in Phase 5)
+    ablate_request_generations: list[dict] = Field(default_factory=list)
     fork_requests: list[dict] = Field(default_factory=list)     # `fork`: operator-seeded improve
     forks_done: int = 0                        # count of processed forks (replay-safe fulfillment)
     # `inject_node`: an operator-authored experiment hand-added to the tree (a manual idea +
@@ -539,6 +568,10 @@ class RunState(BaseModel):
         to detect a zombie whose resume spawn died before the engine ran."""
         return self.last_resume_request_seq > self.last_resume_served_seq
 
+    def finalization_pending(self) -> bool:
+        return (self.finished and self.last_finish_seq >= 0
+                and self.finalized_finish_seq != self.last_finish_seq)
+
     def best(self) -> Optional[Node]:
         return self.nodes.get(self.best_node_id) if self.best_node_id is not None else None
 
@@ -556,7 +589,8 @@ class RunState(BaseModel):
         (tolerated from a hand-edited/BYO-script log by replay) is excluded too: it can neither be
         sorted against real metrics nor selected as best, and would raise TypeError in the policies'
         metric-keyed sorts."""
-        return [n for n in self.evaluated_nodes() if n.feasible and n.metric is not None]
+        return [n for n in self.evaluated_nodes()
+                if n.feasible and n.metric is not None and n.id not in self.aborted_nodes]
 
     def breedable_nodes(self) -> list[Node]:
         """Feasible nodes the search may BREED FROM or CONFIRM (improve/merge/ablate/promote/confirm

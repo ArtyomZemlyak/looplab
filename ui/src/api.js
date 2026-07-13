@@ -14,28 +14,42 @@ export const CONTROL = {
   // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
   pause: (rid) => post(`/api/runs/${rid}/control`, { type: 'pause', data: {} }),
   abort: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_abort', data: { reason: 'finalized' } }),
-  nodeAbort: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'node_abort', data: { node_id: id, reason: 'ui' } }),
+  nodeAbort: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'node_abort', data: { node_id: id, generation, reason: 'ui' } }),
   // Re-run an existing node IN PLACE from a stage (no new node): eval=re-score (keep code),
   // implement=re-run the Developer (keep the idea), propose=full redo. Resume the run to apply.
-  resetNode: (rid, id, stage) => post(`/api/runs/${rid}/control`, { type: 'node_reset', data: { node_id: id, from_stage: stage } }),
-  approve: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'approval_granted', data: { node_id: id } }),
+  resetNode: (rid, id, stage, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'node_reset', data: { node_id: id, generation, from_stage: stage } }),
+  approve: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'approval_granted', data: { node_id: id, generation } }),
   ratify: (rid) => post(`/api/runs/${rid}/control`, { type: 'spec_approved', data: {} }),
   hint: (rid, text) => post(`/api/runs/${rid}/control`, { type: 'hint', data: { text } }),
   budget: (rid, sec) => post(`/api/runs/${rid}/control`, { type: 'budget_extend', data: { max_eval_seconds: sec } }),
-  forceConfirm: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'force_confirm', data: { node_id: id } }),
-  forceAblate: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'force_ablate', data: { node_id: id } }),
-  fork: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'fork', data: { from_node_id: id } }),
+  forceConfirm: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'force_confirm', data: { node_id: id, generation } }),
+  forceAblate: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'force_ablate', data: { node_id: id, generation } }),
+  fork: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'fork', data: { from_node_id: id, generation } }),
   annotate: (rid, id, text) => post(`/api/runs/${rid}/control`, { type: 'annotation', data: { node_id: id, text } }),
-  promote: (rid, id) => post(`/api/runs/${rid}/control`, { type: 'promote', data: { node_id: id, alias: 'champion' } }),
+  promote: (rid, id, generation) => post(`/api/runs/${rid}/control`, {
+    type: 'promote', data: { node_id: id, generation, alias: 'champion' } }),
   // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,
   // rationale, theme?}; optional parent_id (branch from a node) and code (ship ready-made code).
-  inject: (rid, { idea, parent_id = null, code = null }) =>
-    post(`/api/runs/${rid}/control`, { type: 'inject_node', data: { idea, parent_id, code } }),
+  inject: (rid, { idea, parent_id = null, parent_generation = null, code = null }) =>
+    post(`/api/runs/${rid}/control`, { type: 'inject_node', data: {
+      idea, parent_id, code,
+      parent_generations: parent_id != null && parent_generation != null
+        ? { [parent_id]: parent_generation } : undefined,
+    } }),
   reopen: (rid) => post(`/api/runs/${rid}/control`, { type: 'run_reopened', data: {} }),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).
-  merge: (rid, ids) => post(`/api/runs/${rid}/control`, { type: 'inject_node', data: {
-    idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` }, parent_ids: ids } }),
+  merge: (rid, ids, parentGenerations = undefined) => post(`/api/runs/${rid}/control`, {
+    type: 'inject_node', data: {
+      idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` },
+      parent_ids: ids, parent_generations: parentGenerations,
+    } }),
   // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
   // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
   setStrategy: (rid, strategy) => post(`/api/runs/${rid}/control`, { type: 'set_strategy', data: { strategy } }),
@@ -80,6 +94,15 @@ export async function appendAction(runId, action) {
 
 // Re-enter the engine loop on an existing run dir (used to continue a finished run after an inject).
 export const resumeRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/resume`, {})
+
+// Execute a control action end-to-end. Appending an intent is insufficient when the engine is
+// finished or has died; /resume is idempotent and returns already_running for a live engine, so it is
+// safe to call unconditionally for the small registry of actions that need the loop to observe them.
+export async function applyAction(runId, action) {
+  const result = await appendAction(runId, action)
+  if (actionNeedsEngine(action)) await resumeRun(runId)
+  return result
+}
 
 // round-7 "Replay": reset a run IN PLACE — the server archives its event log + spans and re-spawns a
 // fresh run on the same run-id. Only offered on a FINISHED run (no live engine), so it's race-free.

@@ -245,6 +245,16 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     timeout = finite_timeout(timeout)
     wd = Path(workdir).resolve()
     wd.mkdir(parents=True, exist_ok=True)
+    argv = list(argv)
+    docker_cidfile: Optional[Path] = None
+    # Killing the local `docker run` CLI does NOT necessarily stop the daemon-owned container. Attach
+    # a unique host cidfile at the universal argv choke point (covers DockerSandbox and command-eval),
+    # then force-remove that exact container if host timeout/cancel kills the client first.
+    if (len(argv) >= 2 and Path(str(argv[0])).stem.lower() in {"docker", "docker.exe"}
+            and argv[1] == "run" and "--cidfile" not in argv):
+        import uuid
+        docker_cidfile = wd / f".looplab-container-{uuid.uuid4().hex}.cid"
+        argv[2:2] = ["--cidfile", str(docker_cidfile)]
     kwargs: dict = {}
     if os.name == "nt":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
@@ -313,16 +323,28 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     if log_path:
         full_env.setdefault("PYTHONUNBUFFERED", "1")
     try:
+        # Keep the pipes binary and decode only after the bounded drain.  TextIOWrapper.readline()
+        # has no size limit: one candidate-controlled, newline-free stdout record can make it buffer
+        # the whole record in host RAM before our tail cap gets a chance to run.  `_tee_drain` reads
+        # fixed-size binary chunks instead, preserving the public str return values without that DoS.
         proc = subprocess.Popen(
             argv, cwd=str(wd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace", env=full_env, **kwargs)
-    except OSError as e:
+            env=full_env, **kwargs)
+    except (OSError, ValueError, IndexError) as e:
+        # ValueError: embedded NUL in an agent/operator-authored argv/env item.  IndexError: empty
+        # argv.  Both are controlled launch failures, not reasons to crash the whole engine.
+        if docker_cidfile is not None:
+            docker_cidfile.unlink(missing_ok=True)
         return -1, "", f"failed to launch: {e}", False
     # ALWAYS drain through the memory-bounded reader (log_path=None keeps no file but still caps the
     # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
+    if docker_cidfile is not None:
+        if timed_out:
+            _remove_docker_container(str(argv[0]), docker_cidfile)
+        docker_cidfile.unlink(missing_ok=True)
     return rc, _clamp_tail_bytes(out, max_output_bytes), _clamp_tail_bytes(err, max_output_bytes), timed_out
 
 
@@ -332,15 +354,35 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
 _run_argv = run_argv
 
 
+def _remove_docker_container(docker: str, cidfile: Path) -> None:
+    """Best-effort cleanup after the docker CLI itself was killed. argv execution + strict CID shape
+    avoid a shell/injection surface; `--rm` remains the normal successful-exit cleanup path."""
+    try:
+        cid = cidfile.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError):
+        return
+    if not re.fullmatch(r"[0-9a-fA-F]{12,64}", cid):
+        return
+    try:
+        subprocess.run([docker, "rm", "-f", cid], stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
-    """Drain `proc`'s stdout+stderr concurrently: mirror every line to `log_path` (a live,
-    tail-able combined log) while accumulating bounded per-stream buffers for the return value.
+    """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
+    `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
-    threads (daemon) own the pipes so the parent never deadlocks on a chatty child."""
+    threads (daemon) own the pipes so the parent never deadlocks on a chatty child.  Chunked reads
+    matter for the no-newline case: `readline()` can allocate an arbitrarily large candidate-owned
+    line before returning, which bypasses any cap applied after the read."""
+    import codecs
     import threading
     import time as _time
 
     cap = max(max_output_bytes * 4, 256_000)        # bound memory; the FILE (when set) keeps the full log
+    read_chunk = 64 * 1024                          # hard upper bound for one pipe read/allocation
     logf = None
     if log_path:                                    # log_path=None -> memory-bounded drain, no file
         try:
@@ -351,31 +393,55 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
             # Degrade to no live-file; the drain + deadline + tree-kill below still run.
             logf = None
     lock = threading.Lock()
-    bufs = {"out": [], "err": []}
+    bufs: dict[str, list[bytes]] = {"out": [], "err": []}
 
     def _pump(stream, key):
         size = 0
+        decoder = codecs.getincrementaldecoder("utf-8")("replace") if logf is not None else None
         try:
-            for line in iter(stream.readline, ""):
+            # BufferedReader.read1 returns currently-available pipe data (up to read_chunk), so live
+            # logs still update promptly; the fallback keeps the helper friendly to simple test fakes.
+            read = getattr(stream, "read1", None) or stream.read
+            while True:
+                chunk = read(read_chunk)
+                if not chunk:
+                    break
+                if isinstance(chunk, str):          # defensive compatibility with a text-stream fake
+                    chunk = chunk.encode("utf-8", "replace")
                 buf = bufs[key]
-                buf.append(line)
-                size += len(line)
-                if size > cap * 2:                  # collapse to the last `cap` chars (metric is last line)
-                    joined = "".join(buf)[-cap:]
-                    buf.clear(); buf.append(joined); size = len(joined)
+                buf.append(chunk)
+                size += len(chunk)
+                if size > cap * 2:                  # collapse to the last `cap` bytes (metric is last line)
+                    joined = b"".join(buf)[-cap:]
+                    buf.clear()
+                    buf.append(joined)
+                    size = len(joined)
                 if logf is not None:
+                    text = decoder.decode(chunk, final=False)
                     with lock:
-                        logf.write(line)
+                        logf.write(text)
                         logf.flush()
         except Exception:
             pass
         finally:
-            try: stream.close()
-            except Exception: pass
+            if logf is not None and decoder is not None:
+                try:
+                    text = decoder.decode(b"", final=True)
+                    if text:
+                        with lock:
+                            logf.write(text)
+                            logf.flush()
+                except Exception:
+                    pass
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     t_out = threading.Thread(target=_pump, args=(proc.stdout, "out"), daemon=True)
     t_err = threading.Thread(target=_pump, args=(proc.stderr, "err"), daemon=True)
-    t_out.start(); t_err.start()
+    t_out.start()
+    t_err.start()
     timed_out = False
     deadline = _time.monotonic() + timeout
     while True:
@@ -385,16 +451,24 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
         except subprocess.TimeoutExpired:
             if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
                 _kill_tree(proc)
-                try: proc.wait(timeout=10)
-                except Exception: pass
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
                 timed_out = True
                 break
-    t_out.join(timeout=5); t_err.join(timeout=5)    # let the final lines flush before we read the buffers
+    # Let the final lines flush before we read the buffers.
+    t_out.join(timeout=5)
+    t_err.join(timeout=5)
     if logf is not None:
-        try: logf.close()
-        except Exception: pass
+        try:
+            logf.close()
+        except Exception:
+            pass
     rc = proc.returncode if proc.returncode is not None else -1
-    return rc, "".join(bufs["out"]), "".join(bufs["err"]), timed_out
+    out = b"".join(bufs["out"]).decode("utf-8", "replace")
+    err = b"".join(bufs["err"]).decode("utf-8", "replace")
+    return rc, out, err, timed_out
 
 
 def _kill_tree(proc: "subprocess.Popen") -> None:
@@ -493,6 +567,10 @@ class DockerSandbox:
         wd = Path(workdir).resolve()
         wd.mkdir(parents=True, exist_ok=True)
         (wd / "solution.py").write_text(code, encoding="utf-8")
+        # Bound BEFORE int() and BEFORE embedding the deadline into the container argv.  Bounding only
+        # inside host-side run_argv is too late: NaN/inf crash int(), while a huge finite value leaves
+        # the daemon-owned container running long after the bounded docker CLI has been killed.
+        timeout = finite_timeout(timeout, 30.0)
         envs = []
         for k, v in (env or {}).items():            # pass env into the container explicitly
             envs += ["-e", f"{k}={v}"]

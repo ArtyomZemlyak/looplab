@@ -12,35 +12,14 @@ from typing import Optional
 
 import anyio
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
 
 from looplab.core.config import Settings
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
+from looplab.serve.schemas import _GenesisSpec
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 from looplab.serve.routers.control import _defaults_backend_llm
 from looplab.serve.routers.reports import _prior_learnings_index
-
-
-class _GenesisSpec(BaseModel):
-    """The BOSS's proposed plan for a brand-new run, bootstrapped from a one-line goal (there is no run
-    yet, so this is the pre-run counterpart of the per-message _Plan). The UI shows it as an editable spec card and
-    only launches on confirm — creating a run spends real tokens, so we propose-then-go, never silently
-    auto-start. The task is EITHER an inline COMPOSABLE `task` object — NO `kind`, just the capability
-    fields (e.g. {"goal":"...","direction":"max","repo":"/abs/path","cmd":{"command":["python","test.py"],
-    "metric":{"reader":"stdout_json","key":"metric"}}}, or a bare {"competition":"<slug>"} for Kaggle) —
-    OR a path to an existing catalogue `task_file`; `settings` carries only the engine overrides
-    the goal implies (model, node budget, policy…), the rest fall back to the UI defaults."""
-    run_id: str = ""          # invented kebab-case run name (we slugify + de-dup server-side)
-    task: dict = {}           # inline COMPOSABLE task JSON (no `kind`) when authoring a fresh task
-    task_file: str = ""       # OR a path from the catalogue (preferred when one matches)
-    settings: dict = {}       # engine overrides only (llm_model, max_nodes, n_seeds, policy, …)
-    rationale: str = ""       # one-line why-this-plan
-    reply: str = ""           # conversational message to show in the genesis chat
-    # Adaptation checklist: concrete steps the operator must take to make their target ready (chiefly
-    # for kind="repo" — expose a metric, pin deps, choose the edit surface, protect the grader…). The
-    # UI renders these as a to-do list under the spec card. Empty for a ready-to-run catalogue task.
-    setup_steps: list[str] = []
 
 
 def build_router(srv) -> APIRouter:

@@ -180,7 +180,7 @@ class HoldoutGrader:
                 gap = (n.metric - m) if state.direction == "max" else (m - n.metric)
             async with self._e._write_lock:
                 self._e.store.append(EV_HOLDOUT_EVALUATED, {
-                    "node_id": nid, "attempt": n.attempt,           # P0-1 attempt guard
-                    "search_epoch": state.search_epoch,            # P0-2 per-epoch holdout guard
+                    "node_id": nid, "generation": n.attempt,
+                    "search_epoch": state.search_epoch,
                     "metric": m, "gap": gap,
                     "n_holdout": len(self._e._holdout_idx)})

@@ -1,12 +1,15 @@
 {
+  "ablate_request_generations": [],
   "ablate_requests": [],
   "ablations": [],
   "aborted_nodes": [],
   "active_strategy": null,
   "agent_decisions": [],
   "annotations": {},
+  "approval_generation": null,
   "approval_subject": null,
   "approved": false,
+  "approved_node_id": null,
   "archive": {
     "elites": [
       {
@@ -84,10 +87,12 @@
   "building": null,
   "champion": null,
   "config_hash": "1f0bc827ac74",
+  "confirm_request_generations": [],
   "confirm_requests": [],
   "confirm_seed_results": {},
   "confirmed_done": false,
   "confirmed_forced": [],
+  "confirmed_forced_generations": [],
   "coverage_snapshots": [
     {
       "at_node": 3,
@@ -121,6 +126,7 @@
   "eval_seconds_by_kind": {
     "node": 0.273
   },
+  "finalized_finish_seq": 43,
   "finished": true,
   "foresight_selected": [],
   "fork_requests": [],
@@ -138,9 +144,14 @@
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
+  "last_finish_seq": 43,
+  "last_resume_launch_seq": 0,
+  "last_resume_launch_ts": 0.0,
+  "last_resume_request_mode": "resume",
   "last_resume_request_seq": 0,
   "last_resume_request_ts": 0.0,
   "last_resume_served_seq": 0,
+  "last_stop_request_seq": -1,
   "leakage": null,
   "lessons_distilled": [
     {
@@ -649,6 +660,8 @@
     }
   },
   "novelty_events": [],
+  "pause_generation": null,
+  "pause_node_id": null,
   "paused": false,
   "pending_hints": [],
   "pending_strategy": null,

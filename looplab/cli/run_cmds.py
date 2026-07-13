@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import time
 from typing import Optional
 
 import anyio
@@ -17,10 +18,11 @@ from pydantic import ValidationError
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.config import Settings
-from looplab.events.eventstore import EventStore
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.types import (EV_APPROVAL_GRANTED, EV_PAUSE, EV_RESUME, EV_RESUME_SERVED,
                                   EV_RUN_ABORT, EV_RUN_FINISHED, EV_RUN_REOPENED, EV_SPEC_APPROVED)
 from looplab.engine.orchestrator import Engine
+from looplab.engine.finalize import finalize_run
 from looplab.events.replay import fold
 from looplab.adapters.tasks import validate_task
 from looplab.core import appconfig
@@ -48,6 +50,7 @@ def make_llm_client(*args, **kwargs):
 def _run_engine_guarded(eng: Engine):
     """Drive the engine loop to completion, funneling any fatal abort into a terminal event.
     Shared by `run` and `resume` (previously duplicated verbatim in both)."""
+    started = time.time()
     try:
         return anyio.run(eng.run)
     except Exception as e:  # noqa: BLE001 - any fatal abort (e.g. an unreachable LLM endpoint
@@ -56,10 +59,56 @@ def _run_engine_guarded(eng: Engine):
         # the traceback still lands in engine.stderr.log. (A user Ctrl-C / cancel is BaseException,
         # not Exception, so an intentional stop stays resumable.)
         try:
-            eng.store.append(EV_RUN_FINISHED, {"reason": "error", "error": str(e)[:500]})
-        except Exception:  # noqa: BLE001 - best-effort; never mask the original failure
+            error_text = str(e)[:500]
+        except BaseException:  # an adversarial __str__ must not replace the root exception
+            error_text = type(e).__name__
+        error = {"reason": "error", "error": error_text}
+        try:
+            events = eng.store.read_all()
+            current = fold(events)
+            if not current.finished:
+                after_seq = events[-1].seq if events else -1
+                try:
+                    eng._finish_with_report_if_quiescent(
+                        current, error, after_seq=after_seq)
+                except Exception:  # noqa: BLE001 - fall through to the minimal CAS finish
+                    pass
+                # Report generation itself may have appended before failing. Re-read and bind the
+                # fallback finish to the new tail so it is still the ordinary replay-checked CAS.
+                # A UI control can win one of these tail CAS attempts; bounded refold/retry prevents
+                # that benign race from leaving a fatal engine as a permanent zombie.
+                for _attempt in range(8):
+                    events = eng.store.read_all()
+                    current = fold(events)
+                    if current.finished:
+                        break
+                    after_seq = events[-1].seq if events else -1
+                    try:
+                        eng.store.append(
+                            EV_RUN_FINISHED,
+                            {**error, "after_seq": after_seq, "finalization_required": True},
+                            expected_last_seq=after_seq)
+                    except EventStoreConcurrencyError:
+                        continue
+                    except Exception:  # noqa: BLE001 - preserve the original failure
+                        break
+                    break
+            # `run_finished` and wrap-up are distinct durable boundaries. Even when the exception
+            # happened after the terminal append (or in an optional side effect), repair the exact
+            # pending finish before re-raising the ORIGINAL exception.
+            finalize_run(eng, entry_finished=current.finished, start_time=started)
+        except Exception:  # noqa: BLE001 - terminal recovery must never replace the root traceback
             pass
         raise
+
+
+def _pending_finalize(state) -> bool:
+    """A stop/finalize request is newer than the terminal finish that last served one."""
+    last_stop = state.last_stop_request_seq
+    if last_stop >= 0:
+        return last_stop > state.last_finish_seq
+    # Compatibility while folding logs written before the sequence field existed.
+    return bool(state.stop_requested and not state.finished)
 
 
 def _require_healthy_log(store: EventStore, run_dir: Path) -> None:
@@ -386,23 +435,42 @@ def resume(
     # appended run_abort then spawned us) must be RESPECTED: don't lift it, let the loop fold
     # stop_requested -> run_finished -> the wrap-up. This is why the UI's finalize path can spawn the
     # same `resume` command and still finalize.
-    prior = fold(eng.store.read_all())
-    if prior.stop_requested and not prior.finished:
-        typer.echo("run has a pending finalize — wrapping it up (report / cross-run lessons / cost)")
-    elif prior.paused or prior.finished:
-        typer.echo(f"run was {'finished' if prior.finished else 'stopped'} — resuming to continue "
-                   "with the current settings")
-        eng.store.append(EV_RESUME, {})
-    with _engine_singleton(run_dir) as ok:
-        if not ok:
+    # A direct CLI can arrive while the old owner is in the post-run finalization tail: replay already
+    # says finished/stopped, but engine.lock is still held. Returning there loses the user's continue
+    # intent. Only that stopped-state handoff waits; a second CLI against an actively working run still
+    # returns immediately. Re-fold between attempts so another owner that already lifted the gate wins.
+    initial = fold(eng.store.read_all())
+    wait_for_handoff = bool(initial.paused or initial.finished or initial.stop_requested)
+    while True:
+        with _engine_singleton(run_dir) as ok:
+            if ok:
+                # Lifecycle mutation belongs under singleton ownership. A losing CLI in an old
+                # engine's post-finish lock tail must not reopen the run without an owner.
+                prior = fold(eng.store.read_all())
+                if prior.stop_requested and not prior.finished:
+                    typer.echo(
+                        "run has a pending finalize — wrapping it up "
+                        "(report / cross-run lessons / cost)")
+                elif prior.paused or prior.finished:
+                    typer.echo(
+                        f"run was {'finished' if prior.finished else 'stopped'} — "
+                        "resuming to continue with the current settings")
+                    eng.store.append(EV_RESUME, {})
+                # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any
+                # outstanding durable resume intent. Seq-gated in the fold, so one serve satisfies
+                # all piled-up requests; a no-op for a direct CLI resume (no intent recorded).
+                if fold(eng.store.read_all()).resume_pending():
+                    eng.store.append(EV_RESUME_SERVED, {})
+                state = _run_engine_guarded(eng)
+                break
+        if not wait_for_handoff:
             typer.echo(f"engine already running on {run_dir} — not resuming a second loop")
             return
-        # P1-1: we hold the singleton lock and are about to drive the loop, so FULFILL any outstanding
-        # durable resume intent (/resume records one before spawning us). Seq-gated in the fold, so one
-        # serve satisfies all piled-up requests; a no-op for a direct CLI resume (no intent recorded).
-        if fold(eng.store.read_all()).resume_pending():
-            eng.store.append(EV_RESUME_SERVED, {})
-        state = _run_engine_guarded(eng)
+        current = fold(eng.store.read_all())
+        if not (current.paused or current.finished or current.stop_requested):
+            typer.echo(f"run {run_dir} was already resumed by the active engine")
+            return
+        time.sleep(0.05)
     _print_result(state)
 
 
@@ -422,7 +490,12 @@ def stop(run_dir: Path = typer.Argument(..., help="Run directory to STOP (freeze
 
 
 @app.command()
-def finalize(run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE (stop + wrap up).")):
+def finalize(
+    run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE (stop + wrap up)."),
+    task_file: Optional[Path] = typer.Option(
+        None,
+        help="Task file for wrap-up recovery. Defaults to the run's task.snapshot.json."),
+):
     """FINALIZE a run: stop it AND run the end-of-run wrap-up (report, cross-run lessons/case, cost
     roll-up, tree.html). Works whether the run is live or already `stop`ped. Idempotent."""
     if not (run_dir / "events.jsonl").exists():
@@ -430,16 +503,36 @@ def finalize(run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE
         raise typer.Exit(2)
     store = EventStore(run_dir / "events.jsonl")
     _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
-    store.append(EV_RUN_ABORT, {"reason": "finalized"})
-    # If no engine is driving the run, re-enter the loop ourselves so the wrap-up actually runs: the
-    # loop folds, sees stop_requested, appends run_finished and finalizes (report/lessons/…), then exits.
-    if fold(store.read_all()).finished:
-        typer.echo(f"finalized {run_dir}")
-        return
-    snap = run_dir / "task.snapshot.json"
+    # Record exactly one stop intent. The server may already have appended it before spawning this
+    # command; two direct CLIs can also race. A tail CAS makes both cases idempotent. A terminal run
+    # whose current finish is only partially finalized repairs that finish first instead of creating
+    # a spurious new stop/finish pair.
+    while True:
+        events = store.read_all()
+        before = fold(events)
+        if (before.finished and not before.finalization_pending()
+                and not _pending_finalize(before) and not before.resume_pending()):
+            # Already complete is a pure read/no-op. Appending a fresh run_abort here would leave a
+            # misleading last_stop_request_seq newer than last_finish_seq and make a later raw resume
+            # look like an unserved FINALIZE request.
+            typer.echo(f"finalized {run_dir}")
+            return
+        if before.finalization_pending() or _pending_finalize(before):
+            break
+        tail = events[-1].seq if events else -1
+        try:
+            store.append(
+                EV_RUN_ABORT, {"reason": "finalized"}, expected_last_seq=tail)
+            break
+        except EventStoreConcurrencyError:
+            continue
+    # Command functions are also part of the Python compatibility surface (`looplab.cli.finalize(rd)`
+    # in integrations/tests). In a direct call Typer leaves its OptionInfo default object in place;
+    # only an actual Path is an explicit override.
+    snap = task_file if isinstance(task_file, Path) else (run_dir / "task.snapshot.json")
     if not snap.exists():
         typer.echo(f"marked {run_dir} for finalize; a running engine will wrap it up "
-                   "(no task.snapshot.json here to drive the wrap-up directly)")
+                   f"(task file not found: {snap})")
         return
     settings = Settings()
     csnap = run_dir / "config.snapshot.json"
@@ -452,7 +545,27 @@ def finalize(run_dir: Path = typer.Argument(..., help="Run directory to FINALIZE
         if not ok:
             typer.echo(f"engine already running on {run_dir} — it will finalize on its next iteration")
             return
-        _run_engine_guarded(eng)
+        started = time.time()
+        current = fold(eng.store.read_all())
+
+        # The server records a durable wake intent before spawning this process. Once singleton
+        # ownership is ours, acknowledge it even when the run is already terminal; otherwise the
+        # resume reconciler would keep treating the successfully handled request as a zombie.
+        if current.resume_pending():
+            eng.store.append(EV_RESUME_SERVED, {})
+            current = fold(eng.store.read_all())
+
+        # Crash-boundary repair: an accepted run_finished without its exact marker must be wrapped up
+        # even though Engine.run() would immediately hit the terminal gate. This emits no resume event,
+        # so it cannot advance the search epoch or launch candidate work.
+        if current.finalization_pending():
+            finalize_run(eng, entry_finished=True, start_time=started)
+            current = fold(eng.store.read_all())
+
+        if not current.finished:
+            # Normal live/stopped path: the loop sees stop_requested at its first decision boundary,
+            # emits the common final report + run_finished, and performs the durable wrap-up.
+            _run_engine_guarded(eng)
     typer.echo(f"finalized {run_dir}")
 
 
@@ -484,7 +597,11 @@ def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval.
         typer.echo(f"run {run_dir.name} has no evaluated best node to approve yet "
                    "(nothing to approve — let a node evaluate first, or pass --node-id).")
         raise typer.Exit(2)
-    store.append(EV_APPROVAL_GRANTED, {"node_id": nid})
+    if nid in state.aborted_nodes:
+        typer.echo(f"node #{nid} in run {run_dir.name} is aborted — reset it before approval")
+        raise typer.Exit(2)
+    store.append(EV_APPROVAL_GRANTED,
+                 {"node_id": nid, "generation": state.nodes[nid].attempt})
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 

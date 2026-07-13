@@ -208,7 +208,11 @@ class EvalDispatchMixin:
         node like any other; the trials are audit/UI only. No usable trial -> no metric (the node
         fails like an empty run, so a sweep where every config crashed can't pass)."""
         from looplab.runtime.sandbox import _to_float
-        scored = [(t, _to_float(t.get("metric"))) for t in (res.trials or [])]
+        # Candidate stdout is untrusted input. A syntactically valid `{"trials":[1]}` must fail the
+        # node, not raise AttributeError in the host engine. Keep only object-shaped trial records;
+        # replay independently validates them into Trial models later.
+        trials = [t for t in (res.trials or []) if isinstance(t, dict)]
+        scored = [(t, _to_float(t.get("metric"))) for t in trials]
         scored = [(t, m) for t, m in scored if m is not None]
         if not scored:
             res.metric = None
@@ -217,5 +221,7 @@ class EvalDispatchMixin:
         best_t, best_m = chooser(scored, key=lambda tm: tm[1])
         res.metric = best_m
         extra = best_t.get("extra_metrics") or {}
+        if not isinstance(extra, dict):
+            extra = {}
         if extra:
             res.extra_metrics = {**(res.extra_metrics or {}), **extra}

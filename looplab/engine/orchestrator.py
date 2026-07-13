@@ -30,7 +30,7 @@ from looplab.events.types import (
     EV_NODE_BUILDING,
     EV_NODE_FAILED, EV_PAUSE,
     EV_POLICY_DECISION,
-    EV_RUN_FINISHED,
+    EV_RESUME_SERVED, EV_RUN_FINISHED,
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_APPROVED, EV_SPEC_PROPOSED,
@@ -438,6 +438,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # incomparable. `_build_holdout_idx` rebuilds the partition from a fraction.
         self._holdout_fraction = float(holdout_fraction)
         self._holdout_idx: frozenset = self._build_holdout_idx(self._holdout_fraction)
+        self._holdout_epoch = 0
         # RepoTask (ADR-7): an existing repo the agent edits + a command-based eval.
         rs = getattr(task, "repo_spec", None)
         self._repo_spec: dict = rs() if callable(rs) else {}
@@ -473,6 +474,41 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         return self.workspace.materialize(node, workdir)
 
     # ------------------------------------------------------------ loop control
+    def _finish_if_quiescent(self, data: dict, *, after_seq: int) -> bool:
+        """Append a natural finish only if no external event slipped in after the decision snapshot.
+
+        `after_seq` turns the append into an event-log compare-and-set: replay rejects the finish when
+        an inject/reset/budget/control event won the race. The caller then keeps looping and serves it.
+        """
+        finished = self.store.append(
+            EV_RUN_FINISHED,
+            {**data, "after_seq": after_seq, "finalization_required": True},
+        )
+        # The physical sequence is the CAS authority: replay accepts this modern finish iff it is
+        # exactly adjacent to `after_seq`. Re-folding here is both redundant and dangerous — this
+        # method is the defense against a broken/resource-starved fold returning an empty state. If
+        # that same broken fold decides whether the guard succeeded, the engine appends accepted
+        # run_finished events forever in a synchronous busy loop that async cancellation cannot stop.
+        # A concurrent control wins by taking `after_seq + 1`, so our assigned seq is larger and we
+        # correctly return False; the next iteration then serves that control.
+        return finished.seq == after_seq + 1
+
+    def _finish_with_report_if_quiescent(
+            self, state: RunState, data: dict, *, after_seq: int) -> bool:
+        """Write the configured final report and finish as one adjacency-checked CAS chain.
+
+        Every real completion path uses this helper. If an operator/control event lands before,
+        during, or after the potentially slow report generation, sequence adjacency fails and the
+        loop refolds instead of publishing a stale report or swallowing the new intent.
+        """
+        finish_after_seq = after_seq
+        if self.report_writer is not None and self.report_every > 0:
+            _reported, report_seq = self._write_report_with_seq(state, trigger="finish")
+            if report_seq != after_seq + 1:
+                return False
+            finish_after_seq = report_seq
+        return self._finish_if_quiescent(data, after_seq=finish_after_seq)
+
     async def run(self) -> RunState:
         state = fold(self.store.read_all())
         self._setup_phase(state)
@@ -487,33 +523,57 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         _created_no_terminal = 0
         _prev_terminal = -1
         while True:
-            state = fold(self.store.read_all())
+            decision_events = self.store.read_all()
+            state = fold(decision_events)
+            decision_seq = decision_events[-1].seq if decision_events else -1
+            if state.search_epoch != self._holdout_epoch:
+                # A reset/new candidate can win the finish race AFTER holdout disclosure while this
+                # same Engine process stays alive. Rebuild immediately; waiting for a CLI re-entry
+                # would stamp epoch-N events while still scoring the epoch-(N-1) partition.
+                self._holdout_epoch = state.search_epoch
+                self._holdout_idx = self._build_holdout_idx(
+                    self._holdout_fraction, self._holdout_epoch)
+            # `/resume` records a durable request even when this process is already alive. A live
+            # loop acknowledges it only when it can actually re-enter work; terminal/HITL/pause gates
+            # leave it pending so the post-exit waiter (or on-load reconciler) spawns a fresh CLI,
+            # whose normal resume path lifts the appropriate gate.
+            if state.resume_pending() and not state.finished and not state.paused:
+                self.store.append(EV_RESUME_SERVED, {})
+                continue
+            # Terminal/operator gates precede ALL work, including reset rebuilds. An explicit pause
+            # must freeze a queued rerun; a scoped developer-crash pause must stop a stale reset batch.
+            if state.finished:
+                break
+            if isinstance(state.leakage, dict) and state.leakage.get("leak"):
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": "leakage"}, after_seq=decision_seq):
+                    break
+                continue
+            if state.stop_requested:
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": "aborted"}, after_seq=decision_seq):
+                    break
+                continue
+            if state.paused:
+                break
             # node_reset (operator "re-run this node from a stage"): a reset from implement/propose
             # re-develops the SAME node id IN PLACE before any other loop work, so it never mints a new
             # node. (An eval-reset needs no help here — the fold left it pending-with-code and the normal
             # eval dispatch below re-scores it.)
-            _resets = [n for n in state.nodes.values() if n.rerun_from in ("implement", "propose")]
+            _resets = [n for n in state.nodes.values()
+                       if n.rerun_from in ("implement", "propose")
+                       and n.status is NodeStatus.pending and not n.tombstoned
+                       and n.id not in state.aborted_nodes]
             if _resets:
-                for _n in _resets:
-                    self._rerun_node(_n, state)
+                # One rebuild per fold. A developer crash can auto-pause the first node, and a reset/
+                # abort can change the rest while it is building; never process a stale whole batch.
+                self._rerun_node(_resets[0], state)
                 continue
             _terminal_now = sum(1 for _n in state.nodes.values()
                                 if _n.status is not NodeStatus.pending)
             if _terminal_now != _prev_terminal:      # a node reached terminal (progress) -> reset
                 _created_no_terminal = 0
                 _prev_terminal = _terminal_now
-            if state.finished:
-                break
-            # Live operator control (UI intervention via the event log). The UI appends a
-            # control event; the engine — sole writer of domain events — reads the intent here
-            # and writes the effect. `run_abort` terminates (resumable=no); `pause` breaks
-            # WITHOUT finishing (a later `resume` event + re-entering run() continues), the same
-            # files-as-truth shape as the HITL approval gate below.
-            if state.stop_requested:
-                self.store.append(EV_RUN_FINISHED, {"reason": "aborted"})
-                break
-            if state.paused:
-                break
             # Onboarding pre-phase (Phase 3, ADR-7): the agent proposes a trusted eval
             # spec + metric adapter; a human ratifies it once (or autonomous auto-confirms);
             # then it's frozen + protected and the optimization loop trusts it.
@@ -549,20 +609,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             max_s, max_es = self._apply_control_overrides(state)
             # Budget (I13): per-invocation wall-clock ceiling (resets on each resume).
             if max_s is not None and (time.time() - start) >= max_s:
-                self.store.append(EV_RUN_FINISHED, {"reason": "time_budget"})
-                break
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": "time_budget"}, after_seq=decision_seq):
+                    break
+                continue
             # Eval-compute budget (#2): cumulative time spent inside evals across the whole run
             # (persisted via the event log, so it survives resume — unlike wall-clock). Stops
             # the silent multi-hour sweep that real training runs can produce.
             if (max_es is not None
                     and state.total_eval_seconds >= max_es):
-                self.store.append(EV_RUN_FINISHED, {"reason": "eval_budget"})
-                break
+                if self._finish_with_report_if_quiescent(
+                        state, {"reason": "eval_budget"}, after_seq=decision_seq):
+                    break
+                continue
 
             if await self._serve_forced_requests(state):
                 continue
 
             state = self._run_cadences(state)
+            post_cadence_events = self.store.read_all()
+            post_cadence_seq = post_cadence_events[-1].seq if post_cadence_events else -1
+            if post_cadence_seq != decision_seq:
+                # Re-enter every gate after either an internal cadence append or a concurrent control.
+                continue
 
             # Effective node budget: a `budget_extend` with add_nodes (e.g. "give the run 10 more
             # nodes") raises the policy's max_nodes so a reopened/resumed run keeps proposing
@@ -597,20 +666,29 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Approval flows through the event log (a UI/human appends
                 # `approval_granted`); the engine, sole writer of domain events, reads it.
                 if self.require_approval and not state.approved:
-                    if not state.awaiting_approval:
-                        best = state.best()
+                    best = state.best()
+                    # No real candidate can ever be approved. Do not create an impossible HITL gate;
+                    # fall through to the normal report/finalization path with an explicit reason.
+                    if best is not None and not state.awaiting_approval:
                         self.store.append(EV_APPROVAL_REQUESTED, {
-                            "node_id": best.id if best else None,
-                            "metric": best.metric if best else None})
-                    break  # awaiting approval -> stop without finishing
-                # Final report on clean completion: the confirm pass just ran, so the champion +
-                # robustness are settled — this is the definitive report (it reflects post-confirmation
-                # state a same-at_node cadence report wouldn't). Skip only when the cadence is off
-                # (report_every=0 = manual-only), so "manual only" stays truly call-free.
-                if self.report_writer is not None and self.report_every > 0:
-                    state = self._write_report(state, trigger="finish")
-                self.store.append(EV_RUN_FINISHED, {})
-                break
+                            "node_id": best.id, "generation": best.attempt,
+                            "metric": best.metric, "after_seq": decision_seq})
+                        # An abort/reset can win between the stale loop snapshot and this append. Fold
+                        # again and stop only if the exact lifecycle request actually landed; otherwise
+                        # keep the engine alive to select/confirm the remaining candidate set.
+                        requested = fold(self.store.read_all())
+                        if (not requested.awaiting_approval
+                                or requested.approval_subject != best.id
+                                or requested.approval_generation != best.attempt):
+                            continue
+                    if best is not None:
+                        break  # awaiting approval -> stop without finishing
+                finish_data = ({"reason": "no_eligible_candidate"}
+                               if state.best() is None else {})
+                if self._finish_with_report_if_quiescent(
+                        state, finish_data, after_seq=decision_seq):
+                    break
+                continue
 
             ablates = [a for a in actions if a["kind"] == "ablate"]
             if ablates:
@@ -633,9 +711,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # generously so operator injects / wide seed batches never false-trip.
                 _created_no_terminal += len(creates)
                 if _created_no_terminal > max(self.policy.max_nodes, 4) * 3 + 50:
-                    self.store.append(EV_RUN_FINISHED, {
-                        "reason": "stuck: node creation not converging (no node reached terminal)"})
-                    break
+                    if self._finish_with_report_if_quiescent(state, {
+                            "reason": "stuck: node creation not converging (no node reached terminal)"},
+                            after_seq=decision_seq):
+                        break
+                    continue
                 self._create_paused = False   # set by _create_node's developer_crash circuit-breaker
                 for a in creates:
                     if "_scores" in a:   # policy exposed candidate scores -> surface "why this node"
@@ -785,12 +865,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     _ev("data_profiled"); _su_step("data profiled")
                 # Leakage-first grounding (I9): if the task exposes split/feature/target/time
                 # data and a leak is detected, refuse to run — don't produce results on leaky data.
-                if self._leakage_blocks():
-                    self.store.append(EV_RUN_FINISHED, {"reason": "leakage"})
+                leakage_blocked = self._leakage_blocks()
             # P0-3: bind this completion to the material it verified (reuse the wf computed above), so a
             # later resume can tell "done for THIS material" from "done for material that has changed".
             self.store.append(EV_SETUP_FINISHED, {"seconds": round(time.time() - _su_t0, 3),
                                                   "manifest": self._setup_manifest(wf=wf)})
+            if leakage_blocked:
+                # Preserve `_setup_phase`'s direct-call contract while using the same final-report
+                # CAS as every other completion. If a control races this append, run()'s top-level
+                # leakage gate refolds and retries instead of losing the intent.
+                setup_events = self.store.read_all()
+                setup_state = fold(setup_events)
+                setup_seq = setup_events[-1].seq if setup_events else -1
+                self._finish_with_report_if_quiescent(
+                    setup_state, {"reason": "leakage"}, after_seq=setup_seq)
         elif self._repo_spec and state.workspace and not state.workspace_changed:
             # Resume (item #4): the editable workspace is copied fresh each node, so if the
             # operator's repo changed since the run started, later nodes silently evaluate a
@@ -827,6 +915,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # seen exam'). Epoch 0 rebuilds the byte-identical original partition, so a normal
             # single-epoch run (and every replay of an existing log) is unchanged.
             self._holdout_idx = self._build_holdout_idx(self._holdout_fraction, _entry.search_epoch)
+            self._holdout_epoch = _entry.search_epoch
         # E4: cross-run meta-learned priors. Excluding THIS run's id matters on resume: a run that
         # already mid-run-distilled its own comparative lessons (M6) must not read them back as if
         # they were another run's experience — its own results are already in the digest. The stamp
@@ -874,9 +963,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if len(state.fork_requests) > state.forks_done:
             req = state.fork_requests[state.forks_done]
             pid = req.get("from_node_id")
-            if pid in state.nodes:
-                self._create_node({"kind": "improve", "parent_id": pid})  # operator-seeded branch
-            self.store.append(EV_FORK_DONE, {"from_node_id": pid})         # always advance the gate
+            generation = req.get("generation")
+            current = state.nodes.get(pid)
+            # Unstamped queued-before-create requests are historical and bind when their node appears.
+            # Every modern producer stamps, so explicit generations remain strict CAS.
+            served = (current is not None and not current.tombstoned
+                      and pid not in state.aborted_nodes
+                      and (generation is None or current.attempt == generation))
+            if served:
+                generation = current.attempt
+                self._create_node({"kind": "improve", "parent_id": pid,
+                                   "parent_generations": {str(pid): generation}})
+            self.store.append(EV_FORK_DONE, {
+                "from_node_id": pid, "generation": generation,
+                **({} if served else {"skipped": "stale_generation"})})  # always advance the gate
             return True
         # Operator-authored experiment (manual tree edit): the human hand-adds a node (an idea
         # + optional parent + optional ready-made code). Materialize it into a real pending node;
@@ -893,18 +993,46 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                   {"idx": state.injects_done, "error": str(e)[:500]})
             self.store.append(EV_INJECT_DONE, {"idx": state.injects_done})
             return True
-        forced_ablate = next((p for p in state.ablate_requests
-                              if p in state.nodes
-                              and not any(a.get("parent_id") == p for a in state.ablations)), None)
+        forced_ablate = next((r for r in state.ablate_request_generations
+                              if r.get("node_id") in state.nodes
+                              and r.get("node_id") not in state.aborted_nodes
+                              and not state.nodes[r["node_id"]].tombstoned
+                              and state.nodes[r["node_id"]].attempt == r.get("generation")
+                              and not any(a.get("parent_id") == r["node_id"]
+                                          and a.get("generation") == r.get("generation")
+                                          for a in state.ablations)), None)
+        if forced_ablate is None:
+            legacy_ablate = next((p for p in state.ablate_requests
+                                  if p in state.nodes
+                                  and p not in state.aborted_nodes
+                                  and not state.nodes[p].tombstoned
+                                  and not any(a.get("parent_id") == p for a in state.ablations)), None)
+            if legacy_ablate is not None:
+                forced_ablate = {"node_id": legacy_ablate,
+                                  "generation": state.nodes[legacy_ablate].attempt}
         if forced_ablate is not None:
-            await self._ablate(forced_ablate)
+            await self._ablate(forced_ablate["node_id"],
+                               expected_generation=forced_ablate["generation"])
             return True
-        forced_confirm = next((n for n in state.confirm_requests
-                               if n in state.nodes
-                               and state.nodes[n].status is NodeStatus.evaluated
-                               and n not in state.confirmed_forced), None)
+        forced_confirm = next((r for r in state.confirm_request_generations
+                               if r.get("node_id") in state.nodes
+                               and r.get("node_id") not in state.aborted_nodes
+                               and not state.nodes[r["node_id"]].tombstoned
+                               and state.nodes[r["node_id"]].attempt == r.get("generation")
+                               and state.nodes[r["node_id"]].status is NodeStatus.evaluated
+                               and r not in state.confirmed_forced_generations), None)
+        if forced_confirm is None:
+            legacy_confirm = next((nid for nid in state.confirm_requests
+                                   if nid in state.nodes
+                                   and nid not in state.aborted_nodes
+                                   and not state.nodes[nid].tombstoned
+                                   and state.nodes[nid].status is NodeStatus.evaluated
+                                   and nid not in state.confirmed_forced), None)
+            if legacy_confirm is not None:
+                forced_confirm = {"node_id": legacy_confirm,
+                                  "generation": state.nodes[legacy_confirm].attempt}
         if forced_confirm is not None:
-            await self._confirm_node(state.nodes[forced_confirm])
+            await self._confirm_node(state.nodes[forced_confirm["node_id"]])
             return True
         return False
 
@@ -960,7 +1088,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             n = cur.nodes.get(a["node_id"])
             if n is not None and n.status is NodeStatus.pending:
                 self.store.append(EV_NODE_FAILED, {
-                    "node_id": a["node_id"], "error": "aborted by operator",
+                    "node_id": a["node_id"], "generation": n.attempt,
+                    "error": "aborted by operator",
                     "reason": "aborted", "eval_seconds": 0.0})
             return True
         return False
@@ -1181,6 +1310,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         state = fold(self.store.read_all())
         node_id = max(state.nodes, default=-1) + 1  # monotonic across the whole run -> unique
         kind = action["kind"]
+        _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
+                     else ([action["parent_id"]] if action.get("parent_id") is not None else []))
+        # Snapshot the exact parent lifecycles used below before any slow Researcher/Developer work.
+        # A forced fork may also carry the generation the operator inspected; reject it before build
+        # if reset already won the race. The same snapshot is embedded in node_created so replay makes
+        # the final check atomically against event order (closing the check->append TOCTOU gap).
+        raw_expected = action.get("parent_generations")
+        if raw_expected is not None and not isinstance(raw_expected, dict):
+            return
+        parent_generations: dict[str, int] = {}
+        for pid in _bparents:
+            parent = state.nodes.get(pid)
+            if parent is None or parent.tombstoned or pid in state.aborted_nodes:
+                return
+            if raw_expected is not None:
+                expected = raw_expected.get(str(pid), raw_expected.get(pid))
+                if isinstance(expected, bool):
+                    return
+                try:
+                    expected = int(expected)
+                except (TypeError, ValueError, OverflowError):
+                    return
+                if expected != parent.attempt:
+                    return
+            parent_generations[str(pid)] = parent.attempt
+        if raw_expected is not None and len(raw_expected) != len(parent_generations):
+            return
         # Phase-handoff ledger for THIS node build: propose → stages → plan → implement each distill
         # their transcript into a brief the next phase reads (see agents.agent.run_phase), so later
         # phases trust what earlier ones explored instead of re-reading the repo. Node-scoped (fresh
@@ -1192,8 +1348,6 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # so the UI shows it (and streams its live agent-trace) immediately, not only after the
             # minutes-long dev session ends with node_created. Transient marker (folds to st.building,
             # NOT st.nodes), so node-id allocation + resume are untouched; node_created supersedes it.
-            _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
-                         else ([action["parent_id"]] if action.get("parent_id") is not None else []))
             self.store.append(EV_NODE_BUILDING,
                               {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
             if kind == "draft":
@@ -1283,6 +1437,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 _ra = _m.get("at_node")
                 if _ra is not None and _ra <= node_id < _ra + 2:
                     research_origin = {"at_node": _ra, "trigger": _m.get("trigger")}
+            latest = fold(self.store.read_all())
+            if any(pid not in latest.nodes
+                   or latest.nodes[pid].attempt != generation
+                   or latest.nodes[pid].tombstoned
+                   or pid in latest.aborted_nodes
+                   for pid, generation in ((int(pid), gen)
+                                           for pid, gen in parent_generations.items())):
+                # Clear the transient building marker without creating a child from abandoned code.
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": "parent lifecycle changed while building", "reason": "superseded",
+                    "eval_seconds": 0.0})
+                self._discard_node_build_telemetry()
+                return
             self._emit_node_created(
                 node_id=node_id,
                 parent_ids=parents,
@@ -1292,7 +1460,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 research_origin=research_origin,
+                **({"parent_generations": parent_generations} if parent_generations else {}),
             )
+            if node_id not in fold(self.store.read_all()).nodes:
+                self._discard_node_build_telemetry()
+                return
             # The Developer session CRASHED when its code is the "(developer error: …)" sentinel (an
             # exception in _run — e.g. an LLM 401/timeout). FAIL the node now: without this it stays
             # pending, and the eval runs the PARENT's carried-over entrypoint and inherits the PARENT's
@@ -1300,7 +1472,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # the parent's 0.81 this way). node_created → node_failed keeps the one-terminal invariant.
             if isinstance(code, str) and code.startswith("(developer error:"):
                 self.store.append(EV_NODE_FAILED, {
-                    "node_id": node_id, "error": code, "reason": "developer_crash",
+                    "node_id": node_id, "generation": 0,
+                    "error": code, "reason": "developer_crash",
                     "eval_seconds": 0.0})
                 # Circuit-breaker — PAUSE on the FIRST developer_crash. A developer_crash means the
                 # Developer couldn't finish THIS node even after the LLM client's own within-call retries
@@ -1310,12 +1483,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # dead nodes (the 403 blowout spun 67 of them). Freeze (not finish) so a plain `resume`
                 # continues once the cause is resolved — no premature report/lessons.
                 self.store.append(EV_PAUSE, {
+                    "node_id": node_id, "generation": 0,
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                               "unresolved within the node) — resume once it's fixed"})
                 self._create_paused = True   # tell the create-batch loop to STOP after this node
         self._emit_agent_report(node_id)
-        self._emit_hypothesis_ranked(node_id)
-        self._emit_foresight_selected(node_id)
+        self._emit_hypothesis_ranked(node_id, 0)
+        self._emit_foresight_selected(node_id, 0)
 
     def _rerun_node(self, node: Node, state: RunState) -> None:
         """node_reset "propose"/"implement": re-run this EXISTING node id IN PLACE (never mints a new
@@ -1325,12 +1499,26 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         reset (clearing the rerun marker), the node goes pending-with-code, and the eval loop scores it
         next. Same developer-crash circuit-breaker as a first build. (An "eval" reset never reaches here —
         the fold left it pending-with-code and the eval dispatch re-scores it directly.)"""
+        if (node.id in state.aborted_nodes or node.tombstoned
+                or node.status is not NodeStatus.pending):
+            return
         stage = node.rerun_from
         parents = list(node.parent_ids)
         parent = state.nodes.get(parents[0]) if parents else None
+        generation = node.attempt
+        parent_generations = {str(pid): state.nodes[pid].attempt for pid in parents
+                              if pid in state.nodes}
+        if len(parent_generations) != len(parents) or any(
+                pid in state.aborted_nodes or state.nodes[pid].tombstoned for pid in parents):
+            self.store.append(EV_NODE_FAILED, {
+                "node_id": node.id, "generation": generation,
+                "error": "parent is missing or aborted", "reason": "parent_unavailable",
+                "eval_seconds": 0.0})
+            return
         with self.tracer.span("create_node", new_trace=True, node_id=node.id, operator=node.operator):
             self.store.append(EV_NODE_BUILDING,
-                              {"node_id": node.id, "operator": node.operator, "parent_ids": parents})
+                              {"node_id": node.id, "generation": node.attempt,
+                               "operator": node.operator, "parent_ids": parents})
             # "propose" re-proposes (draft/improve/debug); a merge node has no single proposable idea
             # (it's an ensemble of parents), so a propose-reset there degrades to re-implement.
             if stage == "propose" and node.operator != "merge":
@@ -1343,23 +1531,47 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # §1: a reset RE-BUILDS the node from scratch, so standing operator directives must
                 # steer its code too — same as the four _create_node build sites.
                 code = self._implement(self._directed_idea(idea, state), parent)
+            latest = fold(self.store.read_all())
+            current = latest.nodes.get(node.id)
+            parents_current = all(
+                pid in latest.nodes and latest.nodes[pid].attempt == parent_generation
+                and pid not in latest.aborted_nodes and not latest.nodes[pid].tombstoned
+                for pid, parent_generation in ((int(pid), gen)
+                                                for pid, gen in parent_generations.items()))
+            if (current is None or current.attempt != generation
+                    or current.tombstoned or node.id in latest.aborted_nodes or not parents_current):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node.id, "generation": generation,
+                    "error": "node lifecycle changed while rebuilding", "reason": "superseded",
+                    "eval_seconds": 0.0})
+                self._discard_node_build_telemetry()
+                return
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
                 idea=idea.model_dump(mode="json"), code=code,
                 files=getattr(self.developer, "last_files", {}) or {},
-                deleted=getattr(self.developer, "last_deleted", []) or [])
+                deleted=getattr(self.developer, "last_deleted", []) or [],
+                generation=generation,
+                **({"parent_generations": parent_generations} if parent_generations else {}))
+            landed = fold(self.store.read_all()).nodes.get(node.id)
+            if (landed is None or landed.attempt != generation or landed.rerun_from is not None
+                    or landed.code != code):
+                self._discard_node_build_telemetry()
+                return
             if isinstance(code, str) and code.startswith("(developer error:"):
                 self.store.append(EV_NODE_FAILED, {
-                    "node_id": node.id, "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
+                    "node_id": node.id, "generation": generation,
+                    "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
                 self.store.append(EV_PAUSE, {
+                    "node_id": node.id, "generation": generation,
                     "reason": "auto-paused: a Developer session crashed (LLM unreachable or a hard error, "
                               "unresolved within the node) — resume once it's fixed"})
-        self._emit_agent_report(node.id)
+        self._emit_agent_report(node.id, generation)
         # Consume the predictive telemetry for THIS node too: a "propose" reset re-runs the researcher
         # (setting last_hyp_priority/last_foresight), so without consuming it here the pick set would
         # leak onto the NEXT _create_node's id — the exact mis-attribution _emit_role_telemetry prevents.
-        self._emit_hypothesis_ranked(node.id)
-        self._emit_foresight_selected(node.id)
+        self._emit_hypothesis_ranked(node.id, generation)
+        self._emit_foresight_selected(node.id, generation)
 
     def _create_injected_node(self, req: dict) -> None:
         """Materialize an operator-authored experiment (`inject_node` control event) into a real
@@ -1394,6 +1606,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         else:
             pid = req.get("parent_id")
             parents = [pid] if pid is not None and pid in state.nodes else []
+        unavailable = [pid for pid in parents
+                       if state.nodes[pid].tombstoned or pid in state.aborted_nodes]
+        if unavailable:
+            raise ValueError(f"parent node(s) unavailable: {unavailable}")
+        parent_generations = {str(pid): state.nodes[pid].attempt for pid in parents}
+        expected_parent_generations = req.get("parent_generations")
+        if expected_parent_generations is not None:
+            if not isinstance(expected_parent_generations, dict):
+                raise ValueError("parent_generations must be an object")
+            if len(expected_parent_generations) != len(parent_generations):
+                raise ValueError("parent generation snapshot does not match parents")
+            for pid, generation in parent_generations.items():
+                if expected_parent_generations.get(pid) != generation:
+                    raise ValueError(f"stale parent generation for node #{pid}")
         code = req.get("code")
         # U3 real merge: two parents + a merge operator + no ready-made code => build the idea via the
         # engine's own merge/ensemble path (code recombination), identical to a policy-driven merge —
@@ -1412,6 +1638,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # base) — hand the parent's solution to a parent-aware developer.
                     _pnode = state.nodes.get(parents[0]) if parents else None
                     code = self._implement(idea, _pnode)
+            latest = fold(self.store.read_all())
+            if any(pid not in latest.nodes
+                   or latest.nodes[pid].attempt != generation
+                   or latest.nodes[pid].tombstoned
+                   or pid in latest.aborted_nodes
+                   for pid, generation in ((int(pid), gen)
+                                           for pid, gen in parent_generations.items())):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": "parent lifecycle changed while building", "reason": "superseded",
+                    "eval_seconds": 0.0})
+                self._discard_node_build_telemetry()
+                return
             self._emit_node_created(
                 node_id=node_id,
                 parent_ids=parents,
@@ -1425,6 +1664,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                        or ({} if req.get("code") else getattr(self.developer, "last_files", {}))) or {},
                 deleted=req.get("deleted") or [],
                 source="manual",
+                **({"parent_generations": parent_generations} if parent_generations else {}),
                 # Cross-run provenance: a DICT when this inject seeded from a sibling run's
                 # experiment (an `import` action), else None. Coerce defensively — a non-dict
                 # origin (a hand-authored/API inject that passed a label string) would make the
@@ -1432,11 +1672,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # re-creating the SAME node id forever.
                 origin=req.get("origin") if isinstance(req.get("origin"), dict) else None,
             )
+            if node_id not in fold(self.store.read_all()).nodes:
+                self._discard_node_build_telemetry()
+                return
         if not req.get("code"):
             self._emit_agent_report(node_id)
             # consume predictive telemetry for this node so it can't leak onto the next created node
-            self._emit_hypothesis_ranked(node_id)
-            self._emit_foresight_selected(node_id)
+            self._emit_hypothesis_ranked(node_id, 0)
+            self._emit_foresight_selected(node_id, 0)
 
     def _activate_spec(self, proposal: dict) -> None:
         """Make the ratified onboarding proposal the trusted eval (Phase 3): the eval_spec

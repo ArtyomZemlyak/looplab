@@ -120,6 +120,30 @@ def test_truncate_history_shrinks_tool_call_arguments():
     assert len(shrunk) < 5000 and "__elided_arguments_chars__" in shrunk
 
 
+def test_truncate_history_meets_target_with_many_small_tool_arguments():
+    """Aggregate compaction must not depend on one call crossing per_msg_cap. Real tool loops often
+    accumulate many modest JSON argument blobs; together they can overflow the context by thousands
+    of chars even though every individual call is below 400 chars."""
+    calls = [
+        {"role": "assistant", "content": "",
+         "tool_calls": [{"id": str(i), "function": {
+             "name": "read_file", "arguments": '{"path":"' + ("x" * 260) + '"}'}}]}
+        for i in range(30)
+    ]
+    msgs = ([{"role": "system", "content": "task"}] + calls
+            + [{"role": "assistant", "content": "recent"},
+               {"role": "user", "content": "continue"}])
+    assert sum(_msg_chars(m) for m in msgs) > 8000
+
+    out = truncate_history(msgs, max_chars=2000, keep_last=2, per_msg_cap=400)
+
+    assert sum(_msg_chars(m) for m in out) <= 2000
+    assert out[0] == msgs[0] and out[-2:] == msgs[-2:]
+    assert any("__elided_arguments_chars__" in
+               m.get("tool_calls", [{}])[0].get("function", {}).get("arguments", "")
+               for m in out[1:-2])
+
+
 def test_shrunk_tool_call_arguments_stay_valid_json():
     """code-review: a tool call's `arguments` is a JSON string that a strict OpenAI-compatible gateway
     may re-validate on the NEXT request (the trimmed history is re-sent verbatim). Middle-truncating it

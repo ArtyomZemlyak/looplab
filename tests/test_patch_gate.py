@@ -119,6 +119,22 @@ def test_write_node_files_skips_solution_assets_and_escapes(tmp_path):
     assert not (tmp_path / "escape.py").exists()         # traversal blocked
 
 
+def test_fresh_materialize_removes_files_from_an_old_generation(tmp_path):
+    engine = Engine(tmp_path / "run", task=ToyTask.load(ROOT / "examples" / "toy_task.json"),
+                    researcher=None, developer=None, sandbox=SubprocessSandbox(),
+                    policy=GreedyTree(n_seeds=1, max_nodes=1))
+    wd = engine.run_dir / "nodes" / "node_0"
+    wd.mkdir(parents=True)
+    (wd / "stale_helper.py").write_text("OLD", encoding="utf-8")
+    node = Node(id=0, operator="draft", idea=Idea(operator="draft"), code="print(1)",
+                files={"fresh_helper.py": "NEW"}, attempt=1)
+
+    engine._materialize(node, wd)
+
+    assert not (wd / "stale_helper.py").exists()
+    assert (wd / "fresh_helper.py").read_text(encoding="utf-8") == "NEW"
+
+
 def test_engine_protects_grader_asset_from_agent_overwrite(tmp_path):
     """Integrity: an agent that ships its own grader.py (in-surface *.py) must NOT be able
     to replace the task's private grader. Assets are written last and win."""

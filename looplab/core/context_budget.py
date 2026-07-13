@@ -55,7 +55,13 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         # the old `msize <= per_msg_cap` skip left the aggregate unbounded: a 2000-char target could
         # never be reached by many <=400-char turns). Compaction runs oldest-first and STOPS the moment
         # the running total is back under budget, so the most-recent context is preserved verbatim.
-        return f"…[elided {len(s)} chars]…" if len(s) > 24 else s
+        if len(s) > 24:
+            return f"…[elided {len(s)} chars]…"
+        # A sufficiently large history can exceed the aggregate target even when EVERY old turn is
+        # tiny (for example, many terse tool acknowledgements). Keeping <=24-char strings verbatim
+        # makes that target mathematically unreachable. Collapse any non-trivial stale string to one
+        # character when doing so actually saves space; protected system/recent turns stay untouched.
+        return "…" if len(s) > 1 else s
 
     def _mt_args(s: str) -> str:
         # A tool call's `arguments` is a JSON STRING that a strict OpenAI-compatible gateway may
@@ -65,7 +71,11 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         # replace an over-long blob with a COMPACT, still-valid JSON object recording the elided size —
         # the history keeps a syntactically valid tool call, just without the (never re-parsed by us)
         # payload. Only rewrites when it actually shrinks; the caller's size guard skips it otherwise.
-        return ('{"__elided_arguments_chars__": %d}' % len(s)) if len(s) > per_msg_cap else s
+        marker = '{"__elided_arguments_chars__": %d}' % len(s)
+        # Aggregate overflow is about the SUM, not an individual blob. A history containing many
+        # valid 200–300-char tool calls used to remain >4x over budget because each argument string
+        # sat below per_msg_cap. Elide any stale argument blob when the valid-JSON marker is smaller.
+        return marker if len(marker) < len(s) else s
 
     out: list[dict] = []
     for i, m in enumerate(messages):
@@ -87,9 +97,8 @@ def truncate_history(messages: list[dict], max_chars: int, *, keep_last: int = 2
         tcs = m.get("tool_calls")
         if tcs:   # shrink each past tool call's arguments (history context) to a VALID-JSON placeholder
             nm["tool_calls"] = [
-                ({**c, "function": {**((c or {}).get("function") or {}),
+                {**c, "function": {**((c or {}).get("function") or {}),
                                     "arguments": _mt_args(str(((c or {}).get("function") or {}).get("arguments") or ""))}}
-                 if len(str(((c or {}).get("function") or {}).get("arguments") or "")) > per_msg_cap else c)
                 for c in tcs]
         new_size = _msg_chars(nm)
         # For a message only marginally over the cap the marker overhead can make the rewrite LARGER

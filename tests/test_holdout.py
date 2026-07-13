@@ -186,6 +186,9 @@ def test_engine_holdout_phase_emits_events(tmp_path, holdout_select):
     assert final.holdout_evaluated_ids
     hn = [n for n in final.nodes.values() if n.holdout_metric is not None]
     assert hn and all(n.holdout_metric == pytest.approx(1.0) for n in hn)
+    holdout_events = [e for e in eng.store.read_all() if e.type == "holdout_evaluated"]
+    assert holdout_events and all(
+        e.data["generation"] == final.nodes[e.data["node_id"]].attempt for e in holdout_events)
     # replay reproduces the same state (replay-safe)
     st2 = fold(eng.store.read_all())
     assert st2.best_node_id == final.best_node_id
@@ -246,10 +249,17 @@ def test_confirm_seeds_start_at_base(tmp_path):
         return RunResult(exit_code=0, stdout="", stderr="", metric=1.0, timed_out=False)
 
     eng._run_eval = fake_run_eval
-    st = RunState(direction="min")
-    st.nodes[0] = __import__("looplab.core.models", fromlist=["Node"]).Node(
-        id=0, operator="draft", idea=Idea(operator="draft", params={}), metric=1.0,
-        status="evaluated")
+    # Confirmation is lifecycle-fenced against the durable log: a hand-built RunState that has no
+    # matching event history is intentionally treated as stale. Build the evaluated lifecycle the
+    # same way the engine does so this regression isolates only the disjoint seed range contract.
+    eng.store.append("run_started", {
+        "run_id": "run", "task_id": "t", "direction": "min"})
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": Idea(operator="draft", params={}).model_dump(mode="json"), "code": ""})
+    eng.store.append("node_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.0})
+    st = fold(eng.store.read_all())
     anyio.run(eng._confirm_phase, st)
     assert ran == [1, 2, 3]                    # disjoint from the search's implicit seed 0
 

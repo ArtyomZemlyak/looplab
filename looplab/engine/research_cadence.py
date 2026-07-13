@@ -223,11 +223,15 @@ class ResearchCadenceMixin:
     def _write_report(self, state: RunState, *, trigger: str) -> RunState:
         """Generate one run report and record it as a `report_generated` event, then re-fold. Never
         raises — the writer itself degrades to a minimal report on any failure."""
+        return self._write_report_with_seq(state, trigger=trigger)[0]
+
+    def _write_report_with_seq(self, state: RunState, *, trigger: str) -> tuple[RunState, int | None]:
+        """Write a report and return its event sequence for the natural-finish CAS."""
         if self.report_writer is None:
-            return state
+            return state, None
         with self.tracer.span("report", new_trace=True, trigger=trigger):
             content = self.report_writer.generate(state, trigger=trigger)
             # append INSIDE the span so report_generated is stamped with the report op-trace (UI scopes it).
-            self.store.append(EV_REPORT_GENERATED, {
+            event = self.store.append(EV_REPORT_GENERATED, {
                 "content": content, "at_node": content.get("at_node"), "trigger": trigger})
-        return fold(self.store.read_all())
+        return fold(self.store.read_all()), event.seq

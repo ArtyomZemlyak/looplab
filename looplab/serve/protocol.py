@@ -35,7 +35,7 @@ from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESUME, EV_RESUME_REQUESTED, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
 CONTROL_EVENTS = {
@@ -46,7 +46,6 @@ CONTROL_EVENTS = {
     EV_DEEP_RESEARCH,  # P2: operator asks the engine to run the Deep-Research stage now
     EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
     EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
-    EV_RESUME_REQUESTED,    # P1-1: durable resume intent recorded by /resume before spawning the engine
 }
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

@@ -1,6 +1,8 @@
 """I3 sandbox behavior + I10 variance-gate unit tests."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from looplab.trust.gate import one_se_better
@@ -153,3 +155,99 @@ def test_clamp_tail_bytes_respects_byte_budget_on_multibyte():
     s = "世" * 100                                              # 300 UTF-8 bytes
     out = _clamp_tail_bytes(s, 90)
     assert len(out.encode("utf-8")) <= 90                       # a plain [-90:] would keep 270 bytes
+
+
+@pytest.mark.parametrize("argv", [[], ["python", "bad\x00arg"]])
+def test_run_argv_reports_malformed_argv_as_launch_failure(tmp_path, argv):
+    """An agent-authored empty/NUL argv fails the node; it must not crash the engine process."""
+    from looplab.runtime.sandbox import run_argv
+
+    rc, out, err, timed_out = run_argv(argv, str(tmp_path), timeout=1)
+    assert rc == -1 and out == "" and not timed_out
+    assert "failed to launch" in err
+
+
+def test_tee_drain_reads_newline_free_output_in_bounded_chunks():
+    """A giant candidate-controlled line must never reach an unbounded readline() allocation."""
+    from looplab.runtime.sandbox import _tee_drain
+
+    class GuardedStream:
+        def __init__(self, payload: bytes):
+            self.payload = payload
+            self.pos = 0
+            self.requests = []
+
+        def read1(self, size: int) -> bytes:
+            self.requests.append(size)
+            chunk = self.payload[self.pos:self.pos + size]
+            self.pos += len(chunk)
+            return chunk
+
+        def readline(self, *_args, **_kwargs):
+            raise AssertionError("newline-free output must not use unbounded readline()")
+
+        def close(self):
+            pass
+
+    class Proc:
+        def __init__(self):
+            self.stdout = GuardedStream(b"x" * 1_000_000)  # deliberately no newline
+            self.stderr = GuardedStream(b"")
+            self.returncode = 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    proc = Proc()
+    rc, out, err, timed_out = _tee_drain(proc, None, 10.0, 1024, None)
+    assert rc == 0 and not timed_out and err == ""
+    assert proc.stdout.requests and max(proc.stdout.requests) == 64 * 1024
+    # Internal ring is allowed up to 2*max(4*requested, 256k); the public run_argv applies the
+    # tighter requested cap afterward. Most importantly, it never retains the whole 1 MB line.
+    assert 0 < len(out.encode("utf-8")) <= 512_000
+
+
+def test_run_argv_force_removes_daemon_container_after_cancel(tmp_path, monkeypatch):
+    """Killing `docker run` must also kill the daemon-owned container identified by --cidfile."""
+    import io
+    import subprocess
+    import threading
+
+    import looplab.runtime.sandbox as sb
+
+    cid = "a" * 64
+    seen = {"argv": None, "cleanup": None}
+
+    class Proc:
+        def __init__(self, argv, **_kwargs):
+            self.stdout = io.BytesIO(b"")
+            self.stderr = io.BytesIO(b"")
+            self.returncode = None
+            seen["argv"] = list(argv)
+            cpath = Path(argv[argv.index("--cidfile") + 1])
+            cpath.write_text(cid, encoding="ascii")
+
+        def wait(self, timeout=None):
+            if self.returncode is None:
+                raise subprocess.TimeoutExpired("docker", timeout)
+            return self.returncode
+
+    cancel = threading.Event()
+    cancel.set()
+    monkeypatch.setattr(sb.subprocess, "Popen", Proc)
+    monkeypatch.setattr(sb, "_kill_tree", lambda proc: setattr(proc, "returncode", -9))
+
+    def fake_run(argv, **_kwargs):
+        seen["cleanup"] = list(argv)
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(sb.subprocess, "run", fake_run)
+    rc, _out, _err, timed_out = sb.run_argv(
+        ["docker", "run", "--rm", "image", "python", "solution.py"],
+        str(tmp_path), timeout=30, cancel=cancel,
+    )
+
+    assert rc == -9 and timed_out
+    assert "--cidfile" in seen["argv"]
+    assert seen["cleanup"] == ["docker", "rm", "-f", cid]
+    assert not list(tmp_path.glob(".looplab-container-*.cid"))

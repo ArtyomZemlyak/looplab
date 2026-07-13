@@ -16,11 +16,12 @@ already maps `looplab.confirm` to trust/confirm.py. Layering: no runtime import 
 orchestrator (TYPE_CHECKING only) and never serve — only trust, events, core and stdlib."""
 from __future__ import annotations
 
+import threading
 import time
 
 import anyio
 
-from looplab.core.models import RunState
+from looplab.core.models import NodeStatus, RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_BEST_CONFIRMED, EV_CONFIRM_DONE, EV_CONFIRM_EVAL,
                                   EV_NODE_CONFIRMED, EV_SPEC_DRIFT)
@@ -36,31 +37,75 @@ class ConfirmPhaseMixin:
     def _already_confirmed(state: RunState) -> bool:
         return state.confirmed_done  # gated on completion, not on partial progress
 
+    def _confirmation_node_current(self, node_id: int, generation: int) -> bool:
+        state = fold(self.store.read_all())
+        node = state.nodes.get(node_id)
+        return (node is not None and node.attempt == generation
+                and node.status is NodeStatus.evaluated and not node.tombstoned
+                and node_id not in state.aborted_nodes)
+
+    def _confirmation_snapshot_current(self, generations: dict[str, int]) -> bool:
+        state = fold(self.store.read_all())
+        current = {str(node.id): node.attempt for node in state.nodes.values()
+                   if node.id not in state.aborted_nodes and not node.tombstoned}
+        return current == generations
+
     async def _run_confirm_seed(self, nd, s: int):
         """One confirm-seed evaluation of node `nd` under seed `s`: materialize a fresh confirm
         workdir, run the FULL-profile eval, and record the `confirm_eval` (+ any `spec_drift`)
         events — the per-seed body `_confirm_phase` and `_confirm_node` each ran verbatim before
         the extraction, so the event emission here is byte-identical for both callers. Returns
         the metric when the seed run was valid, else None (valid implies a non-None metric)."""
-        workdir = self.run_dir / "confirm" / f"node_{nd.id}_seed_{s}"
+        generation = nd.attempt
+        if not self._confirmation_node_current(nd.id, generation):
+            return None
+        # Generation-specific path: an old confirm subprocess can still be winding down when reset
+        # starts a fresh lifecycle. Sharing its directory would let stale predictions/checkpoints bleed
+        # into the new seed even though replay correctly rejects the old event.
+        workdir = self.run_dir / "confirm" / f"node_{nd.id}_g{generation}_seed_{s}"
         self._materialize(nd, workdir)
+        if not self._confirmation_node_current(nd.id, generation):
+            return None
         # Confirmation uses the FULL eval profile (robust check on the leaders),
         # regardless of the cheaper profile the Researcher used during search.
         _t0 = time.time()
         # Keep the per-seed events INSIDE the span so they carry its trace/span id
         # (events<->spans UI join), consistent with the _evaluate path.
         with self.tracer.span("confirm_seed", new_trace=True, node_id=nd.id, seed=s):
-            res = await anyio.to_thread.run_sync(
-                self._run_eval, nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full",
-            )
-            valid = res.metric is not None and res.exit_code == 0 and not res.timed_out
+            cancel = threading.Event()
+
+            async def _watch_lifecycle() -> None:
+                while not cancel.is_set():
+                    current = await anyio.to_thread.run_sync(
+                        self._confirmation_node_current, nd.id, generation)
+                    if not current:
+                        cancel.set()
+                        return
+                    await anyio.sleep(0.1)
+
+            def _run():
+                return self._run_eval(
+                    nd, str(workdir), {"LOOPLAB_EVAL_SEED": str(s)}, "full", cancel)
+
+            async with anyio.create_task_group() as tg:
+                tg.start_soon(_watch_lifecycle)
+                res = await anyio.to_thread.run_sync(_run)
+                cancel.set()
+                tg.cancel_scope.cancel()
+
+            current = self._confirmation_node_current(nd.id, generation)
+            valid = (current and res.metric is not None
+                     and res.exit_code == 0 and not res.timed_out)
             async with self._write_lock:            # confirm-seed eval cost (#2) + memo (#0)
                 self.store.append(EV_CONFIRM_EVAL, {
-                    "node_id": nd.id, "seed": s, "attempt": nd.attempt,   # P0-1 attempt guard
+                    "node_id": nd.id, "generation": generation, "seed": s,
                     "eval_seconds": round(time.time() - _t0, 3),
-                    "metric": res.metric if valid else None})
-                if res.drift is not None:           # Phase 4: drop + audit drifted seeds
-                    self.store.append(EV_SPEC_DRIFT, {"node_id": nd.id, "seed": s, **res.drift})
+                    "metric": res.metric if valid else None,
+                    **({"superseded": True} if not current else {})})
+                if current and res.drift is not None:  # Phase 4: drop + audit drifted seeds
+                    self.store.append(EV_SPEC_DRIFT,
+                                      {"node_id": nd.id, "seed": s, **res.drift,
+                                       "generation": generation})
         return res.metric if valid else None
 
     async def _confirm_phase(self, state: RunState) -> None:
@@ -77,9 +122,17 @@ class ConfirmPhaseMixin:
         evaluated = sorted(state.breedable_nodes(), key=lambda n: (n.metric, n.id),
                            reverse=(state.direction == "max"))
         topk = evaluated[: self.confirm_top_k]
+        # Snapshot EVERY extant lifecycle, not only top-k: a reset of an unconfirmed/pending node
+        # while this pass runs still changes the candidate epoch and must invalidate completion.
+        generations = {str(nd.id): nd.attempt for nd in state.nodes.values()
+                       if nd.id not in state.aborted_nodes and not nd.tombstoned}
         if not topk:
+            if not self._confirmation_snapshot_current(generations):
+                return
             async with self._write_lock:
-                self.store.append(EV_BEST_CONFIRMED, {"node_id": None, "significant": False})
+                self.store.append(EV_BEST_CONFIRMED,
+                                  {"node_id": None, "significant": False,
+                                   "generations": generations})
             return
 
         summaries: list[dict] = []
@@ -98,6 +151,9 @@ class ConfirmPhaseMixin:
         spent = fold(self.store.read_all()).total_eval_seconds
         must_confirm = min(2, len(topk))
         for i, nd in enumerate(topk):
+            if (not self._confirmation_snapshot_current(generations)
+                    or not self._confirmation_node_current(nd.id, nd.attempt)):
+                return
             if i >= must_confirm and max_es is not None and spent >= max_es:
                 break                                     # leaders confirmed; a resume extends the tail
             if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
@@ -119,7 +175,13 @@ class ConfirmPhaseMixin:
             for s in range(self.confirm_seed_base, self.confirm_seed_base + self.confirm_seeds):
                 if s in done:                         # already evaluated this seed earlier
                     continue
+                if (not self._confirmation_snapshot_current(generations)
+                        or not self._confirmation_node_current(nd.id, nd.attempt)):
+                    return
                 m = await self._run_confirm_seed(nd, s)
+                if (not self._confirmation_snapshot_current(generations)
+                        or not self._confirmation_node_current(nd.id, nd.attempt)):
+                    return
                 if m is not None:
                     scores.append(m)
             spent += time.time() - _t0        # accrue this node's confirm cost (avoids the O(n²) re-fold)
@@ -127,9 +189,11 @@ class ConfirmPhaseMixin:
                 summ = cv_summary(scores)
                 summaries.append({"node_id": nd.id, **summ})
                 async with self._write_lock:
+                    if (not self._confirmation_snapshot_current(generations)
+                            or not self._confirmation_node_current(nd.id, nd.attempt)):
+                        return
                     self.store.append(EV_NODE_CONFIRMED, {
-                        "node_id": nd.id, "attempt": nd.attempt,   # P0-1 attempt guard
-                        "mean": summ["mean"],
+                        "node_id": nd.id, "generation": nd.attempt, "mean": summ["mean"],
                         "std": summ["std"], "seeds": len(scores),
                     })
 
@@ -138,8 +202,13 @@ class ConfirmPhaseMixin:
             chosen, significant = sel["robust"]["node_id"], sel["significant"]
         else:
             chosen, significant = topk[0].id, False  # all seeds failed -> keep leader
+        if not self._confirmation_snapshot_current(generations):
+            return
         async with self._write_lock:
-            self.store.append(EV_BEST_CONFIRMED, {"node_id": chosen, "significant": significant})
+            if not self._confirmation_snapshot_current(generations):
+                return
+            self.store.append(EV_BEST_CONFIRMED, {
+                "node_id": chosen, "significant": significant, "generations": generations})
 
     async def _confirm_node(self, nd) -> None:
         """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed
@@ -147,12 +216,22 @@ class ConfirmPhaseMixin:
         emit `node_confirmed` — that would put this node into the robust-selection pool and could
         promote an otherwise-worse node to best. So a forced confirm informs the operator without
         altering deterministic best-selection. Replay-safe (gated on confirm_done + per-seed memo)."""
+        generation = nd.attempt
+        if not self._confirmation_node_current(nd.id, generation):
+            return
         state = fold(self.store.read_all())
         seeds = max(self.confirm_seeds, 3)
         done = state.confirm_seed_results.get(nd.id, {})
         for s in range(self.confirm_seed_base, self.confirm_seed_base + seeds):
             if s in done:
                 continue
+            if not self._confirmation_node_current(nd.id, generation):
+                return
             await self._run_confirm_seed(nd, s)
+            if not self._confirmation_node_current(nd.id, generation):
+                return
         async with self._write_lock:
-            self.store.append(EV_CONFIRM_DONE, {"node_id": nd.id})   # fulfill the request (gate)
+            if not self._confirmation_node_current(nd.id, generation):
+                return
+            self.store.append(EV_CONFIRM_DONE,
+                              {"node_id": nd.id, "generation": generation})  # fulfillment gate

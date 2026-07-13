@@ -244,6 +244,31 @@ class StrategyCadenceMixin:
     def _already_covered_at(state: RunState, n: int) -> bool:
         return any((c or {}).get("at_node") == n for c in state.coverage_snapshots)
 
+    @staticmethod
+    def _autonomous_strategy_already_recorded_at(state: RunState, n: int) -> bool:
+        """Whether the latest strategy action at this node count was autonomous.
+
+        A cadence can re-enter repeatedly without creating a node (for example, a strategy decision
+        requests Deep Research, whose completion appends another event).  Without a durable gate that
+        re-entry consults again at the same ``n``; a strategist that alternates two valid decisions then
+        appends forever.  ``strategy_history`` is replayed from the log, so the gate survives resume.
+
+        Operator pin re-assertions deliberately do *not* consume the autonomous slot.  Compare ordering,
+        not mere presence: if an operator decision is newer than an earlier autonomous decision at the
+        same ``n``, allow exactly one subsequent autonomous consult against the newly pinned state.
+        """
+        latest_operator = -1
+        latest_autonomous = -1
+        for index, entry in enumerate(state.strategy_history):
+            if (entry or {}).get("at_node") != n:
+                continue
+            strategy = (entry or {}).get("strategy") or {}
+            if strategy.get("source") == "operator":
+                latest_operator = index
+            else:
+                latest_autonomous = index
+        return latest_autonomous > latest_operator
+
     def _maybe_snapshot_coverage(self, state: RunState) -> RunState:
         """Record a `coverage_snapshot` (breadth read-model) at the strategist cadence, then re-fold.
         Recorded even when NO Strategist is wired, so the run's narrowing curve is always queryable
@@ -273,7 +298,9 @@ class StrategyCadenceMixin:
         pin = state.pending_strategy or {}
         raw_pin = {k: pin[k] for k in ("policy", "policy_params", "fidelity")
                    if pin.get(k) is not None}
-        consulting = self.strategist is not None and self._should_consult(state)
+        n = len(state.nodes)
+        consulting = (self.strategist is not None and self._should_consult(state)
+                      and not self._autonomous_strategy_already_recorded_at(state, n))
         active_core = self._strategy_core(state.active_strategy)
         # Cheap pre-check (no ctx/validate): a pin "drifts" if a raw pinned field differs from what's
         # active. For an INVALID pin this is a false alarm (it can never become active), so we still

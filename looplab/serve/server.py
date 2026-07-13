@@ -19,11 +19,13 @@ the `looplab.server.make_llm_client` monkeypatch point keep working).
 """
 from __future__ import annotations
 
+import html as _html
 import logging
 import os
 import subprocess  # noqa: F401 — kept as a module attribute: tests patch `looplab.server.subprocess.Popen`
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 # The wire-protocol names this server shares with the TUI + React UI live in `serve/protocol.py`.
 # CONTROL_EVENTS and POLL_SECONDS are re-exported here (imported, not aliased) so the historical
@@ -34,8 +36,10 @@ from looplab.serve.protocol import CONTROL_EVENTS, POLL_SECONDS  # noqa: F401 �
 # this module (`AppState.make_llm_client`), so the single historical patch point still covers them.
 from looplab.adapters.tasks import make_llm_client  # noqa: F401 — patchable re-export
 from looplab.serve.engine_proc import (  # noqa: F401 — _engine_alive/_kill_process_tree re-exported
-    _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks)
+    _engine_alive, _kill_process_tree, _on_shared_hub, install_reap_hooks,
+    install_resume_reconcile_hooks)
 from looplab.serve.projects import ProjectStore
+from looplab.serve.schemas import _GenesisSpec  # noqa: F401 — historical pure-model re-export
 from looplab.serve.settings_store import SettingsStore
 
 _log = logging.getLogger("looplab.server")
@@ -46,24 +50,15 @@ try:
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
-except ModuleNotFoundError as e:  # pragma: no cover - exercised only without the extra
-    raise ModuleNotFoundError(
-        "The LoopLab UI server needs the [ui] extra: pip install 'looplab[ui]' "
-        "(fastapi + uvicorn)."
-    ) from e
+except ModuleNotFoundError as e:  # allow importing pure re-exports without the [ui] extra
+    if e.name != "fastapi":
+        raise
+    FastAPI = Request = CORSMiddleware = FileResponse = HTMLResponse = JSONResponse = StaticFiles = None  # type: ignore[assignment,misc]
 
-from looplab.serve.appstate import AppState
-from looplab.serve.jobs import JobRegistry
-from looplab.serve import jobs as _jobs_router
-from looplab.serve.routers import (
-    assistant as _assistant_router, boss as _boss_router, control as _control_router,
-    genesis as _genesis_router, misc as _misc_router, org as _org_router,
-    reports as _reports_router, runs as _runs_router)
 # Historical `looplab.server.<name>` import paths for the boss/genesis models + mappers (tests and
 # operator tooling import these from here; the definitions moved with their routes).
 from looplab.serve.routers.boss import (  # noqa: F401 — re-exports
     _Action, _Plan, _action_to_control, _plan_to_actions)
-from looplab.serve.routers.genesis import _GenesisSpec  # noqa: F401 — re-export
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
 from looplab.events.digest import theme_rollup as _theme_rollup  # noqa: F401 — re-export
@@ -90,7 +85,52 @@ _RAW_GET_SUFFIX = ("/artifact", "/artifacts", "/log", "/logs", "/agents_md", "/c
 _RAW_GET_EXACT = ("/api/prompts", "/api/skills", "/api/knowledge", "/api/memory", "/api/llm/health")
 
 
+def _ui_extra_error(missing: str) -> ModuleNotFoundError:
+    return ModuleNotFoundError(
+        "The LoopLab UI server needs the [ui] extra: pip install 'looplab[ui]' "
+        "(fastapi + uvicorn).",
+        name=missing,
+    )
+
+
+def _origin_tuple(value: str | None):
+    """Canonical (scheme, host, port) for an HTTP Origin/target, or None when malformed."""
+    if not value:
+        return None
+    try:
+        p = urlsplit(value)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return None
+        port = p.port or (443 if p.scheme == "https" else 80)
+    except ValueError:
+        return None
+    return p.scheme, p.hostname.lower(), port
+
+
+def _host_name(value: str | None) -> str | None:
+    """Canonical hostname from an HTTP Host header/config entry, rejecting ambiguous syntax."""
+    if not value or any(c in value for c in ("/", "\\", "@")) or any(c.isspace() for c in value):
+        return None
+    try:
+        parsed = urlsplit("//" + value)
+        _ = parsed.port                       # validate a supplied port rather than silently ignoring it
+        host = parsed.hostname
+    except ValueError:
+        return None
+    return host.lower().rstrip(".") if host else None
+
+
 def make_app(run_root: str | os.PathLike) -> "FastAPI":
+    if FastAPI is None:
+        raise _ui_extra_error("fastapi")
+    from looplab.serve import jobs as _jobs_router
+    from looplab.serve.appstate import AppState
+    from looplab.serve.jobs import JobRegistry
+    from looplab.serve.routers import (
+        assistant as _assistant_router, boss as _boss_router, control as _control_router,
+        genesis as _genesis_router, misc as _misc_router, org as _org_router,
+        reports as _reports_router, runs as _runs_router)
+
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
     app = FastAPI(title="LoopLab UI", version="0.1.0")
@@ -104,6 +144,43 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                ["http://localhost:5173", "http://127.0.0.1:5173"])
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
+    allowed_origins = {v for o in origins if (v := _origin_tuple(o)) is not None}
+
+    # Host validation closes DNS rebinding: deriving the target origin from request.base_url alone
+    # trusts the attacker-controlled Host header, so Origin=Host=evil.example would look same-origin
+    # after evil.example is rebound to 127.0.0.1. Local names are safe defaults; a deliberate remote
+    # deployment lists its public hostnames in LOOPLAB_UI_HOSTS (comma-separated, optional ports).
+    configured_hosts = {
+        host for raw in os.environ.get("LOOPLAB_UI_HOSTS", "").split(",")
+        if (host := _host_name(raw.strip())) is not None
+    }
+    allowed_hosts = {"localhost", "127.0.0.1", "::1"} | configured_hosts
+
+    @app.middleware("http")
+    async def _reject_untrusted_host(request: "Request", call_next):
+        host = _host_name(request.headers.get("host"))
+        # Starlette's in-process TestClient uses testserver/testclient; it is not a network-reachable
+        # production exception and keeps the HTTP contract tests representative without weakening Host.
+        in_process_test = (host == "testserver" and request.client is not None
+                           and request.client.host == "testclient")
+        if host not in allowed_hosts and not in_process_test:
+            return JSONResponse({"detail": "untrusted Host header"}, status_code=421)
+        return await call_next(request)
+
+    @app.middleware("http")
+    async def _reject_cross_origin_mutation(request: "Request", call_next):
+        """CORS controls whether browser JS may READ a response; it does not stop a simple cross-site
+        POST from EXECUTING. Reject browser-originated mutations server-side. Requests without Origin
+        remain valid for CLI/TUI clients, while same-origin SPA calls and configured Vite origins work."""
+        if (request.method in ("POST", "PUT", "PATCH", "DELETE")
+                and request.url.path.startswith("/api/")):
+            origin = request.headers.get("origin")
+            if origin:
+                target = _origin_tuple(str(request.base_url))
+                supplied = _origin_tuple(origin)
+                if supplied is None or (supplied != target and supplied not in allowed_origins):
+                    return JSONResponse({"detail": "cross-origin mutation rejected"}, status_code=403)
+        return await call_next(request)
     # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
     # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
     # SPA is served the token in a same-origin <meta> tag (see _index_response). NOTE: "same-origin"
@@ -148,11 +225,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     projects = ProjectStore(root / "projects.json")   # ClearML-style run organization (UI-only)
     # JupyterHub reaper hooks (ASGI shutdown + atexit backstop) — registered before the secret
     # priming below, matching the original make_app construction side-effect order.
+    resume_cancel = install_resume_reconcile_hooks(app, root)
+    # Shutdown handlers run in registration order. Cancel/join resume timers + tail waiters first,
+    # then reap every child that was registered before cancellation won the spawn gate.
     install_reap_hooks(app)
     settings_store = SettingsStore(root)
     settings_store.prime_env()   # apply stored secrets to this process's env (env/.env still wins)
 
-    srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry())
+    srv = AppState(root=root, projects=projects, settings=settings_store, jobs=JobRegistry(),
+                   resume_cancel=resume_cancel)
 
     # Router include ORDER (load-bearing for the overlapping patterns — see routers/__init__.py):
     #   1. runs      — the runs list + per-run read model (also late-binds srv.list_runs_fn)
@@ -203,7 +284,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         dest = request.headers.get("sec-fetch-dest") if request is not None else None
         html = html_path.read_text(encoding="utf-8")
         if dest is None or dest == "document":
-            meta = f'<meta name="ll-token" content="{ui_token}">'
+            # Environment values are untrusted deployment input. Attribute-escape the token so a
+            # quote cannot terminate `content` and inject markup/script into the privileged page.
+            meta = f'<meta name="ll-token" content="{_html.escape(ui_token, quote=True)}">'
             html = html.replace("</head>", meta + "</head>", 1)
         headers = {
             "X-Frame-Options": "DENY",                       # no same-origin iframe -> contentDocument read
@@ -252,7 +335,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
 def serve(run_root: str | os.PathLike, host: str = "127.0.0.1", port: int = 8765,
           root_path: str = "") -> None:
-    import uvicorn
+    if FastAPI is None:
+        raise _ui_extra_error("fastapi")
+    try:
+        import uvicorn
+    except ModuleNotFoundError as e:
+        if e.name != "uvicorn":
+            raise
+        raise _ui_extra_error("uvicorn") from e
     # root_path: ASGI mount prefix for a NON-stripping proxy (JupyterHub non-strip / reverse-proxy
     # subpath). Empty for local + the common prefix-stripping jupyter-server-proxy (the SPA derives
     # its own prefix from the page path), so this is a no-op there.

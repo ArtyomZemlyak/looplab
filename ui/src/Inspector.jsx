@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, clearNodeTrace, applyAction } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
 import { groupAggregate } from './grouping.js'
@@ -20,7 +20,7 @@ const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 // from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
 // unlike the exploratory confirm/ablate/fork which stay in the chat. Appends a node_reset control
 // event; the engine applies it on the next resume.
-function ResetBtn({ runId, id, onToast }) {
+function ResetBtn({ runId, id, generation, onToast }) {
   const [open, setOpen] = useState(false)
   const STAGES = [
     ['eval', 're-score', 'keep the idea + code, just re-run the evaluation (an infra / API-key blip)'],
@@ -29,8 +29,8 @@ function ResetBtn({ runId, id, onToast }) {
   ]
   const doReset = (stage) => {
     setOpen(false)
-    CONTROL.resetNode(runId, id, stage)
-      .then(() => onToast && onToast(`Reset #${id} (${stage}) queued — resume the run to apply`))
+    applyAction(runId, { type: 'node_reset', data: { node_id: id, generation, from_stage: stage } })
+      .then(() => onToast && onToast(`Reset #${id} (${stage}) queued — engine resumed`))
       .catch(() => onToast && onToast(`Reset #${id} failed`))
   }
   return <span style={{ position: 'relative', marginLeft: 8 }}>
@@ -99,7 +99,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                             onClick={() => setTab(t)}>{t}</div>)}
       </div>
       <div className="insp-body">
-        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} onToast={onToast} /></div>
+        <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={runId} onToast={onToast} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
@@ -146,13 +146,14 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
 // Phase 1: the node's declared eval pipeline as a coloured strip (data_prep ✓ → train ✓ → eval ✗), so a
 // crash is pinpointed to its stage instead of hiding behind one opaque "evaluate". Empty on single-command
 // evals. The failed stage is tinted red; a still-pending tail (not yet reached) shows muted.
-function StagePipeline({ stages, failed, runId, id, onToast }) {
+function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
   if (!stages || !stages.length) return null
   const tone = (s) => s.status === 'ok' ? 'var(--ok)' : s.status === 'timeout' ? 'var(--working)'
     : s.status === 'reused' ? 'var(--muted, #888)' : 'var(--fail)'
   const ic = (s) => s.status === 'ok' ? '✓' : s.status === 'timeout' ? '⧗' : s.status === 'reused' ? '↺' : '✗'
-  const rerun = (name) => runId && CONTROL.resetNode(runId, id, name)
-    .then(() => onToast && onToast(`re-running #${id} from '${name}' — reuses earlier stages`))
+  const rerun = (name) => runId && applyAction(
+    runId, { type: 'node_reset', data: { node_id: id, generation, from_stage: name } })
+    .then(() => onToast && onToast(`re-running #${id} from '${name}' — engine resumed`))
     .catch(() => onToast && onToast('re-run failed'))
   return <div style={{ margin: '8px 0' }}>
     <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>
@@ -185,7 +186,7 @@ function Overview({ n, state, runId, onToast }) {
       <KV k="feasible" v={String(n.feasible)} />
       <KV k="eval seconds" v={fmt(n.eval_seconds)} />
     </div>
-    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} onToast={onToast} />
+    <StagePipeline stages={n.stages} failed={n.failed_stage} runId={runId} id={n.id} generation={n.attempt} onToast={onToast} />
     {chg && <><div className="section-h">What this node did</div><div className="v">{chg}</div></>}
     {uses.length > 0 && <><div className="section-h">Merge — techniques fused</div>
       <ul className="bul">{uses.map(u => <li key={u.parentId}>

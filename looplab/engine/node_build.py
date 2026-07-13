@@ -142,7 +142,8 @@ class NodeBuildMixin:
 
     def _emit_node_created(self, *, node_id: int, parent_ids: list, operator: str, idea: dict,
                            code: str, files: dict, deleted=_OMIT, research_origin=_OMIT,
-                           source=_OMIT, origin=_OMIT) -> None:
+                           source=_OMIT, origin=_OMIT, generation=_OMIT,
+                           parent_generations=_OMIT) -> None:
         """The single `node_created` emitter for all four creation sites (`_create_node`,
         `_create_injected_node`, `_ablate`, `_ablate_code`). Optional keys default to the
         `_OMIT` sentinel and are LEFT OUT of the payload when not passed — never None-filled —
@@ -154,7 +155,8 @@ class NodeBuildMixin:
         data = {"node_id": node_id, "parent_ids": parent_ids, "operator": operator,
                 "idea": idea, "code": code, "files": files}
         for k, v in (("deleted", deleted), ("research_origin", research_origin),
-                     ("source", source), ("origin", origin)):
+                     ("source", source), ("origin", origin), ("generation", generation),
+                     ("parent_generations", parent_generations)):
             if v is not _OMIT:
                 data[k] = v
         self.store.append(EV_NODE_CREATED, data)

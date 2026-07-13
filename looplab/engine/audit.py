@@ -24,7 +24,7 @@ class AuditMixin:
     """The engine's audit/trust-emitter cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
 
-    def _emit_agent_report(self, node_id: int) -> None:
+    def _emit_agent_report(self, node_id: int, generation: int = 0) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
         `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
         node carries a trail of how the external coding agent performed. No-op for
@@ -39,9 +39,11 @@ class AuditMixin:
             extra = getattr(self.developer, "audit_extra", None)
             if callable(extra):
                 data.update(extra())
+            data["generation"] = generation
             self.store.append(EV_AGENT_VALIDATED, data)
 
-    def _emit_role_telemetry(self, role, attr: str, event_type: str, node_id: int) -> None:
+    def _emit_role_telemetry(self, role, attr: str, event_type: str, node_id: int,
+                             generation: int | None = None) -> None:
         """Append `event_type` from a role's predictive-telemetry attr (a dict set during
         propose/implement), stamped with `node_id`, then CONSUME it (reset to None). Like
         `_emit_agent_report` this relies on sequential node creation for correctness; the consume adds
@@ -54,24 +56,52 @@ class AuditMixin:
             tid, sid = pick.pop("_trace_id", None), pick.pop("_span_id", None)
             # The ranking LLM ran DURING propose in its own named span (captured there); stamp the event
             # with THAT trace so the UI scopes it to just the ranking, not the whole node.
-            self.store.append(event_type, {"node_id": node_id, **pick}, trace_id=tid, span_id=sid)
+            data = {"node_id": node_id, **pick}
+            if generation is not None:
+                data["generation"] = generation
+            self.store.append(event_type, data, trace_id=tid, span_id=sid)
             setattr(role, attr, None)
 
-    def _emit_hypothesis_ranked(self, node_id: int) -> None:
+    def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None) -> None:
         """FOREAGENT board prioritization audit: if the active Researcher (a `ForesightPanelResearcher`)
         predicted an order over the OPEN-hypothesis board while proposing THIS node, record it as a
         `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
         model's `reason`)."""
-        self._emit_role_telemetry(self.researcher, "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id)
+        self._emit_role_telemetry(
+            self.researcher, "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id, generation)
 
-    def _emit_foresight_selected(self, node_id: int) -> None:
+    def _emit_foresight_selected(self, node_id: int, generation: int | None = None) -> None:
         """FOREAGENT predict-before-execute audit: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in
         `node_created`)."""
-        self._emit_role_telemetry(self.developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id)
-        self._emit_role_telemetry(self.researcher, "last_foresight", EV_FORESIGHT_SELECTED, node_id)
+        self._emit_role_telemetry(
+            self.developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation)
+        self._emit_role_telemetry(
+            self.researcher, "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)
+
+    def _discard_node_build_telemetry(self) -> None:
+        """Consume per-build role state when a reset/abort supersedes the build before node_created.
+
+        Otherwise a following merge/debug path that does not produce fresh predictions can emit the
+        abandoned build's ranking/foresight/report against the next node. Walk common wrapper chains
+        because some developer wrappers expose read-only forwarding properties.
+        """
+        for role, attrs in ((self.researcher, ("last_hyp_priority", "last_foresight")),
+                            (self.developer, ("last_foresight_pick", "last_report"))):
+            for attr in attrs:
+                current = role
+                seen: set[int] = set()
+                while current is not None and id(current) not in seen:
+                    seen.add(id(current))
+                    try:
+                        if hasattr(current, attr):
+                            setattr(current, attr, None)
+                            break
+                    except (AttributeError, TypeError):
+                        pass
+                    current = getattr(current, "inner", None)
 
     def _audit_workdir_writes(self, workdir, protected: set) -> list[dict]:
         """4.4: after an eval, flag any PROTECTED/frozen file (assets/answer keys) whose on-disk state

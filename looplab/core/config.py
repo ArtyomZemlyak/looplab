@@ -118,6 +118,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8-sig",
         extra="ignore",
+        allow_inf_nan=False,
     )
 
     # Run profile (config-first preset, see PROFILES above). "default"/"fast" = today's lean

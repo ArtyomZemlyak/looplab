@@ -77,6 +77,32 @@ def test_message_stream_persists_raw_and_share_strips_it(tmp_path, monkeypatch):
     assert all("raw" not in m for m in shared)                   # a share link shows bubbles only
 
 
+def test_shared_assistant_allowlists_applied_action_fields(tmp_path, monkeypatch):
+    secret = "AKIAIOSFODNN7EXAMPLE"
+
+    def fake_turn(*_args, **_kwargs):
+        return {"ok": True, "reply": "finished", "mode": "auto",
+                "steps": [{"tool": "read_file", "arg": "C:/Users/me/private.txt"}],
+                "applied": [{"tool": "write_file", "label": "updated config",
+                             "abs_path": "C:/Users/me/private/config.py",
+                             "preview": f"+API_KEY={secret}"}],
+                "todos": [{"content": "finish", "status": "completed"}],
+                "tokens": {"total": 12}, "proposals": [{"task_file": "C:/private/task.json"}]}
+
+    monkeypatch.setattr("looplab.serve.routers.assistant._assistant_run_turn", fake_turn)
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"mode": "auto"}).json()["id"]
+    assert client.post(f"/api/assistant/sessions/{sid}/message",
+                       json={"instruction": "do it", "mode": "auto"}).status_code == 200
+    client.post(f"/api/assistant/sessions/{sid}/share")
+
+    messages = client.get(f"/api/assistant/shared/{sid}").json()["messages"]
+    payload = str(messages)
+    assert "abs_path" not in payload and "preview" not in payload and "proposals" not in payload
+    assert "C:/Users/me" not in payload and secret not in payload
+    assert messages[-1]["applied"] == [{"label": "updated config", "tool": "write_file"}]
+
+
 # ---- revert_file is a mutation: mode/approver gated + recorded ----------------------------------
 def test_revert_file_tool_is_permission_gated(tmp_path):
     bak = tmp_path / "bak"

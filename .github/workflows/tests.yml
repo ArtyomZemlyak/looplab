@@ -20,3 +20,35 @@ jobs:
           cache: pip
       - run: pip install -e ".[dev,ui]"
       - run: python -m pytest
+
+  # A small second platform leg is deliberate: subprocess/path/locking behavior is materially
+  # different on Windows, and Linux-only CI previously missed both a path assertion and a network
+  # unit test that expanded into minutes of timeout retries on Windows.
+  pytest-windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -e ".[dev,ui]"
+      - run: python -m pytest
+
+  ui:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - run: npm ci
+        working-directory: ui
+      - run: npm test
+        working-directory: ui
+      - run: npm run build
+        working-directory: ui

@@ -207,11 +207,15 @@ class _ResearchOnceStrategist:
     """Requests deep research on the FIRST consult, then keeps recording partial changes (alternating
     novelty_stance) at later consults. request_research is a ONE-SHOT signal (fires a single
     Deep-Research), so it must NOT latch True through the M3 active_strategy merge and re-fire."""
-    def __init__(self):
+    def __init__(self, max_calls=None):
         self.calls = 0
+        self.max_calls = max_calls
 
     def decide(self, state, ctx):
         self.calls += 1
+        if self.max_calls is not None and self.calls > self.max_calls:
+            raise AssertionError(
+                f"strategist exceeded deterministic call ceiling: {self.calls}>{self.max_calls}")
         if self.calls == 1:
             return {"request_research": True, "novelty_stance": "explore",
                     "source": "rule", "rationale": "need research"}
@@ -223,11 +227,19 @@ def test_request_research_is_one_shot_not_latched_by_merge(tmp_path):
     """M3 review follow-up: merging the decision onto active_strategy must NOT carry the one-shot
     request_research flag forward — otherwise a single research request re-fires the expensive
     Deep-Research stage at every later consult. deep_research_every=0 => only the request fires it."""
-    strat = _ResearchOnceStrategist()
-    anyio.run(_engine(tmp_path / "rr", strategist=strat, strategist_every=1,
-                      deep_research_every=0).run)
-    assert strat.calls >= 3, "need several consults so a latched flag would re-fire"
-    research = [e for e in _read(tmp_path / "rr") if e.type == "research_completed"]
+    strat = _ResearchOnceStrategist(max_calls=6)
+    state = anyio.run(_engine(tmp_path / "rr", strategist=strat, strategist_every=1,
+                              deep_research_every=0).run)
+    events = list(_read(tmp_path / "rr"))
+    decisions = [e for e in events if e.type == "strategy_decision"
+                 and (e.data.get("strategy") or {}).get("source") != "operator"]
+    # n=3 is the seed boundary, then one consult for each newly-settled node through max_nodes=8.
+    # The old runaway stayed at n=3 and emitted alternating decisions forever; this exact call/event
+    # ceiling both fails fast and proves the durable per-node-count gate.
+    assert strat.calls == len(decisions) == 6
+    assert [e.data.get("at_node") for e in decisions] == [3, 4, 5, 6, 7, 8]
+    assert state.finished
+    research = [e for e in events if e.type == "research_completed"]
     assert len(research) == 1, [e.data.get("trigger") for e in research]
 
 

@@ -123,6 +123,11 @@ def test_inline_repair_fixes_in_place_without_new_node(tmp_path):
     evs = _events(tmp_path / "on")
     repaired = [e for e in evs if e.type == "node_repaired"]
     assert repaired, "expected an inline node_repaired event"
+    assert repaired[0].data["generation"] == 0
+    assert repaired[0].data["attempt"] == 1   # distinct inline-repair ordinal, not lifecycle generation
+    terminal = next(e for e in evs if e.type in ("node_evaluated", "node_failed")
+                    and e.data.get("node_id") == 0)
+    assert terminal.data["generation"] == 0
     assert dev.repair_calls >= 1
 
     st = fold(evs)

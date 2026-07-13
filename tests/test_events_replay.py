@@ -187,6 +187,113 @@ def test_fold_tombstoned_pending_node_not_re_evaluated(tmp_path):
     assert st.pending_nodes() == []
 
 
+def test_tombstone_invalidates_confirmation_approval_and_late_builds(tmp_path):
+    """A logically deleted node cannot re-enter selection through an explicit override or late work."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)
+    s.append("best_confirmed", {
+        "node_id": 1, "generations": {"0": 0, "1": 0}, "significant": True})
+    s.append("approval_granted", {"node_id": 1, "generation": 0})
+    s.append("promote", {"node_id": 1, "alias": "winner"})
+    s.append("node_tombstoned", {"node_ids": [1]})
+    # A stale worker completes after deletion. It must not replace the tombstoned record.
+    s.append("node_created", {
+        "node_id": 1, "generation": 0, "parent_ids": [], "operator": "improve",
+        "idea": {"operator": "improve", "params": {"late": True}}, "code": "late"})
+    st = fold(s.read_all())
+    assert st.nodes[1].tombstoned and st.nodes[1].code != "late"
+    assert st.best_node_id == 0
+    assert not st.confirmed_done and not st.approved and st.approved_node_id is None
+    assert st.champion is None
+
+
+def test_tombstoned_parent_and_confirmation_snapshot_are_inactive(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 2.0)
+    _n(s, 1, 1.0)
+    s.append("node_tombstoned", {"node_ids": [1]})
+    # Confirmation snapshots cover the ACTIVE set only; a deleted audit record is not a candidate.
+    s.append("best_confirmed", {
+        "node_id": 0, "generations": {"0": 0}, "significant": False})
+    # A child built from a now-deleted parent is stale and must never land.
+    s.append("node_created", {
+        "node_id": 2, "generation": 0, "parent_ids": [1],
+        "parent_generations": {"1": 0}, "operator": "improve",
+        "idea": {"operator": "improve", "params": {}}, "code": "child"})
+    st = fold(s.read_all())
+    assert st.confirmed_done and st.best_node_id == 0
+    assert 2 not in st.nodes
+
+
+@pytest.mark.parametrize("event_type,event_data", [
+    ("node_tombstoned", {"node_ids": [1]}),
+    ("node_abort", {"node_id": 1, "generation": 0}),
+])
+def test_posthoc_finished_node_removal_preserves_finish_and_evidence_until_actual_resume(
+        tmp_path, event_type, event_data):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {
+        "run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    _n(s, 0, 2.0)
+    _n(s, 1, 1.0)
+    s.append("confirm_eval", {
+        "node_id": 0, "generation": 0, "seed": 1, "metric": 2.1, "eval_seconds": 1.0})
+    s.append("node_confirmed", {
+        "node_id": 0, "generation": 0, "mean": 2.1, "std": 0.0, "seeds": 1})
+    s.append("proxy_scored", {"node_id": 0, "generation": 0, "score": 2.2})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 2.3, "search_epoch": 0})
+    s.append("holdout_evaluated", {
+        "node_id": 1, "generation": 0, "metric": 1.3, "search_epoch": 0})
+    s.append("best_confirmed", {
+        "node_id": 1, "generations": {"0": 0, "1": 0}, "significant": True})
+    s.append("approval_granted", {"node_id": 0, "generation": 0})
+    s.append("report_generated", {"content": {"summary": "sealed"}})
+    finish = s.append("run_finished", {"finalization_required": True})
+    s.append("finalization_finished", {"finish_seq": finish.seq})
+
+    s.append(event_type, event_data)
+    posthoc = fold(s.read_all())
+    assert posthoc.finished and posthoc.search_epoch == 0
+    assert not posthoc.finalization_pending() and posthoc.report == {"summary": "sealed"}
+    assert posthoc.confirmed_done and posthoc.approved and posthoc.approved_node_id == 0
+    assert posthoc.nodes[0].metric == 2.0 and posthoc.nodes[0].confirmed_mean == 2.1
+    assert posthoc.nodes[1].metric == 1.0 and posthoc.nodes[1].holdout_metric == 1.3
+    assert posthoc.holdout_evaluated_ids == [0, 1]
+
+    # The explicit resume is the one and only epoch edge. It rotates the disclosed partition and
+    # requeues only surviving active incumbents; removed-node evidence remains audit-visible.
+    s.append("resume", {})
+    reopened = fold(s.read_all())
+    assert not reopened.finished and reopened.search_epoch == 1
+    assert reopened.nodes[0].attempt == 1 and reopened.nodes[0].status.value == "pending"
+    assert reopened.nodes[0].metric is None and reopened.nodes[0].confirmed_mean is None
+    assert 0 not in reopened.proxy_scores and 0 not in reopened.confirm_seed_results
+    assert reopened.nodes[1].metric == 1.0 and reopened.nodes[1].holdout_metric == 1.3
+    s.append("resume", {})
+    assert fold(s.read_all()).search_epoch == 1
+
+
+def test_reset_of_any_confirmation_competitor_invalidates_winner_snapshot(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)
+    # Robust confirmation deliberately overrode the raw winner with node 0.
+    s.append("best_confirmed", {
+        "node_id": 0, "generations": {"0": 0, "1": 0}, "significant": True})
+    assert fold(s.read_all()).best_node_id == 0
+    # Reset the OTHER competitor and land a fresh, even better lifecycle. The old whole-set
+    # generations snapshot is invalid and may not keep overriding the new result.
+    s.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "eval"})
+    s.append("node_evaluated", {"node_id": 1, "generation": 1, "metric": 0.5})
+    st = fold(s.read_all())
+    assert not st.confirmed_done and st.best_node_id == 1
+
+
 def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
     # P0-1: confirm-seed / node_confirmed / holdout_evaluated events stamped with an attempt the node
     # has since abandoned (node_reset bumped the generation) must be dropped — their stale metrics must
@@ -207,9 +314,43 @@ def test_fold_confirm_and_holdout_bound_to_attempt(tmp_path):
     assert 0 not in st.holdout_evaluated_ids                        # gate not marked by a stale attempt
     assert 0 not in st.confirm_seed_results                         # stale confirm-seed not memoized
     assert st.total_eval_seconds == 0.5                             # stale confirm cost (2.0) NOT added
-    # a FRESH confirm at the current attempt (1) DOES land
+    # A FRESH confirm at the current attempt (1) lands only after that lifecycle is rebuilt+evaluated.
+    s.append("node_created", {
+        "node_id": 0, "generation": 1, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}}, "code": "new"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.25})
     s.append("node_confirmed", {"node_id": 0, "attempt": 1, "mean": 0.2, "std": 0.0, "seeds": 3})
     assert fold(s.read_all()).nodes[0].confirmed_mean == 0.2
+
+
+def test_confirm_and_holdout_results_require_an_evaluated_current_lifecycle(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}}, "code": "c"})
+    # Forged/out-of-order effects cannot attach to pending code or poison the confirm cost key.
+    s.append("confirm_eval", {
+        "node_id": 0, "generation": 0, "seed": 1, "metric": 9.0, "eval_seconds": 0.0})
+    s.append("node_confirmed", {
+        "node_id": 0, "generation": 0, "mean": 9.0, "std": 0.0, "seeds": 1})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 9.0, "search_epoch": 0})
+    pending = fold(s.read_all())
+    assert pending.confirm_seed_results == {} and pending.total_eval_seconds == 0.0
+    assert pending.nodes[0].confirmed_mean is None and pending.nodes[0].holdout_metric is None
+
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+    s.append("confirm_eval", {
+        "node_id": 0, "generation": 0, "seed": 1, "metric": 1.1, "eval_seconds": 3.0})
+    s.append("node_confirmed", {
+        "node_id": 0, "generation": 0, "mean": 1.1, "std": 0.0, "seeds": 1})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.2, "search_epoch": 0})
+    evaluated = fold(s.read_all())
+    assert evaluated.confirm_seed_results == {0: {1: 1.1}}
+    assert evaluated.total_eval_seconds == 3.0
+    assert evaluated.nodes[0].confirmed_mean == 1.1 and evaluated.nodes[0].holdout_metric == 1.2
 
 
 def test_fold_reopen_rehides_holdout(tmp_path):
@@ -234,10 +375,78 @@ def test_fold_reopen_rehides_holdout(tmp_path):
     s.append("holdout_evaluated", {"node_id": 0, "metric": 0.99, "search_epoch": 0})
     st = fold(s.read_all())
     assert st.nodes[0].holdout_metric is None and 0 not in st.holdout_evaluated_ids
-    # a FRESH holdout score at the current epoch (1) lands
-    s.append("holdout_evaluated", {"node_id": 0, "metric": 0.2, "search_epoch": 1})
+    # Even a current-epoch score cannot land before the incumbent's fresh raw eval finishes.
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 1, "metric": 0.88, "search_epoch": 1})
+    assert fold(s.read_all()).nodes[0].holdout_metric is None
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.45})
+    # A FRESH holdout score at the current epoch (1) now lands.
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 1, "metric": 0.2, "search_epoch": 1})
     st = fold(s.read_all())
     assert st.nodes[0].holdout_metric == 0.2 and 0 in st.holdout_evaluated_ids
+
+
+def test_unfinished_reset_after_holdout_rotates_hidden_epoch(tmp_path):
+    """A control winning after holdout scoring but before run_finished cannot reuse the revealed split."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {
+        "run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    _n(s, 0, 2.0)
+    _n(s, 1, 1.0)
+    s.append("confirm_eval", {
+        "node_id": 0, "generation": 0, "seed": 1, "metric": 2.1, "eval_seconds": 1.0})
+    s.append("node_confirmed", {
+        "node_id": 0, "generation": 0, "mean": 2.1, "std": 0.0, "seeds": 1})
+    s.append("proxy_scored", {"node_id": 0, "generation": 0, "score": 2.2})
+    s.append("stage_finished", {
+        "node_id": 1, "generation": 0, "name": "train", "status": "ok"})
+    s.append("stage_finished", {
+        "node_id": 1, "generation": 0, "name": "score", "status": "ok"})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 2.5, "search_epoch": 0})
+    s.append("holdout_evaluated", {
+        "node_id": 1, "generation": 0, "metric": 1.5, "search_epoch": 0})
+    assert not fold(s.read_all()).finished
+    s.append("node_reset", {"node_id": 1, "generation": 0, "from_stage": "score"})
+    st = fold(s.read_all())
+    assert st.search_epoch == 1 and not st.holdout_evaluated_ids
+    assert all(n.holdout_metric is None for n in st.nodes.values())
+    assert st.nodes[1].attempt == 1 and st.nodes[1].status.value == "pending"
+    assert st.nodes[1].rerun_stage is None and st.nodes[1].stages == []
+    assert st.nodes[0].attempt == 1 and st.nodes[0].status.value == "pending"
+    assert st.nodes[0].metric is None and st.nodes[0].confirmed_mean is None
+    assert 0 not in st.confirm_seed_results and 0 not in st.proxy_scores
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 999.0, "search_epoch": 0})
+    assert fold(s.read_all()).nodes[0].holdout_metric is None
+
+
+def test_new_candidate_or_resume_after_disclosed_holdout_rotates_epoch(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {
+        "run_id": "r", "task_id": "t", "direction": "min", "holdout_select": True})
+    _n(s, 0, 1.0)
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 0, "metric": 1.2, "search_epoch": 0})
+    s.append("node_created", {
+        "node_id": 1, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}}, "code": "new"})
+    st = fold(s.read_all())
+    assert st.search_epoch == 1 and not st.holdout_evaluated_ids
+    assert st.nodes[0].attempt == 1 and st.nodes[0].status.value == "pending"
+    assert st.nodes[0].metric is None and st.nodes[1].attempt == 0
+    assert st.nodes[1].status.value == "pending" and st.nodes[1].code == "new"
+    # A second disclosure followed by pause/resume is another search reopening, even though the
+    # old engine never managed to append run_finished.
+    s.append("node_evaluated", {
+        "node_id": 0, "generation": 1, "metric": 1.1})
+    s.append("holdout_evaluated", {
+        "node_id": 0, "generation": 1, "metric": 1.3, "search_epoch": 1})
+    s.append("pause", {})
+    s.append("resume", {})
+    st = fold(s.read_all())
+    assert st.search_epoch == 2 and not st.holdout_evaluated_ids
 
 
 def test_fold_resume_intent_seq_gated(tmp_path):
@@ -306,9 +515,10 @@ def test_log_divergence_ignores_a_torn_tail(tmp_path):
     # mid-file divergence — must return None.
     p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"partial')
     assert log_divergence(p) is None
-    # a corrupt LAST complete line with nothing valid after it is also just a tail, not a divergence
+    # A newline-terminated corrupt line is COMPLETE, so the next append would otherwise grow an
+    # invisible tail behind it. It must fail closed even before a later record exists.
     p.write_bytes(b'{"seq":0,"type":"a"}\n{corrupt\n')
-    assert log_divergence(p) is None
+    assert log_divergence(p) == {"good_records": 1, "corrupt_line": 2, "dropped_lines": 0}
     # a wholly clean log: None
     p.write_bytes(b'{"seq":0,"type":"a"}\n{"seq":1,"type":"b"}\n')
     assert log_divergence(p) is None
@@ -399,6 +609,10 @@ def test_fold_tolerates_metric_less_evaluated_event(tmp_path):
 def test_fold_confirm_seed_results():
     from looplab.core.models import Event
     evs = [Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+           Event(type="node_created", data={
+               "node_id": 3, "parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}}}),
+           Event(type="node_evaluated", data={"node_id": 3, "metric": 1.0}),
            Event(type="confirm_eval", data={"node_id": 3, "seed": 0, "eval_seconds": 1.0, "metric": 0.5}),
            Event(type="confirm_eval", data={"node_id": 3, "seed": 1, "eval_seconds": 1.0, "metric": None})]
     st = fold(evs)
@@ -453,6 +667,7 @@ def test_fold_node_reset_clears_confirm_seed_memo():
             Event(type="node_created", data={"node_id": 1, "parent_ids": [], "operator": "draft",
                                              "idea": {"operator": "draft", "params": {}}, "code": "c"}),
             Event(type="node_evaluated", data={"node_id": 0, "metric": 1.0, "eval_seconds": 1.0}),
+            Event(type="node_evaluated", data={"node_id": 1, "metric": 2.0}),
             Event(type="confirm_eval", data={"node_id": 0, "seed": 1, "eval_seconds": 2.0, "metric": 0.4}),
             Event(type="confirm_eval", data={"node_id": 1, "seed": 1, "eval_seconds": 2.0, "metric": 0.9}),
             Event(type="node_confirmed", data={"node_id": 0, "mean": 0.4, "std": 0.0, "seeds": 1})]
@@ -465,11 +680,14 @@ def test_fold_node_reset_clears_confirm_seed_memo():
     assert st2.confirm_seed_results[1] == {1: 0.9}  # another node's memo is untouched
     # a POST-reset confirm_eval repopulates the memo, and its cost is counted again (the seed
     # genuinely re-ran) — order-tolerant and deterministic across re-folds.
-    post = Event(type="confirm_eval", data={"node_id": 0, "seed": 1, "eval_seconds": 3.0, "metric": 0.7})
-    st3 = fold(base + [reset, post])
+    reevaluated = Event(type="node_evaluated", data={
+        "node_id": 0, "generation": 1, "metric": 0.8})
+    post = Event(type="confirm_eval", data={
+        "node_id": 0, "generation": 1, "seed": 1, "eval_seconds": 3.0, "metric": 0.7})
+    st3 = fold(base + [reset, reevaluated, post])
     assert st3.confirm_seed_results[0] == {1: 0.7}
     assert st3.total_eval_seconds == 1.0 + 2.0 + 2.0 + 3.0
-    assert fold(base + [reset, post]).model_dump() == st3.model_dump()   # determinism
+    assert fold(base + [reset, reevaluated, post]).model_dump() == st3.model_dump()
 
 
 # confirm-seed eval cost is first-occurrence accounted (like node terminals): a duplicated/
@@ -477,6 +695,10 @@ def test_fold_node_reset_clears_confirm_seed_memo():
 def test_fold_confirm_eval_cost_deduped_on_duplicate():
     from looplab.core.models import Event
     base = [Event(type="run_started", data={"run_id": "r", "task_id": "t"}),
+            Event(type="node_created", data={
+                "node_id": 3, "parent_ids": [], "operator": "draft",
+                "idea": {"operator": "draft", "params": {}}}),
+            Event(type="node_evaluated", data={"node_id": 3, "metric": 1.0}),
             Event(type="confirm_eval", data={"node_id": 3, "seed": 0, "eval_seconds": 5.0, "metric": 0.5})]
     once = fold(base)
     dup = fold(base + [Event(type="confirm_eval",
@@ -539,7 +761,8 @@ def test_conflicting_second_terminal_does_not_flip_the_node(tmp_path):
 def test_late_terminal_from_an_abandoned_attempt_is_rejected(tmp_path):
     """arch-review §3 P0-1: after a node_reset bumps the attempt generation, a LATE node_evaluated
     stamped with the OLD attempt (its eval was in flight when the reset happened) must be DROPPED — it
-    can't land as the first-terminal-after-reset and accept a metric/cost from the discarded code."""
+    can't land as the first-terminal-after-reset and accept a metric from discarded code. Its actual
+    compute is still charged to the cumulative eval budget."""
     from looplab.core.models import NodeStatus
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
@@ -550,12 +773,110 @@ def test_late_terminal_from_an_abandoned_attempt_is_rejected(tmp_path):
     s.append("node_evaluated", {"node_id": 0, "attempt": 0, "metric": 9.0, "eval_seconds": 3.0})
     st = fold(s.read_all())
     assert st.nodes[0].status is NodeStatus.pending          # still pending — late terminal dropped
-    assert st.nodes[0].metric is None and st.total_eval_seconds == 0.0
+    assert st.nodes[0].metric is None and st.total_eval_seconds == 3.0
     # the NEW attempt's terminal (attempt=1) IS accepted
     s.append("node_evaluated", {"node_id": 0, "attempt": 1, "metric": 1.0, "eval_seconds": 2.0})
     st2 = fold(s.read_all())
     assert st2.nodes[0].status is NodeStatus.evaluated and st2.nodes[0].metric == 1.0
-    assert st2.total_eval_seconds == 2.0                     # only the live attempt's cost counted
+    assert st2.total_eval_seconds == 5.0                     # discarded + live compute both counted
+
+
+def test_rebuild_preserves_generation_and_rejects_every_late_lifecycle_effect(tmp_path):
+    """An implement/propose reset emits a second node_created for the SAME id. That rebuild must keep
+    generation 1, and every effect still arriving from generation 0 must be inert — not only terminals."""
+    s = EventStore(tmp_path / "e.jsonl")
+    created = {"node_id": 0, "parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}, "rationale": ""}}
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min",
+                             "trust_gate": "gate"})
+    s.append("node_created", {**created, "code": "old"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 5.0})
+    s.append("reward_hack_suspected", {"node_id": 0, "generation": 0,
+                                        "signals": [{"signal": "protected_missing"}]})
+    s.append("node_abort", {"node_id": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    s.append("node_created", {**created, "generation": 1, "code": "new"})
+
+    # All of these belong to the abandoned worker. None may mutate/gate the rebuilt node.
+    s.append("node_repaired", {"node_id": 0, "generation": 0, "attempt": 1,
+                                "code": "stale repair"})
+    s.append("stage_finished", {"node_id": 0, "generation": 0, "name": "old",
+                                 "status": "ok"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 99.0,
+                                 "eval_seconds": 9.0})
+    s.append("confirm_eval", {"node_id": 0, "generation": 0, "seed": 1,
+                               "metric": 99.0, "eval_seconds": 4.0})
+    s.append("node_confirmed", {"node_id": 0, "generation": 0, "mean": 99.0,
+                                 "std": 0.0, "seeds": 1})
+    s.append("holdout_evaluated", {"node_id": 0, "generation": 0, "metric": 99.0})
+    s.append("reward_hack_suspected", {"node_id": 0, "generation": 0,
+                                        "signals": [{"signal": "grader_access"}]})
+    s.append("agent_validated", {"node_id": 0, "generation": 0, "ok": False})
+    s.append("proxy_scored", {"node_id": 0, "generation": 0, "score": 999.0,
+                               "skipped": True})
+
+    s.append("stage_finished", {"node_id": 0, "generation": 1, "name": "current",
+                                 "status": "ok"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0,
+                                 "eval_seconds": 2.0})
+    st = fold(s.read_all())
+    n = st.nodes[0]
+    assert n.attempt == 1 and n.code == "new" and n.metric == 1.0
+    assert [stage["name"] for stage in n.stages] == ["current"]
+    assert n.confirmed_mean is None and n.holdout_metric is None and n.agent_report is None
+    assert 0 not in st.confirm_seed_results and 0 not in st.holdout_evaluated_ids
+    assert 0 not in st.aborted_nodes and 0 not in st.proxy_scores and 0 not in st.proxy_skipped
+    assert st.total_eval_seconds == 6.0   # stale confirm seed cost 4 + current terminal cost 2
+    assert st.best_node_id == 0 and st.breed_excluded == set()  # old trust flag is historical only
+
+
+def test_reset_of_finished_approved_run_starts_one_new_epoch_and_reopens_gates(tmp_path):
+    """node_reset is itself a reopen edge. It clears finished before a later resume can see it, so the
+    reset handler must invalidate confirmation/approval and bump the epoch exactly once."""
+    s = EventStore(tmp_path / "e.jsonl")
+    _confirmed_finished_log(s)
+    s.append("approval_requested", {"node_id": 0})
+    s.append("approval_granted", {"node_id": 0})
+    s.append("node_abort", {"node_id": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    st = fold(s.read_all())
+    assert st.search_epoch == 1 and not st.finished
+    assert not st.confirmed_done and not st.approved and not st.awaiting_approval
+    assert st.approval_subject is None and st.best_node_id is None
+    assert st.nodes[0].attempt == 1 and st.nodes[0].status.value == "pending"
+    assert 0 not in st.aborted_nodes
+
+    s.append("resume", {})
+    assert fold(s.read_all()).search_epoch == 1                 # reset+resume is one edge, not two
+
+
+def test_best_confirmed_rejects_a_mixed_generation_candidate_snapshot(tmp_path):
+    """Checking only the chosen node is insufficient: a reset competitor's stale seeds may have changed
+    the robust winner. best_confirmed is accepted only when its whole top-k generation map is current."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 0.5)
+    _n(s, 1, 0.6)
+    s.append("node_reset", {"node_id": 1, "from_stage": "eval"})
+    s.append("node_evaluated", {"node_id": 1, "generation": 1, "metric": 0.4})
+    s.append("best_confirmed", {"node_id": 0, "significant": True,
+                                 "generations": {"0": 0, "1": 0}})
+    assert fold(s.read_all()).confirmed_done is False
+    s.append("best_confirmed", {"node_id": 1, "significant": True,
+                                 "generations": {"0": 0, "1": 1}})
+    st = fold(s.read_all())
+    assert st.confirmed_done and st.best_node_id == 1
+
+
+def test_new_candidate_after_best_confirmed_invalidates_completion(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 0.5)
+    s.append("best_confirmed", {"node_id": 0, "significant": True,
+                                 "generations": {"0": 0}})
+    _n(s, 1, 0.1)                                      # materialized after the confirm event
+    st = fold(s.read_all())
+    assert not st.confirmed_done and st.best_node_id == 1
 
 
 def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
@@ -565,6 +886,264 @@ def test_unstamped_terminal_still_accepted_backward_compat(tmp_path):
     s = EventStore(tmp_path / "e.jsonl")
     _seed_events(s)                                          # node_evaluated events carry no `attempt`
     assert fold(s.read_all()).nodes[0].status is NodeStatus.evaluated
+
+
+def test_unstamped_terminal_cannot_impersonate_a_post_reset_generation(tmp_path):
+    from looplab.core.models import NodeStatus
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    s.append("node_evaluated", {"node_id": 0, "metric": 99.0, "eval_seconds": 3.0})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.pending and st.nodes[0].metric is None
+    # The metric is ambiguous and therefore rejected, but an unstamped terminal is a legacy
+    # generation-0 record: its real abandoned-work cost is charged once (never to generation 1).
+    assert st.total_eval_seconds == 3.0
+
+    s.append("node_evaluated", {"node_id": 0, "metric": 99.0, "eval_seconds": 3.0})
+    assert fold(s.read_all()).total_eval_seconds == 3.0   # duplicate legacy terminal is not re-charged
+
+
+def test_future_generation_cost_cannot_poison_budget(tmp_path):
+    from looplab.core.models import NodeStatus
+
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_evaluated", {"node_id": 0, "generation": 99, "metric": 99.0,
+                                 "eval_seconds": 10_000.0})
+    s.append("confirm_eval", {"node_id": 0, "generation": 99, "seed": 1,
+                               "metric": 99.0, "eval_seconds": 10_000.0})
+    s.append("confirm_eval", {"node_id": 999, "generation": 0, "seed": 1,
+                               "metric": 99.0, "eval_seconds": 10_000.0})
+    st = fold(s.read_all())
+    assert st.total_eval_seconds == 0.0
+    assert st.nodes[0].status is NodeStatus.pending
+    assert st.confirm_seed_results == {}
+
+
+def test_multiple_unstamped_legacy_resets_still_replay(tmp_path):
+    """Old persisted runs used unstamped reset/rebuild controls but stamped terminal attempts."""
+    from looplab.core.models import NodeStatus
+
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    created = {"node_id": 0, "parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}, "rationale": ""}}
+    s.append("node_created", {**created, "code": "g0"})
+    s.append("node_evaluated", {"node_id": 0, "attempt": 0, "metric": 3.0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    s.append("node_created", {**created, "code": "g1"})
+    s.append("node_evaluated", {"node_id": 0, "attempt": 1, "metric": 2.0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    s.append("node_created", {**created, "code": "g2"})
+    s.append("node_evaluated", {"node_id": 0, "attempt": 2, "metric": 1.0})
+    node = fold(s.read_all()).nodes[0]
+    assert node.attempt == 2 and node.code == "g2"
+    assert node.status is NodeStatus.evaluated and node.metric == 1.0
+
+
+def test_parent_generation_snapshot_rejects_reset_or_aborted_lineage(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    created = {"parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}, "rationale": ""}}
+    s.append("node_created", {**created, "node_id": 0, "code": "parent"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 2.0})
+    s.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    child = {"parent_ids": [0], "operator": "improve",
+             "idea": {"operator": "improve", "params": {}, "rationale": ""}, "code": "child"}
+    s.append("node_created", {**child, "node_id": 1, "parent_generations": {"0": 0}})
+    assert 1 not in fold(s.read_all()).nodes                    # reset won before stale child append
+
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 1.0})
+    s.append("node_created", {**child, "node_id": 1, "parent_generations": {"0": 1}})
+    assert 1 in fold(s.read_all()).nodes
+    s.append("node_abort", {"node_id": 0, "generation": 1})
+    s.append("node_created", {**child, "node_id": 2, "parent_generations": {"0": 1}})
+    s.append("node_created", {**child, "node_id": 3})          # legacy/mapless must still honor abort
+    nodes = fold(s.read_all()).nodes
+    assert 2 not in nodes and 3 not in nodes                    # same-gen abort invalidates parent
+
+
+def test_abort_makes_late_same_generation_effects_inert_but_charges_cost(tmp_path):
+    from looplab.core.models import NodeStatus
+
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_abort", {"node_id": 0, "generation": 0})
+    s.append("stage_finished", {"node_id": 0, "generation": 0, "name": "eval", "status": "ok"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 99.0,
+                                 "eval_seconds": 3.0})
+    s.append("confirm_eval", {"node_id": 0, "generation": 0, "seed": 1,
+                               "metric": 99.0, "eval_seconds": 2.0})
+    s.append("node_confirmed", {"node_id": 0, "generation": 0, "mean": 99.0})
+    s.append("reward_hack_suspected", {"node_id": 0, "generation": 0,
+                                         "signals": [{"signal": "grader_access"}]})
+    s.append("best_confirmed", {"node_id": 0, "generations": {"0": 0}})
+    s.append("node_failed", {"node_id": 0, "generation": 0, "reason": "aborted",
+                              "error": "aborted by operator", "eval_seconds": 3.0})
+    st = fold(s.read_all())
+    assert st.nodes[0].status is NodeStatus.failed and st.nodes[0].metric is None
+    assert st.nodes[0].stages == [] and st.nodes[0].confirmed_mean is None
+    assert st.confirm_seed_results == {} and st.reward_hacks == []
+    assert st.best_node_id is None and not st.confirmed_done
+    assert st.total_eval_seconds == 5.0            # terminal + confirm compute, each charged once
+
+
+def test_repeated_ablation_operations_each_charge_but_duplicate_id_dedupes(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("ablate", {"parent_id": 0, "generation": 0, "ablation_id": "a",
+                         "impacts": {}, "eval_seconds": 4.0})
+    s.append("ablate", {"parent_id": 0, "generation": 0, "ablation_id": "b",
+                         "impacts": {}, "eval_seconds": 5.0})
+    s.append("ablate", {"parent_id": 0, "generation": 0, "ablation_id": "b",
+                         "impacts": {}, "eval_seconds": 5.0})
+    assert fold(s.read_all()).total_eval_seconds == 9.0
+
+
+def test_scoped_developer_crash_pause_does_not_survive_reset(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_failed", {"node_id": 0, "generation": 0,
+                              "reason": "developer_crash", "error": "offline"})
+    s.append("pause", {"node_id": 0, "generation": 0, "reason": "auto"})
+    assert fold(s.read_all()).paused
+
+    s.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+    state = fold(s.read_all())
+    assert not state.paused and state.pause_node_id is None and state.nodes[0].attempt == 1
+    s.append("pause", {"node_id": 0, "generation": 0, "reason": "late auto pause"})
+    assert not fold(s.read_all()).paused
+
+    s.append("pause", {})                         # explicit operator pause is not lifecycle-scoped
+    s.append("node_reset", {"node_id": 0, "generation": 1, "from_stage": "eval"})
+    assert fold(s.read_all()).paused
+
+
+def test_auto_crash_pause_cannot_take_ownership_from_explicit_pause(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("pause", {})                       # human stop while the developer is still failing
+    s.append("node_failed", {"node_id": 0, "generation": 0,
+                              "reason": "developer_crash", "error": "offline"})
+    s.append("pause", {"node_id": 0, "generation": 0, "reason": "auto"})
+    paused = fold(s.read_all())
+    assert paused.paused and paused.pause_node_id is None
+
+    s.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+    reset = fold(s.read_all())
+    assert reset.paused and reset.pause_node_id is None
+
+
+def test_stale_terminal_cannot_clear_new_generation_building_marker(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+    s.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "implement"})
+    s.append("node_reset", {"node_id": 0, "generation": 1, "from_stage": "implement"})
+    s.append("node_building", {"node_id": 0, "generation": 2, "operator": "draft"})
+    s.append("node_failed", {"node_id": 0, "generation": 1,
+                              "reason": "superseded", "error": "late"})
+    assert fold(s.read_all()).building["generation"] == 2
+
+
+def test_run_finished_sequence_cas_rejects_intervening_control(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    started = s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("hint", {"text": "arrived after the finish decision"})
+    s.append("run_finished", {"reason": "done", "after_seq": started.seq})
+    assert not fold(s.read_all()).finished
+
+    latest = s.read_all()[-1]
+    s.append("run_finished", {"reason": "done", "after_seq": latest.seq})
+    assert fold(s.read_all()).finished
+
+
+def test_finalization_handshake_is_opt_in_and_marker_is_bound_to_current_finish(tmp_path):
+    legacy = EventStore(tmp_path / "legacy.jsonl")
+    legacy.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    old_finish = legacy.append("run_finished", {"reason": "legacy"})
+    old_state = fold(legacy.read_all())
+    assert old_state.finished and not old_state.finalization_pending()
+    assert old_state.last_finish_seq == old_state.finalized_finish_seq == old_finish.seq
+
+    modern = EventStore(tmp_path / "modern.jsonl")
+    modern.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    first = modern.append("run_finished", {
+        "reason": "done", "finalization_required": True})
+    assert fold(modern.read_all()).finalization_pending()
+    second = modern.append("run_finished", {
+        "reason": "newer", "finalization_required": True})
+    modern.append("finalization_finished", {"finish_seq": first.seq})
+    stale = fold(modern.read_all())
+    assert stale.last_finish_seq == second.seq and stale.finalization_pending()
+    modern.append("finalization_finished", {"finish_seq": second.seq})
+    assert not fold(modern.read_all()).finalization_pending()
+
+
+def test_finish_report_is_provisional_until_same_cas_or_legacy_adjacent_finish(tmp_path):
+    modern = EventStore(tmp_path / "modern.jsonl")
+    started = modern.append("run_started", {
+        "run_id": "r", "task_id": "t", "direction": "min"})
+    report = modern.append("report_generated", {
+        "trigger": "finish", "content": {"summary": "stale"}})
+    modern.append("hint", {"text": "won the race"})
+    modern.append("run_finished", {"after_seq": report.seq})
+    rejected = fold(modern.read_all())
+    assert not rejected.finished and rejected.report is None
+    fresh_report = modern.append("report_generated", {
+        "trigger": "finish", "content": {"summary": "fresh"}})
+    modern.append("run_finished", {"after_seq": fresh_report.seq})
+    accepted = fold(modern.read_all())
+    assert accepted.finished and accepted.report == {"summary": "fresh"}
+    assert started.seq < report.seq
+
+    adjacent = EventStore(tmp_path / "adjacent.jsonl")
+    adjacent.append("report_generated", {
+        "trigger": "finish", "content": {"summary": "legacy"}})
+    adjacent.append("run_finished", {})
+    assert fold(adjacent.read_all()).report == {"summary": "legacy"}
+
+    separated = EventStore(tmp_path / "separated.jsonl")
+    separated.append("report_generated", {
+        "trigger": "finish", "content": {"summary": "must stay hidden"}})
+    separated.append("future_unknown_event", {})
+    separated.append("run_finished", {})
+    assert fold(separated.read_all()).report is None
+
+
+def test_finalize_resume_intent_mode_survives_launch_claim_and_served_consumes_tail_stop(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    finish = s.append("run_finished", {})
+    stop = s.append("run_abort", {"reason": "finalized"})
+    requested = s.append("resume_requested", {"mode": "finalize"})
+    s.append("resume_requested", {"launch_claim": True})
+    pending = fold(s.read_all())
+    assert pending.finished and pending.stop_requested == "finalized"
+    assert pending.last_stop_request_seq == stop.seq > finish.seq
+    assert pending.last_resume_request_seq > requested.seq
+    assert pending.last_resume_request_mode == "finalize"
+
+    s.append("resume_served", {})
+    served = fold(s.read_all())
+    assert served.finished and served.stop_requested is None
+    s.append("resume_requested", {})
+    assert fold(s.read_all()).last_resume_request_mode == "resume"
 
 
 def test_foreign_eval_cost_does_not_poison_the_fold(tmp_path):
@@ -699,6 +1278,35 @@ def test_operator_may_approve_a_real_non_best_node(tmp_path):
     s.append("approval_granted", {"node_id": 7})                     # operator chooses node 7
     st = fold(s.read_all())
     assert st.approved is True and st.awaiting_approval is False
+    assert st.approved_node_id == 7 and st.best_node_id == 7     # publish what the human chose
+
+
+def test_approval_grant_is_bound_to_node_generation(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 0.5)
+    s.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.4})
+    s.append("approval_requested", {"node_id": 0, "generation": 1})
+    s.append("approval_granted", {"node_id": 0, "generation": 0})  # delayed gen-0 grant
+    assert fold(s.read_all()).approved is False
+    s.append("approval_granted", {"node_id": 0, "generation": 1})
+    st = fold(s.read_all())
+    assert st.approved and st.approved_node_id == 0
+
+
+def test_forced_confirm_completion_is_generation_scoped(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 0.5)
+    s.append("force_confirm", {"node_id": 0})
+    s.append("confirm_done", {"node_id": 0, "generation": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "eval"})
+    s.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.4})
+    s.append("force_confirm", {"node_id": 0})
+    st = fold(s.read_all())
+    assert {"node_id": 0, "generation": 1} in st.confirm_request_generations
+    assert {"node_id": 0, "generation": 1} not in st.confirmed_forced_generations
 
 
 def test_approval_backward_compat_direct_grant(tmp_path):
@@ -819,12 +1427,13 @@ def test_approval_granted_coerces_string_node_id(tmp_path):
     assert fold(s2.read_all()).approved is False
 
 
-def test_approval_granted_tolerates_unhashable_and_bool_node_id(tmp_path):
+def test_approval_granted_tolerates_unhashable_bool_and_fractional_node_id(tmp_path):
     """final-verification §F (blocker regression): a forged approval_granted with an UNHASHABLE node_id
     (list/dict) — a sanctioned /control event appended verbatim — must NOT crash fold (hashing an
     unhashable in `subj not in st.nodes` raises TypeError and bricks every replay). A bool id must not
-    spuriously match node 1 (bool subclasses int). Both are ignored; the run stays awaiting approval."""
-    for i, bad in enumerate([[999], {}, {"x": 1}, True, False]):   # enumerate -> deterministic, no filename collision
+    spuriously match node 1 (bool subclasses int), and a fractional id must not truncate to a real
+    node. All are ignored; the run stays awaiting approval."""
+    for i, bad in enumerate([[999], {}, {"x": 1}, True, False, 0.9]):
         s = EventStore(tmp_path / f"e_{i}.jsonl")
         s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
         _n(s, 0, 0.4)                       # node 0 exists; a bool id must NOT approve it via True->1/0

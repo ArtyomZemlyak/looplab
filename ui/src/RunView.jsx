@@ -132,26 +132,29 @@ export default function RunView({ runId, onBack }) {
   const onNodeAction = async (action, arg) => {
     try {
       if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
-        await CONTROL.merge(runId, [arg.from, arg.to]); await kickEngine(`merging #${arg.from} + #${arg.to}`)
+        const ids = [arg.from, arg.to]
+        const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
+        await CONTROL.merge(runId, ids, generations); await kickEngine(`merging #${arg.from} + #${arg.to}`)
         showToast(`merging #${arg.from} + #${arg.to}`); return
       }
       const id = arg
-      if (action === 'explore') { await CONTROL.fork(runId, id); await kickEngine(`exploring from #${id}`); showToast(`exploring from #${id}`) }
-      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id); await kickEngine(`ablating #${id}`); showToast(`ablating #${id}`) }
+      const generation = live2?.nodes?.[id]?.attempt
+      if (action === 'explore') { await CONTROL.fork(runId, id, generation); await kickEngine(`exploring from #${id}`); showToast(`exploring from #${id}`) }
+      else if (action === 'ablate') { await CONTROL.forceAblate(runId, id, generation); await kickEngine(`ablating #${id}`); showToast(`ablating #${id}`) }
       else if (action === 'inspect') { selectNode(id); setSideC(false) }   // un-collapse: with the side
       // panel folded (sideC persists in localStorage!) selecting alone changes nothing visible
       else if (action === 'diff') { setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare') }
       else if (action === 'merge') { setMergeFrom(id); showToast(`click a node to merge with #${id}`) }
       else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
         const stage = action.split(':')[1]
-        await CONTROL.resetNode(runId, id, stage)
+        await CONTROL.resetNode(runId, id, stage, generation)
         await kickEngine(`re-running #${id} from ${stage}`)
         showToast(`#${id}: re-running from ${stage} — applied on resume`)
       }
       else if (action === 'kill') {
         const ids = pendingDescendants(id)
         if (!ids.length) { showToast(`#${id}: nothing pending to kill (already evaluated)`); return }
-        for (const k of ids) await CONTROL.nodeAbort(runId, k)
+        for (const k of ids) await CONTROL.nodeAbort(runId, k, live2?.nodes?.[k]?.attempt)
         showToast(`killed ${ids.length} pending experiment(s) under #${id}`)
       }
     } catch (e) { showToast(`action failed: ${e.message || 'run not live?'}`) }
@@ -159,7 +162,9 @@ export default function RunView({ runId, onBack }) {
   // When armed for merge, a node click completes the merge instead of selecting.
   const onCanvasSelect = (id) => {
     if (mergeFrom != null && id != null && id !== mergeFrom) {
-      CONTROL.merge(runId, [mergeFrom, id])
+      const ids = [mergeFrom, id]
+      const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
+      CONTROL.merge(runId, ids, generations)
         .then(() => kickEngine(`merging #${mergeFrom} + #${id}`))
         .then(() => showToast(`merging #${mergeFrom} + #${id}`))
         .catch(() => showToast('merge failed'))
