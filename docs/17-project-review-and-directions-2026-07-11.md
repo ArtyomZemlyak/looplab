@@ -2388,9 +2388,13 @@ DCL+R-Drop`. That single missing structure is why concentration was invisible un
 could only jump sideways within the branch, and why dedup/novelty could not tell "a DCL tweak" from "the whole
 DCL branch."
 
-**Proposal — one hierarchical taxonomy, threaded everywhere.** Replace the flat theme with a **path** in a
-shared multi-level tree, e.g. `data / negatives / hard-negative-mining / nv-filtered`, or `model / loss /
-contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
+**Proposal — one shared taxonomy, threaded everywhere.** Replace the flat theme with structured concept
+membership. *(Refined by §21.11's validation: the substrate is a **multi-label concept DAG / bipartite
+experiment↔concept graph**, not a single-parent tree — `dcl-rdrop` is both `loss/decoupled-contrastive` and
+`regularization/r-drop`, and forcing one parent is what re-fragments the signal. The tree framing below is the
+intuition; read §21.11 for the validated graph model and its decisive uncovered-intersection signal.)* As a
+first cut, a **path** in a shared multi-level tree, e.g. `data / negatives / hard-negative-mining /
+nv-filtered`, or `model / loss / contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
 `negatives`, `loss`, `architecture`, `pooling`, `distillation`, `training-schedule`, `eval`) and **grown
 dynamically** as leaves appear — the fix for "themes are too narrow and too many" is not to forbid narrow
 leaves but to give them **parents**. Then thread the taxonomy path through **every subsystem that already
@@ -2553,3 +2557,44 @@ loop's failure was **not** base-model ignorance but **orchestration**: the narro
 champion-expansion, the state-narrator research memos, and the absent data-side infra. That is direct evidence
 the highest-leverage fixes are D1 (perception) + D5 (structure) + D7 (capability-expansion), not a stronger
 model — and it reinforces §10's "don't delegate the loop to a bigger backend."
+
+#### 21.11 Tree → graph: D5's substrate is a concept DAG + multi-label tagging (validated 2026-07-14)
+
+**Upgrade to D5, forced by the data.** A single-parent *tree* mislabels reality: `dcl-rdrop` is genuinely
+BOTH `loss/decoupled-contrastive` AND `regularization/r-drop`; `scale-batch-negatives` is BOTH `loss/DCL` and
+`negatives/in-batch`. The tree forces one choice — which is exactly what produced the §21.10 "re-fragmentation"
+failure. **D5's substrate should therefore be a bipartite experiment↔concept graph: each experiment carries a
+SET of concept tags, and concepts sit in an axis-DAG (a concept may have several parents), so hierarchy
+(level roll-ups) is preserved while multi-membership is explicit.** Higher maintenance (multi-label assignment
++ a governed concept vocabulary/edge set) — accepted because it measurably improves the signal, and quality is
+the priority here.
+
+**Measured on the `rubertlite` run (multi-label tagging by deepseek; deterministic graph analytics):**
+
+- **Concentration is cleaner and choice-free.** `loss/decoupled-contrastive` touch-fraction rises **0.09 →
+  0.57**; the dominant axis-clique `loss × regularization` rises **0 → 0.27**. No arbitrary primary-lever pick;
+  the co-occurring cluster {DCL, temperature, r-drop} is now visible as overlapping high-touch concepts.
+- **Intersection map (what a tree cannot express).** Covered axis-pairs: `loss × regularization` = **16**,
+  `hyperparameter × loss` = 11, `hyperparameter × regularization` = 6, `loss × negatives` = 3 (the weak
+  in-batch hard-neg attempts). The run lived inside one small clique.
+- **The decisive new signal — a continuous *uncovered winning-region* alarm from node 0.** The proven-winning
+  concepts — `negatives/external-mining`, `negatives/false-neg-handling`, `distillation/teacher-distill`,
+  `data/augmentation`, `data/synthetic-queries` — have **`first_touch = None` across all 67 nodes** (0 coverage,
+  the entire run). The graph surfaces this as a standing alarm **from the first node**, naming the empty region
+  — i.e. the missing recipe — directly. This is earlier and more actionable than any concentration threshold:
+  it does not wait for narrowing to accumulate; it reports that the search footprint never entered whole
+  regions. It is also the strongest possible Strategist pivot directive — not "broaden" (flat) or "open a
+  sibling branch" (tree) but **"you have 0 coverage in {negatives/external-mining, distillation, data} — go
+  there."**
+
+**Metric guidance (validated).** For graph concentration use **top-concept touch-fraction + dominant-clique
+share + count of uncovered key concept-regions**, NOT "distinct tag-set count" — the latter stayed ~0.6 the
+whole run (each modifier mints a new exact set) and is too noisy to be an alarm.
+
+**Composition.** This concept graph is the same substrate as §9's NapMem provenance graph and Part III-B §16's
+skill-coverage taxonomy — an experiment's concept tags, a lesson's concept tag, a skill's concept tag, and a
+memory record's level should all be nodes/edges in ONE governed concept graph. Build the graph once; let
+coverage (D5), lock-in (D7), dedup (D4), novelty (D3), the Strategist pivot, deep-research targeting (D2), and
+§16 skill-coverage all read it. **Net: adopt the graph, not the tree — the intersection/uncovered-region
+signal is the single most actionable output of the whole PART IV program, and it is the one representation that
+would have named `negatives + false-neg-filtering + distillation` as the run's blind spot on turn one.**
