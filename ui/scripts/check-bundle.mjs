@@ -46,6 +46,11 @@ export const DEFAULT_BUDGETS = Object.freeze({
       limits: { js: { gzip: 260 * KIB }, css: { gzip: 35 * KIB } },
     },
     {
+      name: 'valid review DAG route',
+      roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx')],
+      limits: { js: { gzip: 220 * KIB }, css: { gzip: 35 * KIB } },
+    },
+    {
       name: 'panel-hub increment',
       roots: [source('src/panels.jsx')],
       // Panels can only open after the owner run workspace is present. Measure bytes newly fetched
@@ -58,7 +63,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       limits: { js: { gzip: 60 * KIB } },
     },
     {
-      name: 'collaboration increment',
+      name: 'owner collaboration increment',
       roots: [source('src/CollabPanel.jsx')],
       // Comments/sharing is independently lazy so review users never pull the owner panel hub.
       // Keep the owner-workspace interaction cheap as comment features grow.
@@ -66,6 +71,14 @@ export const DEFAULT_BUDGETS = Object.freeze({
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
         source('src/Inspector.jsx'), source('src/DirectionsOverview.jsx'),
         source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+      ],
+      limits: { js: { gzip: 20 * KIB } },
+    },
+    {
+      name: 'review collaboration increment',
+      roots: [source('src/CollabPanel.jsx')],
+      baselineRoots: [
+        entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx'),
       ],
       limits: { js: { gzip: 20 * KIB } },
     },
@@ -107,9 +120,21 @@ export const DEFAULT_BUDGETS = Object.freeze({
       requireTargets: true,
     },
     {
+      name: 'valid review and comments exclude owner-only surfaces',
+      roots: [
+        entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx'),
+        source('src/Inspector.jsx'), source('src/Report.jsx'), source('src/CollabPanel.jsx'),
+      ],
+      targets: [
+        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+        source('src/Dock.jsx'), source('src/panels.jsx'),
+      ],
+      requireTargets: true,
+    },
+    {
       name: 'Report-only route defers the graph',
       roots: [entry, named('RunView'), source('src/Report.jsx')],
-      targets: [source('src/Dag.jsx'), named('vendor-flow')],
+      targets: [source('src/Dag.jsx'), source('src/Dock.jsx'), named('vendor-flow')],
       requireTargets: true,
     },
   ],

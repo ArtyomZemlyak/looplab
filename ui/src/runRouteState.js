@@ -22,7 +22,7 @@ const TAB_TO_WIRE = new Map(RUN_ROUTE_TABS.map(tab => [tab, tab.toLowerCase()]))
 const PANEL_SET = new Set(RUN_ROUTE_PANELS)
 const REVIEW_PANEL_SET = new Set(REVIEW_SAFE_PANEL_NAMES)
 const KIND_SET = new Set(TIMELINE_KIND_ORDER)
-const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'attempt', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
 const GENERATION_RE = /^[0-9a-f]{64}$/
 const COMMENT_ID_RE = /^[A-Za-z0-9_-]{8,160}$/
 const INTEGER_RE = /^(0|[1-9][0-9]*)$/
@@ -34,6 +34,7 @@ export const emptyRunRouteState = () => ({
   generation: null,
   view: 'dag',
   nodeId: null,
+  nodeGeneration: null,
   inspectTab: 'Overview',
   commentId: null,
   panel: null,
@@ -104,9 +105,12 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   if (GENERATION_RE.test(String(input.generation || ''))) state.generation = String(input.generation)
   if (input.view === 'report') state.view = 'report'
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
+  const nodeGeneration = state.nodeId != null && Number.isSafeInteger(input.nodeGeneration)
+    && input.nodeGeneration >= 0 ? input.nodeGeneration : null
   if (state.nodeId != null && RUN_ROUTE_TABS.includes(input.inspectTab)) state.inspectTab = input.inspectTab
-  if (state.nodeId != null && state.inspectTab === 'Comments'
+  if (state.nodeId != null && nodeGeneration != null && state.inspectTab === 'Comments'
       && typeof input.commentId === 'string' && COMMENT_ID_RE.test(input.commentId)) {
+    state.nodeGeneration = nodeGeneration
     state.commentId = input.commentId
   }
   if (PANEL_SET.has(input.panel)) state.panel = input.panel
@@ -169,6 +173,11 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     else if (view !== 'dag') issues.push('Unknown workspace view was ignored.')
   }
   state.nodeId = integer(single(params, 'node', issues), 'node id', issues)
+  const attempt = integer(single(params, 'attempt', issues), 'node attempt', issues)
+  if (attempt != null) {
+    if (state.nodeId == null) issues.push('Node attempt without a node was ignored.')
+    else state.nodeGeneration = attempt
+  }
   const tab = single(params, 'tab', issues)
   if (tab != null && tab !== '') {
     const decoded = TAB_FROM_WIRE.get(tab)
@@ -179,9 +188,14 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   const comment = single(params, 'comment', issues)
   if (comment != null && comment !== '') {
     if (!COMMENT_ID_RE.test(comment)) issues.push('Invalid comment target was ignored.')
-    else if (state.nodeId == null || state.inspectTab !== 'Comments') {
-      issues.push('Comment target without the matching Comments tab was ignored.')
+    else if (state.nodeId == null || state.nodeGeneration == null
+        || state.inspectTab !== 'Comments') {
+      issues.push('Comment target without the matching node attempt and Comments tab was ignored.')
     } else state.commentId = comment
+  }
+  if (state.nodeGeneration != null && state.commentId == null) {
+    issues.push('Node attempt without a valid comment target was ignored.')
+    state.nodeGeneration = null
   }
   const panel = single(params, 'panel', issues)
   if (panel != null && panel !== '') {
@@ -230,6 +244,7 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
   if (state.view === 'report') params.set('view', 'report')
   if (state.nodeId != null) {
     params.set('node', String(state.nodeId))
+    if (state.nodeGeneration != null) params.set('attempt', String(state.nodeGeneration))
     if (state.inspectTab !== 'Overview') params.set('tab', TAB_TO_WIRE.get(state.inspectTab))
     if (state.inspectTab === 'Comments' && state.commentId) params.set('comment', state.commentId)
   }

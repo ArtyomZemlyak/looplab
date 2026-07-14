@@ -7,6 +7,19 @@ const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf
 test('RunView owns one paged timeline shared by Dock and EventExplorer', async () => {
   const [runView, dock, panels] = await Promise.all([source('RunView.jsx'), source('Dock.jsx'), source('panels.jsx')])
   assert.match(runView, /const timeline = useTimeline\(runId/)
+  assert.match(runView, /const timelineDeferred = view === 'report' && panel !== 'events'/)
+  assert.match(runView, /enabled: !reviewMode && !routeFenceBlocked && !timelineDeferred/,
+    'a terminal auto-report render must not start the owner timeline request')
+  assert.match(runView, /const activateReportTimeline = \(\) => \{[\s\S]*?setTimelineActivation\(\{ runId, active: true, focusPending: true \}\)/,
+    'expanding the Report timeline must activate its data source')
+  assert.match(runView, /\(timelineDeferred \|\| reportTimelineFocusPending\)[\s\S]*?<div className="dock timeline-deferred-trigger"/,
+    'Report renders a lightweight trigger without mounting the lazy Dock')
+  assert.match(runView, /!reviewMode && !timelineDeferred && <LazyBoundary label="timeline"/)
+  assert.match(runView, /focusOnMount=\{reportTimelineFocusPending\}/)
+  assert.match(dock, /collapseButtonRef\.current\?\.focus\(\{ preventScroll: true \}\)/,
+    'focus must move from the lazy trigger to the loaded Dock control')
+  assert.match(runView, /const autoReport =[\s\S]*?const view = autoReport \? 'report' : requestedView/,
+    'terminal routing must select Report before lazy route children render')
   assert.match(runView, /<Dock[\s\S]*?timeline=\{timeline\}/)
   assert.match(runView, /<EventExplorer runId=\{runId\} timeline=\{timeline\}/)
   assert.match(runView, /const returnToLive = \(\) => \{[\s\S]*?changeViewSeq\(null\)[\s\S]*?timeline\.jumpToLive\(\)/)

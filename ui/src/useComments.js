@@ -39,12 +39,17 @@ export function useComments({
   const loadingMoreRef = useRef(false)
   const subjectValid = nodeId == null || (Number.isSafeInteger(nodeId) && nodeId >= 0
     && Number.isSafeInteger(nodeGeneration) && nodeGeneration >= 0)
+  const resourceEnabled = enabled && !!runId && /^[0-9a-f]{64}$/.test(expectedGeneration || '')
+    && subjectValid
+  // Effects run after paint. Hide a prior scope during render so generation/attempt changes cannot
+  // disclose one frame of the old page before the reset effect commits.
+  const renderScopeChanged = scopeRef.current !== scopeKey || !resourceEnabled
 
   useEffect(() => {
     const scopeChanged = scopeRef.current !== scopeKey
     scopeRef.current = scopeKey
-    if (!enabled || !runId || !/^[0-9a-f]{64}$/.test(expectedGeneration || '') || !subjectValid) {
-      if (scopeChanged || !subjectValid) setResource(subjectValid ? initialState() : {
+    if (!resourceEnabled) {
+      setResource(subjectValid ? initialState() : {
         ...initialState(), initialized: true,
         error: 'An exact experiment attempt is required before comments can be loaded.',
       })
@@ -87,7 +92,7 @@ export function useComments({
       })
     return () => controller.abort()
   }, [scopeKey, runId, nodeId, nodeGeneration, includeResolved, limit, enabled, expectedGeneration,
-    subjectValid, refreshToken, refreshKey])
+    subjectValid, resourceEnabled, refreshToken, refreshKey])
 
   const loadMore = useCallback(async () => {
     const cursor = resource.nextCursor
@@ -126,9 +131,15 @@ export function useComments({
     limit, expectedGeneration, scopeKey])
 
   const comments = useMemo(() => mergeCommentPages(resource.pages), [resource.pages])
+  const visibleResource = renderScopeChanged ? (subjectValid && resourceEnabled
+    ? { ...initialState(), loading: true }
+    : subjectValid ? initialState() : {
+      ...initialState(), initialized: true,
+      error: 'An exact experiment attempt is required before comments can be loaded.',
+    }) : resource
   return {
-    ...resource,
-    comments,
+    ...visibleResource,
+    comments: renderScopeChanged ? [] : comments,
     loadMore,
     refresh: () => setRefreshToken(value => value + 1),
   }

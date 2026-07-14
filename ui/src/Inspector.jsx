@@ -97,12 +97,19 @@ function ResetBtn({ runId, id, generation, onToast }) {
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
   historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
   commentsRevision = null, focusCommentId = null }) {
-  const [detail, setDetail] = useState(null)
+  const nodeAttempt = state?.nodes?.[nodeId]?.attempt
+  const detailScope = `${runId}@${expectedGeneration || '?'}:${nodeId ?? '-'}:${nodeAttempt ?? '?'}:${readOnly
+    ? historySeq ?? readOnlyReason : 'live'}:${evidenceAvailable ? 1 : 0}`
+  const [detailResource, setDetailResource] = useState({ scope: null, data: null })
+  const detailCurrent = detailResource.scope === detailScope
+  const detail = detailCurrent ? detailResource.data : null
+  const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt)
+    || value?.attempt === nodeAttempt
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
   const [detailNonce, setDetailNonce] = useState(0)
   useEffect(() => {
-    setDetail(null)               // clear stale detail immediately so we never render node A's
+    setDetailResource({ scope: detailScope, data: null })
     setDetailError('')
     if (nodeId == null) { setDetailStatus('idle'); return } // payload under node B while B's fetch is in flight (or failed)
     if (readOnlyReason === 'review' && !evidenceAvailable) { setDetailStatus('restricted'); return }
@@ -112,11 +119,18 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
       : ''
     get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}${at}`)
-      .then(d => { if (on) { setDetail(d); setDetailStatus('ready') } })
+      .then(d => {
+        if (on && detailMatchesAttempt(d)) {
+          setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready')
+        } else if (on) {
+          setDetailStatus('error')
+          setDetailError('The experiment attempt changed while details were loading.')
+        }
+      })
       .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
     return () => { on = false }
-  }, [runId, nodeId, state?.nodes?.[nodeId]?.status, readOnly, historySeq, expectedGeneration,
-    readOnlyReason, evidenceAvailable, detailNonce])
+  }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
+    expectedGeneration, readOnlyReason, evidenceAvailable, detailScope, detailNonce])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -138,12 +152,19 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     // alive() gates the async resolution: if the user selects a different node (or the poll is
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
     // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
-    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => { if (alive() && d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
-  }, 4000, [runId, nodeId, nodeWorking], { enabled: !readOnly && nodeWorking, immediate: false })
+    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => {
+      if (alive() && detailMatchesAttempt(d)) {
+        setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready'); setDetailError('')
+      }
+    }).catch(() => {})
+  }, 4000, [runId, nodeId, nodeWorking, detailScope],
+  { enabled: !readOnly && nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
   const n = detail || (state.nodes[nodeId])
   if (!n) return <div className="insp-empty">…</div>
+  const visibleDetailStatus = detailCurrent ? detailStatus
+    : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
@@ -178,8 +199,8 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       </div>
       <div className="insp-body" id={panelId(activeTab)} role="tabpanel"
         aria-labelledby={tabId(activeTab)} tabIndex={0}>
-        {detailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
-        {detailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
+        {visibleDetailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
+        {visibleDetailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
         {readOnly
           ? <div className="insp-hint history-inline">{readOnlyReason === 'review'
               ? evidenceAvailable
@@ -194,9 +215,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
-        {activeTab === 'Code' && (detailStatus === 'ready'
+        {activeTab === 'Code' && (visibleDetailStatus === 'ready'
           ? <Code n={n} />
-          : detailStatus === 'error'
+          : visibleDetailStatus === 'error'
             ? <div className="insp-empty">Code is unavailable because full node details failed to load.</div>
             : <div className="insp-empty">Loading code…</div>)}
         {activeTab === 'Metrics' && <Metrics n={n} detail={detail} state={state} runId={runId} />}

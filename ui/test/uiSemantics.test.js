@@ -236,8 +236,9 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // after the user selected a different node (Inspector) or after building ended (Dock), overwriting
   // fresher state with a stale snapshot. Both must take (alive) and guard the setState with alive().
   const [inspector, dock] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx')])
-  // Inspector node-detail poll: callback receives (alive) and only sets detail when alive() && d.
-  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{ if \(alive\(\) && d\)/)
+  // Inspector node-detail poll: callback receives (alive), rejects another attempt, and only then writes.
+  assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\?\.attempt === nodeAttempt/)
+  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) setNodeTrace\(d\) \}\)/)
   assert.match(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\); loadNodeTrace\(alive\) \}[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)

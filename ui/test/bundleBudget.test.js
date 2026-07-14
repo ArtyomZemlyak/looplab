@@ -137,8 +137,20 @@ test('the default policy is satisfiable by a fully split route and interaction g
 
   const result = evaluateBundle({ manifest: graph, assetStats: measured })
   assert.deepEqual(result.violations, [])
-  assert.equal(result.reachability.length, 5)
+  assert.equal(result.reachability.length, 6)
   assert.ok(result.reachability.every(item => item.paths.length === 0))
+
+  for (const [root, target] of [
+    ['src/Inspector.jsx', 'src/Dock.jsx'],
+    ['src/Report.jsx', 'src/panels.jsx'],
+  ]) {
+    const poisoned = structuredClone(graph)
+    poisoned[root].imports = [target]
+    const blocked = evaluateBundle({ manifest: poisoned, assetStats: measured })
+    assert.ok(blocked.violations.some(item => item.code === 'forbidden_reachability'
+      && item.message.includes('valid review and comments exclude owner-only surfaces')),
+    `${root} must not pull ${target} into a review route`)
+  }
 })
 
 test('all budget and reachability failures are actionable', () => {

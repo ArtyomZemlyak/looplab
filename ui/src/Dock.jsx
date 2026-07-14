@@ -582,8 +582,14 @@ const observationKind = error => {
 export default function Dock({ runId, live, liveSeq, expectedGeneration, timeline, viewSeq, setViewSeq,
   onReturnToLive, onFocus, collapsed, onToggleCollapse, height = 230, onToast, readOnly = false,
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
-  onKindFiltersChange = null }) {
+  onKindFiltersChange = null, focusOnMount = false, onInitialFocus = null }) {
   const log = timeline.rows
+  const collapseButtonRef = useRef(null)
+  useEffect(() => {
+    if (!focusOnMount) return
+    collapseButtonRef.current?.focus({ preventScroll: true })
+    onInitialFocus?.()
+  }, [focusOnMount])
   // URL-owned diagnostic filters: Dock renders them, while RunView commits the canonical fragment
   // state. This lets reload/Back/Forward restore the exact event lens without a second store.
   const kinds = useMemo(() => new Set(kindFilters), [kindFilters])
@@ -1055,7 +1061,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         <span className="spacer" style={{ flex: 1 }} />
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
-        <button className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
+        <button ref={collapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
                 aria-label={collapsed ? 'Expand events and timeline' : 'Collapse events and timeline'}
                 aria-expanded={!collapsed} aria-controls="run-events-timeline"
                 onClick={onToggleCollapse}><OpIcon name={collapsed ? 'chevron-up' : 'chevron-down'} size={13} /></button>

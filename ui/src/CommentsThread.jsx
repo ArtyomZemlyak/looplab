@@ -406,7 +406,9 @@ function CommentCard({
               : comment.resolved ? 'Reopen' : 'Resolve'}
         </button>
       </>}
-      {canViewHistory && !editing && <History runId={runId} comment={comment}
+      {canViewHistory && !editing && <History
+        key={`${runId}:${expectedGeneration || 'unknown'}:${comment.id}:${comment.version}`}
+        runId={runId} comment={comment}
         expectedGeneration={expectedGeneration} onAnnounce={onAnnounce} />}
       {comment.legacy && <span className="muted comment-legacy-note">Legacy notes are read-only.</span>}
       {!readOnly && !comment.legacy && !comment.editable &&

@@ -132,19 +132,34 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
-  const view = routeState.view
+  const requestedView = routeState.view
   const themeFilter = routeState.directionFilter
   const routeFenceBlocked = generationMismatch || generationPending
+  const historyActive = viewSeq != null
+  const landedRef = useRef(false)                            // auto-land on Report once, on finish
+  const deepLinkLandingRef = useRef(route.hadState)          // even invalid state must not be hidden by auto-report
+  const liveTerminalReady = terminalReady(live || {})
+  // Choose Report in the same render that first observes terminal readiness. Waiting for the passive
+  // URL effect would start DAG chunks and the owner log-page request for a surface never displayed.
+  const autoReport = !historyActive && liveTerminalReady && !landedRef.current
+    && !deepLinkLandingRef.current && !runRouteStateHasTarget(routeState, { reviewMode })
+  const view = autoReport ? 'report' : requestedView
+  const [timelineActivation, setTimelineActivation] = useState({
+    runId: null, active: false, focusPending: false,
+  })
+  const reportTimelineActivated = timelineActivation.runId === runId && timelineActivation.active
+  const reportTimelineFocusPending = timelineActivation.runId === runId
+    && timelineActivation.focusPending
+  const timelineDeferred = view === 'report' && panel !== 'events' && !reportTimelineActivated
   // One owner-only paged controller feeds both Dock and EventExplorer. Opening the explorer therefore
   // adds no second raw-log scan, cursor stream, retained window, or competing generation fence.
   const timeline = useTimeline(runId, {
     liveSeq: seq, liveEventCount, expectedGeneration: generation,
-    enabled: !reviewMode && !routeFenceBlocked,
+    enabled: !reviewMode && !routeFenceBlocked && !timelineDeferred,
   })
   const compactWorkspace = useMediaQuery('(max-width: 900px)')
   const [history, setHistory] = useState(liveHistory)
   const [historyRetry, setHistoryRetry] = useState(0)
-  const historyActive = viewSeq != null
   const readOnlyMode = reviewMode || historyActive || routeFenceBlocked
   const reviewEvidence = reviewMode && (reviewMeta?.scopes || []).includes('evidence')
   const panelAllowed = (name) => {
@@ -157,13 +172,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     return {
       ...current,
       nodeId: next,
+      nodeGeneration: next === current.nodeId ? current.nodeGeneration : null,
       inspectTab: next == null ? 'Overview' : current.inspectTab,
       commentId: next === current.nodeId ? current.commentId : null,
     }
   }, options)
   const setInspectTab = (value, options = {}) => route.update(current => {
     const next = typeof value === 'function' ? value(current.inspectTab) : value
-    return { ...current, inspectTab: next, commentId: next === 'Comments' ? current.commentId : null }
+    return { ...current, inspectTab: next,
+      nodeGeneration: next === 'Comments' ? current.nodeGeneration : null,
+      commentId: next === 'Comments' ? current.commentId : null }
   }, options)
   const setPanel = (value, options = {}) => route.update(current => ({
     ...current, panel: typeof value === 'function' ? value(current.panel) : value,
@@ -239,8 +257,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (!openHub) return
     requestAnimationFrame(() => hubMenuRef.current?.querySelector('[role="menuitem"]:not(:disabled)')?.focus({ preventScroll: true }))
   }, [openHub])
-  const landedRef = useRef(false)                            // auto-land on Report once, on finish
-  const deepLinkLandingRef = useRef(route.hadState)          // even invalid state must not be hidden by auto-report
   // Resizable / collapsible panes (standard multi-pane layout), persisted across sessions.
   const [sideW, setSideW] = useState(() => +storageGet('ll.sideW', 420) || 420)
   const [dockH, setDockH] = useState(() => +storageGet('ll.dockH', 230) || 230)
@@ -321,16 +337,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       .then(value => { if (active) setCfg(value) }).catch(() => { if (active) setCfg(null) })
     return () => { active = false }
   }, [runId, routeFenceBlocked])
-  const liveTerminalReady = terminalReady(live || {})
   // Auto-land only after terminal write-out genuinely completed. A run_finished(error) during an
   // explicit finalize is recovery state, not a completed report, and a still-live engine may still be
   // writing report/lessons/cost after the terminal event appeared.
   useEffect(() => {
-    if (!historyActive && liveTerminalReady && !landedRef.current && !deepLinkLandingRef.current
-        && !runRouteStateHasTarget(routeState, { reviewMode })) {
+    if (autoReport) {
       landedRef.current = true; setView('report')
     }
-  }, [liveTerminalReady, historyActive, routeState, reviewMode])
+  }, [autoReport])
   useEffect(() => {
     if (viewSeq == null) { setHistory(liveHistory()); return }
     if (!generation || routeFenceBlocked || reviewMode) return
@@ -401,7 +415,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         return {
           ...current,
           nodeId: nextNode,
+          nodeGeneration: nextNode === current.nodeId ? current.nodeGeneration : null,
           inspectTab: nextNode == null ? 'Overview' : current.inspectTab,
+          commentId: nextNode === current.nodeId ? current.commentId : null,
           sequence: Number.isSafeInteger(history.resolvedSeq) ? history.resolvedSeq : current.sequence,
         }
       }, { mode: 'replace', preserveIssues: true })
@@ -427,10 +443,24 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     if (live2.nodes?.[selectedId]) return
     setRouteNotice(current => [current, `Experiment #${selectedId} is not available in this run state.`]
       .filter(Boolean).join(' '))
-    route.update(current => ({ ...current, nodeId: null, inspectTab: 'Overview' }),
+    route.update(current => ({ ...current, nodeId: null, nodeGeneration: null,
+      inspectTab: 'Overview', commentId: null }),
       { mode: 'replace', preserveIssues: true })
     setCompactInspectorOpen(false)
   }, [live2, selectedId, historyActive, history.status])
+  const currentSelectedAttempt = selectedId == null ? null : live2?.nodes?.[selectedId]?.attempt
+  const commentAttemptMatches = !routeState.commentId
+    || (Number.isSafeInteger(routeState.nodeGeneration)
+      && routeState.nodeGeneration === currentSelectedAttempt)
+  useEffect(() => {
+    if (!routeState.commentId || !live2 || commentAttemptMatches) return
+    setRouteNotice(current => [current,
+      `The linked comment belongs to attempt ${routeState.nodeGeneration}; experiment #${selectedId} is now attempt ${currentSelectedAttempt ?? 'unavailable'}.`]
+      .filter(Boolean).join(' '))
+    route.update(current => ({ ...current, nodeGeneration: null, commentId: null }),
+      { mode: 'replace', preserveIssues: true })
+  }, [routeState.commentId, routeState.nodeGeneration, live2, selectedId,
+    currentSelectedAttempt, commentAttemptMatches])
   useEffect(() => {
     if (!live2 || !themeFilter) return
     const exists = Object.values(live2.nodes || {}).some(node => node.idea?.theme === themeFilter)
@@ -568,8 +598,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     const value = Number(eventSeq)
     const targetSeq = eventSeq == null || value >= seq ? null
       : Number.isSafeInteger(value) && value >= 0 ? value : null
-    route.update(current => ({ ...current, nodeId: id,
-      inspectTab: tab || current.inspectTab, sequence: reviewMode ? null : targetSeq }))
+    route.update(current => {
+      const nextTab = tab || current.inspectTab
+      const preserveComment = id === current.nodeId && nextTab === 'Comments'
+      return { ...current, nodeId: id,
+        nodeGeneration: preserveComment ? current.nodeGeneration : null,
+        inspectTab: nextTab,
+        commentId: preserveComment ? current.commentId : null,
+        sequence: reviewMode ? null : targetSeq }
+    })
     setSelectedGroup(null)
     if (compactWorkspace) setCompactInspectorOpen(true)
     else setSideC(false)     // drill-down means "show me the inspector" — un-fold a collapsed panel
@@ -628,6 +665,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       ...current,
       view: 'dag',
       nodeId: comment.nodeId,
+      nodeGeneration: comment.nodeGeneration,
       inspectTab: 'Comments',
       commentId: comment.id,
       panel: null,
@@ -762,6 +800,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const hasInspectorContext = selectedId != null || selectedGroup != null
   const showInspector = compactWorkspace ? (compactInspectorOpen && hasInspectorContext) : (!sideC && hasInspectorContext)
   const timelineCollapsed = compactWorkspace ? !compactTimelineOpen : dockC
+  const activateReportTimeline = () => {
+    if (reportTimelineActivated) return
+    setTimelineActivation({ runId, active: true, focusPending: true })
+    if (compactWorkspace) setCompactTimelineOpen(true)
+    else setDockC(false)
+  }
   const emptyPresentation = dagEmptyPresentation({
     displayed: state, live, resourceStatus: runStatus, connected,
     historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq,
@@ -958,7 +1002,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
                 onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
                 onPickNode={(id) => {
-                  route.update(current => ({ ...current, view: 'dag', nodeId: id }))
+                  route.update(current => ({ ...current, view: 'dag', nodeId: id,
+                    nodeGeneration: null, commentId: null }))
                   setSelectedGroup(null)
                   if (compactWorkspace) setCompactInspectorOpen(true)
                   else setSideC(false)
@@ -1018,17 +1063,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
                         readOnly={readOnlyMode} historySeq={history.resolvedSeq}
                         expectedGeneration={generation} commentsRevision={state?.comments_revision}
-                        focusCommentId={routeState.commentId}
+                        focusCommentId={commentAttemptMatches ? routeState.commentId : null}
                         readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
                 </LazyBoundary>
               </aside>
             </>}
       </div>
 
-      {!reviewMode && !compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
+      {!reviewMode && (timelineDeferred || reportTimelineFocusPending)
+        && <div className="dock timeline-deferred-trigger" aria-busy={reportTimelineFocusPending}>
+        <div className="dock-tabs">
+          <strong>{reportTimelineFocusPending ? 'Loading events & timeline…' : 'Events & timeline'}</strong>
+          <span className="spacer" />
+          <button type="button" className="btn sm ghost dock-collapse"
+            aria-label="Load events and timeline" aria-expanded="false"
+            onClick={activateReportTimeline}>
+            <OpIcon name="chevron-up" size={13} />
+          </button>
+        </div>
+      </div>}
+      {!reviewMode && !timelineDeferred && !compactWorkspace && !timelineCollapsed && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
         role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
         aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
-      {!reviewMode && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
+      {!reviewMode && !timelineDeferred && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
         <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
           timeline={timeline}
           viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
@@ -1040,7 +1097,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           readOnly={historyActive}
           publishTransport={setTransportController}
           collapsed={timelineCollapsed}
-          onToggleCollapse={() => compactWorkspace ? setCompactTimelineOpen(v => !v) : setDockC(c => !c)}
+          focusOnMount={reportTimelineFocusPending}
+          onInitialFocus={() => setTimelineActivation(current => current.runId === runId
+            ? { ...current, focusPending: false } : current)}
+          onToggleCollapse={() => {
+            if (compactWorkspace) setCompactTimelineOpen(v => !v)
+            else setDockC(c => !c)
+          }}
           height={dockH} />
       </LazyBoundary>}
         </>}

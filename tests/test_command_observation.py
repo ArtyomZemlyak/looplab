@@ -1,4 +1,4 @@
-"""PERF-02: command monitoring reads an append-only log once, then only its delta."""
+"""PERF-02: command monitoring scans an append-only log once, then only its event delta."""
 from __future__ import annotations
 
 import os
@@ -153,6 +153,53 @@ def test_shrink_replace_and_same_size_in_place_rewrite_rebuild_facts(tmp_path, m
     assert replaced.marked_intent(first_id).seq == 0
     assert replaced.marked_intent(second_id) is None
     assert index.metrics.rebuilds == rebuilds + 3
+
+
+def test_probe_change_while_scanning_discards_the_mixed_snapshot(tmp_path, monkeypatch):
+    path = tmp_path / "events.jsonl"
+    path.write_bytes(_row(0, "run_started", {"run_id": "stable"}))
+    original_probe = command_observation._probe_signature
+    probes = 0
+
+    def changing_probe(handle, size):
+        nonlocal probes
+        probes += 1
+        signature = original_probe(handle, size)
+        # Emulate a sampled same-size rewrite after parsing but before the final snapshot fence.
+        return b"changed-during-scan" if probes == 2 else signature
+
+    monkeypatch.setattr(command_observation, "_probe_signature", changing_probe)
+    index = CommandObservationIndex()
+    observed = index.observe(path)
+
+    assert observed.event_count == 1
+    assert observed.state().run_id == "stable"
+    assert index.metrics.rebuilds == 2
+    assert index.metrics.scan_calls == 2
+    assert index.observe(path).revision == observed.revision
+
+
+def test_public_observation_values_cannot_mutate_the_cached_snapshot(tmp_path):
+    path = tmp_path / "events.jsonl"
+    command_id = "cmd_" + "c" * 32
+    path.write_bytes(b"".join([
+        _row(0, "run_started", {"run_id": "immutable", "task_id": "t", "goal": "g"}),
+        _row(1, "resume", {"_command_id": command_id}),
+        _row(2, "run_abort", {"reason": "operator"}),
+    ]))
+    index = CommandObservationIndex()
+    observed = index.observe(path)
+
+    observed.events()[0].data["run_id"] = "corrupt"
+    observed.marked_intent(command_id).data["_command_id"] = "corrupt"
+    observed.latest_run_abort.data["reason"] = "corrupt"
+    observed.state().run_id = "corrupt"
+
+    sibling = index.observe(path)
+    assert sibling.events()[0].data["run_id"] == "immutable"
+    assert sibling.marked_intent(command_id).data["_command_id"] == command_id
+    assert sibling.latest_run_abort.data["reason"] == "operator"
+    assert sibling.state().run_id == "immutable"
 
 
 def test_concurrent_callers_share_one_consistent_cold_scan(tmp_path):

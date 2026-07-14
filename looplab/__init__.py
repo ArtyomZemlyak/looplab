@@ -56,6 +56,7 @@ _LAYOUT = {
     "cli_agent": "agents",
     "comment_projection": "events",
     "command_eval": "runtime",
+    "command_observation": "serve",
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)

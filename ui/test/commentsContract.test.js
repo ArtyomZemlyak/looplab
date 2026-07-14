@@ -600,6 +600,22 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(inspector, /refreshKey=\{commentsRevision\}/)
   assert.match(hook, /refreshKey/)
   assert.match(hook, /commentMatchesSubject/)
-  assert.match(runView, /currentAttempt !== comment\.nodeGeneration/,
-    'run-wide deep links must reject a stale node attempt')
+  assert.match(inspector, /nodeGeneration=\{n\.attempt\}/)
+  assert.match(runView, /currentAttempt !== comment\.nodeGeneration/)
+  assert.match(runView, /commentAttemptMatches \? routeState\.commentId : null/)
+  assert.match(inspector, /detailResource\.scope === detailScope/)
+  assert.match(inspector, /const detail = detailCurrent \? detailResource\.data : null/,
+    'a node, attempt, or generation switch must hide stale full detail before passive effects')
+  assert.match(inspector, /if \(on && detailMatchesAttempt\(d\)\)/,
+    'a reset racing the full-detail response must not relabel another attempt as current')
+  assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'/)
+  assert.match(runView, /nodeGeneration: preserveComment \? current\.nodeGeneration : null/,
+    'dock/report node transitions must not retarget an old comment to a different node')
+  assert.match(hook, /const renderScopeChanged = scopeRef\.current !== scopeKey \|\| !resourceEnabled/)
+  assert.match(hook, /comments: renderScopeChanged \? \[\] : comments/,
+    'scope changes must hide prior comment pages during render, before passive effects')
+  const commentsThread = await readFile(new URL('../src/CommentsThread.jsx', import.meta.url), 'utf8')
+  assert.match(commentsThread,
+    /key=\{`\$\{runId\}:\$\{expectedGeneration \|\| 'unknown'\}:\$\{comment\.id\}:\$\{comment\.version\}`\}/,
+    'a new run/version/generation must invalidate an already-open history cache')
 })

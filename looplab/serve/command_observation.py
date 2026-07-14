@@ -1,15 +1,15 @@
-"""Incremental, snapshot-safe observations for run-command monitoring.
+"""Incremental observations for append-only run-command monitoring.
 
 Command workers poll an append-only ``events.jsonl`` while waiting for an exact intent,
 acknowledgement, domain failure, or terminal postcondition.  Re-reading and folding the complete
-log in every helper turns a long run into quadratic work.  This module scans each recoverable byte
-once, retains only eight active run indexes, and gives one immutable logical observation to all
-helpers in a monitor iteration.
+log in every helper turns a long run into quadratic disk parsing.  This module scans each recoverable
+event byte once, retains only eight active run indexes, and gives one stable logical observation to
+all helpers in a monitor iteration.
 
 The scanner deliberately mirrors :func:`looplab.events.eventstore.iter_jsonl`: the first partial,
 invalid, non-object, or invalid-Event row ends the recoverable prefix.  A later append resumes from
 the last valid byte boundary, so completing a torn tail is observed without re-reading the prefix.
-Replacement, shrink, and ambiguous same-size mutation rebuild the index before it is trusted.
+Replacement, shrink, and a sampled same-size sentinel change rebuild the index before it is trusted.
 """
 from __future__ import annotations
 
@@ -37,6 +37,10 @@ MAX_INDEXED_RUNS = 8
 _PROBE_WINDOW_BYTES = 4 * 1024
 _PROBE_FULL_FILE_LIMIT = 3 * _PROBE_WINDOW_BYTES
 _DUPLICATE_INTENT = object()
+
+
+class _ObservationChanged(RuntimeError):
+    """The sampled file content changed while one logical snapshot was being built."""
 
 
 @dataclass
@@ -74,7 +78,7 @@ class _Index:
     run_finishes: tuple[Event, ...] = ()
     latest_run_abort: Optional[Event] = None
     materialized_revision: Optional[str] = None
-    materialized_events: Optional[list[Event]] = None
+    materialized_events: Optional[tuple[Event, ...]] = None
     folded_revision: Optional[str] = None
     folded_state: Optional[RunState] = None
     finalize_revision: Optional[str] = None
@@ -237,7 +241,7 @@ def _scan(handle: BinaryIO, index: _Index, snapshot_size: int,
 
 @dataclass(frozen=True)
 class CommandObservation:
-    """One immutable recoverable-prefix view shared across command-monitor helpers."""
+    """One stable recoverable-prefix view whose public model accessors return defensive copies."""
 
     path: Path
     revision: str
@@ -257,7 +261,7 @@ class CommandObservation:
 
     def marked_intent(self, command_id: str) -> Optional[Event]:
         value = self._intents.get(command_id)
-        return value if isinstance(value, Event) else None
+        return value.model_copy(deep=True) if isinstance(value, Event) else None
 
     def has_ack(self, command_id: str, event_seq: object) -> bool:
         # Tuple membership retains Python's exact historical equality semantics (including legacy
@@ -268,11 +272,12 @@ class CommandObservation:
         return self.max_non_control_seq > after_seq
 
     def domain_failure_after(self, after_seq: int) -> Optional[Event]:
-        return next(
+        event = next(
             (event for event in self._run_finishes
              if event.seq > after_seq and (event.data or {}).get("reason") == "error"),
             None,
         )
+        return event.model_copy(deep=True) if event is not None else None
 
     def has_non_error_finish_after(self, after_seq: int) -> bool:
         return any(
@@ -283,13 +288,14 @@ class CommandObservation:
 
     @property
     def latest_run_abort(self) -> Optional[Event]:
-        return self._latest_run_abort
+        return (self._latest_run_abort.model_copy(deep=True)
+                if self._latest_run_abort is not None else None)
 
-    def events(self) -> list[Event]:
-        return self._owner._materialize(self)
+    def events(self) -> tuple[Event, ...]:
+        return tuple(event.model_copy(deep=True) for event in self._owner._materialize(self))
 
     def state(self) -> RunState:
-        return self._owner._fold(self)
+        return self._owner._fold(self).model_copy(deep=True)
 
     def incomplete_finalize_scope(self) -> Optional[str]:
         return self._owner._incomplete_finalize_scope(self)
@@ -321,14 +327,14 @@ class CommandObservationIndex:
         size = stat.st_size
         identity = _identity(stat)
         metadata = _metadata(stat)
-        probe_signature = _probe_signature(handle, size)
+        probe_before = _probe_signature(handle, size)
         index = self._indexes.get(key)
         rebuild = (
             index is None
             or index.identity != identity
             or size < index.observed_size
             or (size == index.observed_size and metadata != index.metadata)
-            or (size == index.observed_size and probe_signature != index.probe_signature)
+            or (size == index.observed_size and probe_before != index.probe_signature)
         )
         if rebuild:
             index = self._new_index(stat)
@@ -339,14 +345,21 @@ class CommandObservationIndex:
 
         # An unchanged stopped tail is a cache hit. Growth replays only from the valid boundary,
         # including the formerly partial row that may now have its terminating newline.
-        if rebuild or size != index.observed_size:
+        cache_hit = not rebuild and size == index.observed_size
+        if not cache_hit:
             _scan(handle, index, size, self.metrics)
-        else:
+        probe_after = _probe_signature(handle, size)
+        if probe_after != probe_before:
+            # Never pair events parsed from one same-size image with the sentinel signature from a
+            # later image. Without this fence the next poll could trust that stale pairing forever.
+            self._indexes.pop(key, None)
+            raise _ObservationChanged
+        if cache_hit:
             self.metrics.cache_hits += 1
             self.metrics.last_bytes_read = 0
             self.metrics.last_records_parsed = 0
         index.metadata = metadata
-        index.probe_signature = _probe_signature(handle, size)
+        index.probe_signature = probe_after
         return index
 
     def observe(self, path: str | os.PathLike) -> CommandObservation:
@@ -358,17 +371,26 @@ class CommandObservationIndex:
             with open(path, "rb") as handle, self._lock:
                 self.metrics.refreshes += 1
                 stat = os.fstat(handle.fileno())
-                index = self._refresh_locked(path, handle, stat)
+                try:
+                    index = self._refresh_locked(path, handle, stat)
+                except _ObservationChanged as exc:
+                    if attempt < 2:
+                        continue
+                    raise OSError(f"event log changed while observing {path}") from exc
                 try:
                     current = path.stat()
                 except OSError:
                     if attempt < 2:
                         continue
                     raise
+                sampled_content_changed = (
+                    _probe_signature(handle, stat.st_size) != index.probe_signature)
                 if (_identity(current) != _identity(stat)
                         or current.st_size < stat.st_size
                         or (current.st_size == stat.st_size
-                            and _metadata(current) != _metadata(stat))):
+                            and _metadata(current) != _metadata(stat))
+                        or sampled_content_changed):
+                    self._indexes.pop(str(path), None)
                     if attempt < 2:
                         continue
                     raise OSError(f"event log changed while observing {path}")
@@ -391,13 +413,13 @@ class CommandObservationIndex:
                 )
         raise OSError(f"event log did not stabilize while observing {path}")  # pragma: no cover
 
-    def _materialize(self, observation: CommandObservation) -> list[Event]:
+    def _materialize(self, observation: CommandObservation) -> tuple[Event, ...]:
         index = observation._index
         with self._lock:
             if (index.materialized_revision == observation.revision
                     and index.materialized_events is not None):
                 return index.materialized_events
-        materialized = list(chain.from_iterable(observation._chunks))
+        materialized = tuple(chain.from_iterable(observation._chunks))
         with self._lock:
             if index.revision == observation.revision:
                 index.materialized_revision = observation.revision
@@ -409,7 +431,7 @@ class CommandObservationIndex:
         with self._lock:
             if index.folded_revision == observation.revision and index.folded_state is not None:
                 return index.folded_state
-        state = fold(observation.events())
+        state = fold(self._materialize(observation))
         with self._lock:
             if index.revision == observation.revision:
                 index.folded_revision = observation.revision
@@ -421,7 +443,7 @@ class CommandObservationIndex:
         with self._lock:
             if index.finalize_revision == observation.revision:
                 return index.finalize_scope
-        scope = incomplete_finalize_scope(observation.events())
+        scope = incomplete_finalize_scope(self._materialize(observation))
         with self._lock:
             if index.revision == observation.revision:
                 index.finalize_revision = observation.revision
