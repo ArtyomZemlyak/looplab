@@ -404,3 +404,53 @@ def test_trace_carries_run_id_even_with_an_unfoldable_log(tmp_path):
     tv = client.get("/api/runs/demo/trace").json()
     assert tv["run_id"] == "demo"                      # falls back to the run dir name, never ""
     assert set(tv["nodes"].keys()) == {"0", "1"}       # the span tree still renders from the index
+
+
+def test_persisted_index_negative_length_does_not_slurp_and_rebuilds(run):
+    """R6-F1.2: a corrupt persisted `_l` (negative/oversized) must never reach `f.read(length)` (a
+    negative length reads the whole file into memory). _load_persisted treats it as a torn tail and the
+    caller tops up the rest from spans.jsonl, so the result still matches a full rebuild."""
+    rd, sp, spans = run
+    get_index(sp)
+    span_index._CACHE.clear()
+    ip = rd / "spans.index.jsonl"
+    lines = ip.read_bytes().split(b"\n")
+    # Corrupt a MIDDLE record's length to a negative value (header is line 0; pick line 2).
+    rec = json.loads(lines[2])                                  # line 0 = header, line 2 = the 2nd span
+    victim_id = rec["span_id"]
+    rec["_l"] = -1
+    lines[2] = orjson.dumps(rec)
+    ip.write_bytes(b"\n".join(lines))
+    idx = get_index(sp)                                          # must not slurp/crash; tops up from truth
+    ref = build_trace_view(ST, load_spans(sp), light=True)
+    assert _canon(ref) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
+    # The negative length was rejected at load and the row rebuilt from spans.jsonl, so meta never
+    # carries the -1 that would drive `f.read(-1)`; the full span still resolves to the RIGHT span.
+    row = idx.by_sid[victim_id]
+    assert idx.meta[row][1] >= 0
+    assert (idx.full_span(victim_id) or {}).get("span_id") == victim_id
+
+
+def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
+    """R6-F1.1: if a persisted offset drifts onto a DIFFERENT but still-valid span line (bit-rot on a
+    network mount), full_span must return None — never the neighboring span as if it were the requested
+    one. The read cross-checks the span_id against the row it indexes."""
+    rd, sp, spans = run
+    get_index(sp)
+    span_index._CACHE.clear()
+    ip = rd / "spans.index.jsonl"
+    lines = [l for l in ip.read_bytes().split(b"\n") if l]
+    recs = [json.loads(l) for l in lines[1:]]                   # skip header
+    by_id = {r["span_id"]: r for r in recs}
+    victim, other = by_id["g0_1"], by_id["g1_0"]               # both middle spans (last stays intact)
+    victim["_o"], victim["_l"] = other["_o"], other["_l"]      # point g0_1's row at g1_0's bytes
+    out = [lines[0]] + [orjson.dumps(r) for r in recs]
+    ip.write_bytes(b"\n".join(out) + b"\n")
+    idx = get_index(sp)                                          # loads the tampered index (spotcheck = last span)
+    # Confirm the TAMPERED index actually loaded (g0_1's row now carries g1_0's byte range) so the
+    # drift path is genuinely exercised — not silently rebuilt, which would make the check trivial.
+    row = idx.by_sid["g0_1"]
+    assert idx.meta[row] == (other["_o"], other["_l"])
+    # The drifted row reads g1_0's bytes; the span_id mismatch is detected → None, never the wrong span.
+    assert idx.full_span("g0_1") is None
+    assert (idx.full_span("g1_0") or {}).get("span_id") == "g1_0"   # the intact row still resolves

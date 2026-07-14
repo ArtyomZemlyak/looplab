@@ -1090,7 +1090,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             disabled={timeline.loading.newer} onClick={timeline.loadNewer}>
             {timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
         </div>
-        {(filter.trim() || kinds.size) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
+        {(filter.trim() !== '' || kinds.size > 0) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
           <div className="timeline-window-note" role="note">Filter searches this loaded window. Page older/newer to inspect other events.</div>}
         {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">Loading timeline…</div>}
         {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading replay events around seq {viewSeq}…</div>}

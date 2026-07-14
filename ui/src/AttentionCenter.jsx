@@ -232,7 +232,10 @@ export default function AttentionCenter() {
       const result = await enableAttentionNotifications(items, {
         broadcast: broadcastInvalidation,
       })
-      if (result.state) setPreferences({ state: result.state, available: true, valid: true })
+      // Only assert a verified-available preference envelope when the write actually committed —
+      // mirror disableNotifications, which gates on `result.ok`. A failed persist (quota/blocked)
+      // returns ok:false with the safe old state; reload rather than claim valid:true it never wrote.
+      if (result.state && result.ok) setPreferences({ state: result.state, available: true, valid: true })
       else reloadPreferences()
       setCapability(notificationCapability())
       setNotificationFeedback(feedbackCopy[result.status] || 'Desktop notification settings were not changed.')
@@ -265,7 +268,14 @@ export default function AttentionCenter() {
       && !acknowledgedIds.has(item.id)),
     [currentItems, dismissedIds, acknowledgedIds],
   )
-  const deliveryKey = deliveryItems.map(item => `${item.id}:${item.created}`).join('|')
+  // Include notifyEligible in the key so the delivery effect re-runs when an item flips
+  // stale→fresh (same id+created): otherwise a genuinely-new item that first arrived while its
+  // source was momentarily stale (notifyEligible=false → filtered out, never added to `notified`)
+  // never gets its desktop notification once the source recovers. Re-delivery is idempotent
+  // (deliverAttentionNotifications de-dupes via the persisted `notified` set), so this only surfaces
+  // the previously-skipped one, never a duplicate.
+  const deliveryKey = deliveryItems
+    .map(item => `${item.id}:${item.created}:${item.notifyEligible ? 1 : 0}`).join('|')
   useEffect(() => {
     if (!initialized || !preferences.state.enabled) return
     let active = true

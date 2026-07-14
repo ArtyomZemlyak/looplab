@@ -184,8 +184,18 @@ class SpanIndex:
                         obj = orjson.loads(data)
                     except orjson.JSONDecodeError:
                         continue                       # offset drift on a span — skip it, don't crash
-                    if isinstance(obj, dict):
-                        out.append(obj)
+                    if not isinstance(obj, dict):
+                        continue
+                    # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
+                    # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
+                    # would otherwise be returned as if it were this row's span. Cross-check the read
+                    # span_id against the one this row indexes: on a provable mismatch skip it, so the
+                    # accelerator returns None/less — never WRONG data — as its docstring promises.
+                    expected = self.light[r].get("span_id")
+                    got_id = obj.get("span_id")
+                    if expected is not None and got_id is not None and got_id != expected:
+                        continue
+                    out.append(obj)
         except OSError:
             return out
         return out
@@ -302,7 +312,12 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int) -> Optional[Sp
                     break
                 off = rec.pop("_o", None)
                 length = rec.pop("_l", None)
-                if not isinstance(off, int) or not isinstance(length, int):
+                if (not isinstance(off, int) or isinstance(off, bool)
+                        or not isinstance(length, int) or isinstance(length, bool)
+                        or off < 0 or length < 0 or off + length > size):
+                    # A corrupt/out-of-bounds offset from a damaged persisted index must never reach
+                    # `f.read(length)` (a negative length reads the whole file into memory). Treat it
+                    # like a torn tail: keep the valid prefix, rebuild the rest from spans.jsonl.
                     break
                 idx._append(rec, off, length)
                 last_end = off + length + 1  # +1 for the newline that follows the line in spans.jsonl

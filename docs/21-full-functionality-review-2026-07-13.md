@@ -380,3 +380,66 @@ Regression tests: `test_review_fixes.py` (giant-counter saturation; scrub recurs
 The process diagram (`docs/infographic/agent-architecture.html`) already depicts cost + finalize and
 no number in it is stale after this branch; the new `llm_usage`/`command_ack`/`finalize_step` events
 are diagnostic/accounting (not loop-flow), so no diagram change was warranted.
+
+---
+
+## Round 6 — newly-merged trace-perf + attention-center (2026-07-14)
+
+After round 5, the branch advanced by 15 commits of new work (a **light span index** + **delta-encoded
+generation input** for trace performance, and an **owner attention center**). A sixth max-effort pass
+(11 parallel finder angles over the ~7.1k-line `6a31876..HEAD` range + adversarial verification)
+reviewed only that new surface. **No new P0/P1.** Seven findings were fixed with regression tests; the
+significant remainder are documented below (several are intentional, tested design decisions).
+
+### Fixed (verified, applied, +tests)
+
+| Finding | Fix |
+|---|---|
+| **P2** `routers/attention.py` — the module cache dict is mutated (`cache[k]=…`) and iterated (`set(cache)`) with **no lock**; `/api/attention` is a sync `def` so concurrent polls run on threadpool threads → `RuntimeError: dictionary changed size during iteration` → 500 (the sibling `trace_view` cache locks for exactly this) | added a `threading.Lock` around every cache mutation + the retire iteration |
+| **P2** `span_index.py` `_read_full`/`full_span` returned whatever JSON parsed at the recorded offset **without checking span_id**, so an offset drifting onto a different valid span line (bit-rot / same-size in-place rewrite) returned the WRONG span — contradicting the module's "never wrong data" invariant | cross-check the read span_id against the row's indexed span_id; skip on a provable mismatch |
+| **P2** `span_index.py` `_load_persisted` int-checked but did **not bounds-check** persisted `_o`/`_l`, so a corrupt `_l: -1` reached `f.read(-1)` and slurped the whole file into memory | reject negative/oversized/bool offsets at load (treat as a torn tail → rebuild the rest from truth) |
+| **P2** `AttentionCenter.jsx` desktop-notification delivery effect keyed on `id:created` only, so an item that first arrived while its source was momentarily stale (`notifyEligible=false`, filtered out and never added to `notified`) never re-fired its OS notification once the source recovered | include `notifyEligible` in `deliveryKey`; re-delivery is idempotent via the persisted `notified` set |
+| **P3** `Dock.jsx` timeline-window note used `{(filter.trim() \|\| kinds.size) && …}`, which renders a literal **"0"** when no filter is active (`'' \|\| 0 → 0`); the sibling line uses a ternary. My round-4 `.trim()` newly exposed it | boolean guard: `(filter.trim() !== '' \|\| kinds.size > 0)` |
+| **P3** `AttentionCenter.jsx` `enableNotifications` set `valid:true` even when the underlying save failed; `disableNotifications` correctly gates on `result.ok` | gate enable on `result.state && result.ok` (mirror disable) |
+| **P4** `routers/attention.py` sort tiebreaker `int(item.get("seq") or -1)` maps a genuine `seq==0` to `-1` (falsy-zero) | explicit `isinstance(seq, int)` check instead of `or -1` |
+
+Regression tests: `test_span_index.py` (negative-length rejected + rebuilt from truth; offset-drift
+returns None not the wrong span — both assert the tampered index actually loaded), `uiSemantics.test.js`
+(delivery key includes `notifyEligible`; enable gates on `result.ok`; Dock boolean guard).
+
+### Significant — documented, intentional or maintainer-decision
+
+- **`engine_proc.py` tri-state `_engine_liveness` on flock-unsupported filesystems** (flagged by four
+  finders). The old `_engine_alive` deliberately returned `False` on flock `ENOTSUP/EINVAL` (a
+  load-bearing FUSE/geesefs/NFS comment: *"can't tell → not alive… so it doesn't block deleting a
+  stalled run forever"*). The new probe returns `None` (inconclusive), so on those **documented-supported
+  network mounts** a stopped run becomes undeletable (org 409), auto resume-reconcile stops, the SSE
+  `alive is False` DONE guard never fires (finished run re-folds forever), and the `_engine_alive`
+  compat wrapper *inverts* to `True` (a dead run reads as live). **This is a real regression on FUSE/S3
+  mounts — but the `None`→fail-closed tri-state is intentional and comprehensively tested** (it prevents
+  double-spawn/mutation when liveness is genuinely unknowable), so reverting `ENOTSUP→False` would
+  reverse a deliberate safety decision and break tests. The proper fix is a *new* lock-less liveness
+  path (PID/heartbeat), a design decision for the maintainer — not a review edit.
+- **`replay.py` `_on_spec_proposed`/`_on_spec_approval_requested` early-returns** make the eval-spec fold
+  order-dependent (`spec_approval_requested` is never reset), touching invariant #5. Normal seq-ordered
+  emission is unaffected; flagged for the maintainer.
+- **Attention scalability/UX** (all in the new feature, arguably by-design): `/api/attention` does
+  O(all-runs) `iterdir`+`stat`+liveness-probe per poll; a cache hit short-circuits liveness so a
+  *resumed* run reads as finished until its first append; a finished+failed+finalization-stalled run
+  emits duplicate danger cards; a derived stall card has no upper age bound (one perpetual card per
+  abandoned run).
+- **Delta-trace edge/efficiency** (no round-trip/back-compat/fold bug — reconstruction is exact and
+  order-tolerant): two latent metadata mislabels only reachable via a `carry==0`-with-back-ref writer
+  shape the current writer never emits; `/spans/{sid}` re-hydrates the whole trace per single-span
+  request; the write-side prefix compare is O(T²) over a tool loop (dwarfed by network latency).
+- **Dock lazy-trace staleness** from dropping the whole-run poll: the setup-phase trace and an
+  already-open `node_created` row no longer live-refresh; a transient poll error blanks the building
+  trace instead of holding last-good. Product tradeoffs of the perf rework.
+- **span_index / attention reuse** (drift risk, not live bugs): `_scan_light` + the cache-invalidation
+  guard re-implement `eventstore._parse_jsonl_region` / `EventStore.read_all`; `useAttention` hand-rolls
+  a poll instead of `usePoll`; `attentionStorage` duplicates `api.js`'s write-verify idiom; the
+  attention router reads+parses each changed run's log twice per poll.
+
+No new event types, Settings fields, or registry seams were added (the `_LAYOUT` map already lists
+`attention`/`span_index`), and the new subsystems are documented in `docs/08-tracing-architecture.md`
+and `docs/guide/concepts.md`, so no docs/diagram sync was owed.
