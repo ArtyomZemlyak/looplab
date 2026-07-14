@@ -160,18 +160,22 @@ class NoveltyGrade:
 
 def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
                   tags: Optional[dict[int, frozenset[str]]] = None,
+                  idea_tags: Optional[frozenset] = None,
                   prior_concepts: Optional[set[str]] = None) -> NoveltyGrade:
-    """Grade a PROPOSED idea against the run's history over the concept graph (§21.4). Deterministic. The
-    key advance over the flat gate: it distinguishes 'this DCL tweak' (near-dup / same-impl) from 'the
-    whole DCL branch' (same-direction-new-impl -> ALLOW) using concept membership, and it recognizes a
-    proposal that RE-OPENS a wrongly-abandoned failed direction (-> reexamine, not reject).
+    """Grade a PROPOSED idea against the run's history over the concept graph (§21.4). Deterministic given
+    its tags. The key advance over the flat gate: it distinguishes 'this DCL tweak' (near-dup / same-impl)
+    from 'the whole DCL branch' (same-direction-new-impl -> ALLOW) using concept membership, and it
+    recognizes a proposal that RE-OPENS a wrongly-abandoned failed direction (-> reexamine, not reject).
 
-    `prior_concepts`: concept ids tried in EARLIER runs (from cross-run memory) -> enables level 3.
+    Agentic-first (§21.15 correction): pass `tags` (the LLM-built node tags from `build_concept_map`) and
+    `idea_tags` (the LLM-built concept set for THIS proposed idea) so the branch-vs-leaf decision uses the
+    agent's tagging, consistent with the LLM novelty gate. Both default to the deterministic alias tagger
+    only as the no-LLM FALLBACK. `prior_concepts`: concept ids tried in EARLIER runs (cross-run memory).
     """
     nodes = _experiment_nodes(state)
     if tags is None:
         tags = tag_nodes_heuristic(state, graph)
-    idea_concepts = tag_idea(idea, graph)
+    idea_concepts = idea_tags if idea_tags is not None else tag_idea(idea, graph)
 
     # 1) identical params to a tried node -> reject
     for nd in nodes:

@@ -31,8 +31,16 @@ from looplab.search.graded_novelty import failed_directions
 
 def research_targets(state: RunState, graph: ConceptGraph, *,
                      tags: Optional[dict[int, frozenset[str]]] = None,
+                     important_uncovered: Optional[list] = None,
                      asset_brief: str = "", max_targets: int = 8) -> dict:
     """Ranked, axis-structured deep-research targets from the coverage map (§21.3). Pure/deterministic.
+
+    `important_uncovered` is the UNIVERSAL, per-task importance derived by the LLM agent
+    (`concept_graph.derive_reference_concepts`) — `[{concept_id, why}]`. When given it seeds the HIGHEST-
+    priority targets, so the blind-region signal works on ANY task without a curated skeleton/`key=True`
+    list (the §21.13 universality correction). The axis-based logic below remains a deterministic complement
+    (and the sole source when no derivation is supplied, e.g. offline).
+
     Returns:
 
       targets      - ranked [{axis, kind, concepts, query, rationale, priority}] (best first)
@@ -60,6 +68,22 @@ def research_targets(state: RunState, graph: ConceptGraph, *,
 
     ground = f"\nGROUNDING (assets already in the repo):\n{asset_brief[:800]}" if asset_brief else ""
     targets: list[dict] = []
+    seen_concepts: set[str] = set()
+
+    # 0) DERIVED IMPORTANCE (universal, §21.13) — the LLM agent's per-task "important-but-uncovered" set,
+    # grounded in the task + prior-art. Top priority; works on ANY task (no curated key list needed).
+    for item in (important_uncovered or []):
+        cid = str((item or {}).get("concept_id") or "").strip()
+        if not cid or cid in seen_concepts:
+            continue
+        seen_concepts.add(cid)
+        why = str((item or {}).get("why") or "").strip()
+        axis = cid.split("/", 1)[0]
+        query = (f"Survey applied techniques for the '{cid}' direction for this task (important but NOT yet "
+                 f"tried{': ' + why if why else ''}). Rank concrete, implementable methods by expected "
+                 f"payoff.{ground}")
+        targets.append({"axis": axis, "kind": "derived-important", "concepts": [cid], "query": query,
+                        "priority": -1, "rationale": why or f"'{cid}' is an important untried direction"})
 
     # 1) UNCOVERED axes — the blind regions (key regions first). Highest priority.
     uncovered_axes = cov["uncovered_axes"]

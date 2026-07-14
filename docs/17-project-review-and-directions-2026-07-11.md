@@ -2812,3 +2812,15 @@ The shared alias-matching rule is centralized in `concept_graph._alias_index` (w
 the lesson guard / idea grader / board dedup; the node tagger `tag_nodes_heuristic` uses `_alias_index`
 directly). Phase 2 wires these into live steering (Strategist pivot,
 capability-expansion operator, novelty gate, deep-research targeting) behind the R-gates + mode-gating.
+
+**Agentic-first adaptation (2026-07-14).** Phase 1 originally sourced its tags from the deterministic alias
+heuristic. Per the §21.13 conclusions (LLM-agent-primary + universal), the analytics stay pure but their
+INPUT is now the agentic build: a shared CLI helper `_concept_map_for` builds the concept map with the LLM
+agent by default (`build_concept_map`) and feeds the resulting tags + derived importance into `lock_in` /
+`dedup_analysis` / `research_targets`; `--offline` forces the heuristic. `research_targets` now takes
+`important_uncovered` (the universal per-task derivation) as its TOP-priority targets, so D2 works on any task
+without the hardcoded `key=True` list; `grade_novelty` takes optional `idea_tags` so the branch-vs-leaf
+decision can use the LLM's tagging (consistent with the LLM novelty gate). This matters in practice: on the
+`rubertlite` run the offline heuristic mis-attributed the lock-in axis to `hyperparameter` (it tags
+"temperature" on nearly every node) and tagged 0/147 board hypotheses — the agentic tagger fixes both. The
+deterministic paths remain the no-LLM fallback and the pure/replay-safe read layer.

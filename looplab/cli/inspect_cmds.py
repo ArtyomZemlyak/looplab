@@ -127,6 +127,43 @@ def _run_tools_for(state):
         return None
 
 
+def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
+    """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
+    per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
+    fallback. Returns {graph, tags, important_uncovered, mode, brief}. This is what makes every Phase-1
+    diagnostic (lock-in / board-dedup / research-targets) agentic-first and universal, not
+    heuristic-hardcoded (§21.13/§21.15 correction)."""
+    from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
+    seed = skeleton_for(resolved_type)
+    seed = seed if seed.concepts() else None
+    if not offline:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic fallback, noted
+            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
+            client = None
+        if client is not None:
+            brief = ""
+            if repo is not None and Path(repo).exists():
+                try:
+                    from looplab.tools.asset_brief import asset_brief as _ab
+                    brief = _ab(str(repo), client=client, task_type=resolved_type or None)
+                except Exception as e:  # noqa: BLE001 — grounding optional
+                    typer.echo(f"(asset-brief grounding skipped: {e})")
+            cmap = build_concept_map(state, task_goal=getattr(state, "goal", "") or "", client=client,
+                                     tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief,
+                                     parser=settings.llm_parser)
+            cmap["brief"] = brief
+            return cmap
+    graph = seed or skeleton_for(resolved_type)
+    return {"graph": graph, "tags": tag_nodes_heuristic(state, graph), "important_uncovered": [],
+            "mode": "offline-heuristic", "brief": ""}
+
+
 @app.command(name="concept-coverage")
 def concept_coverage(
     run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
@@ -237,56 +274,66 @@ def asset_brief_cmd(
 @app.command(name="lock-in")
 def lock_in(
     run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
-    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
     threshold: int = typer.Option(5, help="Consecutive same-lever nodes that trip the alarm."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic instead of the "
+                                                          "agentic build (default is the LLM agent build)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV D7 (§21.8): the action-space lock-in detector. Reports the longest run of CONSECUTIVE
-    experiments confined to one axis-region (the 'same-lever streak' the flat coverage signal is blind
-    to) and fires when it exceeds `threshold`. Offline, deterministic; never touches selection."""
-    from looplab.search.concept_graph import skeleton_for
+    experiments confined to one axis-region (the 'same-lever streak' the flat coverage signal is blind to)
+    and fires when it exceeds `threshold`. The LLM agent builds the concept tags by default (`--offline`
+    forces the heuristic). Deterministic detection; never touches selection."""
     from looplab.search.lock_in import lock_in_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    graph = skeleton_for(task_type or state.task_id or "")
-    typer.echo(lock_in_report(state, graph, streak_threshold=threshold))
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    typer.echo(lock_in_report(state, m["graph"], tags=m["tags"], streak_threshold=threshold))
+    typer.echo(f"\n  (concept tags built by: {m['mode']})")
 
 
 @app.command(name="board-dedup")
 def board_dedup(
     run_dir: Path = typer.Argument(..., help="Run dir whose hypothesis board to analyze."),
-    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic instead of the "
+                                                          "agentic build (default is the LLM agent build)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
-    within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would
-    wrongly collapse (keep distinct). Offline, deterministic; merges nothing."""
-    from looplab.search.concept_graph import skeleton_for
+    within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would wrongly
+    collapse (keep distinct). Agentic tags by default (`--offline` forces the heuristic); merges nothing."""
     from looplab.search.taxonomy_dedup import dedup_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    graph = skeleton_for(task_type or state.task_id or "")
-    typer.echo(dedup_report(state, graph))
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    typer.echo(dedup_report(state, m["graph"], tags=m["tags"]))
+    typer.echo(f"\n  (concept tags built by: {m['mode']})")
 
 
 @app.command(name="research-targets")
 def research_targets_cmd(
     run_dir: Path = typer.Argument(..., help="Run dir whose coverage to turn into research targets."),
-    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
     asset_repo: Optional[Path] = typer.Option(
-        None, help="Task repo to ground the queries in the D1 asset brief (offline scan)."),
+        None, help="Task repo to ground the derived importance + queries in the D1 asset brief."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic + axis targets "
+                                                          "only (no LLM-derived importance)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV D2 (§21.3): axis-structured deep-research targets from the coverage map — uncovered axes
-    first, failed directions re-framed as 'research a different implementation', then under-covered axes.
-    Offline, deterministic; produces the targets, runs no research."""
-    from looplab.search.concept_graph import skeleton_for
+    """PART IV D2 (§21.3): axis-structured deep-research targets from the coverage map. The LLM agent
+    derives the per-task IMPORTANT-but-uncovered directions (universal — no hardcoded winning region) as the
+    top targets, then uncovered axes, failed directions re-framed as 'research a different implementation',
+    and under-covered axes. `--offline` drops to deterministic axis targets only. Produces targets, runs no
+    research."""
     from looplab.search.research_targeting import targeting_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    graph = skeleton_for(task_type or state.task_id or "")
-    brief = ""
-    if asset_repo is not None and asset_repo.exists():
-        from looplab.tools.asset_brief import asset_brief
-        brief = asset_brief(asset_repo, task_type=task_type or state.task_id or "")
-    typer.echo(targeting_report(state, graph, asset_brief=brief))
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         repo=asset_repo)
+    typer.echo(targeting_report(state, m["graph"], tags=m["tags"],
+                                important_uncovered=m["important_uncovered"], asset_brief=m.get("brief", "")))
+    typer.echo(f"\n  (targets built by: {m['mode']})")
 
 
 @app.command()
