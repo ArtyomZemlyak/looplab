@@ -140,6 +140,7 @@ def contradiction_scan(state: RunState, *, client=None, parser: str = "tool_call
                       "one means violating the other (not merely different topics)?")]
     contradictions: list[dict] = []
     checked = 0
+    n_judged = 0                       # pairs that produced a USABLE verdict (not an endpoint/parse failure)
     truncated = False
     for i in range(len(stmts)):
         for j in range(i + 1, len(stmts)):
@@ -150,12 +151,19 @@ def contradiction_scan(state: RunState, *, client=None, parser: str = "tool_call
             rep = verify("Lesson pair", f"LESSON A: {stmts[i]}\nLESSON B: {stmts[j]}", crit,
                          client=client, parser=parser, samples=1)
             sc = rep.per_criterion.get("contradicts", {}).get("mean")
-            if sc is not None and sc >= 0.75:
+            if sc is None:
+                continue               # the verifier could not grade this pair — not "no contradiction"
+            n_judged += 1
+            if sc >= 0.75:
                 contradictions.append({"a": stmts[i], "b": stmts[j], "score": sc})
         if truncated:
             break
+    # `adjudicated` distinguishes "nothing contradicts" from "nothing could be judged": if EVERY verify call
+    # failed/abstained (total endpoint failure) n_judged==0, so an empty `contradictions` must NOT read as a
+    # healthy "no contradictions found" (the same all-fail trap E3's novelty-recall guards against).
     return {"available": True, "n_lessons": len(stmts), "contradictions": contradictions,
-            "truncated": truncated}
+            "truncated": truncated, "n_judged": n_judged,
+            "adjudicated": n_judged > 0 or len(stmts) < 2}
 
 
 def _tag_lesson(statement: str, graph) -> list[str]:

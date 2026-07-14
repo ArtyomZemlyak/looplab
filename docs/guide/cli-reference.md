@@ -221,7 +221,7 @@ looplab timings RUN_DIR [--node N]
 
 ## `concept-coverage`
 
-PART IV D5 (§21.11) offline diagnostic. Folds a run's event log and tags each experiment with the
+PART IV D5 (§21.11) read-only diagnostic. Folds a run's event log and tags each experiment with the
 research **concepts** it touches over a concept **axis-DAG** (multi-label — one experiment can touch
 `loss/decoupled-contrastive` *and* `regularization/r-drop`), then reports per-axis coverage, the dominant
 concept / axis-clique **concentration**, and the standing **uncovered-region alarm** — the regions the
@@ -230,16 +230,25 @@ data/synthetic-queries} across all N experiments — direct the next proposals t
 which fires from the first node rather than waiting for narrowing to accumulate. Read-only; never touches
 selection.
 
+**Agentic by default** (agentic-first concept): the LLM builds the map — it grows the concept vocabulary
+from the actual experiments (reading each node's code/logs), so **it sends node code/logs to the configured
+LLM endpoint by default**. Pass `--offline` for the fully local, no-network deterministic heuristic (coarser:
+needs a curated `--task-type` pack and cannot derive per-task importance). The five other Part IV diagnostics
+below (`lock-in`, `board-dedup`, `research-targets`, `novelty-recall`, `lesson-guard`) share this
+`--offline` opt-out contract; `asset-brief` is the exception — it stays offline-by-default (`--llm` opt-in)
+because its agentic path is a heavier full tool-loop.
+
 ```bash
-looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--llm] [--model ID]
+looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--model ID] [--repo PATH]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
-| `--task-type NAME` | inferred from the run's `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`); a generic axis-only graph for unknown types (the LLM tagger grows it) |
-| `--llm` | off (offline alias tagging) | Tag experiments with the grounded **agentic** LLM tagger (reads each node's code/logs, grows the vocabulary) instead of the deterministic offline heuristic. Needs a reachable endpoint |
-| `--model ID` | configured model | Override the model for `--llm` |
+| `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
+| `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
+| `--model ID` | configured model | Override the model for the agentic build |
+| `--repo PATH` | — | Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief |
 
 ---
 

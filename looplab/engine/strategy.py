@@ -295,8 +295,10 @@ class StrategyCadenceMixin:
         if not getattr(self, "_concept_pivot", False) or not self._should_consult(state):
             return state
         n = len(state.nodes)
-        # CODEX AGENT: Node count is not a lifecycle identity; reset/re-propose/abort can change the
-        # graph and steering cues without changing n, leaving this snapshot permanently stale.
+        # `at_node == n` is a monotonic-progress gate, not a lifecycle identity: node records are
+        # append-only (a reset/abort reopens but never REMOVES nodes from the log/fold), so len(state.nodes)
+        # only grows. Skipping a cadence whose n already has a snapshot is therefore self-healing — the very
+        # next node bumps n and refreshes the snapshot; it can never leave one "permanently stale".
         if any((c or {}).get("at_node") == n for c in state.concept_coverage_snapshots):
             return state
         snap = self._concept_coverage_snapshot(state)
@@ -309,7 +311,9 @@ class StrategyCadenceMixin:
         """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).
 
         AGENTIC + UNIVERSAL when a reflect client is wired (§21.13): the LLM agent BUILDS the concept graph
-        from the actual experiments (`build_concept_map`, works on ANY task — no curated skeleton needed),
+        from the actual experiments' RECORDED text (`build_concept_map` with `tools=None`, mode="llm" — it
+        tags from each node's captured idea/params/result/log excerpts, works on ANY task, no curated
+        skeleton needed; wiring run tools would make it fully agentic with live code/log reads but heavier),
         and the uncovered-region directive comes from the per-task DERIVED importance
         (`derive_reference_concepts`), not a hardcoded `key=True` list. This is produced ONCE per strategist
         cadence and RECORDED as an event; `fold` only reads it (the at_node gate makes resume idempotent), so
@@ -335,8 +339,13 @@ class StrategyCadenceMixin:
             mode = "heuristic"
             if client is not None:
                 parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
-                # CODEX AGENT: This retags the full history on every cadence (quadratic total LLM calls),
-                # checkpoints nothing until completion, and tools=None prevents the claimed code/log reads.
+                # COST + SCOPE, by design: this re-tags the whole history each cadence (so per-run tagging is
+                # ~O(nodes × cadences)). That is bounded by `_concept_pivot` being OFF by default (the whole
+                # method early-returns when the flag is off, §295), and the audit snapshot deliberately stays
+                # lightweight: `tools=None` tags from the node's RECORDED text (idea/params/result/log
+                # excerpts already in state), i.e. mode="llm", NOT a live per-node tool-loop — so no live
+                # code/log reads happen here (passing run tools would make it fully agentic but far heavier;
+                # incremental per-node tag caching is the planned optimization, roadmap §21.16).
                 # Span-scope the concept-map LLM generations (agentic tagging + consolidation + importance)
                 # so they file under a `concept_coverage` op, not the ambient/next-node trace (mirrors
                 # `_maybe_consult_strategist`'s `strategist_consult` span). nullcontext on a spanless self.

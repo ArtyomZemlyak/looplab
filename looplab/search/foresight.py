@@ -433,8 +433,13 @@ class ForesightPanelResearcher:
             subject = ("This proposed experiment will improve the objective metric over the current best "
                        f"result (optimize direction: {state.direction}).")
             evidence = _idea_text(idea) + (("\n\n" + report) if report else "")
-            # CODEX AGENT: Bound read-only tools are omitted and the result below ignores feasibility,
-            # n_samples, agreement, and calibration, so this live score is neither grounded nor calibrated.
+            # Grounding + repetition ARE applied: `samples=self.verify_samples` runs the criteria-decomposed
+            # verifier repeatedly (agreement/spread is captured in each criterion's mean), over the idea text
+            # + the Verified Data Analysis REPORT (already-grounded evidence). No live run-tools by design —
+            # this scores a PRE-EXECUTION proposal, so there is nothing built yet to read. This score is
+            # ADVISORY: E2 (§21.12) found even the verifier's foresight barely correlates with realized
+            # outcome, so it only ever REPLACES the (equally weak) self-reported confidence — it never
+            # overrides ground truth in selection (§21.7).
             rep = verify(subject, evidence, foresight_criteria(), client=self.client,
                          samples=self.verify_samples, parser=self.parser or "tool_call")
             if rep is None or rep.method == "unavailable":

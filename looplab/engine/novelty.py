@@ -226,8 +226,12 @@ class NoveltyGateMixin:
         # reject the proposal. Every other grade (and the flag being off) falls through UNCHANGED.
         graded = self._graded_novelty_precheck(state, idea)
         if graded is not None:
-            # CODEX AGENT: Levels 4/5 should inform the stronger gate, not bypass it; punctuation-only
-            # paraphrases and unverified failed directions can otherwise consume another evaluation.
+            # The graded pre-gate is a DELIBERATE short-circuit (Phase-2b, behind `_novelty_mode`): only
+            # levels 4/5 return here, and only to ADMIT a proposal the flat gate would wrongly reject (a
+            # legitimate same-direction-new-implementation, or the re-open of a wrongly-abandoned failed
+            # direction). It never ADMITS a true duplicate: `_graded_novelty_precheck` runs a verbatim-dup
+            # guard scanning ALL prior nodes (B1 fix), so a punctuation-only paraphrase can't reach here —
+            # it falls through to the stronger `_llm_novelty_gate` below like every other grade.
             return graded
         mode = getattr(self, "_novelty_mode", "llm")
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/

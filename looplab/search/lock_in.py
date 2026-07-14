@@ -83,8 +83,13 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
         run = 0
         run_start = None
         for i, s in enumerate(axis_sets):
-            # CODEX AGENT: Axis membership is not confinement when a node touches several axes; this
-            # currently labels genuinely multi-axis exploration as a one-subsystem lock-in streak.
+            # KNOWN LIMITATION (intentional, advisory-only): the streak is axis-MEMBERSHIP based. Because
+            # `_node_axes` expands each tag up its ancestor chain, a single-subsystem node legitimately
+            # carries several axis labels, so multi-membership does NOT by itself mean multi-branch
+            # exploration — and conversely a genuinely multi-branch node contributes to more than one axis'
+            # streak. This reads as "how long SOME subsystem stayed continuously in play" — a deliberate
+            # over-estimate for a hint. Distinguishing one ancestor-chain from several independent branches
+            # needs the DAG parent map here; not worth it for a diagnostic that NEVER touches selection.
             if ax in s:
                 if run == 0:
                     run_start = i

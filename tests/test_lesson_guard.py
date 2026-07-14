@@ -114,3 +114,26 @@ def test_contradiction_scan_degrades_without_client(tmp_path):
     st = _run(tmp_path, [{"statement": "a", "outcome": "o", "evidence": [10]}])
     res = contradiction_scan(st, client=None)
     assert res["available"] is False and res["contradictions"] == []
+
+
+class _FailingVerifierClient:
+    """Every grade fails to produce a usable verdict (total endpoint failure) — the verifier can grade
+    NOTHING, so `mean` comes back None for every pair."""
+    def complete_tool(self, messages, json_schema):
+        raise RuntimeError("endpoint down")
+
+    def complete_text(self, messages):
+        raise RuntimeError("endpoint down")
+
+
+def test_contradiction_scan_all_fail_is_not_reported_as_no_contradictions(tmp_path):
+    """Honesty guard (same class as E3-C): if EVERY verify call fails, an empty contradictions list must NOT
+    read as a clean bill of health — `adjudicated` must be False so the CLI says INCONCLUSIVE."""
+    st = _run(tmp_path, [
+        {"statement": "do not correct false negatives", "outcome": "o", "evidence": [63]},
+        {"statement": "filter false negatives on the data side", "outcome": "o", "evidence": [10]}])
+    res = contradiction_scan(st, client=_FailingVerifierClient())
+    assert res["available"] is True          # a client WAS wired
+    assert res["contradictions"] == []       # ...but nothing could be judged
+    assert res["n_judged"] == 0
+    assert res["adjudicated"] is False       # so: INCONCLUSIVE, not "no contradictions found"

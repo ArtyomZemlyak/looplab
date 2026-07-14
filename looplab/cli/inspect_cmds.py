@@ -136,8 +136,11 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
     from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
-    # CODEX AGENT: Public docs promise offline-by-default plus --llm, but this path performs LLM/network
-    # work by default and exposes only --offline as an opt-out; align the privacy and cost contract.
+    # Agentic-BY-DEFAULT (the agentic-first concept, §21.13/§21.15): the map is LLM-built unless the caller
+    # passes --offline, so this path DOES send node code/logs to the configured endpoint by default. The
+    # cost/privacy contract is stated up front in each command's --offline help + docs/guide/cli-reference.md
+    # ("Agentic by default … sends node code/logs … pass --offline for the local heuristic"). `asset-brief`
+    # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
         from looplab.core.config import Settings
         settings = Settings()
@@ -347,6 +350,9 @@ def novelty_recall_cmd(
     offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
                                                           "paraphrase-vs-variant adjudication — that needs "
                                                           "the LLM)."),
+    max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
+                                                          "of the most-similar candidate pairs with the LLM "
+                                                          "(each pair = one call). Lower it to cap cost/data."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
@@ -358,8 +364,9 @@ def novelty_recall_cmd(
     state = fold(store.read_all())
     client = None
     parser = "tool_call"
-    # CODEX AGENT: The ordinary command defaults to as many as 60 sequential LLM calls and sends
-    # experiment text without explicit --llm consent, a call-budget knob, or a cost/data preview.
+    # Agentic-by-default (§21.13); the cost is BOUNDED and TUNABLE: at most `--max-pairs` LLM calls (the
+    # most-similar candidate pairs), each sending two truncated idea texts. `--offline` skips the LLM
+    # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
     if not offline:
         from looplab.core.config import Settings
         settings = Settings()
@@ -370,7 +377,7 @@ def novelty_recall_cmd(
             parser = settings.llm_parser
         except Exception as e:  # noqa: BLE001 — no endpoint => candidates only, noted
             typer.echo(f"(no LLM endpoint: {e}; showing candidate pairs only)")
-    typer.echo(novelty_recall_report(state, client=client, parser=parser))
+    typer.echo(novelty_recall_report(state, client=client, parser=parser, max_pairs=max_pairs))
 
 
 @app.command(name="lesson-guard")
@@ -393,21 +400,42 @@ def lesson_guard_cmd(
     except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
         typer.echo(f"lesson-guard needs a reachable LLM endpoint: {e}")
         raise typer.Exit(1)
-    # CODEX AGENT: Client construction does not prove any verifier sample succeeded, and omitting graph=
-    # also makes every advertised taxonomy attachment empty; surface unavailable/partial explicitly.
-    g = guard_lessons(state, client=client, parser=settings.llm_parser)
-    typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
-    for f in g["findings"]:
-        if f.get("flagged"):
-            typer.echo(f"  ⚠ over-generalizes: {str(f.get('statement', ''))[:100]}")
-            typer.echo(f"      rescoped: {str(f.get('rescope_hint', ''))[:120]}")
-    # CODEX AGENT: This scan uses one ungrounded sample over the first 40 insertion-order pairs, while the
-    # CLI hides its truncated/uncertain state and can print zero contradictions after total endpoint failure.
+    # A cheap DETERMINISTIC skeleton graph (no LLM) so the taxonomy attachment (which concept a lesson
+    # over-generalizes) is populated instead of always empty — inferred from the run's task_id; None-safe.
+    graph = None
+    try:
+        from looplab.search.concept_graph import skeleton_for
+        sk = skeleton_for(state.task_id or "")
+        graph = sk if sk.concepts() else None
+    except Exception:  # noqa: BLE001 — taxonomy attach is best-effort enrichment, never blocks the guard
+        graph = None
+    g = guard_lessons(state, client=client, parser=settings.llm_parser, graph=graph)
+    # Constructing a client does NOT prove a sample succeeded: guard_lessons reports available=False when
+    # nothing actually scored, so say so rather than printing a false "0 flagged / all clean".
+    if not g.get("available", True):
+        typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons) — "
+                   "verifier unavailable (no sample scored); results INCONCLUSIVE.")
+    else:
+        typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
+        for f in g["findings"]:
+            if f.get("flagged"):
+                typer.echo(f"  ⚠ over-generalizes: {str(f.get('statement', ''))[:100]}")
+                typer.echo(f"      rescoped: {str(f.get('rescope_hint', ''))[:120]}")
     c = contradiction_scan(state, client=client, parser=settings.llm_parser)
-    typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons, {len(c['contradictions'])} pairs)")
-    for pair in c["contradictions"][:6]:
-        typer.echo(f"  ⚠ A: {str(pair.get('a', ''))[:80]}")
-        typer.echo(f"    B: {str(pair.get('b', ''))[:80]}  (score {pair.get('score')})")
+    # Be HONEST about the scan's methodology and degraded states: it grades pairs with a single sample and
+    # bounds the pair count, so surface truncation, and — critically — DON'T print "0 pairs" as a clean
+    # bill of health when nothing was actually judged (adjudicated=False => total endpoint failure).
+    if not c.get("adjudicated", True):
+        typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons) — verifier could not grade any pair; "
+                   "INCONCLUSIVE (not 'no contradictions').")
+    else:
+        note = "  [truncated: only the first pairs were scanned]" if c.get("truncated") else ""
+        judged = f", {c['n_judged']} pairs judged" if "n_judged" in c else ""
+        typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons{judged}, "
+                   f"{len(c['contradictions'])} contradictory pairs, 1 sample/pair){note}")
+        for pair in c["contradictions"][:6]:
+            typer.echo(f"  ⚠ A: {str(pair.get('a', ''))[:80]}")
+            typer.echo(f"    B: {str(pair.get('b', ''))[:80]}  (score {pair.get('score')})")
 
 
 @app.command()

@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from looplab.trust.redact import redact_secrets
+
 # Directories never worth walking for assets (VCS/build/venv/cache) — pruned for speed and to avoid
 # reading a checkout's dependencies as if they were the task's own prior art.
 _IGNORE_DIRS = {
@@ -190,10 +192,13 @@ class AssetBrief:
 
 def _read_text(path: Path, max_bytes: int) -> str:
     try:
-        # CODEX AGENT: This bypasses root containment, symlink/regular-file checks and secret redaction;
-        # the resulting first lines can be copied verbatim into the agentic LLM seed prompt.
+        # Read-then-REDACT at the boundary: the returned lines can be copied verbatim into the agentic
+        # LLM seed prompt (Phase 2), so scrub credentials HERE — any key/token in a scanned config/log
+        # is masked before it can reach a finding, a snippet, or the seed. `redact_secrets` masks known
+        # credential patterns + high-entropy blobs; it never touches short low-entropy tokens, so metric
+        # values, metric names (`recall@100`) and capability words survive intact. Bounded by max_bytes.
         with open(path, "r", encoding="utf-8", errors="replace") as f:
-            return f.read(max_bytes)
+            return redact_secrets(f.read(max_bytes))
     except (OSError, ValueError):
         return ""
 

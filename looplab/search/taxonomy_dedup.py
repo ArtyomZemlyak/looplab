@@ -68,8 +68,11 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
     tagged_hyps = [h for h in hyps if tags.get(h.id)]
     n_tagged = len(tagged_hyps)
     distinct_sets = len({tags[h.id] for h in tagged_hyps})       # frozensets are hashable
-    # CODEX AGENT: Equal coarse concept sets do not prove paraphrase; opposite or materially different
-    # hypotheses are counted as mergeable here without any lexical or semantic equivalence check.
+    # `compression` is an UPPER-BOUND redundancy ESTIMATE, not a merge decision: it counts how many tagged
+    # hypotheses share a coarse concept set (equal sets are only a merge SUGGESTION — two hypotheses in the
+    # same concept branch may still be materially different or opposite). It is reported as "compression
+    # AVAILABLE", never acted on; the actual merge adjudication is the agent + the lexical/BM25/vector
+    # `risks` check below (disjoint-set pairs a blind merge would wrongly join).
     compression = n_tagged - distinct_sets
     top = concept_clusters[0] if concept_clusters else None
     redundancy_frac = round(top["count"] / n_tagged, 4) if (top and n_tagged) else 0.0
