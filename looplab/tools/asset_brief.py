@@ -82,9 +82,13 @@ _LOWER_IS_BETTER = ("rmse", "mae", "mse", "wer", "cer", "perplexity", "ppl", "lo
 
 def _named_metric_re(extra: tuple[str, ...] = ()) -> "re.Pattern":
     fam = _BASE_METRIC_FAMILY + ("|" + "|".join(re.escape(e) for e in extra) if extra else "")
+    # Boundaries are `(?<![a-z0-9])` / `(?![a-z0-9])`, NOT `\b`: checkpoint filenames glue the metric to a
+    # preceding token with an underscore (`..._step=5262_val_recall@100=0.873.ckpt`), and `\b` treats `_` as
+    # a WORD char so it never anchors before `val` — the exact reason the metric read as "(no metric in
+    # filename)". Underscore-as-separator is the whole point of surfacing a checkpoint's score.
     return re.compile(
-        rf"\b((?:val[_\-]?|test[_\-]?|dev[_\-]?)?(?:{fam})(?:@\d+)?)\s*[=:_\-]\s*"
-        r"(0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})\b", re.I)
+        rf"(?<![a-z0-9])((?:val[_\-]?|test[_\-]?|dev[_\-]?)?(?:{fam})(?:@\d+)?)\s*[=:_\-]\s*"
+        r"(0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})(?![a-z0-9])", re.I)
 
 
 # --------------------------------------------------------------------------- #
