@@ -651,8 +651,12 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
   const buildingId = live && !live.finished && live.engine_running !== false && live.building
     ? live.building.node_id : null
-  usePoll(() => get(`/api/runs/${runId}/trace`).then(value => { setTrace(value); setTraceError(false) })
-    .catch(() => setTraceError(true)),
+  // alive() gates the resolution: when building ends the poll disables and the effect above does the
+  // final /trace fetch — a poll response still in flight must not land AFTER that and overwrite the
+  // fresher trace with an older snapshot (which would then stay stale until the next node change).
+  usePoll((alive) => get(`/api/runs/${runId}/trace`)
+    .then(value => { if (alive()) { setTrace(value); setTraceError(false) } })
+    .catch(() => { if (alive()) setTraceError(true) }),
     4000, [runId, buildingId, readOnly, traceWanted], { enabled: !readOnly && traceWanted && buildingId != null })
   const atLiveView = viewSeq == null || viewSeq >= liveSeq
   const visiblyLive = atLiveView && timeline.followingTail && timeline.windowAtTail

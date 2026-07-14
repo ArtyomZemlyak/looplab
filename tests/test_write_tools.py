@@ -193,3 +193,64 @@ def test_file_backups_index_survives_a_gap(tmp_path):
     f.write_text("v3")           # next index must be max+1 = 1 (not len()=1 collision-safe)
     # revert now restores the snapshot taken just before v3 (which was v1)
     assert b.revert(f) and f.read_text() == "v1"
+
+
+def test_failed_patch_does_not_leave_a_phantom_snapshot_that_breaks_undo(tmp_path):
+    """R5-A4.3: recovery snapshots are pushed from the pre-image BEFORE `git apply`. A patch that
+    fails the `--check` dry-run must not leave its snapshot behind: that phantom would sit on top of a
+    real earlier snapshot for the same file, so a later `revert` of the EARLIER edit pops the phantom
+    (restoring the unchanged current bytes) instead of undoing that edit — a silently broken undo."""
+    import subprocess
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    target = tmp_path / "a.txt"
+    target.write_text("v0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    w = WriteTools([tmp_path], mode="auto", repo_root=tmp_path,
+                   backup_dir=tmp_path / "backups", approver=ALLOW)
+
+    # 1) a real edit → the "v0" pre-image is snapshotted; file becomes "v1"
+    assert "wrote" in w.execute("write_file", {"path": str(target), "content": "v1\n"})
+    assert target.read_text() == "v1\n"
+
+    # 2) a malformed patch on the SAME file whose context can't match → fails `git apply --check`
+    bad = ("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n"
+           "@@ -1 +1 @@\n-DOES-NOT-MATCH\n+x\n")
+    assert "patch failed" in w.execute("apply_patch", {"diff": bad})
+    assert target.read_text() == "v1\n"          # git apply is atomic: the file is untouched
+
+    # 3) undo the edit → must restore "v0". A leftover phantom would pop first and leave "v1".
+    assert "reverted" in w.revert(str(target))
+    assert target.read_text() == "v0\n"
+
+
+def test_failed_snapshot_midway_rolls_back_earlier_snapshots(tmp_path, monkeypatch):
+    """R5-A4.3: if `backups.save` fails partway through a multi-file patch, the snapshots already
+    pushed for earlier files must be discarded too — the patch never applied, so no path may keep a
+    phantom that would corrupt a later revert."""
+    import subprocess
+    from looplab.tools.write_tools import FileBackups
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "a.txt").write_text("a0\n", encoding="utf-8")
+    (tmp_path / "b.txt").write_text("b0\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    w = WriteTools([tmp_path], mode="auto", repo_root=tmp_path,
+                   backup_dir=tmp_path / "backups", approver=ALLOW)
+
+    real_save = FileBackups.save
+    calls = {"n": 0}
+
+    def flaky_save(self, path):
+        calls["n"] += 1
+        if calls["n"] == 2:          # first path snapshots, second path's snapshot "fails"
+            return False
+        return real_save(self, path)
+
+    monkeypatch.setattr(FileBackups, "save", flaky_save)
+    diff = ("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-a0\n+a1\n"
+            "diff --git a/b.txt b/b.txt\n--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-b0\n+b1\n")
+    assert "could not create every recovery snapshot" in w.execute("apply_patch", {"diff": diff})
+    monkeypatch.setattr(FileBackups, "save", real_save)
+
+    # a.txt got a phantom snapshot that was rolled back: reverting it now finds nothing to pop.
+    assert "no snapshot to revert" in w.revert(str(tmp_path / "a.txt"))
+    assert (tmp_path / "a.txt").read_text() == "a0\n"

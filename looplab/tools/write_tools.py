@@ -294,15 +294,28 @@ class WriteTools:
         refusal = self._authorize("write", action)
         if refusal:
             return refusal
+        # Snapshots must be taken from the PRE-image, so they are pushed before the apply. But a
+        # snapshot that outlives a patch which never landed is a phantom: it sits on top of any real
+        # snapshot for the same file, so a later user-clicked `revert` of an EARLIER edit pops the
+        # phantom (restoring the unchanged current bytes) instead of undoing that edit — a silently
+        # broken undo. `git apply` is all-or-nothing (checked dry-run first), so on any bail the files
+        # are untouched and reverting each saved path is a clean pop that discards only the phantom.
+        saved: list[str] = []
         if self.backups:
             for rp in g["paths"]:
-                if not self.backups.save(self.repo_root / rp):
+                if self.backups.save(self.repo_root / rp):
+                    saved.append(rp)
+                else:
+                    for done in reversed(saved):
+                        self.backups.revert(self.repo_root / done)
                     return "(refused: could not create every recovery snapshot; no patch was applied)"
         res = _apply_patch(
             diff, str(self.repo_root), allow, self.protect,
             allow_exceptions=self._protect_exceptions,
         )
         if not res.get("applied"):
+            for rp in reversed(saved):
+                self.backups.revert(self.repo_root / rp)
             return f"(patch failed: {res.get('error', 'unknown')})"
         self.applied.append(action)
         return f"(applied patch to {', '.join(res.get('paths', []))})"

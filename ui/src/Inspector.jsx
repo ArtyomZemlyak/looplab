@@ -131,8 +131,11 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
   const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
-  usePoll(() => {
-    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => { if (d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
+  usePoll((alive) => {
+    // alive() gates the async resolution: if the user selects a different node (or the poll is
+    // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
+    // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
+    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => { if (alive() && d) { setDetail(d); setDetailStatus('ready'); setDetailError('') } }).catch(() => {})
   }, 4000, [runId, nodeId, nodeWorking], { enabled: !readOnly && nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>

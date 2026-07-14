@@ -30,11 +30,13 @@ from looplab.events.replay import fold
 from looplab.events.traceview import build_trace_view, load_spans
 from looplab.events.types import (
     EV_BUDGET,
+    EV_COMMAND_ACK,
     EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FINALIZE_STEP,
     EV_LESSONS_DISTILLED,
     EV_LLM_COST,
+    EV_LLM_USAGE,
     EV_READMODEL_SKIPPED,
     EV_REFLECTION_NOTE,
     EV_REPORT_GENERATED,
@@ -117,7 +119,7 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
             continue
         if event.type == EV_REPORT_GENERATED and data.get("finalize_scope") == scope:
             continue
-        if event.type in {"llm_usage", "command_ack", EV_READMODEL_SKIPPED,
+        if event.type in {EV_LLM_USAGE, EV_COMMAND_ACK, EV_READMODEL_SKIPPED,
                           EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED}:
             # The reflection finalize step emits reflection_note (always) and lessons_distilled
             # (comparative). They are this finalization's OWN effects, so — like llm_usage/command_ack
@@ -357,12 +359,17 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
     tail_seq = latest[-1].seq if latest else -1
     if report is not None and report.seq != tail_seq:
         # No provider call: republish the already-durable content only when diagnostics followed it,
-        # restoring the report->finish adjacency required by replay.
-        cloned = engine.store.append(
-            EV_REPORT_GENERATED,
-            dict(report.data or {}),
-            expected_last_seq=tail_seq,
-        )
+        # restoring the report->finish adjacency required by replay. A background-appendable event can
+        # splice in between this tail read and the CAS just like the finish CAS below; on a lost race
+        # bail to a fresh read so scope recovery retries instead of raising out of finalization.
+        try:
+            cloned = engine.store.append(
+                EV_REPORT_GENERATED,
+                dict(report.data or {}),
+                expected_last_seq=tail_seq,
+            )
+        except EventStoreConcurrencyError:
+            return engine.store.read_all(), fold(engine.store.read_all())
         tail_seq = cloned.seq
     payload = {
         **finish_data,

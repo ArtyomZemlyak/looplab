@@ -321,3 +321,62 @@ address the **P1** (assistant error misclassification — user-visible and easy 
 **broken-CI items** (TEST-1, CI-1), and the resource-exhaustion/validation gaps (**VAL-1/2/3**,
 **DOS-1**). SEC-1/SEC-2 and REPLAY-1 are real invariant/robustness weakenings worth fixing even
 though they are hard to trigger today. The P3 list is cleanup that can follow.
+
+---
+
+## Round 5 — gap-sweep re-review (2026-07-14)
+
+A fifth max-effort pass (10 parallel finder angles over the full ~9.7k-line Python diff + the UI
+diff, then adversarial verification) focused on defects the earlier four rounds missed. **No new
+P0/P1.** Nine findings survived verification and were fixed with regression tests; the rest were
+verified as intended/defensible and documented below.
+
+### Fixed (verified, applied, +tests)
+
+| Finding | Fix |
+|---|---|
+| **P2** `orchestrator.py` `_finish_with_report_if_quiescent` + `finalize.py` `_recover_scoped_terminal` — the report-clone `append(expected_last_seq=tail_seq)` was **not** wrapped in `try/except`, unlike the `run_finished` append 3 lines below. A background-appendable `llm_usage` (cost sink) splicing between the tail read and the clone CAS raised `EventStoreConcurrencyError` out of the finish path → engine crash instead of graceful scope-abandon | wrapped both clones in the same guard (append the `abandoned` finalize-step / return a fresh read-fold) — symmetric with the finish CAS |
+| **P2** `Inspector.jsx` live node-detail `usePoll` ignored the `alive()` guard every sibling poll uses → a slow `/nodes/A` response resolving after the user selected node B rendered A's Code/Trace/Metrics under B (sticky) | callback now takes `(alive)` and gates `setDetail` on `alive() && d` |
+| **P2** `write_tools.py` `_patch` — recovery snapshots are pushed from the pre-image **before** `git apply`; a patch that failed the dry-run left its snapshot behind, so a later `revert` of an *earlier* edit on the same file popped the phantom (restoring unchanged bytes) instead of undoing that edit — a **silently broken undo** | discard the just-saved snapshots on any bail (failed `save` mid-loop or failed apply); `git apply` is atomic so the revert is a clean pop |
+| **P2** `control.py` — `control` / `submit_command` / `resolve_activity_claims` / `resolve_start_claim` are `async def` yet call the fully-blocking `srv.commands.*` (cross-process `flock`, up to `lock_acquire_timeout`s, + log fold) **inline on the event loop**, freezing every concurrent SSE/poll in the worker | offloaded each blocking call via `anyio.to_thread.run_sync`, matching the start/preflight handlers' existing pattern |
+| **P3** `Dock.jsx` building-trace `usePoll` ignored `alive()` → a late `/trace` response could overwrite the final post-build fetch with an older snapshot (stale until the next node change) | callback now takes `(alive)` and gates `setTrace`/`setTraceError` on `alive()` |
+| **P4** `routers/reviews.py` `_review_cost` coerced token counters with an unbounded `int(number)`, unlike every other cost sanitizer (`replay._llm_counter`, the metrics step guard) which saturate at 2⁶³−1 → a corrupt `llm_cost` field became a ~1000-digit bigint in the public review projection | cap the integer counters at `2**63 - 1` |
+| **P4** `routers/reviews.py` `_scrub_json` recursed over dict/list/tuple with **no depth limit** → a pathologically nested payload on the read-only review surface raised `RecursionError` → 500 | added a depth cap (`_MAX_SCRUB_DEPTH = 40`); an over-deep subtree collapses to a bounded marker |
+| convention | `finalize.py` `finalize_scope_quiescent` allow-list used raw string literals `"llm_usage"`/`"command_ack"` instead of the `EV_LLM_USAGE`/`EV_COMMAND_ACK` constants (the codebase's event-type-constant convention; a future value rename would silently break the match) — switched to the constants |
+
+Regression tests: `test_review_fixes.py` (giant-counter saturation; scrub recursion bound),
+`test_write_tools.py` (failed-patch phantom-snapshot discard; mid-loop save-failure rollback),
+`uiSemantics.test.js` (both polls gate on `alive()`).
+
+### Verified intended / defensible — documented, not changed
+
+- **`replay.py` `_on_llm_cost` order-dependence** — `EV_LLM_COST` is folded as a baseline only
+  `if not ctx.llm_usage_seen`. This is the **documented compatibility base** for resume-across-upgrade
+  (a legacy cumulative summary seeds the new delta ledger); in a real ordered log the finalize summary
+  always trails usage, so the theoretical reorder can't occur. Left as-is.
+- **`perm_modes.py` git_add/git_branch inline in acceptEdits, and MCP → ask-in-auto** — both are the
+  *intended* risk-based redesign: `git_add`/`git_branch` are genuinely `RISK_REVERSIBLE`, and
+  unregistered/MCP actions are `RISK_UNKNOWN` which the module docstring states "require explicit
+  approval even in Auto." Changing either would reverse a deliberate security decision.
+- **`runs.py` SSE `done` suppressed while `phase == finalizing`** — locked by
+  `test_sse_done_waits_for_error_finalize_recovery`: a dead driver + `run_finished(error)` is
+  finalization-stalled, not terminal-ready; `done` correctly waits for the phase to flip to `finished`.
+- **`server.py` review-header resolved before the unauth allow-list** — a request presenting an
+  (expired) review credential fail-closes with a clear 410 rather than silently downgrading to the
+  public surface; defensible, and changing header precedence touches the auth model.
+- **`control.py` `reject_if_active` gates neutral `/control` intents during a command** — a real
+  behavioral narrowing of the *legacy* path, but which control types may interleave with a command's
+  CAS is a control-plane ordering decision (architecturally significant); the harm is a transient 409
+  with a clear remediation. Flagged for a maintainer decision, not auto-changed.
+- **`llm.py` streaming `finally` now accounts real cost** — this is (correct) budget enforcement on
+  streaming calls; touching the heavily-commented cost/trace hot path for the marginal
+  BudgetExceeded-on-close edge risks more than it fixes.
+- Lower-value items left as-is: cache-hit `_last_usage` zeroing (unreachable — fresh empty-cache
+  client per request), `_bound_run` finally masking a 500 with 410 (P4 observability nit), the
+  case-insensitive lock-identity collision (narrow: case-sensitive volume + case-variant run ids),
+  and six reuse/efficiency cleanups (duplicate task-file resolver, monitor-loop re-folds, three
+  generation-token validators, duplicated Windows-reserved set, double reason-validation).
+
+The process diagram (`docs/infographic/agent-architecture.html`) already depicts cost + finalize and
+no number in it is stale after this branch; the new `llm_usage`/`command_ack`/`finalize_step` events
+are diagnostic/accounting (not loop-flow), so no diagram change was warranted.
