@@ -18,7 +18,7 @@ from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
-from looplab.events.types import EV_NOVELTY_REJECTED
+from looplab.events.types import EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
 class NoveltyGateMixin:
@@ -153,6 +153,57 @@ class NoveltyGateMixin:
             setattr(self.researcher, "_novelty_feedback", prev)
         return idea
 
+    def _graded_novelty_precheck(self, state: RunState, idea: Idea):
+        """PART IV D3 (§21.4, Phase 2b): a concept-graph-aware PRE-gate. When `graded_novelty` is on and
+        the task has a curated concept skeleton, grade the proposal over the concept graph BEFORE the flat
+        dedup gate runs. Returns the idea UNCHANGED (an allow decision that SHORT-CIRCUITS the flat gate)
+        for the two grades the flat LLM/semantic gate gets WRONG:
+          * level 4 `same_direction_new_impl` — shares a concept BRANCH with a tried node but is a
+            materially different implementation. The flat gate can't tell "this DCL tweak" from "the whole
+            DCL branch" and would wrongly reject/repropose a legitimate variant.
+          * level 5 `wrongly_abandoned` — re-opens a FAILED direction (every experiment touching it failed).
+            The flat gate has NO re-open path; it would treat a sound-but-killed direction as a dead end.
+        Returns None (defer to the flat gate, UNCHANGED behavior) for every other grade: level 0 (novel,
+        the flat gate passes it anyway) and levels 1/2/3 (identical / near-dup / prior-run, which the flat
+        gate legitimately dedups). Deterministic (heuristic tagger — no LLM, no client) and audit-only: the
+        allow is recorded as a `novelty_graded` event, never a selection change. No-op (returns None) with
+        the flag off, an empty run, or a task with no skeleton — so the default path is byte-identical."""
+        if not getattr(self, "_graded_novelty", False) or not state.nodes:
+            return None
+        from looplab.search.concept_graph import skeleton_for
+        graph = skeleton_for(state.task_id or "")
+        if not graph.concepts():
+            return None
+        from looplab.search.graded_novelty import grade_novelty
+        try:
+            grade = grade_novelty(state, idea, graph)
+        except Exception:  # noqa: BLE001 — a grader hiccup must never block proposing; fall through
+            return None
+        # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
+        if grade.level not in (4, 5):
+            return None
+        # grade_novelty's own dedup (levels 1/2) is PARAM-based, so a proposal whose params are empty or
+        # key-disjoint from the tried node structurally SKIPS those levels — a VERBATIM text repeat with no
+        # distinguishing params then reaches level 4/5 and would be wrongly short-circuited past the flat
+        # gate. Guard it: when the proposal's idea-TEXT is identical to its near node's (the flat gate's own
+        # notion of identity via `_idea_text`), it is a textual duplicate the param grade couldn't see —
+        # DEFER to the flat gate (which judges text) rather than bypass it. Genuine variants (different
+        # rationale, or a real param tweak that reached level 4 on differing values) are unaffected.
+        near = state.nodes.get(grade.near_node) if grade.near_node is not None else None
+        if near is not None and getattr(near, "idea", None) is not None:
+            def _norm(t: str) -> str:
+                return " ".join((t or "").split()).lower()
+            nt = _norm(self._idea_text(idea))
+            if nt and nt == _norm(self._idea_text(near.idea)):
+                return None                      # verbatim textual duplicate -> defer to the flat gate
+        self.store.append(EV_NOVELTY_GRADED, {
+            # prospective id = max+1, not len() (gap-safe; audit only) — matches the reject events below.
+            "node_id": max(state.nodes, default=-1) + 1, "level": grade.level, "grade": grade.name,
+            "recommendation": grade.recommendation, "near_node": grade.near_node,
+            "shared_concepts": list(grade.shared_concepts), "stance": self._novelty_stance,
+            "rationale": str(grade.rationale)[:200]})
+        return idea
+
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.
         Two layers:
@@ -168,6 +219,13 @@ class NoveltyGateMixin:
         Strategist's novelty stance is "explore" (slice 5): the stance can engage a soft dedup +
         one informed re-propose even when the static gate is off, so novelty pressure follows the
         meta-controller. "balanced"/"exploit" (and gate off) leave this a no-op — exactly as before."""
+        # PART IV D3 (Phase 2b): the concept-graph pre-gate runs FIRST. When it recognizes a legitimate
+        # same-direction-new-implementation (level 4) or a re-open of a wrongly-abandoned failed direction
+        # (level 5), it SHORT-CIRCUITS — the flat gate below can't make that distinction and would wrongly
+        # reject the proposal. Every other grade (and the flag being off) falls through UNCHANGED.
+        graded = self._graded_novelty_precheck(state, idea)
+        if graded is not None:
+            return graded
         mode = getattr(self, "_novelty_mode", "llm")
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/
         # distance heuristic), then re-proposes if it's a dup.

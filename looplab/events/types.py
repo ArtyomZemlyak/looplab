@@ -82,6 +82,11 @@ EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # affects node selection; folded ONLY so the at_node gate makes resume idempotent and the UI/replay
 # can plot coverage over time. See looplab/search/coverage.py.
 EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
+# PART IV D5/D7 (§21.11/§21.8, Phase 2a): concept-graph coverage + uncovered-region snapshot recorded
+# at the strategist cadence when `concept_pivot` is on. Audit-only + the source of the Strategist's
+# "0 coverage in {X} — go there" pivot directive; folded (at_node gate) exactly like coverage_snapshot.
+# Deterministic (heuristic tagger) so replay recomputes/preserves it. See looplab/search/concept_graph.py.
+EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"
@@ -91,6 +96,12 @@ EV_RUNG_PROMOTED = "rung_promoted"
 EV_AGENT_DECISION = "agent_decision"
 EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
 EV_NOVELTY_REJECTED = "novelty_rejected"
+# PART IV D3 (§21.4, Phase 2b): the LIVE novelty gate GRADED a proposal over the concept graph and
+# ALLOWED it despite a concept overlap the flat dedup gate would have rejected — a level-4 "same
+# direction, different implementation" or a level-5 "re-opens a wrongly-abandoned failed direction".
+# Audit-only (records the grade + near-node); recorded only when `graded_novelty` is on. Additive,
+# reader-defaulted; folds into RunState.novelty_grades. See looplab/search/graded_novelty.py.
+EV_NOVELTY_GRADED = "novelty_graded"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"

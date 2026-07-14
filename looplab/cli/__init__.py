@@ -221,7 +221,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
             from looplab.search.foresight import ForesightPanelResearcher
             researcher = ForesightPanelResearcher(
             researcher, k=settings.foresight_panel, tools=_ftools,
-            min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
+            min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
+            verify_score=getattr(settings, "foresight_verify", False),
+            verify_samples=getattr(settings, "foresight_verify_samples", 3))
         # E2 researcher panel: generate K ideas and keep the best by the empirical surrogate.
         elif settings.researcher_panel > 1:
             from looplab.serve.panel import PanelResearcher
@@ -238,7 +240,9 @@ def _engine(run_dir: Path, task: TaskAdapter, settings: Settings,
         from looplab.search.foresight import ForesightPanelResearcher
         researcher = ForesightPanelResearcher(
             researcher, k=settings.foresight_panel, tools=_ftools,
-            min_confidence=getattr(settings, "foresight_min_confidence", 0.0))
+            min_confidence=getattr(settings, "foresight_min_confidence", 0.0),
+            verify_score=getattr(settings, "foresight_verify", False),
+            verify_samples=getattr(settings, "foresight_verify_samples", 3))
         developer = researcher
     # RepoTask onboarding (Phase 3): if the task can propose its own eval spec, build the
     # onboarder (Researcher proposes + Developer writes the adapter).

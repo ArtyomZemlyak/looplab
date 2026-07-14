@@ -21,7 +21,8 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        validate_strategy)
 from looplab.core.models import RunState
 from looplab.events.replay import fold
-from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
+from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT,
+                                  EV_STRATEGY_DECISION)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -283,6 +284,48 @@ class StrategyCadenceMixin:
         self.store.append(EV_COVERAGE_SNAPSHOT, {
             "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
+
+    def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
+        """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
+        strategist cadence when `concept_pivot` is on. Deterministic (heuristic tagger over the task-type
+        skeleton) -> replay-reproducible; audit-only + the source of the explore-stance pivot directive.
+        Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op off-cadence / mid-eval / when
+        the flag is off / when the task has no curated concept skeleton (so it never perturbs a generic
+        task). Never affects selection."""
+        if not getattr(self, "_concept_pivot", False) or not self._should_consult(state):
+            return state
+        n = len(state.nodes)
+        if any((c or {}).get("at_node") == n for c in state.concept_coverage_snapshots):
+            return state
+        snap = self._concept_coverage_snapshot(state)
+        if snap is None:
+            return state
+        self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {"at_node": n, **snap})
+        return fold(self.store.read_all())
+
+    def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
+        """The compact concept-coverage record (uncovered regions + top-concentration + lock-in). None
+        when the task has no curated concept skeleton (nothing to steer on). Pure/deterministic."""
+        from looplab.search.concept_graph import concept_coverage, skeleton_for, uncovered_regions
+        from looplab.search.lock_in import lock_in_signal
+        graph = skeleton_for(state.task_id or "")
+        if not graph.concepts():
+            return None
+        cov = concept_coverage(state, graph)
+        alarm = uncovered_regions(state, graph)
+        lock = lock_in_signal(state, graph)
+        top = cov.get("top_concept") or {}
+        return {
+            "fired": alarm["fired"],
+            "uncovered_key": alarm["uncovered_key"],
+            "uncovered_axes": alarm["uncovered_axes"],
+            "directive": alarm["directive"],
+            "experiments": cov["experiments"],
+            "top_concept": top.get("id"),
+            "top_concept_frac": top.get("frac", 0.0),
+            "locked_axis": lock["locked_axis"],
+            "streak": lock["streak"],
+        }
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.

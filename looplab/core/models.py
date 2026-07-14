@@ -425,6 +425,11 @@ class RunState(BaseModel):
     # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each
     # entry carries `at_node` so the emission gate is idempotent on resume. See search/coverage.py.
     coverage_snapshots: list[dict] = Field(default_factory=list)
+    # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshots (the "0 coverage in {X}"
+    # pivot signal) recorded at the strategist cadence when `concept_pivot` is on. Audit-only — never
+    # affects selection; each entry carries `at_node` so the emission gate is idempotent on resume.
+    # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.
+    concept_coverage_snapshots: list[dict] = Field(default_factory=list)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.
     proposed_spec: Optional[dict] = None  # {eval_spec, adapter_files, goal} from the agent
@@ -541,6 +546,10 @@ class RunState(BaseModel):
     foresight_selected: list[dict] = Field(default_factory=list)
     # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
     novelty_events: list[dict] = Field(default_factory=list)
+    # PART IV D3 (Phase 2b): the live gate's GRADED-ALLOW decisions — proposals allowed despite a
+    # concept overlap the flat gate would reject (level-4 same-direction-new-impl, level-5 re-open of a
+    # wrongly-abandoned direction). Audit-only sidecar; never read by best-selection. Additive.
+    novelty_grades: list[dict] = Field(default_factory=list)
     # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`
     # is the timeline of completed memos (each a ResearchMemo dump); `research_requests` are pending
     # manual `deep_research` control events and `research_served` how many have been fulfilled (the

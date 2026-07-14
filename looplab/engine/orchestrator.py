@@ -150,6 +150,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         require_approval = _opt("require_approval")
         archive_resolution = _opt("archive_resolution")
         coverage_context = _opt("coverage_context")
+        concept_pivot = _opt("concept_pivot")
+        graded_novelty = _opt("graded_novelty")
+        capability_expansion = _opt("capability_expansion")
         phase_handoff_summary = _opt("phase_handoff_summary")
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
@@ -321,6 +324,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
         self._coverage_context = bool(coverage_context)
+        self._concept_pivot = bool(concept_pivot)
+        self._graded_novelty = bool(graded_novelty)
+        self._capability_expansion = bool(capability_expansion)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
@@ -1044,6 +1050,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # context and (b) lands in the log for the UI / historical-replay measurement. Audit-only,
         # replay-safe (at_node gate); no-op when coverage_context is off. See search/coverage.py.
         state = self._maybe_snapshot_coverage(state)
+
+        # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshot (the "0 coverage in {X}"
+        # pivot signal). Deterministic, replay-safe (at_node gate); no-op when concept_pivot is off or
+        # the task has no curated concept skeleton. Feeds the explore-stance novelty hint below.
+        state = self._maybe_snapshot_concept_coverage(state)
 
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).

@@ -18,7 +18,7 @@
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
-| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
 | **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
@@ -2831,3 +2831,52 @@ decision can use the LLM's tagging (consistent with the LLM novelty gate). This 
 `rubertlite` run the offline heuristic mis-attributed the lock-in axis to `hyperparameter` (it tags
 "temperature" on nearly every node) and tagged 0/147 board hypotheses — the agentic tagger fixes both. The
 deterministic paths remain the no-LLM fallback and the pure/replay-safe read layer.
+
+#### 21.16 Phase 2 — implemented (live steering on the foundation)
+
+*Landed 2026-07-14. Phase 2 is the FIRST part of the D-program that touches the live loop — but every
+lever is **opt-in (default off)**, **replay-safe** (deterministic classifiers run live, never in the
+fold; the only new persisted events are additive audit sidecars), and **selection-neutral** (all three
+steer PROMPTS or a pre-eval gate; none change how a node is scored or which node wins). This honors the
+§21.13 discipline "nothing in Phase 2 changes selection before its R1/SearchFitness/eval-trust gates":
+the parts that would touch selection (a scored capability-expansion policy action; feeding the verifier
+score into best-selection) are deliberately DEFERRED — see the scoping note below.*
+
+| Build | Lever | Module(s) | Settings flag | Tests |
+|---|---|---|---|---|
+| **2a** | Strategist concept-pivot directive | `engine/strategy.py` + `engine/proposal_cues.py` (`search/concept_graph.py`, `search/lock_in.py`) | `concept_pivot` | `tests/test_concept_pivot.py` |
+| **2b·D3** | Graded novelty into the LIVE gate | `engine/novelty.py` (`search/graded_novelty.py`) | `graded_novelty` | `tests/test_graded_novelty_gate.py` |
+| **2b·D7** | Capability-expansion forced-jump directive | `engine/proposal_cues.py` (`search/lock_in.py`) | `capability_expansion` | `tests/test_graded_novelty_gate.py` |
+| **2c** | Calibrated foresight confidence | `search/foresight.py` + `trust/verifier.py::foresight_criteria` | `foresight_verify` (`foresight_verify_samples`) | `tests/test_foresight_verify.py` |
+
+- **2a** records a deterministic concept-graph coverage + uncovered-region snapshot
+  (`concept_coverage_snapshot`, audit-only, `at_node`-idempotent) at the strategist cadence, and on an
+  `explore` stance the Researcher's novelty hint names the exact uncovered regions
+  ("0 coverage in {negatives/external-mining, distillation} — go there") instead of the vague "broaden"
+  (§21.11). No-op for a task with no curated skeleton; never touches selection.
+- **2b·D3** grades a fresh proposal over the concept graph BEFORE the flat dedup gate (`_apply_novelty_gate`
+  pre-check). A level-4 "same direction, DIFFERENT implementation" or a level-5 "re-opens a
+  wrongly-abandoned FAILED direction" (§21.4) is ALLOWED through — recorded as a `novelty_graded` audit
+  event — where the flat LLM/semantic gate would wrongly reject it ("this DCL tweak" vs "the whole DCL
+  branch", the node_63 archetype). Levels 1/2/3 (identical / near-dup / prior-run) still defer to the flat
+  gate. Deterministic heuristic tagger, no LLM.
+- **2b·D7** escalates the `explore`-stance hint from "broaden" to a forced-JUMP "expand the ACTION SPACE /
+  build the missing infra (external mining, a new data pipeline, a different eval), do NOT swap another
+  '{locked}' lever" once the 2a cadence reports action-space LOCK-IN (a long consecutive same-lever streak;
+  §21.8, issue #7). Prompt-cue only — it reads the 2a snapshot (so it needs `concept_pivot` to record one).
+- **2c** replaces the world model's SELF-REPORTED foresight confidence — measured Pearson≈0 with the
+  realized outcome (§21.12) — with a CALIBRATED §12-verifier score: after the K-idea ranker picks the
+  predicted-best candidate, the grounded + repeated + criteria-decomposed verifier (`foresight_criteria`:
+  `improves_objective` primary + `sound_and_feasible` guard) scores it, and that becomes the confidence the
+  `foresight_min_confidence` gate and the `foresight_selected` telemetry (`confidence_source`) read.
+  Degrades to the self-reported confidence without a client or on any verifier error.
+
+**Deliberately deferred (needs the R-gates, §21.13).** Two selection-touching pieces are scoped OUT of
+this landing and left for when their prerequisites exist: (1) the **SCORED** capability-expansion policy
+operator (a new action-kind in `search/operators.py`/`policy.py`, scored against `improve`/`merge`) — it
+changes selection and is gated behind R1 epoch-id + SearchFitness + trustworthy eval (§21.13 row for D7);
+2b ships only its DIRECTIVE (prompt) form. (2) Feeding the 2c verifier score into **best-selection** — it
+stays advisory (confidence gate + telemetry) exactly as §12's normative "strictly advisory, never
+overrides the ground-truth metric" (§21.7) requires. When R1/SearchFitness land, both promote off the same
+verifier + concept-graph substrate already shipped here.
+>>>>>>> c87263a (feat(part-iv): Phase 2 — live steering (2a Strategist pivot, 2b graded-novelty gate + capability-expansion, 2c calibrated foresight))

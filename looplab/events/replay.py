@@ -13,14 +13,15 @@ from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
-    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
+    EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
+    EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NODE_TOMBSTONED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
@@ -1066,6 +1067,12 @@ def _on_diversity_archive(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
 def _on_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.coverage_snapshots.append(d)   # audit-only breadth curve; the at_node gate dedups on resume
 
+
+def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV Phase 2a: audit-only concept-graph coverage / uncovered-region curve; the at_node gate
+    # dedups on resume. NEVER touches selection (mirrors _on_coverage_snapshot).
+    st.concept_coverage_snapshots.append(d)
+
 def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.llm_cost = d
 
@@ -1167,6 +1174,9 @@ def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 
 def _on_novelty_rejected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
+
+def _on_novelty_graded(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.novelty_grades.append(d)   # D3: a graded-ALLOW (level-4/5) the flat gate would reject (audit)
 
 def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1+: engine-written agentic merge — fold alias hypotheses into a canonical. Collected
@@ -1610,6 +1620,7 @@ _HANDLERS = {
     EV_ENV_CHANGED: _on_env_changed,
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
+    EV_CONCEPT_COVERAGE_SNAPSHOT: _on_concept_coverage_snapshot,
     EV_LLM_COST: _on_llm_cost,
     EV_ABLATE: _on_ablate,
     EV_POLICY_DECISION: _on_policy_decision,
@@ -1620,6 +1631,7 @@ _HANDLERS = {
     EV_REWARD_HACK_SUSPECTED: _on_reward_hack_suspected,
     EV_FORESIGHT_SELECTED: _on_foresight_selected,
     EV_NOVELTY_REJECTED: _on_novelty_rejected,
+    EV_NOVELTY_GRADED: _on_novelty_graded,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,

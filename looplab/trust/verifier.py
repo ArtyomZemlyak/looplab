@@ -142,6 +142,21 @@ def lesson_overgeneralization_criteria() -> list[Criterion]:
     ]
 
 
+def foresight_criteria() -> list[Criterion]:
+    """2c foresight confidence (§21.12/§21.13): a HIGH score = this proposed experiment will IMPROVE the
+    objective. Replaces the world model's self-reported confidence (measured Pearson≈0) with a grounded,
+    repeated, criteria-decomposed calibrated score. `improves_objective` is the primary criterion (what
+    the confidence gate reads); `sound_and_feasible` guards against a plausible-but-broken pick."""
+    return [
+        Criterion("improves_objective",
+                  "Given the task, the data report and the prior results, is this proposed experiment "
+                  "likely to IMPROVE the objective metric over the current best result?", 1.0),
+        Criterion("sound_and_feasible",
+                  "Is the proposal technically sound and feasible on this data — correct, well-matched to "
+                  "the task, with low overfitting / leakage risk (not a plausible-sounding dead end)?", 0.5),
+    ]
+
+
 def reexamination_criteria() -> list[Criterion]:
     """D3 failed-direction re-examination (§21.4): a HIGH `implementation_bound` score = the failure was
     the IMPLEMENTATION's fault and the direction should be re-opened (the node_63 archetype)."""
