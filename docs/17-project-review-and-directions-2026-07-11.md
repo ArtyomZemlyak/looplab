@@ -2645,3 +2645,61 @@ across 107 hypotheses + 68 nodes; sample hypothesis pairs and measure how many t
 (E4) a lesson-contradiction scan — 43 distilled lessons; a critic pass for mutually inconsistent lessons (the
 false-negative mis-lesson is one), which is the D6 guard applied across the whole lesson store rather than
 per-lesson.
+
+#### 21.13 Consolidated sequence — what to build, in what order (post-validation, 2026-07-14)
+
+*Supersedes §21.9's provisional ordering with everything §21.10–21.12 measured. Re-analysis first, then the
+dependency-ordered plan.*
+
+**Re-analysis — the whole PART IV reduces to two keystones, one cheap independent win, and one meta-lesson.**
+
+1. **Keystone A — the concept graph (D5-graph, §21.11).** It is the shared coordinate system that makes
+   coverage, novelty, dedup, lock-in, the Strategist pivot, and deep-research targeting *directional* instead
+   of blind. Its **uncovered-intersection alarm** alone (0 coverage in `negatives/external-mining`,
+   `false-neg-handling`, `distillation/teacher-distill`, `data/*` across all 67 nodes) would have named the
+   run's blind spot on turn one. Nearly everything else reads it, so it is built first.
+2. **Keystone B — a calibrated advisory verifier (§12).** D3 (re-examination), D6 (lesson guard), and even
+   foresight all need a judge, and the measurements prove a **blind single-shot LLM judge is high-variance**
+   (D3 flipped verdicts across identical runs, §21.12) and **uncalibrated where it already ships** (foresight
+   confidence ↔ outcome Pearson ≈ 0 / −0.21, §21.12). The verifier must be grounded + repeated + criteria-
+   decomposed, never a single blind call.
+3. **Cheap independent win — D1 asset perception.** No dependency on the keystones, offline, highest ROI:
+   one repo-scanned brief would have short-circuited ~50 nodes. Build in parallel from day one.
+4. **Meta-lesson — grounding beats model strength.** D1/D2/D3 all showed a strong base model already *knows*
+   the winning direction; the loop failed on **orchestration** (perception, structure, grounding, capability),
+   not model capacity. So invest in feeding the model the right context (D1 assets + graph coverage + prior-art
+   grounding), not a bigger backend (reinforces §10).
+
+**Reminder that shapes D3.** The novelty gate is **LLM-based** (`novelty_mode='llm'`, `_llm_novelty_gate`,
+`novelty.py`); the embedding/semantic gate is **off** (`novelty_semantic=False`). So D3's multi-level +
+failed-direction-re-examination is an **extension of the LLM gate**, made graph-aware and grounded — *not* a
+new embedding-distance threshold. The optional semantic check becomes at most one signal among the levels.
+
+**Dependency-ordered build plan.** Three phases; Phase 0/1 are offline diagnostics/harnesses (early lane, no
+R0–R4 per §6.6); Phase 2 is live steering and inherits the R-gates + fixed-vs-open-ended mode-gating.
+
+| Order | Build | Reads / needs | Kind | Payoff (measured) |
+|---|---|---|---|---|
+| **0a** | **Concept-graph substrate** — multi-label tags over a concept DAG; offline coverage + **uncovered-region** diagnostic; replay-validate on `rubertlite` | nothing (offline) | foundation | the keystone; uncovered-region alarm names the blind spot on turn one (§21.11) |
+| **0b** | **D1 asset/prior-art brief** — repo scan (result logs, sibling checkpoints, sibling trainers) → seed context | nothing (offline) | foundation | grounds proposals in exact existing infra + proven params (§21.10) |
+| **0c** | **§12 verifier (advisory, offline)** — grounded + repeated + criteria-decomposed; calibrate on the run's labelled cases | logprob-capable backend (else discrete fallback) | foundation | fixes the D3 variance + foresight mis-calibration (§21.12) |
+| **1a** | **D7 uncovered-region alarm + lock-in detector** | graph (0a) | offline analytic | fires from node 0; lock-in fires node_29 in replay (§21.10/21.11) |
+| **1b** | **D6 lesson over-generalization guard** | verifier (0c) + graph tag | offline analytic | flags the false-neg mis-lesson correctly (§21.10) |
+| **1c** | **D3 multi-level LLM novelty + failed-direction re-exam** | **LLM gate** (extend `_llm_novelty_gate`) + graph (branch-vs-leaf) + grounding (D1/0b) + verifier repeated-eval (0c) | offline→advisory | recovers wrongly-killed directions *when grounded*; needs 0b+0c to be reliable (§21.12) |
+| **1d** | **D4 taxonomy-aware dedup** | graph (0a) | offline analytic | compresses the 63/107 DCL cluster; keep concept granularity fine (§21.12) |
+| **1e** | **D2 axis-structured deep-research targeting** | graph (0a) | offline | better ranking, avoids re-proposing failed variants (§21.12) |
+| **2a** | Wire graph coverage + D7 uncovered-region into the **Strategist pivot** directive | 0a,1a + R1 epoch id; SearchFitness | live steering | "0 coverage in {X} — go there" replaces "broaden" |
+| **2b** | **D7 capability-expansion operator** into the policy; D3 into node creation | 1a,1c + R1; trustworthy eval; open-ended capability where breadth is involved | live steering | lets the loop leave a saturated manifold |
+| **2c** | Replace **foresight confidence** with the calibrated verifier score | 0c + §12 gate | live steering | swaps an uninformative signal (Pearson≈0) for a calibrated one |
+
+**Critical path:** `0a concept-graph → 1a D7 alarm → 2a Strategist pivot` is the spine that turns detection
+into escape; `0c verifier → 1b/1c D6/D3` is the parallel spine that stops the loop discarding correct
+directions; `0b D1` runs independently and lands value first. Do **0a+0b+0c in parallel first**; they unblock
+everything and are pure offline work. Nothing in Phase 2 starts before its R1/SearchFitness/eval-trust
+prerequisites (§6.5) — and breadth/QD-flavoured parts stay open-ended-mode only (ADR-6/§11).
+
+**Separately and immediately (the ML track, independent of all the above):** the `rubertlite` model can break
+0.8835 now by porting the already-proven recipe — external hard-negatives + NV-0.95 false-negative filter
+(`dataset.n_negatives`/`negatives_path`, `loss.type='mnr'`), τ→0.005, optionally distilling from the on-disk
+`nomic-moe@0.899`/`e5-base@0.90` teachers — into `dense-retrieval/train.py`. That is a task deliverable, not an
+agent change, and needs none of the D-program.
