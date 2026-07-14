@@ -85,7 +85,9 @@ EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
 # PART IV D5/D7 (§21.11/§21.8, Phase 2a): concept-graph coverage + uncovered-region snapshot recorded
 # at the strategist cadence when `concept_pivot` is on. Audit-only + the source of the Strategist's
 # "0 coverage in {X} — go there" pivot directive; folded (at_node gate) exactly like coverage_snapshot.
-# Deterministic (heuristic tagger) so replay recomputes/preserves it. See looplab/search/concept_graph.py.
+# Produced ONCE per cadence (agentic build when a reflect client is wired -> universal, any task, derived
+# importance; heuristic+skeleton fallback otherwise) and RECORDED; fold only READS it, so replay preserves
+# the recorded snapshot deterministically. See looplab/search/concept_graph.py.
 EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"

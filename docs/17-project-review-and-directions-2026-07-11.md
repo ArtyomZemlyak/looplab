@@ -2879,4 +2879,17 @@ changes selection and is gated behind R1 epoch-id + SearchFitness + trustworthy 
 stays advisory (confidence gate + telemetry) exactly as §12's normative "strictly advisory, never
 overrides the ground-truth metric" (§21.7) requires. When R1/SearchFitness land, both promote off the same
 verifier + concept-graph substrate already shipped here.
->>>>>>> c87263a (feat(part-iv): Phase 2 — live steering (2a Strategist pivot, 2b graded-novelty gate + capability-expansion, 2c calibrated foresight))
+
+**Agentic + universal adaptation (2026-07-14, review).** As landed, Phase 2's live snapshot was
+skeleton-only + heuristic + hardcoded-`key`, so the pivot was a no-op on any non-dense-retrieval task and
+used the coarse tagger that mis-attributes the lock-in axis. `strategy._concept_coverage_snapshot` now
+**builds the map with the LLM agent when a reflect client is wired** (`build_concept_map` +
+`derive_reference_concepts`): universal (any task, no curated skeleton), accurate tags, and the "0 coverage
+in {X}" directive names the per-task DERIVED importance — fixing BOTH `concept_pivot` and (via the
+`locked_axis`/`streak` it records) `capability_expansion`. It is produced ONCE per strategist cadence and
+recorded, so `fold` only reads it and replay stays deterministic (the memo/lessons producer pattern); the
+deterministic heuristic+skeleton path remains the no-client fallback, and with the flags off behaviour is
+byte-identical. **Known follow-up:** `graded_novelty` (2b, per-proposal) still uses the skeleton+heuristic
+tagger — making it agentic needs a per-cadence tag CACHE reused across proposals (rebuilding the map per
+proposal is too costly), so it is left for a coordinated pass. Also removed a stray merge-conflict marker
+the landing left at the end of this section.

@@ -304,27 +304,71 @@ class StrategyCadenceMixin:
         return fold(self.store.read_all())
 
     def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
-        """The compact concept-coverage record (uncovered regions + top-concentration + lock-in). None
-        when the task has no curated concept skeleton (nothing to steer on). Pure/deterministic."""
-        from looplab.search.concept_graph import concept_coverage, skeleton_for, uncovered_regions
+        """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).
+
+        AGENTIC + UNIVERSAL when a reflect client is wired (§21.13): the LLM agent BUILDS the concept graph
+        from the actual experiments (`build_concept_map`, works on ANY task — no curated skeleton needed),
+        and the uncovered-region directive comes from the per-task DERIVED importance
+        (`derive_reference_concepts`), not a hardcoded `key=True` list. This is produced ONCE per strategist
+        cadence and RECORDED as an event; `fold` only reads it (the at_node gate makes resume idempotent), so
+        replay stays deterministic even though the producer is impure — the established memo/lessons pattern.
+        Deterministic FALLBACK (no client): the alias heuristic over the task-type skeleton (curated pack
+        required) — None when neither a client nor a skeleton is available (nothing to steer on)."""
+        from looplab.search.concept_graph import (build_concept_map, concept_coverage, skeleton_for,
+                                                  uncovered_regions)
         from looplab.search.lock_in import lock_in_signal
-        graph = skeleton_for(state.task_id or "")
+        # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
+        # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
+        _rc = getattr(self, "_reflect_client", None)
+        client = _rc() if callable(_rc) else None
+        seed = skeleton_for(state.task_id or "")
+        seed = seed if seed.concepts() else None
+        graph = None
+        tags = None
+        important: list = []
+        mode = "heuristic"
+        if client is not None:
+            try:
+                parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
+                cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
+                                         seed_graph=seed, parser=parser)
+                graph, tags, important = cmap["graph"], cmap["tags"], cmap["important_uncovered"]
+                mode = cmap.get("mode", "llm")
+            except Exception:  # noqa: BLE001 — agentic build failed => deterministic fallback, no crash
+                graph = tags = None
+                important = []
+        if graph is None:                       # deterministic fallback needs a curated skeleton
+            if seed is None:
+                return None
+            graph, tags, mode = seed, None, "heuristic"
         if not graph.concepts():
             return None
-        cov = concept_coverage(state, graph)
-        alarm = uncovered_regions(state, graph)
-        lock = lock_in_signal(state, graph)
+        cov = concept_coverage(state, graph, tags)
+        lock = lock_in_signal(state, graph, tags=tags)
         top = cov.get("top_concept") or {}
+        # UNIVERSAL uncovered-region: prefer the LLM-DERIVED importance (any task); else the skeleton's
+        # hardcoded key-concept alarm (deterministic fallback).
+        if important:
+            keys = [m["concept_id"] for m in important][:8]
+            directive = ("0 coverage in {" + ", ".join(keys[:6]) + "} across all "
+                         f"{cov['experiments']} experiments — direct the next proposals there "
+                         "(not just 'broaden').")
+            fired, uncovered_key, uncovered_axes = True, keys, cov["uncovered_axes"]
+        else:
+            alarm = uncovered_regions(state, graph, tags)
+            fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
+            uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
         return {
-            "fired": alarm["fired"],
-            "uncovered_key": alarm["uncovered_key"],
-            "uncovered_axes": alarm["uncovered_axes"],
-            "directive": alarm["directive"],
+            "fired": fired,
+            "uncovered_key": uncovered_key,
+            "uncovered_axes": uncovered_axes,
+            "directive": directive,
             "experiments": cov["experiments"],
             "top_concept": top.get("id"),
             "top_concept_frac": top.get("frac", 0.0),
             "locked_axis": lock["locked_axis"],
             "streak": lock["streak"],
+            "tag_mode": mode,
         }
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
