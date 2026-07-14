@@ -27,13 +27,24 @@ def is_better(direction: str, a: float, b: float) -> bool:
     return a < b if direction == "min" else a > b
 
 
-class SearchFitness:
-    """The run's ordering owner, built from its optimize `direction`. Stateless beyond `direction`;
-    construct one per fold / policy call (cheap)."""
+# R1-c: the neutral verifier "score" for an unscored node (the §12 verifier's own `unclear` midpoint).
+# In a metric-tie, a node scored ABOVE this beats an unscored node and one scored BELOW loses to it —
+# so an unverified contender is treated as "no signal", neither promoted nor penalized past the midpoint.
+_NEUTRAL_VERIFIER = 0.5
 
-    def __init__(self, direction: str):
+
+class SearchFitness:
+    """The run's ordering owner, built from its optimize `direction`. Stateless beyond `direction`
+    (+ the R1-c `verifier_tiebreak` flag); construct one per fold / policy call (cheap)."""
+
+    def __init__(self, direction: str, *, verifier_tiebreak: bool = False):
         self.direction = direction
         self._reverse = (direction == "max")     # best-first ordering for `sorted(..., reverse=)`
+        # R1-c: when on, the mean-pick key gains a calibrated-verifier tie-break slot BETWEEN the metric
+        # and the id, oriented by direction so a HIGHER verifier score always wins a metric-tie under the
+        # run's chooser (max picks the larger key, min the smaller). Off -> plain (robust_metric, id).
+        self._verifier_tiebreak = bool(verifier_tiebreak)
+        self._vsign = 1.0 if direction == "max" else -1.0
 
     # --- comparator -------------------------------------------------------------------------------
     def is_better(self, a: float, b: float) -> bool:
@@ -56,10 +67,29 @@ class SearchFitness:
     # --- promotion-side keys ----------------------------------------------------------------------
     @staticmethod
     def selection_key(node):
-        """The promotion ranked-scalar key: `(robust_metric, id)`. `robust_metric` is the multi-seed
-        confirmed mean when present, else the raw metric (`models.Node.robust_metric`). This is the SEAM
-        a gated tie-break term extends (R1-c); today it is exactly the tuple `_select_best` inlined."""
+        """The PLAIN promotion ranked-scalar key: `(robust_metric, id)`. `robust_metric` is the multi-seed
+        confirmed mean when present, else the raw metric (`models.Node.robust_metric`). Used by holdout_topk
+        and as the tie-break-OFF path of `promotion_key`."""
         return (node.robust_metric, node.id)
+
+    def promotion_key(self, node):
+        """The mean-pick key `_select_best` ranks by. Plain `(robust_metric, id)` unless the R1-c
+        verifier tie-break is on, in which case a direction-oriented calibrated-verifier slot sits BETWEEN
+        the metric and the id: `(robust_metric, ±verifier_score, id)`. Because the metric stays the FIRST
+        component, the verifier can only ever break a tie among metric-EQUAL nodes — it can NEVER move a
+        node ahead of a strictly-better `robust_metric` (§21.7: the advisory score never overrides ground
+        truth). An unscored node contributes the neutral midpoint, so it is neither promoted nor penalized."""
+        if not self._verifier_tiebreak:
+            return (node.robust_metric, node.id)
+        vs = node.verifier_score
+        # A usable score is a real number in [0,1]; anything else (None, bool — a subclass of int —, NaN,
+        # out-of-range) contributes the neutral midpoint. The fold's `_on_node_verified` already enforces
+        # this before storing, but self-guarding here keeps `promotion_key` a total, deterministic order
+        # regardless of how `verifier_score` was set (no NaN comparison can perturb min/max).
+        usable = (isinstance(vs, (int, float)) and not isinstance(vs, bool)
+                  and vs == vs and 0.0 <= vs <= 1.0)
+        vc = self._vsign * (float(vs) if usable else _NEUTRAL_VERIFIER)
+        return (node.robust_metric, vc, node.id)
 
     @staticmethod
     def holdout_key(node):
@@ -69,8 +99,9 @@ class SearchFitness:
 
     @staticmethod
     def eligible(node, flagged, aborted) -> bool:
-        """The ONE "can this node be selected best" predicate: feasible, not trust-flagged, not aborted,
-        and carrying a usable `robust_metric`. Duplicated verbatim by `_select_best` and `holdout_topk`
-        before this owner existed — centralized so the holdout pool and the fold's pick can never drift."""
+        """The "can this node be selected best" predicate `_select_best` filters its mean-pick pool by:
+        feasible, not trust-flagged, not aborted, and carrying a usable `robust_metric`. (`holdout_topk`
+        expresses the same eligibility through a different-but-agreeing base — `feasible_nodes()` + the
+        flagged filter — and shares only the ranked-scalar `selection_key`, not this predicate.)"""
         return (node.feasible and node.id not in flagged and node.id not in aborted
                 and node.robust_metric is not None)

@@ -22,7 +22,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
 from looplab.core.models import RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT,
-                                  EV_STRATEGY_DECISION)
+                                  EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -370,6 +370,98 @@ class StrategyCadenceMixin:
             "streak": lock["streak"],
             "tag_mode": mode,
         }
+
+    # --- R1-c: calibrated-verifier metric-tie-break -------------------------------------------------
+    def _maybe_verify_ties(self, state: RunState) -> RunState:
+        """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find eligible nodes that TIE on
+        the ranked scalar (`robust_metric`) where the tie is not yet resolvable — a group of ≥2 nodes with
+        ≥1 lacking a `verifier_score` — and verify the unscored ones (grounded on their realized result,
+        `selection_criteria`) so the fold's mean pick can break the tie by soundness. Lazy (only real,
+        exact ties), bounded per cadence, best-effort (no client / any failure -> skip). Emits
+        `node_verified` (generation-scoped); the fold reads it ONLY as a tie-break — it can never override
+        a strictly-better metric (§21.7). No-op when `select_verifier` is off. Runs in the sync cadence
+        (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
+        if not getattr(self, "_select_verifier", False):
+            return state
+        groups = self._metric_tie_groups(state)
+        if not groups:
+            return state
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return state
+        # Process-local guard: don't RE-attempt a (node, generation) whose verify already failed this
+        # run — else a degraded client (verify keeps returning None) would re-verify the same unscored
+        # tie every cadence. In-memory only (verify is live, never replayed); a fresh process on resume
+        # may retry, which is fine (bounded). A successful verify scores the node, so _metric_tie_groups
+        # stops surfacing it regardless.
+        attempted = getattr(self, "_verify_attempted", None)
+        if attempted is None:
+            attempted = self._verify_attempted = set()
+        budget = 4                      # cap verifications per cadence so a big tie cluster can't burst cost
+        done = False
+        for group in groups:
+            for n in group:
+                key = (n.id, n.attempt)
+                if n.verifier_score is not None or key in attempted or budget <= 0:
+                    continue
+                score = self._verifier_soundness(state, n, client)
+                budget -= 1
+                attempted.add(key)
+                if score is not None:
+                    self.store.append(EV_NODE_VERIFIED, {"node_id": n.id, "generation": n.attempt,
+                                                         "score": round(float(score), 4)})
+                    done = True
+            if budget <= 0:
+                break
+        return fold(self.store.read_all()) if done else state
+
+    def _metric_tie_groups(self, state: RunState) -> list:
+        """Eligible-node groups that share an EXACT `robust_metric` and still contain an unscored node —
+        the metric-ties the verifier could resolve. Deterministic order (by each group's lowest node id)
+        so the per-cadence budget picks stably. Pure read over folded state."""
+        from looplab.core.fitness import SearchFitness
+        from looplab.events.replay import flagged_node_ids
+        flagged = flagged_node_ids(state)
+        by_metric: dict = {}
+        for n in state.evaluated_nodes():
+            if SearchFitness.eligible(n, flagged, state.aborted_nodes):
+                by_metric.setdefault(n.robust_metric, []).append(n)
+        groups = [nodes for nodes in by_metric.values()
+                  if len(nodes) >= 2 and any(n.verifier_score is None for n in nodes)]
+        groups.sort(key=lambda nodes: min(n.id for n in nodes))
+        return groups
+
+    def _verifier_soundness(self, state: RunState, node, client) -> Optional[float]:
+        """The calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result
+        (`selection_criteria`, grounded on its idea + metric + confirm/holdout signals), or None on any
+        failure. Best-effort — never raises."""
+        try:
+            from looplab.trust.verifier import selection_criteria, verify
+            r = getattr(self, "researcher", None)
+            parser = next((p for o in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
+                                       getattr(self, "developer", None)) if (p := getattr(o, "parser", None))),
+                          "tool_call")
+            subject = (f"Experiment #{node.id} reported metric={node.metric} on the task (optimize "
+                       f"direction: {state.direction}); its result is genuinely sound and will hold up.")
+            evidence = (f"What it did: {' '.join((getattr(node.idea, 'rationale', '') or '').split())[:250]}\n"
+                        f"Metric: {node.metric}"
+                        + (f"; confirmed mean over {node.confirmed_seeds} seeds: {node.confirmed_mean}"
+                           if node.confirmed_mean is not None else "")
+                        + (f"; holdout metric: {node.holdout_metric}" if node.holdout_metric is not None else "")
+                        + (f"; generalization gap: {node.generalization_gap}"
+                           if node.generalization_gap is not None else ""))
+            rep = verify(subject, evidence, selection_criteria(), client=client,
+                         samples=getattr(self, "_select_verifier_samples", 3), parser=parser)
+            if rep is None or rep.method == "unavailable":
+                return None
+            crit = (rep.per_criterion or {}).get("result_sound") or {}
+            m = crit.get("mean")
+            return float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
+        except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
+            return None
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.

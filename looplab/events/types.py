@@ -104,6 +104,11 @@ EV_NOVELTY_REJECTED = "novelty_rejected"
 # Audit-only (records the grade + near-node); recorded only when `graded_novelty` is on. Additive,
 # reader-defaulted; folds into RunState.novelty_grades. See looplab/search/graded_novelty.py.
 EV_NOVELTY_GRADED = "novelty_graded"
+# R1-c: a calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result, computed live
+# by the engine (an LLM output can't live in the deterministic fold) and frozen here. Generation-scoped
+# and read ONLY as a metric-tie-break in best-selection (never overrides ground truth, §21.7). Additive;
+# folds into Node.verifier_score. Emitted only when `select_verifier` is on. See trust/verifier.py.
+EV_NODE_VERIFIED = "node_verified"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"

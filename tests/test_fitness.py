@@ -79,6 +79,25 @@ def test_holdout_key_uses_holdout_metric():
     assert SearchFitness.holdout_key(_node(3, 0.5, holdout_metric=0.42)) == (0.42, 3)
 
 
+def test_promotion_key_plain_when_tiebreak_off():
+    # tie-break off -> plain (robust_metric, id), byte-identical to selection_key
+    f = SearchFitness("max", verifier_tiebreak=False)
+    n = _node(2, 0.5)
+    assert f.promotion_key(n) == (0.5, 2) == SearchFitness.selection_key(n)
+
+
+def test_promotion_key_inserts_direction_oriented_verifier_slot():
+    n = _node(2, 0.5)
+    n.verifier_score = 0.8
+    # max: +score between metric and id; min: -score (so a HIGHER score always wins the metric-tie)
+    assert SearchFitness("max", verifier_tiebreak=True).promotion_key(n) == (0.5, 0.8, 2)
+    assert SearchFitness("min", verifier_tiebreak=True).promotion_key(n) == (0.5, -0.8, 2)
+    # an unscored node contributes the neutral midpoint (0.5), oriented by direction
+    u = _node(3, 0.5)
+    assert SearchFitness("max", verifier_tiebreak=True).promotion_key(u) == (0.5, 0.5, 3)
+    assert SearchFitness("min", verifier_tiebreak=True).promotion_key(u) == (0.5, -0.5, 3)
+
+
 # --------------------------------------------------------------------------- #
 # eligibility predicate
 # --------------------------------------------------------------------------- #

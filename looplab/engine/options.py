@@ -111,6 +111,9 @@ class EngineOptions:
     holdout_fraction: float = 0.25
     holdout_select: bool = True
     holdout_top_k: int = 3
+    # R1-c: calibrated §12-verifier metric-tie-break in best-selection (opt-in, lazy; needs a client).
+    select_verifier: bool = False
+    select_verifier_samples: int = 3
     # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
     # rebuild policies with the same run-wide settings.
     debug_depth: int = 1                 # T10: debug-lineage bound for every policy

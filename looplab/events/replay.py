@@ -22,7 +22,7 @@ from looplab.events.types import (
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NODE_TOMBSTONED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
@@ -140,6 +140,9 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # setting can't make pre/post-resume metrics incomparable.
     _hf = d.get("holdout_fraction")
     st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
+    # R1-c: recorded at start so replay applies the same selection rule (config isn't available to the
+    # pure fold). Absent in old logs -> False -> byte-identical legacy selection.
+    st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Operator edited the run's trust gate after launch (server config edit). Last write
@@ -584,6 +587,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.confirmed_seeds = None
         n.holdout_metric = None
         n.generalization_gap = None
+        n.verifier_score = None   # R1-c: a soundness score judged the OLD attempt's result — discard it
         n.stages = []
         n.failed_stage = None
         n.rerun_from = None
@@ -763,8 +767,11 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # Finish-time scores computed on the NOW-discarded code must not survive the reset, or a
         # holdout-gated best pick / generalization-gap audit keeps using a stale number the node
         # can no longer reproduce (holdout is append-only + skips already-scored ids, so it would
-        # never be recomputed for this node).
+        # never be recomputed for this node). R1-c's verifier_score is exactly such a finish-time
+        # score (a soundness judgment on the OLD attempt's result) — it must reset too, else the
+        # tie-break would rank the new attempt by a score for a realization it no longer produces.
         n.holdout_metric = None
+        n.verifier_score = None
         if n.id in st.holdout_evaluated_ids:
             st.holdout_evaluated_ids.remove(n.id)
         if stage in ("implement", "propose"):
@@ -1229,6 +1236,22 @@ def _on_proxy_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if d.get("skipped") and nid is not None and nid not in st.proxy_skipped:
         st.proxy_skipped.append(nid)
 
+def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # R1-c: freeze a node's calibrated §12-verifier soundness score (the LLM output can't be recomputed
+    # in the deterministic fold). Generation-scoped exactly like proxy_scored: a score computed against a
+    # reset-abandoned attempt (stale generation) is dropped, so a stale-attempt verification can't bias
+    # selection. Audit sidecar — read ONLY as a metric-tie-break in _select_best; never a raw override.
+    nid = _coerce_node_id(d)
+    n = st.nodes.get(nid) if nid is not None else None
+    if n is None or n.id in st.aborted_nodes:
+        return
+    generation = _event_generation(d)
+    if generation is not _MISSING and not _generation_matches(n, d):
+        return
+    score = d.get("score")
+    if isinstance(score, (int, float)) and not isinstance(score, bool) and 0.0 <= float(score) <= 1.0:
+        n.verifier_score = float(score)
+
 def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # R1 epoch identity: a confirmation certificate authorizes selection state (confirmed_done + the
     # confirm-override in _select_best), so it must be bound to the candidate-set epoch it was computed
@@ -1643,6 +1666,7 @@ _HANDLERS = {
     EV_FORESIGHT_SELECTED: _on_foresight_selected,
     EV_NOVELTY_REJECTED: _on_novelty_rejected,
     EV_NOVELTY_GRADED: _on_novelty_graded,
+    EV_NODE_VERIFIED: _on_node_verified,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
@@ -1725,15 +1749,17 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # R1/SearchFitness: the eligibility predicate, the ranked-scalar keys and the direction chooser are
     # OWNED by core.fitness.SearchFitness — one spelling shared with rank_by_metric / holdout_topk, so a
     # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
-    fit = SearchFitness(st.direction)
+    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak)
     evaluated = [n for n in st.evaluated_nodes() if fit.eligible(n, flagged, st.aborted_nodes)]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
         # this is identical to ranking all evaluated nodes by their single metric.
+        # R1-c: promotion_key adds a calibrated-verifier tie-break slot when select_verifier_tiebreak is
+        # on — it resolves metric-EQUAL contests only, never overriding a strictly-better robust_metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
         pool = confirmed if confirmed else evaluated
-        st.best_node_id = fit.best(pool, key=fit.selection_key).id
+        st.best_node_id = fit.best(pool, key=fit.promotion_key).id
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if

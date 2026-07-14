@@ -168,6 +168,12 @@ class Node(BaseModel):
     # overperformed on the signal the search optimized — the overfitting indicator the Trust
     # panel surfaces. Audit-only.
     generalization_gap: Optional[float] = None
+    # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result (set by a
+    # `node_verified` event, generation-scoped, only when `select_verifier` is on and a metric-tie needs
+    # breaking). Used ONLY as a tie-break among metric-EQUAL feasible nodes (SearchFitness.promotion_key)
+    # — it can never override a strictly-better robust_metric (§21.7 advisory-never-overrides). None
+    # otherwise; additive/reader-defaulted so old logs fold byte-identically.
+    verifier_score: Optional[float] = None
     eval_seconds: Optional[float] = None     # wall-clock of this node's eval (cost accounting #2)
     # Multi-objective (#5): extra reported metrics + unmet hard constraints. `feasible` is
     # False when any constraint was violated — such a node keeps its metric (for the audit
@@ -362,6 +368,10 @@ class RunState(BaseModel):
     # The reserved-holdout fraction the run committed to at start (None in old logs / when off).
     # The engine re-uses this on resume so the split every metric was scored against never changes.
     holdout_fraction: Optional[float] = None
+    # R1-c (folded from run_started; False for old logs -> byte-identical legacy selection). When True,
+    # best-selection's mean pick breaks a metric-EQUAL tie by the calibrated §12-verifier soundness score
+    # (Node.verifier_score) — advisory, never overriding a strictly-better robust_metric (§21.7).
+    select_verifier_tiebreak: bool = False
     nodes: dict[int, Node] = Field(default_factory=dict)
     # The node currently BEING BUILT (a `node_building` marker), shown in the UI the instant work starts
     # on it — before the dev session finishes with node_created. Transient: {node_id, operator,

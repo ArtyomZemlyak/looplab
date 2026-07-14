@@ -157,6 +157,20 @@ def foresight_criteria() -> list[Criterion]:
     ]
 
 
+def selection_criteria() -> list[Criterion]:
+    """R1-c best-selection tie-break (§21.7): a HIGH score = this experiment's REALIZED result is sound
+    and likely to hold up — a genuine improvement on the task, NOT an artifact of overfitting, data
+    leakage, a lucky seed, or gaming the metric. Used only to break a metric-EXACT tie between two
+    equally-scoring nodes (prefer the more trustworthy one); never to override a better ground-truth
+    metric. One primary criterion so the tie-break signal is a single calibrated number."""
+    return [
+        Criterion("result_sound",
+                  "Is this experiment's reported result genuinely SOUND — a real improvement on the task "
+                  "that should generalize — rather than an artifact of overfitting, data leakage, a lucky "
+                  "seed, or gaming the metric?", 1.0),
+    ]
+
+
 def reexamination_criteria() -> list[Criterion]:
     """D3 failed-direction re-examination (§21.4): a HIGH `implementation_bound` score = the failure was
     the IMPLEMENTATION's fault and the direction should be re-opened (the node_63 archetype)."""

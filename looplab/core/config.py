@@ -417,6 +417,18 @@ class Settings(BaseSettings):
     holdout_select: bool = True
     # How many val-leaders get a holdout evaluation at finish (host-graded tasks).
     holdout_top_k: int = Field(default=3, ge=1)
+    # R1-c / Part IV — calibrated §12-verifier tie-break in best-selection. When a fresh node's robust
+    # metric EXACTLY TIES an already-eligible node, the engine runs the §12 verifier (grounded on each
+    # node's realized result, `selection_criteria`) and records a soundness score per node; the fold's
+    # mean pick then breaks the metric-tie by that score. Strictly a TIE-BREAK — it can NEVER move a node
+    # ahead of a strictly-better robust_metric (§21.7 advisory-never-overrides). Recorded in run_started so
+    # replay applies the same rule; old logs fold to False (legacy pick). Lazy (only fires on an actual
+    # tie) + opt-in (default off); needs a reachable LLM client. Enable only after validating calibration
+    # offline with `verifier.calibrate`. See trust/verifier.py + core/fitness.py.
+    select_verifier: bool = False
+    # Verifier sample count for `select_verifier` (the §12 repeated-sampling expectation). 3 tames the
+    # single-shot variance; 1 = single-shot (cheaper, noisier).
+    select_verifier_samples: int = Field(default=3, ge=1)
     # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
     max_seconds: float | None = None
     # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
