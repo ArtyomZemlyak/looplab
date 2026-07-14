@@ -632,6 +632,113 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
 
 
 # --------------------------------------------------------------------------- #
+# Vocabulary consolidation — keep a freely-grown graph from FRAGMENTING (§21.11 follow-up)
+# --------------------------------------------------------------------------- #
+
+def _axis_rename_from_ids(rename: dict) -> dict:
+    """Derive an axis->canonical-axis map from an id->canonical-id map (the id prefix is the axis)."""
+    out: dict = {}
+    for raw, canon in rename.items():
+        ra, ca = str(raw).split("/", 1)[0], str(canon).split("/", 1)[0]
+        if ra and ca and ra != ca:
+            out[ra] = ca
+    return out
+
+
+def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tuple:
+    """Rebuild `(graph, tags)` under an id->canonical-id `rename` map: merge concepts that collapse to the
+    same canonical id (union their axes + key flag), rename axis prefixes, and rewrite every node's tag set
+    to canonical ids (deduped). Pure; identity when `rename` is empty."""
+    if not rename:
+        return graph, tags
+    axis_rename = _axis_rename_from_ids(rename)
+    new = ConceptGraph(task_type=graph.task_type)
+    for c in graph.concepts():
+        cid = rename.get(c.id, c.id)
+        axes = tuple(dict.fromkeys(axis_rename.get(a, a) for a in c.axes)) or (cid.split("/", 1)[0],)
+        existing = new.get(cid)
+        merged_axes = tuple(dict.fromkeys((existing.axes if existing else ()) + axes))
+        merged_key = bool(c.key or (existing.key if existing else False))
+        # ensure() keeps the first entry, so replace to carry the merged axes/key deterministically.
+        new._concepts[cid] = Concept(id=cid, label=(existing.label if existing else c.label),
+                                     axes=merged_axes, key=merged_key)
+    new_tags = {nid: frozenset(rename.get(x, x) for x in cids) for nid, cids in (tags or {}).items()}
+    return new, new_tags
+
+
+def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embed=None,
+                         parser: str = "tool_call") -> tuple:
+    """Consolidate a freely-GROWN concept vocabulary so it does not FRAGMENT into synonyms across a run
+    (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`) — the §21.11 follow-up that makes
+    the grown graph a STABLE coordinate system on any task. Returns `(graph, tags, rename_map)`.
+
+    Agentic-first: with a `client`, one LLM call canonicalizes the vocabulary (merge synonymous
+    concepts/axes to ONE id each; keep genuinely-distinct methods apart — `mixup` ≠ `cutmix`). Deterministic
+    FALLBACK (no client): `hybrid_merge.cluster_near_duplicates` over the concept labels (recall-oriented RRF
+    clustering) plus an axis-normalization pass; the canonical id per cluster is the shortest existing id.
+    Fail-open: any error returns the graph/tags UNCHANGED (never loses information, never raises)."""
+    concepts = [c for c in graph.concepts() if not c.id.endswith("/*")]
+    if len(concepts) < 2:
+        return graph, tags, {}
+    ids = [c.id for c in concepts]
+    rename: dict = {}
+    try:
+        if client is not None:
+            from pydantic import BaseModel, Field
+
+            from looplab.core.parse import parse_structured
+
+            class _Pair(BaseModel):
+                raw: str = ""
+                canonical: str = ""
+
+            class _Out(BaseModel):
+                merges: list[_Pair] = Field(default_factory=list)
+
+            vocab = "\n".join(f"- {c.id}  ({c.label})" for c in concepts)
+            system = (
+                "You consolidate a machine-learning experiment CONCEPT vocabulary that was grown "
+                "incrementally and has SYNONYM fragmentation. Merge concepts/axes that mean the SAME thing to "
+                "ONE canonical `axis/slug` id (e.g. `data-augmentation/*`≡`augmentation/*`, "
+                "`optimizer/*`≡`optimization/*`). Keep genuinely-DIFFERENT methods separate (`mixup`≠`cutmix`; "
+                "`teacher-distill`≠`self-distill`). Output ONLY the ids that should CHANGE, as {raw, canonical} "
+                "pairs where `canonical` is another id from the list (or a cleaned form of it). Call `emit`."
+            )
+            out = parse_structured(client, [{"role": "system", "content": system},
+                                            {"role": "user", "content": "VOCABULARY:\n" + vocab}], _Out, parser)
+            idset = set(ids)
+            for p in out.merges:
+                raw = _normalize_concept_id(p.raw)
+                canon = _normalize_concept_id(p.canonical)
+                if raw and canon and raw != canon and raw in idset and "/" in canon:
+                    rename[raw] = canon
+        else:
+            from looplab.search.hybrid_merge import cluster_near_duplicates
+            labels = [f"{c.id} {c.label}" for c in concepts]
+            for cluster in cluster_near_duplicates(labels, embed=embed):
+                if len(cluster) < 2:
+                    continue
+                members = [ids[i] for i in cluster]
+                canon = min(members, key=lambda s: (len(s), s))  # shortest id = canonical
+                for m in members:
+                    if m != canon:
+                        rename[m] = canon
+    except Exception:  # noqa: BLE001 — consolidation is best-effort; never break the diagnostic
+        return graph, tags, {}
+
+    # Resolve transitive chains (a->b, b->c => a->c) so the rename is a single canonical hop.
+    def _final(x, _seen=None):
+        _seen = _seen or set()
+        while x in rename and x not in _seen:
+            _seen.add(x)
+            x = rename[x]
+        return x
+    rename = {k: _final(k) for k in rename}
+    g2, t2 = _apply_consolidation(graph, tags, rename)
+    return g2, t2, rename
+
+
+# --------------------------------------------------------------------------- #
 # The PRIMARY D5 entry: the LLM agent BUILDS the whole concept map (agentic-first)
 # --------------------------------------------------------------------------- #
 
@@ -660,11 +767,14 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
         return {"graph": graph, "tags": tags, "coverage": concept_coverage(state, graph, tags),
                 "important_uncovered": [], "mode": "offline-heuristic"}
     tags = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True)
+    # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
+    # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
+    graph, tags, renamed = consolidate_concepts(graph, tags, client=client, parser=parser)
     cov = concept_coverage(state, graph, tags)
     important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
                                           client=client, asset_brief=asset_brief, parser=parser)
     return {"graph": graph, "tags": tags, "coverage": cov, "important_uncovered": important,
-            "mode": "agentic" if tools is not None else "llm"}
+            "consolidated": renamed, "mode": "agentic" if tools is not None else "llm"}
 
 
 # --------------------------------------------------------------------------- #

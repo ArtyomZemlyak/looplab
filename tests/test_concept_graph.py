@@ -324,3 +324,49 @@ def test_build_concept_map_offline_fallback(tmp_path):
     assert set(out) == {"graph", "tags", "coverage", "important_uncovered", "mode"}
     assert out["important_uncovered"] == []          # no importance derivation without a client
     assert out["coverage"]["experiments"] == 3
+
+
+# --------------------------------------------------------------------------- #
+# Vocabulary consolidation (§21.11 follow-up) — keep a grown graph from fragmenting
+# --------------------------------------------------------------------------- #
+
+def test_consolidate_applies_llm_rename(monkeypatch):
+    import looplab.core.parse as parse_mod
+    from looplab.search import concept_graph as cg
+    g = cg.ConceptGraph([cg.Concept("augmentation/mixup", "mixup", ("augmentation",)),
+                         cg.Concept("data-augmentation/cutmix", "cutmix", ("data-augmentation",))])
+    tags = {0: frozenset({"augmentation/mixup"}), 1: frozenset({"data-augmentation/cutmix"})}
+
+    class _P:
+        def __init__(s, r, c): s.raw, s.canonical = r, c
+    class _Out:
+        merges = [_P("data-augmentation/cutmix", "augmentation/cutmix")]
+    monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
+
+    g2, t2, rename = cg.consolidate_concepts(g, tags, client=object())
+    assert rename == {"data-augmentation/cutmix": "augmentation/cutmix"}
+    assert "augmentation/cutmix" in g2 and "data-augmentation/cutmix" not in g2
+    assert g2.axes() == ["augmentation"]                     # the fragmented axis is gone
+    assert t2[1] == frozenset({"augmentation/cutmix"})       # tag rewritten to canonical
+
+
+def test_consolidate_resolves_transitive_chain(monkeypatch):
+    import looplab.core.parse as parse_mod
+    from looplab.search import concept_graph as cg
+    g = cg.ConceptGraph([cg.Concept("a/x"), cg.Concept("b/x"), cg.Concept("c/x")])
+    tags = {0: frozenset({"a/x"})}
+    class _P:
+        def __init__(s, r, c): s.raw, s.canonical = r, c
+    class _Out:
+        merges = [_P("a/x", "b/x"), _P("b/x", "c/x")]        # a->b->c
+    monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
+    _, t2, rename = cg.consolidate_concepts(g, tags, client=object())
+    assert rename["a/x"] == "c/x"                            # collapsed transitively
+    assert t2[0] == frozenset({"c/x"})
+
+
+def test_consolidate_no_client_never_crashes():
+    from looplab.search import concept_graph as cg
+    g = cg.ConceptGraph([cg.Concept("a/x"), cg.Concept("a/y")])
+    g2, t2, rename = cg.consolidate_concepts(g, {0: frozenset({"a/x"})}, client=None)
+    assert isinstance(rename, dict) and 0 in t2         # fallback ran, no crash

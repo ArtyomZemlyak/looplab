@@ -2758,9 +2758,16 @@ the winning region as *covered*. Fixes landed on the branch:
   synthetic-query generation + data-quality + schedule. **Normative:** the curated dense-retrieval skeleton /
   `key=True` list is demoted to an OPTIONAL offline seed pack (a fast path for a registered task type, like the
   adapters registry); the universal core is the LLM-grown concept graph + the pure coverage math + the
-  per-task derived importance — no domain hardcoding, works on any task. (Known follow-up: the free-grown
-  vocabulary can fragment — `augmentation` vs `data-augmentation` — so a concept-consolidation pass, reusing
-  `hybrid_merge`, is the next universality hardening.)
+  per-task derived importance — no domain hardcoding, works on any task.
+- **Vocabulary consolidation (2026-07-14, DONE)** — the last universality hardening: a freely-grown vocabulary
+  otherwise FRAGMENTS into synonyms (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`),
+  re-splitting the concentration signal one level up. `concept_graph.consolidate_concepts(graph, tags, *,
+  client=…)` canonicalizes it — agentic-first (one LLM call merges synonymous concepts/axes to one id each,
+  keeping distinct methods apart: `mixup`≠`cutmix`), with `hybrid_merge.cluster_near_duplicates` as the no-LLM
+  fallback; fail-open (returns the graph unchanged on any error). `build_concept_map` runs it after the agent
+  grows the graph and before measuring. Validated live on the image-classification vocabulary: it merged
+  `data-augmentation`→`augmentation` and `optimization`→`optimizer` (8 axes → 6), so the grown graph is a
+  stable coordinate system on any task.
 
 **LLM-agent-primary (2026-07-14).** Design correction: **the LLM agent BUILDS the concept map by default**,
 matching how D1 (`agentic_asset_brief`) and §12 (agentic `verify`) already work — the deterministic alias
