@@ -2747,8 +2747,9 @@ the winning region as *covered*. Fixes landed on the branch:
 - **Discriminative offline aliases + an `in-batch-hard-mining` split** (external/data-side/teacher aliases now
   require the genuine qualifier), dropping external-mining over-tagging 15→1 — but the offline heuristic has an
   inherent ceiling on semantic collisions (self- vs teacher-distillation), documented, with a CLI caveat.
-- **D1 metric-parsing fix** (`\b`→`(?<![a-z0-9])`): checkpoint scores glued by underscores
-  (`..._val_recall@100=0.902.ckpt`) now parse, so the brief headlines the strongest teacher and ranks all.
+- **D1 metric-parsing fix** (word-boundary `\b` → an alnum-only lookbehind/lookahead, so `_` counts as a
+  separator): checkpoint scores glued by underscores (`..._val_recall@100=0.902.ckpt`) now parse, so the brief
+  headlines the strongest teacher and ranks all.
 - **The universal mechanism — `concept_graph.derive_reference_concepts(task_goal, coverage, client,
   asset_brief=…)`**: the "important-but-uncovered" set is now **derived per task** from the goal + explored
   concepts + the D1 prior-art brief, with **no hardcoded key list**. Validated on two unrelated domains with
