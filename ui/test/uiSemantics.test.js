@@ -236,8 +236,9 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // after the user selected a different node (Inspector) or after building ended (Dock), overwriting
   // fresher state with a stale snapshot. Both must take (alive) and guard the setState with alive().
   const [inspector, dock] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx')])
-  // Inspector node-detail poll: callback receives (alive), rejects another attempt, and only then writes.
-  assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\?\.attempt === nodeAttempt/)
+  // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
+  // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
+  assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
   assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) setNodeTrace\(d\) \}\)/)
@@ -258,4 +259,10 @@ test('R6: Dock timeline-window note uses a boolean guard so no stray 0 renders',
   const dock = await source('Dock.jsx')
   // The && chain must start from a boolean, not `filter.trim() || kinds.size` (which is 0 when empty).
   assert.match(dock, /\{\(filter\.trim\(\) !== '' \|\| kinds\.size > 0\) && timeline\.totalEvents != null/)
+})
+
+test('R7: Inspector accepts a fresher node-detail payload (no spurious attempt-changed error)', async () => {
+  const inspector = await source('Inspector.jsx')
+  // detailMatchesAttempt must accept attempt >= summary (fresher after inline repair), not exact-only.
+  assert.match(inspector, /Number\.isSafeInteger\(value\?\.attempt\) && value\.attempt >= nodeAttempt/)
 })

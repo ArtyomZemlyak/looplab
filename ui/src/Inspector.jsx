@@ -103,8 +103,13 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   const [detailResource, setDetailResource] = useState({ scope: null, data: null })
   const detailCurrent = detailResource.scope === detailScope
   const detail = detailCurrent ? detailResource.data : null
+  // Accept a detail payload whose attempt is >= the summary's: the /nodes endpoint is often FRESHER
+  // than the lagging run-state poll (e.g. right after an inline repair bumps `attempt`), and showing
+  // the current truth is correct — only a genuinely STALER payload (an old attempt's late response)
+  // should be rejected. Exact-only matching here flashed a spurious "attempt changed" error banner
+  // during normal live repairs until the next poll reconciled.
   const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt)
-    || value?.attempt === nodeAttempt
+    || (Number.isSafeInteger(value?.attempt) && value.attempt >= nodeAttempt)
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
   const [detailNonce, setDetailNonce] = useState(0)

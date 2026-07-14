@@ -443,3 +443,74 @@ returns None not the wrong span — both assert the tampered index actually load
 No new event types, Settings fields, or registry seams were added (the `_LAYOUT` map already lists
 `attention`/`span_index`), and the new subsystems are documented in `docs/08-tracing-architecture.md`
 and `docs/guide/concepts.md`, so no docs/diagram sync was owed.
+
+---
+
+## Round 7 — collaboration/comments mega-review + docs↔code audit (2026-07-14)
+
+The branch advanced again with a **threaded-comments / collaboration** subsystem (`comment_projection.py`,
+`command_observation.py`, `routers/collaboration.py`, `CommentsThread.jsx`, `commentsModel.js`,
+`useComments.js`), incremental **command-ack observation**, and a JS **bundle-budget** CI gate. A seventh
+pass ran **11 parallel agents** — 8 correctness finders over the new ~6.3k-line surface plus a **3-agent
+docs↔code accuracy audit** — with adversarial verification. **No new P0/P1.**
+
+### Docs audit (the "make docs match reality" pass)
+
+- **`docs/guide/configuration.md`** — audited all **148** `Settings` fields against `config.py`: every
+  default, bound, and `LOOPLAB_*` env var matches. **No changes needed.**
+- **`docs/infographic/agent-architecture.html`** (process diagram) — every number/cadence/threshold
+  verified against code (novelty 0.92, merge-every-3, digest caps, holdout 25%, repair-abandon-at-4,
+  trust gates, all cadences). **Accurate; no changes.** The new cost/attention/span-index/comment
+  subsystems are UI/observability or already gestured at (out of scope for a research-loop flowchart).
+- **Fixed** (prose drifted from the shipped code): `CLAUDE.md` package map — `events/` now lists
+  `comment_projection.py` + `span_index.py`; `serve/` lists all 11 routers + the new
+  `run_commands.py`/`command_observation.py`/`attention.py`/`reviews.py` modules; `engine/` mentions
+  `costs.py` + the expanded `finalize.py`. `docs/guide/concepts.md` — the command-observation monitor no
+  longer "scans from the beginning each pass": the incremental indexed read model (P2) has shipped.
+
+### Fixed (verified, applied, +tests)
+
+| Finding | Fix |
+|---|---|
+| **P2** `comment_projection.py` — an edit/resolution overwrote the comment's `actor_kind` with the **editor's** identity, so a comment authored by the owner but edited by an operator was misattributed to the operator | keep the top-level `actor_kind` = creator; pass the acting actor into `_history_row` so each audit row still attributes its own change |
+| **P2** `run_commands.py` + `comment_projection.py` — the run-level comment cap counted **legacy** `EV_ANNOTATION` notes (uncompactable in an append-only log), so a run with 500 legacy notes 409'd every modern comment forever; the per-subject cap already excluded legacy | count only modern comments against the run cap, in **both** the validation and the fold (kept in lock step so accept/fold never diverge) |
+| **P2** `orchestrator.py::_ack_commands` — the ack cursor + seen-set were advanced (and the seen-set aliased + mutated) **before** the durable `command_ack` appends, so a non-fatal append failure lost those acks for the Engine's life → the UI's command falsely timed out | copy the seen-set (don't alias) and append **before** committing the cursor/seen, so a failed append leaves them unadvanced and the next call re-attempts (restoring the old self-healing) |
+| **P2** `ui/scripts/check-bundle.mjs` — the "is main module" guard compared a non-realpath'd `argv[1]` to `import.meta.url`, so a **symlinked** invocation silently skipped `main()` and exited 0 (false-green CI gate) | resolve symlinks (`realpathSync`) before comparing (verified: the gate now runs via a symlink) |
+| **P2** `Inspector.jsx` — the new `detailMatchesAttempt` guard required an **exact** attempt match, so a *fresher* `/nodes` payload (common right after an inline repair bumps `attempt`) flashed a spurious "attempt changed" error banner | accept `attempt >= nodeAttempt` (fresher-or-equal is current truth; only reject a genuinely staler payload) |
+| **P3** `comment_projection.py::normalize_comment_text` — the whole untrusted body was `.strip()`+UTF-8-encoded **before** the byte-cap check (a 50 MB body fully materialized before rejection) | cheap `len(text)` guard before `.encode()` |
+| **P4** `ui/scripts/check-bundle.mjs` — a stale header comment claimed the checker "is expected to fail until lazy boundaries land" though they landed and it passes | corrected the comment |
+
+Regression tests: `test_collaboration.py` (cross-actor edit preserves creator authorship; legacy
+annotations don't consume the modern-comment budget); `uiSemantics.test.js` (Inspector accepts a
+fresher detail — and the stale round-5 assertion that pinned the old exact-match was updated).
+
+### Significant — documented, intentional or maintainer-decision
+
+- **`_engine_liveness` tri-state on flock-less mounts** (carried from round 6) remains the top
+  maintainer item — intentional/tested `None`→fail-closed; a lock-less liveness fallback is the real fix.
+- **`EV_ANNOTATION` reachable via `/control`** (not in `COLLABORATION_EVENTS`) folds into a *legacy*
+  read-only comment without the command-protocol generation CAS — intended legacy back-compat, but the
+  CAS-less legacy path is worth a maintainer note.
+- **`review_comments`** re-reads/re-folds the whole log **uncached** per request for the untrusted
+  reviewer (the DoS amplification `review_state` was hardened against), and discloses comments to
+  summary-tier links with no `_evidence` gate (the handler frames comments as review-visible — verify intent).
+- **Comment submits gated by the single-in-flight `_active_record` funnel** (409 during a Pause/Abort
+  window) contradicts the engine-independence intent — may be an intentional single-writer simplification.
+- **Version-chain order-sensitivity** in the comment fold (one no-op edit drops later valid edits) —
+  intended idempotency defensiveness.
+- **`command_observation.observe()`** lets a missing log raise `FileNotFoundError` uncaught (unlike
+  `read_all`); `command_ack` counts as `max_non_control_seq` domain-progress (latent — consumer unused);
+  `eventstore.py` broadened the non-`required` flock-acquire `except` to swallow more error types
+  (unlocked-append degrade for more failure modes).
+- **UI**: an unknown server `actor_kind` blanks the whole comments feed (over-strict page validation);
+  the deferred "load timeline from report" trigger is unreachable dead code (`timelineDeferred` false in
+  its branch); `LoadErrorBoundary` presents render bugs as "reload for a consistent build"; comment/badge
+  counts undercount when paginated; node-annotations are no longer shown directly (they still surface as
+  legacy comments in the thread). Product/UX calls for the maintainer.
+- **Cleanup**: `span_index`/attention re-implement `eventstore` JSONL parsing + the cache-invalidation
+  guard; `useAttention` hand-rolls a poll instead of `usePoll`; the attention router double-reads each
+  log per poll; the React-Flow bundle budget lacks a `baselineRoots` (counts ~63 KiB of shared React).
+
+Note: `ui/test/commentsContract.test.js` (a heavy real-vite-server + jsdom integration test added in this
+merge) times out in this sandbox **independently of these changes** (confirmed against stock); it is an
+environmental/CI-resourcing issue, not a code regression.

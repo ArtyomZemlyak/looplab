@@ -144,9 +144,11 @@ complete when the engine emits an exact `command_ack` for that command ID and ev
 ack means **the engine observed the intent**; it does not mean the downstream fork/reset/evaluation or
 research work itself has finished.
 
-The command service and engine acknowledgement monitor currently scan the run log from the beginning
-on each observation pass. That is correct but not yet scale-efficient: a cursor or indexed read model
-is tracked as P2 performance work before claiming command-volume scalability on very long logs.
+The command service and engine acknowledgement monitor read the run log **incrementally**: an indexed
+observation (`serve/command_observation.py`) scans each recoverable event byte once and retains a
+bounded set of active-run indexes, so a long log's command volume no longer forces a full re-scan on
+each observation pass. The engine's own ack cursor is the same shape — it inspects only the appended
+suffix after bootstrapping the historical acknowledgement set.
 
 Each control type also has an explicit payload allowlist. Unknown fields and lossy coercions are
 rejected before append, so an ignored key cannot be persisted while the command reports success.

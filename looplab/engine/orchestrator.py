@@ -515,7 +515,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             cursor = 0
             acked: set[tuple[str, object]] = set()
         else:
-            acked = getattr(self, "_command_ack_seen", set())
+            # Copy, not alias: the dedup passes below mutate ``acked`` in place, but the durable
+            # seen-set must not advance until every ack row is appended — otherwise a failed append
+            # marks an unwritten ack as seen and it is lost for the process lifetime.
+            acked = set(getattr(self, "_command_ack_seen", set()))
 
         # Two passes over the *new suffix* matter: an already-durable ack later in that same suffix
         # must suppress its intent even when the intent row appears first.
@@ -534,17 +537,20 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 acked.add(identity)
                 pending.append(identity)
 
-        # Advance against the exact folded snapshot before appending diagnostics.  A subsequent call
-        # sees those new ack rows in its suffix; a crash between cursor update and append is irrelevant
-        # because these fields are process-local and disappear with the process.
-        self._command_ack_initialized = True
-        self._command_ack_cursor = total
-        self._command_ack_first_event = first
-        self._command_ack_seen = acked
+        # Append the diagnostics FIRST, then commit the process-local cursor/seen against the exact
+        # folded snapshot. A crash before the commit is harmless (a restart re-bootstraps from cursor
+        # 0); a NON-fatal append failure is now also harmless — because the cursor and seen-set stay
+        # unadvanced, the next call re-scans this suffix and re-attempts the un-acked intents (the
+        # already-appended acks are re-observed and deduped in the first pass). A subsequent call sees
+        # the new ack rows in its suffix.
         for command_id, event_seq in pending:
             self.store.append(EV_COMMAND_ACK, {
                 "command_id": command_id, "event_seq": event_seq,
             })
+        self._command_ack_initialized = True
+        self._command_ack_cursor = total
+        self._command_ack_first_event = first
+        self._command_ack_seen = acked
 
     def _begin_finalize(
             self, data: dict, *, scope: str | None = None,

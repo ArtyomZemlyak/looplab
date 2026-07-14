@@ -43,6 +43,11 @@ def normalize_comment_text(value: object) -> str:
     text = value.strip()
     if not text:
         raise ValueError("text must be non-empty")
+    # UTF-8 encodes each char to >=1 byte, so a char count already over the byte cap can only encode
+    # larger — reject before the full .encode() so a pathological (e.g. 50 MB) body isn't materialized
+    # in full on the untrusted command-append path just to be rejected.
+    if len(text) > COMMENT_TEXT_MAX_BYTES:
+        raise ValueError(f"text must be at most {COMMENT_TEXT_MAX_BYTES} UTF-8 bytes")
     try:
         encoded = text.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
@@ -72,14 +77,19 @@ def _actor(value: object, *, legacy: bool = False) -> Optional[str]:
     return value if value in {"deployment_owner", "local_operator"} else None
 
 
-def _history_row(comment: CommentState, event: Event, action: str) -> dict:
+def _history_row(comment: CommentState, event: Event, action: str,
+                 actor: Optional[str] = None) -> dict:
+    # ``actor`` is WHO performed THIS event — the creator on create, the editor on edit/resolution.
+    # The comment's top-level ``actor_kind`` stays the CREATOR for authorship display; each audit row
+    # records its own actor so the trail attributes each change correctly.
+    actor_kind = actor if actor is not None else comment.actor_kind
     return {
         "version": comment.version,
         "action": action,
         "text": comment.text,
         "resolved": comment.resolved,
-        "actor_kind": comment.actor_kind,
-        "actor_label": ACTOR_LABELS[comment.actor_kind],
+        "actor_kind": actor_kind,
+        "actor_label": ACTOR_LABELS[actor_kind],
         "updated_at": _timestamp(event.ts),
         "event_seq": event.seq,
     }
@@ -129,9 +139,14 @@ def apply_comment_event(comments: dict[str, CommentState], event: Event,
             1 for item in comments.values()
             if (not item.legacy and item.node_id == node_id
                 and item.node_generation == node_generation))
+        # Count only MODERN comments against the run cap: legacy EV_ANNOTATION notes must not consume
+        # the modern-comment budget (they can't be compacted in an append-only log, so counting them
+        # would permanently 409 all new attributed comments on a heavily-annotated run). Kept in lock
+        # step with the validation cap in run_commands.py so accept/fold never diverge.
+        modern_count = sum(1 for item in comments.values() if not item.legacy)
         if (not isinstance(comment_id, str) or COMMENT_ID_RE.fullmatch(comment_id) is None
                 or comment_id in comments or node_id is None or node_generation is None
-                or actor is None or version != 1 or len(comments) >= COMMENT_MAX_PER_RUN
+                or actor is None or version != 1 or modern_count >= COMMENT_MAX_PER_RUN
                 or per_subject >= COMMENT_MAX_PER_NODE_GENERATION):
             return None
         comment = CommentState(
@@ -169,11 +184,13 @@ def apply_comment_event(comments: dict[str, CommentState], event: Event,
                 return None
             comment.resolved = resolved
             action = "resolved" if resolved else "reopened"
-        comment.actor_kind = actor
+        # Keep the CREATOR's actor_kind as the comment's authorship; do NOT overwrite it with the
+        # editor's identity (that would misattribute an owner-authored comment to whoever edited it
+        # last). The audit row below records the acting editor via the explicit ``actor`` argument.
         comment.version = version
         comment.updated_at = ts
         comment.updated_seq = seq
-        row = _history_row(comment, event, action)
+        row = _history_row(comment, event, action, actor=actor)
     else:
         return None
 

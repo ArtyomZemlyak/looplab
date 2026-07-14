@@ -488,7 +488,11 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                             f"{node_generation}"),
                 "remediation": "refresh the run before commenting on this experiment lifecycle",
             })
-        if len(current.comments) >= COMMENT_MAX_PER_RUN:
+        # Count only MODERN comments: legacy EV_ANNOTATION notes cannot be compacted in an append-only
+        # log, so counting them here would permanently 409 modern comments on a heavily-annotated run.
+        # Mirrors comment_projection.apply_comment_event so validation and fold never diverge.
+        modern_count = sum(1 for item in current.comments.values() if not item.legacy)
+        if modern_count >= COMMENT_MAX_PER_RUN:
             raise HTTPException(409, {
                 "code": "comment_run_limit_reached",
                 "message": f"this run already has {COMMENT_MAX_PER_RUN} projected comments",

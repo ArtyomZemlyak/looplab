@@ -625,3 +625,35 @@ def test_destructive_guard_still_fails_closed_for_active_comment_record(tmp_path
             pass
     assert exc.value.status_code == 409
     assert command_id in str(exc.value.detail)
+
+
+def test_edit_by_a_different_actor_preserves_creator_authorship():
+    """R7: an edit by a DIFFERENT actor must not rewrite the comment's authorship. The top-level
+    actor_kind stays the CREATOR; each history row still records who performed that specific action."""
+    cid = "cmt_" + "b" * 32
+    events = [
+        _event(0, EV_COMMENT_CREATED, _create_data(cid, text="v1", actor="deployment_owner")),
+        _event(1, EV_COMMENT_EDITED, {
+            "comment_id": cid, "node_id": 0, "node_generation": 0,
+            "base_version": 1, "version": 2, "text": "v2", "actor_kind": "local_operator"}),
+    ]
+    comments, history = project_comments(events, include_history=True)
+    assert comments[cid].actor_kind == "deployment_owner"      # authorship = creator, not last editor
+    rows = history[cid]
+    assert rows[0]["action"] == "created" and rows[0]["actor_kind"] == "deployment_owner"
+    assert rows[1]["action"] == "edited" and rows[1]["actor_kind"] == "local_operator"
+
+
+def test_legacy_annotations_do_not_consume_modern_comment_budget():
+    """R7: legacy EV_ANNOTATION notes (uncompactable in an append-only log) must not count against the
+    MODERN-comment run cap; otherwise a heavily-annotated run permanently 409s all new attributed
+    comments. Validation (run_commands) and fold (comment_projection) both count only modern comments."""
+    comments = {}
+    for seq in range(COMMENT_MAX_PER_RUN):
+        apply_comment_event(comments, _event(seq, EV_ANNOTATION, {"node_id": 0, "text": f"note {seq}"}))
+    assert sum(1 for c in comments.values() if c.legacy) == COMMENT_MAX_PER_RUN   # run full of legacy
+    # a MODERN comment still folds despite the run being "full" of legacy notes
+    cid = "cmt_" + "c" * 32
+    row = apply_comment_event(comments, _event(
+        COMMENT_MAX_PER_RUN, EV_COMMENT_CREATED, _create_data(cid, node=1, text="modern")))
+    assert row is not None and cid in comments and not comments[cid].legacy

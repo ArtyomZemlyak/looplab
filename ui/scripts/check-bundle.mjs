@@ -1,3 +1,4 @@
+import { realpathSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -10,10 +11,9 @@ const entry = Object.freeze({ entry: true })
 const source = src => Object.freeze({ src })
 const named = name => Object.freeze({ name })
 
-// These are target budgets for the split graph, not a waiver for the current monolith. Until the
-// route/panel lazy boundaries land, the checker is expected to fail with both size and missing-root
-// diagnostics. Calibrate downward from measured split output; do not raise these to make eager code
-// green.
+// These are target budgets for the split graph, not a waiver for eager code. The route/panel lazy
+// boundaries have landed and the checker passes today; keep these calibrated downward from measured
+// split output — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
     js: { gzip: 310 * KIB },
@@ -574,7 +574,13 @@ async function main() {
   if (result.violations.length && !reportOnly) process.exitCode = 1
 }
 
-const invokedPath = process.argv[1] ? pathToFileURL(resolve(process.argv[1])).href : ''
+// Resolve symlinks (realpathSync) before comparing: import.meta.url is the realpath, so a symlinked
+// invocation (node_modules/.bin shim, pnpm, a symlinked checkout) would otherwise fail this guard and
+// silently skip main() — a false-green of the entire CI budget gate.
+let invokedPath = ''
+try {
+  invokedPath = process.argv[1] ? pathToFileURL(realpathSync(resolve(process.argv[1]))).href : ''
+} catch { invokedPath = '' }
 if (invokedPath === import.meta.url) {
   main().catch(error => {
     console.error(`Bundle budget check could not run: ${error.message}`)
