@@ -93,6 +93,12 @@ async function mountHarness({ url, fetchStub, load }) {
       flush: async (turns = 3) => {
         for (let turn = 0; turn < turns; turn += 1) {
           await React.act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+          // Also pump requestAnimationFrame: the component restores keyboard focus (and other
+          // rAF-scheduled effects) via rAF, which a setTimeout(0)-only flush never advances — leaving
+          // focus on <body> so focus assertions never observe the restore.
+          await React.act(async () => {
+            await new Promise(resolve => requestAnimationFrame(() => resolve()))
+          })
         }
       },
       close: async () => {
@@ -461,7 +467,10 @@ test('retryable create, edit, resolve, and reopen failures re-arm only their exa
     assert.equal(calls.some(call => call.url.endsWith(`/commands/${abandonedEditId}/retry`)), false)
     await React.act(async () => { buttonByText('Retry same command').click() })
     await harness.flush()
-    assert.equal(document.activeElement, buttonWithExactText('Edit'),
+    // assert.ok over a boolean (=== compare), NOT assert.equal over two live DOM nodes: building an
+    // AssertionError whose actual/expected are jsdom/React-fiber nodes wedges the process for minutes
+    // (it walks the graph), turning a clean failure into a suite-killing hang with no line attribution.
+    assert.ok(document.activeElement === buttonWithExactText('Edit'),
       'closing a successful editor returns keyboard focus to its trigger')
 
     await React.act(async () => { buttonByText('All').click() })

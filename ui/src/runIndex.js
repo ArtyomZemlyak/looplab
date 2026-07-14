@@ -180,7 +180,10 @@ export function indexProjects(projects = []) {
   const byParent = {}
   const byId = Object.fromEntries(projects.map(project => [project.id, project]))
   projects.forEach(project => { (byParent[project.parent_id || null] ||= []).push(project) })
-  Object.values(byParent).forEach(items => items.sort((a, b) => a.name.localeCompare(b.name)))
+  // Coerce the name before localeCompare (like every sibling comparator in this file): a project with
+  // a null/undefined name would otherwise throw and break the entire run list / map render.
+  Object.values(byParent).forEach(items => items.sort(
+    (a, b) => String(a.name || '').localeCompare(String(b.name || ''))))
   const subtree = (id) => {
     const out = new Set([id]); const stack = [id]
     while (stack.length) {

@@ -5,9 +5,15 @@ import { apiUrl, get, normalizeRunGeneration, observeRunGeneration } from './api
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
 // query also makes resizing/zoom changes take effect without a reload.
 export function useMediaQuery(query) {
-  const read = () => typeof window !== 'undefined' && window.matchMedia(query).matches
+  // Guard window.matchMedia's EXISTENCE, not just window's: an environment where window exists but
+  // matchMedia does not (jsdom without a polyfill, some embedded WebViews) would otherwise throw
+  // `window.matchMedia is not a function` in the useState initializer and blow up the whole render.
+  // Degrade to `false` (desktop default), matching the defensive optional-API style used elsewhere.
+  const hasMM = () => typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+  const read = () => hasMM() && window.matchMedia(query).matches
   const [matches, setMatches] = useState(read)
   useEffect(() => {
+    if (!hasMM()) return
     const media = window.matchMedia(query)
     const onChange = () => setMatches(media.matches)
     onChange()

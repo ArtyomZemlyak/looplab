@@ -48,8 +48,15 @@ class FileBackups:
             # live slot and clobber an existing backup.
             existing = [int(b.stem) for b in d.glob("*.bak") if b.stem.isdigit()]
             n = (max(existing) + 1) if existing else 0
-            (d / f"{n}.bak").write_bytes(p.read_bytes() if p.is_file() else b"")
-            (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": p.is_file()}))
+            existed = p.is_file()
+            payload = p.read_bytes() if existed else b""
+            # Write the `.meta` BEFORE the `.bak`. `revert` enumerates `*.bak` and defaults a MISSING
+            # meta to {"existed": True}; if the `.bak` landed but the `.meta` write then failed, that
+            # orphan `.bak` would be reverted as a real snapshot (recreating a file that never existed,
+            # or consuming an undo click). Writing `.meta` first means a failed `.bak` leaves only a lone
+            # `.meta` (invisible to `revert`'s `*.bak` glob), so a partial save can never revert wrong.
+            (d / f"{n}.meta").write_text(json.dumps({"path": str(p), "existed": existed}))
+            (d / f"{n}.bak").write_bytes(payload)
             return True
         except OSError:
             return False

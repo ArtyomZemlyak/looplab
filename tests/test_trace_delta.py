@@ -20,6 +20,18 @@ SYS = {"role": "system", "content": "You are a developer. " + "ctx " * 200}
 USER = {"role": "user", "content": "Write the solution. " + "spec " * 200}
 
 
+@pytest.fixture(autouse=True)
+def _restore_llm_capture():
+    """These tests flip the process-global ``tracing._CAPTURE_LLM_IO`` on (via set_llm_capture) with no
+    teardown of their own. Save/restore it around every test so the mutation can't leak to other tests
+    in the worker and make a default-capture-off assertion order-dependent (pytest-random / xdist)."""
+    saved = tracing._CAPTURE_LLM_IO
+    try:
+        yield
+    finally:
+        tracing.set_llm_capture(saved)
+
+
 def _write_toolloop(rd: Path, n_turns: int = 6):
     """One node's tool-loop: n generations each re-sent the FULL growing history + a tool between them."""
     tracing.set_llm_capture(True)

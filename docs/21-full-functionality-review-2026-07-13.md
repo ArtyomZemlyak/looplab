@@ -514,3 +514,62 @@ fresher detail — and the stale round-5 assertion that pinned the old exact-mat
 Note: `ui/test/commentsContract.test.js` (a heavy real-vite-server + jsdom integration test added in this
 merge) times out in this sandbox **independently of these changes** (confirmed against stock); it is an
 environmental/CI-resourcing issue, not a code regression.
+
+---
+
+## Round 8 — full-branch mega-ultra review (2026-07-14)
+
+A comprehensive pass over the **entire branch** (~49.5k lines): 12 subsystem-partitioned finders
+(engine spine, engine cadence/finalize, events/replay, core, serve×2, tools, search/trust/runtime, UI
+logic, UI components, **backend test quality, UI test quality**) plus adversarial re-verification of the
+round-7 fixes. The `search/trust/adapters/agents` trees were byte-unchanged (only `jupyter.py`, correct);
+UI components and the perm-modes/security surfaces came back clean.
+
+### Adversarial self-review of round 7 (caught a real incomplete-fix — committed `d4d0379`)
+
+Re-verifying my own round-7 changes: the `_ack_commands` reorder and the Inspector `>=` change were
+independently confirmed correct, but the run-cap fix had updated **two of three** enforcement sites —
+`_comment_precondition` (the append-time recheck) still used the total count, so a run with 500 legacy
+notes accepted a comment at intake then dropped it at the append precondition. Fixed the third site +
+an end-to-end test; also hardened `check-bundle.mjs` to match both raw and realpath'd argv (the
+round-7 realpath-only form would false-green under `--preserve-symlinks`).
+
+### Fixed (verified, applied, +tests)
+
+| Finding | Fix |
+|---|---|
+| **P2** `appstate.state_payload` mutated the shared `_state_cache` with **no lock** while the branch added new concurrent callers (`/trace`, `/nodes` via `trace_scalars`→`state_payload`) → `set`/`pop(next(iter))` racing an insert throws "dictionary changed size during iteration" (500) on the hottest endpoints | added a `_state_cache_lock` around the insert+evict (matching the sibling `_trace_view_lock`) |
+| **P2** `traceview.hydrate_inputs` was not total: a malformed `input_carry` (non-int → `full[:carry]` TypeError aborts the **whole** trace; negative → silent truncation) | coerce carry to a non-negative int (fall back to 0 — the delta stands as full input), matching the sibling readers |
+| **P2** `ui/hooks.useMediaQuery` called `window.matchMedia()` unguarded → `TypeError` crashes the whole render where matchMedia is absent (jsdom/WebView) | guard matchMedia's existence, degrade to `false` |
+| **P2** `ui/test/commentsContract.test.js` **hung the entire UI suite** (154s → SIGKILL): a focus assert failed (focus-restore is rAF-scheduled but `flush()` only pumped `setTimeout(0)`) and building an `AssertionError` over live DOM/React-fiber nodes wedged the event loop | `flush()` now pumps `requestAnimationFrame` (focus restores → assert passes) and the assert uses `assert.ok(a === b)` (primitive → no wedge on any future failure). **UI suite now runs commentsContract: 306 pass.** |
+| **P2** `tools.FileBackups.save` wrote `.bak` then `.meta`; a `.meta`-write failure left an orphan `.bak` that `revert`'s missing-meta default (`existed:True`) reverts as a real snapshot | write `.meta` before `.bak` (a lone `.meta` is invisible to `revert`'s `*.bak` glob) |
+| **P3** `ui/runIndex.indexProjects` sorted on raw `a.name.localeCompare` with no null-guard (siblings coerce) → a null project name breaks the whole run list | `String(a.name || '')` |
+| **test-isolation** `test_trace_delta` toggled the process-global `set_llm_capture(True)` with no teardown → leaked to later tests (order-dependent flake) | autouse fixture saves/restores `_CAPTURE_LLM_IO` |
+
+### Significant — documented (maintainer-decision / intended / latent)
+
+- **`finalize._recover_scoped_terminal` re-materializes an error-finish scope forever** (P1, **reproduced**):
+  `_scope_is_effective_terminal` returns False for `reason=='error'`, so on the common crash-then-resume
+  path the recovery re-appends a duplicate `run_finished(error)` + report clone on **every resume**
+  (verified 1→2→3→4) and never writes a `complete`/`abandoned` marker — violating the one-terminal and
+  idempotent-resume invariants. The correct fix is a maintainer-level decision about the error-scope
+  lifecycle (accept the error terminal as effective, or write an abandoned marker) touching a predicate
+  with two call sites in replay-critical code; the existing test that should catch it is neutered by a
+  stub. **Flagged, not auto-fixed.**
+- **`finalize` non-modern trace-projection `raise`** — deliberately re-raises on a trace-build failure
+  (pinned by `test_later_error_supersedes_historical_scoped_success_until_exact_republish`,
+  `match="trace projection failed"`). Intended/tested; a FUSE crash-loop is the accepted tradeoff.
+- **`_engine_liveness` ENOTSUP→None** on lock-less mounts (carried from round 6) — intended/tested.
+- **Serve validation hygiene**: `assistant` turn/revert/stream + `/api/research` + `/api/genesis` parse the
+  body unguarded → 500 (not 400) on malformed JSON; `assistant._public_scope` truncates-before-redacts
+  (owner-only). Clean but low-severity; left for a follow-up to keep this round's blast radius tight.
+- **Test coverage gaps** (the tests review the user asked for): the span-index wrong-identity test never
+  proves the guard fired (offsets stay valid); the append-time comment TOCTOU reject branch, the
+  failure-spike lower bound + ignored-reasons, and an HTTP-level TTL→410 are untested; `bundleBudget`
+  only feeds synthetic manifests (never measures the real dist); source-scan tests are brittle+loose;
+  3 of 4 vite-server suites lack the `optimizeDeps` race mitigation.
+- **Lower-severity**: `failure_spike_seq` stale on a level fall (audit-only); `observedRunGenerations` map
+  unbounded; `machine_runs` idempotency-key/gate-on-recovery contract edges; `SettingsForm` aria-controls
+  + `accessibility` DataTable key (cosmetic); `llm` stream budget-in-`finally` (documented-accepted).
+
+Full suite green after these fixes; UI 306 pass (commentsContract no longer hangs); build + mkdocs OK.

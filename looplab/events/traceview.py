@@ -282,7 +282,15 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
                 partial[cur_sid] = False
                 base = memo[cur_sid]
                 break
-            chain.append((cur_sid, a.get("input_carry") or 0, cur))
+            # Coerce carry to a NON-NEGATIVE int: a malformed span (bit-rot on a network mount, or a
+            # hand-edited log) whose input_carry is a string/float would make `full[:carry]` raise
+            # TypeError and abort the WHOLE trace, and a negative carry would silently truncate the
+            # prefix. Fall back to 0 (the delta stands as the full input) — the safe degradation the
+            # non-list/absent-carry branch above already uses — instead of crashing the projection.
+            raw_carry = a.get("input_carry")
+            carry = raw_carry if (isinstance(raw_carry, int) and not isinstance(raw_carry, bool)
+                                  and raw_carry >= 0) else 0
+            chain.append((cur_sid, carry, cur))
             cur_sid = frm
         full = base
         for csid, carry, delta in reversed(chain):     # apply deltas base→leaf, memoizing every level

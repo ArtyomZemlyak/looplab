@@ -87,6 +87,11 @@ class AppState:
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
         # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.
         self._state_cache: dict[tuple, tuple] = {}
+        # Guards the state-cache insert+evict for the same reason as the trace-view lock below: /state,
+        # the SSE stream, and the /trace + /nodes routes (via trace_scalars -> state_payload) all reach
+        # state_payload concurrently on the threadpool, and `pop(next(iter(dict)))` on a dict another
+        # thread is inserting into raises "dictionary changed size during iteration" (a 500).
+        self._state_cache_lock = threading.Lock()
         # Run-level light trace-view cache keyed by (spans.jsonl, events.jsonl) file identity. The Dock
         # refetches /trace on every node add/settle and polls it while a node builds; without this each
         # fetch rebuilt the view. Combined with the span index (which makes the span read O(new spans)),
@@ -201,9 +206,10 @@ class AppState:
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
         d["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
-            self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
-            if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)
-                self._state_cache.pop(next(iter(self._state_cache)))
+            with self._state_cache_lock:      # only the dict ops; the fold/trim above ran lock-free
+                self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
+                if len(self._state_cache) > 256:  # bound the cache (many runs / seq points / session)
+                    self._state_cache.pop(next(iter(self._state_cache)))
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
                 RUN_GENERATION_FIELD: generation or None}
