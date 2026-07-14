@@ -295,6 +295,8 @@ class StrategyCadenceMixin:
         if not getattr(self, "_concept_pivot", False) or not self._should_consult(state):
             return state
         n = len(state.nodes)
+        # CODEX AGENT: Node count is not a lifecycle identity; reset/re-propose/abort can change the
+        # graph and steering cues without changing n, leaving this snapshot permanently stale.
         if any((c or {}).get("at_node") == n for c in state.concept_coverage_snapshots):
             return state
         snap = self._concept_coverage_snapshot(state)
@@ -333,6 +335,8 @@ class StrategyCadenceMixin:
             mode = "heuristic"
             if client is not None:
                 parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
+                # CODEX AGENT: This retags the full history on every cadence (quadratic total LLM calls),
+                # checkpoints nothing until completion, and tools=None prevents the claimed code/log reads.
                 # Span-scope the concept-map LLM generations (agentic tagging + consolidation + importance)
                 # so they file under a `concept_coverage` op, not the ambient/next-node trace (mirrors
                 # `_maybe_consult_strategist`'s `strategist_consult` span). nullcontext on a spanless self.
@@ -377,6 +381,8 @@ class StrategyCadenceMixin:
             "top_concept": top.get("id"),
             "top_concept_frac": top.get("frac", 0.0),
             "locked_axis": lock["locked_axis"],
+            # CODEX AGENT: This persists the longest-ever streak, not current_streak, so a successful
+            # pivot never clears the live capability-expansion directive.
             "streak": lock["streak"],
             "tag_mode": mode,
         }
@@ -413,6 +419,8 @@ class StrategyCadenceMixin:
         budget = 4                      # cap verifications per cadence so a big tie cluster can't burst cost
         done = False
         for group in groups:
+            # CODEX AGENT: Resolve a tie group atomically or abstain; scoring only some members makes a
+            # failed verification look like synthetic neutral 0.5 and can change the winner by itself.
             for n in group:
                 key = (n.id, n.attempt)
                 if n.verifier_score is not None or key in attempted or budget <= 0:
@@ -421,6 +429,8 @@ class StrategyCadenceMixin:
                 budget -= 1
                 attempted.add(key)
                 if score is not None:
+                    # CODEX AGENT: This selection-relevant event drops n_samples, agreement, model/prompt,
+                    # calibration id, evidence digest, and rationales, so the decision cannot be audited.
                     self.store.append(EV_NODE_VERIFIED, {"node_id": n.id, "generation": n.attempt,
                                                          "score": round(float(score), 4)})
                     done = True
@@ -463,12 +473,16 @@ class StrategyCadenceMixin:
                         + (f"; holdout metric: {node.holdout_metric}" if node.holdout_metric is not None else "")
                         + (f"; generalization gap: {node.generalization_gap}"
                            if node.generalization_gap is not None else ""))
+            # CODEX AGENT: Rationale plus scalar metrics cannot establish leakage, gaming, or overfit;
+            # ground this trust decision in actual code/logs/predictions via read-only tools or abstain.
             rep = verify(subject, evidence, selection_criteria(), client=client,
                          samples=getattr(self, "_select_verifier_samples", 3), parser=parser)
             if rep is None or rep.method == "unavailable":
                 return None
             crit = (rep.per_criterion or {}).get("result_sound") or {}
             m = crit.get("mean")
+            # CODEX AGENT: No minimum n_samples/agreement or bound calibration artifact is enforced;
+            # one surviving raw ordinal verdict can currently decide promotion.
             return float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
             return None

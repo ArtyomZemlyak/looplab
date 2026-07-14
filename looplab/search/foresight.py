@@ -433,6 +433,8 @@ class ForesightPanelResearcher:
             subject = ("This proposed experiment will improve the objective metric over the current best "
                        f"result (optimize direction: {state.direction}).")
             evidence = _idea_text(idea) + (("\n\n" + report) if report else "")
+            # CODEX AGENT: Bound read-only tools are omitted and the result below ignores feasibility,
+            # n_samples, agreement, and calibration, so this live score is neither grounded nor calibrated.
             rep = verify(subject, evidence, foresight_criteria(), client=self.client,
                          samples=self.verify_samples, parser=self.parser or "tool_call")
             if rep is None or rep.method == "unavailable":

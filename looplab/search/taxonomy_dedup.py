@@ -68,6 +68,8 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
     tagged_hyps = [h for h in hyps if tags.get(h.id)]
     n_tagged = len(tagged_hyps)
     distinct_sets = len({tags[h.id] for h in tagged_hyps})       # frozensets are hashable
+    # CODEX AGENT: Equal coarse concept sets do not prove paraphrase; opposite or materially different
+    # hypotheses are counted as mergeable here without any lexical or semantic equivalence check.
     compression = n_tagged - distinct_sets
     top = concept_clusters[0] if concept_clusters else None
     redundancy_frac = round(top["count"] / n_tagged, 4) if (top and n_tagged) else 0.0

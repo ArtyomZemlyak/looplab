@@ -83,6 +83,8 @@ def lock_in_signal(state: RunState, graph: ConceptGraph,
         run = 0
         run_start = None
         for i, s in enumerate(axis_sets):
+            # CODEX AGENT: Axis membership is not confinement when a node touches several axes; this
+            # currently labels genuinely multi-axis exploration as a one-subsystem lock-in streak.
             if ax in s:
                 if run == 0:
                     run_start = i

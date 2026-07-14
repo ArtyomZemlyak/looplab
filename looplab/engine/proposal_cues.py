@@ -142,6 +142,8 @@ class ProposalCuesMixin:
                         f"\nCapability expansion — the search has stayed inside ONE subsystem ('{axis}') "
                         f"for {streak} consecutive experiments (action-space lock-in). Do NOT propose "
                         f"another variant of the '{axis}' lever. EXPAND THE ACTION SPACE: build the "
+                        # CODEX AGENT: Keep capability examples task-derived; ANN-mined negatives is a
+                        # retrieval-specific prescription injected into every task type.
                         "missing infrastructure (a new data pipeline, external/ANN-mined negatives, a "
                         "different evaluation) that reaches a region the current manifold can't — you "
                         "have full file freedom. A capability the run has never built beats another "

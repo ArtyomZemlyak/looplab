@@ -226,6 +226,8 @@ class NoveltyGateMixin:
         # reject the proposal. Every other grade (and the flag being off) falls through UNCHANGED.
         graded = self._graded_novelty_precheck(state, idea)
         if graded is not None:
+            # CODEX AGENT: Levels 4/5 should inform the stronger gate, not bypass it; punctuation-only
+            # paraphrases and unverified failed directions can otherwise consume another evaluation.
             return graded
         mode = getattr(self, "_novelty_mode", "llm")
         # "llm" -> an LLM adjudicates duplication by READING the real experiments (not an embedding/

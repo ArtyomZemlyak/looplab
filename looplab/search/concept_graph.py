@@ -374,6 +374,8 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     # VOCABULARY below), never hardcoded here — so the same tagger works on any task. The multi-touch
     # guidance is phrased with no domain example (a hardcoded dense-retrieval example would mislead the
     # model on a non-dense-retrieval run and leak a vocabulary the graph may not use).
+    # CODEX AGENT: This prompt is frozen before graph.ensure() grows the vocabulary, so later nodes
+    # cannot reuse concepts introduced by earlier nodes and the run manufactures avoidable synonyms.
     system = (
         "You tag a machine-learning experiment with the research CONCEPTS it touches, for a coverage "
         "map. Assign the SET of concepts that apply — an experiment usually touches SEVERAL at once "
@@ -408,6 +410,8 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                     continue
                 if cid in graph:
                     got.add(cid)
+                # CODEX AGENT: Prefix-only axes cannot represent the promised multi-parent DAG; persist
+                # validated parent/axis definitions instead of deriving one parent from the id string.
                 elif grow and "/" in cid:
                     graph.ensure(cid, axes=(cid.split("/", 1)[0],))
                     got.add(cid)
@@ -666,6 +670,8 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
         canon = graph.get(cid)
         label = (canon.label if canon is not None else (existing.label if existing else c.label))
         # ensure() keeps the first entry, so replace to carry the merged axes/key deterministically.
+        # CODEX AGENT: Reconstructing Concept without aliases erases the heuristic tagging vocabulary
+        # for both merged and unrelated concepts after the first consolidation.
         new._concepts[cid] = Concept(id=cid, label=label, axes=merged_axes, key=merged_key)
     new_tags = {nid: frozenset(rename.get(x, x) for x in cids) for nid, cids in (tags or {}).items()}
     return new, new_tags
@@ -820,5 +826,7 @@ def concept_report(state: RunState, graph: ConceptGraph,
         if alarm["uncovered_axes"]:
             lines.append("    entirely-untouched axes: " + ", ".join(alarm["uncovered_axes"]))
     else:
+        # CODEX AGENT: fired can be false while uncovered_axes is non-empty once curated keys are
+        # covered, so this message incorrectly claims that all key/axis regions have coverage.
         lines.append("  uncovered-region alarm: (not fired — all key/axis regions have coverage)")
     return "\n".join(lines)

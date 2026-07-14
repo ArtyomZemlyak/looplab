@@ -136,6 +136,8 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
     from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
+    # CODEX AGENT: Public docs promise offline-by-default plus --llm, but this path performs LLM/network
+    # work by default and exposes only --offline as an opt-out; align the privacy and cost contract.
     if not offline:
         from looplab.core.config import Settings
         settings = Settings()
@@ -307,6 +309,8 @@ def board_dedup(
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    # CODEX AGENT: m["tags"] is keyed by integer node_id, while dedup_report expects string
+    # hypothesis_id keys, so this CLI path reports every hypothesis as untagged.
     typer.echo(dedup_report(state, m["graph"], tags=m["tags"]))
     typer.echo(f"\n  (concept tags built by: {m['mode']})")
 
@@ -353,6 +357,8 @@ def novelty_recall_cmd(
     state = fold(store.read_all())
     client = None
     parser = "tool_call"
+    # CODEX AGENT: The ordinary command defaults to as many as 60 sequential LLM calls and sends
+    # experiment text without explicit --llm consent, a call-budget knob, or a cost/data preview.
     if not offline:
         from looplab.core.config import Settings
         settings = Settings()
@@ -386,12 +392,16 @@ def lesson_guard_cmd(
     except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
         typer.echo(f"lesson-guard needs a reachable LLM endpoint: {e}")
         raise typer.Exit(1)
+    # CODEX AGENT: Client construction does not prove any verifier sample succeeded, and omitting graph=
+    # also makes every advertised taxonomy attachment empty; surface unavailable/partial explicitly.
     g = guard_lessons(state, client=client, parser=settings.llm_parser)
     typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
     for f in g["findings"]:
         if f.get("flagged"):
             typer.echo(f"  ⚠ over-generalizes: {str(f.get('statement', ''))[:100]}")
             typer.echo(f"      rescoped: {str(f.get('rescope_hint', ''))[:120]}")
+    # CODEX AGENT: This scan uses one ungrounded sample over the first 40 insertion-order pairs, while the
+    # CLI hides its truncated/uncertain state and can print zero contradictions after total endpoint failure.
     c = contradiction_scan(state, client=client, parser=settings.llm_parser)
     typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons, {len(c['contradictions'])} pairs)")
     for pair in c["contradictions"][:6]:

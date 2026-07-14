@@ -190,6 +190,8 @@ class AssetBrief:
 
 def _read_text(path: Path, max_bytes: int) -> str:
     try:
+        # CODEX AGENT: This bypasses root containment, symlink/regular-file checks and secret redaction;
+        # the resulting first lines can be copied verbatim into the agentic LLM seed prompt.
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             return f.read(max_bytes)
     except (OSError, ValueError):
@@ -358,6 +360,8 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 continue
 
             if reads_left <= 0:
+                # CODEX AGENT: Setting the global truncated flag here stops the entire walk below;
+                # exhausted content reads must not hide later checkpoints/spreadsheets found by name.
                 brief.truncated = True
                 continue
             reads_left -= 1

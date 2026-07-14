@@ -31,6 +31,8 @@ def _idea_texts(state: RunState) -> tuple[list[int], list[str]]:
     """(node ids, idea texts) for every idea-carrying node, in id order — the proposals that PASSED the
     gate (a rejected proposal never became a node)."""
     nodes = _experiment_nodes(state)
+    # CODEX AGENT: _experiment_nodes includes non-executed lifecycles and _node_text drops parameter
+    # values, so this population cannot support either "BOTH executed" or variant-by-value claims.
     return [n.id for n in nodes], [_node_text(n) for n in nodes]
 
 
@@ -48,6 +50,8 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
 
     Pure except the optional LLM adjudication; best-effort (any error degrades gracefully)."""
     ids, texts = _idea_texts(state)
+    # CODEX AGENT: novelty_events also includes kept proposals, failed reproposals, and numeric nudges;
+    # their count is not a verified true-positive numerator for duplicate rejection.
     caught = len(state.novelty_events)
     out = {"n_nodes": len(ids), "caught": caught, "candidate_pairs": [], "leaks": [],
            "recall": None, "adjudicated": False}
@@ -74,6 +78,8 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
     pairs: list[tuple[int, int]] = []
     for cl in clusters:
         if len(cl) >= 2:
+            # CODEX AGENT: max_pairs is applied only after every C(k,2) pair is materialized and sorted,
+            # so one large cluster still creates quadratic memory and CPU cost.
             for i, j in combinations(sorted(cl), 2):
                 pairs.append((ids[i], ids[j]))
     pairs.sort(key=lambda p: -_jac(idx[p[0]], idx[p[1]]))
@@ -88,6 +94,8 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
     by_id = {i: t for i, t in zip(ids, texts)}
 
     class _V(BaseModel):
+        # CODEX AGENT: Missing is_paraphrase must be an abstention/error, not a silent negative verdict
+        # that can turn an empty model response into a clean recall report.
         is_paraphrase: bool = False
         reason: str = ""
 
@@ -110,9 +118,13 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
             continue
         if getattr(v, "is_paraphrase", False):
             leaks.append({"a": a, "b": b, "reason": (v.reason or "").strip()[:160]})
+    # CODEX AGENT: Count successful verdicts separately; failures above are skipped, yet all attempts
+    # are marked adjudicated below and can produce a false recall=1.0 / "looks healthy" result.
     out["leaks"] = leaks
     out["adjudicated"] = True
     out["adjudicated_count"] = min(len(pairs), max_pairs)   # how many of candidate_pairs were LLM-judged
+    # CODEX AGENT: caught is proposal/event count while leaks is pair count from a different population;
+    # adding these units cannot yield recall or a guaranteed upper bound.
     denom = caught + len(leaks)
     # `caught` is the gate's REJECTION count (`novelty_events`), taken as the TP proxy — it assumes gate
     # precision ~1 (every rejection was a true dup), which INFLATES the numerator, and `leaks` only counts
