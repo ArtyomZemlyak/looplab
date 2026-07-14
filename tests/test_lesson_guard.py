@@ -126,6 +126,27 @@ class _FailingVerifierClient:
         raise RuntimeError("endpoint down")
 
 
+def test_guard_lessons_all_fail_is_not_reported_as_clean(tmp_path):
+    """Honesty guard (same class as the contradiction-scan / E3 fix): a wired-but-dead client that grades
+    NOTHING must not print "0 flagged" as a clean bill of health — adjudicated must be False."""
+    st = _run(tmp_path, [
+        {"statement": "false negatives are hopeless, abandon the whole direction", "outcome": "o",
+         "evidence": [63]}])
+    res = guard_lessons(st, client=_FailingVerifierClient())
+    assert res["available"] is True          # a client WAS wired
+    assert res["n_flagged"] == 0             # ...but nothing was actually graded
+    assert res["n_scored"] == 0
+    assert res["adjudicated"] is False       # so: INCONCLUSIVE, not "no over-generalization found"
+
+
+def test_guard_lessons_normal_run_is_adjudicated(tmp_path):
+    """A working verifier that grades the lessons reports adjudicated=True (not tripped by the guard)."""
+    st = _run(tmp_path, [
+        {"statement": "correcting false negatives always helps", "outcome": "o", "evidence": [63]}])
+    res = guard_lessons(st, client=_Stub())
+    assert res["adjudicated"] is True and res["n_scored"] == 1
+
+
 def test_contradiction_scan_all_fail_is_not_reported_as_no_contradictions(tmp_path):
     """Honesty guard (same class as E3-C): if EVERY verify call fails, an empty contradictions list must NOT
     read as a clean bill of health — `adjudicated` must be False so the CLI says INCONCLUSIVE."""

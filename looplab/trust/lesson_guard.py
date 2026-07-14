@@ -85,8 +85,12 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
                   graph=None, flag_threshold: float = 0.6) -> dict:
     """Run the over-generalization guard over every distilled lesson. Returns:
 
-      available   - False when no client is wired (nothing was scored)
+      available   - False when no client is wired (a client was never even attempted)
+      adjudicated - False when NOTHING actually got a usable verdict (no client, OR a client was wired but
+                    every verify sample failed/abstained — the all-fail honesty guard, cf. E3/E4): an empty
+                    `n_flagged` must NOT read as a clean bill of health when the verifier judged nothing
       n_lessons   - lessons examined
+      n_scored    - lessons the verifier actually graded (produced an over_generalizes mean)
       n_flagged   - lessons flagged as over-generalizing a sound direction
       findings    - [LessonFinding-as-dict] for every lesson (flagged first)
 
@@ -97,6 +101,7 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
     crit = lesson_overgeneralization_criteria()
     findings: list[LessonFinding] = []
     available = client is not None
+    n_scored = 0                        # lessons that got a USABLE verdict (not a failed/abstained sample)
     for rec in recs:
         concepts = _tag_lesson(rec["statement"], graph)
         if client is None:
@@ -107,6 +112,8 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
                                     client=client, samples=samples, parser=parser)
         og = rep.per_criterion.get("over_generalizes", {}).get("mean")
         ds = rep.per_criterion.get("direction_sound", {}).get("mean")
+        if og is not None:
+            n_scored += 1               # the verifier graded this lesson (vs a total endpoint failure)
         flagged = (og is not None and ds is not None
                    and og >= flag_threshold and ds >= flag_threshold)
         hint = ""
@@ -116,9 +123,13 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
         findings.append(LessonFinding(rec["statement"], flagged, og, ds, rep.agreement, concepts,
                                        rec["node_ids"], rescope_hint=hint, at_node=rec["at_node"]))
     findings.sort(key=lambda f: (not f.flagged, -(f.over_generalizes or 0.0)))
+    # `adjudicated` distinguishes "nothing over-generalizes" from "nothing could be judged": vacuously True
+    # when there are no lessons, else True only if at least one lesson actually scored.
     return {
         "available": available,
+        "adjudicated": len(recs) == 0 or n_scored > 0,
         "n_lessons": len(recs),
+        "n_scored": n_scored,
         "n_flagged": sum(1 for f in findings if f.flagged),
         "findings": [_finding_dict(f) for f in findings],
     }

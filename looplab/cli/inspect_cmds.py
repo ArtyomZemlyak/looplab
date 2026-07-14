@@ -410,11 +410,12 @@ def lesson_guard_cmd(
     except Exception:  # noqa: BLE001 — taxonomy attach is best-effort enrichment, never blocks the guard
         graph = None
     g = guard_lessons(state, client=client, parser=settings.llm_parser, graph=graph)
-    # Constructing a client does NOT prove a sample succeeded: guard_lessons reports available=False when
-    # nothing actually scored, so say so rather than printing a false "0 flagged / all clean".
-    if not g.get("available", True):
+    # Constructing a client does NOT prove a sample succeeded: guard_lessons reports adjudicated=False when
+    # NOTHING actually scored (no client, or a wired client whose every verify sample failed/abstained), so
+    # say INCONCLUSIVE rather than printing a false "0 flagged / all clean".
+    if not g.get("adjudicated", True):
         typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons) — "
-                   "verifier unavailable (no sample scored); results INCONCLUSIVE.")
+                   "verifier could not grade any lesson; results INCONCLUSIVE.")
     else:
         typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
         for f in g["findings"]:
