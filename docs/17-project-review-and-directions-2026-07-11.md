@@ -18,7 +18,8 @@
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
-| **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B addendum) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7) |
+| **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -29,7 +30,7 @@ criteria, subordinate to this plan) ·
 [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md) ·
 [ROADMAP.md](ROADMAP.md) · [BACKLOG.md](BACKLOG.md) · [guide/memory.md](guide/memory.md).
 
-**What this is.** One structural document in three parts. **Part I** gives the strategic verdict on
+**What this is.** One structural document in four parts. **Part I** gives the strategic verdict on
 functionality, code, and architecture without duplicating doc 16's line-level issue ledger. **Part II**
 turns that verdict into a dependency-ordered delivery plan with migration rules, release gates, metrics,
 and decision criteria. **Part III** re-evaluates five candidate feature directions — a curated
@@ -37,7 +38,12 @@ Frameworks/Libs knowledge base, NapMem, SciResearcher, research-exploration brea
 against the
 stabilization plan rather than treating them as immediately shippable flags. **Part III-B** (added 2026-07-14)
 extends the same code-level, gated treatment to a five-system DS & deep-research agent cohort — EvoDS, the
-AgenticDataBench/DataSciBench benchmark pair, ResearchStudio-Idea, and Claude Science (§§15–20).
+AgenticDataBench/DataSciBench benchmark pair, ResearchStudio-Idea, and Claude Science (§§15–20). **Part IV**
+(added 2026-07-14) grounds the Part III/§11 narrowing thesis in the first measured LoopLab case — the 67-node
+`rubertlite` run — and derives the research-loop-quality levers it exposes (a hierarchical hypothesis/theme
+taxonomy, seed-time asset ingestion, a graded novelty/critic layer, a capability-expansion operator; §21,
+D1–D7), keeping the Part III gates. Part IV's D5 taxonomy and Part III-B's §16 skill-coverage taxonomy are
+two views of one substrate; D3's failed-direction re-examination pairs with §17's distance-from-seed signal.
 
 **Method and evidence discipline.** The revision combines a fresh code/doc cross-check, direct inspection
 of the current state/event/security/execution seams, commit-by-commit review of the 23-commit remediation
@@ -62,7 +68,8 @@ architecture. Part II — §6 development directions and target architecture · 
 plan. Part III — §8 Frameworks/Libs KB · §9 NapMem · §10 SciResearcher · §11 exploration breadth ·
 §12 LLM-as-a-Verifier · §13 composition and recommendation · §14 verification and sources. **Part III-B (added
 2026-07-14)** — §15 EvoDS · §16 DS-agent benchmarks (AgenticDataBench/DataSciBench) · §17 ResearchStudio-Idea ·
-§18 Claude Science · §19 cohort composition · §20 addendum sources.
+§18 Claude Science · §19 cohort composition · §20 addendum sources. **Part IV (added 2026-07-14)** — §21 the
+`rubertlite` narrowing case and the hypothesis/theme taxonomy (D1–D7).
 
 ---
 
@@ -2231,3 +2238,281 @@ index. **Bottom line:** the near-term output of this cohort is the same as Part 
 and governed schemas** (a validated-skill gate, a first-class programmatic Evaluator, a distance-from-seed
 diagnostic, a sealed provenance bundle) — not a default-on external corpus, a learned policy, or a live
 DS-adapter.
+
+---
+
+## PART IV — RESEARCH-LOOP QUALITY: THE `rubertlite` NARROWING CASE & THE HYPOTHESIS/THEME TAXONOMY
+
+*Added 2026-07-14. **Status:** design hypotheses (recommendation/inference), not committed flags. **Evidence
+base:** the completed 67-node `runs/rubertlite-dense-retrieval` run — the first in-the-wild instance of the
+§11 narrowing pathology on a real LoopLab task — reconstructed from its own `events.jsonl`. Two companion
+analyses hold the raw evidence: `runs/rubertlite-dense-retrieval/AGENT_SEARCH_ANALYSIS.md` (agent behaviour)
+and `data/vectorizer/dense-retrieval/LOOPLAB_RUBERT_ANALYSIS.md` (the ML task). This part extends §§9–12 with
+the levers that run exposed; it re-uses their evaluation discipline and mode-gating and adds no new release
+claim. Code anchors are code-confirmed at `369d6a6`; interventions are inference.*
+
+### 21. What the `rubertlite` run proves — and the levers it exposes
+
+#### 21.0 The case: §11's narrowing, observed — and refined
+
+§11 argued from external literature (arXiv 2605.27905) that agents narrow. The `rubertlite` run is the
+**first measured LoopLab instance**, and it sharpens the thesis in a way the paper could not:
+
+- **The trajectory.** 11 "new-best" jumps to node_48 (recall@100 0.8835), then **19 consecutive dead children
+  all expanded off node_48** — every one a variation of one loss recipe (DCL + R-Drop). Best-so-far never
+  moved again across the last 19 nodes. Greedy's IMPROVE arm targeting `state.best()` (`policy.py:286`) plus
+  the agentic Strategist repeatedly re-expanding the champion produced a **single-parent exploit fan**.
+- **The Strategist DID detect it.** From node_48 on, ~10 consecutive strategist memos say *"firmly
+  plateaued"/"near capacity ceiling"* and it flipped `novelty_stance` to `explore` several times — exactly the
+  reactive-after-collapse behaviour §11 predicts (`strategist.py:145-160`; `_rule_novelty_stance` fires only
+  after concentration ≥0.6–0.75). Detection worked; **escape did not**.
+- **The refinement — this was a FIXED-metric task, yet narrowing still capped it.** §11/ADR-6 hold that in
+  fixed-metric mode local elaboration *is* the win, so diversity pressure is an open-ended-only concern. The
+  `rubertlite` run shows a **second, mode-independent failure that §11 did not isolate**: the agent was not
+  merely "too close to the seed literature," it was **blind to on-disk assets and locked inside one
+  action-subsystem**. The winning recipe (teacher-mined hard negatives + NV-0.95 false-negative filtering) was
+  **already proven on this exact benchmark** (+0.03–0.04 recall@100 on a sibling model, recorded in the repo's
+  own `results_last.xlsx`), and the stronger teacher checkpoints sat in the repo — **both unread**. This is not
+  a novelty-of-ideas problem that quality-diversity fixes; it is a **perception + capability-expansion**
+  problem. It bites in *both* modes and is therefore not gated behind the open-ended capability §11 requires.
+
+The distinction matters for sequencing: the highest-value fixes below (asset ingestion, multi-level novelty,
+the taxonomy substrate) are **offline/context/prompt changes** that neither write domain state nor touch
+promotion, so per §6.6 ("do not gate pure offline analysis behind identity/services") they sit on the **early
+lane** with the §11 diagnostics — *not* behind R0–R4. Only their live-steering variants inherit the gates.
+
+#### 21.1 The seven mechanisms (code-confirmed) → the seven levers
+
+| # | What happened in the run | Code seam today | Lever (§) |
+|---|---|---|---|
+| 1 | Winning recipe + teacher ckpts + `results_last.xlsx` on disk, **never read**; "codebase-understanding" scoped to train/loss/data code only | no seed-time asset scan; `deep_research` grounds in run's own experiments + local `knowledge/` (`deep_research.py:214-256`) | **D1** asset/prior-art ingestion |
+| 2 | "distillation"/"hard-neg" appear 128/234× in the stream but every instance is loss-space or self-distill from its own nodes | `deep_research` breadth/depth not tunable; foresight ranker has **no web** (`cli/__init__.py:169-178`); memo is a state narrator (§10) | **D2** deep-research depth/breadth |
+| 3 | Novelty gate only ever asked "already tried in THIS run?"; never "is this a wrongly-abandoned direction worth re-opening?" | `_llm_novelty_gate` single-level, within-run only (`novelty.py:70-131`); `novelty_semantic` off (`config.py:298`) | **D3** multi-level novelty + failed-direction re-exam |
+| 4 | 107 hypotheses, many redundant DCL variants; board dedup is one blind agent-merge pass | `hybrid_merge` RRF≥2-signal → `cluster_near_duplicates` → `agent_merge` (`hybrid_merge.py`) | **D4** dedup tuning |
+| 5 | Themes were dozens of narrow slugs (`dcl-rdrop-ema`, `dcl-rdrop-gc`…); no notion that all belong to ONE branch "loss → contrastive → DCL" | `idea.theme` = flat agent slug (`roles.py:31`); one flat vocab via `theme_rollup`, fanned to Strategist/digest/API (`coverage.py:30-100`) | **D5** hierarchical taxonomy |
+| 6 | node_63 (loss-side false-neg fix) failed → distilled the **wrong** lesson "don't correct false negatives," poisoning a correct direction | `lessons_distill` has no over-generalization guard; no first-class verifier (§3 ⬜, §12) | **D6** loop-quality critic + lesson guard |
+| 7 | Plateau detected but "explore" only swapped one loss for another; never proposed building new data infra despite full file freedom | Greedy IMPROVE→best (`policy.py:286`); no "expand the action space" operator; stance is the only dial (`strategist.py:50-68`) | **D7** capability-expansion operator + jump |
+
+#### 21.2 D1 — Seed-time asset & prior-art ingestion  *(highest ROI; extends §10 from external → local)*
+
+- **What.** Before the first proposal, scan the *task repo itself* for (a) result logs / experiment tables
+  (`results_last.*`, README result sections), (b) sibling model checkpoints and their metrics (here filenames
+  literally carry `val_recall@100=0.899`), (c) sibling training configs / a hard-negative-capable trainer.
+  Distil a **"prior art & available assets" brief** into the Researcher/Strategist context and seed a few
+  hypotheses from it.
+- **Seam.** A new pre-Genesis/first-seed step feeding `_state_brief` (`roles.py:307-320`) and the deep-research
+  input; reuse `env_inspect` (§8) for installed-code facts and `KnowledgeTools` for the distilled brief. This
+  is the **local-asset complement** to §10's external-literature grounding: same "ground the proposer in
+  evidence" principle, but the evidence is *in the repo*, so it needs **no network policy** — it is read-only
+  local I/O and belongs on the early lane.
+- **Why it dominates.** One line — "hard-neg + NV-0.95 gave +0.04 here" — short-circuits ~50 nodes. §10's
+  grounding profile is about *external* literature and is network-gated; D1 captures most of the `rubertlite`
+  loss with none of that surface.
+- **Evaluation gate.** On a frozen set of repo-backed tasks, A/B "with vs without asset brief": measure
+  nodes-to-first-asset-derived-hypothesis and whether asset-seeded directions survive execution. Promote if it
+  raises early yield without flooding the board with stale-asset distractors (reuse §8's candidate/reviewed
+  trust posture for anything the brief asserts).
+
+#### 21.3 D2 — Deep-research depth/breadth control + optional run-start research  *(extends §10)*
+
+- **What the run showed.** Deep-research memos were **state narrators** (they summarised the current node
+  landscape), and when they named external methods those were uniformly "new loss function" papers, never
+  applied-IR (ANCE/RocketQA/NV-Retriever). Depth/breadth are effectively fixed and shallow, and the foresight
+  ranker sees no web at all (`cli/__init__.py:169-178`).
+- **Change.** (a) Make deep-research **depth and breadth explicit, tunable parameters** (how many
+  sub-questions, how many sources per question, recursion depth), settable per run and *raisable by the
+  Strategist* when a plateau is detected — a natural knob to add beside `research_grounding=off|literature|web`
+  (§10B). (b) Offer a **default-on preliminary research pass at run start** (local-grounded per D1; literature
+  only once §10's network/budget/provenance gates exist). (c) Separate the "state summary" role from a genuine
+  "surface methods NOT yet tried" scout, and query it **across the taxonomy axes of D5** (data / negatives /
+  loss / architecture / distillation / eval), not just "losses for X."
+- **Integration.** Reuses §10's `make_deep_researcher` seam (`deep_research.py:214`) and the existing plumbing
+  that turns the top-5 `recommended_directions` into OPEN hypotheses (`research_cadence.py:130-136`). Depth/
+  breadth and any live web remain behind §10's R0/R2/R3/R4 gates; the *offline* local-grounded pass and the
+  depth/breadth *parameters* are early-lane.
+- **Evaluation gate.** §10's harness already scores cited-claim precision, source coverage, and useful/
+  non-duplicate directions that survive execution — extend it with a depth/breadth sweep and report cost vs
+  surviving-direction yield. Deeper ≠ better by default; find the knee.
+
+#### 21.4 D3 — Multi-level novelty gate + failed-direction re-examination  *(extends §11 novelty gate)*
+
+- **What the run showed.** `_llm_novelty_gate` (`novelty.py:70-131`) asks exactly one question — *near-
+  duplicate of an experiment already tried in THIS run?* — and at worst keeps the original. It has **no level
+  structure** and, critically, **no path to re-open a wrongly-killed direction**. node_63 is the archetype: a
+  correct *direction* (false-negative handling) died from one bad *implementation* (a loss-side hack), and the
+  system had no mechanism to say "the direction is sound, the implementation was wrong — re-research and retry
+  differently."
+- **Change — make novelty a graded, cross-run, taxonomy-aware decision:**
+  1. **Identical** (same params) → reject hard.
+  2. **Near-duplicate in this run** (today's behaviour) → re-propose once.
+  3. **Tried before across runs** (via memory/lessons) → surface the prior outcome, allow if materially
+     different.
+  4. **Same taxonomy-direction, different implementation** (needs D5) → *allow* — the run conflated "this DCL
+     tweak" with "this whole branch"; a taxonomy lets the gate distinguish them.
+  5. **Wrongly-abandoned direction re-examination.** When a *direction* (a D5 node, not one experiment) has
+     failed, periodically **re-verify** it: re-run deep-research on it, check the failed node's implementation
+     quality with the §12 verifier, and re-open it as a fresh hypothesis if the failure looks
+     implementation-bound rather than direction-bound. This is the direct antidote to the node_63 mis-lesson.
+- **Seam.** Extend `_llm_novelty_gate`; wire cross-run lookups through the memory stores; gate re-examination
+  cadence on the Strategist. Keep it best-effort/loop-safe exactly as today (any failure returns the original
+  idea). The optional embedding duplicate check (`novelty_semantic`, off) becomes one signal among the levels.
+  Level 3 ("tried before / too close to prior art") is where **Part III-B §17's Scoop-Check distance-from-seed
+  signal** feeds in: §17 supplies the advisory collision/novelty score (open-ended-mode, grounding-OFF by
+  default), and D3 consumes it as one graded-novelty input — they are complementary, not competing.
+- **Evaluation gate.** On frozen runs with known-good-but-initially-failed directions (node_63 is a labelled
+  example), measure whether the re-examination path recovers them without exploding the proposal budget.
+  Advisory/audit first; never let it auto-spawn unbounded retries.
+
+#### 21.5 D4 — Hypothesis-board dedup tuning  *(hybrid_merge)*
+
+- **What.** Board consolidation is `hybrid_merge` (RRF candidates requiring ≥2 lexical/vector signals →
+  `cluster_near_duplicates` → agent-adjudicated `agent_merge`, `hybrid_merge.py`). The run carried 107
+  hypotheses with heavy redundancy, so the merge was too *lax*; but over-merging would collapse legitimate
+  near-variants (the "t=0.02 vs t=0.05 is a valid variant" point from the earlier audit). The right control is
+  **not a single stricter threshold** but **taxonomy-awareness**: merge aggressively *within* a leaf theme,
+  conservatively *across* branches.
+- **Change.** Make the ≥2-signal candidate floor and the agent-merge SAME/DIFFERENT rule (`merge_system.md`,
+  ADR-8 templated) **condition on D5 taxonomy distance**: same-leaf paraphrases merge; cross-branch stay
+  distinct even when lexically similar. Expose the strictness as a knob the Strategist can raise on a
+  narrowing run (fewer redundant siblings) or lower when breadth is wanted.
+- **Evaluation gate.** Board-size vs unique-direction-coverage on frozen runs; promote only if redundancy
+  drops without losing a direction that later executed well.
+
+#### 21.6 D5 — Shared hierarchical hypothesis/theme taxonomy  *(the centrepiece; unifies §9/§11 and every role)*
+
+**The core idea.** Today a node's `theme` is a **single flat agent-generated slug** (`roles.py:31`), and that
+one flat vocabulary is the canonical `theme_rollup` fanned out to the Strategist, the digest, and the `/runs`
+API (`coverage.py:30-100`). The run produced dozens of hyper-narrow slugs (`dcl-rdrop-ema`, `dcl-rdrop-gc`,
+`dcl-rdrop-swa`…) with **no representation that they are all one branch** `loss → contrastive → decoupled →
+DCL+R-Drop`. That single missing structure is why concentration was invisible until collapse, why "explore"
+could only jump sideways within the branch, and why dedup/novelty could not tell "a DCL tweak" from "the whole
+DCL branch."
+
+**Proposal — one hierarchical taxonomy, threaded everywhere.** Replace the flat theme with a **path** in a
+shared multi-level tree, e.g. `data / negatives / hard-negative-mining / nv-filtered`, or `model / loss /
+contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
+`negatives`, `loss`, `architecture`, `pooling`, `distillation`, `training-schedule`, `eval`) and **grown
+dynamically** as leaves appear — the fix for "themes are too narrow and too many" is not to forbid narrow
+leaves but to give them **parents**. Then thread the taxonomy path through **every subsystem that already
+consumes the theme vocabulary or an idea**, so one structure steers the whole loop:
+
+| Consumer | Today | With the taxonomy |
+|---|---|---|
+| `coverage_signal` (§11) | entropy over flat themes | entropy/concentration **per level** — detect "all mass under `loss/contrastive`" early, while leaves still look diverse |
+| Strategist stance/pivot (§11) | flips to `explore` after flat concentration ≥0.6 | pivots to a **sibling branch at the right depth** ("you've spent 40 nodes under `loss`; open `data/negatives`"), not just "broaden" |
+| Novelty gate (D3) | within-run text dup | branch-vs-leaf distinction (level 4 above) |
+| Board dedup (D4) | one blind merge | merge within-leaf, keep cross-branch (above) |
+| Deep-research (D2) | "losses for X" | query **per uncovered branch**; a summarizing coverage metric names which branches are unexplored |
+| Lessons / memory (§9) | flat notes/lessons | lessons tagged to a taxonomy node; the node_63 lesson attaches to `data/negatives/false-neg-handling` as "*this implementation* failed," not to the branch — directly supports D3/D6 |
+| Nodes / digest / UI | flat theme slug | breadcrumb path; per-branch rollups and a **summarizing metric per branch at each depth** (best score, node count, last-touched, marginal-gain) so breadth/precision are steerable by level |
+
+**Why it is the substrate, not a seventh feature.** D2/D3/D4/§11-strategist all currently operate on the flat
+theme or raw idea text; the taxonomy is the shared coordinate system that makes each of them
+*directional* instead of blind. It is also the concrete ML-experiment realisation of §9's granularity
+hierarchy — NapMem structures *memory*; this structures the *live hypothesis/coverage space* — and the two
+should share the typed-record + provenance design so a lesson's taxonomy tag and a memory record's level line
+up. **This D5 taxonomy and Part III-B §16's "coverage = #skills" operational-pattern taxonomy are two views of
+one substrate:** §16 tags the *skill/operation* store (what the agent knows how to do), D5 tags the *live
+hypothesis/coverage space* (what it is currently exploring); both roll up beside — not replacing — the breadth
+`coverage_signal` (`coverage.py:50`), and a shared named vocabulary lets a skill-coverage gap (§16) directly
+name an unexplored D5 branch. Build them against one schema, not two.
+
+**Seams & discipline.** `idea.theme` (schema, `roles.py:31`) becomes an optional path; the canonical
+`events.digest.theme_rollup` and `coverage.py` roll up **by level**; `proposal_cues.py:104-111`,
+`strategist.py`, `novelty.py`, `hybrid_merge.py`, and the deep-research prompt all read the same tree. Keep the
+fold pure and additive (path is a new optional field; old logs default to a one-level path = today's slug, so
+they fold byte-identically — the §5/§6.6 additive-field rule). Start with the **skeleton + rollup as an
+offline diagnostic** (early lane, like §11's coverage calibration); only wire it into *selection/pivot* after
+the diagnostic shows the per-level signal is real and stable.
+
+**Evaluation gate.** Reprocess the `rubertlite` log offline: does per-level concentration flag the
+`loss/contrastive` collapse **before** node_48 (vs the flat signal that only fired at 0.6+)? Does a
+"pivot-to-uncovered-branch" directive, replayed, point at `data/negatives`? Promote live steering only if the
+per-level signal is earlier and more actionable than the flat one, and mode-gate the *breadth* use exactly as
+§11 (fixed-metric tasks may still legitimately concentrate — the taxonomy makes that concentration *legible
+and deliberate*, it does not force diversity).
+
+#### 21.7 D6 — Loop-quality critic + lesson over-generalization guard  *(this IS the §12 verifier; "strategist vs critic")*
+
+The run answers the user's open question ("critic — or is it the strategist?"): they are **different jobs**.
+The Strategist decides *where to search next* (policy/stance/pivot). The **critic judges quality** — and
+LoopLab has no first-class one (§3 ⬜). §12's LLM-as-a-Verifier is exactly that critic, and the run gives it
+two concrete jobs beyond §12's best-of-N/foresight uses:
+
+- **Lesson over-generalization guard.** node_63 distilled "don't correct false negatives" from a single failed
+  *implementation*. A criteria-decomposed verifier over each `lessons_distill` output — asking "does this
+  lesson generalise from ONE implementation to a whole DIRECTION?" — would have down-scoped it to "*this
+  loss-side* correction failed," preserving the (correct) data-side direction. This attaches naturally to the
+  D5 taxonomy node.
+- **Failed-direction re-examination scoring** (the §15.4/D3 loop): the verifier scores whether a failed node's
+  *implementation* (not its direction) was the cause, gating re-open.
+
+All of this stays **advisory/audit, mode-gated to open-ended surfaces, gated on logprob-capable backends and
+the R3 budget** — precisely §12's four caveats; it never overrides a fixed-metric ground truth. Placement:
+the critic is a **verification primitive** the Strategist *consults*, not a Strategist sub-mode — keep them
+separate so the "where to search" and "is this claim/lesson sound" decisions have distinct owners (the §4
+ownership discipline).
+
+#### 21.8 D7 — Capability-expansion operator + action-space lock-in detector  *(extends §11 selection levers)*
+
+The deepest cause: with **full freedom to edit any file**, the agent only ever edited `loss.py`. The winning
+recipe needed **new infrastructure** (offline ANN mining, `dataset.py` external-negative loading, loading a
+teacher checkpoint) — a large, delayed-payoff, multi-file change that no operator or hypothesis ever proposed,
+partly because the Strategist ranks operators by **gain-per-second** (it explicitly logged "improve = 33×
+merge"), which structurally starves expensive bets.
+
+- **Change.** (a) A **"capability-expansion / build-infra" operator** distinct from `improve`/`merge`, scored
+  on **option value** (does it unlock an unreachable region of the D5 tree?), not per-second gain — a plateaued
+  run should *raise*, not lower, its budget for such bets. (b) An **action-space lock-in detector**: if N
+  consecutive nodes touch only one file/subsystem (here `loss.py`) — observable from the node diffs — flag it
+  and require the next batch to modify a *different* subsystem (data/eval/model), i.e. a different D5 branch.
+  (c) On confirmed plateau, a **forced jump**: temporarily forbid expanding the champion and draw the next
+  proposals from D5 branches with no coverage.
+- **Seam.** New action kind in `search/policy.py` (kinds/meta-keys live there per the package map) and
+  operator in `operators.py`; the lock-in signal extends `coverage_signal`; the forced-jump is a Strategist
+  directive through `proposal_cues.py`. This is the "make `explore` mean *manifold-change*, not
+  *variant-shuffle*" fix §11's integration table gestures at, made concrete.
+- **Mode & gate.** Selection-affecting parts inherit §11/§6 gates (R1 epoch identity, SearchFitness, trustworthy
+  eval, mode-gating). The **detector and the diagnostic** are offline/early-lane. Reconciles with ADR-6:
+  capability-expansion is not "diversity for its own sake" — it is *reaching a provably-better region the fixed
+  metric rewards*, which is squarely ADR-6-legitimate.
+
+#### 21.9 Ordering, offline-vs-gated, and reconciliation
+
+**Early lane (offline; no R0–R4; ship as diagnostics/harnesses first — §6.6):** D1 asset brief; D5 taxonomy
+**skeleton + per-level rollup as a diagnostic** (replay `rubertlite` to validate the earlier signal); the
+lesson-over-generalization and failed-direction **scores** as audit-only (D3/D6); the D2 depth/breadth
+*parameters* and the local-grounded research pass; the D7 lock-in **detector**.
+
+**Gated lane (needs the named prerequisites):** D2 live literature/web (§10 R0/R2/R3/R4); D3/D5/D7 wired into
+**selection/pivot** (R1 epoch identity, SearchFitness/EvaluationService, trustworthy eval, explicit open-ended
+capability per §11); D6 verifier as an advisory selector (logprob backend + R3 budget, §12).
+
+**Suggested order:** (1) D1 + D5-diagnostic — cheapest, and together they would have changed the `rubertlite`
+outcome on turn one; (2) D3 multi-level novelty + D6 lesson guard (audit-only) — stop the loop teaching itself
+that correct directions are dead; (3) D2 depth/breadth + taxonomy-aware deep-research; (4) D4 taxonomy-aware
+dedup; (5) D7 capability-expansion + forced jump; (6) promote any to live steering only past its gate.
+
+**Mode-gating (normative, reconciles with ADR-6/§11).** The `rubertlite` lesson is **not** "add diversity to
+fixed-metric tasks." It is: **perception (D1), structure (D5), and capability-expansion (D7) help both modes**,
+because reaching an unread proven asset or an unbuilt data pipeline is a *fixed-metric win*, not a novelty
+trade. Diversity-for-novelty (§11 breadth/QD) remains open-ended-only. The taxonomy makes a fixed-metric run's
+concentration **legible and deliberate** rather than accidental — it does not force it to spread.
+
+**Consolidated experiment order (appends to §13's table):**
+
+| Order | Experiment | Prerequisite | Promote when | Stop/defer when |
+|---|---|---|---|---|
+| 1a | D1 asset/prior-art brief (offline) | repo scan; §8 candidate-trust posture | early asset-derived directions rise; survive execution | asset distractors offset benefit |
+| 1b | D5 taxonomy skeleton + per-level coverage (diagnostic) | replay harness; frozen logs | per-level signal flags collapse **earlier** than flat (validate on `rubertlite`) | per-level signal not more actionable than flat |
+| 2 | D3 multi-level novelty + D6 lesson guard (audit) | memory cross-run lookup; §12 verifier offline | recovers labelled wrongly-killed directions (node_63) without budget blow-up | retries explode or precision poor |
+| 3 | D2 depth/breadth + taxonomy-guided deep-research | §10 harness; local-grounded pass | surviving-direction yield rises per cost | deeper adds cost without yield |
+| 4 | D4 taxonomy-aware dedup | D5 paths on ideas | redundancy drops, no lost executed direction | over-merge kills valid variants |
+| 5 | D7 capability-expansion + forced jump (selection) | R1 epoch id; SearchFitness; trustworthy eval | reaches a better region a fixed metric rewards | quality/trust/cost regression |
+
+**Net.** PART III asked "measure narrowing first." PART IV supplies the first measurement and finds the
+LoopLab-specific cause is **asset/capability blindness inside a flat, structureless hypothesis space** — fixed
+by a shared hierarchical taxonomy (D5) as substrate, seed-time asset perception (D1), a graded novelty/critic
+layer that stops the loop discarding correct directions (D3/D6), and an operator that lets the loop expand its
+own action space (D7). Most of it is early-lane offline work; the live-steering half inherits the same R-gates
+and mode-gating as §§10–12.
