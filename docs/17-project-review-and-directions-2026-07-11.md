@@ -2598,3 +2598,50 @@ coverage (D5), lock-in (D7), dedup (D4), novelty (D3), the Strategist pivot, dee
 §16 skill-coverage all read it. **Net: adopt the graph, not the tree — the intersection/uncovered-region
 signal is the single most actionable output of the whole PART IV program, and it is the one representation that
 would have named `negatives + false-neg-filtering + distillation` as the run's blind spot on turn one.**
+
+#### 21.12 Further offline tests: D2, D3-statistics, D4, and a foresight probe (measured 2026-07-14)
+
+Extending §21.10 to the remaining levers, again over the run's own data with deepseek-v4-flash for blind
+judgments. These sharpen (and in one case temper) the earlier claims.
+
+- **D3 across four real regressions (blind vs grounded).** On `dclw-loss` (0.006), `dcl-xbm-queue` (0.742),
+  `dcl-asymmetric-temp` (0.0), `debiased-dcl` (0.705): the correction to §21.10 is that the blind critic is
+  **high-variance, not consistently biased** — `debiased-dcl` returned "direction-bound, don't re-examine" in
+  the §21.10 single run and "implementation-bound, re-examine" here on identical input (temp 0.6). The
+  grounded critic was **accurate and stable**: it re-examined the three sound directions AND correctly told the
+  genuinely-weak one apart (`dclw-loss` → direction-bound, don't chase), where the blind critic wanted to
+  re-examine even that. **Refined normative:** D3's failure mode is *variance*, so it needs both grounding
+  (D1/D2/§17) **and** §12's repeated-evaluation — a single blind call is unreliable in *either* direction, and
+  grounding also prevents wasting budget re-examining truly-dead directions.
+- **D2 — breadth beats depth on ranking quality (smaller effect).** Leader-anchored "propose the next
+  experiment" ranked **the memory-bank hard-negative variant #1 — i.e. the node_34 approach that already
+  failed** — with distillation and a listwise loss behind it. Axis-structured breadth ranked the correct
+  mechanisms top-3 (cross-encoder Margin-MSE distillation, cross-encoder-**mined** hard negatives,
+  gradient-scaled cross-batch negatives). Both "reach" the winning region when told what was already tried, so
+  D2's measured value is **ranking quality and not re-proposing known-failed variants**, not first discovery —
+  a real but more modest gain than D1/D3.
+- **D4 — the board is concept-concentrated; the false-merge harm did not appear here.** Tagging all 107
+  hypotheses: **63/107 touch `loss/decoupled-contrastive`**, 39 temperature — the board mirrors the node
+  narrowing, so taxonomy-aware *aggressive within-DCL* merge is clearly warranted. Honest negative: the
+  blind-dedup **false-merge risk was 0 pairs** (lexical-similar-but-disjoint-concept) in this run — the
+  winning-region hypotheses used distinct vocabulary, so a blind merge would not have swallowed them here.
+  D4's demonstrated value is **compression of the redundant DCL cluster**; its *protective* value is
+  sound in principle but was not exercised by this run. (Caveat: with the coarse D4 tag list, 16/107 hyps
+  "touch" the winning region, but with the finer §21.11 vocabulary that separates `external-mining` from
+  `in-batch` and `teacher-distill` from `self-distill`, the *true* external/teacher coverage on the board is
+  ~0 — the 16 are the reachable weak variants. The concept granularity that separates reachable-from-winning is
+  itself load-bearing.)
+- **Bonus — a foresight probe (tests a SHIPPED subsystem, deterministic).** Correlating the pre-execution
+  `foresight_selected` **confidence** with the node's realized recall@100 across 55 paired nodes:
+  **Pearson = −0.10** (high-confidence mean 0.847 vs low 0.806, confounded by run-time). Foresight's stated
+  confidence is **effectively uninformative** about which node actually wins. Foresight (predict-before-execute)
+  is therefore a concrete §12 target: replace an uncalibrated self-reported confidence with a calibrated,
+  repeated, criteria-decomposed verifier score, and measure whether *that* correlates with ground truth
+  (§12's own evaluation gate). This is exactly the "advisory signal that must be calibrated before it steers"
+  discipline §12 prescribes.
+
+**Not yet run (offline, cheap, worth doing next):** (E3) novelty-gate *recall* — the gate fired only 5 times
+across 107 hypotheses + 68 nodes; sample hypothesis pairs and measure how many true paraphrases it missed;
+(E4) a lesson-contradiction scan — 43 distilled lessons; a critic pass for mutually inconsistent lessons (the
+false-negative mis-lesson is one), which is the D6 guard applied across the whole lesson store rather than
+per-lesson.
