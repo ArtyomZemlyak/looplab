@@ -13,6 +13,8 @@ looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
+looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
+looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -211,6 +213,52 @@ looplab timings RUN_DIR [--node N]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl`) |
 | `--node N` | all nodes | Restrict the breakdown to a single node id |
+
+---
+
+## `concept-coverage`
+
+PART IV D5 (§21.11) offline diagnostic. Folds a run's event log and tags each experiment with the
+research **concepts** it touches over a concept **axis-DAG** (multi-label — one experiment can touch
+`loss/decoupled-contrastive` *and* `regularization/r-drop`), then reports per-axis coverage, the dominant
+concept / axis-clique **concentration**, and the standing **uncovered-region alarm** — the regions the
+search footprint never entered (e.g. *"0 coverage in {negatives/external-mining, distillation/teacher-distill,
+data/synthetic-queries} across all N experiments — direct the next proposals there (not just 'broaden')"*),
+which fires from the first node rather than waiting for narrowing to accumulate. Read-only; never touches
+selection.
+
+```bash
+looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--llm] [--model ID]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
+| `--task-type NAME` | inferred from the run's `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`); a generic axis-only graph for unknown types (the LLM tagger grows it) |
+| `--llm` | off (offline alias tagging) | Tag experiments with the grounded **agentic** LLM tagger (reads each node's code/logs, grows the vocabulary) instead of the deterministic offline heuristic. Needs a reachable endpoint |
+| `--model ID` | configured model | Override the model for `--llm` |
+
+---
+
+## `asset-brief`
+
+PART IV D1 (§21.2) offline diagnostic. Produces the seed-time **prior-art & available-assets brief** for
+a task repo — the on-disk result tables, sibling checkpoints (metrics carried in their filenames), and
+reusable trainer capabilities a fresh proposer would otherwise miss. The primary path (`--llm`) is an
+**agent** that explores the repo with read-only tools and writes a grounded brief; the default is a
+bounded, task-agnostic heuristic scan (its domain vocabulary is a pluggable per-task-type pack, opted in
+via `--task-type`). Read-only — nothing is executed or written.
+
+```bash
+looplab asset-brief REPO [--task-type dense-retrieval] [--llm] [--model ID]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `REPO` | *(required)* | Task repo to sweep for prior art & on-disk assets |
+| `--task-type NAME` | generic | Task family whose capability vocabulary to apply (e.g. `dense-retrieval`); omit for a purely generic scan |
+| `--llm` | off (offline scan) | Use the **agentic** brief (an LLM explores the repo with read-only tools) instead of the heuristic scan. Needs a reachable endpoint |
+| `--model ID` | configured model | Override the model for `--llm` |
 
 ---
 

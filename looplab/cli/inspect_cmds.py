@@ -107,6 +107,98 @@ def inspect(run_dir: Path = typer.Argument(...)):
         _print_result(fold(EventStore(events).read_all()))
 
 
+def _make_llm_client(*args, **kwargs):
+    """Late-bound `make_llm_client` (mirrors export_cmds) so a test patching `looplab.cli.make_llm_client`
+    also stubs these diagnostics — a frozen `from looplab.cli import make_llm_client` would not."""
+    from looplab import cli
+    return cli.make_llm_client(*args, **kwargs)
+
+
+def _run_tools_for(state):
+    """Read-only run tools bound to `state` for AGENTIC tagging/briefing (mirrors trust.verify._verify_tools).
+    None on any failure -> the caller runs the plain (non-agentic) LLM path."""
+    try:
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.run_tools import RunTools
+        rt = RunTools()
+        rt.bind_state(state, None)
+        return CompositeTools([rt])
+    except Exception:  # noqa: BLE001 — no tools => degrade to the plain structured call
+        return None
+
+
+@app.command(name="concept-coverage")
+def concept_coverage(
+    run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
+    task_type: Optional[str] = typer.Option(
+        None, help="Concept-graph skeleton to use (e.g. dense-retrieval). Default: inferred from the "
+                   "run's task_id; a generic axis-only graph when unknown."),
+    llm: bool = typer.Option(
+        False, "--llm", help="Tag experiments with the LLM (grounded, grows the vocabulary) instead of "
+                             "the offline alias heuristic. Needs a reachable endpoint."),
+    model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
+):
+    """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic over a run. Reports
+    per-axis coverage, the dominant concept/axis-clique concentration, and the standing 'uncovered
+    winning-region' alarm ('0 coverage in {X} — go there'). Offline by default (deterministic alias
+    tagging); `--llm` uses the grounded agentic tagger."""
+    from looplab.search.concept_graph import (concept_report, skeleton_for, tag_nodes_llm)
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    resolved_type = task_type or state.task_id or ""
+    graph = skeleton_for(resolved_type)
+    # A generic (uncurated) task type has an empty skeleton, so the OFFLINE alias tagger can localize
+    # nothing and the report reads all-uncovered. Tell the user how to get a useful map instead of
+    # silently emitting zeros — pass --llm (grows the vocabulary) or --task-type of a curated pack.
+    if not llm and not graph.concepts():
+        typer.echo(f"note: no curated concept skeleton for task-type '{resolved_type or 'unknown'}', so "
+                   "the offline heuristic can't tag experiments. Pass --llm to tag with the model "
+                   "(it grows the vocabulary), or --task-type <known-pack> (e.g. dense-retrieval).")
+    tags = None
+    if llm:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+            tags = tag_nodes_llm(state, graph, client, parser=settings.llm_parser,
+                                 tools=_run_tools_for(state))
+        except Exception as e:  # noqa: BLE001 — fall back to the offline heuristic, note it
+            typer.echo(f"(--llm tagging failed: {e}; using the offline heuristic)")
+    typer.echo(concept_report(state, graph, tags))
+
+
+@app.command(name="asset-brief")
+def asset_brief_cmd(
+    repo: Path = typer.Argument(..., help="Task repo to sweep for prior art & on-disk assets."),
+    task_type: Optional[str] = typer.Option(
+        None, help="Task family (e.g. dense-retrieval) to name domain capabilities. Default: generic."),
+    llm: bool = typer.Option(
+        False, "--llm", help="Use the agentic brief (an LLM explores the repo with read-only tools) "
+                             "instead of the offline heuristic scan. Needs a reachable endpoint."),
+    model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
+):
+    """PART IV D1 (§21.2): the seed-time prior-art & available-assets brief for a task repo — the
+    on-disk result tables, sibling checkpoints (metrics in filenames), and reusable trainer capabilities
+    the search would otherwise miss. Offline heuristic scan by default; `--llm` runs the agentic sweep."""
+    from looplab.tools.asset_brief import asset_brief
+    if not repo.exists():
+        typer.echo(f"no such repo: {repo}")
+        raise typer.Exit(2)
+    client = None
+    if llm:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — degrade to the offline scan
+            typer.echo(f"(--llm unavailable: {e}; using the offline scan)")
+    typer.echo(asset_brief(repo, client=client, task_type=task_type))
+
+
 @app.command()
 def tensorboard(
     run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),

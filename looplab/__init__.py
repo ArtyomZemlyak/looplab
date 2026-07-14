@@ -43,7 +43,9 @@ _LAYOUT = {
     "appstate": "serve",
     "archive": "search",
     "artifacts": "serve",
+    "asset_brief": "tools",   # PART IV D1 seed-time asset/prior-art brief (offline)
     "audit": "engine",   # engine audit/trust-emitter mixin
+    "concept_graph": "search",   # PART IV D5 concept-graph coverage diagnostic (offline)
     "coverage": "search",
     "crash_repair": "engine",
     "assistant": "serve",
@@ -172,6 +174,7 @@ _LAYOUT = {
     "uibuild": "serve",
     "validate": "core",
     "vectorstore": "tools",
+    "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verify": "trust",
     "web": "tools",
     "workspace": "engine",

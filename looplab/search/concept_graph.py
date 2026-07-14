@@ -1,0 +1,574 @@
+"""Concept graph — the shared coordinate system for the hypothesis/coverage space (PART IV D5, §21.11).
+
+**Keystone A of the PART IV program.** Today a node's only structural label is a single flat
+`idea.theme` slug (`roles.py:31`), rolled up one-dimensionally by `theme_rollup`/`coverage.py`. The
+`rubertlite` run proved that flat vocabulary is *blind to concentration*: dozens of hyper-narrow slugs
+(`dcl-rdrop-ema`, `dcl-rdrop-gc`, …) all belong to ONE branch `loss → contrastive → DCL + R-Drop`, yet
+the flat `dominant_theme_frac` the Strategist saw actually FELL 0.67→0.03 over the run — it reported an
+increasingly *diverse* search while it collapsed onto one recipe (§21.10).
+
+This module is the validated fix (§21.11): a **bipartite experiment↔concept graph** over a **concept
+axis-DAG**. Each experiment carries a SET of concept tags; each concept sits under one or more parent
+axes (a DAG, not a tree — `dcl-rdrop` is BOTH `loss/decoupled-contrastive` AND `regularization/r-drop`,
+and forcing one parent is exactly what re-fragmented the signal, §21.10 refinement 1). Over that graph,
+deterministic analytics surface three signals the flat vocabulary cannot:
+
+  * **top-concept touch-fraction** — the single most-touched concept's share of experiments;
+  * **dominant axis-clique share** — the most-common co-occurring AXIS pair's share (the run lived
+    inside the tiny `loss × regularization` clique — 0 → 0.27);
+  * **count of uncovered key concept-regions** — the decisive *uncovered winning-region* alarm: the
+    proven-winning concepts (`negatives/external-mining`, `negatives/false-neg-handling`,
+    `distillation/teacher-distill`, `data/*`) had `first_touch = None` across ALL 67 nodes. The graph
+    reports that empty region as a STANDING alarm from the first node — earlier and more actionable
+    than any concentration threshold (it does not wait for narrowing to accumulate).
+
+Metric guidance (validated, §21.11): use the three signals above, NOT "distinct tag-set count" — the
+latter stayed ~0.6 the whole run (each modifier mints a fresh exact set) and is too noisy to be an alarm.
+
+**Discipline (mirrors `search/coverage.py`).** The analytics (`concept_coverage`, `uncovered_regions`,
+`concept_report`) are PURE and deterministic over `(RunState, ConceptGraph, tags)` — no I/O, no LLM, no
+wall-clock — so a replay recomputes them byte-identically and a historical log is re-measurable offline.
+The only impure step is *assigning* the multi-label tags: `tag_nodes_heuristic` is a deterministic,
+alias-based (no-LLM) tagger that keys on primary-lever LINEAGE (all `dcl-*` → one family) so the signal
+fires early; `tag_nodes_llm` is the richer optional harness that also GROWS the vocabulary. Both return
+`{node_id: frozenset[concept_id]}` and feed the same pure analytics.
+
+**Phase 0 scope (early lane, §6.6 / §21.13).** This is an OFFLINE diagnostic — it reads a completed
+run's folded state and reports; it does NOT write domain events or touch selection. The lock-in detector
+(D7, 1a) and the live Strategist-pivot wiring (2a) read this graph but are separate later phases.
+"""
+from __future__ import annotations
+
+from collections import Counter
+from dataclasses import dataclass
+from itertools import combinations
+from typing import Optional
+
+from looplab.core.models import RunState
+
+
+# --------------------------------------------------------------------------- #
+# The concept vocabulary + axis-DAG
+# --------------------------------------------------------------------------- #
+
+@dataclass(frozen=True)
+class Concept:
+    """One node in the concept DAG. `axes` are its PARENT axes (one or more — the DAG's multi-parent
+    edge set); `aliases` are the surface tokens that map an experiment's text onto this concept at
+    LINEAGE granularity (all `dcl-*` modifiers share the one `dcl` family, so the signal keys on the
+    primary lever, not the leaf slug — §21.10 refinement 1). `key=True` marks a "winning-region"
+    concept: coverage is judged against these for the uncovered-region alarm, but the alarm itself
+    reports EVERY uncovered skeleton region, not only the key ones."""
+    id: str                                 # canonical, axis-prefixed, e.g. "negatives/external-mining"
+    label: str = ""                         # human label (defaults to id)
+    axes: tuple[str, ...] = ()              # parent axis ids — DAG multi-membership
+    aliases: tuple[str, ...] = ()           # lowercase surface tokens for the heuristic tagger
+    key: bool = False                       # part of a known/target winning region (alarm labelling)
+
+    def __post_init__(self):
+        # A concept with no explicit axis is its own axis root (defensive; skeletons always set axes).
+        if not self.axes:
+            object.__setattr__(self, "axes", (self.id.split("/", 1)[0],))
+        if not self.label:
+            object.__setattr__(self, "label", self.id)
+
+
+class ConceptGraph:
+    """A governed concept vocabulary over an axis-DAG. Seeded from a task-type skeleton and grown
+    dynamically as new concepts appear (the fix for "themes are too narrow and too many" is not to
+    forbid narrow leaves but to give them PARENTS — §21.6). Membership is many-to-many: an experiment
+    tags a SET of concepts, and a concept sits under a SET of axes."""
+
+    def __init__(self, concepts: Optional[list[Concept]] = None, *, task_type: str = ""):
+        self.task_type = task_type
+        self._concepts: dict[str, Concept] = {}
+        for c in concepts or []:
+            self.add(c)
+
+    # -- construction / growth ------------------------------------------------
+    def add(self, concept: Concept) -> Concept:
+        """Register (or, if the id already exists, keep the original — the skeleton wins over a
+        dynamically-grown duplicate so a governed key/axis assignment is never clobbered)."""
+        return self._concepts.setdefault(concept.id, concept)
+
+    def ensure(self, concept_id: str, *, axes: tuple[str, ...] = (), key: bool = False) -> Concept:
+        """Get-or-create a concept id (used by the LLM tagger when it proposes a new concept). A
+        grown concept inherits its axis from the id prefix unless one is given; `key` never upgrades an
+        existing entry (only the skeleton declares winning regions)."""
+        existing = self._concepts.get(concept_id)
+        if existing is not None:
+            return existing
+        return self.add(Concept(id=concept_id, axes=axes, key=key))
+
+    # -- read helpers ---------------------------------------------------------
+    def __contains__(self, concept_id: str) -> bool:
+        return concept_id in self._concepts
+
+    def get(self, concept_id: str) -> Optional[Concept]:
+        return self._concepts.get(concept_id)
+
+    def concepts(self) -> list[Concept]:
+        # Deterministic order (id-sorted) so every derived report/analytic is order-stable.
+        return [self._concepts[k] for k in sorted(self._concepts)]
+
+    def axes(self) -> list[str]:
+        """All distinct parent axes in the graph, sorted — the top level of the DAG."""
+        out: set[str] = set()
+        for c in self._concepts.values():
+            out.update(c.axes)
+        return sorted(out)
+
+    def axes_of(self, concept_id: str) -> tuple[str, ...]:
+        c = self._concepts.get(concept_id)
+        return c.axes if c is not None else (str(concept_id).split("/", 1)[0],)
+
+    def key_concepts(self) -> list[str]:
+        return [c.id for c in self.concepts() if c.key]
+
+
+# --------------------------------------------------------------------------- #
+# Task-type skeletons (the seed vocabulary)
+# --------------------------------------------------------------------------- #
+#
+# The dense-retrieval skeleton is the one the `rubertlite` case validated (§21.6 axis list, extended by
+# §21.11's `regularization`/`hyperparameter` axes that the DAG needs to express the `loss × regularization`
+# clique). `key=True` marks the proven winning region the run never entered — so a replay of `rubertlite`
+# fires the uncovered-region alarm on those exact concepts (the §21.11 decisive signal). Aliases are
+# LINEAGE families (a modifier like `-ema`/`-gc`/`-swa` still maps to the family) so concentration reads
+# the branch, not the leaf.
+
+_DENSE_RETRIEVAL_CONCEPTS: list[Concept] = [
+    # ---- loss ----
+    Concept("loss/decoupled-contrastive", "Decoupled contrastive loss (DCL)", ("loss",),
+            ("dcl", "decoupled contrastive", "decoupled-contrastive", "decoupled loss")),
+    Concept("loss/contrastive", "Contrastive / InfoNCE loss", ("loss",),
+            ("contrastive", "infonce", "info-nce", "nt-xent", "ntxent")),
+    Concept("loss/mnr", "Multiple-negatives-ranking loss", ("loss",),
+            ("mnr", "multiple negatives", "multiple-negatives", "multiple negative ranking")),
+    Concept("loss/margin-mse", "Margin-MSE distillation loss", ("loss", "distillation"),
+            ("margin-mse", "margin mse", "marginmse")),
+    Concept("loss/listwise", "Listwise / KL ranking loss", ("loss",),
+            ("listwise", "list-wise", "kl loss", "kl-divergence loss", "lambdaloss")),
+    Concept("loss/triplet", "Triplet / hinge loss", ("loss",),
+            ("triplet", "hinge loss", "margin ranking")),
+    # ---- negatives ----
+    Concept("negatives/in-batch", "In-batch / cross-batch negatives", ("negatives",),
+            ("in-batch negative", "in batch negative", "batch negative", "cross-batch negative",
+             "xbm", "memory bank", "gradient cache", "gradcache", "grad-cache")),
+    Concept("negatives/external-mining", "External / offline hard-negative mining", ("negatives",),
+            ("hard negative mining", "hard-negative mining", "mined negative", "mined hard neg",
+             "external negative", "offline mining", "ann mining", "bm25 negative", "teacher-mined",
+             "cross-encoder mined", "retrieved negative", "hard neg mining"), key=True),
+    Concept("negatives/false-neg-handling", "False-negative filtering / denoising", ("negatives",),
+            ("false negative", "false-negative", "false neg", "nv-", "nv filter", "denoise negative",
+             "denoised", "positive-aware", "positive aware", "negative filtering"), key=True),
+    # ---- distillation ----
+    Concept("distillation/teacher-distill", "Cross-encoder / teacher distillation", ("distillation",),
+            ("teacher distill", "teacher-distill", "cross-encoder distill", "knowledge distillation",
+             "distill from teacher", "reranker distill", "kd from", "teacher checkpoint"), key=True),
+    Concept("distillation/self-distill", "Self-distillation from own checkpoints", ("distillation",),
+            ("self-distill", "self distill", "self-distillation", "ema teacher")),
+    # ---- data ----
+    Concept("data/augmentation", "Data augmentation", ("data",),
+            ("augment", "augmentation", "back-translation", "backtranslation", "paraphrase",
+             "cropping", "span deletion", "eda")),
+    Concept("data/synthetic-queries", "Synthetic query / doc generation", ("data",),
+            ("synthetic quer", "synthetic data", "generated quer", "query generation", "doc2query",
+             "gpl", "pseudo-quer", "llm-generated quer"), key=True),
+    Concept("data/curriculum", "Curriculum / sampling / dedup of data", ("data",),
+            ("curriculum", "data sampling", "resampl", "dedup", "clean data", "data mixture")),
+    # ---- architecture / pooling ----
+    Concept("architecture/backbone", "Encoder backbone change", ("architecture",),
+            ("backbone", "encoder swap", "bert-large", "roberta", "deberta", "bigger model",
+             "model size", "layer count")),
+    Concept("pooling/strategy", "Pooling strategy (mean/cls/last)", ("pooling", "architecture"),
+            ("mean pooling", "cls pooling", "last-token pooling", "pooling strategy", "attention pooling")),
+    Concept("architecture/matryoshka", "Matryoshka / dimensionality", ("architecture",),
+            ("matryoshka", "mrl", "embedding dimension", "reduce dimension", "projection head")),
+    # ---- regularization ----
+    Concept("regularization/r-drop", "R-Drop consistency regularization", ("regularization",),
+            ("r-drop", "rdrop", "r drop", "consistency regular")),
+    Concept("regularization/ema", "EMA / weight averaging", ("regularization", "training-schedule"),
+            ("ema", "exponential moving average", "swa", "weight averaging", "model averaging")),
+    Concept("regularization/dropout", "Dropout / weight decay", ("regularization",),
+            ("dropout", "weight decay", "l2 regular", "label smoothing")),
+    # ---- hyperparameter ----
+    Concept("hyperparameter/temperature", "Contrastive temperature", ("hyperparameter", "loss"),
+            ("temperature", "tau", "logit scale", "logit-scale")),
+    Concept("hyperparameter/batch-size", "Batch size / accumulation", ("hyperparameter",),
+            ("batch size", "batch-size", "batchsize", "gradient accumulation", "large batch")),
+    Concept("hyperparameter/learning-rate", "Learning rate / schedule", ("hyperparameter",
+                                                                         "training-schedule"),
+            ("learning rate", "learning-rate", "lr ", "lr=", "warmup", "cosine schedule",
+             "scheduler")),
+    # ---- training-schedule ----
+    Concept("training-schedule/longer", "Longer / multi-stage training", ("training-schedule",),
+            ("longer training", "more epoch", "multi-stage", "two-stage", "continue training",
+             "extended training")),
+    # ---- eval ----
+    Concept("eval/metric-tuning", "Eval / retrieval-index tuning", ("eval",),
+            ("recall@", "ndcg", "faiss", "index tuning", "retrieval eval", "rerank eval")),
+]
+
+# The axis skeleton — every axis that seeds an EMPTY column so the uncovered-region alarm can fire on an
+# axis no concept was ever tagged under (e.g. a run that never touches `data` at all). Order = report order.
+_DENSE_RETRIEVAL_AXES: tuple[str, ...] = (
+    "data", "negatives", "loss", "distillation", "architecture", "pooling",
+    "regularization", "hyperparameter", "training-schedule", "eval",
+)
+
+
+def dense_retrieval_skeleton() -> ConceptGraph:
+    """The validated dense-retrieval concept skeleton (§21.6/§21.11)."""
+    g = ConceptGraph(list(_DENSE_RETRIEVAL_CONCEPTS), task_type="dense-retrieval")
+    # Seed the axis roots so an entirely-untouched axis still appears in the coverage frame. A synthetic
+    # `<axis>/*` placeholder concept (never key, no aliases -> never heuristically tagged) anchors the
+    # axis in `graph.axes()` even before any real concept under it is grown.
+    for ax in _DENSE_RETRIEVAL_AXES:
+        g.ensure(f"{ax}/*", axes=(ax,))
+    return g
+
+
+# Task-type -> skeleton builder. A generic (axis-only) skeleton is the fallback for task types without a
+# curated vocabulary — the graph then grows entirely from the LLM tagger. Kept tiny and additive so new
+# task types register one row (mirrors the adapters registry discipline).
+_SKELETONS = {
+    "dense-retrieval": dense_retrieval_skeleton,
+}
+# Fuzzy task-id -> registered-skeleton aliases (mirrors asset_brief._LEXICON_ALIASES), so a run whose
+# task_id is e.g. "vectorizer" still resolves the dense-retrieval skeleton. Substring match, first hit.
+_SKELETON_ALIASES = {
+    "dense-retrieval": ("dense-retrieval", "dense_retrieval", "retrieval", "vectorizer", "embedding",
+                        "sentence-transformer", "bi-encoder", "biencoder"),
+}
+
+
+def skeleton_for(task_type: str) -> ConceptGraph:
+    """Build the seed graph for a task type; a generic empty-but-typed graph when none is curated. Fuzzy:
+    an unregistered id is matched against known packs' aliases before falling back to generic."""
+    t = (task_type or "").strip().lower()
+    if t in _SKELETONS:
+        return _SKELETONS[t]()
+    for pack, aliases in _SKELETON_ALIASES.items():
+        if t and any(a in t for a in aliases):
+            return _SKELETONS[pack]()
+    return ConceptGraph(task_type=task_type or "")
+
+
+# --------------------------------------------------------------------------- #
+# Tagging: experiment -> set of concept ids
+# --------------------------------------------------------------------------- #
+
+def _experiment_nodes(state: RunState) -> list:
+    """Idea-carrying nodes in id order — the run's experiments, exactly as `coverage.py` counts them
+    (failed nodes included: a failed experiment is still effort spent in a region)."""
+    return sorted((n for n in state.nodes.values() if getattr(n, "idea", None) is not None),
+                  key=lambda n: n.id)
+
+
+def _node_text(node) -> str:
+    """The searchable surface text for a node: theme + rationale + hypothesis + operator + param names.
+    Lowercased. This is what the heuristic tagger and the LLM tagger both describe an experiment by."""
+    idea = getattr(node, "idea", None)
+    parts = [
+        getattr(idea, "theme", "") or "",
+        getattr(idea, "rationale", "") or "",
+        getattr(idea, "hypothesis", "") or "",
+        getattr(node, "operator", "") or "",
+        " ".join(str(k) for k in (getattr(idea, "params", None) or {})),
+        " ".join(str(k) for k in (getattr(idea, "space", None) or {})),
+    ]
+    return " ".join(parts).lower()
+
+
+def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, frozenset[str]]:
+    """Deterministic, no-LLM multi-label tagging by lineage-family alias match (pure — safe in replay
+    and tests). Each experiment maps to the SET of concepts whose aliases appear in its text; a node
+    matching no alias gets the empty set (tracked as `untagged` by the analytics — real effort not yet
+    localized). Keys on lineage families, so all `dcl-*` variants land on the one `decoupled-contrastive`
+    concept and concentration reads the branch (§21.10 refinement 1). This is MULTI-label: an experiment
+    that names both a specific and a generic alias is tagged with BOTH concepts (that is the point of the
+    graph). Aliases match on alnum boundaries (not raw substrings) so `ema` does not fire inside
+    `schema` and `dcl` does not fire inside `include`."""
+    # Pre-index (boundary-anchored alias regex, concept_id) once. The lookarounds are alnum-boundaries
+    # (not \b) because aliases legitimately start/end with a hyphen (`r-drop`), where \b is unreliable.
+    import re as _re
+    index: list[tuple[object, str]] = []
+    for c in graph.concepts():
+        for a in c.aliases:
+            a = (a or "").strip().lower()
+            if a:
+                index.append((_re.compile(r"(?<![a-z0-9])" + _re.escape(a) + r"(?![a-z0-9])"), c.id))
+    tags: dict[int, frozenset[str]] = {}
+    for n in _experiment_nodes(state):
+        text = _node_text(n)
+        hit = {cid for pat, cid in index if pat.search(text)}
+        tags[n.id] = frozenset(hit)
+    return tags
+
+
+def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str = "tool_call",
+                  grow: bool = True, tools=None) -> dict[int, frozenset[str]]:
+    """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
+    the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
+    GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
+    passed it runs AGENTIC (reads the node's actual code/logs before tagging, via `agentic_struct`,
+    mirroring `verify_memo`); otherwise a plain structured call. The alias-based `tag_nodes_heuristic`
+    is only the deterministic OFFLINE FALLBACK (used per-node when a call fails, and by tests). Best-
+    effort and loop-safe — a failed node degrades to its heuristic tags, never crashing the harness.
+    Impure by design (the LLM step); the analytics it feeds stay pure."""
+    from pydantic import BaseModel, Field
+
+    from looplab.core.parse import parse_structured
+
+    class TagOut(BaseModel):
+        concept_ids: list[str] = Field(default_factory=list)
+
+    heuristic = tag_nodes_heuristic(state, graph)
+    axes = graph.axes()
+    # The prompt is TASK-AGNOSTIC: the domain vocabulary comes ONLY from the graph (KNOWN AXES / KNOWN
+    # VOCABULARY below), never hardcoded here — so the same tagger works on any task. The multi-touch
+    # guidance is phrased with no domain example (a hardcoded dense-retrieval example would mislead the
+    # model on a non-dense-retrieval run and leak a vocabulary the graph may not use).
+    system = (
+        "You tag a machine-learning experiment with the research CONCEPTS it touches, for a coverage "
+        "map. Assign the SET of concepts that apply — an experiment usually touches SEVERAL at once "
+        "(e.g. a change to the loss AND a regularizer), so tag EVERY concept that applies, not just the "
+        "most obvious one. Prefer concepts from the KNOWN VOCABULARY below; only when none fits, propose "
+        "a new id of the form `axis/short-slug` using one of the known AXES. Key on the underlying "
+        "METHOD (its lineage/family), not the surface name — variants of one method that differ only by "
+        "a modifier are the same concept. Call `emit` once with `concept_ids` (the list of ids)."
+        f"\n\nKNOWN AXES: {', '.join(axes) or '(none — propose axis/slug ids)'}\n\nKNOWN VOCABULARY:\n"
+        + ("\n".join(f"- {c.id}: {c.label}" for c in graph.concepts() if not c.id.endswith("/*"))
+           or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
+    )
+    tags: dict[int, frozenset[str]] = {}
+    for n in _experiment_nodes(state):
+        desc = _describe_node(n)
+        msgs = [{"role": "system", "content": system},
+                {"role": "user", "content": f"EXPERIMENT (node {n.id}):\n{desc}\n\n"
+                                            "Which concepts does it touch? Read the node's code/logs "
+                                            "first if a tool is available, then emit."}]
+        try:
+            if tools is not None:
+                from looplab.agents.agent import agentic_struct
+                out = agentic_struct(client, tools, msgs, TagOut, parser=parser,
+                                     loop_opts={"max_turns": 8},
+                                     fallback=lambda m: parse_structured(client, m, TagOut, parser))
+            else:
+                out = parse_structured(client, msgs, TagOut, parser)
+            got: set[str] = set()
+            for raw in out.concept_ids:
+                cid = _normalize_concept_id(raw)
+                if not cid:
+                    continue
+                if cid in graph:
+                    got.add(cid)
+                elif grow and "/" in cid:
+                    graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                    got.add(cid)
+            tags[n.id] = frozenset(got) if got else heuristic.get(n.id, frozenset())
+        except Exception:  # noqa: BLE001 — degrade this node to heuristic, never crash the harness
+            tags[n.id] = heuristic.get(n.id, frozenset())
+    return tags
+
+
+def _normalize_concept_id(raw) -> str:
+    s = str(raw or "").strip().lower().replace(" ", "-")
+    return s.strip("/")
+
+
+def _describe_node(node) -> str:
+    """A compact, tagging-relevant description of an experiment for the LLM tagger."""
+    idea = getattr(node, "idea", None)
+    bits = [f"operator={getattr(node, 'operator', '')}"]
+    if getattr(idea, "theme", None):
+        bits.append(f"theme={idea.theme}")
+    if getattr(idea, "hypothesis", None):
+        bits.append(f"hypothesis={idea.hypothesis}")
+    rat = " ".join((getattr(idea, "rationale", "") or "").split())
+    if rat:
+        bits.append(f"rationale={rat[:400]}")
+    params = getattr(idea, "params", None) or {}
+    if params:
+        bits.append("params=" + ", ".join(sorted(str(k) for k in params))[:200])
+    return " | ".join(bits)
+
+
+# --------------------------------------------------------------------------- #
+# Analytics (pure, deterministic over (state, graph, tags))
+# --------------------------------------------------------------------------- #
+
+def concept_coverage(state: RunState, graph: ConceptGraph,
+                     tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
+    """The graph coverage read-model — the validated concentration signals (§21.11). Pure and
+    deterministic; an empty run yields zeros. When `tags` is omitted, the deterministic heuristic tagger
+    is used (so the diagnostic runs with no LLM).
+
+    Keys:
+      experiments        - idea-carrying nodes (run's experiments, `coverage.py` denominator)
+      tagged             - experiments that received >=1 concept tag
+      untagged           - experiments no concept matched (effort not yet localized)
+      concepts_touched   - distinct concepts with >=1 touch
+      axes_touched       - distinct axes with >=1 touch
+      axes_total         - skeleton axes in the graph
+      top_concept        - {id, count, frac}: the most-touched concept and its share of TAGGED experiments
+      dominant_clique    - {axes:[a,b], count, frac}: the most-common co-occurring AXIS pair and its share
+      uncovered_axes     - skeleton axes with 0 touches across the whole run
+      uncovered_concepts - real (non-placeholder) skeleton concepts with first_touch == None
+      uncovered_key      - KEY (winning-region) concepts uncovered — the standing alarm's payload
+      axis_touch         - {axis: experiment-count} rollup (an experiment counts once per axis it touches)
+      concept_touch      - {concept_id: experiment-count}
+      first_touch        - {concept_id: 0-based experiment index of first touch} (touched concepts only)
+    """
+    nodes = _experiment_nodes(state)
+    if tags is None:
+        tags = tag_nodes_heuristic(state, graph)
+    n = len(nodes)
+    if n == 0:
+        return _empty_coverage(graph)
+
+    concept_touch: Counter = Counter()
+    axis_touch: Counter = Counter()
+    clique_pairs: Counter = Counter()
+    first_touch: dict[str, int] = {}
+    tagged = 0
+    for idx, node in enumerate(nodes):
+        cids = tags.get(node.id, frozenset())
+        if cids:
+            tagged += 1
+        node_axes: set[str] = set()
+        for cid in cids:
+            concept_touch[cid] += 1
+            first_touch.setdefault(cid, idx)
+            node_axes.update(graph.axes_of(cid))
+        for ax in node_axes:
+            axis_touch[ax] += 1
+        # An axis-clique is a co-occurring AXIS pair on ONE experiment (§21.11): the run lived inside the
+        # `loss × regularization` clique. Count unordered pairs so the dominant clique is direction-free.
+        for a, b in combinations(sorted(node_axes), 2):
+            clique_pairs[(a, b)] += 1
+
+    denom = tagged or n  # fraction over TAGGED experiments (untagged effort isn't ON a concept yet)
+    # Deterministic argmax: highest count, ties broken by the SMALLEST key. `Counter.most_common` breaks
+    # ties by insertion order — and the counters are filled by iterating each node's `frozenset` of tags,
+    # whose order is PYTHONHASHSEED-randomized — so most_common(1) would make `top_concept`/`dominant_clique`
+    # non-deterministic on a tie, violating the pure/replay-safe contract. Sorting on (-count, key) fixes it.
+    top_cid, top_count = _argmax(concept_touch)
+    clique, clique_count = _argmax(clique_pairs)
+
+    all_axes = graph.axes()
+    real_concepts = [c.id for c in graph.concepts() if not c.id.endswith("/*")]
+    uncovered_axes = [ax for ax in all_axes if axis_touch.get(ax, 0) == 0]
+    uncovered_concepts = [cid for cid in real_concepts if cid not in first_touch]
+    uncovered_key = [cid for cid in graph.key_concepts() if cid not in first_touch]
+
+    return {
+        "experiments": n,
+        "tagged": tagged,
+        "untagged": n - tagged,
+        "concepts_touched": len(concept_touch),
+        "axes_touched": len(axis_touch),
+        "axes_total": len(all_axes),
+        "top_concept": ({"id": top_cid, "count": top_count, "frac": round(top_count / denom, 4)}
+                        if top_cid else None),
+        "dominant_clique": ({"axes": list(clique), "count": clique_count,
+                             "frac": round(clique_count / denom, 4)} if clique else None),
+        "uncovered_axes": uncovered_axes,
+        "uncovered_concepts": uncovered_concepts,
+        "uncovered_key": uncovered_key,
+        "axis_touch": dict(sorted(axis_touch.items())),
+        "concept_touch": dict(sorted(concept_touch.items())),
+        "first_touch": dict(sorted(first_touch.items())),
+    }
+
+
+def _argmax(counter):
+    """(key, count) of the max-count entry, ties broken by the smallest key — a DETERMINISTIC argmax
+    (unlike `Counter.most_common`, whose tie order follows hash-seed-randomized insertion). (None, 0)
+    when empty."""
+    if not counter:
+        return None, 0
+    key = min(counter, key=lambda k: (-counter[k], k))
+    return key, counter[key]
+
+
+def _empty_coverage(graph: ConceptGraph) -> dict:
+    all_axes = graph.axes()
+    real = [c.id for c in graph.concepts() if not c.id.endswith("/*")]
+    return {
+        "experiments": 0, "tagged": 0, "untagged": 0, "concepts_touched": 0,
+        "axes_touched": 0, "axes_total": len(all_axes),
+        "top_concept": None, "dominant_clique": None,
+        "uncovered_axes": all_axes, "uncovered_concepts": real,
+        "uncovered_key": graph.key_concepts(),
+        "axis_touch": {}, "concept_touch": {}, "first_touch": {},
+    }
+
+
+def uncovered_regions(state: RunState, graph: ConceptGraph,
+                      tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
+    """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
+    output. Reports which skeleton regions the search footprint NEVER entered, from the first node, as a
+    ready-to-use Strategist pivot directive ("you have 0 coverage in {X} — go there", not "broaden").
+    Pure. `fired` is True whenever a KEY winning-region concept is uncovered (or, absent a curated key
+    set, whenever an entire axis is untouched)."""
+    cov = concept_coverage(state, graph, tags)
+    key_uncovered = cov["uncovered_key"]
+    axes_uncovered = cov["uncovered_axes"]
+    has_key = bool(graph.key_concepts())
+    fired = bool(key_uncovered) if has_key else bool(axes_uncovered)
+    # The directive names concrete regions: prefer the labelled key concepts; else the empty axes.
+    targets = key_uncovered or axes_uncovered
+    directive = ""
+    if fired and targets:
+        directive = ("0 coverage in {" + ", ".join(targets[:6]) + "} across all "
+                     f"{cov['experiments']} experiments — direct the next proposals there "
+                     "(not just 'broaden').")
+    return {
+        "fired": fired,
+        "experiments": cov["experiments"],
+        "uncovered_key": key_uncovered,
+        "uncovered_axes": axes_uncovered,
+        "directive": directive,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Human-readable report (for the CLI diagnostic)
+# --------------------------------------------------------------------------- #
+
+def concept_report(state: RunState, graph: ConceptGraph,
+                   tags: Optional[dict[int, frozenset[str]]] = None) -> str:
+    """A compact text diagnostic over the concept graph — the offline CLI's output. Pure."""
+    if tags is None:
+        tags = tag_nodes_heuristic(state, graph)
+    cov = concept_coverage(state, graph, tags)
+    lines = [
+        f"Concept-graph coverage  (task-type={graph.task_type or 'generic'})",
+        f"  experiments: {cov['experiments']}  tagged: {cov['tagged']}  untagged: {cov['untagged']}",
+        f"  concepts touched: {cov['concepts_touched']}   axes touched: "
+        f"{cov['axes_touched']}/{cov['axes_total']}",
+    ]
+    tc = cov["top_concept"]
+    if tc:
+        lines.append(f"  top concept: {tc['id']}  touch-fraction={tc['frac']} ({tc['count']} exps)")
+    dc = cov["dominant_clique"]
+    if dc:
+        lines.append(f"  dominant axis-clique: {dc['axes'][0]} × {dc['axes'][1]}  "
+                     f"share={dc['frac']} ({dc['count']} exps)")
+    if cov["axis_touch"]:
+        lines.append("  per-axis touch: "
+                     + ", ".join(f"{ax}={c}" for ax, c in cov["axis_touch"].items()))
+    alarm = uncovered_regions(state, graph, tags)
+    lines.append("")
+    if alarm["fired"]:
+        lines.append("  ⚠ UNCOVERED-REGION ALARM")
+        lines.append("    " + alarm["directive"])
+        if alarm["uncovered_key"]:
+            lines.append("    uncovered key regions: " + ", ".join(alarm["uncovered_key"]))
+        if alarm["uncovered_axes"]:
+            lines.append("    entirely-untouched axes: " + ", ".join(alarm["uncovered_axes"]))
+    else:
+        lines.append("  uncovered-region alarm: (not fired — all key/axis regions have coverage)")
+    return "\n".join(lines)

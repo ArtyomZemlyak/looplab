@@ -18,7 +18,7 @@
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
-| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier — offline foundation) |
 | **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
@@ -2703,3 +2703,38 @@ prerequisites (§6.5) — and breadth/QD-flavoured parts stay open-ended-mode on
 (`dataset.n_negatives`/`negatives_path`, `loss.type='mnr'`), τ→0.005, optionally distilling from the on-disk
 `nomic-moe@0.899`/`e5-base@0.90` teachers — into `dense-retrieval/train.py`. That is a task deliverable, not an
 agent change, and needs none of the D-program.
+
+#### 21.14 Phase 0 — implemented (the offline foundation)
+
+*Landed 2026-07-14. The three keystone-independent Phase-0 pieces (0a/0b/0c) ship as **offline diagnostics /
+library primitives** — no new `Settings` fields, no new event types, no change to the live loop or selection
+(that is Phase 2). All three are LLM/AGENTIC-first with deterministic, no-network fallbacks so the offline
+suite exercises them without an endpoint.*
+
+| Build | Module | CLI | Tests |
+|---|---|---|---|
+| **0a** concept graph + coverage + uncovered-region | `looplab/search/concept_graph.py` | `looplab concept-coverage RUN_DIR [--llm]` | `tests/test_concept_graph.py` |
+| **0b** D1 asset/prior-art brief | `looplab/tools/asset_brief.py` | `looplab asset-brief REPO [--llm]` | `tests/test_asset_brief.py` |
+| **0c** §12 advisory verifier + calibration | `looplab/trust/verifier.py` | *(library primitive; consumed by D3/D6/foresight in Ph.1/2)* | `tests/test_verifier.py` |
+
+- **0a** is a **multi-label concept DAG** (§21.11) sitting beside the flat `coverage.py`. The pure analytics
+  (`concept_coverage`/`uncovered_regions`/`concept_report`) mirror `coverage.py`'s deterministic, fold-derived
+  discipline; the impure step is only *tagging* — `tag_nodes_llm` (the primary, optionally agentic, grows the
+  vocabulary for ANY task) with `tag_nodes_heuristic` (alias/lineage, deterministic) as the offline fallback.
+  The concept skeleton is a **pluggable per-task-type pack** (`skeleton_for`; dense-retrieval is the one
+  validated pack, generic-graph fallback otherwise), so nothing is hardcoded to the `rubertlite` case. A
+  replay of a DCL-heavy run fires the uncovered-region alarm on `negatives/external-mining`,
+  `false-neg-handling`, `distillation/teacher-distill`, `data/*` — the §21.11 decisive signal.
+- **0b** is **agentic-first**: `agentic_asset_brief` runs an LLM over `RepoScoutTools` (read-only
+  list/grep/read) to write a grounded brief; `scan_assets`/`format_brief` is the bounded, task-AGNOSTIC
+  offline fallback + seed hint. Domain capability vocabulary lives only in a pluggable `AssetLexicon`
+  (`lexicon_for`); metric-name recognition is cross-domain. Read-only local I/O (mirrors `env_inspect`).
+- **0c** mirrors `trust/verify.py::verify_memo`: **criteria-decomposed** (named `Criterion`s), **repeated**
+  (N samples → sample-mean = the sampling-based expectation §12's logit-expectation needs on a
+  no-logprob backend), **grounded** (optional run tools → `agentic_struct`). Strictly advisory; degrades to
+  `method="unavailable"` without a client. `calibrate` reports Pearson/threshold/agreement of the score vs a
+  gold label — §12's own evaluation gate — with ready-made `lesson_overgeneralization_criteria` (D6) and
+  `reexamination_criteria` (D3) presets. `_agreement` surfaces the single-shot variance §21.12 measured.
+
+Phase 1 (D7 alarm/lock-in, D6/D3 audits, D4/D2) and Phase 2 (live Strategist pivot, capability-expansion
+operator, foresight replacement) build on these and inherit the R-gates + mode-gating as specified above.

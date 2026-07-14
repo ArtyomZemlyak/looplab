@@ -1,0 +1,280 @@
+"""Concept-graph diagnostic (PART IV D5 keystone, §21.11) — the offline coverage / uncovered-region
+signal over a multi-label concept DAG.
+
+These lock in the three validated behaviours (§21.10/§21.11): the heuristic tagger keys on primary-lever
+LINEAGE (all `dcl-*` variants -> one family, so concentration reads the branch not the leaf); the pure
+analytics are deterministic over (RunState, graph, tags); and the *uncovered winning-region* alarm fires
+on the exact regions the `rubertlite` run never entered, from the first node — the decisive PART IV
+signal. The analytics never write events or touch selection (Phase 0 = offline diagnostic)."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from looplab.core.models import RunState
+from looplab.events.eventstore import EventStore
+from looplab.events.replay import fold
+from looplab.search.concept_graph import (concept_coverage, concept_report, dense_retrieval_skeleton,
+                                          skeleton_for, tag_nodes_heuristic, tag_nodes_llm,
+                                          uncovered_regions)
+
+
+def _store(tmp_path, nodes, direction="max") -> EventStore:
+    """Build a run log from `nodes` = [(theme, rationale, metric), ...]; metric=None => failed node."""
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": direction})
+    for i, (theme, rationale, metric) in enumerate(nodes):
+        op = "draft" if i < 3 else "improve"
+        # neutral `seed` param (matches no concept alias) so a node is tagged only by its theme/rationale
+        s.append("node_created", {"node_id": i, "parent_ids": [], "operator": op,
+                                  "idea": {"operator": op, "params": {"seed": float(i)},
+                                           "theme": theme, "rationale": rationale}})
+        if metric is None:
+            s.append("node_failed", {"node_id": i, "error": "boom", "reason": "crash"})
+        else:
+            s.append("node_evaluated", {"node_id": i, "metric": metric})
+    return s
+
+
+# `rubertlite`-shaped run: every node is a DCL + R-Drop loss/regularization tweak; the winning region
+# (external hard-neg mining, false-neg filtering, teacher distillation, synthetic data) is never entered.
+_DCL_RUN = [
+    ("dcl-rdrop-ema", "decoupled contrastive loss with r-drop and ema weight averaging", 0.80),
+    ("dcl-rdrop-gc", "dcl with r-drop and gradient cache in-batch negatives", 0.81),
+    ("dcl-temperature", "tune the contrastive temperature / logit scale for dcl", 0.82),
+    ("dcl-rdrop-swa", "decoupled contrastive + r-drop + swa averaging", 0.83),
+    ("dcl-listwise", "decoupled contrastive with a listwise kl ranking term", 0.835),
+]
+
+# A run that DOES reach the winning region (external mining + teacher distillation).
+_BROAD_RUN = [
+    ("dcl-baseline", "decoupled contrastive baseline", 0.80),
+    ("hard-neg-mining", "offline hard negative mining with a cross-encoder to mine negatives", 0.86),
+    ("teacher-distill", "distill from the cross-encoder teacher checkpoint (margin-mse)", 0.88),
+    ("false-neg-filter", "apply nv-style false-negative filtering / denoise negatives", 0.87),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Graph model
+# --------------------------------------------------------------------------- #
+
+def test_skeleton_is_a_multiparent_dag():
+    g = dense_retrieval_skeleton()
+    # ema sits under BOTH regularization and training-schedule — the DAG expresses multi-membership a
+    # single-parent tree cannot (the §21.11 upgrade).
+    assert set(g.axes_of("regularization/ema")) == {"regularization", "training-schedule"}
+    # every seeded axis is present even before any concept under it is touched
+    for ax in ("data", "negatives", "loss", "distillation"):
+        assert ax in g.axes()
+    # the winning region is declared as key concepts
+    assert "negatives/external-mining" in g.key_concepts()
+    assert "distillation/teacher-distill" in g.key_concepts()
+
+
+def test_skeleton_for_unknown_task_type_is_generic_and_empty():
+    g = skeleton_for("some-new-task")
+    assert g.concepts() == [] and g.axes() == [] and g.key_concepts() == []
+
+
+def test_ensure_grows_without_clobbering_key():
+    g = dense_retrieval_skeleton()
+    before = g.get("negatives/external-mining")
+    # a dynamically-grown duplicate must not downgrade the curated key concept
+    g.ensure("negatives/external-mining")
+    assert g.get("negatives/external-mining") is before and before.key
+    # a genuinely new concept is added under its id-prefix axis
+    g.ensure("loss/brand-new")
+    assert "loss/brand-new" in g and g.axes_of("loss/brand-new") == ("loss",)
+
+
+# --------------------------------------------------------------------------- #
+# Heuristic tagging (lineage, not surface token)
+# --------------------------------------------------------------------------- #
+
+def test_heuristic_tagger_keys_on_lineage(tmp_path):
+    st = fold(_store(tmp_path, _DCL_RUN).read_all())
+    g = dense_retrieval_skeleton()
+    tags = tag_nodes_heuristic(st, g)
+    # all five dcl-* variants collapse onto the ONE decoupled-contrastive family (not five leaves)
+    for nid in range(5):
+        assert "loss/decoupled-contrastive" in tags[nid]
+    assert {"loss/decoupled-contrastive"} <= set().union(*tags.values())
+
+
+def test_untagged_nodes_are_tracked(tmp_path):
+    st = fold(_store(tmp_path, [("mystery", "an approach with no matching alias here", 0.5)]).read_all())
+    g = dense_retrieval_skeleton()
+    cov = concept_coverage(st, g)
+    assert cov["experiments"] == 1 and cov["untagged"] == 1 and cov["tagged"] == 0
+
+
+def test_failed_nodes_still_count_as_experiments(tmp_path):
+    nodes = [("dcl-rdrop", "decoupled contrastive with r-drop", None),   # failed
+             ("dcl-temp", "dcl temperature", 0.8)]
+    st = fold(_store(tmp_path, nodes).read_all())
+    cov = concept_coverage(st, dense_retrieval_skeleton())
+    assert cov["experiments"] == 2   # a failed experiment is still effort spent in the region
+
+
+# --------------------------------------------------------------------------- #
+# Coverage analytics + the uncovered-region alarm
+# --------------------------------------------------------------------------- #
+
+def test_empty_run_is_all_zeros_and_fully_uncovered():
+    g = dense_retrieval_skeleton()
+    cov = concept_coverage(RunState(), g)
+    assert cov["experiments"] == 0 and cov["top_concept"] is None
+    assert cov["dominant_clique"] is None
+    # nothing touched -> every skeleton axis and every key region is uncovered
+    assert set(cov["uncovered_axes"]) == set(g.axes())
+    assert set(cov["uncovered_key"]) == set(g.key_concepts())
+    alarm = uncovered_regions(RunState(), g)
+    assert alarm["fired"] is True
+
+
+def test_dcl_run_fires_the_winning_region_alarm(tmp_path):
+    st = fold(_store(tmp_path, _DCL_RUN).read_all())
+    g = dense_retrieval_skeleton()
+    alarm = uncovered_regions(st, g)
+    assert alarm["fired"] is True
+    # the alarm names the EXACT regions the run never entered (§21.11 decisive signal)
+    for cid in ("negatives/external-mining", "negatives/false-neg-handling",
+                "distillation/teacher-distill"):
+        assert cid in alarm["uncovered_key"]
+    assert "0 coverage in {" in alarm["directive"]
+    # ... and the concentration is legible: DCL is the dominant lineage, loss is the busy axis
+    cov = concept_coverage(st, g)
+    assert cov["top_concept"]["frac"] >= 0.5
+    assert "loss" in cov["dominant_clique"]["axes"]
+    # loss is the busy axis; the winning-region negatives concept was never entered (only the weak
+    # in-batch variant may be — §21.11 notes those weak in-batch attempts, so we assert on the KEY concept)
+    assert cov["axis_touch"]["loss"] == 5
+    assert "negatives/external-mining" not in cov["first_touch"]
+
+
+def test_reached_regions_drop_out_of_the_alarm(tmp_path):
+    st = fold(_store(tmp_path, _BROAD_RUN).read_all())
+    g = dense_retrieval_skeleton()
+    cov = concept_coverage(st, g)
+    # the key regions are now touched
+    assert "negatives/external-mining" in cov["first_touch"]
+    assert "distillation/teacher-distill" in cov["first_touch"]
+    assert "negatives/external-mining" not in cov["uncovered_key"]
+    alarm = uncovered_regions(st, g)
+    # not every key region is covered (synthetic-queries still isn't), so with a curated key set the
+    # alarm still fires — but it no longer names the mining/distill/false-neg regions the run reached.
+    assert "negatives/external-mining" not in alarm["uncovered_key"]
+    assert "distillation/teacher-distill" not in alarm["uncovered_key"]
+
+
+def test_generic_skeleton_alarm_fires_on_untouched_axes(tmp_path):
+    # the universality path: a graph with NO curated key concepts (a custom task type) still alarms —
+    # it fires on entirely-untouched AXES rather than key concepts (the has_key=False branch).
+    from looplab.search.concept_graph import Concept, ConceptGraph
+    g = ConceptGraph([Concept("loss/x", axes=("loss",), aliases=("widget-loss",)),
+                      Concept("data/y", axes=("data",), aliases=("gizmo-aug",))], task_type="custom")
+    assert g.key_concepts() == []                       # no curated winning region
+    st = fold(_store(tmp_path, [("t", "tune the widget-loss", 0.5)]).read_all())
+    alarm = uncovered_regions(st, g)
+    assert alarm["fired"] is True                       # data axis untouched -> alarm fires
+    assert "data" in alarm["uncovered_axes"] and "loss" not in alarm["uncovered_axes"]
+    # and once every axis is touched, it goes quiet
+    st2 = fold(_store(tmp_path, [("t", "widget-loss", 0.5), ("u", "gizmo-aug data", 0.6)]).read_all())
+    assert uncovered_regions(st2, g)["fired"] is False
+
+
+def test_first_touch_records_earliest_experiment_index(tmp_path):
+    st = fold(_store(tmp_path, _BROAD_RUN).read_all())
+    cov = concept_coverage(st, dense_retrieval_skeleton())
+    # external mining first appears at node index 1 (the 2nd experiment), distillation at index 2
+    assert cov["first_touch"]["negatives/external-mining"] == 1
+    assert cov["first_touch"]["distillation/teacher-distill"] == 2
+
+
+def test_multiparent_concept_counts_toward_all_its_axes(tmp_path):
+    # a single ema node touches BOTH regularization and training-schedule via the DAG multi-parent edge
+    st = fold(_store(tmp_path, [("ema", "exponential moving average weight averaging", 0.7)]).read_all())
+    cov = concept_coverage(st, dense_retrieval_skeleton())
+    assert cov["axis_touch"].get("regularization") == 1
+    assert cov["axis_touch"].get("training-schedule") == 1
+
+
+def test_analytics_are_deterministic(tmp_path):
+    st = fold(_store(tmp_path, _DCL_RUN).read_all())
+    g = dense_retrieval_skeleton()
+    assert concept_coverage(st, g) == concept_coverage(st, g)
+    assert uncovered_regions(st, g) == uncovered_regions(st, g)
+
+
+def test_top_concept_tie_break_is_deterministic(tmp_path):
+    # one node touching several concepts that all tie at count 1: the winner must be the lexicographically
+    # SMALLEST concept id, not whichever the (hash-seed-randomized) frozenset iteration yielded first.
+    nodes = [("x", "r-drop and ema and dropout and temperature and mnr loss", 0.5)]
+    st = fold(_store(tmp_path, nodes).read_all())
+    cov = concept_coverage(st, dense_retrieval_skeleton())
+    tied = sorted(cov["concept_touch"])   # all count 1
+    assert cov["top_concept"]["id"] == tied[0]   # smallest id wins the tie, deterministically
+
+
+def test_heuristic_tagger_respects_word_boundaries(tmp_path):
+    # 'schema' must not fire the 'ema' alias; 'include' must not fire 'dcl' — raw-substring false positives
+    st = fold(_store(tmp_path, [("x", "redesign the database schema and include indexes", 0.5)]).read_all())
+    tags = tag_nodes_heuristic(st, dense_retrieval_skeleton())
+    assert tags[0] == frozenset()
+
+
+def test_report_renders_alarm(tmp_path):
+    st = fold(_store(tmp_path, _DCL_RUN).read_all())
+    rep = concept_report(st, dense_retrieval_skeleton())
+    assert "UNCOVERED-REGION ALARM" in rep
+    assert "negatives/external-mining" in rep
+
+
+# --------------------------------------------------------------------------- #
+# LLM tagger (optional richer path) — degrade-don't-block + growth
+# --------------------------------------------------------------------------- #
+
+class _TagClient:
+    """Fake LLM tagger: returns a fixed concept-id set (tool_call only)."""
+    def __init__(self, ids):
+        self.ids = ids
+        self.calls = 0
+
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        return {"concept_ids": self.ids}
+
+    def complete_text(self, messages):
+        return "not json"
+
+
+class _BadClient:
+    def complete_tool(self, messages, json_schema):
+        raise RuntimeError("boom")
+
+    def complete_text(self, messages):
+        return "nope"
+
+
+def test_llm_tagger_assigns_and_grows(tmp_path):
+    st = fold(_store(tmp_path, [("x", "some run", 0.5)]).read_all())
+    g = dense_retrieval_skeleton()
+    client = _TagClient(["negatives/external-mining", "negatives/brand-new-family"])
+    tags = tag_nodes_llm(st, g, client, grow=True)
+    assert client.calls == 1
+    assert "negatives/external-mining" in tags[0]
+    # a proposed new id was grown into the graph under its axis
+    assert "negatives/brand-new-family" in g
+    assert "negatives/brand-new-family" in tags[0]
+
+
+def test_llm_tagger_degrades_to_heuristic_on_failure(tmp_path):
+    # a node whose text DOES match a heuristic alias: on LLM failure it must fall back to that tag
+    st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
+    g = dense_retrieval_skeleton()
+    tags = tag_nodes_llm(st, g, _BadClient())
+    assert "loss/decoupled-contrastive" in tags[0]   # heuristic fallback, harness never crashed
+
+
+ROOT = Path(__file__).resolve().parents[1]  # sanity: importable package layout
+assert ROOT.exists()
