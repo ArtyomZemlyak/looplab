@@ -136,6 +136,7 @@ class ConfirmPhaseMixin:
             async with self._write_lock:
                 self.store.append(EV_BEST_CONFIRMED,
                                   {"node_id": None, "significant": False,
+                                   "search_epoch": state.search_epoch,
                                    "generations": generations})
             return
 
@@ -212,7 +213,8 @@ class ConfirmPhaseMixin:
             if not self._confirmation_snapshot_current(generations):
                 return
             self.store.append(EV_BEST_CONFIRMED, {
-                "node_id": chosen, "significant": significant, "generations": generations})
+                "node_id": chosen, "significant": significant,
+                "search_epoch": state.search_epoch, "generations": generations})
 
     async def _confirm_node(self, nd) -> None:
         """Operator-forced multi-seed confirmation of ONE node (force_confirm). Records the per-seed

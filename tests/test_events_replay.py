@@ -926,6 +926,44 @@ def test_best_confirmed_rejects_a_mixed_generation_candidate_snapshot(tmp_path):
     assert st.confirmed_done and st.best_node_id == 1
 
 
+def test_best_confirmed_stale_epoch_is_rejected(tmp_path):
+    """R1 epoch identity: a best_confirmed STAMPED with a search_epoch other than the current one is
+    rejected — an epoch-(N-1) confirmation can't authorize confirmed_done or the confirm-override in a
+    fresh epoch (the non-requeuing-reopen gap _generation_map_matches doesn't catch)."""
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)
+    # run is at epoch 0; a certificate stamped epoch 7 is stale -> dropped
+    s.append("best_confirmed", {"node_id": 0, "significant": True,
+                                "generations": {"0": 0, "1": 0}, "search_epoch": 7})
+    st = fold(s.read_all())
+    assert not st.confirmed_done
+    assert st.best_node_id == 1        # the mean pick stands; the stale confirm-override of #0 was dropped
+
+
+def test_best_confirmed_current_epoch_is_accepted(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)
+    s.append("best_confirmed", {"node_id": 0, "significant": True,
+                                "generations": {"0": 0, "1": 0}, "search_epoch": 0})
+    st = fold(s.read_all())
+    assert st.confirmed_done and st.best_node_id == 0     # current-epoch stamp -> override applies
+
+
+def test_best_confirmed_without_epoch_stamp_folds_byte_identically(tmp_path):
+    # additive/reader-defaulted: a legacy best_confirmed with NO search_epoch is treated as legacy-current
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    _n(s, 0, 5.0)
+    _n(s, 1, 1.0)
+    s.append("best_confirmed", {"node_id": 0, "significant": True, "generations": {"0": 0, "1": 0}})
+    st = fold(s.read_all())
+    assert st.confirmed_done and st.best_node_id == 0
+
+
 def test_new_candidate_after_best_confirmed_invalidates_completion(tmp_path):
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})

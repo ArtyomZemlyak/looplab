@@ -96,7 +96,7 @@ run-instance, and manifest boundaries.
 
 | Axis | Verdict |
 |---|---|
-| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, the reopen-search-epoch + subject-bound approval, several permission/path boundaries, and event-log repair landed. Full search-epoch stamping (promotion/finalization and per-epoch hidden holdout), complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
+| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, the reopen-search-epoch + subject-bound approval, the per-epoch freshly-hidden holdout, `best_confirmed` epoch-stamping, a single `SearchFitness` ordering owner, several permission/path boundaries, and event-log repair landed. Complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
 | **Code & tests** | **Substantial, disciplined, and green in validation CI.** The remediation series added focused regressions and the full suite passes for validation commit `89af408`; green examples do not prove the remaining interleavings, fail-open-lock behavior, object authorization, unpolled deadlines, or workspace identity. |
 | **Functionality** | **Broad, unevenly production-ready.** The default trust posture is mostly audit/off, temporal CV has no shipped caller, six adapters are synthetic/harness-oriented, and the isolated real-task path is under-validated. |
 | **Directions** | **Finish residual stabilization, then promote features through gates.** Offline discovery may continue, but live production activation still waits for the relevant identity, policy, budget, and provenance contracts. |
@@ -108,9 +108,10 @@ Four incomplete identity families explain much of the residual defect cluster:
    forced-operation, artifact, and cost effects are not all scoped to that generation, so P0-1 is partial.
 2. **`SearchEpoch`** — reopening a *finished* run now bumps `search_epoch` and re-opens confirmation and
    subject-bound approval for the new candidate set (`931c28b`), so an older champion no longer locks
-   selection. The residual is partial: holdout is not re-hidden per epoch, and promotion/finalization outputs
-   are not yet epoch-stamped, so a reopened run still scores against an already-disclosed holdout — P0-2
-   partial (§14.6).
+   selection. Holdout is now re-hidden per epoch (`e111bf5`, epoch-salted split) and `best_confirmed` is
+   epoch-stamped so a stale-epoch confirmation can't authorize selection (R1-b); the residual is the broader
+   identity family (run instances, event/evaluation IDs, request/subject revisions, transition validator,
+   append CAS on engine appends) — P0-2 partial (§14.6).
 3. **`RequestId` + `SubjectHash`** — permission resolution now uses pending→resolved CAS and centrally gates
    MCP/background kill (`87dfc7e`), but approvals, aborts, forced operations, and promotion/finalization
    decisions are not all bound to the exact request and subject revision.
@@ -445,7 +446,7 @@ fail-closed behavior so safety does not depend on an operator remembering this l
 | Workstream | Primary finding IDs | Status | Scope | Depends on | Exit gate |
 |---|---|---|---|---|---|
 | **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **in progress · release blocker** | **Landed:** known corrupt-tail refusal/repair, permission CAS and MCP/kill gates, stage/path/timeout containment, tri-state workdir audit, named leakage fixes, strategy-param guard, event partition, aggregate-context fix. **Remaining:** recheck divergence under writer coordination, fail on unsupported locks, default-deny route/object scopes, one ToolSpec/effect inventory, global PathPolicy/fresh artifacts, calibrated advisory policy, durable wakeup | none | every known and newly identified bypass is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
-| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, full search-epoch stamping of promotion/finalization plus a per-epoch hidden holdout, request/subject revisions on all forced/control requests, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
+| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`); per-epoch freshly-hidden holdout (`e111bf5`); `best_confirmed` epoch-stamping so a stale-epoch confirmation can't authorize selection, with `run_finished` (`after_seq` CAS) + `finalization_finished` (`finished`-check) already reopen-safe (R1-b); a single `SearchFitness` ordering owner (R1-a). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, request/subject revisions on all forced/control requests, transition validator, append CAS on engine appends, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
 | **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §14.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
 | **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **in progress · stabilization blocker** | **Landed:** ablation cost accounting, explicit background tree kill/wait, finite timeout/path fixes, `--mount` Windows grammar. **Remaining:** multidimensional reserve-before-spawn BudgetLedger; session-owned deadline watcher; bounded logs/readers/regex; stable cross-platform input mapping; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is settled once; no orphan tree after kill; memory/disk bounds; real Windows/Linux matrix green |
 | **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · post-stabilization polish — only versioned TrustEvidence binding is release-relevant; see §6.6** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
@@ -1357,7 +1358,7 @@ to **partial** in the follow-on increment at `931c28b` — see §14.6):
 | Finding | Status | Landed containment | Residual exit gate |
 |---|---|---|---|
 | P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
-| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§14.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
+| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§14.6); per-epoch freshly-hidden holdout (`e111bf5`); `best_confirmed` epoch-stamped (R1-b) | subject/`expected_seq` on all forced/control requests; broader run/event/evaluation identity |
 | P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
 | P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
 | P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
@@ -1503,12 +1504,17 @@ locking, or ownership); a partial version risks breaking the replay/single-write
 rests on, so they are sequenced as dedicated workstreams with their own verification rather than shipped as
 risky slices:
 
-1. **P0-2 residual — full epoch stamping + epoch-specific hidden holdout.** The increment re-opens the
-   confirmation/approval gates but does not yet stamp `search_epoch` onto promotion/finalization outputs, nor
-   give a reopened epoch a *freshly hidden* holdout partition. A reopened run re-scores new candidates on the
-   *same* holdout that was already disclosed at the first finish — comparable and non-crashing, but no longer a
-   truly unseen signal (an "already-seen exam"). Fix: reserve a still-hidden per-epoch partition (or start a
-   fresh run) and carry the epoch on every promotion/finalization record. (§14.2 P0-2 residual.)
+1. **P0-2 residual — full epoch stamping (mostly landed).** The epoch-specific *freshly-hidden* holdout
+   landed (`e111bf5`): `_holdout_indices` salts the partition by `search_epoch`, the engine rebuilds
+   `_holdout_idx` on every epoch, and a reopen clears the disclosed holdout so a new epoch re-scores on an
+   unseen split — no "already-seen exam" (see the ✅ P0-2 row in §14.5). Promotion/finalization epoch
+   stamping is also now covered: `best_confirmed` carries `search_epoch` and the fold rejects a stale-epoch
+   confirmation, so an epoch-(N-1) certificate can't authorize `confirmed_done`/the confirm-override in a
+   fresh epoch (R1-b); `run_finished` is already protected by its `after_seq` CAS and `finalization_finished`
+   by its `st.finished`/`last_finish_seq` check (a reopen clears `finished`), so both reject the stale-reopen
+   race without a separate epoch stamp. What remains of the identity family is the broader R1 work below
+   (run instances, event/evaluation IDs, request/subject revisions on all forced/control requests, a
+   transition validator, append CAS on the engine's own domain appends, a typed payload/upcaster registry).
 2. **P1-1 zombie run (open).** The resume/finalize handoff on the server has a race that can leave a run
    marked live with no engine driving it. Fix: an atomic durable command intent plus an
    `EngineSupervisor`/reconciler that owns lock acquisition and pending wakeup, so clients never assemble the

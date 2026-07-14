@@ -1230,6 +1230,16 @@ def _on_proxy_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.proxy_skipped.append(nid)
 
 def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # R1 epoch identity: a confirmation certificate authorizes selection state (confirmed_done + the
+    # confirm-override in _select_best), so it must be bound to the candidate-set epoch it was computed
+    # against. A best_confirmed STAMPED with a stale epoch — e.g. an in-flight confirm pass that appends
+    # AFTER a cross-writer reopen bumped search_epoch — is rejected, so an epoch-(N-1) confirmation can't
+    # authorize state a fresh epoch N must re-decide. Additive/reader-defaulted: a missing stamp (legacy
+    # logs / manual events) is treated as legacy-current, so old logs fold byte-identically. The
+    # requeuing-reopen case is already caught by _generation_map_matches; this closes the NON-requeuing
+    # reopen (no disclosed holdout), which leaves generations unchanged but still bumps the epoch.
+    if "search_epoch" in d and d.get("search_epoch") != st.search_epoch:
+        return
     if not _generation_map_matches(st, d):
         return
     nid = _coerce_node_id(d)
