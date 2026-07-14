@@ -75,6 +75,7 @@ _LAYOUT = {
     "env_inspect": "tools",
     "errors": "core",
     "eval_dispatch": "engine",
+    "fitness": "core",
     "eval_stages": "engine",
     "eventstore": "events",
     "evaluate": "engine",

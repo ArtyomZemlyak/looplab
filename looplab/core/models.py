@@ -7,6 +7,11 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
+# The single direction-comparator owner. fitness.py imports nothing from models (duck-typed on nodes),
+# so this top-level import is cycle-free and keeps RunState.is_better a one-hop delegation, not a
+# per-call import (R1/SearchFitness).
+from looplab.core.fitness import is_better as _is_better
+
 
 class NodeStatus(str, Enum):
     pending = "pending"      # node_created seen, not yet evaluated (resume re-entry point)
@@ -650,4 +655,6 @@ class RunState(BaseModel):
         )
 
     def is_better(self, a: float, b: float) -> bool:
-        return a < b if self.direction == "min" else a > b
+        # Delegates to the single comparator owner (core/fitness.py) so "better" has ONE spelling
+        # across the fold, the policies and this convenience primitive (R1/SearchFitness).
+        return _is_better(self.direction, a, b)

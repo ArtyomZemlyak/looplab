@@ -62,8 +62,11 @@ def rank_by_metric(state: RunState, nodes) -> list:
     """Rank `nodes` best-first by observed metric with an id tie-break — descending when
     the run maximizes, ascending when it minimizes. The one ranking idiom every policy
     (and the diversity archive) shares; nodes must carry a non-None `metric` (the
-    feasible/evaluated pools policies rank always do)."""
-    return sorted(nodes, key=lambda n: (n.metric, n.id), reverse=(state.direction == "max"))
+    feasible/evaluated pools policies rank always do). Delegates to the SearchFitness owner
+    (core/fitness.py) so search-side ranking has ONE spelling shared with the fold's promotion
+    pick (R1/SearchFitness)."""
+    from looplab.core.fitness import SearchFitness
+    return SearchFitness(state.direction).rank(nodes)
 
 
 # --------------------------------------------------------------------------- #

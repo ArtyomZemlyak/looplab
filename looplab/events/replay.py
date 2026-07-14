@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
+from looplab.core.fitness import SearchFitness
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
                      hypothesis_id, run_setup_key)
 from looplab.events.types import (
@@ -1711,22 +1712,18 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # Exclude nodes with no usable metric: a hand-edited / BYO-script node_evaluated event can carry
     # metric=null yet fold to status=evaluated, and comparing None vs a float in the chooser below
     # would raise TypeError and brick every re-fold/resume. Such a node simply can't be "best".
-    evaluated = [n for n in st.evaluated_nodes()
-                 if n.feasible and n.id not in flagged and n.id not in st.aborted_nodes
-                 and n.robust_metric is not None]
+    # R1/SearchFitness: the eligibility predicate, the ranked-scalar keys and the direction chooser are
+    # OWNED by core.fitness.SearchFitness — one spelling shared with rank_by_metric / holdout_topk, so a
+    # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
+    fit = SearchFitness(st.direction)
+    evaluated = [n for n in st.evaluated_nodes() if fit.eligible(n, flagged, st.aborted_nodes)]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
         # this is identical to ranking all evaluated nodes by their single metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
         pool = confirmed if confirmed else evaluated
-        chooser = min if st.direction == "min" else max
-
-        def _key(n):
-            v = n.robust_metric
-            return (v, n.id)
-
-        st.best_node_id = chooser(pool, key=_key).id
+        st.best_node_id = fit.best(pool, key=fit.selection_key).id
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
@@ -1748,8 +1745,7 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     if st.holdout_select and evaluated:
         hpool = [n for n in evaluated if n.holdout_metric is not None]
         if hpool:
-            chooser = min if st.direction == "min" else max
-            st.best_node_id = chooser(hpool, key=lambda n: (n.holdout_metric, n.id)).id
+            st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch
     # that authorizes publication of some OTHER algorithmic best. Honor it last; if the chosen node is
