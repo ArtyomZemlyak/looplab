@@ -17,7 +17,9 @@
 | **Current implementation disposition** | §6.3 and §14.2 of this document |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
-| **Last verified** | 2026-07-12 |
+| **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7) |
+| **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -28,13 +30,20 @@ criteria, subordinate to this plan) ·
 [13-external-works-analysis-2026-07.md](13-external-works-analysis-2026-07.md) ·
 [ROADMAP.md](ROADMAP.md) · [BACKLOG.md](BACKLOG.md) · [guide/memory.md](guide/memory.md).
 
-**What this is.** One structural document in three parts. **Part I** gives the strategic verdict on
+**What this is.** One structural document in four parts. **Part I** gives the strategic verdict on
 functionality, code, and architecture without duplicating doc 16's line-level issue ledger. **Part II**
 turns that verdict into a dependency-ordered delivery plan with migration rules, release gates, metrics,
 and decision criteria. **Part III** re-evaluates five candidate feature directions — a curated
 Frameworks/Libs knowledge base, NapMem, SciResearcher, research-exploration breadth, and LLM-as-a-Verifier —
 against the
-stabilization plan rather than treating them as immediately shippable flags.
+stabilization plan rather than treating them as immediately shippable flags. **Part III-B** (added 2026-07-14)
+extends the same code-level, gated treatment to a five-system DS & deep-research agent cohort — EvoDS, the
+AgenticDataBench/DataSciBench benchmark pair, ResearchStudio-Idea, and Claude Science (§§15–20). **Part IV**
+(added 2026-07-14) grounds the Part III/§11 narrowing thesis in the first measured LoopLab case — the 67-node
+`rubertlite` run — and derives the research-loop-quality levers it exposes (a hierarchical hypothesis/theme
+taxonomy, seed-time asset ingestion, a graded novelty/critic layer, a capability-expansion operator; §21,
+D1–D7), keeping the Part III gates. Part IV's D5 taxonomy and Part III-B's §16 skill-coverage taxonomy are
+two views of one substrate; D3's failed-direction re-examination pairs with §17's distance-from-seed signal.
 
 **Method and evidence discipline.** The revision combines a fresh code/doc cross-check, direct inspection
 of the current state/event/security/execution seams, commit-by-commit review of the 23-commit remediation
@@ -57,7 +66,10 @@ automatic production rollout.
 **Contents.** Part I — §1 executive summary · §2 snapshot · §3 functionality · §4 code & tests · §5
 architecture. Part II — §6 development directions and target architecture · §7 dependency-ordered delivery
 plan. Part III — §8 Frameworks/Libs KB · §9 NapMem · §10 SciResearcher · §11 exploration breadth ·
-§12 LLM-as-a-Verifier · §13 composition and recommendation · §14 verification and sources.
+§12 LLM-as-a-Verifier · §13 composition and recommendation · §14 verification and sources. **Part III-B (added
+2026-07-14)** — §15 EvoDS · §16 DS-agent benchmarks (AgenticDataBench/DataSciBench) · §17 ResearchStudio-Idea ·
+§18 Claude Science · §19 cohort composition · §20 addendum sources. **Part IV (added 2026-07-14)** — §21 the
+`rubertlite` narrowing case and the hypothesis/theme taxonomy (D1–D7).
 
 ---
 
@@ -747,7 +759,10 @@ scoping decision (§6.4/§6.6), not deferred bug-fixing.
 | **§12 · LLM-as-a-Verifier** | **Adopt as a calibrated ADVISORY verifier** on open-ended surfaces (best-of-N ranking, foresight, novelty, memo quality) and a candidate trust-detector architecture; never override the ground-truth metric. | High — fills the "no first-class Evaluator" (§3) and research-loop-quality (§6.6) gaps; strictly advisory. | **M** integration / gated | advisory/audit; open-ended; logprob-capable backends |
 
 Nothing here replaces the core or outranks R0–R4. Offline corpus design and evaluation harnesses may proceed
-early; production steering waits for identity, provenance, tool policy, budget, and trustworthy promotion.
+early; production steering waits for identity, provenance, tool policy, budget, and trustworthy promotion. The
+2026-07-14 DS & deep-research agent cohort (EvoDS, AgenticDataBench/DataSciBench, ResearchStudio-Idea, Claude
+Science) is analyzed in **Part III-B (§§15–20)**, which carries its own TL;DR table and extends the §13
+experiment order.
 
 ### 8. Frameworks/Libs knowledge base (shared KB)
 
@@ -1313,7 +1328,9 @@ flowchart LR
 | 8 | Self-distillation | v2 trajectory audit + data governance + isolated training budget | separate approved research proposal | default: deferred |
 
 The recommended near-term output of Part III is therefore **evaluation harnesses and governed schemas**, not
-default-on web, a production pyramid, or a global diversity policy.
+default-on web, a production pyramid, or a global diversity policy. Part III-B §19 extends this consolidated
+order with orders 9–14 for the 2026-07-14 DS/deep-research cohort (offline-first; the live reuse/adapter/
+steering surfaces keep the same R-gates and mode-gating).
 
 ### 14. Verification, corrections, and evidence status (reconciled 2026-07-12)
 
@@ -1513,3 +1530,989 @@ risky slices:
 and bounded execution. Preserve the existing event-log projection and Engine compatibility surface. Treat
 KB, grounded web research, memory navigation, SciResearcher, and quality-diversity as gated experiments whose
 promotion depends on measured correctness, trust, reproducibility, and cost.
+
+---
+
+## PART III-B — JULY-14 ADDENDUM: DS & DEEP-RESEARCH AGENT COHORT (2026-07-14)
+
+*As of executable revision `bf18f4c` · Added 2026-07-14 · Normative for: the §§15–20 feature hypotheses only ·
+Extends (does not supersede) Part III §§8–14 · Companion: §13 composition and §14 evidence discipline.*
+
+This addendum applies the same code-level, **gated-hypothesis** treatment as Part III §§8–14 to a five-system
+cohort surfaced in a 2026-07-14 AI/agents digest — the **deep-research** and **data-science research** agents
+the requester asked to evaluate for LoopLab synergy. Each item below is a hypothesis with prerequisites and an
+evaluation gate, not a commitment to enable a flag or import a framework; the composition with the existing
+lanes is §19, and nothing here outranks R0–R4 or flips a default.
+
+**Evidence status (read first).** The five systems were located and cross-checked by web search on 2026-07-14;
+**`arxiv.org` `/abs`, `/html`, and `/pdf` all returned HTTP 403 from this environment**, so every paper account
+below is **abstract-level and author-reported** (the same limitation §12 records for arXiv 2607.05391). Every
+one is a **data-science / data-agent / research-ideation** result (EvoDS, the two benchmarks, ResearchStudio-Idea)
+or a **biomedical product** (Claude Science) — **transfer to LoopLab's ML-engineering loop is an inference, not a
+claimed result.** By contrast, every LoopLab code claim in this addendum was traced to the current repository and
+independently re-verified by an adversarial pass (per section: 17 / 19 / ~17 / ~18 / 17 code claims confirmed;
+the few citation imprecisions it found are corrected here). Statements keep the doc's three-way classification —
+**code-confirmed**, **externally-evidenced**, **recommendation/inference**.
+
+**TL;DR verdict (addendum).** *(The main Part III TL;DR is at the top of Part III; these four rows are the
+July-14 cohort. §19 shows how they attach to §§8–13 and extends the §13 experiment order with orders 9–14.)*
+
+| Item | Verdict | Synergy | Effort | Mode |
+|---|---|---|---|---|
+| **§15 · EvoDS (ASA + adaptive context)** | **Port the ASA protocol, not the RL.** Add an offline execution-validation gate before candidate→promoted and a read-path status filter (two write-only states already exist); A/B per-step context relevance against the existing oldest-first compaction baseline. | Reinforces §8 (skill lifecycle) + §9 (context); two of three ASA verbs already skeletoned and validation closes the KB-poisoning gap. RL contribution unreproducible (ADR-7); author-reported, DS-domain. | **M** | offline harness/all; live reuse gated |
+| **§16 · AgenticDataBench + DataSciBench** | **Build a DataSciBench-style host-side TFC grader as the first-class Evaluator §3 names, plus an AgenticDataBench operational-pattern taxonomy — both pure OFFLINE harnesses.** A real external DS-adapter inherits `mlebench_real` prep/license/Docker isolation and is R1-R4-gated. | Strongest concrete map to §3; TFC replaces the self-reported metric without reopening reward-hack; taxonomy is a coverage yardstick for the §8 skill store. DS/tabular + B2B-fintech domain; benchmark availability author-reported. | **M** harness / **L** isolated adapter | offline/ungated; fixed-metric; live adapter gated |
+| **§17 · ResearchStudio-Idea (Scoop-Check / IdeaSpark)** | **Build Scoop-Check as the ADVISORY collision/distance-from-seed signal §11 wants** — over a versioned external corpus, computed offline/shadow first (recorded embedder digest), feeding proposal cues + the audit-only board, never node selection. Mode-gate to open-ended. | Directly supplies §11's missing distance-from-seed machinery; `hybrid_merge` RRF is the ready retriever. Competitive-not-superior novelty confirms novel≠good — pair with foresight quality (Heuresis). External corpus = injection/poisoning surface (§8/§10). | **M–L** | explicit open-ended; grounding OFF by default |
+| **§18 · Claude Science (artifact provenance)** | **Treat as a provenance-validation precedent for R2, not a platform.** Seal the existing read-time-joined slices (events + spans + workdirs + fingerprints) into one exportable RunManifest/ArtifactManifest; advance the mtime freshness gate toward digest binding. | Affirms the event-log-as-truth design; no new mechanism to port — LoopLab already practices the discipline. Biomedical product; figure-centric surface has no LoopLab producer; connectors out of scope. | **M** (folds into R2) | offline enrichment; R2-gated |
+
+### 15. EvoDS — self-evolving DS agent (skill acquisition + adaptive context)
+
+**What it is** ([arXiv:2606.03841](https://arxiv.org/abs/2606.03841); *Self-Evolving Autonomous Data Science
+Agent with Skill Learning and Context Management*, Yang/Liu/Ning/Liu, submitted 2026-06-02, accepted KDD'26 —
+the arXiv `/abs`, `/html`, and `/pdf` endpoints all returned **HTTP 403** from this environment, so the
+account below is **abstract-level and author-reported**, and the transfer to LoopLab's ML-engineering loop is
+an **inference**, not a claimed result). EvoDS argues that existing data-science agents are limited by
+**static action sets** and **no principled long-horizon context management**, which hinders reuse of
+cross-task experience and reliable multi-stage pipelines. It proposes two strategies: **(1) Autonomous Skill
+Acquisition (ASA)** — the agent **synthesizes, validates, and reuses** executable skills, turning episodic
+experience into a growing procedural action set; and **(2) Adaptive Context Management** — per-step selection
+of what to retain over a long horizon. Both are trained via **agentic reinforcement learning**; the domain is
+tabular/DS agents, not ML-engineering on a metric harness.
+
+Read against LoopLab, EvoDS is unusual among the Part III items because **two of its three ASA verbs already
+exist in the tree** (synthesize + reuse) and its context-management strategy names a mechanism LoopLab ships a
+strong deterministic baseline of. The genuinely novel-to-us contribution is the middle verb — **skill
+VALIDATION** — plus a trust lifecycle, which is the same `candidate→reviewed→invalid` governance gap §8
+already flags for KB notes. The RL contribution is **out of scope** by ADR-7 (backend-agnostic; a strong model
+backs a STEP, never the loop), exactly as with §9's GRPO navigation policy and §10's SFT/RL self-training.
+
+#### Relation to LoopLab — the skill *synthesize→reuse* pipeline exists; *validate* and a lifecycle do not (code-verified)
+
+LoopLab already runs a real episodic→procedural distillation pipeline, so ASA is not an import but an
+**extension of existing machinery**:
+
+- **Synthesize.** At run-end finalization (`lessons_distill.py:137-148`), for every hypothesis with
+  `status=='supported'` and `best_delta>0`, the engine calls `write_auto_skill` (`memory.py:411-446`), which
+  drafts an `auto-<slug>.md` card with `name/description/provenance:auto/status/source_task/fingerprints`
+  frontmatter. The body comes from `distill_skill_body` (`lessons_distill.py:263-294`): an LLM distils a short
+  card + a **minimal snippet** from the winning node's code (`code_node.code[:4000]`), degrading to a
+  code-free evidence summary when there is no client or no code.
+- **Generalize (a partial "validate" proxy).** A card flips `candidate→promoted` only when the same slug
+  recurs from a **different task fingerprint** (Jaccard `< 0.6`) or was already promoted (`memory.py:429-431`)
+  — a statistical cross-task recurrence heuristic, **not** empirical re-validation of the skill's code.
+- **Reuse.** `SkillTools` (`skills.py:76-89`) exposes `list_skills` (all cards as `name: description`,
+  **unranked, unfiltered, no status/similarity gate**) and `use_skill` (full body by exact name). Reuse is
+  therefore **context injection of a recipe card**, not extension of the callable action set — the exact
+  contrast with ASA, whose reuse installs an **executable** skill. One `SkillTools` is wired over both
+  hand-written `skills_dir` and `<memory_dir>/skills` (`tasks.py:447-459`); `skills_dir` defaults `None`
+  (`config.py:730`), so auto cards surface once written while the hand-written tier is off by default.
+
+The load-bearing gap: **what LoopLab validates is the node's metric gain under the REAL eval, not the
+persisted snippet.** `replay.py:1876-1908` defines `supported` as a hypothesis whose evidence node advanced
+the run SOTA under the real eval (record-setter, sticky) or beat its feasible parent — a ground-truth signal,
+but it attaches to the **node**, while the distilled card is a **fresh LLM abstraction of the winning code
+that is never executed or checked** — the only re-validation reminder ("validate with the eval before trusting
+it") is prose in the code-free *fallback* summary (`lessons_distill.py:270-271`); the promoted LLM-distilled
+card that is actually reused (returned at `lessons_distill.py:291-292`) carries no such reminder at all. And
+the read path is status-blind: `_parse_skill` (`skills.py:22-35`) extracts
+only `name`+`description` and drops `status/provenance/fingerprints`, so a one-task un-run `candidate` is
+surfaced with equal prominence to a cross-task `promoted` card. There is **no `invalid`/retire state and no
+forgetting** — a skill later refuted is never removed. This is precisely the §8 KB-lifecycle hole; skills are
+marginally ahead (two write-only states) but functionally in the same hole, and lack the lesson store's
+hygiene (`filter_contradicted`, `consolidate_lessons`, `lesson_rank_key`).
+
+On the **Adaptive Context Management** side, LoopLab already ships bounded, LLM-summarizing context management
+in every tool-using persona — a stronger deterministic baseline than most Part III papers assume. Each turn
+`drive_tool_loop` (`tool_loop.py:163`) re-sends the full `messages` list, and before the LLM call
+(`tool_loop.py:306`) compacts in place: `compact_history` (`context_budget.py:115`) keeps the system head +
+last 3 turns verbatim and LLM-summarizes the stale middle, or `truncate_history` (`context_budget.py:37`)
+middle-truncates deterministically; every tool result is capped at `RESULT_CAP=4000`. `context_budget_chars`
+defaults to 1M chars (`config.py:579`), `agent_auto_summary=True` (`config.py:627`), wired universally via
+`loop_opts_from_settings` (`tool_loop.py:649`), with a coarser cross-phase brief `summarize_phase`
+(`tool_loop.py:622`) and the curated always-on working set `_state_brief` (`roles.py:304`) above it. But every
+budget is **character-based** (a ~4-char/token proxy, so the true trigger drifts) and the policy is **fixed
+and position-based** (oldest-first middle, keep head + last N) — there is **no importance/relevance/recency
+scoring**, which is the exact delta versus EvoDS's per-step "adaptive" selection.
+
+#### Integration seams
+
+| Paper piece | LoopLab seam | Change |
+|---|---|---|
+| ASA · synthesize | `write_auto_skill` (`memory.py:411-446`) + `distill_skill_body` (`lessons_distill.py:263-294`), triggered `lessons_distill.py:137-148` | Already present; capture the winning node's executable env/inputs alongside the snippet so a validation harness can re-run it |
+| ASA · **validate** (the missing verb) | new **offline** harness between `distill_skill_body` and the `candidate→promoted` flip (`memory.py:429-431`) | Execute the distilled snippet against a held-out replay of its source task; assert **executability** + a re-validation delta; advance `candidate→reviewed` only on pass — never touch the live loop |
+| ASA · reuse + a read-path status gate | `_parse_skill` (`skills.py:22-35`), `list_skills`/`use_skill` (`skills.py:76-89`) | Extend the reader to surface `status`, rank by fingerprint-Jaccard/task-similarity, and filter `candidate`/`invalid` — mirror the lesson store's `lesson_rank_key`/`filter_contradicted` |
+| Trust lifecycle | `write_auto_skill` frontmatter + a central review ledger (shared with §8) | Add an `invalid`/retire transition and a `candidate→reviewed→invalid` ledger; auto cards enter `candidate`, only an authorized review reaches the trusted tier |
+| Skill hygiene (dedup/contradiction) | `hybrid_merge.consolidate` (RRF; already shared by lessons/board) | Cluster near-duplicate skills and adjudicate conflicting techniques, which today both persist unranked |
+| Adaptive context (importance scoring) | compaction dispatch (`tool_loop.py:306`) + `compact_history` (`context_budget.py:115`) + `compressor_model` slot | A/B a relevance/recency-scored keep policy and token-based budgets against the current oldest-first, char-based baseline — deterministic/prompt-guided, **not** learned |
+
+#### Complications
+
+- **Skill poisoning (the sharpest new risk).** The promoted artifact is an **un-run LLM abstraction** of the
+  winning code (`distill_skill_body`), which can be non-runnable, hallucinated, or drifted from the actual
+  winning node — yet it is offered for reuse (and injected into Developer context) with no execution check.
+  This is a KB-poisoning surface of the §8 class, made worse because reuse pastes the card straight into an
+  agent that writes code against it. The validation harness must gate promotion, and reuse must stay
+  data-only (never let a card grant tool authority; cf. OWASP
+  [prompt injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) /
+  [excessive agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/)).
+- **Validation ≠ correctness.** A general reusable skill has **no single ground-truth metric**, so an offline
+  harness can only assert executability + a held-out-task replay delta — never general correctness. Any
+  LLM-as-verifier scoring here stays advisory (§12) and mode-gating holds: **never override the ground-truth
+  metric** to bless a skill, and never let a `dataset`-style self-reported metric (reward-hackable by
+  construction) stand in for a held-out grader.
+- **Backend-agnosticism (ADR-7).** EvoDS's core contribution is agentic RL over skill-use and context policy;
+  LoopLab cannot reproduce the learned policy, only a **prompt/deterministic approximation** whose value must
+  be proven offline. State this as a hard architectural boundary, identical to §9's GRPO and §10's SFT/RL — a
+  TODO it is not.
+- **Domain transfer.** EvoDS is DS/tabular and author-reported at abstract level (arXiv 403 here); LoopLab's
+  toy→dataset→repo→MLE-bench ladder is a different task shape, so the ASA/context **protocol** transfers, the
+  reported gains do not.
+- **Adaptive-context char/token drift.** Any importance-scored policy still rides on the char-proxy budgets
+  (`context_budget_chars`, `RESULT_CAP`); a real token count is a prerequisite for calibrated relevance
+  trade-offs, and there is no shared budget ledger (the R3 BudgetLedger §9 wants) across the four
+  uncoordinated context mechanisms.
+
+#### Evaluation gate
+
+Both arms are **pure offline harnesses — ungated by R0–R5** (they never touch the live loop's state safety),
+but each must clear a measure-first bar before any read-path change. Note the split: only the *measurement* is
+ungated — **shipping** the status-aware, contradiction-filtered retrieval (or a scored context policy) into the
+live Developer context is itself an R0–R5-gated live-path change, because it alters what enters the agent
+mid-run and carries the injection surface below. **Skill validation:** on a frozen set of
+auto-distilled cards, execute each distilled snippet in a held-out replay of its source task and record
+executability rate, re-validation delta against the recorded node metric, and drift between the snippet and
+the actual winning code; promote the `candidate→reviewed` gate + status-aware retrieval only if reused
+`reviewed` skills raise implementation success (or lower incorrect-API rate, §8's metric) at a declared
+token/latency ceiling, with **zero** un-run cards reaching the trusted tier. **Adaptive context:** on frozen
+long-horizon tool-loop transcripts, A/B the current oldest-first char-based compaction against a
+relevance/recency-scored, token-budgeted policy and a deterministic planner, measuring downstream task success
+and evidence-coverage loss versus tokens/calls saved. **Stop-when:** the validation harness shows distilled
+snippets do not reliably re-run (keep skills as prose recipes, not reusable actions), or the scored context
+policy adds cost without a practical correctness/coverage gain (retain the deterministic baseline).
+
+#### Synergy — HIGH conceptual overlap; reinforces §8 + §9, adds a real skill-validation/poisoning gap
+
+EvoDS is the closest external precedent to machinery LoopLab **already runs**: the synthesize→reuse skill
+pipeline and a strong deterministic context-management baseline both exist in-tree. Its lasting contribution
+for us is naming what LoopLab is **missing** — the **validate** verb and a `candidate→reviewed→invalid` skill
+lifecycle — which is the same governance gap §8 identifies for KB notes and the same read-path
+status/provenance discipline §9 wants for memory. **Recommend:** build the offline skill-validation harness
+now (execute-before-promote + status-aware, contradiction-filtered retrieval), fold its lifecycle into the §8
+KB review ledger, and A/B a relevance-scored context policy against the shipped baseline; keep the agentic-RL
+policy out of scope, keep reuse data-only, and never let a skill's metric claim displace the ground-truth
+eval.
+
+### 16. AgenticDataBench + DataSciBench — DS-agent evaluation standards
+
+**What they are.** Two 2026 data-science-agent benchmarks, grouped here because their value to LoopLab is
+the same kind (evaluation infrastructure), not a live loop feature. **DataSciBench**
+([arXiv:2502.13897](https://arxiv.org/abs/2502.13897); THUDM, Tsinghua + Caltech; *Findings of ACL 2026*; repo
+[github.com/THUDM/DataSciBench](https://github.com/THUDM/DataSciBench)) proposes a **Task-Function-Code (TFC)**
+framework that scores each **code-execution outcome** against precisely-defined metrics plus **programmatic
+rules**, with 25 aggregated functions over 519 ground-truth test cases, evaluated across 23 LLMs. **AgenticDataBench**
+([arXiv:2607.01647](https://arxiv.org/abs/2607.01647); Jul 2026) is a 15-vertical-domain data-agent benchmark
+— including 5 real-world **B2B fintech** use cases — with fine-grained ground-truth labels, and it defines
+"**data-science skills**" as recurring data-centric operational patterns (e.g. "Handling Missing Data") whose
+**count quantifies benchmark coverage** (schema inspection, joins, cleaning, visualization, business-context
+reasoning). Evidence status: DataSciBench is peer-reviewed at a venue, but the arXiv page was **unreachable
+from this environment** (HTTP 403), so the TFC spec here is **abstract-level**; AgenticDataBench is
+**author-reported** (Jul 2026) with benchmark availability, harness, and license **unconfirmed**. Both are
+DS/tabular (and, for AgenticDataBench, fintech-B2B) domain — transfer to LoopLab's toy→MLE-bench
+ML-**engineering** ladder is an **inference**, not a reported result.
+
+#### Relation to LoopLab — the strongest map onto §3's missing Evaluator, but grading is scattered
+
+The doc's most concrete hook is that **§3 marks the "Evaluator" role ⬜** — "no first-class Evaluator;
+verification is a distributed subsystem." That distribution is code-verified: grading is spread across
+`host_score` (`runtime/command_eval.py:266`), the out-of-process MLE-bench grader
+`grade_in_subprocess` (`adapters/mlebench_grade.py:39`), the engine dispatcher
+`HoldoutGrader.apply_host_grade` (`engine/holdout.py:51`), and the precedence rule where a `host_grader` score
+**replaces** any self-reported metric (`engine/eval_dispatch.py:200`, comment lines 197-199). There is no
+single `EvaluationService`/`Evaluator` object a TFC grader could register into — it would add a `kind` branch
+in `apply_host_grade` plus a new grade module, mirroring MLE-bench.
+
+**Vector (b) — DataSciBench TFC as a first-class programmatic Evaluator primitive.** LoopLab already has the
+*deterministic host-side grader* pattern TFC needs: `host_score` is dependency-free, data-never-code, and
+runs host-side over flat prediction/label lists. But it is **only 5 scalar scorers** (rmse/mse/mae/accuracy/
+error_rate) over **one** flat list (`command_eval.py:266`); TFC's ~25 aggregated functions with per-function
+programmatic rules over **multi-artifact** outputs (files written, schema conformance, cleaning outcomes,
+visualizations) is **net-new host code**. The closest existing "programmatic rule" surface is the
+`constraints`/`metrics` readers (`command_eval.py:_violations:523`; violations are *computed* at `:727` and the
+best-selection exclusion happens downstream in the engine) — named declarative pass/fail bounds — but they
+**gate best-selection**, they do not aggregate a per-function TFC score. Crucially,
+the only code-authored grader path, the `adapter` reader (`command_eval.py:read_metric:107`), is deliberately
+**trust-gated**: agent-authored, human-ratified/frozen only, and explicitly forbidden for
+`cross_check`/`metrics`/`constraints`. A TFC grader must therefore be **operator/host-authored** (a new
+`host_grader` kind), never agent-authored, to stay inside the trust boundary — and it must live on the
+**fixed-metric** side where the grader **is** truth. This is precisely where it **complements §12**: the
+DataSciBench-style TFC grader supplies *deterministic ground-truth rules* for fixed-metric tasks, whereas the
+§12 logit-expectation verifier stays an *advisory continuous score* for open-ended, no-ground-truth surfaces
+(idea/plan/memo quality, best-of-N among drafts). One never displaces the other, and neither overrides the
+held-out metric.
+
+**Vector (a) — a real tabular / "AgentDS-style" TaskAdapter with a private grader.** AgenticDataBench's
+fine-grained ground-truth labels want the same held-out-grader machinery `mlebench_real` already implements:
+`host_grader()` returns a scorer descriptor and the candidate writes a submission the host scores against a
+private answer key **never copied into the workspace** (`adapters/mlebench_real.py:host_grader:141`), staged
+behind a licensing/isolation gate (`_public_dir:106` raises with a `mlebench_prep` instruction and "accept the
+competition rules first", `assets:113` capped by `_MAX_ASSET_BYTES = 512MB` at `:124`). A tabular AgentDS-style
+adapter plugs into `_KINDS` (`adapters/tasks.py:82`) plus the `host_grader`/`eval_spec` optional hooks
+(`TASK_OPTIONAL_HOOKS:74`) — but it **cannot reuse `DatasetTask`**, which self-reports its own metric and is
+reward-hackable by construction (`adapters/dataset_task.py` module docstring, the TRUST-BOUNDARY CAVEAT at
+~L11-16, redirects to `repo`/`mlebench_real` for the "agent never authors its own metric" guarantee). So this vector inherits the
+**exact external/infra gate** §6.5 puts on "Real MLE-bench publication" (R1-R4 + a real isolated adapter +
+preregistered pilot): a `mlebench_prep`-style prepare+license+Docker-isolation pipeline that **does not exist**
+for any non-Kaggle dataset, and the 5 fintech B2B domains are very likely proprietary. The **dormant**
+`trust/cv.py::Evaluator` Protocol + `purged_walk_forward`/`consistent_cv` (`:55/:35/:59`, complete and tested
+but with only `cv_summary` live at `:65`) is the leakage-controlled temporal-CV seam such a DS split would
+finally consume.
+
+**Coverage taxonomy (ties to §15/§8).** AgenticDataBench's "coverage = number of data-science skills" maps
+onto the skill store (§15) and the curated KB (§8), but is **not computable today**: `search/coverage.py::coverage_signal`
+(`:50`) is a deliberately embedding-free, fold-derived measure of **hypothesis-space breadth** (theme
+entropy, dominant-theme fraction, operator spread) — a **name collision** with "skill coverage", not the same
+axis — and skills are untagged free-form (§15), so no schema links a run's activity to a named operational-pattern
+taxonomy. A curated taxonomy could seed the near-empty hand-written skill tier (§15) and yield an offline
+coverage KPI, but a **fixed taxonomy that steers proposals** re-imports the §11 narrowing risk (Heuresis:
+steering diversity does not by itself expand the quality-novelty frontier), so any coverage metric must be a
+**monitoring/audit** read, never a selection driver.
+
+#### Integration seams
+
+| Paper piece | LoopLab seam | Change |
+|---|---|---|
+| TFC programmatic-rule grader (25 functions, ground-truth) | `runtime/command_eval.py::host_score:266` + `engine/holdout.py::apply_host_grade:51` | Add a `kind:"datascibench"` branch + a host-authored `adapters/datascibench_grade.py` mirroring `grade_in_subprocess:39`; multi-artifact/file/schema/viz rules are net-new host code, operator-authored (not the trust-gated `adapter` reader) |
+| First-class Evaluator abstraction | the scattered graders behind §3's ⬜ + `trust/cv.py::Evaluator:55` (dormant) | Introduce one `EvaluationService`/`Evaluator` these grade modules register into; the R4 SearchFitness/EvaluationService contract §6.5 names is the home; keep the fold-side `host_grader` precedence (`eval_dispatch.py:200`) |
+| Held-out-labelled real DS dataset | new `_KINDS` entry (`tasks.py:82`) + `host_grader`/`eval_spec` hooks (`TASK_OPTIONAL_HOOKS:74`), modeled on `mlebench_real` | New adapter with a private grader + `mlebench_prep`-style prepare/license/Docker-isolation pipeline; **not** a `DatasetTask` reuse (self-reported metric is reward-hackable) |
+| Leakage-safe DS splits | `trust/cv.py::purged_walk_forward:35`/`consistent_cv:59` (tested, no live caller) | Wire the dormant splitter behind the adapter's `eval_spec`; record immutable split IDs so a hidden set cannot be reused |
+| "Coverage = #skills" taxonomy | skill store (§15) + curated KB facets (§8) + `search/coverage.py:50` | Add a **named** operational-pattern taxonomy + a skill-coverage read-model **separate** from the existing breadth `coverage_signal`; audit-only, never a proposal steer |
+
+#### Complications
+
+- **Domain transfer is load-bearing.** Both benchmarks are DS/tabular (AgenticDataBench half-fintech-B2B), not
+  ML-engineering repo edits; TFC's rule surface and the 15 verticals may not exercise LoopLab's real-work paths
+  (`repo`, `mlebench_real`). Classify any adoption as **externally-evidenced** for the *pattern*, never as a
+  claimed LoopLab result — and the arXiv record could not be verified here.
+- **Mode-gating is mandatory (fixed-metric vs open-ended).** A TFC grader belongs on the **fixed-metric** side
+  where the host grader is truth and **must never be overridden** (the same reward-hack/leakage vector the
+  trust layer exists to close). The §12 advisory verifier stays on the open-ended side; conflating the two
+  would let an LLM score bless a submission — exactly the boundary `eval_dispatch.py:200` enforces.
+- **Trust boundary on grader authorship.** TFC rules must be **host/operator-authored**; routing them through
+  the agent-authored `adapter` reader (`command_eval.py:107`) would breach the frozen-module trust gate.
+- **Licensing / isolation / poisoning for the real-data vector.** Fintech B2B data is likely proprietary and
+  needs the accept-the-rules + answer-key-outside-workspace + untrusted-Docker-tier discipline
+  (`mlebench_real._public_dir:106`); ingested external tables are an injection/poisoning surface
+  ([OWASP prompt injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)) and inherit §8's
+  `candidate→reviewed→invalid` lifecycle requirement and §10's "external content is adversarial/nondeterministic".
+- **Backend-agnostic (ADR-7).** These are benchmarks/harnesses, not models — nothing to train or ship, so the
+  **offline** TFC-grader harness and coverage metric are **ungated**; only the **live real-data adapter**
+  (network/isolation/private-grader) is R0-R5-gated exactly like real MLE-bench (§6.5).
+- **Name collision on "coverage".** `coverage_signal` is hypothesis-space breadth, not skill coverage; a
+  planner must not conflate them, and a steering taxonomy re-imports the §11 narrowing pathology.
+
+#### Evaluation gate
+
+Measure first, offline, ungated. Stand up the DataSciBench-style TFC grader as a **frozen** host-side harness
+and score LoopLab's existing graders/agents against its labelled cases — reporting per-function pass rate,
+false-clean rate on protected inputs, added latency/cost, and whether the TFC verdict agrees with the task's
+own ground-truth metric where both apply. For the real-data vector, treat it as the §6.5 "real isolated
+adapter" lane: build one AgentDS-style adapter with immutable split IDs and a private grader behind the
+`mlebench_prep` licensing/isolation pipeline, and run a **preregistered limited pilot** (confidence intervals,
+cost, failures, holdout discipline). **Promote** the TFC grader as a fixed-metric Evaluator primitive only if
+it improves correctness measurement at a declared cost ceiling and **never** overrides the held-out metric;
+**promote** the real adapter only after R1-R4 plus isolation/leakage tests pass. **Stop/defer** if the domain
+does not transfer to LoopLab tasks, if data licensing/isolation cannot be cleared, or if a coverage taxonomy
+starts steering proposals rather than merely auditing them.
+
+#### Synergy — MODERATE-HIGH as evaluation infrastructure, gated, not a live feature
+
+Of the Part III items, DataSciBench's TFC is the most concrete answer to §3's "no first-class Evaluator" gap
+that fits LoopLab's hard rules — a deterministic, host-authored, ground-truth grader that **complements** the
+§12 advisory verifier along the fixed-metric/open-ended seam rather than competing with it, and that reuses
+the answer-key-outside-workspace trust model `mlebench_real` already ships. AgenticDataBench contributes a
+candidate real-DS adapter target and a skill-coverage vocabulary that ties into §15/§8. But every high-value
+piece is **evaluation infrastructure**, not a change to the live loop: the TFC harness and coverage metric are
+ungated offline work; the real fintech adapter inherits the full R0-R5 + isolation + preregistered-pilot gate
+of real MLE-bench (§6.5). **Recommend:** build the TFC grader + skill-coverage harness offline now (no new
+safety surface); pursue the real tabular adapter only as a separately-gated §6.5 lane; never enable either as a
+default-on live feature, and never let a programmatic rule or a coverage taxonomy override the ground-truth
+metric or steer proposals.
+
+### 17. ResearchStudio-Idea — evidence-grounded research ideation
+
+**What it is** ([arXiv:2607.04439](https://arxiv.org/abs/2607.04439); NTU + Microsoft Research + NUS +
+CFAR/A\*STAR, part of MS ResearchStudio, Jul 5 2026 — the arXiv `/abs`, `/html`, `/pdf` pages all returned
+HTTP 403 from this environment, so everything below is **author-reported**, abstract-level, and drawn from the
+ML-conference-ideation domain; transfer to LoopLab's code-experiment loop is an **inference**, not evidence). A
+reusable **skill suite** for research ideation built from **1,947 ICLR/ICML/NeurIPS papers (2021-2025)**, from
+which the authors mine **31 recurring ideation sub-patterns** consolidated into **15 reusable ideation
+patterns**. Three named skills compose the suite: **Paper-Search** (multi-source literature search),
+**Scoop-Check** (a **prior-art COLLISION checker** that retrieves conflicting published work for a candidate
+idea), and **IdeaSpark**, an end-to-end pipeline that evaluates evidence readiness, reconstructs research
+context, identifies bottlenecks, **selects a pattern**, instantiates candidate directions, **retrieves
+colliding prior work**, performs **outcome-informed auditing** (against accept/reject outcomes of prior work),
+and renders an **idea card**. The reported result is honest and modest: a blind automated judge scored
+IdeaSpark's proposals **stronger than baselines while keeping COMPETITIVE — explicitly not superior —
+novelty**.
+
+#### Relation to LoopLab — the pipeline already exists, scattered; two stages are missing
+
+LoopLab already runs a near 1:1 analog of IdeaSpark's *downstream* half, wired as an audit-only lane that never
+touches node selection. The stages map cleanly onto existing seams:
+
+- **Evidence grounding / context reconstruction / bottleneck ID** ↔ `DeepResearcher.research`
+  (`agents/deep_research.py:128`): a run-wide agentic "think hard" step that breaks the review into 2-4
+  sub-questions over the state brief and emits **one** `ResearchMemo`, recorded audit-only as
+  `research_completed` (never enters the search DAG).
+- **Candidate directions** ↔ `_MemoOut.recommended_directions` (`agents/deep_research.py:39`) →
+  `ResearchCadenceMixin._record_deep_research` (`engine/research_cadence.py:99-139`): the top-5 directions
+  fan out to **one standing `EV_HINT`** (the same channel the Researcher reads) and, when
+  `track_hypotheses` (default True, `config.py:329`), **one `EV_HYPOTHESIS_ADDED` per direction** onto the
+  OPEN board.
+- **Pattern-guided prioritization** ↔ `ForesightPanelResearcher._prioritize_board`
+  (`search/foresight.py:382`) + `rank` (`:101`): FOREAGENT predict-before-execute orders the open board by
+  expected payoff (`_hyp_order`, surfaced best-first by `_state_brief`, `roles.py:304`, `[:5]` cap drops the
+  lowest-payoff). **This is the closest thing LoopLab has to IdeaSpark's pattern step — but it re-orders
+  already-generated ideas; it does not generate FROM a pattern catalogue.**
+- **Outcome-informed audit** ↔ partial, via `trust/verify.py::verify_memo` (`:108`, wired at
+  `research_cadence.py:108-118`): deterministic `check_claims` (do cited node ids exist) + a single-rubric
+  LLM pass grading a memo's claims against **its own within-run cited evidence**. This is
+  claim-grounding, **not** prior-art/outcome collision — a different purpose, not a substitute.
+- **Idea card** ↔ partial and scattered: the pieces (`ResearchMemo`, the hint channel, the hypothesis board,
+  foresight telemetry) exist but no single object carries readiness → pattern → candidate → collision-verdict
+  → audit.
+
+**The two genuinely missing stages are Paper-Search and Scoop-Check.** Paper-Search maps onto the
+grounded-research profile (**§10**): `LiteratureTools.arxiv_search` (`tools/literature.py:26`) is a
+single-source, `max_results=3`, arXiv-only tool, and both `literature_search` and `web_search` default **OFF**
+(`config.py:708 / :712`) — so IdeaSpark's evidence-grounding stage is dark in the default config, exactly as
+§10 intends. Scoop-Check has **no equivalent at all**: LoopLab's only "has this been done" check is
+`engine/novelty.py` (`_apply_novelty_gate:156`, `_llm_novelty_gate:70`, `_semantic_duplicate:47`), which is
+**strictly within-run dedup** ("already tried in THIS run", reading real nodes via tools) with zero retrieval
+of conflicting *external* prior work. And `coverage_signal` (`search/coverage.py:50`) is deliberately
+embedding-free (replay determinism) — it measures within-run theme concentration, not distance to any external
+corpus.
+
+That absence is precisely the lever **§11** names as unbuilt: the **distance-from-seed metric** (doc lines
+1124/1135/1152), whose seam §11 already locates at `engine/novelty.py` + Genesis/ingestion sources with the
+warning that "absence is *metric unavailable*, not permission to substitute distance-from-archive." **The key
+observation of this section: Scoop-Check IS a concrete precedent for that metric.** Both are the same
+primitive — score a candidate idea by retrieval against a **fixed external corpus** — and distance-from-seed
+≈ (1 − collision-score) over such a corpus. Scoop-Check demonstrates the corpus is buildable (1,947 papers)
+and supplies a collision-retrieval design, which LoopLab already has the substrate for: `hybrid_merge`'s RRF
+fusion of grep-lexical + BM25 + vector (`HybridIndex.candidates`, `search/hybrid_merge.py:92-118`) is exactly
+the retriever a collision-checker needs; today it is reached only through the write-path `consolidate` entry
+point (`hybrid_merge.py:246`) for lesson/hypothesis-board consolidation (`_maybe_merge_hypotheses`,
+`research_cadence.py:162`).
+
+#### Integration seams
+
+| Paper piece | LoopLab seam | Change |
+|---|---|---|
+| IdeaSpark evidence-grounding / bottleneck ID | `agents/deep_research.py:128` (`DeepResearcher.research`) | Add an explicit **evidence-readiness** pre-gate before the memo fires (today `deep_research_every=3` cadence, `config.py:718`, is the only trigger); record readiness as a memo field |
+| Candidate directions → tracked board | `research_cadence.py:99-139` (`_record_deep_research`) | Already built (hint + `EV_HYPOTHESIS_ADDED`); attach a **collision verdict** field per direction before the board splice |
+| Pattern-guided generation | curated **ideation-pattern corpus** (§8-style; new) + `roles.py::_state_brief` | Seed the 15 mined patterns as a small, **governed** corpus (candidate→reviewed→invalid, §8); surface top patterns into the Researcher brief — **generate** from pattern, not just re-rank |
+| Scoop-Check prior-art collision | `engine/novelty.py:156` + `HybridIndex.candidates` (RRF, `search/hybrid_merge.py:92-118`) | Add an **advisory** collision score over a versioned external seed corpus; feed `proposal_cues` + the audit-only board, **never** node selection |
+| Distance-from-seed metric (§11) | `engine/novelty.py` + a versioned seed corpus | Record seed-corpus **digest + embedder/model/version + score event** (§11's replay-safety rule); compute **offline/shadow first** |
+| Paper-Search (multi-source) | grounded-research profile (§10): `tools/literature.py:26`, `config.py:708/712` | Keep **OFF by default**; treat any external source as adversarial (injection/egress); multi-source only under the §10 profile |
+| Outcome-informed audit | `trust/verify.py:108` (`verify_memo`); the §12 continuous verifier | Extend the claim-grounding auditor toward outcome/collision auditing; keep audit-only, calibrated |
+| Idea-card artifact | `ResearchMemo` + board + foresight telemetry | Optional: render one auditable idea card carrying readiness→pattern→candidate→collision→audit (provenance bundle) |
+
+#### Complications
+
+- **External-content-is-adversarial (§10).** A seed corpus + retriever is an injection/poisoning surface
+  (OWASP). Paper-Search and the collision corpus stay OFF by default, gated on network egress, and any ingested
+  content needs the **candidate→reviewed→invalid lifecycle §8 wants** — the same governance the curated KB and
+  the ideation-pattern corpus require. The 15 patterns are literature-distilled, not run-distilled, so they are
+  a governance object, not a drop-in.
+- **Mode-gating is mandatory.** Collision/distance-from-seed is meaningful only in **open-ended** mode; on
+  fixed-metric tasks (`mlebench_real`, `dataset`) the held-out grader is truth and a novelty-vs-literature
+  signal must **never** touch the ground-truth metric or promotion path. Gate on an explicit objective
+  capability, not task kind — the same bar §11/§12 set.
+- **"Novel" ≠ "good" (§11 / Heuresis).** IdeaSpark's own result — stronger proposals at **competitive, not
+  superior, novelty** — directly *validates* §11's complication: a collision checker filters scooped ideas
+  without inflating novelty, so it must be **paired with the foresight quality estimate** (quality-diversity),
+  never used to maximize distance. Heuresis warns that steering diversity does not by itself expand the
+  quality-novelty frontier; a collision/distance signal is a monitoring + gated-A/B artifact, worthless as a
+  KPI until calibrated against semantic/citation/human clusters.
+- **Replay-safety.** §11's rule holds: a collision/distance score must be recorded as a provenance-stamped
+  **event** (with corpus digest + embedder version), never recomputed live inside the deterministic fold —
+  which stays embedding-free and I/O-free by invariant.
+- **Backend-agnosticism (ADR-7).** Nothing here needs training; the whole suite is a prompt/retrieval pattern,
+  which is the only form reproducible under ADR-7. Pattern selection is a heuristic/agentic step, not a learned
+  policy.
+- **Board linkage is fragile under paraphrase.** Evidence links a node to a board hypothesis by a
+  **normalized-statement** id (`hypothesis_id`, a lowercased/whitespace-collapsed slug+md5, `core/models.py:222-231`) —
+  so case/whitespace variants still link, but a genuine word-level paraphrase forks a **new** id (`replay.py:1766`
+  `_derive_hypotheses`; `_state_brief` therefore instructs "copy its statement EXACTLY", `roles.py:352`). Drift is
+  healed only LIVE by the agentic `_maybe_merge_hypotheses` pass (gated on a reflect client and board≥4), so
+  degraded/offline runs leave paraphrased directions unlinked. A pattern/collision pipeline that generates
+  reworded directions worsens this unless it emits stable ids.
+- **Domain transfer.** Author-reported, ML-conference-ideation domain, blind-judge — transfer to LoopLab's
+  code-experiment ideation is inference, and the whole stage is a declared open-ended-mode capability, not a
+  default-on path.
+
+#### Evaluation gate
+
+Measure first, offline. Build the collision/distance-from-seed score as a **shadow** signal over a
+**pre-registered, frozen, versioned seed corpus** (digest + embedder/model/version recorded per §11), and on a
+frozen open-ended benchmark compare arms: (a) current reactive novelty gate, (b) + advisory collision score on
+`proposal_cues` + board, (c) + pattern-guided generation from the 15-pattern corpus, each paired with the
+foresight quality estimate. Report **quality, semantic/citation diversity, distance-from-seed,
+research-question novelty, collision precision/recall, trust violations, execution success, cost, and
+confidence intervals** — the §11 metric panel. **Promote** an arm only if it improves breadth/novelty by a
+practical threshold **without** a quality/trust/cost regression and never at the expense of ground truth;
+**stop** an arm early on reward-hack increase, collapse, injection detection, or budget overrun (charge every
+retrieval/verify call to the R3 budget the doc already wants). The pattern corpus and collision index are pure
+**offline analysis harnesses — ungated by R0-R5**; only turning the signal onto a **live** proposal path is
+gated (behind §10's grounded-research profile + open-ended mode + provenance).
+
+#### Synergy — HIGH for the open-ended lane, strictly gated
+
+This is the most direct external precedent in Part III for a lever LoopLab has already scoped but not built:
+Scoop-Check gives §11's **distance-from-seed** metric a concrete, demonstrated design, and LoopLab already
+owns almost all the downstream plumbing — the deep-research memo, the hint→board fan-out, foresight
+prioritization, the `hybrid_merge` RRF retriever that could *be* the collision engine, and coverage snapshots
+as the narrowing curve. The two missing stages (Paper-Search, Scoop-Check) are exactly the §10-gated,
+governance-heavy pieces the doc treats with caution, and IdeaSpark's honest "competitive-not-superior novelty"
+result is itself the evidence for §11's "novel ≠ good" discipline. **Recommend:** build the collision/
+distance-from-seed **shadow** signal and the governed 15-pattern corpus **now** (offline, no new safety
+surface), pairing every collision score with the foresight quality estimate; adopt it as an **advisory**
+proposal-time cue and audit-board annotation **only** in open-ended mode, on a versioned corpus, behind the §10
+profile, if it moves the quality-novelty frontier within budget; and keep it forever off the fixed-metric
+promotion path.
+
+### 18. Claude Science — research workbench + artifact provenance
+
+**What it is** ([anthropic.com/news/claude-science-ai-workbench](https://www.anthropic.com/news/claude-science-ai-workbench);
+a **product announcement, not a paper** — no benchmark, no reproducible method, so everything below is
+vendor-described, not evidence). An application-layer "research OS" over Claude models that unifies literature
+review, data analysis, computing workflows, and scientific writing in one environment. Two features are
+load-bearing for LoopLab: (1) **artifact provenance** — every figure ships with the exact **code + environment
++ a plain-language description of the steps + the full message history** that produced it; and (2) **multi-agent
+computational-review templates** — sub-agents read thousands of papers, extract each one's central claim and key
+quantitative finding, construct a narrative arc, and write the review section by section. It ships 60+
+skills/connectors querying UniProt/PDB/Ensembl/ClinVar/ChEMBL/GEO. **Domain caveat, load-bearing:** it is a
+**biomedical** workbench (genomics/single-cell/proteomics/structural biology/cheminformatics), wet-lab-adjacent
+and figure-centric — not ML-engineering with a never-overridden ground-truth metric. Per §6.4 ("adopt the
+pattern, not the platform"), only the **provenance principle** transfers; the connectors, the figure surface,
+and the productized review platform do not, and ADR-7 (backend-agnostic, we ship/train no model) rules out the
+"research OS" framing as an architecture.
+
+#### Relation to LoopLab — this validates a direction LoopLab already committed to, rather than exposing a gap
+
+Unusually among Part III items, Claude Science's headline feature is something LoopLab already **practices as a
+discipline**: the append-only `events.jsonl` is the single source of truth, and every domain event is stamped
+with the active span's `(trace_id, span_id)` (`eventstore.py:407-412`, `current_ids()`), which joins the
+research DAG to the per-operation `spans.jsonl` trace (`core/tracing.py`). From that join the UI reconstructs
+each of the four provenance components Claude Science bundles: the **message history** (`traceview.py`
+`build_conversation:299` + `hydrate_inputs:233` rebuild the de-duplicated, delta-decoded verbatim LLM input per
+node — surfaced at `serve/routers/runs.py` `node_conversation:442`/`node_trace:332`), the **code** (`node.code`
++ the parent-diff in `node_detail:212`), the **environment** (`orchestrator._env_fingerprint:1723` pins
+python/platform/key-lib versions and `_dirty_inputs:1748` enumerates uncommitted repo bytes as a bounded diff
+*digest*, both recorded in `EV_RUN_STARTED:804`; the content-addressed `_setup_manifest:1706` digest of
+config+workspace+data provenance is bound into `EV_SETUP_FINISHED` at `orchestrator.py:872`, not run_started),
+and the **"output was produced by THIS run" integrity property** (the freshness gate,
+`command_eval.py::_file_is_fresh:93`, commit `78fbfc3`, rejects a metric-source file whose mtime predates eval
+start). So the substrate the announcement productizes is largely present, offline and files-as-truth. The
+review-template pattern maps onto `deep_research.py::DeepResearcher.research:128` (sub-question decomposition
+over the state brief) and the writing surfaces `serve/report.py::generate_report:122` (per-run conclusion-first
+narrative, audit-only `report_generated`, never into the DAG) + `serve/scope_report.py` (cross-run portfolio
+synthesis); the unified-workbench surface maps onto `serve/` (the read-only `node_conversation`/`node_trace`/
+`artifacts` API + the embedded assistant) and the **docs 18-20 unified-DS-workspace** direction. **But the
+alignment is directional, not complete:** the R2 sealed objects — `RunManifest` / `InputSnapshot` /
+`ArtifactManifest` — are **design-only** (grep across `*.py` returns zero hits; §6.3 marks R2 "Remaining"; only
+the P0-3/P0-5 slices landed — `7603114` (content-addressed setup manifest) / `cbcde25` (environment identity) —
+and the cheap freshness gate `78fbfc3` is a separate R0 pull-forward). Today's provenance is **read-time-joined across three
+separate stores** (events / spans / node workdirs) by the UI projections, **not one sealed, digest-bound,
+exportable bundle**; the freshness gate is an mtime heuristic (`_FRESH_EPS=2.0s`), not a per-artifact content
+digest; `mlflow_export.py:21` logs champion+code but drops the message history and env fingerprint; and LoopLab
+emits **metrics/predictions/`solution.py`, not figures**, so the literal "every figure ships with…" surface has
+no producer here.
+
+#### Integration seams
+
+| Paper/product piece | LoopLab seam | Change |
+|---|---|---|
+| Per-artifact provenance bundle (code + env + steps + message history) | R2 `RunManifest`/`InputSnapshot`/`ArtifactManifest` (design-only) over `EV_RUN_STARTED` (`orchestrator.py:804`) + `_env_fingerprint`/`_setup_manifest`/`_dirty_inputs` (`:1723`/`:1706`/`:1748`) | **Offline enrichment, not a live-path change:** seal the already-recorded slices into one digest-bound, exportable object per champion result; keep the event log canonical and the bundle derived/rebuildable |
+| "Output created by THIS evaluation" integrity | freshness gate `command_eval.py::_file_is_fresh:93` (`78fbfc3`) | Upgrade the mtime heuristic to a per-artifact content digest bound into `ArtifactManifest` (§6.6 already names this a follow-up to the cheap gate); mtime stays the cheap first line |
+| Message-history reconstruction | `traceview.build_conversation:299` + `hydrate_inputs:233`; `serve/routers/runs.py::node_conversation:442` | Include the reconstructed conversation (or a stable reference to the span offsets, `span_index.py`) in the export bundle; do not re-embed heavy I/O |
+| Multi-agent computational-review templates | `deep_research.py::DeepResearcher.research:128` + `serve/report.py::generate_report:122` + `scope_report.py` | Optional: a claim+finding extraction template over run evidence; keep it synthesizing **internal** run data, never auto-ingesting external papers into a trusted index (§8) |
+| 60+ skills/connectors to external DBs | `tools/mcp_tools.py::McpTools:55`/`GatedMcpTools:128` (wired **assistant-only**, `serve/assistant.py:311`) + §8 KB | Any research-loop connector is a **new external surface** inheriting §10 network/injection gates and the §8 candidate→reviewed→invalid lifecycle; do not reach it from the autonomous loop without those |
+| Unified workbench UX | `serve/` read-only API + docs 18-20 unified-DS-workspace | Treat as a UX precedent for a shareable, provenance-carrying result view; no engine change |
+
+#### Complications
+
+- **Domain transfer is the dominant caveat.** Claude Science is biomedical, figure-centric, and external-DB-
+  grounded; LoopLab is ML/DS engineering with a **never-overridden ground-truth metric** and mandatory
+  fixed-metric-vs-open-ended mode-gating (§11/§12). The provenance *pattern* transfers; the connectors, the
+  figure pipeline, and the review-template product are out of scope and must not be smuggled in as requirements.
+- **Backend-agnosticism (ADR-7).** The "research OS over Claude models" framing is a platform, not a mechanism;
+  LoopLab routes every role through LiteLLM and ships no model. Adopt only the sealed-provenance discipline,
+  which is model-independent.
+- **Provenance is scattered, not sealed — and that is the actual work.** R2's `RunManifest`/`InputSnapshot`/
+  `ArtifactManifest` are the heavier, external-material-identity class §6.6 explicitly separates from the cheap
+  in-fold counters (input digests, environment, dirty bytes the pure `fold` cannot observe). Sealing must stay
+  an **offline, derived enrichment** so it never reopens the replay/idempotency invariants; the bundle is
+  rebuildable, never a second source of truth.
+- **No figure producer.** Do not build a figure-provenance surface with no figures; apply the discipline to the
+  artifacts LoopLab actually emits (metrics/predictions/`solution.py`/logs/champion).
+- **Connectors are an injection/poisoning surface.** MCP is assistant-only today and its exemplar connectors are
+  biomedical; wiring any external connector into the research loop inherits §10 (external content is
+  adversarial/nondeterministic, egress/injection risk, OWASP) and the §8 KB lifecycle — never auto-promote
+  retrieved external instructions into tool authority.
+- **It is a product, not a result.** There is nothing to reproduce and no benchmark; classify every claim here
+  as a **recommendation** that affirms the existing R2/event-log-as-truth direction, not as evidence for it.
+
+#### Evaluation gate
+
+There is no new algorithm to A/B — the measure-first question is whether **sealing** the existing provenance
+slices into one exportable, digest-bound bundle reduces reproduction friction enough to justify R2's cost.
+Build the seal as an offline harness (ungated, no new live surface): from a completed run's log + spans +
+workdirs, emit one `RunManifest`+`InputSnapshot`+per-eval `ArtifactManifest` for the champion and verify it
+**replays to the identical champion** under `looplab replay`. Report bundle size, rebuild latency, and whether
+a third party handed only the bundle can reproduce the result without the live run dir. Promote the sealing into
+R2 when a champion can be shipped as one sealed object that reproduces under replay and the per-artifact digest
+closes the false-clean window the mtime gate leaves open; **stop/defer** when the bundle merely duplicates the
+event log without added auditability or shareability. External connectors are a **separate** gate: they do not
+proceed until §10 network/policy/source-snapshot controls and the §8 candidate→reviewed→invalid lifecycle exist
+— and never into the autonomous loop before then.
+
+#### Synergy — validation of the R2 / event-log-as-truth direction plus a UX and connector-catalog precedent, not a feature to build into the loop
+
+This is the strongest *existing-design alignment* in Part III: LoopLab already carries the code + environment +
+message-history provenance Claude Science makes first-class, so the transfer is to **seal the scattered slices
+into the R2 manifest objects the doc already committed to** — low new-code risk, offline enrichment, no
+live-path activation, and it directly serves the §9 typed-provenance-edges direction and the §8–9 "R2
+provenance IDs" gate (a paraphrase of those seams, not a verbatim §9 quote). The review-template
+and unified-workbench angles reinforce `deep_research`/`report`/`serve/` and the docs 18-20 workspace direction
+without a new mechanism. Its connector catalog is a precedent, not an import: any external connector inherits
+§10 and §8 and stays out of the research loop until those gates exist. **Recommend:** fold the sealed-provenance
+harness into the R2 workstream as an offline enrichment and a UX precedent; treat connectors as separately
+gated; claim nothing beyond "affirms the direction," since this is a biomedical product, not a portable result.
+
+### 19. How the July-14 DS/deep-research cohort composes with §§8-13
+
+The five July-14 systems (§15 EvoDS, §16 the AgenticDataBench/DataSciBench pair, §17 ResearchStudio-Idea,
+§18 Claude Science) do **not** open a new architecture. Read against §§8-13 they mostly **reinforce lanes the
+doc already has**: EvoDS lands on the §8 skill-KB lifecycle and the §9 adaptive-context/navigation question;
+the DS benchmarks land on the §3 "no first-class Evaluator" gap plus a new *external DS-adapter* harness lane;
+ResearchStudio-Idea's Scoop-Check is the concrete precedent for §11's still-unbuilt distance-from-seed signal
+and rides the §10 grounded-research profile; Claude Science is a **provenance-validation** precedent for the
+R2 manifest workstream, not a mechanism to port. The same discipline as §13 applies unchanged: **nothing here
+outranks R0-R4 and nothing here flips a default.** What *is* different is that this cohort is unusually
+offline-heavy — a TFC-style host-grader, a skill-validation harness, an operational-pattern taxonomy, and a
+shadow-computed collision score are all **pure offline analysis/harnesses (ungated)** and may proceed early;
+only the *live* reuse/steering/adapter surfaces inherit the R-gates.
+
+```mermaid
+flowchart LR
+    S[R0–R4 safety/provenance/services] --> P8[§8 governed KB pilot]
+    S --> P9[§9 navigation / adaptive-context A/B]
+    S --> P10[§10 grounded-research profile]
+    S --> P11[§11 coverage / distance-from-seed]
+    S --> P12[§12 verifier advisory]
+    E[§15 EvoDS · ASA + adaptive context] -. validate-before-promote .-> P8
+    E -. per-step relevance vs oldest-first compaction .-> P9
+    DB[§16 DS benchmarks · TFC + skill-coverage] --> EV[§3 first-class Evaluator]
+    DB -. offline harness .-> ADP[external DS-adapter lane]
+    RS[§17 ResearchStudio · Scoop-Check / IdeaSpark] -. collision ≈ 1−distance .-> P11
+    RS -. pattern-guided ideation .-> P10
+    CS[§18 Claude Science · artifact provenance] -. seal the slices .-> R2[R2 RunManifest / ArtifactManifest]
+    EV -. can host TFC rules .-> P12
+    ADP:::defer
+    T[EvoDS/NapMem RL policies]:::defer
+    classDef defer fill:#eee,stroke:#999,color:#666;
+```
+
+- **EvoDS reinforces §8 + §9; it does not add a lane.** Two of ASA's three verbs already exist —
+  **synthesis** (`write_auto_skill`, `memory.py:411-446`, triggered at `lessons_distill.py:137-148` for each
+  metric-advancing `supported` hypothesis) and **reuse** (`use_skill`/`list_skills`, `skills.py:76-89`); the
+  `candidate→promoted` flip (`memory.py:429-431`) is part of the synthesis/write side, not a third verb. The
+  missing verb is **validate**: `distill_skill_body`
+  (`lessons_distill.py:263-294`) emits a *fresh, un-run* LLM abstraction of the winning code, and
+  `_parse_skill` (`skills.py:22-35`) drops the status field so `list_skills` surfaces every card
+  identically — exactly the §8 candidate→reviewed→invalid poisoning gap. An **offline execution-validation
+  gate** before promotion plus a **read-path status filter** close most of the ASA gap without touching the
+  live loop. Adaptive context has the same shape: LoopLab already ships bounded, LLM-summarizing compaction
+  (`tool_loop.py:306`, `context_budget.py`) — EvoDS's per-step, importance-aware selection is a candidate
+  **A/B against that deterministic baseline**, never a replacement (the *measurement* is offline/ungated;
+  changing the live compaction policy or its default is an R0–R4-gated live-path change). Its RL contribution is off-limits by
+  ADR-7 (a strong model backs a STEP, never the loop); only the synthesize/validate/reuse *protocol*
+  transfers, and the transfer is an inference from an author-reported, DS-domain result (arXiv unreachable
+  here).
+
+- **The DS benchmarks reinforce §3 and add an offline external-adapter harness.** DataSciBench's Task-Function-
+  Code framing is the **strongest, most concrete** map to the §3 evaluator gap: a deterministic, host-side,
+  data-never-code grader is exactly the first-class Evaluator §3 marks ⬜, and it slots in as a new
+  `host_grader` *kind* dispatched by `holdout.apply_host_grade` (`holdout.py:51`) alongside a
+  `datascibench_grade.py` mirroring `mlebench_grade.grade_in_subprocess`. Because a TFC verdict **replaces**
+  the self-reported metric (`eval_dispatch.py:200`) it fixes reward-hackable adapters (`dataset_task`)
+  without reopening the reward-hack vector — and it is precisely the ground-truth path the §12 verifier must
+  never displace. AgenticDataBench contributes an operational-pattern **taxonomy** (a coverage yardstick for
+  the near-empty §8 skill store; note the name collision with `search/coverage.py`, which measures
+  hypothesis-space breadth, a different axis). Both the grader and the taxonomy are **pure offline harnesses,
+  ungated**; the existing `host_score` (`command_eval.py:266`) covers only 5 scalar scorers over one flat
+  list, so the multi-artifact TFC rule surface is net-new host code, and any *real external* DS dataset
+  (incl. the B2B-fintech verticals) inherits the full `mlebench_real` prep/license/Docker-isolation pipeline
+  — **that live adapter is R1-R4-gated** (§6.5).
+
+- **ResearchStudio-Idea reinforces §10 + §11 and is the concrete precedent §11 lacks.** Scoop-Check and §11's
+  distance-from-seed are — by this doc's reading, a design inference rather than a paper- or code-confirmed
+  identity — the **same primitive**: score a candidate idea by retrieval against a *fixed external corpus*.
+  Scoop-Check shows such a corpus is buildable (the suite was mined from 1,947 papers; its live
+  collision-retrieval corpus may differ) and supplies a collision-retrieval design, so distance-from-seed ≈
+  (1 − collision-score) is a proposed construction, not an established metric. LoopLab's only "has this been
+  done" check today is `engine/novelty.py` (the LLM gate `_llm_novelty_gate:70` plus the embedding gate
+  `_semantic_duplicate:47`, selected by `novelty_mode:171` — **within-run** dedup only), and `hybrid_merge`'s
+  RRF fusion (grep+BM25+vector, `HybridIndex.candidates`, `hybrid_merge.py:92-118`) is the ready retriever. Build it as an **advisory** signal, computed offline/shadow
+  first with a recorded embedder digest, feeding `proposal_cues` and the audit-only board — **never node
+  selection**, mode-gated to open-ended. Two guardrails carry over verbatim: IdeaSpark's own result is
+  *competitive, not superior* novelty, which **validates §11's "novel ≠ good"** — a collision filter must be
+  paired with the foresight quality estimate, not used to maximize distance (Heuresis: steering diversity
+  does not by itself expand the quality-novelty frontier); and its evidence-grounding presumes a live
+  literature corpus, which is the §10 grounded-research profile — **OFF by default**, an injection/poisoning
+  surface that needs the §8 lifecycle. Transfer to code-experiment ideation is an inference from an
+  ML-conference-idea, blind-judge result.
+
+- **Claude Science affirms the R2 provenance workstream; it ports no mechanism.** LoopLab already *practices*
+  the discipline the product ships: `eventstore.append` stamps every domain event with `(trace_id, span_id)`
+  (`eventstore.py:407-412`) joining to `spans.jsonl`; `traceview.build_conversation` reconstructs the
+  verbatim message history; `node.code` + the `run_started` env/workspace fingerprints
+  (`orchestrator.py:803,1723`; the content-addressed setup manifest rides `setup_finished`, `:872`) carry
+  code+environment; the 78fbfc3 freshness gate (`command_eval.py:93`)
+  enforces "this output was produced by THIS eval." But it is a **read-time join across three stores**, not
+  the single sealed digest-bound `RunManifest`/`InputSnapshot`/`ArtifactManifest` R2 targets (design-only
+  today; §6.3 lists them under Remaining). The transfer is **"seal the existing slices into one exportable
+  bundle" and advance the mtime gate toward digest binding** — a provenance-validation task that **folds
+  into R2**, not a standalone feature. Its biomedical, figure-centric surface has no LoopLab producer, and
+  its 60+ connectors are out of scope.
+
+- **The RL policies of EvoDS and NapMem stay deferred**, exactly as §13 defers self-distillation: ADR-7
+  forbids training the research loop, so any adaptive-context or skill-use gain must be a prompt-guided or
+  deterministic-planner approximation whose value is proven offline — the learned-policy contribution is a
+  hard architectural boundary, not a TODO.
+
+**Experiment-order UPDATE.** The rows below *extend* the §13 consolidated experiment order (they do not
+renumber orders 0-8; R0-R4 at order 0 is never bypassed). The offline-first items — the skill-validation
+harness, the TFC host-grader, the operational-pattern taxonomy, and the shadow collision score — sit
+alongside order 1 (baselines) and carry no new safety surface; the live reuse/steering/adapter surfaces
+inherit the same R-gates and mode-gating (fixed-metric vs open-ended, ground-truth metric NEVER overridden)
+the rest of Part III applies. The near-term deliverable of this cohort is therefore, again, **evaluation
+harnesses and governed schemas** — a validated-skill gate, a first-class programmatic Evaluator, a
+distance-from-seed diagnostic, and a sealed provenance bundle — not a default-on external corpus, a learned
+context policy, or a live DS-adapter.
+
+| Order | Experiment | Prerequisite | Promote when | Stop/defer when |
+|---|---|---|---|---|
+| 9 | Skill validate-before-promote harness (§15 EvoDS ASA) | frozen won-hypothesis skills; sandbox executor | distilled snippet executes + replays on a held-out task before candidate→promoted, AND `_parse_skill` reads a read-path status filter | snippet non-runnable/hallucinated rate high or reuse shows no gain — keep prose-only cards |
+| 10 | DataSciBench-style TFC host-grader as first-class Evaluator (§16 → §3) | R2 `host_grader` kind seam + `datascibench_grade.py`; frozen labelled cases | programmatic-rule score tracks ground truth on the frozen corpus and replaces the self-reported metric without reopening reward-hack | multi-artifact rule surface underperforms `host_score` or the corpus license is unclearable |
+| 11 | Operational-pattern taxonomy + skill-coverage KPI (§16 AgenticDataBench) | offline; tag schema over `SkillTools` | coverage KPI is reproducible and stays distinct from `search/coverage.py` breadth (name-collision guarded) | a fixed taxonomy steers proposals into the §11 narrowing pathology without a frontier gain |
+| 12 | Scoop-Check collision / distance-from-seed advisory (§17 → §11) | versioned seed corpus + recorded embedder digest; §8 KB lifecycle; explicit open-ended mode | collision/distance correlates with independent novelty judgement AND pairs with foresight quality with no score/trust regression | corpus poisoning/injection, or distance-maximization trades measured quality (Heuresis) |
+| 13 | Adaptive-context relevance-scoring A/B (§15 EvoDS) | existing compaction/`summarize_phase` baseline + R3 budget ledger | per-step importance selection beats oldest-first compaction on long-horizon nodes within the token/cost ceiling | no gain over deterministic position-based compaction; learned policy off-limits (ADR-7) |
+| 14 | Sealed provenance bundle — RunManifest/ArtifactManifest (§18 → R2) | R2 provenance workstream | one exportable object binds champion → exact code + env + message-history, and the freshness gate advances from mtime toward digest binding | folds into R2 — not promoted as a standalone feature |
+
+### 20. Addendum evidence status and sources (2026-07-14)
+
+Per-system verification, mirroring §14.5's scope discipline. **Code side:** every LoopLab file:line seam cited
+in §§15–19 was traced to executable revision `bf18f4c` and re-verified by an independent adversarial pass;
+citation imprecisions it surfaced (e.g. `hybrid_merge.py:246` is the `consolidate` entry, RRF fusion is
+`HybridIndex.candidates` at `:92-118`; the setup manifest rides `setup_finished` `:872`, not `run_started`;
+`dataset_task`'s trust caveat is the module docstring, not the class line) are corrected inline. **Paper side:**
+external results are author-reported and were confirmed only at abstract level because `arxiv.org` was
+unreachable (HTTP 403) from this environment — LoopLab applicability is an inference requiring the experiments
+in each Evaluation gate, exactly as §14.5 states for the §§9–12 papers.
+
+| System | Type | Domain | Primary source (verified via search; arXiv page 403 here) | Status |
+|---|---|---|---|---|
+| §15 EvoDS | paper (KDD'26) | DS/tabular agents | [arXiv:2606.03841](https://arxiv.org/abs/2606.03841) — *Self-Evolving Autonomous Data Science Agent with Skill Learning and Context Management* | author-reported |
+| §16 DataSciBench | paper (ACL'26 Findings) | DS agents | [arXiv:2502.13897](https://arxiv.org/abs/2502.13897) · [github.com/THUDM/DataSciBench](https://github.com/THUDM/DataSciBench) · [datascibench.github.io](https://datascibench.github.io/) | author-reported; repo/site public |
+| §16 AgenticDataBench | paper (Jul 2026) | DS agents (incl. B2B fintech) | [arXiv:2607.01647](https://arxiv.org/abs/2607.01647) — *A Comprehensive Benchmark for Data Agents* | author-reported; testbed/HF dataset stated, unconfirmed here |
+| §17 ResearchStudio-Idea | paper (Jul 2026) | ML-conference research ideation | [arXiv:2607.04439](https://arxiv.org/abs/2607.04439) · [github.com/microsoft/ResearchStudio](https://github.com/microsoft/ResearchStudio) | author-reported |
+| §18 Claude Science | product (not a paper) | biomedical research workbench | [anthropic.com/news/claude-science-ai-workbench](https://www.anthropic.com/news/claude-science-ai-workbench) | vendor-described; no benchmark/method |
+
+Security precedents reused from §14.4 apply unchanged to every live-path item here (external content is
+adversarial): OWASP [prompt injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/) and
+[excessive agency](https://genai.owasp.org/llmrisk/llm062025-excessive-agency/) for ingested tables, corpora,
+and connectors; the §8 `candidate→reviewed→invalid` lifecycle for any external material entering a trusted
+index. **Bottom line:** the near-term output of this cohort is the same as Part III's — **evaluation harnesses
+and governed schemas** (a validated-skill gate, a first-class programmatic Evaluator, a distance-from-seed
+diagnostic, a sealed provenance bundle) — not a default-on external corpus, a learned policy, or a live
+DS-adapter.
+
+---
+
+## PART IV — RESEARCH-LOOP QUALITY: THE `rubertlite` NARROWING CASE & THE HYPOTHESIS/THEME TAXONOMY
+
+*Added 2026-07-14. **Status:** design hypotheses (recommendation/inference), not committed flags. **Evidence
+base:** the completed 67-node `runs/rubertlite-dense-retrieval` run — the first in-the-wild instance of the
+§11 narrowing pathology on a real LoopLab task — reconstructed from its own `events.jsonl`. Two companion
+analyses hold the raw evidence: `runs/rubertlite-dense-retrieval/AGENT_SEARCH_ANALYSIS.md` (agent behaviour)
+and `data/vectorizer/dense-retrieval/LOOPLAB_RUBERT_ANALYSIS.md` (the ML task). This part extends §§9–12 with
+the levers that run exposed; it re-uses their evaluation discipline and mode-gating and adds no new release
+claim. Code anchors are code-confirmed at `369d6a6`; interventions are inference.*
+
+### 21. What the `rubertlite` run proves — and the levers it exposes
+
+#### 21.0 The case: §11's narrowing, observed — and refined
+
+§11 argued from external literature (arXiv 2605.27905) that agents narrow. The `rubertlite` run is the
+**first measured LoopLab instance**, and it sharpens the thesis in a way the paper could not:
+
+- **The trajectory.** 11 "new-best" jumps to node_48 (recall@100 0.8835), then **19 consecutive dead children
+  all expanded off node_48** — every one a variation of one loss recipe (DCL + R-Drop). Best-so-far never
+  moved again across the last 19 nodes. Greedy's IMPROVE arm targeting `state.best()` (`policy.py:286`) plus
+  the agentic Strategist repeatedly re-expanding the champion produced a **single-parent exploit fan**.
+- **The Strategist DID detect it.** From node_48 on, ~10 consecutive strategist memos say *"firmly
+  plateaued"/"near capacity ceiling"* and it flipped `novelty_stance` to `explore` several times — exactly the
+  reactive-after-collapse behaviour §11 predicts (`strategist.py:145-160`; `_rule_novelty_stance` fires only
+  after concentration ≥0.6–0.75). Detection worked; **escape did not**.
+- **The refinement — this was a FIXED-metric task, yet narrowing still capped it.** §11/ADR-6 hold that in
+  fixed-metric mode local elaboration *is* the win, so diversity pressure is an open-ended-only concern. The
+  `rubertlite` run shows a **second, mode-independent failure that §11 did not isolate**: the agent was not
+  merely "too close to the seed literature," it was **blind to on-disk assets and locked inside one
+  action-subsystem**. The winning recipe (teacher-mined hard negatives + NV-0.95 false-negative filtering) was
+  **already proven on this exact benchmark** (+0.03–0.04 recall@100 on a sibling model, recorded in the repo's
+  own `results_last.xlsx`), and the stronger teacher checkpoints sat in the repo — **both unread**. This is not
+  a novelty-of-ideas problem that quality-diversity fixes; it is a **perception + capability-expansion**
+  problem. It bites in *both* modes and is therefore not gated behind the open-ended capability §11 requires.
+
+The distinction matters for sequencing: the highest-value fixes below (asset ingestion, multi-level novelty,
+the taxonomy substrate) are **offline/context/prompt changes** that neither write domain state nor touch
+promotion, so per §6.6 ("do not gate pure offline analysis behind identity/services") they sit on the **early
+lane** with the §11 diagnostics — *not* behind R0–R4. Only their live-steering variants inherit the gates.
+
+#### 21.1 The seven mechanisms (code-confirmed) → the seven levers
+
+| # | What happened in the run | Code seam today | Lever (§) |
+|---|---|---|---|
+| 1 | Winning recipe + teacher ckpts + `results_last.xlsx` on disk, **never read**; "codebase-understanding" scoped to train/loss/data code only | no seed-time asset scan; `deep_research` grounds in run's own experiments + local `knowledge/` (`deep_research.py:214-256`) | **D1** asset/prior-art ingestion |
+| 2 | "distillation"/"hard-neg" appear 128/234× in the stream but every instance is loss-space or self-distill from its own nodes | `deep_research` breadth/depth not tunable; foresight ranker has **no web** (`cli/__init__.py:169-178`); memo is a state narrator (§10) | **D2** deep-research depth/breadth |
+| 3 | Novelty gate only ever asked "already tried in THIS run?"; never "is this a wrongly-abandoned direction worth re-opening?" | `_llm_novelty_gate` single-level, within-run only (`novelty.py:70-131`); `novelty_semantic` off (`config.py:298`) | **D3** multi-level novelty + failed-direction re-exam |
+| 4 | 107 hypotheses, many redundant DCL variants; board dedup is one blind agent-merge pass | `hybrid_merge` RRF≥2-signal → `cluster_near_duplicates` → `agent_merge` (`hybrid_merge.py`) | **D4** dedup tuning |
+| 5 | Themes were dozens of narrow slugs (`dcl-rdrop-ema`, `dcl-rdrop-gc`…); no notion that all belong to ONE branch "loss → contrastive → DCL" | `idea.theme` = flat agent slug (`roles.py:31`); one flat vocab via `theme_rollup`, fanned to Strategist/digest/API (`coverage.py:30-100`) | **D5** hierarchical taxonomy |
+| 6 | node_63 (loss-side false-neg fix) failed → distilled the **wrong** lesson "don't correct false negatives," poisoning a correct direction | `lessons_distill` has no over-generalization guard; no first-class verifier (§3 ⬜, §12) | **D6** loop-quality critic + lesson guard |
+| 7 | Plateau detected but "explore" only swapped one loss for another; never proposed building new data infra despite full file freedom | Greedy IMPROVE→best (`policy.py:286`); no "expand the action space" operator; stance is the only dial (`strategist.py:50-68`) | **D7** capability-expansion operator + jump |
+
+#### 21.2 D1 — Seed-time asset & prior-art ingestion  *(highest ROI; extends §10 from external → local)*
+
+- **What.** Before the first proposal, scan the *task repo itself* for (a) result logs / experiment tables
+  (`results_last.*`, README result sections), (b) sibling model checkpoints and their metrics (here filenames
+  literally carry `val_recall@100=0.899`), (c) sibling training configs / a hard-negative-capable trainer.
+  Distil a **"prior art & available assets" brief** into the Researcher/Strategist context and seed a few
+  hypotheses from it.
+- **Seam.** A new pre-Genesis/first-seed step feeding `_state_brief` (`roles.py:307-320`) and the deep-research
+  input; reuse `env_inspect` (§8) for installed-code facts and `KnowledgeTools` for the distilled brief. This
+  is the **local-asset complement** to §10's external-literature grounding: same "ground the proposer in
+  evidence" principle, but the evidence is *in the repo*, so it needs **no network policy** — it is read-only
+  local I/O and belongs on the early lane.
+- **Why it dominates.** One line — "hard-neg + NV-0.95 gave +0.04 here" — short-circuits ~50 nodes. §10's
+  grounding profile is about *external* literature and is network-gated; D1 captures most of the `rubertlite`
+  loss with none of that surface.
+- **Evaluation gate.** On a frozen set of repo-backed tasks, A/B "with vs without asset brief": measure
+  nodes-to-first-asset-derived-hypothesis and whether asset-seeded directions survive execution. Promote if it
+  raises early yield without flooding the board with stale-asset distractors (reuse §8's candidate/reviewed
+  trust posture for anything the brief asserts).
+
+#### 21.3 D2 — Deep-research depth/breadth control + optional run-start research  *(extends §10)*
+
+- **What the run showed.** Deep-research memos were **state narrators** (they summarised the current node
+  landscape), and when they named external methods those were uniformly "new loss function" papers, never
+  applied-IR (ANCE/RocketQA/NV-Retriever). Depth/breadth are effectively fixed and shallow, and the foresight
+  ranker sees no web at all (`cli/__init__.py:169-178`).
+- **Change.** (a) Make deep-research **depth and breadth explicit, tunable parameters** (how many
+  sub-questions, how many sources per question, recursion depth), settable per run and *raisable by the
+  Strategist* when a plateau is detected — a natural knob to add beside `research_grounding=off|literature|web`
+  (§10B). (b) Offer a **default-on preliminary research pass at run start** (local-grounded per D1; literature
+  only once §10's network/budget/provenance gates exist). (c) Separate the "state summary" role from a genuine
+  "surface methods NOT yet tried" scout, and query it **across the taxonomy axes of D5** (data / negatives /
+  loss / architecture / distillation / eval), not just "losses for X."
+- **Integration.** Reuses §10's `make_deep_researcher` seam (`deep_research.py:214`) and the existing plumbing
+  that turns the top-5 `recommended_directions` into OPEN hypotheses (`research_cadence.py:130-136`). Depth/
+  breadth and any live web remain behind §10's R0/R2/R3/R4 gates; the *offline* local-grounded pass and the
+  depth/breadth *parameters* are early-lane.
+- **Evaluation gate.** §10's harness already scores cited-claim precision, source coverage, and useful/
+  non-duplicate directions that survive execution — extend it with a depth/breadth sweep and report cost vs
+  surviving-direction yield. Deeper ≠ better by default; find the knee.
+
+#### 21.4 D3 — Multi-level novelty gate + failed-direction re-examination  *(extends §11 novelty gate)*
+
+- **What the run showed.** `_llm_novelty_gate` (`novelty.py:70-131`) asks exactly one question — *near-
+  duplicate of an experiment already tried in THIS run?* — and at worst keeps the original. It has **no level
+  structure** and, critically, **no path to re-open a wrongly-killed direction**. node_63 is the archetype: a
+  correct *direction* (false-negative handling) died from one bad *implementation* (a loss-side hack), and the
+  system had no mechanism to say "the direction is sound, the implementation was wrong — re-research and retry
+  differently."
+- **Change — make novelty a graded, cross-run, taxonomy-aware decision:**
+  1. **Identical** (same params) → reject hard.
+  2. **Near-duplicate in this run** (today's behaviour) → re-propose once.
+  3. **Tried before across runs** (via memory/lessons) → surface the prior outcome, allow if materially
+     different.
+  4. **Same taxonomy-direction, different implementation** (needs D5) → *allow* — the run conflated "this DCL
+     tweak" with "this whole branch"; a taxonomy lets the gate distinguish them.
+  5. **Wrongly-abandoned direction re-examination.** When a *direction* (a D5 node, not one experiment) has
+     failed, periodically **re-verify** it: re-run deep-research on it, check the failed node's implementation
+     quality with the §12 verifier, and re-open it as a fresh hypothesis if the failure looks
+     implementation-bound rather than direction-bound. This is the direct antidote to the node_63 mis-lesson.
+- **Seam.** Extend `_llm_novelty_gate`; wire cross-run lookups through the memory stores; gate re-examination
+  cadence on the Strategist. Keep it best-effort/loop-safe exactly as today (any failure returns the original
+  idea). The optional embedding duplicate check (`novelty_semantic`, off) becomes one signal among the levels.
+  Level 3 ("tried before / too close to prior art") is where **Part III-B §17's Scoop-Check distance-from-seed
+  signal** feeds in: §17 supplies the advisory collision/novelty score (open-ended-mode, grounding-OFF by
+  default), and D3 consumes it as one graded-novelty input — they are complementary, not competing.
+- **Evaluation gate.** On frozen runs with known-good-but-initially-failed directions (node_63 is a labelled
+  example), measure whether the re-examination path recovers them without exploding the proposal budget.
+  Advisory/audit first; never let it auto-spawn unbounded retries.
+
+#### 21.5 D4 — Hypothesis-board dedup tuning  *(hybrid_merge)*
+
+- **What.** Board consolidation is `hybrid_merge` (RRF candidates requiring ≥2 lexical/vector signals →
+  `cluster_near_duplicates` → agent-adjudicated `agent_merge`, `hybrid_merge.py`). The run carried 107
+  hypotheses with heavy redundancy, so the merge was too *lax*; but over-merging would collapse legitimate
+  near-variants (the "t=0.02 vs t=0.05 is a valid variant" point from the earlier audit). The right control is
+  **not a single stricter threshold** but **taxonomy-awareness**: merge aggressively *within* a leaf theme,
+  conservatively *across* branches.
+- **Change.** Make the ≥2-signal candidate floor and the agent-merge SAME/DIFFERENT rule (`merge_system.md`,
+  ADR-8 templated) **condition on D5 taxonomy distance**: same-leaf paraphrases merge; cross-branch stay
+  distinct even when lexically similar. Expose the strictness as a knob the Strategist can raise on a
+  narrowing run (fewer redundant siblings) or lower when breadth is wanted.
+- **Evaluation gate.** Board-size vs unique-direction-coverage on frozen runs; promote only if redundancy
+  drops without losing a direction that later executed well.
+
+#### 21.6 D5 — Shared hierarchical hypothesis/theme taxonomy  *(the centrepiece; unifies §9/§11 and every role)*
+
+**The core idea.** Today a node's `theme` is a **single flat agent-generated slug** (`roles.py:31`), and that
+one flat vocabulary is the canonical `theme_rollup` fanned out to the Strategist, the digest, and the `/runs`
+API (`coverage.py:30-100`). The run produced dozens of hyper-narrow slugs (`dcl-rdrop-ema`, `dcl-rdrop-gc`,
+`dcl-rdrop-swa`…) with **no representation that they are all one branch** `loss → contrastive → decoupled →
+DCL+R-Drop`. That single missing structure is why concentration was invisible until collapse, why "explore"
+could only jump sideways within the branch, and why dedup/novelty could not tell "a DCL tweak" from "the whole
+DCL branch."
+
+**Proposal — one hierarchical taxonomy, threaded everywhere.** Replace the flat theme with a **path** in a
+shared multi-level tree, e.g. `data / negatives / hard-negative-mining / nv-filtered`, or `model / loss /
+contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
+`negatives`, `loss`, `architecture`, `pooling`, `distillation`, `training-schedule`, `eval`) and **grown
+dynamically** as leaves appear — the fix for "themes are too narrow and too many" is not to forbid narrow
+leaves but to give them **parents**. Then thread the taxonomy path through **every subsystem that already
+consumes the theme vocabulary or an idea**, so one structure steers the whole loop:
+
+| Consumer | Today | With the taxonomy |
+|---|---|---|
+| `coverage_signal` (§11) | entropy over flat themes | entropy/concentration **per level** — detect "all mass under `loss/contrastive`" early, while leaves still look diverse |
+| Strategist stance/pivot (§11) | flips to `explore` after flat concentration ≥0.6 | pivots to a **sibling branch at the right depth** ("you've spent 40 nodes under `loss`; open `data/negatives`"), not just "broaden" |
+| Novelty gate (D3) | within-run text dup | branch-vs-leaf distinction (level 4 above) |
+| Board dedup (D4) | one blind merge | merge within-leaf, keep cross-branch (above) |
+| Deep-research (D2) | "losses for X" | query **per uncovered branch**; a summarizing coverage metric names which branches are unexplored |
+| Lessons / memory (§9) | flat notes/lessons | lessons tagged to a taxonomy node; the node_63 lesson attaches to `data/negatives/false-neg-handling` as "*this implementation* failed," not to the branch — directly supports D3/D6 |
+| Nodes / digest / UI | flat theme slug | breadcrumb path; per-branch rollups and a **summarizing metric per branch at each depth** (best score, node count, last-touched, marginal-gain) so breadth/precision are steerable by level |
+
+**Why it is the substrate, not a seventh feature.** D2/D3/D4/§11-strategist all currently operate on the flat
+theme or raw idea text; the taxonomy is the shared coordinate system that makes each of them
+*directional* instead of blind. It is also the concrete ML-experiment realisation of §9's granularity
+hierarchy — NapMem structures *memory*; this structures the *live hypothesis/coverage space* — and the two
+should share the typed-record + provenance design so a lesson's taxonomy tag and a memory record's level line
+up. **This D5 taxonomy and Part III-B §16's "coverage = #skills" operational-pattern taxonomy are two views of
+one substrate:** §16 tags the *skill/operation* store (what the agent knows how to do), D5 tags the *live
+hypothesis/coverage space* (what it is currently exploring); both roll up beside — not replacing — the breadth
+`coverage_signal` (`coverage.py:50`), and a shared named vocabulary lets a skill-coverage gap (§16) directly
+name an unexplored D5 branch. Build them against one schema, not two.
+
+**Seams & discipline.** `idea.theme` (schema, `roles.py:31`) becomes an optional path; the canonical
+`events.digest.theme_rollup` and `coverage.py` roll up **by level**; `proposal_cues.py:104-111`,
+`strategist.py`, `novelty.py`, `hybrid_merge.py`, and the deep-research prompt all read the same tree. Keep the
+fold pure and additive (path is a new optional field; old logs default to a one-level path = today's slug, so
+they fold byte-identically — the §5/§6.6 additive-field rule). Start with the **skeleton + rollup as an
+offline diagnostic** (early lane, like §11's coverage calibration); only wire it into *selection/pivot* after
+the diagnostic shows the per-level signal is real and stable.
+
+**Evaluation gate.** Reprocess the `rubertlite` log offline: does per-level concentration flag the
+`loss/contrastive` collapse **before** node_48 (vs the flat signal that only fired at 0.6+)? Does a
+"pivot-to-uncovered-branch" directive, replayed, point at `data/negatives`? Promote live steering only if the
+per-level signal is earlier and more actionable than the flat one, and mode-gate the *breadth* use exactly as
+§11 (fixed-metric tasks may still legitimately concentrate — the taxonomy makes that concentration *legible
+and deliberate*, it does not force diversity).
+
+#### 21.7 D6 — Loop-quality critic + lesson over-generalization guard  *(this IS the §12 verifier; "strategist vs critic")*
+
+The run answers the user's open question ("critic — or is it the strategist?"): they are **different jobs**.
+The Strategist decides *where to search next* (policy/stance/pivot). The **critic judges quality** — and
+LoopLab has no first-class one (§3 ⬜). §12's LLM-as-a-Verifier is exactly that critic, and the run gives it
+two concrete jobs beyond §12's best-of-N/foresight uses:
+
+- **Lesson over-generalization guard.** node_63 distilled "don't correct false negatives" from a single failed
+  *implementation*. A criteria-decomposed verifier over each `lessons_distill` output — asking "does this
+  lesson generalise from ONE implementation to a whole DIRECTION?" — would have down-scoped it to "*this
+  loss-side* correction failed," preserving the (correct) data-side direction. This attaches naturally to the
+  D5 taxonomy node.
+- **Failed-direction re-examination scoring** (the §15.4/D3 loop): the verifier scores whether a failed node's
+  *implementation* (not its direction) was the cause, gating re-open.
+
+All of this stays **advisory/audit, mode-gated to open-ended surfaces, gated on logprob-capable backends and
+the R3 budget** — precisely §12's four caveats; it never overrides a fixed-metric ground truth. Placement:
+the critic is a **verification primitive** the Strategist *consults*, not a Strategist sub-mode — keep them
+separate so the "where to search" and "is this claim/lesson sound" decisions have distinct owners (the §4
+ownership discipline).
+
+#### 21.8 D7 — Capability-expansion operator + action-space lock-in detector  *(extends §11 selection levers)*
+
+The deepest cause: with **full freedom to edit any file**, the agent only ever edited `loss.py`. The winning
+recipe needed **new infrastructure** (offline ANN mining, `dataset.py` external-negative loading, loading a
+teacher checkpoint) — a large, delayed-payoff, multi-file change that no operator or hypothesis ever proposed,
+partly because the Strategist ranks operators by **gain-per-second** (it explicitly logged "improve = 33×
+merge"), which structurally starves expensive bets.
+
+- **Change.** (a) A **"capability-expansion / build-infra" operator** distinct from `improve`/`merge`, scored
+  on **option value** (does it unlock an unreachable region of the D5 tree?), not per-second gain — a plateaued
+  run should *raise*, not lower, its budget for such bets. (b) An **action-space lock-in detector**: if N
+  consecutive nodes touch only one file/subsystem (here `loss.py`) — observable from the node diffs — flag it
+  and require the next batch to modify a *different* subsystem (data/eval/model), i.e. a different D5 branch.
+  (c) On confirmed plateau, a **forced jump**: temporarily forbid expanding the champion and draw the next
+  proposals from D5 branches with no coverage.
+- **Seam.** New action kind in `search/policy.py` (kinds/meta-keys live there per the package map) and
+  operator in `operators.py`; the lock-in signal extends `coverage_signal`; the forced-jump is a Strategist
+  directive through `proposal_cues.py`. This is the "make `explore` mean *manifold-change*, not
+  *variant-shuffle*" fix §11's integration table gestures at, made concrete.
+- **Mode & gate.** Selection-affecting parts inherit §11/§6 gates (R1 epoch identity, SearchFitness, trustworthy
+  eval, mode-gating). The **detector and the diagnostic** are offline/early-lane. Reconciles with ADR-6:
+  capability-expansion is not "diversity for its own sake" — it is *reaching a provably-better region the fixed
+  metric rewards*, which is squarely ADR-6-legitimate.
+
+#### 21.9 Ordering, offline-vs-gated, and reconciliation
+
+**Early lane (offline; no R0–R4; ship as diagnostics/harnesses first — §6.6):** D1 asset brief; D5 taxonomy
+**skeleton + per-level rollup as a diagnostic** (replay `rubertlite` to validate the earlier signal); the
+lesson-over-generalization and failed-direction **scores** as audit-only (D3/D6); the D2 depth/breadth
+*parameters* and the local-grounded research pass; the D7 lock-in **detector**.
+
+**Gated lane (needs the named prerequisites):** D2 live literature/web (§10 R0/R2/R3/R4); D3/D5/D7 wired into
+**selection/pivot** (R1 epoch identity, SearchFitness/EvaluationService, trustworthy eval, explicit open-ended
+capability per §11); D6 verifier as an advisory selector (logprob backend + R3 budget, §12).
+
+**Suggested order:** (1) D1 + D5-diagnostic — cheapest, and together they would have changed the `rubertlite`
+outcome on turn one; (2) D3 multi-level novelty + D6 lesson guard (audit-only) — stop the loop teaching itself
+that correct directions are dead; (3) D2 depth/breadth + taxonomy-aware deep-research; (4) D4 taxonomy-aware
+dedup; (5) D7 capability-expansion + forced jump; (6) promote any to live steering only past its gate.
+
+**Mode-gating (normative, reconciles with ADR-6/§11).** The `rubertlite` lesson is **not** "add diversity to
+fixed-metric tasks." It is: **perception (D1), structure (D5), and capability-expansion (D7) help both modes**,
+because reaching an unread proven asset or an unbuilt data pipeline is a *fixed-metric win*, not a novelty
+trade. Diversity-for-novelty (§11 breadth/QD) remains open-ended-only. The taxonomy makes a fixed-metric run's
+concentration **legible and deliberate** rather than accidental — it does not force it to spread.
+
+**Consolidated experiment order (appends to §13's table):**
+
+| Order | Experiment | Prerequisite | Promote when | Stop/defer when |
+|---|---|---|---|---|
+| 1a | D1 asset/prior-art brief (offline) | repo scan; §8 candidate-trust posture | early asset-derived directions rise; survive execution | asset distractors offset benefit |
+| 1b | D5 taxonomy skeleton + per-level coverage (diagnostic) | replay harness; frozen logs | per-level signal flags collapse **earlier** than flat (validate on `rubertlite`) | per-level signal not more actionable than flat |
+| 2 | D3 multi-level novelty + D6 lesson guard (audit) | memory cross-run lookup; §12 verifier offline | recovers labelled wrongly-killed directions (node_63) without budget blow-up | retries explode or precision poor |
+| 3 | D2 depth/breadth + taxonomy-guided deep-research | §10 harness; local-grounded pass | surviving-direction yield rises per cost | deeper adds cost without yield |
+| 4 | D4 taxonomy-aware dedup | D5 paths on ideas | redundancy drops, no lost executed direction | over-merge kills valid variants |
+| 5 | D7 capability-expansion + forced jump (selection) | R1 epoch id; SearchFitness; trustworthy eval | reaches a better region a fixed metric rewards | quality/trust/cost regression |
+
+**Net.** PART III asked "measure narrowing first." PART IV supplies the first measurement and finds the
+LoopLab-specific cause is **asset/capability blindness inside a flat, structureless hypothesis space** — fixed
+by a shared hierarchical taxonomy (D5) as substrate, seed-time asset perception (D1), a graded novelty/critic
+layer that stops the loop discarding correct directions (D3/D6), and an operator that lets the loop expand its
+own action space (D7). Most of it is early-lane offline work; the live-steering half inherits the same R-gates
+and mode-gating as §§10–12.
