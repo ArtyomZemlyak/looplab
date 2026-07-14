@@ -2738,3 +2738,25 @@ suite exercises them without an endpoint.*
 
 Phase 1 (D7 alarm/lock-in, D6/D3 audits, D4/D2) and Phase 2 (live Strategist pivot, capability-expansion
 operator, foresight replacement) build on these and inherit the R-gates + mode-gating as specified above.
+
+**Universality (post-review, 2026-07-14) — derived importance, not a hardcoded winning region.** A review +
+live tests found the keystone signal was accidentally *dense-retrieval-specific*: the uncovered-region alarm
+fired off hand-marked `key=True` concepts, which literally encode the `rubertlite` answer, and the offline
+alias heuristic over-tagged those key concepts (external-mining fired on 15 in-batch nodes) so the alarm read
+the winning region as *covered*. Fixes landed on the branch:
+- **Discriminative offline aliases + an `in-batch-hard-mining` split** (external/data-side/teacher aliases now
+  require the genuine qualifier), dropping external-mining over-tagging 15→1 — but the offline heuristic has an
+  inherent ceiling on semantic collisions (self- vs teacher-distillation), documented, with a CLI caveat.
+- **D1 metric-parsing fix** (`\b`→`(?<![a-z0-9])`): checkpoint scores glued by underscores
+  (`..._val_recall@100=0.902.ckpt`) now parse, so the brief headlines the strongest teacher and ranks all.
+- **The universal mechanism — `concept_graph.derive_reference_concepts(task_goal, coverage, client,
+  asset_brief=…)`**: the "important-but-uncovered" set is now **derived per task** from the goal + explored
+  concepts + the D1 prior-art brief, with **no hardcoded key list**. Validated on two unrelated domains with
+  zero curated pack: on **image-classification** it surfaced ViT/Swin, EfficientNet, SAM, knowledge-
+  distillation, stochastic-depth, EMA, ConvNeXt, model-soups; on **dense-retrieval** (D1-grounded) it surfaced
+  synthetic-query generation + data-quality + schedule. **Normative:** the curated dense-retrieval skeleton /
+  `key=True` list is demoted to an OPTIONAL offline seed pack (a fast path for a registered task type, like the
+  adapters registry); the universal core is the LLM-grown concept graph + the pure coverage math + the
+  per-task derived importance — no domain hardcoding, works on any task. (Known follow-up: the free-grown
+  vocabulary can fragment — `augmentation` vs `data-augmentation` — so a concept-consolidation pass, reusing
+  `hybrid_merge`, is the next universality hardening.)

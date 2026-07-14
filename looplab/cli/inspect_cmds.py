@@ -137,15 +137,23 @@ def concept_coverage(
         False, "--llm", help="Tag experiments with the LLM (grounded, grows the vocabulary) instead of "
                              "the offline alias heuristic. Needs a reachable endpoint."),
     model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
+    repo: Optional[Path] = typer.Option(
+        None, help="Task repo to ground the UNIVERSAL uncovered-region derivation with a D1 prior-art brief "
+                   "(implies --llm). The derived 'important-but-uncovered' set works on ANY task — it does "
+                   "not need a curated concept pack."),
 ):
     """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic over a run. Reports
     per-axis coverage, the dominant concept/axis-clique concentration, and the standing 'uncovered
     winning-region' alarm ('0 coverage in {X} — go there'). Offline by default (deterministic alias
-    tagging); `--llm` uses the grounded agentic tagger."""
-    from looplab.search.concept_graph import (concept_report, skeleton_for, tag_nodes_llm)
+    tagging); `--llm` uses the grounded tagger AND derives the important-uncovered set per task (universal —
+    no hardcoded winning region), optionally grounded in `--repo`'s prior-art brief."""
+    from looplab.search.concept_graph import (concept_coverage, concept_report,
+                                              derive_reference_concepts, skeleton_for, tag_nodes_llm)
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     resolved_type = task_type or state.task_id or ""
+    if repo is not None:
+        llm = True
     graph = skeleton_for(resolved_type)
     # A generic (uncurated) task type has an empty skeleton, so the OFFLINE alias tagger can localize
     # nothing and the report reads all-uncovered. Tell the user how to get a useful map instead of
@@ -155,6 +163,8 @@ def concept_coverage(
                    "the offline heuristic can't tag experiments. Pass --llm to tag with the model "
                    "(it grows the vocabulary), or --task-type <known-pack> (e.g. dense-retrieval).")
     tags = None
+    client = None
+    settings = None
     if llm:
         from looplab.core.config import Settings
         settings = Settings()
@@ -166,7 +176,29 @@ def concept_coverage(
                                  tools=_run_tools_for(state))
         except Exception as e:  # noqa: BLE001 — fall back to the offline heuristic, note it
             typer.echo(f"(--llm tagging failed: {e}; using the offline heuristic)")
+            client = None
     typer.echo(concept_report(state, graph, tags))
+    # UNIVERSAL uncovered-region (§21.13): derive the important-but-uncovered directions per task from the
+    # task goal + explored concepts (+ the D1 prior-art brief when --repo is given), instead of a hardcoded
+    # `key=True` list that only a curated pack has. This is what makes the alarm work on ANY task.
+    if client is not None:
+        brief_text = ""
+        if repo is not None:
+            try:
+                from looplab.tools.asset_brief import asset_brief as _asset_brief
+                brief_text = _asset_brief(str(repo), task_type=resolved_type or None)
+            except Exception as e:  # noqa: BLE001 — grounding is optional; derive from task+coverage alone
+                typer.echo(f"(asset-brief grounding skipped: {e})")
+        cov = concept_coverage(state, graph, tags)
+        missing = derive_reference_concepts(state.goal or "", cov, client=client,
+                                            asset_brief=brief_text, parser=settings.llm_parser)
+        typer.echo("\n  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
+        if missing:
+            for m in missing:
+                typer.echo(f"    · {m['concept_id']}: {m['why']}")
+        else:
+            typer.echo("    (none surfaced — the run's coverage looks complete for this task, or "
+                       "derivation was unavailable)")
     # The offline alias tagger keys on lineage families (so `dcl-*` variants collapse to one concept), but it
     # cannot resolve SEMANTIC ambiguity: a node that says "teacher checkpoint" while distilling from its OWN
     # merged model reads as `teacher-distill`, and a "false negatives" MENTION in a loss-term rationale reads

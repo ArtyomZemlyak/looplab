@@ -278,3 +278,35 @@ def test_llm_tagger_degrades_to_heuristic_on_failure(tmp_path):
 
 ROOT = Path(__file__).resolve().parents[1]  # sanity: importable package layout
 assert ROOT.exists()
+
+
+# --------------------------------------------------------------------------- #
+# Universal per-task importance derivation (§21.13) — no hardcoded key list
+# --------------------------------------------------------------------------- #
+
+def test_derive_reference_concepts_degrades_without_client():
+    # No LLM reachable -> best-effort empty, never raises (keeps the diagnostic alive).
+    from looplab.search.concept_graph import derive_reference_concepts
+    assert derive_reference_concepts("some task", {"concept_touch": {"loss/x": 1}}, client=None) == []
+
+
+def test_derive_reference_concepts_filters_explored(monkeypatch):
+    # The derivation must DROP anything already explored and normalize ids — universal, no domain pack.
+    import looplab.core.parse as parse_mod
+    from looplab.search import concept_graph as cg
+
+    class _It:
+        def __init__(self, cid, why=""):
+            self.concept_id, self.why = cid, why
+
+    class _Out:
+        missing = [_It("Data/Synthetic-Queries", "generate queries"),
+                   _It("loss/decoupled-contrastive", "already tried")]  # explored -> dropped
+
+    monkeypatch.setattr(parse_mod, "parse_structured", lambda *a, **k: _Out())
+    out = cg.derive_reference_concepts(
+        "dense retrieval", {"concept_touch": {"loss/decoupled-contrastive": 5}},
+        client=object())
+    ids = [m["concept_id"] for m in out]
+    assert ids == ["data/synthetic-queries"]        # normalized + explored filtered out
+    assert out[0]["why"] == "generate queries"

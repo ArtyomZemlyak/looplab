@@ -558,6 +558,64 @@ def uncovered_regions(state: RunState, graph: ConceptGraph,
 
 
 # --------------------------------------------------------------------------- #
+# UNIVERSAL importance: derive the "winning region" per task (no hardcoded key list)
+# --------------------------------------------------------------------------- #
+
+def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_brief: str = "",
+                              parser: str = "tool_call", max_items: int = 10) -> list[dict]:
+    """UNIVERSAL, task-agnostic 'important-but-uncovered' derivation — the per-RUN replacement for a
+    hardcoded `key=True` winning region (which only a curated task pack like dense-retrieval has, and which
+    literally encodes the answer for that one case). Given the task goal, the concepts ALREADY explored
+    (from `coverage`), and optionally the repo's own prior-art brief (D1 `asset_brief`), ask the model which
+    STANDARD high-value method families a strong researcher would try for THIS task that the run has NOT
+    touched. Returns `[{concept_id, why}]` for the missing directions — grounded per task, zero domain
+    hardcoding. This is what makes the uncovered-region alarm (§21.11) fire on ANY task, not just the one
+    curated pack. Impure (one LLM call); best-effort (returns [] on any failure, so it never breaks a
+    diagnostic). Grounding it in the D1 brief closes the loop the offline heuristic cannot: importance comes
+    from the repo's own evidence + the model's task knowledge, not a maintainer's guess."""
+    from pydantic import BaseModel, Field
+
+    from looplab.core.parse import parse_structured
+
+    class _Item(BaseModel):
+        concept_id: str = ""
+        why: str = ""
+
+    class _Out(BaseModel):
+        missing: list[_Item] = Field(default_factory=list)
+
+    explored = sorted(coverage.get("concept_touch", {}) or {})
+    system = (
+        "You audit an ML research run for BLIND SPOTS. Given the TASK and the method-concepts already "
+        "EXPLORED, list the most important method families / research directions for THIS task that are NOT "
+        "yet explored — the standard high-value levers a strong researcher would reach for. Judge importance "
+        "for the SPECIFIC task, not generically. Each item: `concept_id` as `axis/short-slug` (reuse an "
+        "explored axis when one fits), plus a one-line `why`. Only genuinely IMPORTANT and genuinely "
+        "UNCOVERED directions — omit anything already in the explored list. Call `emit` once with `missing`."
+    )
+    user = (f"TASK: {task_goal or '(unspecified)'}\n\nEXPLORED CONCEPTS ({len(explored)}):\n"
+            + ("\n".join(f"- {c}" for c in explored) or "(none yet)"))
+    if asset_brief:
+        user += ("\n\nPRIOR ART in the repo (method families already known to matter for this task — a run "
+                 "that has NOT touched these has a blind spot):\n" + asset_brief[:2000])
+    try:
+        out = parse_structured(client, [{"role": "system", "content": system},
+                                        {"role": "user", "content": user}], _Out, parser)
+    except Exception:  # noqa: BLE001 — best-effort: no importance signal beats crashing the diagnostic
+        return []
+    seen = set(explored)
+    items: list[dict] = []
+    for it in out.missing:
+        cid = _normalize_concept_id(it.concept_id)
+        if cid and cid not in seen:
+            seen.add(cid)
+            items.append({"concept_id": cid, "why": (it.why or "").strip()[:160]})
+        if len(items) >= max_items:
+            break
+    return items
+
+
+# --------------------------------------------------------------------------- #
 # Human-readable report (for the CLI diagnostic)
 # --------------------------------------------------------------------------- #
 
