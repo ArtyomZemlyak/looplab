@@ -1952,7 +1952,7 @@ def test_action_router_maps_plan_to_multiple_controls():
     st = _St()
     assert _action_to_control(_Action(action="budget", nodes=10), st)["type"] == "budget_extend"
     assert _action_to_control(_Action(action="budget", nodes=10), st)["data"]["add_nodes"] == 10
-    assert _action_to_control(_Action(action="note", node_id=3, text="nice"), st)["type"] == "annotation"
+    assert _action_to_control(_Action(action="note", node_id=3, text="nice"), st)["type"] == "comment_created"
     assert _action_to_control(_Action(action="budget", nodes=0), st) is None      # no-op budget -> dropped
     assert _action_to_control(_Action(action="advise"), st) is None               # pure advice -> dropped
 

@@ -42,8 +42,8 @@ _RESERVED_RUN_IDS = {"reports", "assistant", ".reviews", ".command-locks"}
 # so token auth cannot protect them. Keep that projection useful, but recursively remove raw material
 # wherever it is nested (not only under nodes — inject_requests also carries full code/file maps).
 _PUBLIC_STATE_RAW_KEYS = {
-    "abs_path", "code", "deleted", "files", "preview", "raw", "stderr", "stdout", "stdout_tail",
-    "triage_rationale",
+    "abs_path", "annotations", "code", "comments", "deleted", "files", "preview", "raw",
+    "stderr", "stdout", "stdout_tail", "triage_rationale",
 }
 
 

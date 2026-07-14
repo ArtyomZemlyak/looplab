@@ -314,6 +314,31 @@ class Event(BaseModel):
     span_id: Optional[str] = None
 
 
+class CommentState(BaseModel):
+    """Current projection of one event-sourced operator comment.
+
+    The append-only events remain the audit history.  This model intentionally stores only the
+    current revision so folding a frequently edited comment does not duplicate every historical text
+    inside ``RunState``.  ``RunState.comments`` is excluded from its ordinary JSON dump because the
+    live state/SSE surface is intentionally tokenless; authenticated comment routes serialize an
+    explicit allow-list instead.
+    """
+
+    comment_id: str
+    node_id: int
+    node_generation: Optional[int] = None
+    text: str
+    actor_kind: str
+    version: int = 1
+    resolved: bool = False
+    created_at: float = 0.0
+    updated_at: float = 0.0
+    created_seq: int = -1
+    updated_seq: int = -1
+    legacy: bool = False
+    editable: bool = True
+
+
 class RunState(BaseModel):
     """Pure fold of the event log ([ADR-12]). Never mutated except by `replay.fold`.
 
@@ -520,7 +545,12 @@ class RunState(BaseModel):
     # that the policy then evaluates like any other — so a human can steer the search directly.
     inject_requests: list[dict] = Field(default_factory=list)
     injects_done: int = 0                      # count of processed injects (replay-safe fulfillment)
-    annotations: dict[int, list[str]] = Field(default_factory=dict)  # `annotation`: node notes
+    annotations: dict[int, list[str]] = Field(default_factory=dict)  # legacy `annotation`: node notes
+    # Modern collaboration is read only through authenticated, bounded projections.  Excluding it
+    # here prevents free-form comment text from entering the tokenless /state + SSE payload.
+    comments: dict[str, CommentState] = Field(default_factory=dict, exclude=True)
+    # Safe scalar used by clients to refresh the bounded comment projection only when it changes.
+    comments_revision: int = -1
     promotions: list[dict] = Field(default_factory=list)        # `promote`: solution-registry audit
     champion: Optional[int] = None             # node id the `champion` registry alias points at
     llm_cost: Optional[dict] = None            # run-level LLM cost/token roll-up ({cost,tokens,…})

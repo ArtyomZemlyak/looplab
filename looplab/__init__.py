@@ -54,6 +54,7 @@ _LAYOUT = {
     "bg_tasks": "runtime",
     "classification": "adapters",
     "cli_agent": "agents",
+    "comment_projection": "events",
     "command_eval": "runtime",
     "config": "core",
     "confirm": "trust",

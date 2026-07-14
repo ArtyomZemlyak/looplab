@@ -133,6 +133,11 @@ EV_FORK = "fork"
 EV_INJECT_NODE = "inject_node"
 EV_DEEP_RESEARCH = "deep_research"
 EV_ANNOTATION = "annotation"
+# Event-sourced collaboration.  ``annotation`` remains the immutable legacy note event; modern
+# writers use the versioned comment lifecycle below so edits/resolution retain an auditable history.
+EV_COMMENT_CREATED = "comment_created"
+EV_COMMENT_EDITED = "comment_edited"
+EV_COMMENT_RESOLUTION_CHANGED = "comment_resolution_changed"
 EV_PROMOTE = "promote"
 EV_APPROVAL_GRANTED = "approval_granted"
 EV_SPEC_APPROVED = "spec_approved"

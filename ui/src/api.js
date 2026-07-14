@@ -1024,6 +1024,22 @@ export const CONTROL = {
   fork: (rid, id, generation) => runCommand(
     rid, 'fork', { from_node_id: id, generation }),
   annotate: (rid, id, text) => runCommand(rid, 'annotation', { node_id: id, text }),
+  // Structured comments are append-only run commands. The caller supplies the exact displayed run
+  // generation separately from the node's attempt generation; a late click can therefore update
+  // neither a replacement run nor a reset incarnation of the same numeric node id.
+  createComment: (rid, { nodeId, nodeGeneration, text }, options = {}) => runCommand(
+    rid, 'comment_created', { node_id: nodeId, node_generation: nodeGeneration, text }, options),
+  editComment: (rid, { commentId, nodeId, nodeGeneration, expectedVersion, text }, options = {}) => runCommand(
+    rid, 'comment_edited', {
+      comment_id: commentId, node_id: nodeId, node_generation: nodeGeneration,
+      expected_version: expectedVersion, text,
+    }, options),
+  setCommentResolved: (rid, {
+    commentId, nodeId, nodeGeneration, expectedVersion, resolved,
+  }, options = {}) => runCommand(rid, 'comment_resolution_changed', {
+    comment_id: commentId, node_id: nodeId, node_generation: nodeGeneration,
+    expected_version: expectedVersion, resolved,
+  }, options),
   promote: (rid, id, generation) => runCommand(
     rid, 'promote', { node_id: id, generation, alias: 'champion' }),
   // Operator-authored experiment: hand-add a node to the search tree. `idea` = {operator, params,
@@ -1221,6 +1237,29 @@ export const createRunReview = (runId, { ttl_seconds, include_evidence = false }
 export const listRunReviews = (runId) => get(`/api/runs/${encodeURIComponent(runId)}/reviews`)
 export const revokeRunReview = (runId, linkId) =>
   send(`/api/runs/${encodeURIComponent(runId)}/reviews/${encodeURIComponent(linkId)}`, 'DELETE')
+
+// Bounded collaboration projections. In review mode reviewReadPath() translates both owner paths to
+// `/api/review/comments...`; the capability still supplies the run identity and every mutation is
+// rejected before fetch by assertNotReviewMutation().
+export const runComments = (runId, {
+  nodeId = null, nodeGeneration = null, includeResolved = true, limit = 100, cursor = null,
+} = {}) => {
+  const query = new URLSearchParams()
+  if (nodeId != null) query.set('node_id', String(nodeId))
+  if (nodeGeneration != null) query.set('node_generation', String(nodeGeneration))
+  query.set('include_resolved', includeResolved ? 'true' : 'false')
+  query.set('limit', String(Math.max(1, Math.min(100, Math.trunc(Number(limit) || 100)))))
+  if (cursor != null) query.set('cursor', String(cursor))
+  return get(`/api/runs/${encodeURIComponent(runId)}/comments?${query}`,
+    { cache: 'no-store' })
+}
+export const commentHistory = (runId, commentId, { limit = 100, cursor = null } = {}) => {
+  const query = new URLSearchParams()
+  query.set('limit', String(Math.max(1, Math.min(100, Math.trunc(Number(limit) || 100)))))
+  if (cursor != null) query.set('cursor', String(cursor))
+  return get(`/api/runs/${encodeURIComponent(runId)}/comments/${encodeURIComponent(commentId)}/history?${query}`,
+    { cache: 'no-store' })
+}
 
 // super-tasks: a user-managed, flat grouping of runs by the global task they attack (parallel axis
 // to projects). create / rename / delete the bucket, then assign any run (existing or new) to it.

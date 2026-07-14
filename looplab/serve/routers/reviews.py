@@ -7,12 +7,15 @@ import math
 import re
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 
 from looplab.serve.metrics_adapters import read_node_metrics
+from looplab.events.comment_projection import (
+    CommentCursorError, comments_page, project_comments)
 from looplab.serve.reviews import (
     DEFAULT_TTL_SECONDS, REVIEW_HEADER, ReviewError, exact_review_generation)
+from looplab.serve.run_commands import run_generation_token
 from looplab.trust.redact import redact_secrets
 
 
@@ -278,6 +281,40 @@ def build_router(srv) -> APIRouter:
                 raise HTTPException(400, "historical snapshots are not available through review links")
             return _scrub_json(srv.state_payload(rd), omit_keys=_SUMMARY_OMIT_KEYS)
 
+    @router.get("/api/review/comments")
+    def review_comments(request: Request, limit: int = Query(100, ge=1, le=100),
+                        cursor: Optional[str] = None,
+                        node_id: Optional[int] = Query(None, ge=0),
+                        node_generation: Optional[int] = Query(None, ge=0),
+                        include_resolved: bool = True):
+        """Current, redacted comments only; review capabilities never expose prior revisions."""
+        with _bound_run(request) as (_record_value, rd):
+            if (node_id is None) != (node_generation is None):
+                raise HTTPException(400, {
+                    "code": "comment_filter_invalid",
+                    "message": "node_id and node_generation must be supplied together",
+                    "remediation": "select an exact experiment lifecycle or remove both filters",
+                })
+            events = srv.events(rd)
+            generation = run_generation_token(events)
+            comments, _history = project_comments(events)
+            try:
+                payload = comments_page(
+                    comments, generation=generation, limit=limit, cursor=cursor,
+                    node_id=node_id, node_generation=node_generation,
+                    include_resolved=include_resolved)
+            except CommentCursorError as exc:
+                raise HTTPException(409 if exc.stale else 400, {
+                    "code": "comment_cursor_stale" if exc.stale else "invalid_comment_cursor",
+                    "message": str(exc),
+                    "remediation": "refresh comments from the first page",
+                }) from exc
+            for comment in payload["comments"]:
+                comment["editable"] = False
+            # Current-only is still untrusted free-form text: use the same recursive scrub as every
+            # other review projection, including credential-shaped mapping keys and values.
+            return _scrub_json(payload)
+
     @router.get("/api/review/config")
     def review_config(request: Request):
         with _bound_run(request) as (_record_value, rd):
@@ -341,7 +378,6 @@ def build_router(srv) -> APIRouter:
             if isinstance(out.get("files"), dict):
                 out["files"] = {name: redact_secrets(body) if isinstance(body, str) else body
                                 for name, body in out["files"].items()}
-            out["annotations"] = st.annotations.get(nid, [])
             out["confirm_seeds_detail"] = st.confirm_seed_results.get(nid, {})
             if node.parent_ids:
                 parent = st.nodes.get(node.parent_ids[0])

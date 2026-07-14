@@ -25,7 +25,7 @@ from looplab.engine.costs import (
     bind_run_client_cost, reconcile_cost_accountants, reconcile_usage_outbox)
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
-    EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
+    EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT,
     EV_INJECT_NODE, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
@@ -265,7 +265,11 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
         return {"type": EV_HINT, "data": {"text": c.text, "replace": True},
                 "label": f"Set directive: {c.text[:60]}"}
     if a in ("note", "annotate") and nid is not None and c.text:
-        return {"type": EV_ANNOTATION, "data": {"node_id": nid, "text": c.text}, "label": f"Note on #{nid}: {c.text[:50]}"}
+        node = (getattr(st, "nodes", {}) or {}).get(nid)
+        generation = getattr(node, "attempt", 0)
+        return {"type": EV_COMMENT_CREATED,
+                "data": {"node_id": nid, "node_generation": generation, "text": c.text},
+                "label": f"Comment on #{nid}: {c.text[:50]}"}
     if a in ("budget", "extend_budget"):
         n = int(c.nodes)
         if n <= 0:                       # a budget verb only ADDS room — ignore zero/negative (no-op)

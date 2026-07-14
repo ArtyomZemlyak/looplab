@@ -495,17 +495,56 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         so an unrelated engine/background event can never be mistaken for command observation. The
         caller passes the exact snapshot used for ``fold``: a second read here could include a command
         appended after the fold and falsely acknowledge an intent this iteration never observed.
+
+        A long-running engine calls this at every decision boundary.  Keep a local cursor over the
+        exact ``EventStore`` snapshot: the first call bootstraps the historical acknowledgement set,
+        while later calls inspect only the appended suffix.  ``EventStore.read_all`` retains Event
+        object identity across ordinary appends and rebuilds the cache on replacement/rewrite, so a
+        changed first object (or a shorter snapshot) safely invalidates the cursor.  The attributes
+        are initialized lazily because a few focused tests construct ``Engine`` with
+        ``object.__new__``.
         """
-        acked = {(str((event.data or {}).get("command_id")), (event.data or {}).get("event_seq"))
-                 for event in events if event.type == EV_COMMAND_ACK}
-        for event in events:
+        total = len(events)
+        initialized = bool(getattr(self, "_command_ack_initialized", False))
+        cursor = int(getattr(self, "_command_ack_cursor", 0)) if initialized else 0
+        first = events[0] if total else None
+        cached_first = getattr(self, "_command_ack_first_event", None)
+        invalidated = initialized and (
+            cursor > total or (cursor > 0 and (first is None or first is not cached_first)))
+        if invalidated:
+            cursor = 0
+            acked: set[tuple[str, object]] = set()
+        else:
+            acked = getattr(self, "_command_ack_seen", set())
+
+        # Two passes over the *new suffix* matter: an already-durable ack later in that same suffix
+        # must suppress its intent even when the intent row appears first.
+        for index in range(cursor, total):
+            event = events[index]
+            if event.type == EV_COMMAND_ACK:
+                acked.add((str((event.data or {}).get("command_id")),
+                           (event.data or {}).get("event_seq")))
+
+        pending: list[tuple[str, int]] = []
+        for index in range(cursor, total):
+            event = events[index]
             command_id = (event.data or {}).get("_command_id")
             identity = (str(command_id), event.seq)
             if command_id and identity not in acked:
-                self.store.append(EV_COMMAND_ACK, {
-                    "command_id": str(command_id), "event_seq": event.seq,
-                })
                 acked.add(identity)
+                pending.append(identity)
+
+        # Advance against the exact folded snapshot before appending diagnostics.  A subsequent call
+        # sees those new ack rows in its suffix; a crash between cursor update and append is irrelevant
+        # because these fields are process-local and disappear with the process.
+        self._command_ack_initialized = True
+        self._command_ack_cursor = total
+        self._command_ack_first_event = first
+        self._command_ack_seen = acked
+        for command_id, event_seq in pending:
+            self.store.append(EV_COMMAND_ACK, {
+                "command_id": command_id, "event_seq": event_seq,
+            })
 
     def _begin_finalize(
             self, data: dict, *, scope: str | None = None,

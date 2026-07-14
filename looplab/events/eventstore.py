@@ -57,15 +57,34 @@ class EventStoreConcurrencyError(RuntimeError):
             f"another writer appended in between; re-read the state and retry.")
 
 
+class EventStoreLockError(RuntimeError):
+    """A caller requiring cross-process append serialization could not acquire that guarantee.
+
+    Ordinary engine writers retain the historical best-effort behavior.  Security-sensitive
+    multi-writer protocols opt into this error rather than silently appending unlocked.
+    """
+
+    def __init__(self, path: "str | os.PathLike", cause: BaseException):
+        self.path = str(path)
+        self.cause = cause
+        super().__init__(f"cross-process event append lock is unavailable for {path}: {cause}")
+
+
 @contextmanager
-def _interprocess_lock(lock_path: Path):
+def _interprocess_lock(lock_path: Path, *, required: bool = False):
     """Best-effort exclusive cross-process lock (msvcrt on Windows, fcntl on POSIX). The live UI
     server appends control events to the SAME events.jsonl the engine subprocess writes; without
     serialization their appends can interleave into a torn line (which `iter_jsonl` truncates at,
     silently dropping later events). Degrades to a no-op if locking is unavailable."""
     f = None
+    locked = False
     try:
-        f = open(lock_path, "a+")
+        try:
+            f = open(lock_path, "a+")
+        except OSError as exc:
+            if required:
+                raise EventStoreLockError(lock_path, exc) from exc
+            raise  # preserve the existing engine-writer behavior for an inaccessible lock path
         try:
             if os.name == "nt":
                 import msvcrt
@@ -74,18 +93,29 @@ def _interprocess_lock(lock_path: Path):
             else:
                 import fcntl
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-        except OSError:
-            pass  # lock unavailable -> degrade to the single-writer assumption
+            locked = True
+        # Some filesystems/runtimes expose the module but report an unsupported advisory-lock
+        # operation as ValueError/NotImplementedError rather than OSError.  A strict caller must
+        # receive one stable failure type for every such capability gap; otherwise the command
+        # worker would turn it into a generic 200/command_worker_failed response.
+        except (OSError, ImportError, AttributeError, NotImplementedError, ValueError) as exc:
+            if required:
+                raise EventStoreLockError(lock_path, exc) from exc
+            pass  # ordinary engine writer: retain the historical single-writer degradation
         yield
     finally:
         if f is not None:
-            try:
-                if os.name == "nt":
-                    import msvcrt
-                    f.seek(0)
-                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
+            if locked:
+                try:
+                    if os.name == "nt":
+                        import msvcrt
+                        f.seek(0)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        import fcntl
+                        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+                except (OSError, AttributeError, NotImplementedError, ValueError):
+                    pass
             f.close()
 
 
@@ -345,7 +375,7 @@ class EventStore:
                 tail = f.read(size)
         except OSError:
             return -1
-        for raw in reversed([l for l in tail.split(b"\n") if l.strip()]):
+        for raw in reversed([line for line in tail.split(b"\n") if line.strip()]):
             try:
                 obj = orjson.loads(raw)
             except orjson.JSONDecodeError:
@@ -388,7 +418,7 @@ class EventStore:
 
     def append(self, type: str, data: dict[str, Any], *,
                trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
-               expected_last_seq: "int | None" = None) -> Event:
+               expected_last_seq: "int | None" = None, require_lock: bool = False) -> Event:
         """Durably append one event and return it (the envelope with its assigned seq).
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
@@ -403,14 +433,19 @@ class EventStore:
         tail is still exactly that seq at the moment we hold the lock — else raise
         `EventStoreConcurrencyError`. The check + append are one critical section, so a caller that
         read state at seq N can guarantee no other event slipped in before its intent (optimistic
-        concurrency for a UI control raised on a possibly-stale view). None = today's behavior."""
+        concurrency for a UI control raised on a possibly-stale view). None = today's behavior.
+
+        ``require_lock`` is deliberately opt-in so existing engine behavior is unchanged.  Versioned
+        collaboration enables it and fails visibly if the cross-process lock cannot be acquired.
+        """
         # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
         # its op's span closed (foresight ranking) carries the captured trace_id of that op, and an
         # explicit None means "no trace" (so it never inherits the ambient node/eval trace by accident).
         if trace_id is _UNSET_TRACE:
             trace_id, span_id = current_ids()
-        with self._append_lock, _interprocess_lock(Path(str(self.path) + ".lock")):
+        with self._append_lock, _interprocess_lock(
+                Path(str(self.path) + ".lock"), required=require_lock):
             # Revalidate bytes written or replaced since the last read WHILE holding the writer lock.
             # A construction-time snapshot is insufficient on FUSE/network mounts: corruption can
             # appear mid-run, and appending after it would make every new event invisible to replay.

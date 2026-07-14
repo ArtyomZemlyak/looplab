@@ -10,6 +10,7 @@
     "dev": "vite",
     "test": "node --test test/*.test.js",
     "build": "vite build",
+    "check:bundle": "node scripts/check-bundle.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

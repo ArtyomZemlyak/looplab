@@ -50,5 +50,9 @@ jobs:
         working-directory: ui
       - run: npm test
         working-directory: ui
-      - run: npm run build
+      - name: Build production UI
+        run: npm run build
+        working-directory: ui
+      - name: Enforce bundle budgets
+        run: npm run check:bundle
         working-directory: ui

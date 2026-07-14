@@ -9,9 +9,11 @@ from typing import Iterable
 
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
                      hypothesis_id, run_setup_key)
+from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
     EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
@@ -1677,6 +1679,15 @@ def _on_annotation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if nid is None:
         return
     st.annotations.setdefault(nid, []).append(d.get("text", ""))
+    if apply_comment_event(st.comments, e) is not None:
+        st.comments_revision = e.seq
+
+
+def _on_comment(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # Collaboration is audit-only and selection-neutral.  The shared reducer applies only an exact
+    # version chain and turns malformed/hand-authored records into deterministic no-ops.
+    if apply_comment_event(st.comments, e) is not None:
+        st.comments_revision = e.seq
 
 def _on_promote(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d)
@@ -1762,6 +1773,9 @@ _HANDLERS = {
     EV_REPORT_GENERATED: _on_report_generated,
     EV_CONFIRM_DONE: _on_confirm_done,
     EV_ANNOTATION: _on_annotation,
+    EV_COMMENT_CREATED: _on_comment,
+    EV_COMMENT_EDITED: _on_comment,
+    EV_COMMENT_RESOLUTION_CHANGED: _on_comment,
     EV_PROMOTE: _on_promote,
 }
 

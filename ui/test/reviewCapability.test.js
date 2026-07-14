@@ -22,6 +22,10 @@ test('review reads use the capability namespace and preserve query parameters', 
     assert.equal(apiPrefix(), '/user/a/proxy/8765')
     assert.equal(reviewReadPath('/api/runs/demo/state?seq=29'), '/api/review/state?seq=29')
     assert.equal(reviewReadPath('/api/runs/demo/nodes/4/metrics'), '/api/review/nodes/4/metrics')
+    assert.equal(reviewReadPath('/api/runs/demo/comments?node_id=4&node_generation=2'),
+      '/api/review/comments?node_id=4&node_generation=2')
+    assert.equal(reviewReadPath('/api/runs/demo/comments/cmt_abc/history?limit=100'),
+      '/api/review/comments/cmt_abc/history?limit=100')
     assert.equal(reviewReadPath('/api/settings'), '/api/settings')
   } finally {
     if (previous === undefined) delete globalThis.location

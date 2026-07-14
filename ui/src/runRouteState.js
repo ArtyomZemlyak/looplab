@@ -2,7 +2,7 @@
 // review bearer after `#` prevents node ids, filters, and capability material from reaching HTTP
 // request targets, referrers, proxy logs, or server analytics.
 
-export const RUN_ROUTE_TABS = ['Overview', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+export const RUN_ROUTE_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 export const RUN_ROUTE_PANELS = [
   'overview', 'queue', 'hypotheses', 'research', 'failures', 'trust', 'pareto', 'data',
   'compare', 'sensitivity', 'importance', 'crossrun', 'artifacts', 'registry', 'memory',
@@ -11,10 +11,10 @@ export const RUN_ROUTE_PANELS = [
 export const TIMELINE_KIND_ORDER = [
   'proposal', 'eval', 'decision', 'research', 'report', 'trust', 'control', 'lifecycle',
 ]
-export const REVIEW_SUMMARY_TABS = ['Overview', 'Trust', 'Cost']
-export const REVIEW_EVIDENCE_TABS = ['Overview', 'Code', 'Trust', 'Cost']
+export const REVIEW_SUMMARY_TABS = ['Overview', 'Comments', 'Trust', 'Cost']
+export const REVIEW_EVIDENCE_TABS = ['Overview', 'Comments', 'Code', 'Trust', 'Cost']
 export const REVIEW_SAFE_PANEL_NAMES = [
-  'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare',
+  'overview', 'trust', 'sensitivity', 'importance', 'failures', 'pareto', 'data', 'compare', 'collab',
 ]
 
 const TAB_FROM_WIRE = new Map(RUN_ROUTE_TABS.map(tab => [tab.toLowerCase(), tab]))
@@ -22,8 +22,9 @@ const TAB_TO_WIRE = new Map(RUN_ROUTE_TABS.map(tab => [tab, tab.toLowerCase()]))
 const PANEL_SET = new Set(RUN_ROUTE_PANELS)
 const REVIEW_PANEL_SET = new Set(REVIEW_SAFE_PANEL_NAMES)
 const KIND_SET = new Set(TIMELINE_KIND_ORDER)
-const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'tab', 'panel', 'focus', 'seq', 'q', 'kinds'])
+const KNOWN_KEYS = new Set(['gen', 'view', 'node', 'tab', 'comment', 'panel', 'focus', 'seq', 'q', 'kinds'])
 const GENERATION_RE = /^[0-9a-f]{64}$/
+const COMMENT_ID_RE = /^[A-Za-z0-9_-]{8,160}$/
 const INTEGER_RE = /^(0|[1-9][0-9]*)$/
 const CONTROL_RE = /[\u0000-\u001f\u007f]/
 const MAX_FOCUS_CHARS = 160
@@ -34,6 +35,7 @@ export const emptyRunRouteState = () => ({
   view: 'dag',
   nodeId: null,
   inspectTab: 'Overview',
+  commentId: null,
   panel: null,
   directionFilter: null,
   sequence: null,
@@ -103,6 +105,10 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   if (input.view === 'report') state.view = 'report'
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
   if (state.nodeId != null && RUN_ROUTE_TABS.includes(input.inspectTab)) state.inspectTab = input.inspectTab
+  if (state.nodeId != null && state.inspectTab === 'Comments'
+      && typeof input.commentId === 'string' && COMMENT_ID_RE.test(input.commentId)) {
+    state.commentId = input.commentId
+  }
   if (PANEL_SET.has(input.panel)) state.panel = input.panel
   if (typeof input.directionFilter === 'string' && input.directionFilter.length > 0
       && input.directionFilter.length <= MAX_FOCUS_CHARS && !CONTROL_RE.test(input.directionFilter)) {
@@ -170,6 +176,13 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     else if (state.nodeId == null) issues.push('Inspector tab without a node was ignored.')
     else state.inspectTab = decoded
   }
+  const comment = single(params, 'comment', issues)
+  if (comment != null && comment !== '') {
+    if (!COMMENT_ID_RE.test(comment)) issues.push('Invalid comment target was ignored.')
+    else if (state.nodeId == null || state.inspectTab !== 'Comments') {
+      issues.push('Comment target without the matching Comments tab was ignored.')
+    } else state.commentId = comment
+  }
   const panel = single(params, 'panel', issues)
   if (panel != null && panel !== '') {
     if (PANEL_SET.has(panel)) state.panel = panel
@@ -218,6 +231,7 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
   if (state.nodeId != null) {
     params.set('node', String(state.nodeId))
     if (state.inspectTab !== 'Overview') params.set('tab', TAB_TO_WIRE.get(state.inspectTab))
+    if (state.inspectTab === 'Comments' && state.commentId) params.set('comment', state.commentId)
   }
   if (state.panel) params.set('panel', state.panel)
   if (state.directionFilter) params.set('focus', state.directionFilter)

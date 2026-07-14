@@ -35,15 +35,21 @@ from pydantic import ValidationError
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.models import Event, Idea
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
+from looplab.events.comment_projection import (
+    COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
+    normalize_comment_text)
+from looplab.events.eventstore import (
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, iter_jsonl)
+from looplab.events.replay import fold
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_COMMAND_ACK,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.engine_proc import _engine_alive, _engine_liveness, _spawn_engine
-from looplab.serve.protocol import CONTROL_EVENTS
+from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.trust.redact import redact_secrets
 
 
@@ -85,6 +91,10 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_APPROVAL_GRANTED: _spec(EV_APPROVAL_GRANTED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_SPEC_APPROVED: _spec(EV_SPEC_APPROVED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_ANNOTATION: _spec(EV_ANNOTATION, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_CREATED: _spec(EV_COMMENT_CREATED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_EDITED: _spec(EV_COMMENT_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_COMMENT_RESOLUTION_CHANGED: _spec(
+        EV_COMMENT_RESOLUTION_CHANGED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
@@ -114,6 +124,11 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_APPROVAL_GRANTED: frozenset({"node_id", "generation"}),
     EV_SPEC_APPROVED: frozenset(),
     EV_ANNOTATION: frozenset({"node_id", "text"}),
+    EV_COMMENT_CREATED: frozenset({"node_id", "node_generation", "text"}),
+    EV_COMMENT_EDITED: frozenset(
+        {"comment_id", "node_id", "node_generation", "expected_version", "text"}),
+    EV_COMMENT_RESOLUTION_CHANGED: frozenset(
+        {"comment_id", "node_id", "node_generation", "expected_version", "resolved"}),
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
@@ -433,6 +448,164 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if len(value) > limit:
             raise HTTPException(400, f"{name} must be at most {limit} characters")
         return value
+
+    def _comment_id(value: object) -> str:
+        if not isinstance(value, str) or COMMENT_ID_RE.fullmatch(value) is None:
+            raise HTTPException(400, {
+                "code": "invalid_comment_id",
+                "message": "comment_id must be cmt_ followed by exactly 32 lowercase hex characters",
+                "remediation": "refresh the collaboration panel and retry the exact visible comment",
+            })
+        return value
+
+    def _comment_text(value: object) -> str:
+        try:
+            return normalize_comment_text(value)
+        except ValueError as exc:
+            raise HTTPException(400, {
+                "code": "invalid_comment_text",
+                "message": str(exc),
+                "remediation": "enter non-empty text no larger than 8192 UTF-8 bytes",
+            }) from exc
+
+    def _comment_version(value: object) -> int:
+        version = _strict_integer(value, "expected_version")
+        if version < 1:
+            raise HTTPException(400, "expected_version must be positive")
+        return version
+
+    if event_type == EV_COMMENT_CREATED:
+        current = _state()
+        node_id = _node("node_id")
+        node_generation = _strict_integer(data.get("node_generation"), "node_generation")
+        if node_generation < 0:
+            raise HTTPException(400, "node_generation must be non-negative")
+        node = current.nodes[node_id]
+        if node.attempt != node_generation:
+            raise HTTPException(409, {
+                "code": "node_generation_changed",
+                "message": (f"experiment #{node_id} is generation {node.attempt}, not "
+                            f"{node_generation}"),
+                "remediation": "refresh the run before commenting on this experiment lifecycle",
+            })
+        if len(current.comments) >= COMMENT_MAX_PER_RUN:
+            raise HTTPException(409, {
+                "code": "comment_run_limit_reached",
+                "message": f"this run already has {COMMENT_MAX_PER_RUN} projected comments",
+                "remediation": "archive or compact comment history before creating more",
+            })
+        per_subject = sum(
+            1 for item in current.comments.values()
+            if (not item.legacy and item.node_id == node_id
+                and item.node_generation == node_generation))
+        if per_subject >= COMMENT_MAX_PER_NODE_GENERATION:
+            raise HTTPException(409, {
+                "code": "comment_subject_limit_reached",
+                "message": (f"experiment #{node_id} generation {node_generation} already has "
+                            f"{COMMENT_MAX_PER_NODE_GENERATION} comments"),
+                "remediation": "resolve or consolidate the existing discussion",
+            })
+        comment_id = ""
+        for _ in range(128):
+            candidate = "cmt_" + secrets.token_hex(16)
+            if candidate not in current.comments:
+                comment_id = candidate
+                break
+        if not comment_id:
+            raise HTTPException(503, {
+                "code": "comment_id_unavailable",
+                "message": "the server could not allocate a unique comment id",
+                "remediation": "retry with the same command idempotency key",
+                "retryable": True,
+            })
+        data = {
+            "comment_id": comment_id,
+            "node_id": node_id,
+            "node_generation": node_generation,
+            "text": _comment_text(data.get("text")),
+            "actor_kind": ("deployment_owner" if getattr(srv, "owner_auth_enabled", False)
+                           else "local_operator"),
+            "version": 1,
+        }
+    elif event_type in {EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED}:
+        current = _state()
+        raw_comment_id = data.get("comment_id")
+        # Legacy annotations are projected under a synthetic lookup-only id. Accept that exact
+        # shape solely so the caller gets the intentional read-only result below; it is never
+        # admitted into a modern collaboration event (modern ids remain strictly validated).
+        if (isinstance(raw_comment_id, str)
+                and re.fullmatch(r"legacy_(?:0|[1-9]\d*)", raw_comment_id)):
+            comment_id = raw_comment_id
+        else:
+            comment_id = _comment_id(raw_comment_id)
+        comment = current.comments.get(comment_id)
+        if comment is None:
+            raise HTTPException(404, {
+                "code": "comment_not_found",
+                "message": "the comment does not exist in this run generation",
+                "remediation": "refresh the collaboration panel",
+            })
+        if not comment.editable or comment.legacy:
+            raise HTTPException(409, {
+                "code": "legacy_comment_read_only",
+                "message": "legacy annotations have no verifiable actor or lifecycle and are read-only",
+                "remediation": "create a new attributed comment instead",
+            })
+        if comment.version >= COMMENT_MAX_VERSION:
+            raise HTTPException(409, {
+                "code": "comment_version_limit_reached",
+                "message": f"comment {comment_id} reached its {COMMENT_MAX_VERSION}-revision limit",
+                "remediation": "resolve it and create a concise follow-up comment",
+            })
+        supplied_node_id = _strict_integer(data.get("node_id"), "node_id")
+        supplied_generation = _strict_integer(
+            data.get("node_generation"), "node_generation")
+        if (supplied_node_id != comment.node_id
+                or supplied_generation != comment.node_generation):
+            raise HTTPException(409, {
+                "code": "comment_subject_changed",
+                "message": "the submitted node lifecycle does not own this comment",
+                "remediation": "refresh the collaboration panel before editing this comment",
+            })
+        expected_version = _comment_version(data.get("expected_version"))
+        if comment.version != expected_version:
+            raise HTTPException(409, {
+                "code": "comment_version_changed",
+                "message": (f"comment {comment_id} is version {comment.version}, not "
+                            f"{expected_version}"),
+                "current_version": comment.version,
+                "remediation": "refresh the comment and re-apply the edit to its current version",
+            })
+        normalized = {
+            "comment_id": comment_id,
+            "node_id": comment.node_id,
+            "node_generation": comment.node_generation,
+            "base_version": expected_version,
+            "version": expected_version + 1,
+            "actor_kind": ("deployment_owner" if getattr(srv, "owner_auth_enabled", False)
+                           else "local_operator"),
+        }
+        if event_type == EV_COMMENT_EDITED:
+            text = _comment_text(data.get("text"))
+            if text == comment.text:
+                raise HTTPException(409, {
+                    "code": "comment_unchanged",
+                    "message": "the edited text is identical to the current comment",
+                    "remediation": "no update is needed",
+                })
+            normalized["text"] = text
+        else:
+            resolved = data.get("resolved")
+            if not isinstance(resolved, bool):
+                raise HTTPException(400, "resolved must be a boolean")
+            if resolved == comment.resolved:
+                raise HTTPException(409, {
+                    "code": "comment_resolution_unchanged",
+                    "message": "the comment already has that resolution state",
+                    "remediation": "refresh the collaboration panel",
+                })
+            normalized["resolved"] = resolved
+        data = normalized
 
     if event_type == EV_NODE_RESET:
         raw_stage = data.get("from_stage", "eval")
@@ -811,6 +984,7 @@ class RunCommandService:
         self.lock_acquire_timeout = max(0.05, float(lock_acquire_timeout))
         self._local_lock = threading.RLock()
         self._run_locks: dict[str, threading.RLock] = {}
+        self._command_observations = CommandObservationIndex(max_indexed_runs=8)
 
     def _engine_state(self, rd: Path) -> Optional[bool]:
         try:
@@ -1661,33 +1835,37 @@ class RunCommandService:
         return bool(state.finalization_pending() or (state.stop_requested and (
             not state.finished or str(state.stop_reason or "").lower() == "error")))
 
-    def _pending_finalize_intent(self, rd: Path):
+    def _pending_finalize_intent(
+            self, rd: Path, observation: Optional[CommandObservation] = None):
         """Return the latest canonical external/legacy run_abort and its semantic digest."""
-        for event in reversed(self._events(rd)):
-            if event.type != EV_RUN_ABORT:
-                continue
-            data = dict(event.data or {})
-            data.pop("_command_id", None)
-            try:
-                normalized = _normalize_finalize_data(data)
-                _raw, digest = self._payload(EV_RUN_ABORT, normalized)
-            except HTTPException:
-                return event, None
-            return event, digest
-        return None, None
+        observation = observation or self._observe(rd)
+        event = observation.latest_run_abort
+        if event is None:
+            return None, None
+        data = dict(event.data or {})
+        data.pop("_command_id", None)
+        try:
+            normalized = _normalize_finalize_data(data)
+            _raw, digest = self._payload(EV_RUN_ABORT, normalized)
+        except HTTPException:
+            return event, None
+        return event, digest
 
-    def _attached_finalize_intact(self, rd: Path, record: dict) -> bool:
+    def _attached_finalize_intact(
+            self, rd: Path, record: dict,
+            observation: Optional[CommandObservation] = None) -> bool:
         expected_seq = record.get("attached_event_seq")
         expected_digest = record.get("attached_semantic_payload_digest")
         if expected_seq is None or not expected_digest:
             return False
-        latest, digest = self._pending_finalize_intent(rd)
+        observation = observation or self._observe(rd)
+        latest, digest = self._pending_finalize_intent(rd, observation)
         if latest is None or latest.seq != expected_seq or digest != expected_digest:
             return False
         # The historical row may still exist after an external resume/superseding stop. Attachment
         # represents the effective pending finalize, not mere event ancestry.
         expected_reason = str((record.get("data") or {}).get("reason") or "")
-        return str(self.srv.state(rd).stop_requested or "") == expected_reason
+        return str(observation.state().stop_requested or "") == expected_reason
 
     def _pending_finalize_record(self, rd: Path, semantic_payload_digest: Optional[str] = None
                                  ) -> tuple[Optional[Path], Optional[dict]]:
@@ -1963,18 +2141,21 @@ class RunCommandService:
         self._clear_spawn_claim(rd, str(record.get("id") or ""))
         return self._terminal(path, record, "succeeded")
 
-    def _reconcile_observation(self, rd: Path, path: Path, record: dict) -> dict:
+    def _reconcile_observation(
+            self, rd: Path, path: Path, record: dict,
+            observation: Optional[CommandObservation] = None) -> dict:
         """Promote a failed/timed-out record if its durable postcondition arrived later.
 
         GET is observation-only: it never appends or spawns.  A same-key POST may explicitly retry
         the existing command below; it reuses the marked intent and therefore cannot double-apply an
         additive budget/fork/inject request.
         """
+        observation = observation or self._observe(rd)
         marked_invalid = (not record.get("attached") and record.get("event_seq") is not None
                           and self._find_intent(
-                              rd, str(record.get("id") or ""), record) is None)
+                              rd, str(record.get("id") or ""), record, observation) is None)
         attached_invalid = bool(record.get("attached")
-                                and not self._attached_finalize_intact(rd, record))
+                                and not self._attached_finalize_intact(rd, record, observation))
         if marked_invalid or attached_invalid:
             return self._terminal(path, record, "failed", error=_error(
                 "command_intent_missing",
@@ -1987,7 +2168,7 @@ class RunCommandService:
         spec = CONTROL_SPECS.get(str(record.get("event_type") or ""))
         if spec is None:
             return record
-        if self._postcondition(rd, record):
+        if self._postcondition(rd, record, observation):
             updated = dict(record)
             updated["reconciled_from"] = status
             return self._succeeded(rd, path, updated)
@@ -2009,17 +2190,17 @@ class RunCommandService:
 
     def _safe_retry(self, rd: Path, path: Path, record: dict) -> dict:
         """Re-arm the SAME command id/key; never mint or append a second logical intent."""
-        record = self._reconcile_observation(rd, path, record)
+        observation = self._observe(rd)
+        record = self._reconcile_observation(rd, path, record, observation)
         if record.get("status") not in {"failed", "timed_out"}:
             return record
-        events = self._events(rd)
         updated = dict(record)
         updated["status"] = "accepted"
         updated["error"] = None
         updated["updated_at"] = time.time()
         updated["deadline_at"] = time.time() + self.command_timeout
         updated["absolute_deadline_at"] = time.time() + self.max_observation_timeout
-        updated["observe_after_seq"] = events[-1].seq if events else -1
+        updated["observe_after_seq"] = observation.latest_seq
         updated["retry_count"] = int(updated.get("retry_count", 0)) + 1
         # A prior spawn no longer proves this retry has a driver.  Recovery must observe fresh domain
         # progress or claim a new spawn under the per-run sequencer.
@@ -2031,7 +2212,111 @@ class RunCommandService:
         self._save(path, updated)
         return updated
 
+    @staticmethod
+    def _comment_precondition(state, event_type: str, data: dict) -> Optional[dict]:
+        """Recheck the exact semantic subject immediately before a collaboration append."""
+        if event_type == EV_COMMENT_CREATED:
+            node_id = data.get("node_id")
+            generation = data.get("node_generation")
+            node = state.nodes.get(node_id)
+            if node is None or node.attempt != generation:
+                current = getattr(node, "attempt", None)
+                error = _error(
+                    "node_generation_changed",
+                    f"the comment target is no longer experiment #{node_id} generation {generation}",
+                    "refresh the run and create a new comment against the current lifecycle")
+                error["current_generation"] = current
+                return error
+            if data.get("comment_id") in state.comments:
+                return _error(
+                    "comment_id_conflict", "the allocated comment id is already present",
+                    "submit a new command with a new idempotency key")
+            if len(state.comments) >= COMMENT_MAX_PER_RUN:
+                return _error(
+                    "comment_run_limit_reached",
+                    f"this run already has {COMMENT_MAX_PER_RUN} projected comments",
+                    "archive or compact comment history before creating more comments")
+            per_subject = sum(
+                1 for item in state.comments.values()
+                if (not item.legacy and item.node_id == node_id
+                    and item.node_generation == generation))
+            if per_subject >= COMMENT_MAX_PER_NODE_GENERATION:
+                return _error(
+                    "comment_subject_limit_reached",
+                    (f"experiment #{node_id} generation {generation} already has "
+                     f"{COMMENT_MAX_PER_NODE_GENERATION} comments"),
+                    "resolve or consolidate the existing discussion")
+            return None
+        comment_id = data.get("comment_id")
+        comment = state.comments.get(comment_id)
+        if comment is None or not comment.editable:
+            return _error(
+                "comment_not_found", "the editable comment no longer exists",
+                "refresh the collaboration panel")
+        if (comment.node_id != data.get("node_id")
+                or comment.node_generation != data.get("node_generation")):
+            return _error(
+                "comment_subject_changed", "the comment subject identity no longer matches",
+                "inspect the event history before retrying")
+        expected = data.get("base_version")
+        if comment.version != expected:
+            error = _error(
+                "comment_version_changed",
+                f"comment {comment_id} is version {comment.version}, not {expected}",
+                "refresh the comment and re-apply the edit to its current version")
+            error["current_version"] = comment.version
+            return error
+        if comment.version >= COMMENT_MAX_VERSION or data.get("version") > COMMENT_MAX_VERSION:
+            return _error(
+                "comment_version_limit_reached",
+                f"comment {comment_id} reached its {COMMENT_MAX_VERSION}-revision limit",
+                "resolve it and create a concise follow-up comment")
+        return None
+
+    def _append_collaboration_intent(self, rd: Path, record: dict, event_data: dict
+                                     ) -> tuple[Optional[Event], int, Optional[dict]]:
+        """Strict-lock, bounded-CAS append for a versioned comment mutation.
+
+        Engine/domain events may advance the shared log between our read and append.  Retry those
+        unrelated tail races after refolding; reject only when the run/node/comment identity moved.
+        """
+        store = EventStore(self._events_path(rd))
+        baseline = -1
+        for _ in range(8):
+            events = store.read_all()
+            current_generation = run_generation_token(events)
+            if current_generation != record.get("run_generation"):
+                error = self._generation_changed_error(record, current_generation)
+                return None, (events[-1].seq if events else -1), error
+            state = fold(events)
+            error = self._comment_precondition(state, str(record.get("event_type") or ""), event_data)
+            if error is not None:
+                return None, (events[-1].seq if events else -1), error
+            baseline = events[-1].seq if events else -1
+            try:
+                intent = store.append(
+                    str(record["event_type"]), event_data,
+                    expected_last_seq=baseline, require_lock=True)
+                return intent, baseline, None
+            except EventStoreConcurrencyError:
+                continue
+            except EventStoreLockError as exc:
+                return None, baseline, _error(
+                    "event_lock_unavailable", str(exc),
+                    "restore cross-process file locking, then retry this exact command id",
+                    retryable=True)
+        return None, baseline, _error(
+            "comment_concurrency_busy",
+            "the event log kept changing while the comment version was being verified",
+            "retry this exact command id after the run produces less event traffic",
+            retryable=True)
+
     def _decision(self, rd: Path, event_type: str) -> tuple[str, Optional[dict]]:
+        # Comments never wake or steer the engine.  Requiring a readable engine.lock here would make
+        # collaboration unavailable precisely when storage ownership diagnostics are degraded, even
+        # though the strict event append lock below is the only ownership guarantee this write needs.
+        if event_type in COLLABORATION_EVENTS:
+            return "append", None
         state = self.srv.state(rd)
         liveness = self._engine_state(rd)
         if liveness is None:
@@ -2202,7 +2487,7 @@ class RunCommandService:
                     path = reattach_path
                     record = self._reconcile_observation(rd, path, reattach)
                 else:
-                    if self._recent_spawn_claim(rd):
+                    if event_type not in COLLABORATION_EVENTS and self._recent_spawn_claim(rd):
                         raise HTTPException(409, {
                             "code": "engine_start_uncertain",
                             "message": "An earlier engine start has not exposed its lock or exited.",
@@ -2254,7 +2539,8 @@ class RunCommandService:
                         "updated_at": now,
                         "deadline_at": now + self.command_timeout,
                         "absolute_deadline_at": now + self.max_observation_timeout,
-                        "driver_was_alive": self._engine_state(rd),
+                        "driver_was_alive": (None if event_type in COLLABORATION_EVENTS
+                                             else self._engine_state(rd)),
                     }
                     try:
                         if normalization_error is not None:
@@ -2299,10 +2585,18 @@ class RunCommandService:
                         detail = exc.detail
                         if (isinstance(detail, dict) and detail.get("code")
                                 and detail.get("message")):
-                            record["error"] = _error(
+                            safe_error = _error(
                                 str(detail["code"]), str(detail["message"]),
                                 str(detail.get("remediation") or ""),
                                 retryable=bool(detail.get("retryable", False)))
+                            # Expose only the bounded numeric CAS value needed to recover from a
+                            # stale comment edit. Arbitrary exception-detail fields stay excluded.
+                            current_version = detail.get("current_version")
+                            if (isinstance(current_version, int)
+                                    and not isinstance(current_version, bool)
+                                    and 1 <= current_version <= COMMENT_MAX_VERSION):
+                                safe_error["current_version"] = current_version
+                            record["error"] = safe_error
                         else:
                             record["error"] = _error(
                                 "invalid_command" if exc.status_code < 404 else "command_target_not_found",
@@ -2324,7 +2618,16 @@ class RunCommandService:
                 self._execute(rd, path, record, claimed=True)
             else:
                 self._start_worker(rd, path, record)
-        return self._public(self._load(path) or record)
+        result = self._public(self._load(path) or record)
+        # A collaboration append promises strict cross-process serialization. Surface the missing
+        # guarantee as HTTP 503 (while retaining the durable command id for explicit same-intent
+        # recovery) instead of returning an ordinary failed 200 record.
+        if (event_type in COLLABORATION_EVENTS and result.get("status") == "failed"
+                and (result.get("error") or {}).get("code") == "event_lock_unavailable"):
+            detail = dict(result["error"])
+            detail["command_id"] = result.get("id")
+            raise HTTPException(503, detail)
+        return result
 
     def retry(self, rd: Path, command_id: str) -> dict:
         path = self._path(rd, command_id)
@@ -2343,7 +2646,8 @@ class RunCommandService:
             record = self._reconcile_observation(rd, path, record)
             if record.get("status") == "succeeded":
                 return self._public(record)
-            if self._recent_spawn_claim(rd):
+            if (record.get("event_type") not in COLLABORATION_EVENTS
+                    and self._recent_spawn_claim(rd)):
                 raise HTTPException(409, {
                     "code": "engine_start_uncertain",
                     "existing_command_id": command_id,
@@ -2372,8 +2676,18 @@ class RunCommandService:
                         f"GET /commands/{active_id} to a terminal status before retrying {command_id}."),
                 })
             record = self._safe_retry(rd, path, record)
-        self._start_worker(rd, path, record)
-        return self._public(self._load(path) or record)
+        if record.get("event_type") in COLLABORATION_EVENTS \
+                and self._claim_execution(rd, str(record["id"])):
+            self._execute(rd, path, record, claimed=True)
+        else:
+            self._start_worker(rd, path, record)
+        result = self._public(self._load(path) or record)
+        if (record.get("event_type") in COLLABORATION_EVENTS and result.get("status") == "failed"
+                and (result.get("error") or {}).get("code") == "event_lock_unavailable"):
+            detail = dict(result["error"])
+            detail["command_id"] = result.get("id")
+            raise HTTPException(503, detail)
+        return result
 
     def get(self, rd: Path, command_id: str) -> dict:
         path = self._path(rd, command_id)
@@ -2498,18 +2812,22 @@ class RunCommandService:
     def _events(self, rd: Path):
         return EventStore(self._events_path(rd)).read_all()
 
-    def _find_intent(self, rd: Path, command_id: str, record: Optional[dict] = None):
+    def _observe(self, rd: Path) -> CommandObservation:
+        return self._command_observations.observe(self._events_path(rd))
+
+    def _find_intent(
+            self, rd: Path, command_id: str, record: Optional[dict] = None,
+            observation: Optional[CommandObservation] = None):
         """Return the one exact marked intent, not merely any event carrying the marker.
 
         The record's sequence, event type, and normalized semantic payload are all part of durable
         command identity. Log repair/rewrite that preserves only ``_command_id`` must never satisfy a
         folded-intent postcondition or make a stale command_ack look causal.
         """
-        marked = [event for event in self._events(rd)
-                  if (event.data or {}).get("_command_id") == command_id]
-        if len(marked) != 1:
+        observation = observation or self._observe(rd)
+        event = observation.marked_intent(command_id)
+        if event is None:
             return None
-        event = marked[0]
         if record is None:
             return event
         expected_seq = record.get("event_seq")
@@ -2532,24 +2850,29 @@ class RunCommandService:
             return None
         return event
 
-    def _domain_progress(self, rd: Path, after_seq: int) -> bool:
-        return any(event.seq > after_seq and event.type not in CONTROL_EVENTS for event in self._events(rd))
+    def _domain_progress(
+            self, rd: Path, after_seq: int,
+            observation: Optional[CommandObservation] = None) -> bool:
+        observation = observation or self._observe(rd)
+        return observation.has_domain_progress(after_seq)
 
     @staticmethod
     def _observe_after(record: dict) -> int:
         return int(record.get(
             "observe_after_seq", record.get("event_seq", record.get("baseline_seq", -1))))
 
-    def _domain_failure(self, rd: Path, record: dict) -> Optional[dict]:
+    def _domain_failure(
+            self, rd: Path, record: dict,
+            observation: Optional[CommandObservation] = None) -> Optional[dict]:
         after = self._observe_after(record)
-        for event in self._events(rd):
-            if (event.seq > after and event.type == "run_finished"
-                    and (event.data or {}).get("reason") == "error"):
-                detail = str((event.data or {}).get("error") or "engine exited with an error")
-                return _error(
-                    "engine_failed", detail[:500],
-                    "correct the run error, then POST this command id's /retry endpoint",
-                    retryable=True)
+        observation = observation or self._observe(rd)
+        event = observation.domain_failure_after(after)
+        if event is not None:
+            detail = str((event.data or {}).get("error") or "engine exited with an error")
+            return _error(
+                "engine_failed", detail[:500],
+                "correct the run error, then POST this command id's /retry endpoint",
+                retryable=True)
         return None
 
     def _spawn(self, rd: Path) -> Optional[int]:
@@ -2560,34 +2883,37 @@ class RunCommandService:
         # only for ordinary paused/finished continuation.  Never append run_reopened here.
         return self.spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
 
-    def _postcondition(self, rd: Path, record: dict) -> bool:
+    def _postcondition(
+            self, rd: Path, record: dict,
+            observation: Optional[CommandObservation] = None) -> bool:
+        observation = observation or self._observe(rd)
         kind = record.get("postcondition")
-        if record.get("attached") and not self._attached_finalize_intact(rd, record):
+        if (record.get("attached")
+                and not self._attached_finalize_intact(rd, record, observation)):
             return False
         if (not record.get("attached") and record.get("event_seq") is not None
                 and self._find_intent(
-                    rd, str(record.get("id") or ""), record) is None):
+                    rd, str(record.get("id") or ""), record, observation) is None):
             return False
         if kind == "folded_intent":
-            intent = self._find_intent(rd, str(record["id"]), record)
+            intent = self._find_intent(rd, str(record["id"]), record, observation)
             if intent is None:
                 return False
-            self.srv.state(rd)  # prove the complete log, including the marked intent, still folds
+            observation.state()  # prove the complete log, including the marked intent, still folds
             return True
         if kind == "paused_and_stopped":
-            state = self.srv.state(rd)
+            state = observation.state()
             return bool(state.paused and self._engine_state(rd) is False)
         if kind == "finished_and_stopped":
-            state = self.srv.state(rd)
+            state = observation.state()
             if (not state.finished or self._engine_state(rd) is not False
                     or str(state.stop_reason or "").lower() == "error"):
                 return False
             if not state.stop_requested:
                 return False
-            events = self._events(rd)
             # New-format engines publish this only after cost/reflection/read-model/trace/tree are
             # complete. A legacy terminal event has no explicit scope and stays backward compatible.
-            if (incomplete_finalize_scope(events) is not None
+            if (observation.incomplete_finalize_scope() is not None
                     or state.finalization_pending()):
                 return False
             # An attached record observes an external/legacy finalize rather than owning a marked
@@ -2599,9 +2925,7 @@ class RunCommandService:
             # ``observe_after_seq`` advances past the failed attempt, so success requires a fresh,
             # non-error run_finished causally after that boundary.
             after = self._observe_after(record)
-            finished = [event for event in events if event.type == "run_finished"
-                        and str((event.data or {}).get("reason") or "").lower() != "error"]
-            if any(event.seq > after for event in finished):
+            if observation.has_non_error_finish_after(after):
                 return True
             # Decision→append race: natural completion can land after the preflight baseline but just
             # before this command's run_abort intent. It is still the terminal attempt this finalize
@@ -2610,22 +2934,20 @@ class RunCommandService:
                 baseline = int(record.get("baseline_seq", -1))
             except (TypeError, ValueError, OverflowError):
                 baseline = -1
-            return record.get("event_type") == EV_RUN_ABORT and any(
-                event.seq > baseline for event in finished)
+            return (record.get("event_type") == EV_RUN_ABORT
+                    and observation.has_non_error_finish_after(baseline))
         if kind == "engine_ack":
             command_id = str(record.get("id") or "")
             event_seq = record.get("event_seq")
-            return any(
-                event.type == EV_COMMAND_ACK
-                and str((event.data or {}).get("command_id") or "") == command_id
-                and (event.data or {}).get("event_seq") == event_seq
-                for event in self._events(rd))
+            return observation.has_ack(command_id, event_seq)
         return False
 
-    def _driver_or_progress(self, rd: Path, record: dict) -> bool:
+    def _driver_or_progress(
+            self, rd: Path, record: dict,
+            observation: Optional[CommandObservation] = None) -> bool:
         if record.get("spawned_by_command") and self._engine_state(rd) is True:
             return True
-        return self._postcondition(rd, record)
+        return self._postcondition(rd, record, observation)
 
     def _execute(self, rd: Path, path: Path, initial: dict, *, claimed: bool) -> None:
         record = self._load(path) or dict(initial)
@@ -2651,9 +2973,11 @@ class RunCommandService:
                     "invalid_command", f"unknown control event: {event_type!r}"))
                 return
 
-            intent = self._find_intent(rd, command_id, record)
+            observation = self._observe(rd)
+            intent = self._find_intent(rd, command_id, record, observation)
             decision_baseline = None
-            if record.get("attached") and not self._attached_finalize_intact(rd, record):
+            if (record.get("attached")
+                    and not self._attached_finalize_intact(rd, record, observation)):
                 self._terminal(path, record, "failed", error=_error(
                     "command_intent_missing",
                     "the attached external finalize intent is missing or changed",
@@ -2708,7 +3032,15 @@ class RunCommandService:
                 record["baseline_seq"] = decision_baseline
                 event_data = dict(record.get("data") or {})
                 event_data["_command_id"] = command_id
-                store = EventStore(self._events_path(rd))
+                if event_type in COLLABORATION_EVENTS:
+                    intent, decision_baseline, append_error = self._append_collaboration_intent(
+                        rd, record, event_data)
+                    if append_error is not None:
+                        status = "failed" if append_error.get("retryable") else "rejected"
+                        self._terminal(path, record, status, error=append_error)
+                        return
+                else:
+                    store = EventStore(self._events_path(rd))
                 if event_type in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
                     # Approval is valid only against the exact decision snapshot. The per-run command
                     # sequencer does not exclude the engine/CLI, so an external grant/reset can land
@@ -2722,7 +3054,7 @@ class RunCommandService:
                             "the approval state changed before the intent could be recorded",
                             "refresh the run and submit a new approval command", retryable=False))
                         return
-                else:
+                elif event_type not in COLLABORATION_EVENTS:
                     intent = store.append(event_type, event_data)
                 record["baseline_seq"] = decision_baseline
             if intent is not None:
@@ -2736,10 +3068,11 @@ class RunCommandService:
             record["updated_at"] = time.time()
             self._save(path, record)
 
-            if self._postcondition(rd, record):
+            observation = self._observe(rd)
+            if self._postcondition(rd, record, observation):
                 self._succeeded(rd, path, record)
                 return
-            domain_error = (self._domain_failure(rd, record)
+            domain_error = (self._domain_failure(rd, record, observation)
                             if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
             if domain_error is not None:
                 self._clear_spawn_claim(rd, command_id)
@@ -2787,12 +3120,13 @@ class RunCommandService:
                     startup_deadline = min(
                         float(record["deadline_at"]), time.time() + self.startup_timeout)
                     while time.time() < startup_deadline:
-                        if self._postcondition(rd, record):
+                        observation = self._observe(rd)
+                        if self._postcondition(rd, record, observation):
                             if spec.engine_policy is EnginePolicy.ENSURE_RUNNING:
                                 self._succeeded(rd, path, record)
                                 return
                             break
-                        domain_error = self._domain_failure(rd, record)
+                        domain_error = self._domain_failure(rd, record, observation)
                         if domain_error is not None:
                             self._clear_spawn_claim(rd, command_id)
                             self._terminal(path, record, "failed", error=domain_error)
@@ -2818,21 +3152,23 @@ class RunCommandService:
             sequence_ctx.__exit__(None, None, None)
             sequence_held = False
 
-            if spec.engine_policy is EnginePolicy.ENSURE_RUNNING and self._postcondition(rd, record):
+            observation = self._observe(rd)
+            if (spec.engine_policy is EnginePolicy.ENSURE_RUNNING
+                    and self._postcondition(rd, record, observation)):
                 self._succeeded(rd, path, record)
                 return
 
             if record.get("last_progress_seq") is None:
-                observed = self._events(rd)
-                last_progress_seq = observed[-1].seq if observed else -1
+                last_progress_seq = observation.latest_seq
             else:
                 last_progress_seq = int(record.get("last_progress_seq", -1))
             while True:
                 self._heartbeat_execution(rd, command_id)
-                if self._postcondition(rd, record):
+                observation = self._observe(rd)
+                if self._postcondition(rd, record, observation):
                     self._succeeded(rd, path, record)
                     return
-                domain_error = (self._domain_failure(rd, record)
+                domain_error = (self._domain_failure(rd, record, observation)
                                 if spec.engine_policy is not EnginePolicy.NO_SPAWN else None)
                 if domain_error is not None:
                     self._clear_spawn_claim(rd, command_id)
@@ -2840,8 +3176,7 @@ class RunCommandService:
                     return
 
                 now = time.time()
-                events = self._events(rd)
-                latest_seq = events[-1].seq if events else -1
+                latest_seq = observation.latest_seq
                 liveness = self._engine_state(rd)
                 alive = liveness is True
                 if (alive and record.get("spawned_by_command")
@@ -2889,7 +3224,8 @@ class RunCommandService:
                 # Popen→engine.lock window for other command workers/processes.
                 if spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
                     with self.sequence(rd):
-                        if self._postcondition(rd, record):
+                        retry_observation = self._observe(rd)
+                        if self._postcondition(rd, record, retry_observation):
                             self._succeeded(rd, path, record)
                             return
                         retry_liveness = self._engine_state(rd)
@@ -2920,7 +3256,8 @@ class RunCommandService:
                                 time.time() + self.startup_timeout)
                             while time.time() < startup_deadline:
                                 self._heartbeat_execution(rd, command_id)
-                                if (self._postcondition(rd, record)
+                                startup_observation = self._observe(rd)
+                                if (self._postcondition(rd, record, startup_observation)
                                         or self._engine_state(rd) is True):
                                     self._clear_spawn_claim(rd, command_id)
                                     record["spawn_claim_released"] = True

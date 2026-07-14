@@ -23,17 +23,20 @@ const blockingViolations = violations => violations
   }))
 
 test('Attention Center stays on the owner plane and out of review/shared routes', async () => {
-  const [appSource, centerSource] = await Promise.all([
+  const [appSource, workspaceSource, centerSource] = await Promise.all([
     readFile(new URL('../src/App.jsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/OwnerWorkspace.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/AttentionCenter.jsx', import.meta.url), 'utf8'),
   ])
 
-  assert.equal((appSource.match(/<AttentionCenter\b/g) || []).length, 1)
-  assert.match(appSource, /<AttentionCenter \/>/)
+  assert.equal((workspaceSource.match(/<AttentionComponent\b/g) || []).length, 1)
+  assert.match(workspaceSource, /<AttentionComponent \/>/)
+  assert.match(workspaceSource, /const AttentionCenter = lazy\(/,
+    'the owner-only poller must remain deferred until the owner workspace mounts')
   const reviewReturn = appSource.indexOf("if (route.view === 'review') return")
   const sharedReturn = appSource.indexOf("if (route.view === 'shared') return")
   const ownerGate = appSource.indexOf('<OwnerAuth label={routeLabel}>')
-  const ownerMount = appSource.indexOf('<AttentionCenter />')
+  const ownerMount = appSource.indexOf('<OwnerWorkspace route={route}>')
   assert.ok(reviewReturn >= 0 && ownerMount > reviewReturn,
     'the review route must return before owner-only Attention Center effects can mount')
   assert.ok(sharedReturn > reviewReturn && ownerGate > sharedReturn && ownerMount > ownerGate,

@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, apiPrefix, operatorMeta,
+import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, operatorMeta,
   commandFeedback, getRunCommand, COMMAND_SUCCEEDED, COMMAND_FAILED,
-  createRunReview, listRunReviews, revokeRunReview } from './util.js'
+} from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
@@ -11,27 +11,14 @@ import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import SettingsForm from './SettingsForm.jsx'
 import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
-import { useDialogFocus } from './useDialogFocus.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
-import { hashWithRunRouteState, reviewRouteStateForScope } from './runRouteState.js'
+import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
 
-export function Panel({ title, sub, onClose, children, wide }) {
-  const dialogRef = useRef(null)
-  useDialogFocus(dialogRef, onClose)
-  return (
-    <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
-      <div ref={dialogRef} className="panel" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}
-           style={wide ? { width: 'min(1100px, 95%)' } : {}}>
-        <div className="panel-h"><span className="ttl">{title}</span>{sub && <span className="pill">{sub}</span>}<span className="right" /><button className="btn sm ghost" aria-label={`Close ${title}`} onClick={onClose}>✕</button></div>
-        <div className="panel-b">{children}</div>
-      </div>
-    </div>
-  )
-}
+export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
 
@@ -328,48 +315,6 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
         </div>
       </>}
     </Panel>
-  )
-}
-
-// U6 · live "why" strip: a compact, always-visible narration of the loop's latest AUTONOMOUS
-// decisions — folded from the events LoopLab already logs (policy "why-this-node", A7 Strategist,
-// the unified agent's macro-action). Builds operator trust ("it explored because it stalled") so a
-// run can be left unattended. Click a referenced node to jump to it. Pure projection; no new events.
-export function WhyStrip({ state, onSelect }) {
-  const items = []
-  const strat = (state.strategy_history || [])[(state.strategy_history || []).length - 1]
-  if (strat && (strat.strategy?.rationale || strat.strategy?.policy)) {
-    items.push({ icon: 'compass', label: 'strategy',
-      text: strat.strategy.rationale || `policy → ${strat.strategy.policy}`, at: strat.at_node })
-  }
-  const dec = (state.agent_decisions || [])[(state.agent_decisions || []).length - 1]
-  if (dec && (dec.rationale || dec.chosen)) {
-    // `chosen` used to be a bare node id but the agentic policy makes it an ACTION object
-    // {kind, parent_id, parent_ids, node_id} — render a readable label, never the raw object
-    // (a raw object as a JSX child is React error #31, which black-screened the whole run view).
-    const ch = dec.chosen
-    const label = (ch && typeof ch === 'object')
-      ? `${ch.kind || 'action'}${ch.node_id != null ? ' #' + ch.node_id : (ch.parent_id != null ? ' from #' + ch.parent_id : '')}`
-      : (ch || 'action')
-    items.push({ icon: 'bolt', label, text: dec.rationale || '', at: dec.at_node })
-  }
-  if (state.policy_reason) {
-    items.push({ icon: 'target', label: 'policy', node: state.policy_chosen,
-      text: `${state.policy_reason}${state.policy_chosen != null ? ` → #${state.policy_chosen}` : ''}` })
-  }
-  if (!items.length) return null
-  return (
-    <div className="why-strip" title="why the loop is doing what it's doing (live)">
-      {items.slice(0, 3).map((it, i) => {
-        const Item = it.node != null ? 'button' : 'span'
-        return <Item key={i} type={it.node != null ? 'button' : undefined}
-          className={'why-item' + (it.node != null ? ' disclosure-button' : '')}
-          onClick={it.node != null ? () => onSelect?.(it.node) : undefined}>
-          <OpIcon name={it.icon} size={12} className="why-ic" />
-          <b>{it.label}</b> {it.text}{it.at != null ? <span className="muted"> @{it.at}</span> : null}
-        </Item>
-      })}
-    </div>
   )
 }
 
@@ -784,49 +729,6 @@ export function GpuPanel({ onClose }) {
   )
 }
 
-// "Research" — the Deep-Research stage memos (Phase 2). One entry per `research_completed` memo:
-// the model's conclusion (summary/findings/recommended_directions) up front + the consulted sources
-// as clickable links; the raw deliberation sits in a collapsed "reasoning (debug)" disclosure. The
-// `focus` index (set when an operator clicks a research node in the DAG) auto-expands that memo.
-export function MemoCard({ memo, idx, open, onToggle }) {
-  const [think, setThink] = useState(false)
-  return (
-    <div className="memo-card">
-      <button type="button" className="memo-head disclosure-button" aria-expanded={open}
-        onClick={() => onToggle(idx)}>
-        <span className="span-tw">{open ? '▾' : '▸'}</span>
-        <b><OpIcon name="search" className="t-ic" /> memo #{idx + 1}</b>
-        {memo.trigger && <span className="pill">{memo.trigger}</span>}
-        {memo.at_node != null && <span className="muted"> @{memo.at_node} nodes</span>}
-        <span className="spacer" style={{ flex: 1 }} />
-        <span className="muted">{(memo.sources || []).length} source{(memo.sources || []).length === 1 ? '' : 's'}</span>
-      </button>
-      {open && <div className="memo-body">
-        <div className="section-h">Conclusion</div>
-        <div className="v">{memo.summary || '—'}</div>
-        {(memo.findings || []).length > 0 && <>
-          <div className="section-h">Findings</div>
-          <ul className="bul">{memo.findings.map((f, i) => <li key={i}>{f}</li>)}</ul></>}
-        {(memo.recommended_directions || []).length > 0 && <>
-          <div className="section-h">Recommended directions (fed to the Researcher)</div>
-          <ul className="bul">{memo.recommended_directions.map((d, i) => <li key={i}>{d}</li>)}</ul></>}
-        {(memo.sources || []).length > 0 && <>
-          <div className="section-h">Sources consulted</div>
-          <ul className="bul">{memo.sources.map((s, i) => <li key={i}>
-            {s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || '—')}
-            {s.snippet && <span className="muted"> — {String(s.snippet).slice(0, 120)}</span>}</li>)}</ul></>}
-        {memo.reasoning && <div className="think-debug" style={{ marginTop: 8 }}>
-          <button type="button" className="role-think disclosure-button" aria-expanded={think}
-            onClick={() => setThink(v => !v)} style={{ fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
-            {think ? '▾' : '▸'} reasoning (debug)</button>
-          {think && <Markdown className="think-body" text={memo.reasoning} />}
-        </div>}
-      </div>}
-    </div>
-  )
-}
-
-
 // F1 · Global hyperparameter importance — across ALL evaluated feasible nodes in the run, how
 // strongly does each numeric param predict the metric (|Pearson r|)? The per-node Sensitivity panel
 // is local (one ablation); this is the run-wide W&B-style "which knobs matter" view. Pure UI.
@@ -908,106 +810,6 @@ export function CrossRunPanel({ state, onClose }) {
           </tbody></table></DataTable>
         : <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
       <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>
-    </Panel>
-  )
-}
-
-// F4 · Collaboration — a thread view of every node annotation (folded from `annotation` events) plus
-// a read-only share link. Annotations are already events; this surfaces them as a reviewable thread.
-export function CollabPanel({ state, runId, onSelect, onClose, onToast, reviewRouteState = null }) {
-  const [ttl, setTtl] = useState(7 * 24 * 60 * 60)
-  const [includeEvidence, setIncludeEvidence] = useState(false)
-  const [links, setLinks] = useState([])
-  const [linksStatus, setLinksStatus] = useState('loading')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [createdUrl, setCreatedUrl] = useState('')
-  const ann = state.annotations || {}
-  const entries = Object.entries(ann).flatMap(([nid, notes]) =>
-    (notes || []).map((text, i) => ({ nid: Number(nid), i, text })))
-    .sort((a, b) => a.nid - b.nid)
-  const refreshLinks = async () => {
-    setLinksStatus('loading')
-    try {
-      const result = await listRunReviews(runId)
-      setLinks(result.links || []); setLinksStatus('ready'); setError('')
-    } catch (e) {
-      setLinksStatus('error'); setError(e.message || 'Could not load review links')
-    }
-  }
-  useEffect(() => {
-    let active = true
-    setLinksStatus('loading'); setError('')
-    listRunReviews(runId)
-      .then(result => { if (active) { setLinks(result.links || []); setLinksStatus('ready') } })
-      .catch(e => { if (active) { setLinksStatus('error'); setError(e.message || 'Could not load review links') } })
-    return () => { active = false }
-  }, [runId])
-  const copy = async (url) => {
-    try { await navigator.clipboard.writeText(url); onToast?.('review link copied') }
-    catch { setCreatedUrl(url); onToast?.('Copy the visible link manually') }
-  }
-  const create = async () => {
-    if (busy) return
-    setBusy(true); setError(''); setCreatedUrl('')
-    try {
-      const result = await createRunReview(runId, { ttl_seconds: ttl, include_evidence: includeEvidence })
-      const base = `${location.origin}${apiPrefix()}/`
-      const target = new URL(result.path, base)
-      const scopedState = reviewRouteStateForScope({ ...(reviewRouteState || {}),
-        generation: result.generation }, { evidence: includeEvidence })
-      target.hash = hashWithRunRouteState(target.hash, scopedState,
-        { reviewMode: true, forceGeneration: true })
-      const url = target.href
-      setCreatedUrl(url)
-      await copy(url)
-      await refreshLinks()
-    } catch (e) { setError(e.message || 'Could not create review link') }
-    finally { setBusy(false) }
-  }
-  const revoke = async (id) => {
-    setBusy(true); setError('')
-    try { await revokeRunReview(runId, id); await refreshLinks(); onToast?.('review link revoked') }
-    catch (e) { setError(e.message || 'Could not revoke link') }
-    finally { setBusy(false) }
-  }
-  return (
-    <Panel title="Collaboration" sub={`${entries.length} note(s)`} onClose={onClose}>
-      <div className="review-link-builder">
-        <div className="section-h">Create a read-only review link</div>
-        <p className="muted">The link is bound to this run, expires automatically, can be revoked, and never carries owner controls.</p>
-        <div className="review-link-options">
-          <label>Expires
-            <select value={ttl} onChange={e => setTtl(Number(e.target.value))}>
-              <option value={60 * 60}>1 hour</option><option value={24 * 60 * 60}>1 day</option>
-              <option value={7 * 24 * 60 * 60}>7 days</option><option value={30 * 24 * 60 * 60}>30 days</option>
-            </select>
-          </label>
-          <label className="review-evidence-option"><input type="checkbox" checked={includeEvidence}
-            onChange={e => setIncludeEvidence(e.target.checked)} /> Include redacted source evidence</label>
-        </div>
-        {includeEvidence && <div className="notice warn">Source and result details can still contain sensitive project information. Known credential patterns are redacted; raw logs, prompts, traces, and artifacts remain excluded.</div>}
-        {error && <div className="notice resource-error" role="alert">{error}</div>}
-        <button className="btn sm primary" disabled={busy} onClick={create}><OpIcon name="link" size={12} /> {busy ? 'Creating…' : 'Create & copy link'}</button>
-        {createdUrl && <div className="review-created"><label htmlFor="created-review-url">New link (shown once)</label>
-          <div><input id="created-review-url" readOnly value={createdUrl} onFocus={e => e.target.select()} />
-            <button className="btn sm" onClick={() => copy(createdUrl)}>Copy</button></div></div>}
-        <div className="section-h">Existing links</div>
-        {linksStatus === 'loading' ? <div className="muted" role="status">Loading review links…</div>
-          : links.length ? <div className="review-link-list">{links.map(link => <div key={link.id} className="review-link-row">
-          <div><b>{link.status}</b> · {(link.scopes || []).includes('evidence') ? 'summary + evidence' : 'summary'}
-            <div className="muted">expires {new Date(link.expires_at * 1000).toLocaleString()}</div></div>
-          {['active', 'stale'].includes(link.status) && <button className="btn sm danger" disabled={busy} onClick={() => revoke(link.id)}>Revoke</button>}
-        </div>)}</div> : linksStatus === 'ready' ? <div className="muted">No review links created yet.</div>
-          : <div className="review-links-error"><span className="muted">Existing links could not be loaded.</span>
-            <button className="btn sm" disabled={busy} onClick={refreshLinks}>Retry</button></div>}
-      </div>
-      <div className="muted" style={{ margin: '16px 0 8px' }}>Annotations are owner-authored run events. Review-link recipients can read them but cannot add or change them.</div>
-      {entries.length
-        ? <div className="thread">{entries.map((e, k) => <div key={k} className="kv" style={{ alignItems: 'baseline' }}>
-            <div className="k"><button className="btn sm ghost" onClick={() => { onSelect && onSelect(e.nid); onClose() }}>#{e.nid}</button></div>
-            <div className="v">{e.text}</div></div>)}</div>
-        : <div className="muted">No annotations yet — add one from a node’s Inspector (Note).</div>}
     </Panel>
   )
 }

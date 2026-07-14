@@ -172,6 +172,7 @@ def test_every_control_event_has_one_explicit_engine_policy():
     assert {name for name, spec in CONTROL_SPECS.items()
             if spec.engine_policy is EnginePolicy.NO_SPAWN} == {
         "pause", "node_abort", "hint", "annotation", "promote",
+        "comment_created", "comment_edited", "comment_resolution_changed",
         "hypothesis_added", "hypothesis_updated",
     }
 

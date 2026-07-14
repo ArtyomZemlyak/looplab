@@ -11,7 +11,27 @@ import react from '@vitejs/plugin-react'
 export default defineConfig({
   base: './',
   plugins: [react()],
-  build: { outDir: 'dist', emptyOutDir: true },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
+    // The post-build budget gate resolves route closures from Vite's graph instead of guessing from
+    // hashed filenames. Keep the normal 500 kB warning as a visible early signal; the stricter raw /
+    // gzip and reachability budgets live in scripts/check-bundle.mjs and fail CI.
+    manifest: true,
+    chunkSizeWarningLimit: 500,
+    rollupOptions: {
+      output: {
+        onlyExplicitManualChunks: true,
+        // Keep the only deliberate vendor split tied to the graph interaction boundary. React and
+        // every other dependency remain under Rollup's graph-driven sharing; broad vendor buckets
+        // would make lightweight routes download code they never execute.
+        manualChunks(id) {
+          if (/[/\\]node_modules[/\\]@xyflow[/\\]/.test(id)) return 'vendor-flow'
+          return undefined
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: { '/api': { target: 'http://127.0.0.1:8765', changeOrigin: true } },

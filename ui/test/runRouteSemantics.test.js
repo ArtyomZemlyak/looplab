@@ -10,7 +10,8 @@ test('App routes on the fragment path while diagnostic state uses Back and Forwa
   assert.match(app, /window\.addEventListener\('hashchange', on\)/)
   assert.match(app, /window\.addEventListener\('popstate', on\)/)
   assert.match(app, /<ReviewRoute key=\{route\.token \|\| 'invalid-review'\}/)
-  assert.match(app, /key=\{`\$\{resource\.data\.id \|\| token\}:\$\{resource\.data\.run_id\}`\}/)
+  assert.match(app, /const reviewKey = `\$\{resource\.data\.id \|\| token\}:\$\{resource\.data\.run_id\}`/)
+  assert.match(app, /<RunView key=\{reviewKey\}/)
 })
 
 test('RunView URL state is authoritative and stale generations lock every mutation surface', async () => {
@@ -47,7 +48,7 @@ test('historical Inspector and Report detail reads carry the exact run generatio
 })
 
 test('minted review links carry only scope-safe canonical context after the bearer', async () => {
-  const [panels, api] = await Promise.all([source('panels.jsx'), source('api.js')])
+  const [panels, api] = await Promise.all([source('CollabPanel.jsx'), source('api.js')])
   assert.match(panels, /reviewRouteStateForScope\(\{ \.\.\.\(reviewRouteState \|\| \{\}\),/)
   assert.match(panels, /generation: result\.generation/)
   assert.match(panels, /hashWithRunRouteState\(target\.hash, scopedState,/)

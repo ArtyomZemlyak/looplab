@@ -198,6 +198,7 @@ def test_evidence_is_opt_in_redacted_and_digest_only_on_disk(tmp_path, monkeypat
     detail = client.get("/api/review/nodes/0", headers={"X-LoopLab-Review": token})
     assert detail.status_code == 200
     payload = detail.json()
+    assert "annotations" not in payload
     assert "sk-abcdefghijklmnopqrstuvwxyz123456" not in payload["code"]
     assert "stdout_tail" not in payload
     payload_raw = json.dumps(payload)

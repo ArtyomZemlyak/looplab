@@ -1,18 +1,15 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
 import { get, fmt, fmtInt, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet } from './util.js'
-import Dag from './Dag.jsx'
-import Inspector, { GroupSummary } from './Inspector.jsx'
-import Dock from './Dock.jsx'
 import { computeGroups, autoCollapseSet } from './grouping.js'
-import ReportView from './Report.jsx'
-import DirectionsOverview from './DirectionsOverview.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
+import LazyBoundary from './LazyBoundary.jsx'
+import WhyStrip from './WhyStrip.jsx'
 import { useDialogFocus } from './useDialogFocus.js'
 import { nextRovingIndex } from './accessibility.jsx'
 import {
@@ -22,12 +19,45 @@ import {
 import {
   approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady,
 } from './runIndex.js'
-import {
-  TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
-  ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
-  ComparePanel, GpuPanel, HyperImportancePanel, CrossRunPanel, CollabPanel, OverviewPanel, ResearchPanel,
-  ArtifactsPanel, HypothesisBoard, QueuePanel, WhyStrip,
-} from './panels.jsx'
+
+const lazyNamed = (load, name) => lazy(() => load().then(module => ({
+  default: name === 'default' ? module.default : module[name],
+})))
+
+const Dag = lazy(() => import('./Dag.jsx'))
+const Dock = lazy(() => import('./Dock.jsx'))
+const ReportView = lazy(() => import('./Report.jsx'))
+const DirectionsOverview = lazy(() => import('./DirectionsOverview.jsx'))
+
+let inspectorPromise
+const loadInspector = () => inspectorPromise || (inspectorPromise = import('./Inspector.jsx'))
+const Inspector = lazyNamed(loadInspector, 'default')
+const GroupSummary = lazyNamed(loadInspector, 'GroupSummary')
+
+// All optional panels intentionally share one deferred module request. The first opened panel pays
+// the cost once; list/settings/report-only routes cannot reach this owner-only hub statically.
+let panelsPromise
+const loadPanels = () => panelsPromise || (panelsPromise = import('./panels.jsx'))
+const TrustPanel = lazyNamed(loadPanels, 'TrustPanel')
+const SensitivityPanel = lazyNamed(loadPanels, 'SensitivityPanel')
+const FailuresPanel = lazyNamed(loadPanels, 'FailuresPanel')
+const ParetoPanel = lazyNamed(loadPanels, 'ParetoPanel')
+const DataQualityPanel = lazyNamed(loadPanels, 'DataQualityPanel')
+const ConfigPanel = lazyNamed(loadPanels, 'ConfigPanel')
+const AuthoringPanel = lazyNamed(loadPanels, 'AuthoringPanel')
+const MemoryPanel = lazyNamed(loadPanels, 'MemoryPanel')
+const RegistryPanel = lazyNamed(loadPanels, 'RegistryPanel')
+const EventExplorer = lazyNamed(loadPanels, 'EventExplorer')
+const ComparePanel = lazyNamed(loadPanels, 'ComparePanel')
+const GpuPanel = lazyNamed(loadPanels, 'GpuPanel')
+const HyperImportancePanel = lazyNamed(loadPanels, 'HyperImportancePanel')
+const CrossRunPanel = lazyNamed(loadPanels, 'CrossRunPanel')
+const CollabPanel = lazy(() => import('./CollabPanel.jsx'))
+const OverviewPanel = lazyNamed(loadPanels, 'OverviewPanel')
+const ResearchPanel = lazyNamed(loadPanels, 'ResearchPanel')
+const ArtifactsPanel = lazyNamed(loadPanels, 'ArtifactsPanel')
+const HypothesisBoard = lazyNamed(loadPanels, 'HypothesisBoard')
+const QueuePanel = lazyNamed(loadPanels, 'QueuePanel')
 
 // The panel bar, grouped by importance then process order (Report is the [Search|Report] toggle, and
 // the deep-research/policy/strategist "why" cards now live in the chat — so those panels are gone).
@@ -41,13 +71,13 @@ const HUBS = [
   ['Progress', [['queue', 'Queue'], ['hypotheses', 'Hypotheses'], ['research', 'Research'], ['failures', 'Failures']]],
   ['Trust', [['trust', 'Trust'], ['pareto', 'Pareto / diversity'], ['data', 'Data quality']]],
   ['Analysis', [['compare', 'Compare'], ['sensitivity', 'Sensitivity'], ['importance', 'Importance'], ['crossrun', 'Cross-run']]],
-  ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Collab'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
+  ['Lab', [['artifacts', 'Artifacts'], ['registry', 'Registry'], ['memory', 'Memory'], ['collab', 'Comments & sharing'], ['authoring', 'Authoring'], ['events', 'Events'], ['gpu', 'GPU']]],
 ]
 const HUB_OF = Object.fromEntries(HUBS.flatMap(([label, items]) => items.map(([k]) => [k, label])))
 // Historical overlays must derive only from the exact folded snapshot. Panels that fetch current
 // config, raw detail, another run, or a sidecar stay closed so `seq + panel` cannot create a hybrid.
 const HISTORY_SAFE_PANELS = new Set(['sensitivity', 'importance', 'failures', 'pareto', 'data'])
-const LIVE_INSPECT_TABS = ['Overview', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+const LIVE_INSPECT_TABS = ['Overview', 'Comments', 'Trials', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 const READ_ONLY_INSPECT_TABS = ['Overview', 'Code', 'Trust', 'Cost']
 
 const TRANSPORT_EMPTY_ACTIONS = new Set(['resume', 'finalize'])
@@ -124,11 +154,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const setSelectedId = (value, options = {}) => route.update(current => {
     const next = typeof value === 'function' ? value(current.nodeId) : value
-    return { ...current, nodeId: next, inspectTab: next == null ? 'Overview' : current.inspectTab }
+    return {
+      ...current,
+      nodeId: next,
+      inspectTab: next == null ? 'Overview' : current.inspectTab,
+      commentId: next === current.nodeId ? current.commentId : null,
+    }
   }, options)
-  const setInspectTab = (value, options = {}) => route.update(current => ({
-    ...current, inspectTab: typeof value === 'function' ? value(current.inspectTab) : value,
-  }), options)
+  const setInspectTab = (value, options = {}) => route.update(current => {
+    const next = typeof value === 'function' ? value(current.inspectTab) : value
+    return { ...current, inspectTab: next, commentId: next === 'Comments' ? current.commentId : null }
+  }, options)
   const setPanel = (value, options = {}) => route.update(current => ({
     ...current, panel: typeof value === 'function' ? value(current.panel) : value,
   }), options)
@@ -577,6 +613,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     try { await onNodeAction('merge', { from: mergeFrom, to: target }, { fromChooser: true }) }
     finally { setMergeSubmitting(false) }
   }
+  const openComment = comment => {
+    if (!comment || !Number.isSafeInteger(comment.nodeId)) return
+    if (comment.legacy) {
+      showToast('Legacy notes have no attempt identity and stay in the run-wide comment feed.')
+      return
+    }
+    const currentAttempt = live2?.nodes?.[comment.nodeId]?.attempt
+    if (currentAttempt !== comment.nodeGeneration) {
+      showToast(`This comment belongs to attempt ${comment.nodeGeneration}; the current node is attempt ${currentAttempt ?? 'unavailable'}.`)
+      return
+    }
+    route.update(current => ({
+      ...current,
+      view: 'dag',
+      nodeId: comment.nodeId,
+      inspectTab: 'Comments',
+      commentId: comment.id,
+      panel: null,
+    }))
+    setSelectedGroup(null)
+    if (compactWorkspace) setCompactInspectorOpen(true)
+    else setSideC(false)
+  }
 
   const copyViewLink = async () => {
     const relative = route.exactHref(routeState, { forReview: reviewMode })
@@ -892,27 +951,35 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
       {view === 'report'
         ? <div className="main"><div className="report-scroll">
-            <ReportView state={state} runId={runId} onToast={showToast}
-              readOnly={readOnlyMode} historySeq={history.resolvedSeq}
-              expectedGeneration={routeState.generation}
-              readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
-              onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
-              onPickNode={(id) => {
-                route.update(current => ({ ...current, view: 'dag', nodeId: id }))
-                setSelectedGroup(null)
-                if (compactWorkspace) setCompactInspectorOpen(true)
-                else setSideC(false)
-              }} /></div></div>
+            <LazyBoundary label="run report" resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
+              <ReportView state={state} runId={runId} onToast={showToast}
+                readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                expectedGeneration={routeState.generation}
+                readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
+                onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
+                onPickNode={(id) => {
+                  route.update(current => ({ ...current, view: 'dag', nodeId: id }))
+                  setSelectedGroup(null)
+                  if (compactWorkspace) setCompactInspectorOpen(true)
+                  else setSideC(false)
+                }} />
+            </LazyBoundary>
+          </div></div>
         : <>
-      <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
+      <LazyBoundary label="direction overview" resetKey={`${runId}:${generation || 'pending'}`}>
+        <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
+      </LazyBoundary>
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
-        <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}><Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
-          groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
-          onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
-          onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
-          mergeArm={readOnlyMode ? null : mergeFrom}
-          selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} />
+        <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}>
+          <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
+            <Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+              groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
+              onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
+              onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
+              mergeArm={readOnlyMode ? null : mergeFrom}
+              selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} />
+          </LazyBoundary>
           <DagEmptyOverlay presentation={emptyPresentation} transport={transportController}
             onAction={onEmptyAction} />
         </div>
@@ -942,14 +1009,18 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                           aria-label={`${compactWorkspace ? 'Close' : 'Collapse'} ${selectedGroup != null ? 'group details' : 'experiment inspector'}`}
                           onClick={() => compactWorkspace ? closeCompactInspector() : setSideC(true)}>⟩</button>
                 </div>
-                {selectedGroup != null
-                  ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
-                      state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
-                  : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
-                      tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
-                      readOnly={readOnlyMode} historySeq={history.resolvedSeq}
-                      expectedGeneration={routeState.generation}
-                      readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
+                <LazyBoundary label={selectedGroup != null ? 'group details' : 'experiment inspector'}
+                  resetKey={selectedGroup != null ? `group:${selectedGroup}` : `node:${selectedId}`}>
+                  {selectedGroup != null
+                    ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
+                        state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
+                    : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
+                        tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
+                        readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                        expectedGeneration={generation} commentsRevision={state?.comments_revision}
+                        focusCommentId={routeState.commentId}
+                        readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence} />}
+                </LazyBoundary>
               </aside>
             </>}
       </div>
@@ -957,21 +1028,26 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {!reviewMode && !compactWorkspace && !dockC && <div className="splitter h" onPointerDown={startDrag('dock')} onKeyDown={resizeWithKeys('dock')}
         role="separator" tabIndex={0} aria-orientation="horizontal" aria-label="Resize timeline"
         aria-valuemin={MIN_DOCK_HEIGHT} aria-valuemax={Math.max(MIN_DOCK_HEIGHT, window.innerHeight - 470)} aria-valuenow={Math.round(dockH)} title="Drag or use arrow keys to resize" />}
-      {!reviewMode && <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
-            timeline={timeline}
-            viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
-            filter={routeState.timelineFilter}
-            onFilterChange={value => route.update(current => ({ ...current, timelineFilter: value }), { mode: 'replace' })}
-            kindFilters={routeState.timelineKinds}
-            onKindFiltersChange={value => route.update(current => ({ ...current, timelineKinds: value }))}
-            onToast={showToast}
-            readOnly={historyActive}
-            publishTransport={setTransportController}
-            collapsed={timelineCollapsed}
-            onToggleCollapse={() => compactWorkspace ? setCompactTimelineOpen(v => !v) : setDockC(c => !c)}
-            height={dockH} />}
+      {!reviewMode && <LazyBoundary label="timeline" resetKey={`${runId}:${generation || 'pending'}`}>
+        <Dock runId={runId} live={live} liveSeq={seq} expectedGeneration={generation}
+          timeline={timeline}
+          viewSeq={viewSeq} setViewSeq={changeViewSeq} onReturnToLive={returnToLive} onFocus={focusNode}
+          filter={routeState.timelineFilter}
+          onFilterChange={value => route.update(current => ({ ...current, timelineFilter: value }), { mode: 'replace' })}
+          kindFilters={routeState.timelineKinds}
+          onKindFiltersChange={value => route.update(current => ({ ...current, timelineKinds: value }))}
+          onToast={showToast}
+          readOnly={historyActive}
+          publishTransport={setTransportController}
+          collapsed={timelineCollapsed}
+          onToggleCollapse={() => compactWorkspace ? setCompactTimelineOpen(v => !v) : setDockC(c => !c)}
+          height={dockH} />
+      </LazyBoundary>}
         </>}
 
+      {panel && panelAllowed(panel) && <LazyBoundary label={`${HUB_OF[panel] || panel} panel`}
+        mode="overlay" resetKey={panel}>
+      <>
       {panel === 'overview' && panelAllowed('overview') && <OverviewPanel state={state} maxEval={maxEval} onClose={closePanel}
         onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }} />}
       {panel === 'research' && panelAllowed('research') && <ResearchPanel state={state} runId={runId} onToast={showToast} onClose={closePanel} />}
@@ -986,7 +1062,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'compare' && panelAllowed('compare') && <ComparePanel state={state} runId={runId} initialPair={comparePair}
         onClose={() => { closePanel(); setComparePair(null) }} />}
       {panel === 'crossrun' && panelAllowed('crossrun') && <CrossRunPanel state={state} onClose={closePanel} />}
-      {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId} onSelect={selectNode} onToast={showToast} onClose={closePanel} reviewRouteState={routeState} />}
+      {panel === 'collab' && panelAllowed('collab') && <CollabPanel state={state} runId={runId}
+        onSelect={selectNode} onOpenComment={openComment} onToast={showToast} onClose={closePanel}
+        reviewRouteState={routeState} reviewMode={reviewMode}
+        expectedGeneration={generation} refreshKey={state?.comments_revision} />}
       {panel === 'config' && panelAllowed('config') && <ConfigPanel runId={runId} state={state} live={live} onToast={showToast} onClose={closePanel} />}
       {panel === 'authoring' && panelAllowed('authoring') && <AuthoringPanel onToast={showToast} onClose={closePanel} />}
       {panel === 'memory' && panelAllowed('memory') && <MemoryPanel onClose={closePanel} />}
@@ -995,6 +1074,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {panel === 'events' && panelAllowed('events') && <EventExplorer runId={runId} timeline={timeline}
         historyActive={historyActive} onReturnToLive={returnToLive} onClose={closePanel} />}
       {panel === 'artifacts' && panelAllowed('artifacts') && <ArtifactsPanel runId={runId} onToast={showToast} onClose={closePanel} />}
+      </>
+      </LazyBoundary>}
 
       {toast && <div className="toast" role="status" aria-live="polite" aria-atomic="true">{toast}</div>}
     </main>

@@ -88,6 +88,27 @@ test('tab depends on a node and defaults are omitted', () => {
   assert.equal(encodeRunRouteState({ ...emptyRunRouteState(), generation: GEN }, { forceGeneration: true }), `gen=${GEN}`)
 })
 
+test('comment deep links round-trip only with a node and the Comments tab', () => {
+  const id = `cmt_${'1'.repeat(32)}`
+  const hash = `#/run/demo?gen=${GEN}&node=7&tab=comments&comment=${id}`
+  const parsed = parseRunRouteState(hash)
+  assert.deepEqual(parsed.issues, [])
+  assert.equal(parsed.state.nodeId, 7)
+  assert.equal(parsed.state.inspectTab, 'Comments')
+  assert.equal(parsed.state.commentId, id)
+  assert.equal(hashWithRunRouteState(hash, parsed.state), hash)
+
+  for (const invalid of [
+    `#/run/demo?gen=${GEN}&comment=${id}`,
+    `#/run/demo?gen=${GEN}&node=7&tab=trust&comment=${id}`,
+    `#/run/demo?gen=${GEN}&node=7&tab=comments&comment=bad`,
+  ]) {
+    const rejected = parseRunRouteState(invalid)
+    assert.equal(rejected.state.commentId, null)
+    assert.match(rejected.issues.join(' '), /comment/i)
+  }
+})
+
 test('an explicit generation-only exact view survives canonical hydration', () => {
   const source = `#/run/demo?gen=${GEN}`
   const parsed = parseRunRouteState(source)

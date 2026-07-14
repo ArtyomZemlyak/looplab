@@ -1,9 +1,8 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { lazy, useEffect, useMemo, useRef, useState } from 'react'
 import { get, fmt, fmtDate, fmtAgo, listProjects, createProject, patchProject, deleteProject, assignRun, renameRun, deleteRun,
   listSupertasks, createSupertask, renameSupertask, deleteSupertask, assignSupertask } from './util.js'
 import { useMediaQuery, usePoll } from './hooks.js'
-import MapView from './MapView.jsx'
-import ScopeReport from './ScopeReport.jsx'
+import LazyBoundary from './LazyBoundary.jsx'
 import ThemeSwitcher from './ThemeSwitcher.jsx'
 import EnergyToggle from './EnergyToggle.jsx'
 import { OpIcon } from './icons.jsx'
@@ -14,6 +13,9 @@ import {
 import { defaultCollapsedClusters } from './runMapModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
 import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
+
+const MapView = lazy(() => import('./MapView.jsx'))
+const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 
 // Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
 // inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
@@ -501,9 +503,11 @@ export default function RunList({ onOpen, onSettings }) {
           {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
           {view === 'map' && projectsError && <div className="notice resource-error" role="alert"><b>Map unavailable.</b><span>Project metadata is required to place runs correctly.</span><button className="btn sm primary" onClick={loadProjects}>Retry</button></div>}
           {view === 'map' && !projectsError && runs && visible.length > 0 && <div className="map-stage">
-            <MapView onOpen={onOpen} runs={visible} projects={proj.projects}
-              collapsed={mapCollapsed} onToggle={toggleMapCluster}
-              scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
+            <LazyBoundary label="run map" resetKey={`map:${sel}`}>
+              <MapView onOpen={onOpen} runs={visible} projects={proj.projects}
+                collapsed={mapCollapsed} onToggle={toggleMapCluster}
+                scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
+            </LazyBoundary>
           </div>}
           {view === 'list' && runs && visible.map(r => (
             <div className="run-card" key={r.run_id} draggable
@@ -567,8 +571,10 @@ export default function RunList({ onOpen, onSettings }) {
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onClose={closeSuperTasks} />}
 
-      {showReport && scope && <ScopeReport scope={scope}
-        onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />}
+      {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}>
+        <ScopeReport scope={scope}
+          onOpen={(id) => { setShowReport(false); onOpen(id) }} onClose={() => setShowReport(false)} />
+      </LazyBoundary>}
     </main>
   )
 }

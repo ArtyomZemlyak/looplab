@@ -36,7 +36,7 @@ from looplab.serve.launch import (
     validate_idempotency_key,
 )
 from looplab.serve.protocol import (
-    CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
+    COLLABORATION_EVENTS, CONTROL_EVENTS, EXPECTED_RUN_GENERATION_FIELD, GENESIS_CHAT_SEQ_BASE)
 from looplab.serve.run_commands import normalize_control
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 
@@ -141,6 +141,13 @@ def build_router(srv) -> APIRouter:
                 etype = body.get("type")
                 if etype not in CONTROL_EVENTS:
                     raise HTTPException(400, f"unknown control event: {etype!r}")
+                if etype in COLLABORATION_EVENTS:
+                    raise HTTPException(409, {
+                        "code": "command_protocol_required",
+                        "message": "versioned comments require the durable command endpoint",
+                        "remediation": (
+                            "submit with Idempotency-Key and the exact expected run generation"),
+                    })
                 # Approval decisions are valid only for the exact gate the normalizer folded. If the
                 # caller omitted an explicit CAS, bind the append to that pre-normalization tail so a
                 # replacement approval request cannot be accepted by this legacy endpoint.

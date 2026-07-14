@@ -1,15 +1,16 @@
-import React, { useEffect, useState } from 'react'
-import RunList from './RunList.jsx'
-import RunView from './RunView.jsx'
-import Settings from './Settings.jsx'
-import SharedAssistant from './SharedAssistant.jsx'
-import AssistantBar from './AssistantBar.jsx'
-import AttentionCenter from './AttentionCenter.jsx'
+import React, { lazy, useEffect, useState } from 'react'
 import OwnerAuth from './OwnerAuth.jsx'
+import LazyBoundary from './LazyBoundary.jsx'
+import OwnerWorkspace from './OwnerWorkspace.jsx'
 import { reviewManifest, reviewTokenFromLocation } from './api.js'
 import { initTheme } from './ThemeSwitcher.jsx'
 import { initFx } from './fx.js'
 import { routeHashPath } from './runRouteState.js'
+
+const RunList = lazy(() => import('./RunList.jsx'))
+const RunView = lazy(() => import('./RunView.jsx'))
+const Settings = lazy(() => import('./Settings.jsx'))
+const SharedAssistant = lazy(() => import('./SharedAssistant.jsx'))
 
 initTheme()   // restore the saved design theme before first paint
 initFx()      // restore the saved Energy/Reactor FX level (data-fx) before first paint
@@ -63,8 +64,11 @@ function ReviewRoute({ token }) {
       {resource.status === 'error' && <button className="btn primary" onClick={() => setRetry(n => n + 1)}>Retry</button>}
     </div>
   </main>
-  return <RunView key={`${resource.data.id || token}:${resource.data.run_id}`} runId={resource.data.run_id} onBack={null}
-    reviewMode reviewMeta={resource.data} />
+  const reviewKey = `${resource.data.id || token}:${resource.data.run_id}`
+  return <LazyBoundary label="run review" mode="route" focusOnReady resetKey={reviewKey}>
+    <RunView key={reviewKey} runId={resource.data.run_id} onBack={null}
+      reviewMode reviewMeta={resource.data} />
+  </LazyBoundary>
 }
 
 function RouteFocus({ label, routeKey, children }) {
@@ -112,18 +116,23 @@ export default function App() {
   // like the review route. Falling through into <OwnerAuth> made a token-protected deployment show
   // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
   if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
-    <SharedAssistant sid={route.id} onBack={back} />
+    <LazyBoundary label="shared Assistant chat" mode="route" focusOnReady resetKey={routeKey}>
+      <SharedAssistant sid={route.id} onBack={back} />
+    </LazyBoundary>
   </RouteFocus>
-  if (route.view === 'run') content = <RunView key={route.id} runId={route.id} onBack={back} />
-  else if (route.view === 'settings') content = <Settings onBack={back} />
-  else content = <RunList onOpen={open} onSettings={settings} />
+  if (route.view === 'run') content = <LazyBoundary label={`run ${route.id}`} mode="route" focusOnReady resetKey={routeKey}>
+    <RunView key={route.id} runId={route.id} onBack={back} />
+  </LazyBoundary>
+  else if (route.view === 'settings') content = <LazyBoundary label="settings" mode="route" focusOnReady resetKey={routeKey}>
+    <Settings onBack={back} />
+  </LazyBoundary>
+  else content = <LazyBoundary label="runs" mode="route" focusOnReady resetKey={routeKey}>
+    <RunList onOpen={open} onSettings={settings} />
+  </LazyBoundary>
 
-  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}><div className="app-shell">
-      <div className="app-shell-main">{content}</div>
-      {/* Mounted once, outside the route switch → the assistant persists across owner navigation. */}
-      {/* Owner-plane inbox only. Review returns above and shared pages omit all attention polling,
-          cross-tab channels, storage and Notification API access. */}
-      <AttentionCenter />
-      <AssistantBar runId={route.view === 'run' ? route.id : null} />
-    </div></RouteFocus></OwnerAuth>
+  return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}>
+    {/* OwnerWorkspace is stable across list/run/settings changes. Its one Assistant instance keeps
+        conversation and draft state; public review/share returns above before owner pollers mount. */}
+    <OwnerWorkspace route={route}>{content}</OwnerWorkspace>
+  </RouteFocus></OwnerAuth>
 }

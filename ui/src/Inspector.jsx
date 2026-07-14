@@ -11,6 +11,7 @@ import { diffLines } from './lineDiff.js'
 import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
+import CommentsThread from './CommentsThread.jsx'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -18,8 +19,9 @@ import { DataTable, nextRovingIndex } from './accessibility.jsx'
 // LLM I/O, and the coding-agent's validation — instead of three disconnected panes. The Inspector is
 // READ-ONLY (Workstream C): every node action — confirm/ablate/fork/promote/note — is done from the
 // chat (add the node via its ＋#id chip, or use a /command), so there's no per-node button toolbar.
-// Tab order (user preference): Overview → Trace → Training → Code → Metrics → Trust → Cost.
-const TABS = ['Overview', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
+// Tab order keeps durable review context closest to the summary: Overview → Comments →
+// Trials (sweeps) → Trace → Code → Metrics → Trust → Cost.
+const TABS = ['Overview', 'Comments', 'Trace', 'Code', 'Metrics', 'Trust', 'Cost']
 
 // The ONE per-node write action (Workstream-C exception): re-run THIS node in place — no new node —
 // from a chosen stage. It's a recovery/fix control (natural to trigger from the failed node itself),
@@ -93,7 +95,8 @@ function ResetBtn({ runId, id, generation, onToast }) {
 }
 
 export default function Inspector({ runId, nodeId, state, live, tab, setTab, onToast, readOnly = false,
-  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true }) {
+  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true,
+  commentsRevision = null, focusCommentId = null }) {
   const [detail, setDetail] = useState(null)
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
@@ -147,7 +150,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // Sweep nodes get a Trials tab (right after Overview). `activeTab` guards against a stale tab
   // (e.g. 'Trials' left selected after switching to a non-sweep node) falling through to nothing.
   const sweep = isSweep(n)
-  const liveTabs = sweep ? ['Overview', 'Trials', ...TABS.slice(1)] : TABS
+  const liveTabs = sweep ? ['Overview', 'Comments', 'Trials', ...TABS.slice(2)] : TABS
   const tabs = readOnly
     ? readOnlyReason === 'review' ? reviewInspectorTabs(evidenceAvailable) : ['Overview', 'Code', 'Trust', 'Cost']
     : liveTabs
@@ -183,9 +186,12 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
                 : 'Summary-only review. Source, live traces, and actions are not included.'
               : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
-          : <div className="insp-hint muted">Actions (confirm · ablate · fork · promote · note) live in the chat — <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context there, or type a <code>/command</code>.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
+          : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) live in the chat. Use the Comments tab for durable review notes, or attach <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
+        {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
+          nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
+          readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
         {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
         {activeTab === 'Code' && (detailStatus === 'ready'
@@ -295,7 +301,6 @@ function Overview({ n, state, runId, onToast }) {
     <div className="section-h">Idea params</div>
     {Object.keys(p).length ? <div className="kv">{Object.entries(p).map(([k, v]) => <KV key={k} k={k} v={fmt(v)} />)}</div> : <div className="muted">none</div>}
     {n.idea?.rationale && !(chg && chg.includes(n.idea.rationale)) && <><div className="section-h">Rationale</div><div className="v">{n.idea.rationale}</div></>}
-    {n.annotations?.length > 0 && <><div className="section-h">Notes</div>{n.annotations.map((a, i) => <div key={i} className="chip" style={{ margin: 2 }}>{a}</div>)}</>}
     {n.deleted?.length > 0 && <><div className="section-h">Deleted files</div><div className="v">{n.deleted.join(', ')}</div></>}
   </>
 }
