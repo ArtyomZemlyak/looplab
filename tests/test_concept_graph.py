@@ -370,3 +370,15 @@ def test_consolidate_no_client_never_crashes():
     g = cg.ConceptGraph([cg.Concept("a/x"), cg.Concept("a/y")])
     g2, t2, rename = cg.consolidate_concepts(g, {0: frozenset({"a/x"})}, client=None)
     assert isinstance(rename, dict) and 0 in t2         # fallback ran, no crash
+
+
+def test_consolidation_preserves_aliases_for_heuristic_tagging():
+    # Regression: rebuilding concepts during consolidation must NOT erase aliases, or the heuristic
+    # tagger goes blind on the consolidated graph (and a merged concept must inherit the synonym's alias).
+    from looplab.search.concept_graph import (Concept, ConceptGraph, _apply_consolidation, tag_text)
+    g = ConceptGraph([Concept("loss/a", "A", ("loss",), ("alpha-loss",)),
+                      Concept("loss/b", "B", ("loss",), ("beta-loss",))])
+    g2, _ = _apply_consolidation(g, {}, {"loss/b": "loss/a"})   # merge b -> a
+    a = g2.get("loss/a")
+    assert set(a.aliases) == {"alpha-loss", "beta-loss"}         # own + merged-away synonym's aliases
+    assert "loss/a" in tag_text("using a beta-loss run", g2)     # heuristic still tags on consolidated graph

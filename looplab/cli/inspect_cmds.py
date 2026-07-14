@@ -309,10 +309,11 @@ def board_dedup(
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
-    # CODEX AGENT: m["tags"] is keyed by integer node_id, while dedup_report expects string
-    # hypothesis_id keys, so this CLI path reports every hypothesis as untagged.
-    typer.echo(dedup_report(state, m["graph"], tags=m["tags"]))
-    typer.echo(f"\n  (concept tags built by: {m['mode']})")
+    # dedup works over HYPOTHESIS tags (keyed by hypothesis id), NOT the node tags in m["tags"] (keyed by
+    # node id) — passing node tags would leave every hypothesis untagged. Let dedup_analysis tag the
+    # hypotheses itself via the (agent-BUILT, alias-carrying) graph.
+    typer.echo(dedup_report(state, m["graph"]))
+    typer.echo(f"\n  (concept graph built by: {m['mode']})")
 
 
 @app.command(name="research-targets")

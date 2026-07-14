@@ -369,29 +369,32 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         concept_ids: list[str] = Field(default_factory=list)
 
     heuristic = tag_nodes_heuristic(state, graph)
-    axes = graph.axes()
     # The prompt is TASK-AGNOSTIC: the domain vocabulary comes ONLY from the graph (KNOWN AXES / KNOWN
-    # VOCABULARY below), never hardcoded here — so the same tagger works on any task. The multi-touch
-    # guidance is phrased with no domain example (a hardcoded dense-retrieval example would mislead the
-    # model on a non-dense-retrieval run and leak a vocabulary the graph may not use).
-    # CODEX AGENT: This prompt is frozen before graph.ensure() grows the vocabulary, so later nodes
-    # cannot reuse concepts introduced by earlier nodes and the run manufactures avoidable synonyms.
-    system = (
-        "You tag a machine-learning experiment with the research CONCEPTS it touches, for a coverage "
-        "map. Assign the SET of concepts that apply — an experiment usually touches SEVERAL at once "
-        "(e.g. a change to the loss AND a regularizer), so tag EVERY concept that applies, not just the "
-        "most obvious one. Prefer concepts from the KNOWN VOCABULARY below; only when none fits, propose "
-        "a new id of the form `axis/short-slug` using one of the known AXES. Key on the underlying "
-        "METHOD (its lineage/family), not the surface name — variants of one method that differ only by "
-        "a modifier are the same concept. Call `emit` once with `concept_ids` (the list of ids)."
-        f"\n\nKNOWN AXES: {', '.join(axes) or '(none — propose axis/slug ids)'}\n\nKNOWN VOCABULARY:\n"
-        + ("\n".join(f"- {c.id}: {c.label}" for c in graph.concepts() if not c.id.endswith("/*"))
-           or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
-    )
+    # VOCABULARY), never hardcoded here — so the same tagger works on any task. The multi-touch guidance is
+    # phrased with no domain example (a hardcoded dense-retrieval example would mislead the model on a
+    # non-dense-retrieval run and leak a vocabulary the graph may not use).
+
+    def _system() -> str:
+        # REBUILT PER NODE from the CURRENT graph: as `grow=True` adds concepts for earlier nodes, later
+        # nodes see them in KNOWN VOCABULARY and REUSE them instead of minting synonyms — fewer avoidable
+        # duplicates for consolidation to clean up afterward.
+        axes = graph.axes()
+        return (
+            "You tag a machine-learning experiment with the research CONCEPTS it touches, for a coverage "
+            "map. Assign the SET of concepts that apply — an experiment usually touches SEVERAL at once "
+            "(e.g. a change to the loss AND a regularizer), so tag EVERY concept that applies, not just the "
+            "most obvious one. Prefer concepts from the KNOWN VOCABULARY below; only when none fits, propose "
+            "a new id of the form `axis/short-slug` using one of the known AXES. Key on the underlying "
+            "METHOD (its lineage/family), not the surface name — variants of one method that differ only by "
+            "a modifier are the same concept. Call `emit` once with `concept_ids` (the list of ids)."
+            f"\n\nKNOWN AXES: {', '.join(axes) or '(none — propose axis/slug ids)'}\n\nKNOWN VOCABULARY:\n"
+            + ("\n".join(f"- {c.id}: {c.label}" for c in graph.concepts() if not c.id.endswith("/*"))
+               or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
+        )
     tags: dict[int, frozenset[str]] = {}
     for n in _experiment_nodes(state):
         desc = _describe_node(n)
-        msgs = [{"role": "system", "content": system},
+        msgs = [{"role": "system", "content": _system()},   # rebuilt from the current (grown) vocabulary
                 {"role": "user", "content": f"EXPERIMENT (node {n.id}):\n{desc}\n\n"
                                             "Which concepts does it touch? Read the node's code/logs "
                                             "first if a tool is available, then emit."}]
@@ -410,8 +413,8 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                     continue
                 if cid in graph:
                     got.add(cid)
-                # CODEX AGENT: Prefix-only axes cannot represent the promised multi-parent DAG; persist
-                # validated parent/axis definitions instead of deriving one parent from the id string.
+                # A grown concept is single-axis by construction (the LLM proposes `axis/slug`, so its one
+                # parent IS the id prefix); multi-parent DAG membership is for the CURATED skeleton concepts.
                 elif grow and "/" in cid:
                     graph.ensure(cid, axes=(cid.split("/", 1)[0],))
                     got.add(cid)
@@ -669,10 +672,13 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
         # merged-away synonym's) — fall back to any label already accumulated, then this concept's.
         canon = graph.get(cid)
         label = (canon.label if canon is not None else (existing.label if existing else c.label))
-        # ensure() keeps the first entry, so replace to carry the merged axes/key deterministically.
-        # CODEX AGENT: Reconstructing Concept without aliases erases the heuristic tagging vocabulary
-        # for both merged and unrelated concepts after the first consolidation.
-        new._concepts[cid] = Concept(id=cid, label=label, axes=merged_axes, key=merged_key)
+        # Preserve the tagging VOCABULARY: the rebuilt canonical must carry the aliases of EVERY concept
+        # merged into it (its own + each synonym's), or the heuristic tagger (`tag_text`/`tag_nodes_heuristic`)
+        # would tag nothing on a consolidated graph (aliases default to `()` on a bare Concept). Merge, dedup.
+        merged_aliases = tuple(dict.fromkeys((existing.aliases if existing else ()) + c.aliases))
+        # ensure() keeps the first entry, so replace to carry the merged axes/aliases/key deterministically.
+        new._concepts[cid] = Concept(id=cid, label=label, axes=merged_axes, aliases=merged_aliases,
+                                     key=merged_key)
     new_tags = {nid: frozenset(rename.get(x, x) for x in cids) for nid, cids in (tags or {}).items()}
     return new, new_tags
 
@@ -826,7 +832,11 @@ def concept_report(state: RunState, graph: ConceptGraph,
         if alarm["uncovered_axes"]:
             lines.append("    entirely-untouched axes: " + ", ".join(alarm["uncovered_axes"]))
     else:
-        # CODEX AGENT: fired can be false while uncovered_axes is non-empty once curated keys are
-        # covered, so this message incorrectly claims that all key/axis regions have coverage.
-        lines.append("  uncovered-region alarm: (not fired — all key/axis regions have coverage)")
+        # The alarm keys on the WINNING-region (`key`) concepts, so `fired` can be False (all key regions
+        # covered) while whole non-key AXES are still untouched — don't claim "all regions covered" then.
+        if alarm["uncovered_axes"]:
+            lines.append("  uncovered-region alarm: key regions covered, but entirely-untouched axes remain: "
+                         + ", ".join(alarm["uncovered_axes"]))
+        else:
+            lines.append("  uncovered-region alarm: (not fired — all key/axis regions have coverage)")
     return "\n".join(lines)

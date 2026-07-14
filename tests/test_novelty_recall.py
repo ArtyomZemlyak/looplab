@@ -51,3 +51,14 @@ def test_degrades_when_no_pairs(tmp_path):
     st = _state(tmp_path, [("only-one", "a single lonely experiment")])
     r = paraphrase_leaks(st, client=object())
     assert r["candidate_pairs"] == [] and r["recall"] is None
+
+
+def test_all_adjudications_fail_is_not_reported_as_healthy(tmp_path, monkeypatch):
+    # Regression: if EVERY adjudication errors/abstains, the report must be "candidates unjudged",
+    # never a false recall=1.0 / "looks healthy".
+    import looplab.core.parse as parse_mod
+    st = _state(tmp_path, [("x", "same"), ("y", "same")], novelty_rejected=3)
+    monkeypatch.setattr(parse_mod, "parse_structured",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    r = paraphrase_leaks(st, client=object())
+    assert r["adjudicated"] is False and r["recall"] is None     # no false healthy

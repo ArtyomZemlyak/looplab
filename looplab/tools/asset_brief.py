@@ -317,6 +317,9 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
     caps: set[str] = set()
     reads_left = max_read_files
     examined = 0
+    hit_file_cap = False        # only the ENTRY cap (max_files) stops the walk; read-budget exhaustion
+    #                             marks the brief truncated but keeps walking (name-based assets — checkpoints,
+    #                             spreadsheets — need NO read, so exhausting reads must not hide later ones).
     for dirpath, dirnames, filenames in os.walk(root):
         # prune ignored dirs in place (also skips hidden dumping grounds) AND sort the traversal — os.walk
         # yields entries in arbitrary os.scandir order, so which files survive the max_files/max_read_files
@@ -326,6 +329,7 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
             examined += 1
             if examined > max_files:
                 brief.truncated = True
+                hit_file_cap = True
                 break
             fp = Path(dirpath) / fn
             try:
@@ -360,8 +364,8 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 continue
 
             if reads_left <= 0:
-                # CODEX AGENT: Setting the global truncated flag here stops the entire walk below;
-                # exhausted content reads must not hide later checkpoints/spreadsheets found by name.
+                # Read budget spent: mark the brief truncated but DON'T stop the walk — later checkpoints /
+                # spreadsheets are found by NAME (no read), so exhausting reads must not hide them.
                 brief.truncated = True
                 continue
             reads_left -= 1
@@ -387,7 +391,7 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 caps_here = sorted(here_caps)
                 detail = ("capabilities: " + ", ".join(caps_here)) if caps_here else _first_line(text)
                 brief.configs.append(AssetFinding("config", rel, detail, metrics))
-        if brief.truncated:
+        if hit_file_cap:
             break
 
     brief.files_scanned = examined
