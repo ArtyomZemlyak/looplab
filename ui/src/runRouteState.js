@@ -111,9 +111,14 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   if (!reviewMode && Number.isSafeInteger(input.sequence) && input.sequence >= 0 && state.generation) {
     state.sequence = input.sequence
   }
-  if (!reviewMode && typeof input.timelineFilter === 'string') {
-    const value = input.timelineFilter.trim()
-    if (value.length <= MAX_FILTER_CHARS && !CONTROL_RE.test(value)) state.timelineFilter = value
+  if (!reviewMode && typeof input.timelineFilter === 'string'
+      && input.timelineFilter.length <= MAX_FILTER_CHARS && !CONTROL_RE.test(input.timelineFilter)) {
+    // Do NOT trim here: this value is bound directly to the Dock filter's controlled <input>, so
+    // trimming on every keystroke drops the trailing space of a multi-word filter ("node failed"
+    // would collapse to "nodefailed"). The feed filters on filter.trim() at the use site, and the
+    // URL parse path (parseRunRoute) trims persisted values, so interior/trailing spaces are only
+    // preserved live while typing. Mirrors directionFilter above, which was never trimmed.
+    state.timelineFilter = input.timelineFilter
   }
   if (!reviewMode && Array.isArray(input.timelineKinds)) {
     const selected = new Set(input.timelineKinds.filter(kind => KIND_SET.has(kind)))
@@ -217,7 +222,11 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
   if (state.panel) params.set('panel', state.panel)
   if (state.directionFilter) params.set('focus', state.directionFilter)
   if (!reviewMode && state.sequence != null && state.generation) params.set('seq', String(state.sequence))
-  if (!reviewMode && state.timelineFilter) params.set('q', state.timelineFilter)
+  // Trim only when writing the canonical URL: the live state keeps interior/trailing spaces so the
+  // Dock filter input can be typed left-to-right, but the shareable link stays canonical (and the
+  // parse path also trims, so a copied link round-trips identically).
+  const canonicalFilter = state.timelineFilter.trim()
+  if (!reviewMode && canonicalFilter) params.set('q', canonicalFilter)
   if (!reviewMode && state.timelineKinds.length) params.set('kinds', state.timelineKinds.join(','))
   return params.toString()
 }

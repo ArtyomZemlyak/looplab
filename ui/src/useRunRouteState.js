@@ -24,8 +24,14 @@ export function useRunRouteState({ generation = null, reviewMode = false } = {})
     const nextHash = hashWithRunRouteState(window.location.hash, state, { reviewMode, forceGeneration })
     if (nextHash === window.location.hash) return
     const href = `${window.location.pathname}${window.location.search}${nextHash}`
-    window.history[mode === 'replace' ? 'replaceState' : 'pushState'](window.history.state, '', href)
-    hydratedHashRef.current = nextHash
+    try {
+      window.history[mode === 'replace' ? 'replaceState' : 'pushState'](window.history.state, '', href)
+      hydratedHashRef.current = nextHash
+    } catch {
+      // WebKit throttles history writes (~100 per 30s); a per-keystroke filter (mode:'replace') can
+      // trip it and throw SecurityError. The in-memory route state already updated, so typing must
+      // continue — swallow the URL-sync failure and leave hydratedHashRef so a later hydrate reconciles.
+    }
   }, [reviewMode])
 
   const hydrate = useCallback(() => {

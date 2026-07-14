@@ -897,6 +897,13 @@ def test_control_append_and_validation(tmp_path):
     nonint = client.post("/api/runs/demo/control",
                          json={"type": "pause", "data": {}, "expected_seq": "nope"})
     assert nonint.status_code == 400
+    # A lone surrogate is valid JSON (\ud800) that json.loads decodes but str.encode("utf-8") cannot
+    # encode. The payload-size guard's encode must catch it as a clean 400, not surface a 500 (the
+    # encode used to sit outside the try that wraps json.dumps). Sent as raw content because httpx's
+    # own json= encoder would reject the surrogate before it ever reached the server.
+    surrogate = client.post("/api/runs/demo/control", headers={"Content-Type": "application/json"},
+                            content='{"type":"hint","data":{"text":"x\\ud800"}}')
+    assert surrogate.status_code == 400 and "encodable" in surrogate.json()["detail"]
 
 
 def test_node_controls_compare_and_set_lifecycle_generation(tmp_path):

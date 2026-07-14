@@ -736,10 +736,14 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         data["status"] = status
 
     try:
-        encoded = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid
+        # JSON \uD800) but str.encode("utf-8") then raises UnicodeEncodeError — a ValueError subclass.
+        # Keeping the encode out here surfaced it as a 500; every sibling validation error is a 400.
+        encoded_bytes = json.dumps(
+            data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError, OverflowError) as exc:
-        raise HTTPException(400, f"control data must be finite JSON: {exc}") from exc
-    if len(encoded.encode("utf-8")) > 1_048_576:
+        raise HTTPException(400, f"control data must be finite, encodable JSON: {exc}") from exc
+    if len(encoded_bytes) > 1_048_576:
         raise HTTPException(413, "control data is too large (maximum 1 MiB)")
     return data
 
