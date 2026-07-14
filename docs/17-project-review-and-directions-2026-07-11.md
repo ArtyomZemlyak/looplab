@@ -2388,9 +2388,13 @@ DCL+R-Drop`. That single missing structure is why concentration was invisible un
 could only jump sideways within the branch, and why dedup/novelty could not tell "a DCL tweak" from "the whole
 DCL branch."
 
-**Proposal — one hierarchical taxonomy, threaded everywhere.** Replace the flat theme with a **path** in a
-shared multi-level tree, e.g. `data / negatives / hard-negative-mining / nv-filtered`, or `model / loss /
-contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
+**Proposal — one shared taxonomy, threaded everywhere.** Replace the flat theme with structured concept
+membership. *(Refined by §21.11's validation: the substrate is a **multi-label concept DAG / bipartite
+experiment↔concept graph**, not a single-parent tree — `dcl-rdrop` is both `loss/decoupled-contrastive` and
+`regularization/r-drop`, and forcing one parent is what re-fragments the signal. The tree framing below is the
+intuition; read §21.11 for the validated graph model and its decisive uncovered-intersection signal.)* As a
+first cut, a **path** in a shared multi-level tree, e.g. `data / negatives / hard-negative-mining /
+nv-filtered`, or `model / loss / contrastive / DCL`. The tree is **seeded from a task-type skeleton** (for dense-retrieval: `data`,
 `negatives`, `loss`, `architecture`, `pooling`, `distillation`, `training-schedule`, `eval`) and **grown
 dynamically** as leaves appear — the fix for "themes are too narrow and too many" is not to forbid narrow
 leaves but to give them **parents**. Then thread the taxonomy path through **every subsystem that already
@@ -2553,3 +2557,149 @@ loop's failure was **not** base-model ignorance but **orchestration**: the narro
 champion-expansion, the state-narrator research memos, and the absent data-side infra. That is direct evidence
 the highest-leverage fixes are D1 (perception) + D5 (structure) + D7 (capability-expansion), not a stronger
 model — and it reinforces §10's "don't delegate the loop to a bigger backend."
+
+#### 21.11 Tree → graph: D5's substrate is a concept DAG + multi-label tagging (validated 2026-07-14)
+
+**Upgrade to D5, forced by the data.** A single-parent *tree* mislabels reality: `dcl-rdrop` is genuinely
+BOTH `loss/decoupled-contrastive` AND `regularization/r-drop`; `scale-batch-negatives` is BOTH `loss/DCL` and
+`negatives/in-batch`. The tree forces one choice — which is exactly what produced the §21.10 "re-fragmentation"
+failure. **D5's substrate should therefore be a bipartite experiment↔concept graph: each experiment carries a
+SET of concept tags, and concepts sit in an axis-DAG (a concept may have several parents), so hierarchy
+(level roll-ups) is preserved while multi-membership is explicit.** Higher maintenance (multi-label assignment
++ a governed concept vocabulary/edge set) — accepted because it measurably improves the signal, and quality is
+the priority here.
+
+**Measured on the `rubertlite` run (multi-label tagging by deepseek; deterministic graph analytics):**
+
+- **Concentration is cleaner and choice-free.** `loss/decoupled-contrastive` touch-fraction rises **0.09 →
+  0.57**; the dominant axis-clique `loss × regularization` rises **0 → 0.27**. No arbitrary primary-lever pick;
+  the co-occurring cluster {DCL, temperature, r-drop} is now visible as overlapping high-touch concepts.
+- **Intersection map (what a tree cannot express).** Covered axis-pairs: `loss × regularization` = **16**,
+  `hyperparameter × loss` = 11, `hyperparameter × regularization` = 6, `loss × negatives` = 3 (the weak
+  in-batch hard-neg attempts). The run lived inside one small clique.
+- **The decisive new signal — a continuous *uncovered winning-region* alarm from node 0.** The proven-winning
+  concepts — `negatives/external-mining`, `negatives/false-neg-handling`, `distillation/teacher-distill`,
+  `data/augmentation`, `data/synthetic-queries` — have **`first_touch = None` across all 67 nodes** (0 coverage,
+  the entire run). The graph surfaces this as a standing alarm **from the first node**, naming the empty region
+  — i.e. the missing recipe — directly. This is earlier and more actionable than any concentration threshold:
+  it does not wait for narrowing to accumulate; it reports that the search footprint never entered whole
+  regions. It is also the strongest possible Strategist pivot directive — not "broaden" (flat) or "open a
+  sibling branch" (tree) but **"you have 0 coverage in {negatives/external-mining, distillation, data} — go
+  there."**
+
+**Metric guidance (validated).** For graph concentration use **top-concept touch-fraction + dominant-clique
+share + count of uncovered key concept-regions**, NOT "distinct tag-set count" — the latter stayed ~0.6 the
+whole run (each modifier mints a new exact set) and is too noisy to be an alarm.
+
+**Composition.** This concept graph is the same substrate as §9's NapMem provenance graph and Part III-B §16's
+skill-coverage taxonomy — an experiment's concept tags, a lesson's concept tag, a skill's concept tag, and a
+memory record's level should all be nodes/edges in ONE governed concept graph. Build the graph once; let
+coverage (D5), lock-in (D7), dedup (D4), novelty (D3), the Strategist pivot, deep-research targeting (D2), and
+§16 skill-coverage all read it. **Net: adopt the graph, not the tree — the intersection/uncovered-region
+signal is the single most actionable output of the whole PART IV program, and it is the one representation that
+would have named `negatives + false-neg-filtering + distillation` as the run's blind spot on turn one.**
+
+#### 21.12 Further offline tests: D2, D3-statistics, D4, and a foresight probe (measured 2026-07-14)
+
+Extending §21.10 to the remaining levers, again over the run's own data with deepseek-v4-flash for blind
+judgments. These sharpen (and in one case temper) the earlier claims.
+
+- **D3 across four real regressions (blind vs grounded).** On `dclw-loss` (0.006), `dcl-xbm-queue` (0.742),
+  `dcl-asymmetric-temp` (0.0), `debiased-dcl` (0.705): the correction to §21.10 is that the blind critic is
+  **high-variance, not consistently biased** — `debiased-dcl` returned "direction-bound, don't re-examine" in
+  the §21.10 single run and "implementation-bound, re-examine" here on identical input (temp 0.6). The
+  grounded critic was **accurate and stable**: it re-examined the three sound directions AND correctly told the
+  genuinely-weak one apart (`dclw-loss` → direction-bound, don't chase), where the blind critic wanted to
+  re-examine even that. **Refined normative:** D3's failure mode is *variance*, so it needs both grounding
+  (D1/D2/§17) **and** §12's repeated-evaluation — a single blind call is unreliable in *either* direction, and
+  grounding also prevents wasting budget re-examining truly-dead directions.
+- **D2 — breadth beats depth on ranking quality (smaller effect).** Leader-anchored "propose the next
+  experiment" ranked **the memory-bank hard-negative variant #1 — i.e. the node_34 approach that already
+  failed** — with distillation and a listwise loss behind it. Axis-structured breadth ranked the correct
+  mechanisms top-3 (cross-encoder Margin-MSE distillation, cross-encoder-**mined** hard negatives,
+  gradient-scaled cross-batch negatives). Both "reach" the winning region when told what was already tried, so
+  D2's measured value is **ranking quality and not re-proposing known-failed variants**, not first discovery —
+  a real but more modest gain than D1/D3.
+- **D4 — the board is concept-concentrated; the false-merge harm did not appear here.** Tagging all 107
+  hypotheses: **63/107 touch `loss/decoupled-contrastive`**, 39 temperature — the board mirrors the node
+  narrowing, so taxonomy-aware *aggressive within-DCL* merge is clearly warranted. Honest negative: the
+  blind-dedup **false-merge risk was 0 pairs** (lexical-similar-but-disjoint-concept) in this run — the
+  winning-region hypotheses used distinct vocabulary, so a blind merge would not have swallowed them here.
+  D4's demonstrated value is **compression of the redundant DCL cluster**; its *protective* value is
+  sound in principle but was not exercised by this run. (Caveat: with the coarse D4 tag list, 16/107 hyps
+  "touch" the winning region, but with the finer §21.11 vocabulary that separates `external-mining` from
+  `in-batch` and `teacher-distill` from `self-distill`, the *true* external/teacher coverage on the board is
+  ~0 — the 16 are the reachable weak variants. The concept granularity that separates reachable-from-winning is
+  itself load-bearing.)
+- **Bonus — a foresight probe (tests a SHIPPED subsystem, deterministic).** Correlating the pre-execution
+  `foresight_selected` **confidence** with the node's realized recall@100 across 55 paired nodes:
+  **Pearson = −0.10** (high-confidence mean 0.847 vs low 0.806, confounded by run-time). Foresight's stated
+  confidence is **effectively uninformative** about which node actually wins. Foresight (predict-before-execute)
+  is therefore a concrete §12 target: replace an uncalibrated self-reported confidence with a calibrated,
+  repeated, criteria-decomposed verifier score, and measure whether *that* correlates with ground truth
+  (§12's own evaluation gate). This is exactly the "advisory signal that must be calibrated before it steers"
+  discipline §12 prescribes.
+
+**Not yet run (offline, cheap, worth doing next):** (E3) novelty-gate *recall* — the gate fired only 5 times
+across 107 hypotheses + 68 nodes; sample hypothesis pairs and measure how many true paraphrases it missed;
+(E4) a lesson-contradiction scan — 43 distilled lessons; a critic pass for mutually inconsistent lessons (the
+false-negative mis-lesson is one), which is the D6 guard applied across the whole lesson store rather than
+per-lesson.
+
+#### 21.13 Consolidated sequence — what to build, in what order (post-validation, 2026-07-14)
+
+*Supersedes §21.9's provisional ordering with everything §21.10–21.12 measured. Re-analysis first, then the
+dependency-ordered plan.*
+
+**Re-analysis — the whole PART IV reduces to two keystones, one cheap independent win, and one meta-lesson.**
+
+1. **Keystone A — the concept graph (D5-graph, §21.11).** It is the shared coordinate system that makes
+   coverage, novelty, dedup, lock-in, the Strategist pivot, and deep-research targeting *directional* instead
+   of blind. Its **uncovered-intersection alarm** alone (0 coverage in `negatives/external-mining`,
+   `false-neg-handling`, `distillation/teacher-distill`, `data/*` across all 67 nodes) would have named the
+   run's blind spot on turn one. Nearly everything else reads it, so it is built first.
+2. **Keystone B — a calibrated advisory verifier (§12).** D3 (re-examination), D6 (lesson guard), and even
+   foresight all need a judge, and the measurements prove a **blind single-shot LLM judge is high-variance**
+   (D3 flipped verdicts across identical runs, §21.12) and **uncalibrated where it already ships** (foresight
+   confidence ↔ outcome Pearson ≈ 0 / −0.21, §21.12). The verifier must be grounded + repeated + criteria-
+   decomposed, never a single blind call.
+3. **Cheap independent win — D1 asset perception.** No dependency on the keystones, offline, highest ROI:
+   one repo-scanned brief would have short-circuited ~50 nodes. Build in parallel from day one.
+4. **Meta-lesson — grounding beats model strength.** D1/D2/D3 all showed a strong base model already *knows*
+   the winning direction; the loop failed on **orchestration** (perception, structure, grounding, capability),
+   not model capacity. So invest in feeding the model the right context (D1 assets + graph coverage + prior-art
+   grounding), not a bigger backend (reinforces §10).
+
+**Reminder that shapes D3.** The novelty gate is **LLM-based** (`novelty_mode='llm'`, `_llm_novelty_gate`,
+`novelty.py`); the embedding/semantic gate is **off** (`novelty_semantic=False`). So D3's multi-level +
+failed-direction-re-examination is an **extension of the LLM gate**, made graph-aware and grounded — *not* a
+new embedding-distance threshold. The optional semantic check becomes at most one signal among the levels.
+
+**Dependency-ordered build plan.** Three phases; Phase 0/1 are offline diagnostics/harnesses (early lane, no
+R0–R4 per §6.6); Phase 2 is live steering and inherits the R-gates + fixed-vs-open-ended mode-gating.
+
+| Order | Build | Reads / needs | Kind | Payoff (measured) |
+|---|---|---|---|---|
+| **0a** | **Concept-graph substrate** — multi-label tags over a concept DAG; offline coverage + **uncovered-region** diagnostic; replay-validate on `rubertlite` | nothing (offline) | foundation | the keystone; uncovered-region alarm names the blind spot on turn one (§21.11) |
+| **0b** | **D1 asset/prior-art brief** — repo scan (result logs, sibling checkpoints, sibling trainers) → seed context | nothing (offline) | foundation | grounds proposals in exact existing infra + proven params (§21.10) |
+| **0c** | **§12 verifier (advisory, offline)** — grounded + repeated + criteria-decomposed; calibrate on the run's labelled cases | logprob-capable backend (else discrete fallback) | foundation | fixes the D3 variance + foresight mis-calibration (§21.12) |
+| **1a** | **D7 uncovered-region alarm + lock-in detector** | graph (0a) | offline analytic | fires from node 0; lock-in fires node_29 in replay (§21.10/21.11) |
+| **1b** | **D6 lesson over-generalization guard** | verifier (0c) + graph tag | offline analytic | flags the false-neg mis-lesson correctly (§21.10) |
+| **1c** | **D3 multi-level LLM novelty + failed-direction re-exam** | **LLM gate** (extend `_llm_novelty_gate`) + graph (branch-vs-leaf) + grounding (D1/0b) + verifier repeated-eval (0c) | offline→advisory | recovers wrongly-killed directions *when grounded*; needs 0b+0c to be reliable (§21.12) |
+| **1d** | **D4 taxonomy-aware dedup** | graph (0a) | offline analytic | compresses the 63/107 DCL cluster; keep concept granularity fine (§21.12) |
+| **1e** | **D2 axis-structured deep-research targeting** | graph (0a) | offline | better ranking, avoids re-proposing failed variants (§21.12) |
+| **2a** | Wire graph coverage + D7 uncovered-region into the **Strategist pivot** directive | 0a,1a + R1 epoch id; SearchFitness | live steering | "0 coverage in {X} — go there" replaces "broaden" |
+| **2b** | **D7 capability-expansion operator** into the policy; D3 into node creation | 1a,1c + R1; trustworthy eval; open-ended capability where breadth is involved | live steering | lets the loop leave a saturated manifold |
+| **2c** | Replace **foresight confidence** with the calibrated verifier score | 0c + §12 gate | live steering | swaps an uninformative signal (Pearson≈0) for a calibrated one |
+
+**Critical path:** `0a concept-graph → 1a D7 alarm → 2a Strategist pivot` is the spine that turns detection
+into escape; `0c verifier → 1b/1c D6/D3` is the parallel spine that stops the loop discarding correct
+directions; `0b D1` runs independently and lands value first. Do **0a+0b+0c in parallel first**; they unblock
+everything and are pure offline work. Nothing in Phase 2 starts before its R1/SearchFitness/eval-trust
+prerequisites (§6.5) — and breadth/QD-flavoured parts stay open-ended-mode only (ADR-6/§11).
+
+**Separately and immediately (the ML track, independent of all the above):** the `rubertlite` model can break
+0.8835 now by porting the already-proven recipe — external hard-negatives + NV-0.95 false-negative filter
+(`dataset.n_negatives`/`negatives_path`, `loss.type='mnr'`), τ→0.005, optionally distilling from the on-disk
+`nomic-moe@0.899`/`e5-base@0.90` teachers — into `dense-retrieval/train.py`. That is a task deliverable, not an
+agent change, and needs none of the D-program.
