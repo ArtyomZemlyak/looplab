@@ -35,14 +35,14 @@ from pydantic import ValidationError
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.models import Event, Idea
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
     EV_COMMAND_ACK,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
-from looplab.serve.engine_proc import _engine_alive, _spawn_engine
+from looplab.serve.engine_proc import _engine_alive, _engine_liveness, _spawn_engine
 from looplab.serve.protocol import CONTROL_EVENTS
 from looplab.trust.redact import redact_secrets
 
@@ -443,15 +443,43 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, "from_stage must be a non-empty stage name")
         data["from_stage"] = stage
 
+    if event_type == EV_SPEC_APPROVED:
+        current = _state()
+        if (current.proposed_spec is None or not current.spec_approval_requested
+                or current.spec_confirmed):
+            raise HTTPException(409, {
+                "code": "ratification_not_requested",
+                "message": "the run is not awaiting eval-spec ratification",
+                "remediation": "refresh the run and ratify only its active spec request",
+            })
+
     target_key = _LIFECYCLE_CONTROL_TARGETS.get(event_type)
     if target_key is not None:
         current = _state()
+        if event_type == EV_APPROVAL_GRANTED and not current.awaiting_approval:
+            raise HTTPException(409, {
+                "code": "approval_not_requested",
+                "message": "the run is not awaiting result approval",
+                "remediation": "refresh the run and approve only its active result request",
+            })
         raw_nid = data.get(target_key)
         if event_type == EV_APPROVAL_GRANTED and raw_nid is None:
-            best = current.best()
-            if best is None:
-                raise HTTPException(400, "run has no evaluated node to approve")
-            nid = best.id
+            # A bare/default approval means "the exact pending request", never "whatever node is
+            # best now". The best can change, and reset can reuse a node id with another attempt.
+            # Modern callers pass both fields explicitly; this fallback preserves convenience only
+            # when the fold still has authoritative subject + lifecycle identity.
+            nid = current.approval_subject
+            pending_generation = current.approval_generation
+            if (not current.awaiting_approval or isinstance(nid, bool)
+                    or not isinstance(nid, int) or nid < 0
+                    or isinstance(pending_generation, bool)
+                    or not isinstance(pending_generation, int) or pending_generation < 0):
+                raise HTTPException(409, {
+                    "code": "approval_target_unavailable",
+                    "message": "the pending approval target cannot be verified",
+                    "remediation": "refresh the run and inspect Events before approving",
+                })
+            data["generation"] = pending_generation
         else:
             nid = _strict_integer(raw_nid, target_key)
             if nid < 0:
@@ -748,6 +776,7 @@ def _error(code: str, message: str, remediation: str = "", *, retryable: bool = 
 
 class RunCommandService:
     def __init__(self, srv, *, engine_alive: Callable[[Path], bool] = _engine_alive,
+                 engine_liveness: Optional[Callable[[Path], Optional[bool]]] = None,
                  spawn_engine: Callable[..., Optional[int]] = _spawn_engine,
                  process_alive: Callable[[Optional[int]], Optional[bool]] = _process_alive,
                  process_identity: Callable[[Optional[int]], Optional[str]] = _process_identity,
@@ -757,6 +786,10 @@ class RunCommandService:
                  lock_acquire_timeout: float = 60.0):
         self.srv = srv
         self.engine_alive = engine_alive
+        # Existing tests/integrations inject the historical bool probe. Treat those values as exact;
+        # production uses the tri-state probe so unsupported/inaccessible ownership stays unknown.
+        self.engine_liveness = (engine_liveness if engine_liveness is not None else
+                                (_engine_liveness if engine_alive is _engine_alive else engine_alive))
         self.spawn_engine = spawn_engine
         self.process_alive = process_alive
         self.process_identity = process_identity
@@ -771,6 +804,29 @@ class RunCommandService:
         self.lock_acquire_timeout = max(0.05, float(lock_acquire_timeout))
         self._local_lock = threading.RLock()
         self._run_locks: dict[str, threading.RLock] = {}
+
+    def _engine_state(self, rd: Path) -> Optional[bool]:
+        try:
+            value = self.engine_liveness(rd)
+        except OSError:
+            return None
+        if value is True:
+            return True
+        if value is False:
+            return False
+        return None
+
+    @staticmethod
+    def _engine_unknown_error(operation: str, *, retryable: bool = False) -> dict:
+        return _error(
+            "engine_liveness_unknown",
+            f"cannot {operation} because engine ownership is unknown",
+            ("inspect engine.lock and storage locking, then retry this command only after liveness "
+             "is verifiable" if retryable else
+             "inspect engine.lock and storage locking, then submit a new command with a new "
+             "idempotency key after liveness is verifiable"),
+            retryable=retryable,
+        )
 
     def _lock_directory(self) -> Path:
         root = self.srv.root.resolve()
@@ -1092,7 +1148,8 @@ class RunCommandService:
             return False
         # engine.lock is the startup postcondition for the lease itself. Once observed, the Popen
         # race is over and even an external/reset claim can be retired immediately.
-        if self.engine_alive(rd):
+        liveness = self._engine_state(rd)
+        if liveness is True:
             try:
                 path.unlink()
             except OSError:
@@ -1101,6 +1158,8 @@ class RunCommandService:
             # liveness as false just before this probe observed the child acquire engine.lock; false
             # here would be interpreted as permission to Popen a duplicate (TOCTOU).
             return True
+        if liveness is None:
+            return True  # unknown ownership is an expiry-free anti-Popen fence
         quarantined = bool(row.get("quarantined"))
         if quarantined:
             if not self._claim_child_definitely_gone(row):
@@ -1238,7 +1297,8 @@ class RunCommandService:
         path = self._spawn_claim_path(rd)
         row = self._load(path)
         if not path.exists():
-            return "live" if self.engine_alive(rd) else "absent"
+            liveness = self._engine_state(rd)
+            return "live" if liveness is True else "absent" if liveness is False else "uncertain"
         if row is None or not isinstance(row.get("command_id"), str) \
                 or not row.get("command_id"):
             # Preserve the existing fail-closed semantics (and any future quarantine bookkeeping).
@@ -1265,11 +1325,14 @@ class RunCommandService:
             return "uncertain"
         if current.get("command_id") != expected:
             return "mismatched"
-        if self.engine_alive(rd):
+        liveness = self._engine_state(rd)
+        if liveness is True:
             # The first `_recent_spawn_claim` probe may have raced just before lock acquisition. Run
             # it once more so the existing claim-retirement behavior remains centralized.
             self._recent_spawn_claim(rd)
             return "live"
+        if liveness is None:
+            return "uncertain"
         if self._claim_child_exactly_alive(current):
             return "pending_known"
         return "uncertain"
@@ -1289,12 +1352,15 @@ class RunCommandService:
             path = self._spawn_claim_path(canonical)
             if not path.exists():
                 return {"ok": True, "resolved": False, "reason": "no_spawn_claim"}
-            if self.engine_alive(canonical):
+            liveness = self._engine_state(canonical)
+            if liveness is True:
                 try:
                     path.unlink()
                 except OSError as exc:
                     raise HTTPException(503, f"could not retire observed-live spawn claim: {exc}") from exc
                 return {"ok": True, "resolved": True, "reason": "engine_lock_observed"}
+            if liveness is None:
+                raise HTTPException(409, self._engine_unknown_error("resolve the engine spawn claim"))
 
             row = self._load(path)
             if row and isinstance(row.get("command_id"), str):
@@ -1329,7 +1395,11 @@ class RunCommandService:
                     "message": "Process identity is unavailable; automatic child-death proof is impossible.",
                     "remediation": f"After inspection, repeat with confirmation exactly: {phrase}",
                 })
-            if self.engine_alive(canonical):  # final check immediately before the destructive unlink
+            liveness = self._engine_state(canonical)  # final check before destructive unlink
+            if liveness is not False:
+                if liveness is None:
+                    raise HTTPException(
+                        409, self._engine_unknown_error("resolve the engine spawn claim"))
                 raise HTTPException(409, "engine became live while resolving its spawn claim")
             try:
                 path.unlink()
@@ -1956,7 +2026,10 @@ class RunCommandService:
 
     def _decision(self, rd: Path, event_type: str) -> tuple[str, Optional[dict]]:
         state = self.srv.state(rd)
-        alive = self.engine_alive(rd)
+        liveness = self._engine_state(rd)
+        if liveness is None:
+            return "reject", self._engine_unknown_error(f"apply {event_type}")
+        alive = liveness is True
         pending_finalize = self._finalize_incomplete(rd, state)
 
         if event_type == EV_RUN_ABORT:
@@ -2080,9 +2153,23 @@ class RunCommandService:
                 normalized_candidate = None
                 semantic_candidate = None
                 normalization_error = None
+                gate_field = ({EV_APPROVAL_GRANTED: "approval_request_seq",
+                               EV_SPEC_APPROVED: "spec_approval_request_seq"}.get(event_type))
+                gate_before = (getattr(self.srv.state(rd), gate_field, None)
+                               if gate_field is not None else None)
                 try:
                     normalized_candidate = normalize_control(
                         self.srv, rd, event_type, raw_data)
+                    if gate_field is not None:
+                        gate_after = getattr(self.srv.state(rd), gate_field, None)
+                        if (not isinstance(gate_before, int) or isinstance(gate_before, bool)
+                                or gate_before < 0 or gate_after != gate_before):
+                            raise HTTPException(409, {
+                                "code": "approval_state_changed",
+                                "message": "the approval request changed while the command was admitted",
+                                "remediation": "refresh the run and submit a new approval command",
+                                "retryable": False,
+                            })
                     _semantic_raw, semantic_candidate = self._payload(
                         event_type, normalized_candidate)
                 except HTTPException as exc:
@@ -2160,13 +2247,16 @@ class RunCommandService:
                         "updated_at": now,
                         "deadline_at": now + self.command_timeout,
                         "absolute_deadline_at": now + self.max_observation_timeout,
-                        "driver_was_alive": self.engine_alive(rd),
+                        "driver_was_alive": self._engine_state(rd),
                     }
                     try:
                         if normalization_error is not None:
                             raise normalization_error
                         normalized = dict(normalized_candidate or {})
                         record["data"] = normalized
+                        if gate_field is not None:
+                            record["approval_gate_field"] = gate_field
+                            record["approval_gate_seq"] = gate_before
                         _semantic_raw, record["semantic_payload_digest"] = self._payload(
                             event_type, normalized)
                         record["engine_policy"] = CONTROL_SPECS[event_type].engine_policy.value
@@ -2199,10 +2289,18 @@ class RunCommandService:
                                 record["attached_semantic_payload_digest"] = pending_digest
                     except HTTPException as exc:
                         record["status"] = "rejected"
-                        record["error"] = _error(
-                            "invalid_command" if exc.status_code < 404 else "command_target_not_found",
-                            str(exc.detail),
-                            "correct the command payload and submit it with a new idempotency key")
+                        detail = exc.detail
+                        if (isinstance(detail, dict) and detail.get("code")
+                                and detail.get("message")):
+                            record["error"] = _error(
+                                str(detail["code"]), str(detail["message"]),
+                                str(detail.get("remediation") or ""),
+                                retryable=bool(detail.get("retryable", False)))
+                        else:
+                            record["error"] = _error(
+                                "invalid_command" if exc.status_code < 404 else "command_target_not_found",
+                                str(detail),
+                                "correct the command payload and submit it with a new idempotency key")
 
                     # The cross-process sequencer already excludes competing creators. Atomic replace
                     # publishes either no record or the complete record, never an immortal empty
@@ -2471,10 +2569,11 @@ class RunCommandService:
             return True
         if kind == "paused_and_stopped":
             state = self.srv.state(rd)
-            return bool(state.paused and not self.engine_alive(rd))
+            return bool(state.paused and self._engine_state(rd) is False)
         if kind == "finished_and_stopped":
             state = self.srv.state(rd)
-            if not state.finished or self.engine_alive(rd) or str(state.stop_reason or "").lower() == "error":
+            if (not state.finished or self._engine_state(rd) is not False
+                    or str(state.stop_reason or "").lower() == "error"):
                 return False
             if not state.stop_requested:
                 return False
@@ -2517,7 +2616,7 @@ class RunCommandService:
         return False
 
     def _driver_or_progress(self, rd: Path, record: dict) -> bool:
-        if record.get("spawned_by_command") and self.engine_alive(rd):
+        if record.get("spawned_by_command") and self._engine_state(rd) is True:
             return True
         return self._postcondition(rd, record)
 
@@ -2573,6 +2672,16 @@ class RunCommandService:
                 # finalize if another external event superseded it after record creation.
                 decision = "already_attached"
             elif intent is None:
+                gate_field = record.get("approval_gate_field")
+                if gate_field in {"approval_request_seq", "spec_approval_request_seq"}:
+                    admitted_gate = record.get("approval_gate_seq")
+                    current_gate = getattr(self.srv.state(rd), gate_field, None)
+                    if current_gate != admitted_gate:
+                        self._terminal(path, record, "rejected", error=_error(
+                            "approval_state_changed",
+                            "the approval request changed before the intent could be recorded",
+                            "refresh the run and submit a new approval command", retryable=False))
+                        return
                 # Capture causality BEFORE folding state for the decision. In particular, an engine
                 # can complete an externally-appended finalize after `_decision` observes pending but
                 # before this worker continues; that run_finished must remain *after* the attach
@@ -2592,7 +2701,23 @@ class RunCommandService:
                 record["baseline_seq"] = decision_baseline
                 event_data = dict(record.get("data") or {})
                 event_data["_command_id"] = command_id
-                intent = EventStore(self._events_path(rd)).append(event_type, event_data)
+                store = EventStore(self._events_path(rd))
+                if event_type in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
+                    # Approval is valid only against the exact decision snapshot. The per-run command
+                    # sequencer does not exclude the engine/CLI, so an external grant/reset can land
+                    # after `_decision`; append with CAS and re-evaluate instead of double-approving.
+                    try:
+                        intent = store.append(
+                            event_type, event_data, expected_last_seq=decision_baseline)
+                    except EventStoreConcurrencyError:
+                        self._terminal(path, record, "rejected", error=_error(
+                            "approval_state_changed",
+                            "the approval state changed before the intent could be recorded",
+                            "refresh the run and submit a new approval command", retryable=False))
+                        return
+                else:
+                    intent = store.append(event_type, event_data)
+                record["baseline_seq"] = decision_baseline
             if intent is not None:
                 record["event_seq"] = intent.seq
             elif "baseline_seq" not in record:
@@ -2614,7 +2739,14 @@ class RunCommandService:
                 self._terminal(path, record, "failed", error=domain_error)
                 return
 
-            if spec.engine_policy is not EnginePolicy.NO_SPAWN and not self.engine_alive(rd):
+            liveness = self._engine_state(rd)
+            if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
+                self._terminal(
+                    path, record, "failed",
+                    error=self._engine_unknown_error(
+                        f"start a driver for {event_type}", retryable=True))
+                return
+            if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 spawned_now = False
                 if self._recent_spawn_claim(rd):
                     record["waiting_for_spawn"] = True
@@ -2660,7 +2792,7 @@ class RunCommandService:
                             return
                         # Lock is startup evidence only. ENSURE_RUNNING stays executing until the
                         # exact command_ack arrives; finalize waits for finished + dead.
-                        if self.engine_alive(rd):
+                        if self._engine_state(rd) is True:
                             self._clear_spawn_claim(rd, command_id)
                             record["spawn_claim_released"] = True
                             break
@@ -2703,7 +2835,8 @@ class RunCommandService:
                 now = time.time()
                 events = self._events(rd)
                 latest_seq = events[-1].seq if events else -1
-                alive = self.engine_alive(rd)
+                liveness = self._engine_state(rd)
+                alive = liveness is True
                 if (alive and record.get("spawned_by_command")
                         and not record.get("spawn_claim_released")):
                     self._clear_spawn_claim(rd, command_id)
@@ -2727,6 +2860,15 @@ class RunCommandService:
                     record["updated_at"] = now
                     self._save(path, record)
 
+                if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is None:
+                    # Preserve any extant spawn claim: an inaccessible lock may belong to the child
+                    # we launched, so terminalize observably but never clear/retry into a duplicate.
+                    self._terminal(
+                        path, record, "failed",
+                        error=self._engine_unknown_error(
+                            f"continue driving {event_type}", retryable=True))
+                    return
+
                 # Check the bounded absolute deadline before considering another Popen. A slow child
                 # owns its lease through this boundary; expiry must terminalize the command first,
                 # not launch a second child in the same monitor iteration.
@@ -2743,7 +2885,14 @@ class RunCommandService:
                         if self._postcondition(rd, record):
                             self._succeeded(rd, path, record)
                             return
-                        if not self.engine_alive(rd) and not self._recent_spawn_claim(rd):
+                        retry_liveness = self._engine_state(rd)
+                        if retry_liveness is None:
+                            self._terminal(
+                                path, record, "failed",
+                                error=self._engine_unknown_error(
+                                    f"restart a driver for {event_type}", retryable=True))
+                            return
+                        if retry_liveness is False and not self._recent_spawn_claim(rd):
                             self._record_spawn_claim(rd, command_id, None)
                             try:
                                 pid = self._spawn(rd)
@@ -2764,7 +2913,8 @@ class RunCommandService:
                                 time.time() + self.startup_timeout)
                             while time.time() < startup_deadline:
                                 self._heartbeat_execution(rd, command_id)
-                                if self._postcondition(rd, record) or self.engine_alive(rd):
+                                if (self._postcondition(rd, record)
+                                        or self._engine_state(rd) is True):
                                     self._clear_spawn_claim(rd, command_id)
                                     record["spawn_claim_released"] = True
                                     break
@@ -2774,7 +2924,7 @@ class RunCommandService:
             uncertain_start = False
             if (record.get("spawned_by_command")
                     and not record.get("spawn_claim_released")):
-                if self.engine_alive(rd):
+                if self._engine_state(rd) is True:
                     self._clear_spawn_claim(rd, command_id)
                     record["spawn_claim_released"] = True
                 else:

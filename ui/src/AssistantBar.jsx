@@ -4,6 +4,7 @@ import { OpIcon } from './icons.jsx'
 import { useMediaQuery, usePoll } from './hooks.js'
 import { getRunAccess } from './runMode.js'
 import { useDialogFocus } from './useDialogFocus.js'
+import { pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
 import {
   clearLaunchDraftSession, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
@@ -26,7 +27,7 @@ import {
   assistantFork, assistantShare, commandActionForEvent, commandCanRetry, commandErrorMessage,
   commandEventForAction,
   commandFailureRecord, commandFeedback, commandRecordMatchesAction, getRunCommand, retryRunCommand,
-  getObservedRunGeneration,
+  getObservedRunGeneration, normalizeRunGeneration,
   COMMAND_SUCCEEDED, COMMAND_FAILED,
   createIdempotencyKey, saveAssistantRunTransport, loadAssistantRunTransport,
   clearAssistantRunTransport, clearRunCommandLock, loadRunCommandLock, saveRunCommandLock,
@@ -216,6 +217,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   const fileRef = useRef(null)
   const commandStatusRef = useRef(null)
   const commandFocusRequestedRef = useRef(false)
+  const openSessionRef = useRef(null)
   const toastRunIdRef = useRef(runId)
   useEffect(() => {
     setRunAccessState(getRunAccess(runId))
@@ -338,7 +340,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }, [])
 
   // ── sessions (full view) ──
-  const openSession = async (id, { recover = false } = {}) => {
+  const openSession = async (id, { recover = false, observeOnly = false } = {}) => {
     // Re-opening the session that is ALREADY live-streaming would abort its own stream (and downgrade
     // to polling) — the thread is already on screen, so just no-op.
     if (id === sidRef.current && runningRef.current) return
@@ -365,7 +367,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       try { prog = await assistantProgress(id); progressKnown = true } catch { /* offline: observe only */ }
       const trailingUser = arr.length && arr[arr.length - 1].role === 'user'
       const dangling = danglingAssistantTurn(arr)
-      const inFlight = prog.active || !!dangling || (recover && trailingUser)
+      const inFlight = prog.active || (!observeOnly && (!!dangling || (recover && trailingUser)))
       if (inFlight && mountedRef.current && sidRef.current === id) {
         setBusy(true); runningRef.current = true
         const act = (prog.steps || []).length ? [{ type: 'tools', labels: prog.steps }] : []
@@ -377,7 +379,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         let recoveryCtrl = null
         let exactState = 'idle'
         const startExactRecovery = async () => {
-          if (!dangling || exactState !== 'idle') return
+          if (observeOnly || !dangling || exactState !== 'idle') return
           exactState = 'checking'
           let latest
           try { latest = await assistantGet(id) } catch { exactState = 'idle'; return }
@@ -405,6 +407,7 @@ export default function AssistantBar({ runId, hidden = false }) {
             try {
               const pp = await assistantProgress(id)
               if (!pp.active) {
+                if (observeOnly) break
                 // The server may have been offline for the first progress read, or an attached worker
                 // may have died. Re-check the durable transcript before the one allowed recovery POST.
                 if (dangling && exactState === 'idle') startExactRecovery()
@@ -452,6 +455,35 @@ export default function AssistantBar({ runId, hidden = false }) {
       else flash(e.message)
     }
   }
+  openSessionRef.current = openSession
+  // The Attention Center can reveal an existing permission card, but opening attention must remain
+  // observational: never let this navigation gesture recover/replay a dangling Assistant turn.
+  useEffect(() => {
+    if (hidden) return undefined
+    let active = true
+    const onOpenAttentionSession = async event => {
+      const session = event?.detail?.session
+      if (typeof session !== 'string' || !/^[0-9a-f]{16}$/.test(session)) {
+        flash('The Assistant approval link is no longer valid; refresh the Attention Center')
+        return
+      }
+      if (sidRef.current !== session) {
+        await openSessionRef.current?.(session, { observeOnly: true })
+      }
+      if (!active) return
+      if (sidRef.current !== session) {
+        flash('Could not open the Assistant session that owns this approval')
+        return
+      }
+      setView('side'); setHasNew(false)
+      requestAnimationFrame(() => inputRef.current?.focus({ preventScroll: true }))
+    }
+    window.addEventListener('ll:open-assistant-session', onOpenAttentionSession)
+    return () => {
+      active = false
+      window.removeEventListener('ll:open-assistant-session', onOpenAttentionSession)
+    }
+  }, [hidden]) // openSessionRef always points at the current render
   const openLaunchRecovery = async () => {
     const recovery = launchRecoveries[0]
     if (!recovery) return
@@ -779,17 +811,20 @@ export default function AssistantBar({ runId, hidden = false }) {
     directCaptureRef.current = true
     try {
       let nodeGeneration = null
+      let expectedGeneration = getObservedRunGeneration(runId)
       if (d.name === 'approve') {
         const payload = await get(`/api/runs/${encodeURIComponent(runId)}/state`)
-        const node = payload?.state?.nodes?.[d.arg]
-        if (!node) throw new Error(`No experiment #${d.arg} exists in this run`)
-        if (!Number.isSafeInteger(node.attempt) || node.attempt < 0) {
-          throw new Error(`Experiment #${d.arg} has no verifiable lifecycle generation`)
+        const target = pendingApprovalTarget(payload?.state)
+        if (!target) throw new Error('The pending approval target is missing or changed; inspect Events before acting')
+        if (target.nodeId !== d.arg) {
+          throw new Error(`The active approval is for experiment #${target.nodeId}, not #${d.arg}`)
         }
-        nodeGeneration = node.attempt
+        expectedGeneration = normalizeRunGeneration(payload?.generation)
+        if (!expectedGeneration) throw new Error('The run generation could not be verified; refresh before approving')
+        nodeGeneration = target.nodeGeneration
       }
       const entry = { ...d, runId, nodeGeneration,
-        expectedGeneration: getObservedRunGeneration(runId),
+        expectedGeneration,
         idempotencyKey: createIdempotencyKey(), record: { status: 'submitting' } }
       commandFocusRequestedRef.current = true
       setCurrentFailure(entry, null)

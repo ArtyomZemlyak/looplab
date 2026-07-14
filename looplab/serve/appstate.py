@@ -21,7 +21,7 @@ from looplab.core.models import Event
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import iter_jsonl
 from looplab.events.replay import fold
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
 from looplab.serve.llm_context import llm_settings
 from looplab.serve.projects import ProjectStore
@@ -133,7 +133,7 @@ class AppState:
                 out = dict(d)
                 # Liveness is a present-time fact. Stamping it into an old prefix fold creates a
                 # hybrid object that is neither historical nor live.
-                out["engine_running"] = _engine_alive(rd) if upto_seq is None else None
+                out["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
                 return {"state": out, "seq": last_seq, "max_seq": max_seq,
                         "event_count": event_count,
                         RUN_GENERATION_FIELD: generation or None}
@@ -186,7 +186,7 @@ class AppState:
         # Liveness: is a real engine process driving this run RIGHT NOW? (lock probe, not the event log).
         # A run with finished=False but engine_running=False is a ZOMBIE — the UI uses this to stop
         # showing a perpetual "thinking" strip and to resume on the next engine-needing chat action.
-        d["engine_running"] = _engine_alive(rd) if upto_seq is None else None
+        d["engine_running"] = _engine_liveness(rd) if upto_seq is None else None
         if ckey is not None:                 # cache the trimmed payload for the next unchanged tick
             self._state_cache[ckey] = (d, last_seq, max_seq, generation, event_count)
             if len(self._state_cache) > 256:  # bound the cache (many runs / seq points over a session)

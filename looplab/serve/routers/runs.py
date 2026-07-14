@@ -23,7 +23,7 @@ from looplab.events.types import EV_TRUST_GATE_CHANGED
 from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
-from looplab.serve.engine_proc import _engine_alive, reconcile_pending_resume
+from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
 from looplab.serve.protocol import (
@@ -146,12 +146,12 @@ def build_router(srv) -> APIRouter:
         # engine_running is a live fact (lock probe), so it stays OUT of the mtime-keyed summary cache —
         # a zombie's events.jsonl is unchanged, yet its liveness flips the instant its engine dies.
         def _alive(rd, resume_pending: bool):
-            alive = _engine_alive(rd)
+            alive = _engine_liveness(rd)
             # P1-1 on-load reconcile: any not-alive run may carry an unserved durable resume. This
             # includes request-after-run_finished (an inject/reopen that hit the old finalization
             # tail); reconcile_pending_resume itself rejects ordinary finished runs with no pending
             # request. The detached re-spawn appears as running on the next refresh.
-            if not alive and resume_pending:
+            if alive is False and resume_pending:
                 try:
                     reconcile_pending_resume(rd, cancel_event=srv.resume_cancel)
                 except Exception:  # noqa: BLE001 — recovery is best-effort; never break the run list
@@ -677,7 +677,7 @@ def build_router(srv) -> APIRouter:
             except Exception as e:  # noqa: BLE001
                 raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
         return {"ok": True, "config": updated, "changed": sorted(changed),
-                "engine_running": _engine_alive(rd)}
+                "engine_running": _engine_liveness(rd)}
 
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):

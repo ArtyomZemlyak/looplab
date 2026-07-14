@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.core.config import Settings
-from looplab.serve.engine_proc import _engine_alive
+from looplab.serve.engine_proc import _engine_alive, _engine_liveness
 from looplab.serve.settings_store import SettingsStore
 
 # A build older than this (seconds) is surfaced to the boss/assistant as possibly STUCK. Generous by
@@ -148,18 +148,35 @@ def _boss_context(st, nid: Optional[int], full: "Path", *, advisory: bool = Fals
     # Run liveness UP FRONT: without it the boss can't tell a stalled run (engine died without
     # finishing — e.g. its only node crashed / never started) from a healthy one, so it tends to
     # only chat. A stalled run almost always needs the boss to ACT (resume + fix), not advise.
-    if st.finished:
+    liveness = _engine_liveness(full)
+    # Preserve the old bool monkeypatch seam only after an exact-False tri-state result. Unknown is
+    # never collapsed into "live" by the conservative compatibility wrapper.
+    if liveness is False and _engine_alive(full):
+        liveness = True
+    if liveness is None:
+        status = (
+            "RUN STATUS: UNKNOWN — engine ownership cannot be verified. Do not infer live, "
+            "stalled, or terminal-ready state and do not recommend or issue lifecycle actions "
+            "until engine.lock and storage locking are inspected."
+        )
+    elif st.finished and liveness is True:
+        status = (
+            "RUN STATUS: FINISHING — run_finished is durable, but the engine still owns the run "
+            "while terminal report/cost write-out completes. Observe only; do not issue lifecycle "
+            "actions until the engine releases ownership."
+        )
+    elif st.finished:
         status = (("RUN STATUS: finished. More experiments need the node budget raised first — "
                    "recommend the operator extend it; there's no room to run them until then.")
                   if advisory else
                   ("RUN STATUS: finished. Raise the node budget — budget(nodes=N) — before asking "
                    "for more experiments, else there's no room to run them."))
-    elif _engine_alive(full):
+    elif liveness is True:
         status = (("RUN STATUS: live — the engine is running and applies control actions between "
                    "nodes.")
                   if advisory else
                   "RUN STATUS: live — the engine is running and applies your actions between nodes.")
-    else:
+    elif liveness is False:
         status = (("RUN STATUS: STALLED — the engine is NOT running and the run hasn't finished (a "
                    "node likely crashed or never started). You have NO actions channel here — "
                    "RECOMMEND the operator resume the run (and debug/fix the failing node); never "

@@ -41,6 +41,7 @@ _LAYOUT = {
     "agents_md": "tools",
     "appconfig": "core",
     "appstate": "serve",
+    "attention": "serve",
     "archive": "search",
     "artifacts": "serve",
     "audit": "engine",   # engine audit/trust-emitter mixin

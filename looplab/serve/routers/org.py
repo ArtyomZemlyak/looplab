@@ -5,7 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.serve.engine_proc import (
-    _engine_alive, _fresh_resume_launch_pending, _fresh_run_launch_pending, _run_lifecycle_lock)
+    _engine_alive, _engine_liveness, _fresh_resume_launch_pending, _fresh_run_launch_pending,
+    _run_lifecycle_lock)
 from looplab.serve.projects import ProjectError
 
 
@@ -103,10 +104,9 @@ def build_router(srv) -> APIRouter:
         old guard keyed on `finished`, which wrongly blocked deleting a stalled run even though no
         engine was running. We still never yank the dir out from under a running engine.
 
-        Caveat: liveness is the OS file lock (the SAME mechanism cli._engine_singleton uses to prevent
-        two engines). On a filesystem where flock is a no-op (some FUSE/NFS mounts), a live engine
-        can't be detected here — but it equally can't be guarded against a second engine, so this is a
-        property of that environment, not of delete. The UI confirms the delete with the operator."""
+        Liveness is the OS file lock (the SAME mechanism cli._engine_singleton uses to prevent two
+        engines). If that ownership evidence is inaccessible or locking is unsupported, deletion
+        fails closed; an explicit UI confirmation cannot make unknown writer ownership safe."""
         import shutil
         rd = _run_dir(run_id)
         with srv.commands.destructive_guard(rd, "delete run") as rd:
@@ -114,7 +114,19 @@ def build_router(srv) -> APIRouter:
             # fence additionally excludes the durable-resume reconciler and reset's pre-lock launch
             # window introduced by older/CLI-compatible control paths.
             with _run_lifecycle_lock(rd):
-                if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                liveness = _engine_liveness(rd)
+                if liveness is None:
+                    raise HTTPException(409, {
+                        "code": "engine_liveness_unknown",
+                        "message": "Run deletion was refused because engine ownership is unknown.",
+                        "remediation": (
+                            "Inspect engine.lock and storage locking, then retry only after the "
+                            "engine is verifiably stopped."),
+                        "retryable": True,
+                    })
+                # Keep the historical `_engine_alive` seam for downstream/tests while requiring the
+                # authoritative tri-state probe to say exact False before destructive work.
+                if (liveness is True or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
                         or _fresh_run_launch_pending(rd)):
                     raise HTTPException(
                         409, "run is live or launching — pause/stop it before deleting")

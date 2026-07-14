@@ -138,6 +138,9 @@ class Node(BaseModel):
     tombstoned: bool = False
     metric: Optional[float] = None
     status: NodeStatus = NodeStatus.pending
+    # Fold-internal causal anchor for projections that must identify the FIRST accepted terminal of
+    # this lifecycle. Excluded from every public model dump: the durable source remains the event log.
+    terminal_event_seq: Optional[int] = Field(default=None, exclude=True)
     error: str = ""
     # Failure taxonomy (set by node_failed): setup | timeout | oom | crash | no_metric | drift.
     # Audit/observability only — lets a UI/operator see WHY runs fail across a search.
@@ -358,6 +361,11 @@ class RunState(BaseModel):
     # The engine re-uses this on resume so the split every metric was scored against never changes.
     holdout_fraction: Optional[float] = None
     nodes: dict[int, Node] = Field(default_factory=dict)
+    # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
+    # reset/abort from regrouping old failures into a brand-new browser notification identity.
+    current_failure_count: int = Field(default=0, exclude=True)
+    failure_spike_level: int = Field(default=0, exclude=True)
+    failure_spike_seq: Optional[int] = Field(default=None, exclude=True)
     # The node currently BEING BUILT (a `node_building` marker), shown in the UI the instant work starts
     # on it — before the dev session finishes with node_created. Transient: {node_id, operator,
     # parent_ids, started}; cleared when that node's node_created/node_failed folds. NOT in `nodes`, so it
@@ -376,6 +384,9 @@ class RunState(BaseModel):
     # treated as finalized by replay so old persisted runs never become synthetic recovery work.
     last_finish_seq: int = -1
     finalized_finish_seq: int = -1
+    # Seq of the accepted finalization_finished marker (not the finish it names). Fold-internal and
+    # excluded from API payloads; attention uses it to ignore duplicate/stale marker envelopes.
+    finalization_marker_seq: Optional[int] = Field(default=None, exclude=True)
     data_profile: Optional[dict] = None   # set by the grounding pre-phase (I16)
     leakage: Optional[dict] = None        # set by the grounding leakage scan (I9)
     data_provenance: Optional[dict] = None  # D4: pinned content hashes of task assets/data
@@ -419,6 +430,7 @@ class RunState(BaseModel):
     # None when no request is pending.
     approval_subject: Optional[int] = None
     approval_generation: Optional[int] = None   # lifecycle generation the pending request names
+    approval_request_seq: Optional[int] = Field(default=None, exclude=True)
     approved_node_id: Optional[int] = None      # explicit human choice; overrides algorithmic best
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
     # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,
@@ -429,6 +441,7 @@ class RunState(BaseModel):
     # adapter; a human ratifies it once; then the loop trusts it.
     proposed_spec: Optional[dict] = None  # {eval_spec, adapter_files, goal} from the agent
     spec_approval_requested: bool = False
+    spec_approval_request_seq: Optional[int] = Field(default=None, exclude=True)
     spec_confirmed: bool = False          # human ratified the proposed eval spec
     # Drift cross-check audit (Phase 4, ratify_freeze_drift): each entry is a divergence the
     # independent reader caught {node_id, primary, cross, tolerance, [seed]}. Audit only —
@@ -484,6 +497,7 @@ class RunState(BaseModel):
     paused: bool = False                       # `pause`/`resume`: resumable break (not finished)
     pause_node_id: Optional[int] = None         # scoped auto-pause owner (None = explicit operator pause)
     pause_generation: Optional[int] = None
+    pause_event_seq: Optional[int] = Field(default=None, exclude=True)
     stop_requested: Optional[str] = None       # `run_abort`: reason; loop -> run_finished + break
     # Seq of the latest finalize intent. A request newer than the accepted finish still needs a new
     # finish/finalization boundary; an older one was already consumed by that finish.

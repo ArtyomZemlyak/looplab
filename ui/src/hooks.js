@@ -214,24 +214,3 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   return { live, seq, generation, eventCount, connected, status, error,
     retry: () => setRetryToken(n => n + 1) }
 }
-
-// Browser notifications for finish / approval / failure-spike.
-export function useNotifications(enabled, state) {
-  const prev = useRef({ phase: null, fails: 0 })
-  useEffect(() => {
-    if (!enabled || !state) return
-    // `Notification` is absent in insecure/unsupported contexts — referencing it bare throws.
-    if (!('Notification' in window)) return
-    if (Notification.permission === 'default') Notification.requestPermission()
-    const phase = state.phase
-    const fails = Object.values(state.nodes || {}).filter(n => n.status === 'failed').length
-    const notify = (t, b) => { try { new Notification(t, { body: b }) } catch {} }
-    if (prev.current.phase && phase !== prev.current.phase) {
-      if (phase === 'finished') notify('LoopLab — run finished', `best=${state.best_node_id ?? '—'}`)
-      if (phase === 'approval') notify('LoopLab — approval needed', state.goal || '')
-      if (phase === 'spec_approval') notify('LoopLab — eval spec needs ratification', '')
-    }
-    if (fails - prev.current.fails >= 3) notify('LoopLab — failures spiking', `${fails} failed nodes`)
-    prev.current = { phase, fails }
-  }, [enabled, state])
-}

@@ -12,7 +12,7 @@ const projects = [
 ]
 const runs = [
   { run_id: 'a', label: 'Alpha', task_id: 'min-task', direction: 'min', project_id: 'p', best_metric: 10, mtime: 1, engine_running: true },
-  { run_id: 'b', label: 'Beta', task_id: 'min-task', direction: 'min', project_id: 'c', best_metric: 0, mtime: 2, finished: true },
+  { run_id: 'b', label: 'Beta', task_id: 'min-task', direction: 'min', project_id: 'c', best_metric: 0, mtime: 2, finished: true, engine_running: false },
   { run_id: 'c', label: 'Gamma', task_id: 'max-task', direction: 'max', project_id: null, best_metric: 0.9, mtime: 3, engine_running: false },
   { run_id: 'd', label: 'Delta', task_id: 'max-task', direction: 'max', project_id: null, best_metric: null, mtime: 4, engine_running: true },
 ]
@@ -86,6 +86,25 @@ test('natural finish with a live process is terminal write-out, not Resume/Repla
   assert.equal(lifecyclePhaseLabel(writing), 'finishing')
 })
 
+test('unknown engine ownership never becomes terminal-ready', () => {
+  const active = { finished: false, phase: 'search', engine_running: null }
+  assert.equal(runLifecycle(active).mode, 'unknown')
+  assert.equal(effectiveRunStatus(active), 'unknown')
+  assert.equal(lifecyclePhaseLabel(active), 'engine ownership unknown')
+
+  const natural = { finished: true, phase: 'finished', engine_running: null }
+  assert.equal(terminalReady(natural), false)
+  assert.equal(runLifecycle(natural).mode, 'finishing')
+
+  const finalized = {
+    finished: true, phase: 'finished', stop_requested: true,
+    stop_reason: 'finalized', engine_running: null,
+  }
+  assert.equal(finalizationIncomplete(finalized), true)
+  assert.equal(terminalReady(finalized), false)
+  assert.equal(runLifecycle(finalized).mode, 'finalizing')
+})
+
 test('canonical header phase never falls back to a stale folded finished label during finalization', () => {
   assert.equal(lifecyclePhaseLabel({
     finished: true, phase: 'finished', stop_requested: true, engine_running: true,
@@ -121,10 +140,13 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
     [{ nodes: {}, phase: 'finalizing', engine_running: false }, 'finalization-stalled', ['finalize', 'events']],
     [{ nodes: {}, phase: 'finalizing', engine_running: true }, 'finalizing', []],
     [{ nodes: {}, finished: true, engine_running: true }, 'finishing', []],
-    [{ nodes: {}, phase: 'spec_approval', paused: true, engine_running: false }, 'approval', ['assistant']],
+    [{ nodes: {}, phase: 'spec_approval', paused: true, spec_approval_requested: true,
+      engine_running: false }, 'approval', ['assistant']],
     [{ nodes: {}, phase: 'approval', engine_running: false }, 'approval-incomplete', ['events']],
-    [{ nodes: {}, phase: 'approval', best_node_id: 4, engine_running: false }, 'approval', ['assistant']],
+    [{ nodes: {}, phase: 'approval', best_node_id: 4, engine_running: false },
+      'approval-incomplete', ['events']],
     [{ nodes: {}, paused: true, engine_running: false }, 'paused', ['resume', 'finalize']],
+    [{ nodes: {}, phase: 'search', engine_running: null }, 'unknown', ['events']],
     [{ nodes: {}, phase: 'search', engine_running: false }, 'stalled', ['resume', 'finalize', 'events']],
     [{ nodes: {}, finished: true, engine_running: false }, 'finished', ['report', 'resume']],
     [{ nodes: {}, phase: 'setup', engine_running: true }, 'preparing', ['events']],
@@ -138,9 +160,10 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
 
 test('zero-node fallback distinguishes a retained disconnected state', () => {
   const value = dagEmptyPresentation({
-    displayed: { nodes: {} }, live: { nodes: {} }, resourceStatus: 'ready', connected: false,
+    displayed: { nodes: {}, engine_running: null }, live: { nodes: {}, engine_running: null },
+    resourceStatus: 'ready', connected: false,
   })
-  assert.equal(value.kind, 'empty')
+  assert.equal(value.kind, 'unknown')
   assert.equal(value.liveRegion, 'assertive')
   assert.deepEqual(value.actions.map(item => item.id), ['events', 'retry-connection'])
   assert.match(value.body, /connection is interrupted/)

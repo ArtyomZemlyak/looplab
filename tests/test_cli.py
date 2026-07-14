@@ -328,6 +328,7 @@ def test_approve_rejects_a_nonexistent_node_id(tmp_path):
     es.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
                                "idea": {"operator": "draft", "params": {}, "rationale": ""}})
     es.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    es.append("approval_requested", {"node_id": 0, "generation": 0})
     result = runner.invoke(app, ["approve", str(rd), "--node-id", "999"])
     assert result.exit_code == 2, result.output
     assert "no node #999" in result.output
@@ -346,15 +347,15 @@ def test_approve_with_no_best_node_errors(tmp_path):
     rd.mkdir()
     es = EventStore(rd / "events.jsonl")
     es.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    es.append("approval_requested", {})
     result = runner.invoke(app, ["approve", str(rd)])               # no --node-id, no evaluated node
     assert result.exit_code == 2, result.output
-    assert "no evaluated best" in result.output
+    assert "no verifiable pending approval subject" in result.output
     assert not any(e.type == "approval_granted" for e in EventStore(rd / "events.jsonl").read_all())
 
 
-def test_approve_defaults_to_best_even_when_best_id_is_zero(tmp_path):
-    """`approve` with no --node-id ratifies the current best; guard the falsy-zero footgun — best.id==0
-    must not be mistaken for "no best" (a future `if nid:` instead of `if nid is None:` would break it)."""
+def test_approve_defaults_to_pending_subject_even_when_id_is_zero(tmp_path):
+    """`approve` with no --node-id ratifies the exact pending subject; guard the falsy-zero footgun."""
     from looplab.events.eventstore import EventStore
     rd = tmp_path / "run"
     rd.mkdir()
@@ -363,7 +364,28 @@ def test_approve_defaults_to_best_even_when_best_id_is_zero(tmp_path):
     es.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
                                "idea": {"operator": "draft", "params": {}, "rationale": ""}})
     es.append("node_evaluated", {"node_id": 0, "metric": 0.5})      # node 0 IS the best
-    result = runner.invoke(app, ["approve", str(rd)])               # no --node-id -> default best (id 0)
+    es.append("approval_requested", {"node_id": 0, "generation": 0})
+    result = runner.invoke(app, ["approve", str(rd)])
     assert result.exit_code == 0, result.output
     grants = [e for e in EventStore(rd / "events.jsonl").read_all() if e.type == "approval_granted"]
     assert len(grants) == 1 and grants[0].data.get("node_id") == 0
+
+
+def test_approve_never_defaults_to_a_different_best_or_preapproves(tmp_path):
+    from looplab.events.eventstore import EventStore
+    rd = tmp_path / "run"
+    rd.mkdir()
+    es = EventStore(rd / "events.jsonl")
+    es.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    for node_id, metric in ((0, 10.0), (7, 1.0)):
+        es.append("node_created", {"node_id": node_id, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}, "rationale": ""}})
+        es.append("node_evaluated", {"node_id": node_id, "generation": 0, "metric": metric})
+
+    early = runner.invoke(app, ["approve", str(rd)])
+    assert early.exit_code == 2 and "not currently awaiting" in early.output
+    es.append("approval_requested", {"node_id": 0, "generation": 0})
+    approved = runner.invoke(app, ["approve", str(rd)])
+    assert approved.exit_code == 0, approved.output
+    grant = [event for event in es.read_all() if event.type == "approval_granted"][-1]
+    assert grant.data == {"node_id": 0, "generation": 0}  # best is #7, pending subject is #0

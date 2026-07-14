@@ -4,6 +4,7 @@ import RunView from './RunView.jsx'
 import Settings from './Settings.jsx'
 import SharedAssistant from './SharedAssistant.jsx'
 import AssistantBar from './AssistantBar.jsx'
+import AttentionCenter from './AttentionCenter.jsx'
 import OwnerAuth from './OwnerAuth.jsx'
 import { reviewManifest, reviewTokenFromLocation } from './api.js'
 import { initTheme } from './ThemeSwitcher.jsx'
@@ -114,6 +115,9 @@ export default function App() {
   return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}><div className="app-shell">
       <div className="app-shell-main">{content}</div>
       {/* Mounted once, outside the route switch → the assistant persists across all navigation. */}
+      {/* Owner-plane inbox only. Review returns above and shared pages omit all attention polling,
+          cross-tab channels, storage and Notification API access. */}
+      {!hideAssistant && <AttentionCenter />}
       <AssistantBar runId={route.view === 'run' ? route.id : null} hidden={hideAssistant} />
     </div></RouteFocus></OwnerAuth>
 }

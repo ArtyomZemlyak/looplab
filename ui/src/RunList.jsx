@@ -456,6 +456,7 @@ export default function RunList({ onOpen, onSettings }) {
                <option value="paused">paused</option>
                <option value="approval">approval needed</option>
                <option value="stalled">stalled</option>
+               <option value="unknown">ownership unknown</option>
               <option value="finished">finished</option>
             </select>
             <select className="sel" aria-label="Filter by task" value={taskFilter} onChange={e => setTaskFilter(e.target.value)}>
@@ -512,6 +513,7 @@ export default function RunList({ onOpen, onSettings }) {
                 const stalled = status === 'stalled'
                 return <span className={'pill phase ' + status}
                              title={stalled ? 'engine stopped unexpectedly — open the run to resume'
+                                : status === 'unknown' ? 'engine ownership could not be verified; inspect before acting'
                                 : status === 'finalizing' ? 'wrapping up report, lessons, and cost'
                                 : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
               })()}

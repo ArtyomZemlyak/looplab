@@ -724,6 +724,7 @@ def test_lifecycle_normalizer_requires_exact_attempt_and_parent_snapshot(tmp_pat
     rd = _seed(tmp_path)
     store = EventStore(rd / "events.jsonl")
     store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    store.append("approval_requested", {"node_id": 0, "generation": 1})
     _client_unused, srv = _client(tmp_path, _Driver())
 
     lifecycle = {
@@ -757,6 +758,111 @@ def test_lifecycle_normalizer_requires_exact_attempt_and_parent_snapshot(tmp_pat
     normalized_inject = normalize_control(srv, rd, "inject_node", {
         "idea": idea, "parent_id": 0, "parent_generations": {"0": 1}})
     assert normalized_inject["parent_generations"] == {"0": 1}
+
+
+def test_approval_normalizer_defaults_to_pending_subject_and_requires_active_gate(tmp_path):
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 10.0})
+    store.append("node_created", {
+        "node_id": 7, "generation": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "better"},
+    })
+    store.append("node_evaluated", {"node_id": 7, "generation": 0, "metric": 1.0})
+    store.append("approval_requested", {"node_id": 0, "generation": 0})
+    _client_unused, srv = _client(tmp_path, _Driver())
+
+    default = normalize_control(srv, rd, "approval_granted", {})
+    assert default == {"node_id": 0, "generation": 0}  # pending subject, not best #7
+    explicit = normalize_control(
+        srv, rd, "approval_granted", {"node_id": 7, "generation": 0})
+    assert explicit == {"node_id": 7, "generation": 0}
+
+    no_gate = _seed(tmp_path, "no-gate")
+    with pytest.raises(HTTPException) as approval_error:
+        normalize_control(srv, no_gate, "approval_granted", {"node_id": 0, "generation": 0})
+    assert approval_error.value.detail["code"] == "approval_not_requested"
+    EventStore(no_gate / "events.jsonl").append(
+        "spec_proposed", {"eval_spec": {"cmd": "python train.py"}})
+    with pytest.raises(HTTPException) as ratify_error:
+        normalize_control(srv, no_gate, "spec_approved", {})
+    assert ratify_error.value.detail["code"] == "ratification_not_requested"
+
+
+def test_engine_driving_command_rejects_unknown_liveness_without_spawn(tmp_path):
+    rd = _seed(tmp_path)
+    driver = _Driver(alive=False)
+    client, srv = _client(tmp_path, driver)
+    srv.commands.engine_liveness = lambda _rd: None
+
+    response = _post(client, "resume", key="unknown-liveness-resume")
+    assert response.status_code == 200
+    record = response.json()
+    assert record["status"] == "rejected"
+    assert record["error"]["code"] == "engine_liveness_unknown"
+    assert record["error"]["retryable"] is False
+    assert driver.calls == []
+    assert "resume" not in _types(rd)
+
+
+def test_delayed_approval_command_cannot_rebind_to_a_new_request(tmp_path):
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+    store.append("approval_requested", {"node_id": 0, "generation": 0})
+    client, srv = _client(tmp_path, _Driver(alive=False))
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+
+    admitted = _post(
+        client, "approval_granted", {"node_id": 0, "generation": 0},
+        key="delayed-approval-request-1").json()
+    assert admitted["status"] == "accepted"
+
+    # Request 1 is resolved externally while this admitted worker is delayed, then request 2 opens.
+    store.append("approval_granted", {"node_id": 0, "generation": 0})
+    store.append("node_reset", {"node_id": 0, "generation": 0, "from_stage": "eval"})
+    store.append("node_evaluated", {"node_id": 0, "generation": 1, "metric": 0.9})
+    request_2 = store.append("approval_requested", {"node_id": 0, "generation": 1})
+    path = srv.commands._path(rd, admitted["id"])
+    srv.commands._execute(rd, path, srv.commands._load(path), claimed=False)
+
+    final = srv.commands._load(path)
+    assert final["status"] == "rejected"
+    assert final["error"]["code"] == "approval_state_changed"
+    assert final["error"]["retryable"] is False
+    grants = [event for event in store.read_all() if event.type == "approval_granted"]
+    assert len(grants) == 1
+    assert all((event.data or {}).get("_command_id") != admitted["id"] for event in grants)
+    assert fold(store.read_all()).approval_request_seq == request_2.seq
+
+
+def test_approval_append_cas_rejects_an_intervening_event(tmp_path, monkeypatch):
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_evaluated", {"node_id": 0, "generation": 0, "metric": 1.0})
+    store.append("approval_requested", {"node_id": 0, "generation": 0})
+    client, srv = _client(tmp_path, _Driver(alive=False))
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+    admitted = _post(
+        client, "approval_granted", {"node_id": 0, "generation": 0},
+        key="approval-tail-cas").json()
+
+    decide = srv.commands._decision
+
+    def advance_tail(run_dir, event_type):
+        decision = decide(run_dir, event_type)
+        store.append("diagnostic_only", {})
+        return decision
+
+    monkeypatch.setattr(srv.commands, "_decision", advance_tail)
+    path = srv.commands._path(rd, admitted["id"])
+    srv.commands._execute(rd, path, srv.commands._load(path), claimed=False)
+
+    final = srv.commands._load(path)
+    assert final["status"] == "rejected"
+    assert final["error"]["code"] == "approval_state_changed"
+    assert final["error"]["retryable"] is False
+    assert not any(event.type == "approval_granted" for event in store.read_all())
 
 
 @pytest.mark.parametrize("unavailable", ["tombstoned", "aborted"])

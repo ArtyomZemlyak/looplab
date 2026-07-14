@@ -147,7 +147,6 @@ def test_fold_node_tombstoned_excludes_from_selection(tmp_path):
     # Append-only delete (§6.3): a node_tombstoned event marks the subtree logically deleted — the
     # node STAYS in st.nodes (parent links resolve) but is excluded from every selection helper, so
     # it can't be chosen best or bred from. Here node 1 is the min (best) until it is tombstoned.
-    from looplab.core.models import NodeStatus
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
     _n(s, 0, 5.0)
@@ -773,7 +772,8 @@ def test_fold_confirm_eval_cost_deduped_on_duplicate():
 def test_eventstore_seq_and_nondict_guard(tmp_path):
     from looplab.events.eventstore import EventStore, iter_jsonl
     s = EventStore(tmp_path / "e.jsonl")
-    s.append("a", {}); s.append("b", {})
+    s.append("a", {})
+    s.append("b", {})
     assert [e.seq for e in s.read_all()] == [0, 1]
     with open(tmp_path / "e.jsonl", "ab") as f:
         f.write(b"5\n")                                             # valid JSON but not an object
@@ -1530,3 +1530,19 @@ def test_spec_approved_requires_a_proposal(tmp_path):
     s.append("spec_proposed", {"eval_spec": {"metric": {"kind": "adapter"}}})
     s.append("spec_approved", {})
     assert fold(s.read_all()).spec_confirmed is True
+
+
+def test_spec_content_is_frozen_at_the_human_review_boundary(tmp_path):
+    s = EventStore(tmp_path / "spec-freeze.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    proposal_a = {"eval_spec": {"metric": {"kind": "builtin", "name": "accuracy"}}}
+    proposal_b = {"eval_spec": {"metric": {"kind": "adapter", "name": "unreviewed"}}}
+    s.append("spec_proposed", proposal_a)
+    s.append("spec_approval_requested", {})
+    s.append("spec_proposed", proposal_b)  # late agent output cannot swap the reviewed content
+    pending = fold(s.read_all())
+    assert pending.proposed_spec == proposal_a and pending.spec_approval_requested
+    s.append("spec_approved", {})
+    s.append("spec_proposed", proposal_b)  # ratified spec remains frozen as well
+    ratified = fold(s.read_all())
+    assert ratified.spec_confirmed is True and ratified.proposed_spec == proposal_a

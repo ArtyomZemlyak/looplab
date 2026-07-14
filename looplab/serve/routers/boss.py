@@ -298,12 +298,30 @@ def _action_to_control(c: "_Action", st) -> Optional[dict]:
                     source_run=c.source_run, source_node=int(c.source_node)),
                 "label": f"Import #{c.source_node} from run {c.source_run}"}
     if a == "approve":
-        node = nid if nid is not None else st.best_node_id
-        if node is None:                      # no champion yet -> not an actionable approve
+        # An omitted node means the exact pending subject, not the latest best. Explicit non-best
+        # approval remains supported, but default/NL approval must not drift when ranking changes.
+        if not getattr(st, "awaiting_approval", False):
             return None
-        return {"type": EV_APPROVAL_GRANTED,
-                "data": _bound_node_data(st, node, node_id=node), "label": f"Approve #{node}"}
+        node = nid if nid is not None else getattr(st, "approval_subject", None)
+        nodes = getattr(st, "nodes", {}) or {}
+        target = nodes.get(node) if node is not None else None
+        if (node is None or target is None or getattr(target, "tombstoned", False)
+                or node in (getattr(st, "aborted_nodes", []) or [])):
+            return None
+        if nid is None:
+            generation = getattr(st, "approval_generation", None)
+            if (not isinstance(generation, int) or isinstance(generation, bool) or generation < 0
+                    or target.attempt != generation):
+                return None
+            data = {"node_id": node, "generation": generation}
+        else:
+            data = _bound_node_data(st, node, node_id=node)
+        return {"type": EV_APPROVAL_GRANTED, "data": data, "label": f"Approve #{node}"}
     if a == "ratify":
+        if (getattr(st, "proposed_spec", None) is None
+                or not getattr(st, "spec_approval_requested", False)
+                or getattr(st, "spec_confirmed", False)):
+            return None
         return {"type": EV_SPEC_APPROVED, "data": {}, "label": "Ratify the eval spec"}
     if a in ("stop", "pause", "finalize", "abort", "resume"):
         # 3 verbs: stop = freeze (EV_PAUSE, no wrap-up); finalize = stop + wrap-up (EV_RUN_ABORT →

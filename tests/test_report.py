@@ -931,12 +931,24 @@ def _read_events(rd: Path):
 def test_command_to_action_mapping():
     from looplab.serve.server import _Action, _action_to_control
 
+    class _Pending:
+        attempt = 2
+        tombstoned = False
+
     class _S:
         best_node_id = 9
+        awaiting_approval = True
+        approval_subject = 7
+        approval_generation = 2
+        nodes = {7: _Pending()}
+        aborted_nodes = []
     s = _S()
     assert _action_to_control(_Action(action="confirm", node_id=5), s)["type"] == "force_confirm"
     assert _action_to_control(_Action(action="fork", node_id=4), s)["data"] == {"from_node_id": 4}
-    assert _action_to_control(_Action(action="approve"), s)["data"] == {"node_id": 9}  # defaults to best
+    # Default approval binds to the exact pending lifecycle, never a different current best.
+    assert _action_to_control(_Action(action="approve"), s)["data"] == {
+        "node_id": 7, "generation": 2,
+    }
     # 3-verb operator control: stop = freeze (pause), finalize = wrap up (run_abort), resume
     assert _action_to_control(_Action(action="stop"), s)["type"] == "pause"
     assert _action_to_control(_Action(action="finalize"), s)["type"] == "run_abort"

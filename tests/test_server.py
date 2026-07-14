@@ -253,7 +253,7 @@ def test_engine_liveness_lock_probe(tmp_path):
     holds the lock the probe flips to True. Uses the real cli._engine_singleton so the lock semantics
     match production and the test stays cross-platform (msvcrt on Windows, fcntl elsewhere)."""
     from looplab.cli import _engine_singleton
-    from looplab.serve.server import _engine_alive
+    from looplab.serve.engine_proc import _engine_alive
 
     _build_run(tmp_path)                       # finished run; nothing holds the lock
     client = TestClient(make_app(tmp_path))
@@ -270,6 +270,106 @@ def test_engine_liveness_lock_probe(tmp_path):
         assert _engine_alive(tmp_path / "demo") is True
         assert client.get("/api/runs/demo/state").json()["state"]["engine_running"] is True
     assert _engine_alive(tmp_path / "demo") is False   # released on context exit
+
+
+def test_engine_liveness_probe_never_recreates_a_raced_away_lock(tmp_path, monkeypatch):
+    """Observation must not become a filesystem write if cleanup wins the lstat→open race."""
+    import looplab.serve.engine_proc as engine_proc
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    lock = rd / "engine.lock"
+    lock.write_text("sentinel", encoding="utf-8")
+    original_open = os.open
+
+    def disappear_after_metadata(path, flags, *args, **kwargs):
+        if Path(path) == lock:
+            lock.unlink()
+        return original_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", disappear_after_metadata)
+    assert engine_proc._engine_liveness(rd) is None
+    lock.write_text("sentinel", encoding="utf-8")
+    assert engine_proc._engine_alive(rd) is True  # conservative bool callers also fail closed
+    assert lock.exists() is False
+
+
+def test_engine_liveness_dangling_lock_link_is_unknown(tmp_path, monkeypatch):
+    """A dangling ownership link is an observed suspicious entry, not proof that no writer exists."""
+    from looplab.serve.engine_proc import _engine_alive, _engine_liveness
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    lock = rd / "engine.lock"
+    try:
+        lock.symlink_to(rd / "missing-lock-target")
+    except OSError:
+        # Windows may deny symlink creation without Developer Mode. Simulate the exact lstat entry
+        # so this safety regression still runs on the platform where it matters most.
+        import stat as stat_module
+        original_lstat = Path.lstat
+
+        class _LinkStat:
+            st_mode = stat_module.S_IFLNK | 0o777
+            st_file_attributes = 0
+
+        monkeypatch.setattr(
+            Path, "lstat",
+            lambda path, *args, **kwargs: (_LinkStat() if path == lock
+                                           else original_lstat(path, *args, **kwargs)))
+    assert lock.is_symlink() and not lock.exists()
+    assert _engine_liveness(rd) is None
+    assert _engine_alive(rd) is True
+
+
+def test_engine_liveness_run_directory_link_is_unknown(tmp_path, monkeypatch):
+    """A reconciler must not treat an aliased run directory with no lock as safe to spawn into."""
+    import stat as stat_module
+    from looplab.serve.engine_proc import _engine_alive, _engine_liveness
+
+    rd = tmp_path / "aliased-run"
+    original_lstat = Path.lstat
+
+    class _RunLinkStat:
+        st_mode = stat_module.S_IFLNK | 0o777
+        st_file_attributes = 0
+
+    monkeypatch.setattr(
+        Path, "lstat",
+        lambda path, *args, **kwargs: (_RunLinkStat() if path == rd
+                                       else original_lstat(path, *args, **kwargs)))
+    assert _engine_liveness(rd) is None
+    assert _engine_alive(rd) is True
+
+
+def test_engine_liveness_revalidates_lock_path_after_open(tmp_path, monkeypatch):
+    """Locking an old fd is inconclusive if engine.lock was replaced with another inode."""
+    from looplab.serve.engine_proc import _engine_liveness
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    lock = rd / "engine.lock"
+    lock.write_bytes(b"sentinel")
+    original_lstat = Path.lstat
+    first = original_lstat(lock)
+    lock_lstats = 0
+
+    class _ReplacementStat:
+        st_mode = first.st_mode
+        st_dev = first.st_dev
+        st_ino = first.st_ino + 1
+        st_file_attributes = getattr(first, "st_file_attributes", 0)
+
+    def replaced_after_open(path, *args, **kwargs):
+        nonlocal lock_lstats
+        if path == lock:
+            lock_lstats += 1
+            if lock_lstats > 1:
+                return _ReplacementStat()
+        return original_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", replaced_after_open)
+    assert _engine_liveness(rd) is None
 
 
 def test_runs_summary_only_reconciles_cached_pending_resume(tmp_path, monkeypatch):
@@ -606,6 +706,30 @@ def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monk
     with TestClient(make_app(tmp_path)) as client:
         assert client.get("/api/health").status_code == 200
     assert len(spawns) == 1 and "resume" in spawns[0][0][0]
+
+
+def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, monkeypatch):
+    """Unknown/reparse runs stay quarantined without one 20 Hz polling thread per directory."""
+    from looplab.serve import engine_proc as ep
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
+    store.append("resume_requested", {})
+    spawns = []
+    waiters = []
+    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(ep, "_engine_liveness", lambda _rd: None)
+    monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
+    monkeypatch.setattr(
+        ep, "_spawn_engine_after_exit",
+        lambda *args, **kwargs: waiters.append((args, kwargs)) or True)
+
+    with TestClient(make_app(tmp_path)) as client:
+        assert client.get("/api/health").status_code == 200
+    assert spawns == [] and waiters == []
 
 
 @pytest.mark.parametrize("intent", ["inject_node", "resume", "run_reopened"])
@@ -967,12 +1091,31 @@ def test_delete_finished_and_stalled_runs(tmp_path):
     assert r.status_code == 200 and not sr.exists()             # was a spurious 409 before the fix
 
 
-def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
-    """On a FUSE/S3 mount (geesefs) flock is unsupported and raises a plain OSError — that must read as
-    NOT alive (can't tell), not 'engine held'. The old code returned True for ANY OSError, which made
-    every run look live forever and blocked deleting a stalled run. Only BlockingIOError = held."""
+def test_delete_and_reset_fail_closed_when_engine_liveness_is_unknown(tmp_path, monkeypatch):
+    from looplab.serve.routers import control as control_router
+    from looplab.serve.routers import org as org_router
+
+    _build_run(tmp_path, "delete-unknown")
+    _build_run(tmp_path, "reset-unknown")
+    client = TestClient(make_app(tmp_path))
+    monkeypatch.setattr(org_router, "_engine_liveness", lambda _rd: None)
+    monkeypatch.setattr(control_router, "_engine_liveness", lambda _rd: None)
+
+    deleted = client.delete("/api/runs/delete-unknown")
+    assert deleted.status_code == 409
+    assert deleted.json()["detail"]["code"] == "engine_liveness_unknown"
+    assert (tmp_path / "delete-unknown" / "events.jsonl").is_file()
+
+    reset = client.post("/api/runs/reset-unknown/reset")
+    assert reset.status_code == 409
+    assert reset.json()["detail"]["code"] == "engine_liveness_unknown"
+    assert (tmp_path / "reset-unknown" / "events.jsonl").is_file()
+
+
+def test_engine_alive_unsupported_flock_is_unknown_and_bool_fails_closed(tmp_path, monkeypatch):
+    """Unsupported flock is unknown: reads avoid a false stall and mutation bool callers block."""
     fcntl = pytest.importorskip("fcntl")        # POSIX-only; Windows uses the msvcrt branch
-    from looplab.serve.server import _engine_alive
+    from looplab.serve.engine_proc import _engine_alive, _engine_liveness
     rd = tmp_path / "r"
     rd.mkdir()
     (rd / "engine.lock").write_text("", encoding="utf-8")
@@ -982,8 +1125,10 @@ def test_engine_alive_unsupported_flock_reads_not_alive(tmp_path, monkeypatch):
             raise exc
         return _f
     monkeypatch.setattr(fcntl, "flock", _raise(OSError("flock not supported on this fs")))
-    assert _engine_alive(rd) is False           # unsupported -> not alive (delete not blocked)
+    assert _engine_liveness(rd) is None          # unknown is not evidence for a derived stall
+    assert _engine_alive(rd) is True            # conservative mutation compatibility blocks
     monkeypatch.setattr(fcntl, "flock", _raise(BlockingIOError("held")))
+    assert _engine_liveness(rd) is True
     assert _engine_alive(rd) is True            # genuinely held by a live engine
 
 
@@ -1465,7 +1610,7 @@ def test_sse_done_waits_for_finished_engine_to_exit(tmp_path, monkeypatch):
 
     _build_run(tmp_path)
     probes = iter((True, False))
-    monkeypatch.setattr(appstate, "_engine_alive", lambda _rd: next(probes, False))
+    monkeypatch.setattr(appstate, "_engine_liveness", lambda _rd: next(probes, False))
     client = TestClient(make_app(tmp_path))
 
     response = client.get("/api/runs/demo/events")
@@ -1794,7 +1939,7 @@ def test_action_router_maps_plan_to_multiple_controls():
     and the multi-action shape that makes 'you have 10 more nodes, try some nets' a real batch."""
     from looplab.serve.server import _Action, _Plan, _action_to_control, _plan_to_actions
 
-    class _St:  # _action_to_control only reads st.best_node_id (for the approve verb)
+    class _St:
         best_node_id = 7
 
     st = _St()
@@ -1816,12 +1961,19 @@ def test_action_router_maps_plan_to_multiple_controls():
     assert acts[2]["data"]["idea"]["operator"] == "draft"
 
     class _N:
-        attempt = 2
+        def __init__(self, attempt):
+            self.attempt = attempt
     class _BoundSt:
         best_node_id = 5
-        nodes = {5: _N()}
+        awaiting_approval = True
+        approval_subject = 7
+        approval_generation = 4
+        aborted_nodes = []
+        nodes = {5: _N(2), 7: _N(4)}
     bound = _action_to_control(_Action(action="approve"), _BoundSt())
-    assert bound["data"] == {"node_id": 5, "generation": 2}
+    assert bound["data"] == {"node_id": 7, "generation": 4}
+    explicit = _action_to_control(_Action(action="approve", node_id=5), _BoundSt())
+    assert explicit["data"] == {"node_id": 5, "generation": 2}
 
 
 def test_boss_hint_replaces_standing_directive():

@@ -19,7 +19,9 @@ import {
   clearRunAccess, historyMatches, liveHistory, reconcileHistoricalSelection, rejectHistory,
   requestHistory, resolveHistory, setRunAccess,
 } from './runMode.js'
-import { dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady } from './runIndex.js'
+import {
+  approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady,
+} from './runIndex.js'
 import {
   TrustPanel, SensitivityPanel, FailuresPanel, ParetoPanel, DataQualityPanel,
   ConfigPanel, AuthoringPanel, MemoryPanel, RegistryPanel, EventExplorer,
@@ -660,6 +662,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     : finalizing ? 'finalizing'
       : lifecycle.mode === 'finished' ? 'done'
         : lifecycle.mode === 'stalled' ? 'stalled'
+          : lifecycle.mode === 'unknown' ? 'off'
           : (lifecycle.mode === 'paused' || lifecycle.mode === 'approval') ? 'paused' : 'on'
   const liveLabel = !connected ? 'offline'
     : lifecycle.mode === 'finalization-stalled' ? 'finalization stalled'
@@ -667,6 +670,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         : lifecycle.mode === 'finalizing' ? 'finalizing'
           : lifecycle.mode === 'finished' ? 'finished'
             : lifecycle.mode === 'stalled' ? 'stalled'
+              : lifecycle.mode === 'unknown' ? 'engine ownership unknown'
               : lifecycle.mode === 'paused' ? 'paused'
                 : lifecycle.mode === 'approval' ? 'approval needed' : 'live'
   if (historyActive && !hist) return <div className="app">
@@ -703,8 +707,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     displayed: state, live, resourceStatus: runStatus, connected,
     historyActive, reviewMode, sequence: history.resolvedSeq ?? viewSeq,
   })
-  const approvalCommand = live.phase === 'spec_approval' ? '/ratify'
-    : live.phase === 'approval' && live.best_node_id != null ? `/approve #${live.best_node_id}` : null
+  const approvalCommand = approvalCommandFor(live)
   const revealEvents = () => {
     if (compactWorkspace) setCompactTimelineOpen(true)
     else setDockC(false)
@@ -816,7 +819,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           style={{ background: 'rgba(74,163,255,.12)', borderBottom: '1px solid var(--accent-dim)' }}>
           {approvalCommand ? <>
             <b>{live.phase === 'approval'
-              ? `Human approval required for the final best — type `
+              ? `Human approval required for experiment #${live.approval_subject} — type `
               : 'Eval spec needs ratification — type '}</b>
             <code className="cmd-hint">{approvalCommand}</code>
             <b>&nbsp;in the chat below.</b>

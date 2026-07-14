@@ -642,37 +642,53 @@ def finalize(
 
 @app.command()
 def approve(run_dir: Path = typer.Argument(..., help="Run dir awaiting approval."),
-            node_id: Optional[int] = typer.Option(None, help="Node to approve (default: best).")):
+            node_id: Optional[int] = typer.Option(
+                None, help="Node to approve (default: exact pending subject).")):
     """Approve a paused run (human-in-the-loop): ratify whatever it's waiting on — an agent-proposed
     eval spec, or the final-best node — by appending the matching event so `resume` can finish."""
     store = _require_run_dir(run_dir)
     _require_healthy_log(store, run_dir)   # fail closed on a mid-file corruption before appending (P0-4)
-    state = fold(store.read_all())
-    if state.proposed_spec is not None and not state.spec_confirmed:
-        store.append(EV_SPEC_APPROVED, {})       # ratify the agent-proposed eval/adapter
+    events = store.read_all()
+    state = fold(events)
+    expected_seq = events[-1].seq if events else -1
+
+    def append_exact(event_type: str, data: dict) -> None:
+        try:
+            store.append(event_type, data, expected_last_seq=expected_seq)
+        except EventStoreConcurrencyError:
+            typer.echo(f"run {run_dir.name} changed while approval was being prepared; refresh and retry")
+            raise typer.Exit(2)
+
+    if (state.proposed_spec is not None and state.spec_approval_requested
+            and not state.spec_confirmed):
+        append_exact(EV_SPEC_APPROVED, {})       # ratify the agent-proposed eval/adapter
         typer.echo(f"approved eval spec for run {run_dir.name}")
         return
-    best = state.best()
-    nid = node_id if node_id is not None else (best.id if best else None)
+    if not state.awaiting_approval:
+        typer.echo(f"run {run_dir.name} is not currently awaiting result approval")
+        raise typer.Exit(2)
+    nid = node_id if node_id is not None else state.approval_subject
     # Validate the target before appending: the fold honors a grant only for a REAL candidate node
     # (subject-bound approval, P0-2), so an explicit `--node-id` typo would append a grant the fold
     # silently ignores while this command printed "approved" — a confusing no-op. Fail loudly instead.
-    if node_id is not None and node_id not in state.nodes:
-        typer.echo(f"no node #{node_id} in run {run_dir.name} — nothing approved "
-                   f"(pass a real node id, or omit --node-id to approve the current best)")
+    if nid is not None and nid not in state.nodes:
+        typer.echo(f"no node #{nid} in run {run_dir.name} — nothing approved "
+                   f"(pass a real node id, or omit --node-id to approve the pending subject)")
         raise typer.Exit(2)
-    # No explicit id AND no evaluated best -> there is nothing to approve. Appending a bare
-    # `{"node_id": None}` here would still fold to approved=True (the back-compat path) and finalize an
-    # approved run with no champion — refuse instead, symmetric with the bad-id guard above.
+    # A malformed legacy request may be awaiting without a verifiable subject. Never guess best.
     if nid is None:
-        typer.echo(f"run {run_dir.name} has no evaluated best node to approve yet "
-                   "(nothing to approve — let a node evaluate first, or pass --node-id).")
+        typer.echo(f"run {run_dir.name} has no verifiable pending approval subject "
+                   "(inspect its events, or pass an explicit --node-id).")
         raise typer.Exit(2)
-    if nid in state.aborted_nodes:
+    node = state.nodes[nid]
+    if nid in state.aborted_nodes or node.tombstoned:
         typer.echo(f"node #{nid} in run {run_dir.name} is aborted — reset it before approval")
         raise typer.Exit(2)
-    store.append(EV_APPROVAL_GRANTED,
-                 {"node_id": nid, "generation": state.nodes[nid].attempt})
+    if node_id is None and (state.approval_generation is None
+                            or state.approval_generation != node.attempt):
+        typer.echo(f"run {run_dir.name} has a stale pending approval lifecycle; inspect events and retry")
+        raise typer.Exit(2)
+    append_exact(EV_APPROVAL_GRANTED, {"node_id": nid, "generation": node.attempt})
     typer.echo(f"approved node {nid} for run {run_dir.name}")
 
 

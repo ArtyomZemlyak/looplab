@@ -312,7 +312,9 @@ def test_chat_gets_advisory_stalled_wording(tmp_path, monkeypatch):
 
     class _Cap:
         def __init__(self, s): self.model = s.llm_model
-        def complete_text(self, msgs): captured["sys"] = msgs[0]["content"]; return "ok"
+        def complete_text(self, msgs):
+            captured["sys"] = msgs[0]["content"]
+            return "ok"
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: _Cap(s))
     client = TestClient(make_app(tmp_path))
@@ -321,6 +323,45 @@ def test_chat_gets_advisory_stalled_wording(tmp_path, monkeypatch):
     assert "STALLED" in captured["sys"]                     # the liveness fact still reaches the model
     assert "RECOMMEND the operator" in captured["sys"]      # …as advice
     assert "you MUST act" not in captured["sys"]            # never as an order it can't execute
+
+
+def test_chat_treats_unknown_engine_ownership_as_observation_only(tmp_path, monkeypatch):
+    _stalled_run(tmp_path)
+    captured = {}
+
+    class _Cap:
+        def __init__(self, settings): self.model = settings.llm_model
+        def complete_text(self, messages):
+            captured["sys"] = messages[0]["content"]
+            return "ok"
+
+    monkeypatch.setattr("looplab.serve.llm_context._engine_liveness", lambda _rd: None)
+    monkeypatch.setattr(
+        "looplab.serve.llm_context._engine_alive",
+        lambda _rd: (_ for _ in ()).throw(AssertionError("unknown must not use bool fallback")))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda settings: _Cap(settings))
+    response = TestClient(make_app(tmp_path)).post(
+        "/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "status?"}]})
+    assert response.json()["ok"]
+    assert "RUN STATUS: UNKNOWN" in captured["sys"]
+    assert "Do not infer live, stalled, or terminal-ready" in captured["sys"]
+    assert "RECOMMEND the operator resume" not in captured["sys"]
+
+
+@pytest.mark.parametrize("liveness, label", [(None, "UNKNOWN"), (True, "FINISHING")])
+def test_finished_boss_context_waits_for_exact_engine_release(
+        tmp_path, monkeypatch, liveness, label):
+    from looplab.events.replay import fold
+    from looplab.serve.llm_context import _boss_context
+
+    rd = _stalled_run(tmp_path)
+    EventStore(rd / "events.jsonl").append("run_finished", {"reason": "done"})
+    state = fold(EventStore(rd / "events.jsonl").read_all())
+    monkeypatch.setattr("looplab.serve.llm_context._engine_liveness", lambda _rd: liveness)
+    context = _boss_context(state, None, rd, advisory=True)
+    assert f"RUN STATUS: {label}" in context
+    assert "recommend the operator extend" not in context
+    assert "Observe only" in context if label == "FINISHING" else "do not recommend" in context
 
 
 def test_command_keeps_imperative_stalled_wording(tmp_path, monkeypatch):

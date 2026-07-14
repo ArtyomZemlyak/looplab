@@ -21,11 +21,12 @@ from looplab.core.atomicio import atomic_write_bytes, atomic_write_text
 from looplab.core.config import Settings
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, write_jsonl_atomic
 from looplab.events.replay import fold
-from looplab.events.types import EV_RESUME_REQUESTED
+from looplab.events.types import EV_APPROVAL_GRANTED, EV_RESUME_REQUESTED, EV_SPEC_APPROVED
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.engine_proc import (
-    _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _fresh_resume_launch_pending,
-    _fresh_run_launch_pending, _mark_run_launching, _resolve_task_file, _run_lifecycle_lock)
+    _claim_and_spawn_resume, _clear_run_launching, _engine_alive, _engine_liveness,
+    _fresh_resume_launch_pending, _fresh_run_launch_pending, _mark_run_launching,
+    _resolve_task_file, _run_lifecycle_lock)
 from looplab.serve.launch import (
     idempotency_key_digest,
     launch_request_digest,
@@ -104,6 +105,20 @@ def build_router(srv) -> APIRouter:
     router = APIRouter()
     _run_dir, root = srv.run_dir, srv.root
 
+    def _known_engine_liveness(rd: Path, operation: str) -> bool:
+        """Return a real lock verdict; unknown ownership cannot authorize a mutation/Popen."""
+        liveness = _engine_liveness(rd)
+        if liveness is None:
+            raise HTTPException(409, {
+                "code": "engine_liveness_unknown",
+                "message": f"Cannot {operation} because engine ownership is unknown.",
+                "remediation": (
+                    "Inspect engine.lock and storage locking, then retry only after liveness "
+                    "is verifiable."),
+                "retryable": True,
+            })
+        return liveness
+
     # ------------------------------------------------------------------ control
     @router.post("/api/runs/{run_id}/control")
     async def control(run_id: str, request: Request):
@@ -120,10 +135,17 @@ def build_router(srv) -> APIRouter:
             etype = body.get("type")
             if etype not in CONTROL_EVENTS:
                 raise HTTPException(400, f"unknown control event: {etype!r}")
+            gated_baseline = None
+            if etype in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
+                events = srv.events(rd)
+                gated_baseline = events[-1].seq if events else -1
             # One shared normalizer owns strict payload validation plus node-attempt and parent
             # generation CAS. Pass the raw data intact so attempt>0 tokens are never erased here.
             data = normalize_control(srv, rd, etype, body.get("data"))
+            _known_engine_liveness(rd, "append a control event")
             expected = body.get("expected_seq")
+            if expected is None and gated_baseline is not None:
+                expected = gated_baseline
             if expected is not None:
                 if isinstance(expected, bool):
                     raise HTTPException(400, "expected_seq must be an integer")
@@ -220,6 +242,7 @@ def build_router(srv) -> APIRouter:
                     400, "run is not resumable — no task.snapshot.json or ui_meta.json "
                          "(it predates self-describing runs; start it via the UI to enable resume)")
             with _run_lifecycle_lock(rd):
+                known_alive = _known_engine_liveness(rd, "resume the run")
                 # Durable before every liveness branch: a current owner in its final tail, or a
                 # detached child that dies before engine.lock, leaves a recoverable intent.
                 mode = _append_resume_request(rd)
@@ -227,7 +250,9 @@ def build_router(srv) -> APIRouter:
                 ["finalize", str(rd), "--task-file", str(task_file)]
                 if mode == "finalize"
                 else ["resume", str(rd), "--task-file", str(task_file)])
-            was_alive = _engine_alive(rd)
+            # Preserve the historical monkeypatch seam while the production verdict remains the
+            # exact tri-state result captured under the lifecycle fence.
+            was_alive = known_alive or _engine_alive(rd)
             # Mirror the launch into the command service's pre-lock lease so command-aware callers
             # also fail closed during Popen→engine.lock. The event-log claim stays authoritative.
             srv.commands.begin_external_spawn(rd, "legacy-resume")
@@ -266,7 +291,8 @@ def build_router(srv) -> APIRouter:
         # markers. Keep this lock order (command → lifecycle) everywhere to avoid inversion.
         with srv.commands.destructive_guard(rd, "reset run") as rd:
             with _run_lifecycle_lock(rd):
-                if (_engine_alive(rd) or _fresh_resume_launch_pending(rd)
+                known_alive = _known_engine_liveness(rd, "reset the run")
+                if (known_alive or _engine_alive(rd) or _fresh_resume_launch_pending(rd)
                         or _fresh_run_launch_pending(rd)
                         or not srv.state(rd).finished):
                     raise HTTPException(
@@ -448,7 +474,8 @@ def build_router(srv) -> APIRouter:
         with srv.commands.destructive_guard(rd, "clear node trace") as rd:
             # Re-check inside the command sequencer: a pending worker must not Popen between the
             # liveness probe and the whole-file atomic rewrite.
-            if _engine_alive(rd):
+            known_alive = _known_engine_liveness(rd, "clear the node trace")
+            if known_alive or _engine_alive(rd):
                 raise HTTPException(409, "run is live — stop it first (the engine is writing spans.jsonl)")
             sp = rd / "spans.jsonl"
             if not sp.exists():
@@ -559,6 +586,7 @@ def build_router(srv) -> APIRouter:
         updated = dict(record)
         start_id = str(updated.get("id") or "")
         meta_matches = _start_meta_id(rd) == start_id
+        liveness = _engine_liveness(rd)
 
         def transition(**changes) -> None:
             # Stable polling must be observational: publish a new timestamp only for an actual state
@@ -570,7 +598,8 @@ def build_router(srv) -> APIRouter:
         if meta_matches and _has_first_run_started(rd):
             transition(status="succeeded", phase="event_observed", paid_effect_unknown=False,
                        error_code=None)
-        elif meta_matches and _engine_alive(rd):
+        elif meta_matches and (liveness is True
+                               or (liveness is False and _engine_alive(rd))):
             transition(status="executing", phase="engine_observed", paid_effect_unknown=False,
                        error_code=None)
         elif str(updated.get("phase") or "") in {
@@ -799,7 +828,8 @@ def build_router(srv) -> APIRouter:
                     "code": "run_id_conflict", "message": f"run {run_id!r} already exists",
                     "field_errors": {"run_id": "choose another run name"},
                 })
-            if _engine_alive(rd):
+            known_alive = _known_engine_liveness(rd, "start the run")
+            if known_alive or _engine_alive(rd):
                 raise HTTPException(409, {
                     "code": "external_start_in_progress" if key else "start_in_progress",
                     "message": f"run {run_id!r} already has an engine starting",

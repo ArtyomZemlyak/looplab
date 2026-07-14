@@ -148,7 +148,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     from looplab.serve.appstate import AppState
     from looplab.serve.jobs import JobRegistry
     from looplab.serve.routers import (
-        assistant as _assistant_router, boss as _boss_router, control as _control_router,
+        assistant as _assistant_router, attention as _attention_router,
+        boss as _boss_router, control as _control_router,
         genesis as _genesis_router, misc as _misc_router, org as _org_router,
         reports as _reports_router, reviews as _reviews_router, runs as _runs_router)
 
@@ -327,12 +328,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                            and parts[4] == "status")
         is_log_page = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "log-page")
-        if is_command or is_start_status or is_log_page:
+        is_attention = request.url.path in {"/api/attention", "/api/assistant/permissions"}
+        if is_command or is_start_status or is_log_page or is_attention:
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
             vary.update({"X-LoopLab-Token", "Authorization"})
             if is_log_page:
                 vary.add(REVIEW_HEADER)
+            elif is_attention:
+                vary.update({"X-LoopLab-Token", REVIEW_HEADER})
             else:
                 vary.add("Idempotency-Key")
             response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
@@ -367,19 +371,21 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
 
     # Router include ORDER (load-bearing for the overlapping patterns — see routers/__init__.py):
     #   1. runs      — the runs list + per-run read model (also late-binds srv.list_runs_fn)
-    #   2. reviews   — owner link management + the token-scoped reviewer manifest
-    #   3. org       — projects / super-tasks / label / delete-run
-    #   4. control   — /control appends + resume/reset//api/start engine spawns
-    #   5. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
-    #   6. assistant — sessions + the HITL permission registry
-    #   7. boss      — chat-log / chat / suggest / command / report_refresh
-    #   8. jobs      — GET /api/jobs/{id} over the shared JobRegistry
-    #   9. reports   — cross-run scope reports (reads srv.list_runs_fn at request time)
-    #  10. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
+    #   2. attention — owner-only redacted event/liveness projection (observation-only)
+    #   3. reviews   — owner link management + the token-scoped reviewer manifest
+    #   4. org       — projects / super-tasks / label / delete-run
+    #   5. control   — /control appends + resume/reset//api/start engine spawns
+    #   6. genesis   — /api/research + /api/genesis (reads srv.list_tasks_fn at request time)
+    #   7. assistant — sessions + the HITL permission registry
+    #   8. boss      — chat-log / chat / suggest / command / report_refresh
+    #   9. jobs      — GET /api/jobs/{id} over the shared JobRegistry
+    #  10. reports   — cross-run scope reports (reads srv.list_runs_fn at request time)
+    #  11. misc      — settings/secret/tasks/health/gpu, then the generic `GET /api/{kind}`
     #                  authoring route, which MUST register after every other /api route it would
     #                  otherwise shadow (and before /api/memory, preserving the original order).
     # The static mounts + the SPA catch-all `GET /{path:path}` come after ALL /api routers.
-    for _build in (_runs_router.build_router, _reviews_router.build_router, _org_router.build_router,
+    for _build in (_runs_router.build_router, _attention_router.build_router,
+                   _reviews_router.build_router, _org_router.build_router,
                    _control_router.build_router, _genesis_router.build_router,
                    _assistant_router.build_router, _boss_router.build_router,
                    _jobs_router.build_router, _reports_router.build_router,

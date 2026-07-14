@@ -6,9 +6,11 @@ when the single-user server shuts down. Extracted verbatim from `serve/server.py
 from __future__ import annotations
 
 import atexit
+import errno
 import hashlib
 import os
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -29,51 +31,150 @@ def _on_shared_hub() -> bool:
                 or os.environ.get("JUPYTERHUB_API_TOKEN"))
 
 
-def _engine_alive(rd: Path) -> bool:
-    """True iff a LIVE engine process currently drives this run. The engine holds an exclusive OS lock on
-    <run_dir>/engine.lock for its whole lifetime (cli._engine_singleton) and the OS frees it on exit —
-    even on crash — so this is a race-free, staleness-free liveness signal: a non-blocking acquire that
-    FAILS means a process holds it (alive); one that SUCCEEDS means none does (a finished run, or a
-    ZOMBIE whose engine died without emitting run_finished — the bug this distinguishes from "thinking").
-
-    Probe-and-release: we never hold the lock past this call, and close the handle in `finally` so even a
-    mid-probe error can't leak a lock that would block a real resume. Best-effort — any error → False."""
+def _engine_liveness(rd: Path) -> Optional[bool]:
+    """True when held, False when definitively free/absent, None when the probe is inconclusive."""
     lock = rd / "engine.lock"
-    if not lock.exists():
-        return False                     # no engine has ever locked this dir (or it predates the lock)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+
+    def _is_reparse(entry) -> bool:
+        attributes = int(getattr(entry, "st_file_attributes", 0) or 0)
+        return bool(reparse_flag and attributes & reparse_flag)
+
     try:
-        f = open(lock, "a+")
+        run_entry = rd.lstat()
+    except FileNotFoundError:
+        return False  # required for a not-yet-materialized, validated new-start path
     except OSError:
-        return False
+        return None
+    if (stat.S_ISLNK(run_entry.st_mode) or not stat.S_ISDIR(run_entry.st_mode)
+            or _is_reparse(run_entry)):
+        return None
+    try:
+        canonical_run = rd.resolve(strict=True)
+    except (FileNotFoundError, OSError):
+        return None
+
+    def _run_dir_unchanged() -> bool:
+        try:
+            current = rd.lstat()
+            return bool(
+                stat.S_ISDIR(current.st_mode)
+                and not stat.S_ISLNK(current.st_mode)
+                and not _is_reparse(current)
+                and (current.st_dev, current.st_ino, current.st_mode)
+                == (run_entry.st_dev, run_entry.st_ino, run_entry.st_mode)
+                and rd.resolve(strict=True) == canonical_run
+            )
+        except (FileNotFoundError, OSError):
+            return False
+
+    try:
+        # ``Path.exists`` follows links, so checking it first misclassified a dangling
+        # ``engine.lock`` symlink as authoritative absence.  Inspect the directory entry itself:
+        # any link/reparse/special inode is untrusted ownership evidence, never permission to
+        # mutate the run or launch another writer.
+        entry = lock.lstat()
+    except FileNotFoundError:
+        # Revalidate the directory identity before authorizing a no-lock verdict; it may have been
+        # swapped to a symlink/reparse point between the directory and lock metadata probes.
+        return False if _run_dir_unchanged() else None
+    except OSError:
+        return None
+    try:
+        if (stat.S_ISLNK(entry.st_mode) or not stat.S_ISREG(entry.st_mode)
+                or _is_reparse(entry)):
+            return None
+        if lock.resolve(strict=True).parent != canonical_run:
+            return None
+    except FileNotFoundError:
+        # The lock entry changed or became dangling after lstat. It was observed, so this is not
+        # proof of absence.
+        return None
+    except OSError:
+        return None
+    fd = None
+    try:
+        # Open an existing inode only and refuse a link swap on platforms with O_NOFOLLOW.  The
+        # fstat identity check closes the regular-file replacement race on the remaining platforms.
+        flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(lock, flags)
+        opened = os.fstat(fd)
+        if ((entry.st_dev, entry.st_ino) != (opened.st_dev, opened.st_ino)
+                or not stat.S_ISREG(opened.st_mode)):
+            os.close(fd)
+            fd = None
+            return None
+        f = os.fdopen(fd, "r+b", buffering=0)
+        fd = None
+    except FileNotFoundError:
+        # Unlike a clean initial lstat miss, disappearance after an observed entry is a race.
+        return None
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        return None
+
+    def _lock_entry_unchanged() -> bool:
+        try:
+            current = lock.lstat()
+            return bool(
+                stat.S_ISREG(current.st_mode)
+                and not stat.S_ISLNK(current.st_mode)
+                and not _is_reparse(current)
+                and (current.st_dev, current.st_ino, current.st_mode)
+                == (entry.st_dev, entry.st_ino, entry.st_mode)
+                == (opened.st_dev, opened.st_ino, opened.st_mode)
+                and lock.resolve(strict=True).parent == canonical_run
+            )
+        except (FileNotFoundError, OSError):
+            return False
+
+    def _ownership_paths_unchanged() -> bool:
+        return _run_dir_unchanged() and _lock_entry_unchanged()
+
     try:
         if os.name == "nt":
             import msvcrt
             f.seek(0)
             try:
                 msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError:
-                return True              # byte held by a live engine
-            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)   # we got it → no engine; release at once
-            return False
-        else:
-            import fcntl
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return True              # genuinely HELD by a live engine (EWOULDBLOCK)
-            except OSError:
-                # flock UNSUPPORTED on this filesystem (FUSE/S3 like geesefs, some NFS) raises ENOTSUP/
-                # EINVAL — NOT a held lock. Treat as "can't tell -> not alive" (best-effort, matches the
-                # docstring) so it doesn't falsely report every run as live and, e.g., block deleting a
-                # stalled run forever. (Locking simply degrades on such mounts — same as the engine
-                # singleton; it's a property of the FS.)
-                return False
-            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-            return False
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}:
+                    return True if _ownership_paths_unchanged() else None
+                return None
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            return False if _ownership_paths_unchanged() else None
+        import fcntl
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True if _ownership_paths_unchanged() else None
+        except OSError:
+            return None
+        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        return False if _ownership_paths_unchanged() else None
     except OSError:
-        return False                     # platform without file locking → can't tell → assume not alive
+        return None
     finally:
         f.close()
+
+
+def _engine_alive(rd: Path) -> bool:
+    """Conservative boolean compatibility API: only a proven-free lock is treated as stopped."""
+    return _engine_liveness(rd) is not False
+
+
+def _spawn_liveness(rd: Path) -> Optional[bool]:
+    """Tri-state spawn probe with the historical bool monkeypatch seam preserved.
+
+    Production's bool wrapper is conservative, so the second probe can only turn a raced exact-False
+    into a safe True. Tests/downstream callers that monkeypatch `_engine_alive` retain their existing
+    live-flip/cancellation seam; an initial None is never delegated or collapsed.
+    """
+    liveness = _engine_liveness(rd)
+    if liveness is False and _engine_alive(rd):
+        return True
+    return liveness
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -443,11 +544,15 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 # A claimant can acquire engine.lock between the caller's liveness probe and this
                 # fold. Preserve a post-exit waiter on that live flip; otherwise a tail-exiting owner
                 # can strand the accepted intent indefinitely.
-                if wait_on_alive and _engine_alive(rd):
+                liveness = _spawn_liveness(rd)
+                if wait_on_alive and liveness is True:
                     should_wait = True
                     break
                 return False
-            if _engine_alive(rd):
+            liveness = _spawn_liveness(rd)
+            if liveness is not False:
+                if liveness is None:
+                    return False
                 should_wait = True
                 break
             last_seq = events[-1].seq if events else -1
@@ -462,7 +567,12 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 continue
             except (EventLogCorruptionError, OSError):
                 return False
-            if _engine_alive(rd):
+            liveness = _spawn_liveness(rd)
+            if liveness is not False:
+                if liveness is None:
+                    # Keep the just-written launch claim as durable quarantine.  A later healthy
+                    # probe can reconcile it; uncertainty is never permission to Popen.
+                    return False
                 # Another CLI acquired engine.lock after the claim. It can already be unwinding, so
                 # retain a waiter instead of assuming it will necessarily fold/serve this request.
                 should_wait = True
@@ -518,7 +628,7 @@ def reconcile_pending_resume(rd: Path, *, now: Optional[float] = None,
         return False                      # another worker already launched a CLI for this intent
     if _within_resume_grace(st.last_resume_request_ts, now):
         return False                      # give the in-flight spawn time to acquire the lock + serve
-    if _engine_alive(rd):
+    if _spawn_liveness(rd) is not False:
         return False                      # an engine IS running -> the intent is being served
     task_file = _resolve_task_file(rd)
     if not task_file:
@@ -567,7 +677,7 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
         try:
             last_sig = None
             while True:
-                while _engine_alive(run_dir):
+                while _spawn_liveness(run_dir) is not False:
                     sig = _log_sig()
                     if sig != last_sig:
                         last_sig = sig
@@ -590,7 +700,7 @@ def _spawn_engine_after_exit(cli_args: list[str], *, run_dir: Path,
                 # A different CLI can acquire engine.lock between our dead probe and claim. Keep
                 # this same registered waiter through that handoff rather than recursively trying to
                 # register a duplicate under our own key.
-                if _engine_alive(run_dir):
+                if _spawn_liveness(run_dir) is not False:
                     continue
                 return
         finally:
@@ -649,10 +759,16 @@ def install_resume_reconcile_hooks(app, root: Path) -> threading.Event:
                 continue
             cli_args = _cli_args_for_resume_state(
                 rd, ["resume", str(rd), "--task-file", str(task_file)], state)
-            if _engine_alive(rd):
+            startup_liveness = _spawn_liveness(rd)
+            if startup_liveness is True:
                 # A server restart loses the old in-memory tail waiter; reinstall it while the
                 # engine still owns the run. The durable launch claim arbitrates multiple workers.
                 _spawn_engine_after_exit(cli_args, run_dir=rd, cancel_event=shutdown)
+                continue
+            if startup_liveness is None:
+                # Do not create one 20 Hz waiter thread per malformed/reparse/unsupported run at
+                # startup. Unknown ownership remains quarantined until a later healthy observation
+                # or server restart can prove an exact state.
                 continue
             latest_ts = max(float(state.last_resume_request_ts or 0.0),
                             float(state.last_resume_launch_ts or 0.0))

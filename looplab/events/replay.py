@@ -487,6 +487,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
         if first_terminal:
             n.metric = d.get("metric")          # missing -> None (feasible_nodes filters it)
             n.status = NodeStatus.evaluated
+            n.terminal_event_seq = e.seq
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
             n.eval_seconds = d.get("eval_seconds")
@@ -504,6 +505,32 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
                     continue
             n.trials = trials
             _charge_terminal_cost(st, n, d, ctx)
+
+
+_FAILURE_SPIKE_IGNORED_REASONS = {"aborted", "cancelled", "proxy_skipped", "superseded"}
+
+
+def _counts_as_current_failure(st: RunState, n: Node) -> bool:
+    return (n.status is NodeStatus.failed and not n.tombstoned and n.id not in st.aborted_nodes
+            and str(n.error_reason or "").strip().lower() not in _FAILURE_SPIKE_IGNORED_REASONS)
+
+
+def _add_current_failure(st: RunState, n: Node, event: Event) -> None:
+    if not _counts_as_current_failure(st, n):
+        return
+    st.current_failure_count += 1
+    level = st.current_failure_count // 3
+    if level > st.failure_spike_level:
+        st.failure_spike_seq = event.seq
+    st.failure_spike_level = level
+
+
+def _remove_current_failure(st: RunState, n: Node) -> None:
+    if not _counts_as_current_failure(st, n):
+        return
+    st.current_failure_count = max(0, st.current_failure_count - 1)
+    st.failure_spike_level = st.current_failure_count // 3
+
 
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = _node_for_event(st, d)
@@ -523,6 +550,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         first_terminal = n.status is NodeStatus.pending
         if first_terminal:
             n.status = NodeStatus.failed
+            n.terminal_event_seq = e.seq
             n.error = d.get("error", "")
             n.error_reason = d.get("reason", "")
             # Crash-triage verdict, when the LLM triage ran (signal-delivery §1): fold it onto
@@ -536,6 +564,7 @@ def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             if d.get("failed_stage"):
                 n.failed_stage = d.get("failed_stage")   # Phase 1: which pipeline stage broke
             _charge_terminal_cost(st, n, d, ctx)
+            _add_current_failure(st, n, e)
 
 def _on_node_repaired(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # In-node inline repair (hybrid crash repair): a NON-terminal event that replaces the
@@ -573,6 +602,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
             continue
         n.attempt += 1
         n.status = NodeStatus.pending
+        n.terminal_event_seq = None
         n.metric = None
         n.error = ""
         n.error_reason = ""
@@ -658,6 +688,7 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         nid = _coerce_node_id({"node_id": raw})
         n = st.nodes.get(nid) if nid is not None else None
         if n is not None and not n.tombstoned:
+            _remove_current_failure(st, n)
             n.tombstoned = True
             n.rerun_from = None
             n.rerun_stage = None
@@ -713,6 +744,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # the code and flag `rerun_from` so the engine re-develops (re-proposes for `propose`).
     n = _node_for_event(st, d)
     if n is not None and not n.tombstoned and _control_generation_matches(n, d):
+        _remove_current_failure(st, n)
         was_finished = st.finished
         holdout_was_disclosed = bool(st.holdout_evaluated_ids)
         old_generation = n.attempt
@@ -726,6 +758,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.pause_node_id = None
             st.pause_generation = None
         n.status = NodeStatus.pending
+        n.terminal_event_seq = None
         n.metric = None
         n.error = ""
         n.error_reason = ""
@@ -999,12 +1032,16 @@ def _on_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     if (subject is not None and generation is not _MISSING
             and (node is None or not _generation_matches(node, d))):
         return
+    same_pending = (st.awaiting_approval and st.approval_subject == subject
+                    and st.approval_generation == (node.attempt if node is not None else None))
     st.awaiting_approval = True
     # P0-2: record WHICH node the request is for (the engine emits the current best) as audit context,
     # surfaced in the projection so the UI can show what is awaiting approval. This is NOT the grant
     # gate — `_on_approval_granted` binds to node existence, not to this subject (see there).
     st.approval_subject = subject
     st.approval_generation = node.attempt if node is not None else None
+    if not same_pending:
+        st.approval_request_seq = e.seq
 
 def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P0-2 approval gate: honor a grant that names a REAL node in the run — the current best OR an
@@ -1037,9 +1074,19 @@ def _on_approval_granted(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     st.approval_generation = None
 
 def _on_spec_proposed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # The request is the human-review boundary. Once it exists (and especially after ratification),
+    # a late agent event must not swap in content the operator never reviewed under the same card.
+    if st.spec_approval_requested or st.spec_confirmed:
+        return
     st.proposed_spec = d
 
 def _on_spec_approval_requested(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # A request without a proposal can never be ratified. Treat it as malformed instead of exposing
+    # an actionable phase that every first-party approval producer must reject.
+    if st.proposed_spec is None or st.spec_confirmed:
+        return
+    if not st.spec_approval_requested:
+        st.spec_approval_request_seq = e.seq
     st.spec_approval_requested = True
 
 def _on_spec_approved(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1309,6 +1356,7 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             st.report = report
         ctx.pending_finish_report = None
     st.finished = True
+    st.finalization_marker_seq = None
     if e.seq is not None:
         st.last_finish_seq = e.seq
         # Recovery is explicitly opted into by modern finish events. Markerless historical finishes
@@ -1330,8 +1378,10 @@ def _on_finalization_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
         finish_seq = int(raw)
     except (TypeError, ValueError, OverflowError):
         return
-    if st.finished and finish_seq == st.last_finish_seq:
+    if (st.finished and finish_seq == st.last_finish_seq
+            and st.finalized_finish_seq != finish_seq):
         st.finalized_finish_seq = finish_seq
+        st.finalization_marker_seq = e.seq
 
 def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # RESUME (the one operator "continue"): lift EVERY stopped state so re-entering the loop
@@ -1419,6 +1469,7 @@ def _on_run_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # STOP: freeze WITHOUT finalizing (finalize.py gates the wrap-up on `finished`, which a pause
     # never sets). A later `finalize` (EV_RUN_ABORT) can still wrap it up; RESUME lifts it.
+    previous = (st.paused, st.pause_node_id, st.pause_generation)
     if d.get("node_id") is not None:
         # A human STOP is stronger than the scoped developer-crash circuit breaker. If the operator
         # paused while a build was still failing, the later automatic pause must not take ownership:
@@ -1436,6 +1487,8 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.pause_node_id = None
         st.pause_generation = None
     st.paused = True
+    if previous != (st.paused, st.pause_node_id, st.pause_generation):
+        st.pause_event_seq = e.seq
 
 def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d)
@@ -1444,6 +1497,8 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if (nid is not None
             and (legacy_unknown or (n is not None and _control_generation_matches(n, d)))
             and nid not in st.aborted_nodes):
+        if n is not None:
+            _remove_current_failure(st, n)
         st.aborted_nodes.append(nid)
         if n is not None:
             n.rerun_from = None

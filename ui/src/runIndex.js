@@ -10,11 +10,11 @@ const stopFinishedWithError = run => String(run?.stop_reason || '').toLowerCase(
 export function finalizationIncomplete(run = {}) {
   if (run.phase === 'finalizing') return true
   if (!run.stop_requested) return false
-  return !run.finished || stopFinishedWithError(run) || run.engine_running === true
+  return !run.finished || stopFinishedWithError(run) || run.engine_running !== false
 }
 
 export function terminalReady(run = {}) {
-  return !!run.finished && !finalizationIncomplete(run) && run.engine_running !== true
+  return !!run.finished && !finalizationIncomplete(run) && run.engine_running === false
 }
 
 export function runLifecycle(run = {}) {
@@ -25,7 +25,7 @@ export function runLifecycle(run = {}) {
     mode: run.engine_running === false ? 'finalization-stalled' : 'finalizing',
   }
   // A natural finish and an explicit successful finalize both have a short process write-out window.
-  if (run.finished && run.engine_running === true) return {
+  if (run.finished && run.engine_running !== false) return {
     finalizationIncomplete: false, terminalReady: false, mode: 'finishing',
   }
   if (run.finished) return { finalizationIncomplete: false, terminalReady: true, mode: 'finished' }
@@ -35,10 +35,37 @@ export function runLifecycle(run = {}) {
   if (run.phase === 'approval' || run.phase === 'spec_approval') return {
     finalizationIncomplete: false, terminalReady: false, mode: 'approval',
   }
+  if (run.engine_running == null) return {
+    finalizationIncomplete: false, terminalReady: false, mode: 'unknown',
+  }
   if (run.engine_running === false) return {
     finalizationIncomplete: false, terminalReady: false, mode: 'stalled',
   }
   return { finalizationIncomplete: false, terminalReady: false, mode: 'running' }
+}
+
+// Approval is a node-LIFECYCLE decision, not a synonym for "approve whichever node is best now".
+// A reset can reuse the same node id with a new attempt, and the best can change while a request is
+// pending. First-party shortcuts therefore exist only when the folded request still names an exact
+// subject + generation that matches the visible node. Missing/legacy context fails closed to Events.
+export function pendingApprovalTarget(state = {}) {
+  if (state.phase !== 'approval' || state.awaiting_approval !== true) return null
+  const nodeId = state.approval_subject
+  const nodeGeneration = state.approval_generation
+  if (!Number.isSafeInteger(nodeId) || nodeId < 0
+      || !Number.isSafeInteger(nodeGeneration) || nodeGeneration < 0) return null
+  const node = state.nodes?.[nodeId]
+  if (!node || node.tombstoned || node.status === 'aborted'
+      || node.attempt !== nodeGeneration) return null
+  return { nodeId, nodeGeneration }
+}
+
+export function approvalCommandFor(state = {}) {
+  if (state.phase === 'spec_approval' && state.spec_approval_requested && !state.spec_confirmed) {
+    return '/ratify'
+  }
+  const target = pendingApprovalTarget(state)
+  return target ? `/approve #${target.nodeId}` : null
 }
 
 // A blank graph is not one state. It can mean an early historical snapshot, an intentionally
@@ -88,8 +115,7 @@ export function dagEmptyPresentation({
   // Spec approval can legitimately precede node #0. It must outrank a folded paused flag so the
   // operator receives the exact ratification action instead of an unsafe generic Resume.
   if (state.phase === 'approval' || state.phase === 'spec_approval') {
-    const command = state.phase === 'spec_approval' ? '/ratify'
-      : state.best_node_id != null ? `/approve #${state.best_node_id}` : null
+    const command = approvalCommandFor(state)
     if (!command) return result(
       'approval-incomplete', 'danger', 'Approval state is incomplete',
       'The run requests human approval but does not identify an experiment. Inspect the timeline instead of sending a guessed command.',
@@ -106,6 +132,12 @@ export function dagEmptyPresentation({
     'paused', 'attention', 'Paused before the first experiment',
     'Resume to continue setup and create the first experiment, or finalize to wrap up without one.',
     [action('resume', 'Resume run', 'primary'), action('finalize', 'Finalize run', 'danger')],
+  )
+  if (mode === 'unknown') return result(
+    'unknown', 'neutral', 'Engine ownership is unknown',
+    'LoopLab cannot verify whether an engine owns this run. Inspect Events and storage locking before taking recovery action.',
+    [action('events', 'Show events', 'primary'),
+      ...(!connected ? [action('retry-connection', 'Retry connection')] : [])], 'assertive',
   )
   if (mode === 'stalled') return result(
     'stalled', 'danger', 'Engine stopped before the first experiment',
@@ -140,6 +172,7 @@ export function lifecyclePhaseLabel(run = {}) {
   const mode = runLifecycle(run).mode
   if (mode === 'finalization-stalled') return 'finalization stalled'
   if (mode === 'finalizing' || mode === 'finishing' || mode === 'finished') return mode
+  if (mode === 'unknown') return 'engine ownership unknown'
   return run.phase || mode || '—'
 }
 

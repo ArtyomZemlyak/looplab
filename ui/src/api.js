@@ -1342,6 +1342,12 @@ export const assistantCommands = () => get('/api/assistant/commands')
 export const assistantRevert = (path) => post('/api/assistant/revert', { path })
 export const assistantShare = (sid) => post(`/api/assistant/sessions/${encodeURIComponent(sid)}/share`, {})
 // Pending human-in-the-loop confirm requests for a session, and resolving one.
-export const assistantPermissions = (sid) => get(`/api/assistant/permissions?session=${encodeURIComponent(sid)}`)
+export const assistantPermissions = (sid = null) => get(sid == null
+  ? '/api/assistant/permissions'
+  : `/api/assistant/permissions?session=${encodeURIComponent(sid)}`)
 export const assistantResolve = (reqId, decision) =>
   post(`/api/assistant/permissions/${encodeURIComponent(reqId)}`, { decision })
+export const attentionFeed = (limit = 200, cursor = null) => get(
+  `/api/attention?limit=${encodeURIComponent(limit)}`
+  + (cursor == null ? '' : `&cursor=${encodeURIComponent(cursor)}`),
+)

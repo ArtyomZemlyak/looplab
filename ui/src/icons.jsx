@@ -52,6 +52,9 @@ const GLYPHS = {
   'chevron-down': <path d="M3.5 6.5 8 11l4.5-4.5" />,
   // header = speech bubble
   chat: <path d="M3 3.8h10v6.4H6.5L4 12.4V10.2H3Z" />,
+  // owner attention inbox / desktop notification opt-in
+  bell: <><path d="M3.4 11.5h9.2c-1-1.1-1.4-2.2-1.4-4V6.4a3.2 3.2 0 0 0-6.4 0v1.1c0 1.8-.4 2.9-1.4 4Z" />
+    <path d="M6.5 13.1a1.7 1.7 0 0 0 3 0" /></>,
 
   // ---- organizational glyphs (replace the color emoji so every theme stays monochrome) ----
   // project = folder with a tab
