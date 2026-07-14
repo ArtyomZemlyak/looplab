@@ -136,17 +136,20 @@ class ProposalCuesMixin:
             if getattr(self, "_capability_expansion", False):
                 csnaps = state.concept_coverage_snapshots
                 cs = csnaps[-1] if csnaps else {}
-                axis, streak = cs.get("locked_axis"), cs.get("streak", 0)
+                # Gate on the CURRENT streak (clears after a successful pivot), name the CURRENTLY-locked
+                # axis (recent_axis, falling back to the longest-streak axis).
+                streak = cs.get("current_streak", 0)
+                axis = cs.get("recent_axis") or cs.get("locked_axis")
                 if axis and streak >= _LOCK_IN_STREAK:
                     nov_hint += (
-                        f"\nCapability expansion — the search has stayed inside ONE subsystem ('{axis}') "
-                        f"for {streak} consecutive experiments (action-space lock-in). Do NOT propose "
-                        f"another variant of the '{axis}' lever. EXPAND THE ACTION SPACE: build the "
-                        # CODEX AGENT: Keep capability examples task-derived; ANN-mined negatives is a
-                        # retrieval-specific prescription injected into every task type.
-                        "missing infrastructure (a new data pipeline, external/ANN-mined negatives, a "
-                        "different evaluation) that reaches a region the current manifold can't — you "
-                        "have full file freedom. A capability the run has never built beats another "
+                        f"\nCapability expansion — the search is still confined to ONE subsystem "
+                        f"('{axis}'): {streak} consecutive experiments there (action-space lock-in). Do "
+                        f"NOT propose another variant of the '{axis}' lever. EXPAND THE ACTION SPACE: "
+                        # Task-AGNOSTIC categories (no domain-specific prescription): the concrete build
+                        # is the researcher's to derive from THIS task's assets/uncovered regions.
+                        "build a capability the run has never had — new data / inputs, a different model "
+                        "or representation, or a different evaluation — that reaches a region the current "
+                        "lever can't. You have full file freedom; a genuinely new capability beats another "
                         "tweak of the saturated one.")
         elif stance == "exploit":
             nov_hint = ("\nNovelty stance: EXPLOIT — refine and deepen the current best line of "

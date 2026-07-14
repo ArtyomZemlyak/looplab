@@ -142,8 +142,9 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
     # R1-c: recorded at start so replay applies the same selection rule (config isn't available to the
     # pure fold). Absent in old logs -> False -> byte-identical legacy selection.
-    # CODEX AGENT: Resume can reload a mutable select_verifier setting into the live Engine while replay
-    # remains pinned here; either event config changes or reject this setting in resume-time edits.
+    # The fold stays pinned to the RECORDED value (never a live re-read); the engine re-pins its own
+    # `_select_verifier` gate from this recorded value on resume (orchestrator `_reentry_repin`), so the
+    # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
     st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -907,8 +908,11 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if (n is not None and n.status is NodeStatus.evaluated
             and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d, legacy_attempt=True)):
-        # CODEX AGENT: Confirmation changes the evidence used to judge soundness without invalidating
-        # verifier_score; bind trust evidence to an evidence revision and reverify after confirm/holdout.
+        # A confirmation REFINES this node's result (more seeds → confirmed_mean) rather than DISCARDING
+        # it, so its verifier_score (a soundness judgment on the same experiment) is kept as a reasonable
+        # estimate — unlike a node_reset, which discards the result entirely and clears verifier_score.
+        # (A confirmed_mean tie that newly emerges is still re-surfaced by _metric_tie_groups, which keys
+        # on robust_metric = confirmed_mean, so any UNSCORED confirmed node in the tie is verified.)
         n.confirmed_mean = d.get("mean")
         n.confirmed_std = d.get("std")
         n.confirmed_seeds = d.get("seeds")
@@ -1249,10 +1253,12 @@ def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = st.nodes.get(nid) if nid is not None else None
     if n is None or n.id in st.aborted_nodes:
         return
-    generation = _event_generation(d)
-    # CODEX AGENT: node_verified is a new selection-affecting event, so accepting a missing generation
-    # as current weakens the claimed lifecycle scope and creates unnecessary legacy ambiguity.
-    if generation is not _MISSING and not _generation_matches(n, d):
+    # node_verified is a BRAND-NEW selection-affecting event — no legacy log carries it, and the engine
+    # always stamps `generation` (n.attempt) at emit — so REQUIRE the stamp (reject a missing OR mismatched
+    # generation) rather than accept-a-missing-one as current. A forged/hand-edited unscoped score can't
+    # then bias selection; this is strictly tighter than the additive-legacy pattern the older per-node
+    # events must keep for their pre-generation logs.
+    if _event_generation(d) is _MISSING or not _generation_matches(n, d):
         return
     score = d.get("score")
     if isinstance(score, (int, float)) and not isinstance(score, bool) and 0.0 <= float(score) <= 1.0:
@@ -1350,9 +1356,13 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
             _rotate_search_epoch(st, requeue_partition_scores=st.holdout_epoch_aware)
         else:
             _rotate_search_epoch(st, requeue_partition_scores=False)
-        # CODEX AGENT: The accepted epoch-N certificate also lives in ctx.best_confirmed; clear it here
-        # or the post-pass keeps overriding the new epoch's metric winner after confirmed_done resets.
+        # A reopen begins a new candidate epoch, so the prior epoch's confirmation certificate must not
+        # keep authorizing selection. Clear BOTH the folded flag AND the threaded ctx.best_confirmed the
+        # `_select_best` confirm-override reads — every other invalidation site (node_reset, tombstone,
+        # new-candidate) pairs these two, and omitting the ctx clear here let an epoch-(N-1) certificate
+        # keep overriding epoch-N's metric winner after confirmed_done reset.
         st.confirmed_done = False
+        ctx.best_confirmed = None
         st.approved = False
         st.awaiting_approval = False
         st.approval_subject = None
@@ -1772,8 +1782,11 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
-    # CODEX AGENT: This unconditional certificate override erases promotion_key's verifier tie-break;
-    # equal confirmed means are again resolved by robust_selection's node-id order.
+    # The confirm certificate is the confirm phase's OWN authoritative winner (robust_selection over the
+    # multi-seed means + a significance test), so it overrides the mean pick — including its verifier
+    # tie-break. Scope boundary (by design): among confirmed nodes that tie on confirmed_mean the winner
+    # is the confirm phase's choice, not the verifier's; the verifier tie-break applies to the mean pick
+    # and the holdout pick (both rankings HERE), not to which node the confirm phase certified.
     if (best_confirmed is not None and best_confirmed in st.nodes
             and st.nodes[best_confirmed].status is NodeStatus.evaluated
             and not st.nodes[best_confirmed].tombstoned
@@ -1791,8 +1804,9 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     if st.holdout_select and evaluated:
         hpool = [n for n in evaluated if n.holdout_metric is not None]
         if hpool:
-            # CODEX AGENT: Equal holdout metrics discard the verifier decision and fall back to node id;
-            # keep soundness as a later tie-break when the stronger holdout signal is uninformative.
+            # holdout_key carries the SAME verifier tie-break slot (when select_verifier is on): a tie on
+            # the unseen-signal holdout metric is broken by soundness too, so the stronger holdout signal
+            # decides first and the verifier only resolves a holdout tie (never overrides it).
             st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch

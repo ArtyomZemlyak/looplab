@@ -37,6 +37,15 @@ def test_node_verified_folds_into_score(tmp_path):
     assert fold(s.read_all()).nodes[0].verifier_score == 0.73
 
 
+def test_node_verified_without_generation_is_dropped(tmp_path):
+    # a BRAND-NEW selection-affecting event has no legacy logs, so a missing generation stamp is REJECTED
+    # (not accepted-as-current) — a forged/hand-edited unscoped score can't bias selection.
+    s = _run(tmp_path)
+    _add(s, 0, 0.9)
+    s.append("node_verified", {"node_id": 0, "score": 0.8})     # no generation
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+
+
 def test_node_verified_stale_generation_is_dropped(tmp_path):
     s = _run(tmp_path)
     _add(s, 0, 0.9)
@@ -194,6 +203,21 @@ def test_metric_tie_groups_surfaces_confirmed_ties(tmp_path):
     groups = Engine._metric_tie_groups(None, st)
     assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # only the confirmed tie
 
+def test_reopen_clears_stale_confirm_override(tmp_path):
+    # a best_confirmed from epoch N must NOT keep overriding after a reopen to epoch N+1 — the reopen
+    # clears BOTH confirmed_done AND the threaded ctx.best_confirmed the confirm-override reads.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})
+    _add(s, 0, 0.5)
+    s.append("best_confirmed", {"node_id": 0, "significant": True, "generations": {"0": 0},
+                                "search_epoch": 0})
+    s.append("run_finished", {})                               # finish so the reopen rotates the epoch
+    assert fold(s.read_all()).best_node_id == 0               # epoch-0 confirm override
+    s.append("run_reopened", {})                              # -> epoch 1, clears the completion gates
+    _add(s, 1, 0.9)                                            # a better node in the new epoch
+    assert fold(s.read_all()).best_node_id == 1              # stale confirm override cleared -> metric winner
+
+
 class _VClient:
     """Fake reflect client: the §12 verifier's tool call returns a fixed verdict per criterion."""
     def __init__(self, verdict="yes"):
@@ -203,6 +227,34 @@ class _VClient:
     def complete_tool(self, messages, json_schema):
         self.calls += 1
         return {"verdicts": [self.verdict], "rationales": ["r"]}
+
+    def complete_text(self, messages):
+        return "x"
+
+
+class _FlakyVClient:
+    """Returns an UNPARSEABLE verdict on the `fail_on`-th call (that node's verify -> None)."""
+    def __init__(self, fail_on):
+        self.fail_on = fail_on
+        self.calls = 0
+
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        return {"verdicts": ["" if self.calls == self.fail_on else "yes"], "rationales": ["r"]}
+
+    def complete_text(self, messages):
+        return "x"
+
+
+class _NoisyVClient:
+    """Cycles disagreeing verdicts across samples so cross-sample agreement is low (0.33 for 3)."""
+    def __init__(self):
+        self.calls = 0
+
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        return {"verdicts": [["strong_yes", "strong_no", "unclear"][(self.calls - 1) % 3]],
+                "rationales": ["r"]}
 
     def complete_text(self, messages):
         return "x"
@@ -269,6 +321,36 @@ def test_maybe_verify_ties_noop_without_a_tie(tmp_path):
     _add(s, 0, 0.9)
     _add(s, 1, 0.5)                                                 # no tie
     _Host(s, client=_VClient())._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "node_verified" for e in s.read_all())
+
+
+def test_node_verified_carries_provenance(tmp_path):
+    # a selection-affecting event must be auditable: it carries n_samples + agreement (fold reads score)
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    _Host(s, client=_VClient("yes"), samples=1)._maybe_verify_ties(fold(s.read_all()))
+    ev = [e for e in s.read_all() if e.type == "node_verified"]
+    assert ev and all("n_samples" in e.data and "agreement" in e.data for e in ev)
+
+
+def test_tie_group_abstains_atomically_on_a_failure(tmp_path):
+    # ATOMIC: if ANY member of a tie group fails verification, the WHOLE group is left unscored (its tie
+    # falls to the id break) — never half-scored (which would let a neutral 0.5 outrank a verified-low).
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    _Host(s, client=_FlakyVClient(fail_on=2), samples=1)._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "node_verified" for e in s.read_all())   # neither member committed
+
+
+def test_low_agreement_verdict_is_abstained(tmp_path):
+    # a high-variance verdict (samples disagree -> agreement 0.33 < 0.5) must not decide a tie: abstain,
+    # so the whole group (atomic) stays on the id tie-break rather than steering on noise.
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    _Host(s, client=_NoisyVClient(), samples=3)._maybe_verify_ties(fold(s.read_all()))
     assert not any(e.type == "node_verified" for e in s.read_all())
 
 

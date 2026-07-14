@@ -229,11 +229,14 @@ def test_grade_payload_is_hashseed_independent(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _explore_state(tmp_path, *, locked_axis="loss", streak=7) -> RunState:
+    # `streak` here drives `current_streak` (what the capability-expansion directive gates on — the
+    # CURRENT lock-in, not the longest-ever); recent_axis names the currently-locked axis.
     st = fold(_run(tmp_path).read_all())
     st.concept_coverage_snapshots.append(
         {"at_node": 2, "fired": True, "uncovered_key": ["negatives/external-mining"],
          "directive": "0 coverage in {negatives/external-mining} — go there",
-         "locked_axis": locked_axis, "streak": streak})
+         "locked_axis": locked_axis, "recent_axis": locked_axis,
+         "streak": streak, "current_streak": streak})
     return st
 
 

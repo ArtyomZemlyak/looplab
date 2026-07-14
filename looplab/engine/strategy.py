@@ -381,9 +381,14 @@ class StrategyCadenceMixin:
             "top_concept": top.get("id"),
             "top_concept_frac": top.get("frac", 0.0),
             "locked_axis": lock["locked_axis"],
-            # CODEX AGENT: This persists the longest-ever streak, not current_streak, so a successful
-            # pivot never clears the live capability-expansion directive.
-            "streak": lock["streak"],
+            "streak": lock["streak"],                  # longest same-lever run (diagnostic)
+            # current_streak = the same-lever run ENDING at the latest experiment; recent_axis = the axis
+            # the last few experiments concentrate on. The capability-expansion directive gates on
+            # current_streak (not the longest-ever streak) and names recent_axis, so a successful pivot to
+            # a different axis drops both and CLEARS the "expand the action space" cue — it fires only while
+            # the search is STILL locked in right now, not forever after a past lock-in.
+            "current_streak": lock["current_streak"],
+            "recent_axis": lock["recent_axis"],
             "tag_mode": mode,
         }
 
@@ -408,32 +413,44 @@ class StrategyCadenceMixin:
             client = None
         if client is None:
             return state
-        # Process-local guard: don't RE-attempt a (node, generation) whose verify already failed this
-        # run — else a degraded client (verify keeps returning None) would re-verify the same unscored
-        # tie every cadence. In-memory only (verify is live, never replayed); a fresh process on resume
-        # may retry, which is fine (bounded). A successful verify scores the node, so _metric_tie_groups
-        # stops surfacing it regardless.
+        # Process-local FAILURE guard: a (node, generation) whose verify returned None is recorded so a
+        # degraded client can't re-verify the same tie every cadence (a success sets verifier_score, which
+        # _metric_tie_groups already excludes). In-memory only (verify is live, never replayed); a fresh
+        # process on resume may retry, which is fine (bounded).
         attempted = getattr(self, "_verify_attempted", None)
         if attempted is None:
             attempted = self._verify_attempted = set()
-        budget = 4                      # cap verifications per cadence so a big tie cluster can't burst cost
+        budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
         done = False
         for group in groups:
-            # CODEX AGENT: Resolve a tie group atomically or abstain; scoring only some members makes a
-            # failed verification look like synthetic neutral 0.5 and can change the winner by itself.
-            for n in group:
-                key = (n.id, n.attempt)
-                if n.verifier_score is not None or key in attempted or budget <= 0:
-                    continue
-                score = self._verifier_soundness(state, n, client)
+            # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
+            # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
+            # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
+            # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
+            # falls back to the id tie-break), and a group larger than the cadence budget is left for a
+            # later cadence (a group larger than the cap is never verified — honest + bounded).
+            if any((n.id, n.attempt) in attempted for n in group):
+                continue
+            todo = [n for n in group if n.verifier_score is None]
+            if not todo or len(todo) > budget:
+                continue
+            verdicts, failed = [], False
+            for n in todo:
+                v = self._verifier_soundness(state, n, client)
                 budget -= 1
-                attempted.add(key)
-                if score is not None:
-                    # CODEX AGENT: This selection-relevant event drops n_samples, agreement, model/prompt,
-                    # calibration id, evidence digest, and rationales, so the decision cannot be audited.
-                    self.store.append(EV_NODE_VERIFIED, {"node_id": n.id, "generation": n.attempt,
-                                                         "score": round(float(score), 4)})
-                    done = True
+                if v is None:
+                    attempted.add((n.id, n.attempt))   # a failure abstains the WHOLE group hereafter
+                    failed = True
+                    break
+                verdicts.append((n, v))
+            if not failed:                              # atomic commit: every member scored
+                for n, v in verdicts:
+                    # Persist the score + provenance (n_samples, agreement) so a selection-affecting
+                    # decision is auditable; the fold reads only `score` (the rest is audit-only).
+                    self.store.append(EV_NODE_VERIFIED, {
+                        "node_id": n.id, "generation": n.attempt, "score": round(v["score"], 4),
+                        "n_samples": v["n_samples"], "agreement": v["agreement"]})
+                done = True
             if budget <= 0:
                 break
         return fold(self.store.read_all()) if done else state
@@ -461,10 +478,17 @@ class StrategyCadenceMixin:
         groups.sort(key=lambda nodes: min(n.id for n in nodes))
         return groups
 
-    def _verifier_soundness(self, state: RunState, node, client) -> Optional[float]:
-        """The calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result
-        (`selection_criteria`, grounded on its idea + metric + confirm/holdout signals), or None on any
-        failure. Best-effort — never raises."""
+    def _verifier_soundness(self, state: RunState, node, client) -> Optional[dict]:
+        """The calibrated §12-verifier soundness verdict for a node's REALIZED result, or None on any
+        failure / too-noisy a verdict. Returns `{score, n_samples, agreement}` — `score` is the
+        `result_sound` criterion mean in [0,1] (grounded on the node's idea + metric + confirm/holdout
+        signals); the provenance rides on the audit event. Best-effort — never raises.
+
+        ABSTAINS (None) when cross-sample AGREEMENT is below a majority (only measurable with >1 sample):
+        a high-variance verdict — the single-shot noise §21.12 measured — must not decide a tie. Evidence
+        is scalar-summary only (the hard leakage/gaming/overfit signals stay the job of the trust layer's
+        reward-hack / leakage detectors); this advisory tie-break asks only "does the reported result look
+        sound", and abstains rather than over-claiming when the judgment is unstable."""
         try:
             from looplab.trust.verifier import selection_criteria, verify
             r = getattr(self, "researcher", None)
@@ -480,17 +504,22 @@ class StrategyCadenceMixin:
                         + (f"; holdout metric: {node.holdout_metric}" if node.holdout_metric is not None else "")
                         + (f"; generalization gap: {node.generalization_gap}"
                            if node.generalization_gap is not None else ""))
-            # CODEX AGENT: Rationale plus scalar metrics cannot establish leakage, gaming, or overfit;
-            # ground this trust decision in actual code/logs/predictions via read-only tools or abstain.
+            samples = getattr(self, "_select_verifier_samples", 3)
             rep = verify(subject, evidence, selection_criteria(), client=client,
-                         samples=getattr(self, "_select_verifier_samples", 3), parser=parser)
+                         samples=samples, parser=parser)
             if rep is None or rep.method == "unavailable":
                 return None
             crit = (rep.per_criterion or {}).get("result_sound") or {}
             m = crit.get("mean")
-            # CODEX AGENT: No minimum n_samples/agreement or bound calibration artifact is enforced;
-            # one surviving raw ordinal verdict can currently decide promotion.
-            return float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
+            score = float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
+            if score is None:
+                return None
+            # Reject a too-noisy verdict (variance is only measurable across >1 sample): if fewer than half
+            # the samples agree on the modal verdict, the judgment is unstable — abstain so a coin-flip
+            # can't decide the tie (which then falls back to the id tie-break for the whole group).
+            if samples > 1 and rep.agreement < 0.5:
+                return None
+            return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement}
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
             return None
 
