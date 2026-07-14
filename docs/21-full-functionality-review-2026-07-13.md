@@ -27,6 +27,31 @@ gap / edge-case bug / resource issue · **P3** quality/latent.
 double-start/idempotency machine, event-log invariants, the permission policy) is unusually careful
 and, in most places, correct. Findings are one P1 and a set of P2/P3 gaps.
 
+## Fixes applied in this branch (2026-07-14)
+
+A follow-up `/code-review -fix` pass applied and tested the P1 and every P2 except the log-pager
+concurrency refactor:
+
+| Finding | Fix | Regression test |
+|---|---|---|
+| P1-UI | `assistantErrors.js` regex strictly start-anchored; dropped bare `error:` + unanchored substrings | `assistantErrors.test.js` (new case) |
+| TEST-1 | assertion accepts `{404, 405}` | — |
+| CI-1 | removed the duplicate `ui:` job (restores master's single job) | — |
+| SEC-1 | `patch.py` exception now scoped to grader globs only (`_is_grade_glob`); structural trees stay protected | `test_perm_modes.py` (new case) |
+| SEC-2 | `reviews.py` + `appstate.py` redact **before** truncating | — |
+| PERF-1 | `costs.py` trusts the successful append; rescan only on the ambiguous "append raised" branch | existing ledger suite |
+| REPLAY-1 | `finalize.py` quiescence allow-list now includes `reflection_note`/`lessons_distilled` | existing recovery suite |
+| VAL-1 | `le=` bounds on `n_seeds`/`max_nodes`/`max_parallel`; `normalize_control` bounds `add_nodes`/`max_parallel` | `test_config.py` + `test_launch_preflight.py` (new) |
+| VAL-2 | `launch.py` caps `task_file` size (8 MiB) before any whole-file read | `test_launch_preflight.py` (new) |
+| VAL-3 | `boss.py` `_json_object` guard on all four handlers (400, not 500) | `test_report.py` (new) |
+| TUI-1 | `tui.py` `rich.markup.escape` on all 9 dynamic failure-line prints | existing TUI suite |
+| UI-2 | `hooks.js` transient probe failure now self-heals (owner: EventSource backoff; review: re-probe) | existing UI suite |
+| chat cap | `launch.py` `_clean_chat` bounds turn count + per-turn content | — |
+
+**Deferred** (higher-risk / involved, left for a dedicated change): **DOS-1/MEM-1** — the log-pager
+global-lock + unbounded-index refactor (an availability concern, not a correctness bug) — and the
+P3 cleanup list below.
+
 ---
 
 ## P1

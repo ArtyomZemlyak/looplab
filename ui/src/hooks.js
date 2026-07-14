@@ -196,10 +196,21 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
       })
       .catch(e => {
         if (stopped) return
-        const reviewEnded = pollOnly && (e?.status === 401 || e?.status === 404 || e?.status === 410)
-        setStatus(reviewEnded ? 'gone' : e?.status === 404 ? 'not_found' : 'error')
-        setError(reviewEnded ? 'This review link expired, was revoked, or is invalid.'
-          : e?.status === 404 ? 'This run does not exist or was removed.' : (e?.message || 'Could not load this run.'))
+        const st = e?.status
+        const reviewEnded = pollOnly && (st === 401 || st === 404 || st === 410)
+        if (reviewEnded) {
+          setStatus('gone'); setError('This review link expired, was revoked, or is invalid.'); return
+        }
+        if (st === 404) {
+          setStatus('not_found'); setError('This run does not exist or was removed.'); return
+        }
+        // Transient probe failure (proxy 504, dropped connection, keepalive-starved idle drop): do NOT
+        // strand the workspace on an error screen with nothing scheduled to retry (UI-2). The owner
+        // stream self-heals via the EventSource onerror backoff, so start it; the review poll path
+        // reschedules a re-probe. Either way the UI recovers on its own once the blip clears.
+        setError(e?.message || 'Could not load this run.')
+        if (!pollOnly) { setStatus('loading'); connect() }
+        else { setStatus('error'); timer = setTimeout(() => setRetryToken(n => n + 1), MIN_BACKOFF) }
       })
     return () => {
       stopped = true; clearTimeout(timer); clearTimeout(pollTimer)

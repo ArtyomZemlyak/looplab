@@ -97,10 +97,26 @@ def test_preflight_loads_and_validates_task_file_without_side_effects(tmp_path):
     assert not (tmp_path / "invalid-file").exists()
 
 
+def test_preflight_rejects_oversized_task_file(tmp_path, monkeypatch):
+    """VAL-2: preflight slurps the task_file whole (load_document + fingerprint), so an unbounded file
+    must be rejected before the read — otherwise a multi-GB path hangs the worker / exhausts memory."""
+    import looplab.serve.launch as launch
+    monkeypatch.setattr(launch, "_MAX_TASK_FILE_BYTES", 64)
+    big = tmp_path / "big.json"
+    big.write_text('{"kind":"quadratic"}' + " " * 200, encoding="utf-8")  # valid JSON, over the cap
+    response = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={
+        "run_id": "big-file", "task_file": str(big),
+    })
+    assert response.status_code == 400
+    assert response.json()["detail"]["code"] == "task_file_too_large"
+    assert not (tmp_path / "big-file").exists()
+
+
 @pytest.mark.parametrize(("settings", "field"), [
     ({"max_nodez": 4}, "settings.max_nodez"),
     ({"llm_api_key": "must-not-transit-here"}, "settings.llm_api_key"),
     ({"max_nodes": 0}, "settings.max_nodes"),
+    ({"max_parallel": 100000}, "settings.max_parallel"),   # VAL-1: no upper bound → resource exhaustion
 ])
 def test_preflight_rejects_unknown_secret_and_invalid_settings(tmp_path, settings, field):
     response = TestClient(make_app(tmp_path)).post("/api/start/preflight", json={

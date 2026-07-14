@@ -93,6 +93,16 @@ def _match(path: str, glob: str, _fn=fnmatch.fnmatch) -> bool:
     return "**/" in glob and _fn(path, glob.replace("**/", "", 1))
 
 
+def _is_grade_glob(glob: str) -> bool:
+    """Whether a protect glob exists to catch grader/eval files — the ONLY kind an editable exception
+    (DEFAULT_PROTECT_EXCEPTIONS) is allowed to carve back out. Matches the case-folded
+    `*grade*`/`*grader*`/`*grading*` family (`grade` also covers `grader`). A structural rule
+    (`.git/**`, `answers/**`, `held_out/**`, `private/**`, event logs) is NOT a grade glob, so an
+    exception can never override it. Globs reach here already case-folded via `_ci`."""
+    g = glob.lower()
+    return "grade" in g or "grading" in g
+
+
 def _in_surface(p: str, allow: list[str], prefixes: list[str]) -> bool:
     """Is `p` within the edit surface? With multi-editable `prefixes` (named repo subdirs), a
     path UNDER a named repo is governed ONLY by that repo's prefixed globs, and a root path only
@@ -163,11 +173,8 @@ class SurfacePolicy:
         self.check_escapes = check_escapes
 
     def _is_protected(self, path: str) -> bool:
-        if self.allow_exceptions:
-            pc_x = _ci(path)
-            if any(pc_x == g or _match(pc_x, g) for g in self.allow_exceptions):
-                return False   # an explicit editable exception overrides the protect-list (F11)
         if self.protected_exact:
+            # Exact mode's callers pass no exceptions, so their protect intent always wins.
             if path in self.protected:
                 return True
             # Exact mode's protect entries are MOSTLY pre-normalized literal names, but glob forms
@@ -185,7 +192,19 @@ class SurfacePolicy:
                     return True
             return False
         pc = _ci(path)
-        return any(pc == g or _match(pc, g) for g in self.protected)
+        matched = [g for g in self.protected if pc == g or _match(pc, g)]
+        if not matched:
+            return False
+        if self.allow_exceptions and any(pc == g or _match(pc, g) for g in self.allow_exceptions):
+            # An editable exception (F11) exists ONLY to carve migration scripts (upgrade.py /
+            # downgrade.py) back out of the BROAD grader globs (`**/*grade*.py` also catches
+            # `upgrade.py`). It must NEVER override a STRUCTURAL integrity rule — `.git/**`,
+            # `answers/**`, `held_out/**`, `private/**`, event logs. So the path is editable only when
+            # EVERY glob that matched it is a grader glob; if a structural rule also matched, it stays
+            # protected (e.g. `answers/upgrade.py`, `.git/hooks/upgrade.py`).
+            if all(_is_grade_glob(g) for g in matched):
+                return False
+        return True
 
     def check(self, path: str) -> str | None:
         """None if `path` is editable, else the first failing reason code

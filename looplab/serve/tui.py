@@ -130,6 +130,14 @@ def _observed_command(record: dict, staged: Optional[dict] = None) -> dict:
 
 # ----------------------------------------------------------------------------- the interactive app
 
+def _command_failure_line(label, error) -> str:
+    """Escape server/LLM-supplied text before it enters a rich markup string: a stray ``[/tag]`` in a
+    label or error message otherwise raises rich ``MarkupError`` and aborts the TUI — and, because
+    ``_reconcile_pending`` re-prints the persisted row, it re-crashes on every reopen of the run."""
+    from rich.markup import escape
+    return f"  [red]✗[/red] {escape(str(label))} — {escape(str(error))}"
+
+
 class Tui:
     """The redraw-then-prompt REPL. Holds the rich Console + the Api client; each surface is a method
     that draws itself then reads one line. Kept thin: the heavy lifting is in the pure helpers above and
@@ -573,7 +581,7 @@ class Tui:
                         turn["status"] = "failed"
                         error = (result or {}).get("error") if isinstance(result, dict) else None
                         turn["error"] = error or "report refresh returned no confirmed success"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                     else:
                         turn["status"] = "done"
                         self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]")
@@ -589,7 +597,7 @@ class Tui:
                     if self._persist(run_id, turn) is False:
                         turn["status"] = "failed"
                         turn["error"] = "could not durably stage command identity; nothing was submitted"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                         return
                     result = self.api.run_command(
                         run_id, str(action.get("type") or ""), action.get("data") or {},
@@ -606,11 +614,11 @@ class Tui:
                     elif status in _COMMAND_FAILED:
                         turn["status"] = "failed"
                         turn["error"] = _command_error(result)
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                     else:
                         turn["status"] = "failed"
                         turn["error"] = f"unexpected command status: {status or 'missing'}"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
             except ApiError as e:
                 ambiguous = command_error_transient(e)
                 turn["status"] = "pending" if ambiguous else "failed"
@@ -619,7 +627,7 @@ class Tui:
                     self.console.print(
                         f"  [yellow]…[/yellow] {label} — response lost; checking the staged command id")
                 else:
-                    self.console.print(f"  [red]✗[/red] {label} — {e}")
+                    self.console.print(_command_failure_line(label, e))
             if staged_index is None:
                 history.append(turn)
                 self._persist(run_id, turn)
@@ -732,7 +740,7 @@ class Tui:
                 turn["status"] = "failed"
                 turn["error"] = "pending command has no durable id; its outcome cannot be verified"
                 self._persist_command_status(run_id, turn, action_index=action_index)
-                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                self.console.print(_command_failure_line(label, turn['error']))
                 continue
             try:
                 record = self.api.get_run_command(run_id, command_id)
@@ -760,7 +768,7 @@ class Tui:
                         turn["status"] = "failed"
                         turn["error"] = f"staged command could not be recovered: {retry_exc}"
                         self._persist_command_status(run_id, turn, action_index=action_index)
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                         continue
                 elif exc.status in (200, 404):
                     turn["status"] = "failed"
@@ -772,7 +780,7 @@ class Tui:
                         prefix = "command record is unavailable"
                     turn["error"] = f"{prefix}: {exc}"
                     self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                    self.console.print(_command_failure_line(label, turn['error']))
                     continue
                 if replay is None:
                     unresolved = True
@@ -792,7 +800,7 @@ class Tui:
                 turn["status"] = "failed"
                 turn["error"] = _command_error(record)
                 self._persist_command_status(run_id, turn, action_index=action_index)
-                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                self.console.print(_command_failure_line(label, turn['error']))
             elif status in _COMMAND_PENDING:
                 unresolved = True
             else:

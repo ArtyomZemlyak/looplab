@@ -160,7 +160,9 @@ class AppState:
             # in the stdout tail. Drop stdout_tail entirely (the full tail is behind the token-gated
             # node-detail endpoint) and redact the short error message the node table still shows.
             n.pop("stdout_tail", None)
-            n["error"] = redact_secrets((n.get("error") or "")[:160])
+            # Redact BEFORE truncating: a secret straddling byte 160 would otherwise lose its tail,
+            # leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
+            n["error"] = redact_secrets(n.get("error") or "")[:160]
             # Intra-node sweep: a node can carry many trials — replace the full array with a compact
             # summary for the live state (card badge + spark + explode-hull header). The full trials
             # ride along the on-demand /nodes/{id} detail endpoint, like code/files do.

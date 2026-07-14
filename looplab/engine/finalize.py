@@ -33,8 +33,10 @@ from looplab.events.types import (
     EV_DIVERSITY_ARCHIVE,
     EV_FINALIZATION_FINISHED,
     EV_FINALIZE_STEP,
+    EV_LESSONS_DISTILLED,
     EV_LLM_COST,
     EV_READMODEL_SKIPPED,
+    EV_REFLECTION_NOTE,
     EV_REPORT_GENERATED,
     EV_RUN_ABORT,
     EV_RUN_FINISHED,
@@ -115,7 +117,13 @@ def finalize_scope_quiescent(events, scope: str) -> bool:
             continue
         if event.type == EV_REPORT_GENERATED and data.get("finalize_scope") == scope:
             continue
-        if event.type in {"llm_usage", "command_ack", EV_READMODEL_SKIPPED}:
+        if event.type in {"llm_usage", "command_ack", EV_READMODEL_SKIPPED,
+                          EV_REFLECTION_NOTE, EV_LESSONS_DISTILLED}:
+            # The reflection finalize step emits reflection_note (always) and lessons_distilled
+            # (comparative). They are this finalization's OWN effects, so — like llm_usage/command_ack
+            # diagnostics — they must not read as a foreign event that abandons scope-based recovery
+            # (REPLAY-1): otherwise a crash after reflection_note but before the completion markers
+            # leaves the non-modern error-recovery finish permanently unfinished.
             continue
         if event.type in {EV_BUDGET, EV_DIVERSITY_ARCHIVE, EV_LLM_COST} and (
             data.get("finalize_scope") == scope
