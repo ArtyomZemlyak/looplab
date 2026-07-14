@@ -21,7 +21,7 @@ from looplab.core.models import RunState
 from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold
-from looplab.events.traceview import build_trace_view, load_spans
+from looplab.events.traceview import build_trace_view, hydrate_inputs, load_spans
 from looplab.events.types import (EV_BUDGET, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
                                   EV_LLM_COST, EV_READMODEL_SKIPPED)
 from looplab.search.archive import DiversityArchive
@@ -136,8 +136,12 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             pass
     # UI projection (ADR-17): join the research tree (events) to its execution detail
     # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
+    # Hydrate the delta-encoded generation inputs first (tracing.generation stores only each turn's
+    # delta on disk) so the archived trace.json holds the FULL verbatim prompts — same as the live
+    # `/trace/by_trace` endpoint (hydrate → then build_trace_view caps). Without this the persisted
+    # projection would disagree with the live one (delta vs full input) for any external reader.
     try:
-        tv = build_trace_view(final, load_spans(engine.run_dir / "spans.jsonl"))
+        tv = build_trace_view(final, hydrate_inputs(load_spans(engine.run_dir / "spans.jsonl")))
     except Exception:  # noqa: BLE001 - derived projection; event fold remains authoritative
         return final
     try:
