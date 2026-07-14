@@ -207,7 +207,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       })}
       {hn && (() => {   // hover crosshair + tooltip tracking the nearest node
         const v = hn.confirmed_mean ?? hn.metric, hx = X(hn.id), hy = Y(v)
-        const label = `#${hn.id} ${hn.operator} → ${fmt(v)}`
+        const label = `#${hn.id} ${hn.operator || ''} → ${fmt(v)}`
         const tw = Math.max(64, label.length * 6.0), tx = Math.min(w - 10 - tw, Math.max(pad, hx - tw / 2))
         return <g pointerEvents="none">
           <line x1={hx} x2={hx} y1={pad / 2} y2={h - pad} stroke={AX} strokeDasharray="3 3" opacity=".6" />

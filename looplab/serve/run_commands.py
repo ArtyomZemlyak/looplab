@@ -560,13 +560,16 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(400, "budget_extend needs at least one budget field")
         if data.get("add_nodes") is not None:
             value = _integer("add_nodes")
-            if value <= 0:
-                raise HTTPException(400, "add_nodes must be a positive integer")
+            # Upper bound too: a huge extension (or a 400-digit int) is not a valid budget and would
+            # let a single control command balloon the run. Ceiling mirrors Settings.max_nodes.
+            if value <= 0 or value > 1_000_000:
+                raise HTTPException(400, "add_nodes must be between 1 and 1000000")
             data["add_nodes"] = value
         if data.get("max_parallel") is not None:
             value = _integer("max_parallel")
-            if value <= 0:
-                raise HTTPException(400, "max_parallel must be a positive integer")
+            # Ceiling mirrors Settings.max_parallel: an unbounded value fans out that many sandboxes.
+            if value <= 0 or value > 1024:
+                raise HTTPException(400, "max_parallel must be between 1 and 1024")
             data["max_parallel"] = value
         for name in ("max_seconds", "max_eval_seconds", "timeout"):
             if data.get(name) is None:
@@ -761,10 +764,14 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         data["status"] = status
 
     try:
-        encoded = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+        # Encode INSIDE the guard: json.dumps(ensure_ascii=False) accepts a lone surrogate (valid
+        # JSON \uD800) but str.encode("utf-8") then raises UnicodeEncodeError — a ValueError subclass.
+        # Keeping the encode out here surfaced it as a 500; every sibling validation error is a 400.
+        encoded_bytes = json.dumps(
+            data, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
     except (TypeError, ValueError, OverflowError) as exc:
-        raise HTTPException(400, f"control data must be finite JSON: {exc}") from exc
-    if len(encoded.encode("utf-8")) > 1_048_576:
+        raise HTTPException(400, f"control data must be finite, encodable JSON: {exc}") from exc
+    if len(encoded_bytes) > 1_048_576:
         raise HTTPException(413, "control data is too large (maximum 1 MiB)")
     return data
 

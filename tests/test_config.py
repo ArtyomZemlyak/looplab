@@ -17,6 +17,19 @@ def test_config_lower_bounds():
     assert Settings().max_parallel == 1  # default still valid
 
 
+def test_config_upper_bounds_reject_resource_exhaustion():
+    """The UI /start path writes these knobs straight into the engine env, so an unbounded value
+    (e.g. max_parallel=100000 from a crafted preflight) would fan out that many sandboxes. Reject at
+    the config boundary. Ceilings are generous — realistic runs top out far below."""
+    from pydantic import ValidationError
+    for bad in ({"max_parallel": 100000}, {"max_parallel": 1025}, {"n_seeds": 2000},
+                {"max_nodes": 10**7}):
+        with pytest.raises(ValidationError):
+            Settings(**bad)
+    # Generous ceilings still admit any real run.
+    assert Settings(max_parallel=1024, n_seeds=1024, max_nodes=1_000_000).max_parallel == 1024
+
+
 def test_nonfinite_time_budgets_are_rejected_at_model_boundary():
     from pydantic import ValidationError
     from looplab.core.models import Idea

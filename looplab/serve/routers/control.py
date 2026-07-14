@@ -129,36 +129,47 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "control body must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "control body must be a JSON object")
-        with srv.commands.sequence(rd):
-            rd = srv.commands.validate_paths(rd)
-            srv.commands.reject_if_active(rd, "append a legacy control event")
-            etype = body.get("type")
-            if etype not in CONTROL_EVENTS:
-                raise HTTPException(400, f"unknown control event: {etype!r}")
-            gated_baseline = None
-            if etype in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
-                events = srv.events(rd)
-                gated_baseline = events[-1].seq if events else -1
-            # One shared normalizer owns strict payload validation plus node-attempt and parent
-            # generation CAS. Pass the raw data intact so attempt>0 tokens are never erased here.
-            data = normalize_control(srv, rd, etype, body.get("data"))
-            _known_engine_liveness(rd, "append a control event")
-            expected = body.get("expected_seq")
-            if expected is None and gated_baseline is not None:
-                expected = gated_baseline
-            if expected is not None:
-                if isinstance(expected, bool):
-                    raise HTTPException(400, "expected_seq must be an integer")
+
+        def _append_control() -> dict:
+            # Offloaded to a worker thread: ``sequence`` takes the cross-process flock (blocking up to
+            # ``lock_acquire_timeout``) and the append does disk I/O — holding that on the ASGI event
+            # loop freezes every concurrent SSE/poll in the worker. Same offload the start/preflight
+            # handlers already use.
+            with srv.commands.sequence(rd):
+                local_rd = srv.commands.validate_paths(rd)
+                srv.commands.reject_if_active(local_rd, "append a legacy control event")
+                etype = body.get("type")
+                if etype not in CONTROL_EVENTS:
+                    raise HTTPException(400, f"unknown control event: {etype!r}")
+                # Approval decisions are valid only for the exact gate the normalizer folded. If the
+                # caller omitted an explicit CAS, bind the append to that pre-normalization tail so a
+                # replacement approval request cannot be accepted by this legacy endpoint.
+                gated_baseline = None
+                if etype in {EV_APPROVAL_GRANTED, EV_SPEC_APPROVED}:
+                    events = srv.events(local_rd)
+                    gated_baseline = events[-1].seq if events else -1
+                # One shared normalizer owns strict payload validation plus node-attempt and parent
+                # generation CAS. Pass the raw data intact so attempt>0 tokens are never erased here.
+                data = normalize_control(srv, local_rd, etype, body.get("data"))
+                _known_engine_liveness(local_rd, "append a control event")
+                expected = body.get("expected_seq")
+                if expected is None and gated_baseline is not None:
+                    expected = gated_baseline
+                if expected is not None:
+                    if isinstance(expected, bool):
+                        raise HTTPException(400, "expected_seq must be an integer")
+                    try:
+                        expected = int(expected)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise HTTPException(400, "expected_seq must be an integer") from exc
                 try:
-                    expected = int(expected)
-                except (TypeError, ValueError, OverflowError) as exc:
-                    raise HTTPException(400, "expected_seq must be an integer") from exc
-            try:
-                ev = EventStore(rd / "events.jsonl").append(
-                    etype, data, expected_last_seq=expected)
-            except EventStoreConcurrencyError as exc:
-                raise HTTPException(409, str(exc)) from exc
-        return {"ok": True, "seq": ev.seq, "type": etype}
+                    ev = EventStore(local_rd / "events.jsonl").append(
+                        etype, data, expected_last_seq=expected)
+                except EventStoreConcurrencyError as exc:
+                    raise HTTPException(409, str(exc)) from exc
+            return {"ok": True, "seq": ev.seq, "type": etype}
+
+        return await anyio.to_thread.run_sync(_append_control)
 
     # ------------------------------------------------------------------ authoritative command lifecycle
     def _command_response_headers(response: Response) -> None:
@@ -177,9 +188,11 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "command body must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "command body must be a JSON object")
-        return srv.commands.submit(
-            rd, request.headers.get("Idempotency-Key", ""), body.get("type"), body.get("data"),
-            expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD))
+        idem = request.headers.get("Idempotency-Key", "")
+        # submit() takes the run flock and folds the log — offload so it never blocks the event loop.
+        return await anyio.to_thread.run_sync(lambda: srv.commands.submit(
+            rd, idem, body.get("type"), body.get("data"),
+            expected_generation=body.get(EXPECTED_RUN_GENERATION_FIELD)))
 
     @router.get("/api/runs/{run_id}/commands/{command_id}")
     def get_command(run_id: str, command_id: str, response: Response):
@@ -201,8 +214,10 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "resolve-activity-claims body must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "resolve-activity-claims body must be a JSON object")
-        return srv.commands.resolve_active_claims(
-            _run_dir(run_id), str(body.get("confirmation") or ""))
+        rd = _run_dir(run_id)
+        confirmation = str(body.get("confirmation") or "")
+        return await anyio.to_thread.run_sync(
+            lambda: srv.commands.resolve_active_claims(rd, confirmation))
 
     # ------------------------------------------------------------------ spawn / resume
     def _task_file_for(rd: Path) -> Optional[str]:
@@ -695,7 +710,9 @@ def build_router(srv) -> APIRouter:
         rd = (root / run_id).resolve()
         if rd == root or rd.parent != root or rd.name.lower() in _RESERVED_RUN_IDS:
             raise HTTPException(400, "bad run_id")
-        return srv.commands.resolve_spawn_claim(rd, str(body.get("confirmation") or ""))
+        confirmation = str(body.get("confirmation") or "")
+        return await anyio.to_thread.run_sync(
+            lambda: srv.commands.resolve_spawn_claim(rd, confirmation))
 
     @router.get("/api/start/{run_id}/status")
     def start_status(run_id: str, request: Request, response: Response,

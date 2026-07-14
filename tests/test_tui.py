@@ -1332,3 +1332,57 @@ def test_genesis_offline_soft_fails(tmp_path, monkeypatch):
     _bind(api, TestClient(make_app(tmp_path)))
     r = api.genesis([{"role": "user", "content": "a toy run"}], "a toy run", None)
     assert isinstance(r, dict) and r.get("ok") is False
+
+
+def test_reconcile_pending_survives_rich_markup_in_persisted_label():
+    """A persisted command label carrying a rich-markup fragment (e.g. a boss directive that quotes
+    "[/tmp]") must NOT raise rich MarkupError and abort the TUI. Because _reconcile_pending re-prints
+    the row on every reopen, an unescaped label re-crashed the dashboard each time it was opened (P2)."""
+    class FakeApi:
+        def run_generation(self, _run_id):
+            return GENERATION
+
+        def get_run_command(self, run_id, command_id):
+            return {"id": command_id, "status": "succeeded"}
+
+    app = _command_tui(FakeApi())
+    app._persist_command_status = lambda *_a, **_k: None
+    history = [{
+        "role": "action",
+        "action": {"type": "set_directive", "data": {}, "label": "use the [/tmp] cache [bold]x"},
+        "status": "pending",
+        "command": {"id": "cmd_" + "a" * 32, "event_type": "set_directive"},
+    }]
+    # Would raise rich.errors.MarkupError before the escape fix.
+    assert app._reconcile_pending("demo", history) is True
+    assert "tmp" in app.console.file.getvalue()   # label rendered (escaped), not crashed
+
+
+def test_render_chat_survives_rich_markup_in_persisted_content():
+    """Persisted boss-chat content — a user line or an LLM recap that quotes a rich-markup fragment
+    like "[/dim]" — must NOT raise MarkupError. _render_chat re-prints the whole transcript on every
+    chat view, so an unescaped line re-crashed the dashboard on each open (P2, same class as the
+    command-label escape above; the round-2 escape pass had missed the user/summary render paths)."""
+    app = _command_tui(type("_Api", (), {})())
+    history = [
+        {"role": "user", "content": "try [/bold green] and [red]x"},
+        {"role": "summary", "content": "recap [/dim] done"},
+    ]
+    app._render_chat(history)                      # would raise rich.errors.MarkupError before the fix
+    out = app.console.file.getvalue()
+    assert "try" in out and "recap" in out         # both lines rendered (escaped), not crashed
+
+
+def test_status_panel_survives_rich_markup_in_goal_and_stop_reason():
+    """The run status Panel interpolates the user goal and the (engine/operator) stop_reason, and rich
+    parses Panel content as markup — so a goal like "strip [/b] tags" or an abort reason quoting
+    "[/dim]" raised MarkupError on EVERY _draw_run, i.e. re-crashed the run view on each reopen. The
+    round-2/round-4 escape passes had never covered _status_panel."""
+    app = _command_tui(type("_Api", (), {})())
+    panel = app._status_panel("demo", {
+        "phase": "finished", "finished": True, "nodes": {},
+        "goal": "strip [/b] tags from [red]html", "stop_reason": "aborted [/dim] by op",
+    })
+    app.console.print(panel)                       # would raise rich.errors.MarkupError before the fix
+    out = app.console.file.getvalue()
+    assert "strip" in out and "aborted" in out     # goal + stop_reason rendered (escaped), not crashed

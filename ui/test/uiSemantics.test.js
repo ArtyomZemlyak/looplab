@@ -230,3 +230,17 @@ test('an unsent Assistant storage quarantine keeps failure and Dismiss visible i
   assert.match(assistant, /const localStorageFailure = entry => \{[\s\S]*?clearUnsentDirectRecovery\(failure\)[\s\S]*?setCurrentFailure\(entry, failure\)/)
   assert.match(assistant, /failure\.record\?\.error\?\.code === 'command_storage_unavailable'[\s\S]*?!clearUnsentDirectRecovery\(failure\)[\s\S]*?remains quarantined/)
 })
+
+test('live node-detail and per-node building-trace polls gate their setState on usePoll alive()', async () => {
+  // R5-UI: a poll whose callback ignores the alive() predicate lets a slow in-flight response land
+  // after the user selected a different node (Inspector) or after building ended (Dock), overwriting
+  // fresher state with a stale snapshot. Both must take (alive) and guard the setState with alive().
+  const [inspector, dock] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx')])
+  // Inspector node-detail poll: callback receives (alive) and only sets detail when alive() && d.
+  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{ if \(alive\(\) && d\)/)
+  // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
+  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) setNodeTrace\(d\) \}\)/)
+  assert.match(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\); loadNodeTrace\(alive\) \}[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,
+    'the timeline must not regress to a whole-run trace fold/poll')
+})

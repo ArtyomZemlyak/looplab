@@ -72,7 +72,12 @@ def _unique_redacted_key(clean_key: str, counts: dict[str, int], occupied) -> st
     return output_key
 
 
-def _scrub_json(value, *, omit_keys: set[str] | frozenset[str] = frozenset()):
+# Deeper than any real engine event payload, far under the interpreter recursion limit: a
+# pathologically/adversarially nested value on this untrusted read surface must truncate, not 500.
+_MAX_SCRUB_DEPTH = 40
+
+
+def _scrub_json(value, *, omit_keys: set[str] | frozenset[str] = frozenset(), _depth: int = 0):
     """Copy a JSON-like value while masking secrets in every nested key/string/value.
 
     Key-aware masking matters for values such as ``{"db_password": "ordinary-looking"}``, whose
@@ -82,6 +87,10 @@ def _scrub_json(value, *, omit_keys: set[str] | frozenset[str] = frozenset()):
     overwriting one another.
     Returning fresh containers also ensures review filtering never mutates AppState's shared cache.
     """
+    if _depth >= _MAX_SCRUB_DEPTH:
+        # Collapse an over-deep subtree to a bounded marker rather than recursing into a
+        # RecursionError (which would surface as a 500 on the read-only reviewer GET).
+        return "***(nested too deep)***"
     if isinstance(value, dict):
         out = {}
         key_counts: dict[str, int] = {}
@@ -93,12 +102,12 @@ def _scrub_json(value, *, omit_keys: set[str] | frozenset[str] = frozenset()):
             if _secret_key(key):
                 out[output_key] = None if item is None else "***"
             else:
-                out[output_key] = _scrub_json(item, omit_keys=omit_keys)
+                out[output_key] = _scrub_json(item, omit_keys=omit_keys, _depth=_depth + 1)
         return out
     if isinstance(value, list):
-        return [_scrub_json(item, omit_keys=omit_keys) for item in value]
+        return [_scrub_json(item, omit_keys=omit_keys, _depth=_depth + 1) for item in value]
     if isinstance(value, tuple):
-        return [_scrub_json(item, omit_keys=omit_keys) for item in value]
+        return [_scrub_json(item, omit_keys=omit_keys, _depth=_depth + 1) for item in value]
     if isinstance(value, str):
         return redact_secrets(value)
     return value
@@ -154,7 +163,10 @@ def _review_cost(raw) -> dict:
         except (TypeError, ValueError, OverflowError):
             continue
         if math.isfinite(number) and number >= 0:
-            out[key] = int(number) if key != "cost" else number
+            # Saturate the integer counters at the same 63-bit ceiling every other cost sanitizer
+            # uses (replay._llm_counter, _review_metrics' step guard); a corrupt token field must
+            # not become a ~1000-digit bigint in the public review projection.
+            out[key] = min(int(number), 2**63 - 1) if key != "cost" else number
     return {**defaults, **out}
 
 
@@ -316,7 +328,9 @@ def build_router(srv) -> APIRouter:
             out = {key: dumped[key] for key in _REVIEW_NODE_KEYS if key in dumped}
             # Keep the same short failure summary already present in the light state projection; the
             # unbounded captured process output remains excluded below.
-            out["error"] = redact_secrets(str(dumped.get("error") or "")[:160])
+            # Redact BEFORE truncating: a secret straddling byte 160 would otherwise have its tail
+            # cut, leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
+            out["error"] = redact_secrets(str(dumped.get("error") or ""))[:160]
             # Evidence is explicit opt-in, but still run the normal secret scrub before disclosure.
             # stdout_tail is captured process output, not source evidence, and is intentionally absent.
             # Do not attach spans.jsonl either: it contains model prompts/tool outputs and is a live

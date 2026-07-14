@@ -29,13 +29,15 @@ test('Attention Center stays on the owner plane and out of review/shared routes'
   ])
 
   assert.equal((appSource.match(/<AttentionCenter\b/g) || []).length, 1)
-  assert.match(appSource, /\{!hideAssistant && <AttentionCenter \/>\}/)
-  assert.match(appSource,
-    /else if \(route\.view === 'shared'\)[^\r\n]*hideAssistant = true[^\r\n]*\}/)
+  assert.match(appSource, /<AttentionCenter \/>/)
   const reviewReturn = appSource.indexOf("if (route.view === 'review') return")
-  const ownerMount = appSource.indexOf('{!hideAssistant && <AttentionCenter />}')
+  const sharedReturn = appSource.indexOf("if (route.view === 'shared') return")
+  const ownerGate = appSource.indexOf('<OwnerAuth label={routeLabel}>')
+  const ownerMount = appSource.indexOf('<AttentionCenter />')
   assert.ok(reviewReturn >= 0 && ownerMount > reviewReturn,
     'the review route must return before owner-only Attention Center effects can mount')
+  assert.ok(sharedReturn > reviewReturn && ownerGate > sharedReturn && ownerMount > ownerGate,
+    'the public shared route must return before OwnerAuth and owner-only Attention Center mount')
 
   assert.doesNotMatch(centerSource, /requestPermission\s*\(/,
     'permission prompts belong only to the explicit enable operation')

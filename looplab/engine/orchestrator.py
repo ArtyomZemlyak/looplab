@@ -615,12 +615,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         tail_seq = events[-1].seq if events else -1
         if report is not None and report.seq != tail_seq:
             # Only diagnostics may have followed; clone the durable content without another provider
-            # call so report->finish is adjacent again.
-            report = self.store.append(
-                "report_generated",
-                dict(report.data or {}),
-                expected_last_seq=tail_seq,
-            )
+            # call so report->finish is adjacent again. A background-appendable event (an `llm_usage`
+            # from a cost sink) can splice in between this tail read and the CAS, exactly like the
+            # finish CAS below — abandon the scope on a lost race instead of crashing the finish path.
+            try:
+                report = self.store.append(
+                    "report_generated",
+                    dict(report.data or {}),
+                    expected_last_seq=tail_seq,
+                )
+            except EventStoreConcurrencyError:
+                self.store.append(EV_FINALIZE_STEP, {
+                    "scope": scope,
+                    "step": "abandoned",
+                    "outcome": "event_won_report_clone_cas",
+                })
+                return False
             tail_seq = report.seq
         try:
             finished = self.store.append(

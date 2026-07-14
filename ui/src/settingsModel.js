@@ -29,10 +29,11 @@ const searchableText = (group, field) => [
   field.help,
   field.placeholder,
   ...(field.options || []),
-].filter(Boolean).join(' ').toLocaleLowerCase()
+].filter(Boolean).join(' ').toLowerCase()   // locale-INVARIANT: toLocaleLowerCase() folds "I"→"ı"
+                                            // in tr/az, so "API key" would stop matching a typed "api"
 
 export function normalizeSettingsQuery(query) {
-  return String(query || '').trim().toLocaleLowerCase()
+  return String(query || '').trim().toLowerCase()   // match searchableText: locale-invariant fold
 }
 
 // Search intentionally spans the complete catalogue even while the Essential

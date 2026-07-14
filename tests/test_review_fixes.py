@@ -229,3 +229,43 @@ def test_stage_reuse_relaxes_freshness_for_secondary_readers(tmp_path):
     assert read_metric("", str(tmp_path), spec, since=time.time()) is None
     # relaxed anchor (stage-scoped re-run reuses the stage) → the value is read
     assert read_metric("", str(tmp_path), spec, since=None) == 0.9
+
+
+# ============================================================ Round-5 gap-sweep `-fix` regressions ===
+# Each pins a finding from the 2026-07-14 round-5 review so a later change can't silently reintroduce it.
+
+# ------------------------------------------------ R5-DE3: review cost projection saturates giant counters
+def test_review_cost_saturates_giant_token_counter():
+    """A corrupt/hand-edited llm_cost token field (e.g. 1e300) must not become a ~1000-digit bigint in
+    the public review projection; it is capped at the same 63-bit ceiling every other cost sanitizer
+    uses (replay._llm_counter, the metrics step guard). `cost` stays a finite float."""
+    from looplab.serve.routers.reviews import _review_cost
+    out = _review_cost({"total_tokens": 1e300, "calls": 5, "cost": 2.5})
+    assert out["total_tokens"] == 2**63 - 1
+    assert out["calls"] == 5
+    assert out["cost"] == 2.5
+    # a normal payload is untouched
+    normal = _review_cost({"total_tokens": 1234, "calls": 3, "cost": 0.7})
+    assert normal == {"total_tokens": 1234, "calls": 3, "cost": 0.7}
+
+
+# ------------------------------------------------- R5-DE4: review scrub bounds its recursion (no 500)
+def test_scrub_json_bounds_recursion_depth():
+    """A pathologically/adversarially deep event payload on the read-only review surface must truncate
+    to a bounded marker instead of raising RecursionError (which would surface as a 500)."""
+    from looplab.serve.routers.reviews import _scrub_json, _MAX_SCRUB_DEPTH
+    deep = cur = {}
+    for _ in range(5000):                       # far past the interpreter recursion limit
+        cur["child"] = {}
+        cur = cur["child"]
+    scrubbed = _scrub_json({"root": deep})      # must not raise
+    # Walk down and confirm the over-deep subtree became the bounded marker.
+    node = scrubbed["root"]
+    for _ in range(_MAX_SCRUB_DEPTH + 5):
+        if node == "***(nested too deep)***":
+            break
+        assert isinstance(node, dict)
+        node = node["child"]
+    assert node == "***(nested too deep)***"
+    # a shallow structure is copied through untouched (with normal redaction semantics)
+    assert _scrub_json({"a": {"b": [1, 2, "ok"]}}) == {"a": {"b": [1, 2, "ok"]}}

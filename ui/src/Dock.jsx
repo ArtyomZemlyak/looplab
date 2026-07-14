@@ -647,7 +647,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const [showControls, setShowControls] = useState(() => storageGet('ll.dock.controls') === '1')
   const toggleControls = () => setShowControls(v => { const n = !v; storageSet('ll.dock.controls', n ? '1' : '0'); return n })
   useEffect(() => {
-    if (filter || kinds.size > 0) setShowControls(true)
+    if (filter.trim() || kinds.size > 0) setShowControls(true)
   }, [filter, kinds.size])
   // Trace details are fetched per node, only when that row is expanded. This keeps the virtualized,
   // paged timeline O(visible events) and avoids folding or transferring the whole run trace.
@@ -1049,7 +1049,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             ? visiblyLive ? `live · ${liveSeq}` : 'reading · jump latest'
             : `replay ${sliderVal}/${liveSeq} → live`}</button>
         {/* a left-over filter is invisible once controls collapse — surface it so the feed never looks empty for no reason */}
-        {!showControls && (filter || kinds.size > 0) &&
+        {!showControls && (filter.trim() || kinds.size > 0) &&
           <button type="button" className="hist-tag-mini hist"
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</button>}
         <span className="spacer" style={{ flex: 1 }} />
@@ -1084,13 +1084,13 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
           <span className="muted">
             {timeline.totalEvents != null ? `${log.length} loaded of ${timeline.totalEvents}` : `${log.length} loaded`}
-            {(filter || kinds.size) ? ` · ${feed.length} matching loaded events` : ''}
+            {(filter.trim() || kinds.size) ? ` · ${feed.length} matching loaded events` : ''}
           </span>
           {timeline.hasMore.newer && <button type="button" className="btn sm ghost"
             disabled={timeline.loading.newer} onClick={timeline.loadNewer}>
             {timeline.loading.newer ? 'Loading…' : 'Load newer'}</button>}
         </div>
-        {(filter || kinds.size) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
+        {(filter.trim() || kinds.size) && timeline.totalEvents != null && timeline.totalEvents > log.length &&
           <div className="timeline-window-note" role="note">Filter searches this loaded window. Page older/newer to inspect other events.</div>}
         {timeline.status === 'loading' && log.length === 0 && <div className="timeline-resource muted" role="status">Loading timeline…</div>}
         {timeline.loading.around && <div className="timeline-resource muted" role="status">Loading replay events around seq {viewSeq}…</div>}
@@ -1110,7 +1110,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             : 'The final source row is incomplete or non-canonical; showing the last verified event prefix.'}
         </div>}
         {feed.length === 0 && timeline.status === 'ready' && !timeline.loading.around
-          ? <div className="timeline-resource muted">{(filter || kinds.size) ? 'nothing matches the loaded window' : 'no events yet'}</div>
+          ? <div className="timeline-resource muted">{(filter.trim() || kinds.size) ? 'nothing matches the loaded window' : 'no events yet'}</div>
           : <VirtualTimeline rows={feed} getKey={timelineEventKey}
               identity={`${runId}:${timeline.generation || 'pending'}`}
               className="feed chat-feed" ariaLabel="Run events"

@@ -85,6 +85,11 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   const [error, setError] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
   const esRef = useRef(null)
+  // Review-path re-probe backoff. The owner path self-heals inside one effect run via the EventSource
+  // onerror ramp, but the review path re-probes by bumping retryToken (a fresh effect run that resets
+  // the local backoff), so its ramp must live in a ref that survives across runs — else a sustained
+  // proxy 5xx would re-probe on a fixed 1.5s tick (the GET storm the owner ramp avoids).
+  const reviewRetryRef = useRef(1500)
 
   useEffect(() => {
     if (!runId) return
@@ -154,6 +159,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         setGenerationState({ runId, value: lastGeneration })
         setEventCountState({ runId, value: lastEventCount })
         setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
+        reviewRetryRef.current = 1500   // a good probe resets the review re-probe backoff
         if (!pollOnly) connect()
         else {
           setConnected(true)
@@ -196,10 +202,26 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
       })
       .catch(e => {
         if (stopped) return
-        const reviewEnded = pollOnly && (e?.status === 401 || e?.status === 404 || e?.status === 410)
-        setStatus(reviewEnded ? 'gone' : e?.status === 404 ? 'not_found' : 'error')
-        setError(reviewEnded ? 'This review link expired, was revoked, or is invalid.'
-          : e?.status === 404 ? 'This run does not exist or was removed.' : (e?.message || 'Could not load this run.'))
+        const st = e?.status
+        const reviewEnded = pollOnly && (st === 401 || st === 404 || st === 410)
+        if (reviewEnded) {
+          setStatus('gone'); setError('This review link expired, was revoked, or is invalid.'); return
+        }
+        if (st === 404) {
+          setStatus('not_found'); setError('This run does not exist or was removed.'); return
+        }
+        // Transient probe failure (proxy 504, dropped connection, keepalive-starved idle drop): do NOT
+        // strand the workspace on an error screen with nothing scheduled to retry (UI-2). The owner
+        // stream self-heals via the EventSource onerror backoff, so start it; the review poll path
+        // reschedules a re-probe. Either way the UI recovers on its own once the blip clears.
+        setError(e?.message || 'Could not load this run.')
+        if (!pollOnly) { setStatus('loading'); connect() }
+        else {
+          setStatus('error')
+          const delay = reviewRetryRef.current
+          reviewRetryRef.current = Math.min(delay * 2, MAX_BACKOFF)   // ramp like the owner path
+          timer = setTimeout(() => setRetryToken(n => n + 1), delay)
+        }
       })
     return () => {
       stopped = true; clearTimeout(timer); clearTimeout(pollTimer)

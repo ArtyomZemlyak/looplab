@@ -100,24 +100,30 @@ export default function App() {
   const back = () => { location.hash = '' }
   const settings = () => { location.hash = '#/settings' }
 
-  // The shared read-only view owns the whole screen (it IS a public chat), so the persistent assistant
-  // is hidden there; everywhere else (list / run / settings) the assistant stays available.
-  let content, hideAssistant = false
+  // Public review/share views own the whole screen and return before any owner-plane component mounts.
+  // Everywhere else (list / run / settings) the persistent assistant and attention inbox stay available.
+  let content
   const routeKey = `${route.view}:${route.id || route.token || ''}`
   if (route.view === 'review') return <RouteFocus label={routeLabel} routeKey={routeKey}>
     <ReviewRoute key={route.token || 'invalid-review'} token={route.token} />
   </RouteFocus>
+  // The shared read-only chat is a PUBLIC surface: the backend serves /api/assistant/shared/ WITHOUT
+  // the owner token (server.py::_unauth_api_ok), so it must bypass the OwnerAuth unlock gate exactly
+  // like the review route. Falling through into <OwnerAuth> made a token-protected deployment show
+  // recipients the "Unlock LoopLab controls" screen instead of the chat, defeating the share link.
+  if (route.view === 'shared') return <RouteFocus label={routeLabel} routeKey={routeKey}>
+    <SharedAssistant sid={route.id} onBack={back} />
+  </RouteFocus>
   if (route.view === 'run') content = <RunView key={route.id} runId={route.id} onBack={back} />
   else if (route.view === 'settings') content = <Settings onBack={back} />
-  else if (route.view === 'shared') { content = <SharedAssistant sid={route.id} onBack={back} />; hideAssistant = true }
   else content = <RunList onOpen={open} onSettings={settings} />
 
   return <OwnerAuth label={routeLabel}><RouteFocus label={routeLabel} routeKey={routeKey}><div className="app-shell">
       <div className="app-shell-main">{content}</div>
-      {/* Mounted once, outside the route switch → the assistant persists across all navigation. */}
+      {/* Mounted once, outside the route switch → the assistant persists across owner navigation. */}
       {/* Owner-plane inbox only. Review returns above and shared pages omit all attention polling,
           cross-tab channels, storage and Notification API access. */}
-      {!hideAssistant && <AttentionCenter />}
-      <AssistantBar runId={route.view === 'run' ? route.id : null} hidden={hideAssistant} />
+      <AttentionCenter />
+      <AssistantBar runId={route.view === 'run' ? route.id : null} />
     </div></RouteFocus></OwnerAuth>
 }

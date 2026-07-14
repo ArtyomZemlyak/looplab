@@ -429,8 +429,12 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(404, "not shared")
         # The shared route is intentionally untokened. Return only what the read-only transcript
         # renders; never expose raw prompts, diff previews, absolute paths, refs, or launch proposals.
+        # Sanitize FIRST (like the owner GET at assistant_get): a legacy raw failure bubble embeds the
+        # provider request URL / routed model / account id, which redact_secrets does NOT strip — so
+        # without this the PUBLIC share leaks provider metadata the authenticated route already hides.
         meta = {"shared": True, "title": _shared_text(sess["meta"].get("title") or "Shared chat")}
-        return {"meta": meta, "messages": [_shared_message(m) for m in sess["messages"]]}
+        return {"meta": meta,
+                "messages": [_shared_message(_sanitize_assistant_message(m)) for m in sess["messages"]]}
 
     @router.post("/api/assistant/sessions/{sid}/fork")
     def assistant_fork(sid: str):

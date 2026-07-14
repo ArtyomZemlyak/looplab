@@ -16,6 +16,20 @@ test('ordinary assistant prose is not treated as an error', () => {
   assert.equal(assistantErrorInfo('The experiment improved by 12%.'), null)
 })
 
+test('normal replies that merely mention errors are not classified as provider failures', () => {
+  // Regression: an anchored bare "Error:" prefix and unanchored substrings (llm request /
+  // provider returned error / error code: NNN / temporarily rate-limited) used to hide real answers.
+  for (const prose of [
+    'Error: I could not find that file — try `ls runs/`.',
+    'Batch each LLM request into one call to cut latency.',
+    'The provider returned error handling that we should test.',
+    'To debug, check the error code: 500 branch in the log.',
+    'This model is temporarily rate-limited during peak hours, per the docs.',
+  ]) {
+    assert.equal(assistantErrorInfo(prose), null, prose)
+  }
+})
+
 test('legacy persisted provider exceptions are normalized', () => {
   const cases = [
     ["Couldn't reach the model (AuthenticationError: secret-key for user-77)", 'credentials'],

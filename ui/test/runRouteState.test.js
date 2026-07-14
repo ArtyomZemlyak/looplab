@@ -10,6 +10,15 @@ import {
 
 const GEN = 'a'.repeat(64)
 
+test('timeline filter preserves live spaces (typing) but writes a trimmed canonical URL', () => {
+  // Regression: the Dock filter <input> binds directly to this state, so trimming per keystroke
+  // dropped the trailing space of a multi-word filter ("node failed" collapsed to "nodefailed").
+  const live = sanitizeRunRouteState({ timelineFilter: 'node failed ' })
+  assert.equal(live.timelineFilter, 'node failed ')          // interior + trailing spaces kept live
+  const url = encodeRunRouteState({ timelineFilter: '  node failed  ' })
+  assert.match(url, /(^|&)q=node\+failed(&|$)/)               // shareable URL is canonical (trimmed)
+})
+
 test('owner diagnostic state round-trips canonically inside the fragment', () => {
   const state = {
     ...emptyRunRouteState(), generation: GEN, view: 'report', nodeId: 14, inspectTab: 'Code',
