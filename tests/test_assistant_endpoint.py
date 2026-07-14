@@ -133,6 +133,23 @@ def test_assistant_failure_never_persists_provider_payload():
     assert "user-77" not in legacy["content"]
 
 
+def test_shared_route_sanitizes_legacy_provider_failure():
+    """The PUBLIC (untokened) share projection must strip provider metadata from a legacy failure
+    bubble exactly like the owner GET does. redact_secrets alone leaves the request URL / routed
+    model / account id, so the share route must compose sanitize_assistant_message before its
+    read-only projection (the owner route already did; the share route did not)."""
+    from looplab.serve.routers.assistant import _shared_message
+    legacy = {
+        "role": "assistant",
+        "content": ("Couldn't reach the model (APIConnectionError: request to "
+                    "https://api.provider.example/v1/messages model=claude-secret acct=acct-42)"),
+    }
+    out = _shared_message(sanitize_assistant_message(legacy))
+    rendered = json.dumps(out)
+    for leak in ("provider.example", "claude-secret", "acct-42", "v1/messages"):
+        assert leak not in rendered, leak
+
+
 def test_run_turn_write_with_approval(tmp_path):
     target = tmp_path / "new.txt"
     client = _FakeChatClient([_call("write_file", {"path": str(target), "content": "hi"}), _final("done")])

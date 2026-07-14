@@ -205,7 +205,7 @@ export function runRouteStateHasTarget(state, { reviewMode = false } = {}) {
   return value.view !== 'dag' || value.nodeId != null || value.panel != null
     || value.directionFilter != null || value.sequence != null
     || (!reviewMode && Number.isSafeInteger(state?.sequence) && state.sequence >= 0)
-    || value.timelineFilter !== '' || value.timelineKinds.length > 0
+    || value.timelineFilter.trim() !== '' || value.timelineKinds.length > 0
 }
 
 export function encodeRunRouteState(input, { reviewMode = false, forceGeneration = false } = {}) {

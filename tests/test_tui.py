@@ -1371,3 +1371,18 @@ def test_render_chat_survives_rich_markup_in_persisted_content():
     app._render_chat(history)                      # would raise rich.errors.MarkupError before the fix
     out = app.console.file.getvalue()
     assert "try" in out and "recap" in out         # both lines rendered (escaped), not crashed
+
+
+def test_status_panel_survives_rich_markup_in_goal_and_stop_reason():
+    """The run status Panel interpolates the user goal and the (engine/operator) stop_reason, and rich
+    parses Panel content as markup — so a goal like "strip [/b] tags" or an abort reason quoting
+    "[/dim]" raised MarkupError on EVERY _draw_run, i.e. re-crashed the run view on each reopen. The
+    round-2/round-4 escape passes had never covered _status_panel."""
+    app = _command_tui(type("_Api", (), {})())
+    panel = app._status_panel("demo", {
+        "phase": "finished", "finished": True, "nodes": {},
+        "goal": "strip [/b] tags from [red]html", "stop_reason": "aborted [/dim] by op",
+    })
+    app.console.print(panel)                       # would raise rich.errors.MarkupError before the fix
+    out = app.console.file.getvalue()
+    assert "strip" in out and "aborted" in out     # goal + stop_reason rendered (escaped), not crashed

@@ -234,9 +234,9 @@ class Tui:
             glyph, colour, label = phase_meta(r)
             best = r.get("best_confirmed")
             best = r.get("best_metric") if best is None else best
-            t.add_row(str(i), r.get("run_id", "?"), f"[{colour}]{glyph} {label}[/{colour}]",
+            t.add_row(str(i), _esc(r.get("run_id", "?")), f"[{colour}]{glyph} {_esc(label)}[/{colour}]",
                       str(r.get("nodes", 0)), fmt_metric(best),
-                      (r.get("task_id") or r.get("goal") or "—")[:28], fmt_ago(r.get("mtime")))
+                      _esc((r.get("task_id") or r.get("goal") or "—")[:28]), fmt_ago(r.get("mtime")))
         return t
 
     def _status_panel(self, run_id: str, state: dict):
@@ -252,16 +252,16 @@ class Tui:
         running = sum(1 for n in nodes.values() if n.get("status") == "pending")
         ok = sum(1 for n in nodes.values() if n.get("metric") is not None and not n.get("error"))
         lines = [
-            f"[{colour}]{glyph} {label}[/{colour}]"
+            f"[{colour}]{glyph} {_esc(label)}[/{colour}]"
             + (f"   direction={state.get('direction')}" if state.get("direction") else ""),
             f"nodes: [bold]{len(nodes)}[/bold] total · {ok} scored · {running} in flight",
             f"best:  [bold]{fmt_metric(best)}[/bold]" + (f"  (node {best_id})" if best_id is not None else ""),
         ]
         if state.get("goal"):
-            lines.append(f"goal:  {state['goal']}")
+            lines.append(f"goal:  {_esc(state['goal'])}")
         if state.get("stop_reason"):
-            lines.append(f"[dim]stopped: {state['stop_reason']}[/dim]")
-        return Panel("\n".join(lines), title=f"[bold]{run_id}[/bold]", border_style=colour, expand=True)
+            lines.append(f"[dim]stopped: {_esc(state['stop_reason'])}[/dim]")
+        return Panel("\n".join(lines), title=f"[bold]{_esc(run_id)}[/bold]", border_style=colour, expand=True)
 
     # ---- data fetch (quiet: the live loop polls on a timer, so no per-poll spinner/flicker) ---------
     def _fetch_runs(self) -> list:
@@ -281,7 +281,7 @@ class Tui:
         self.console.clear()
         live = "[green]● live[/green]" if self._interactive() else ""
         self.console.print("[bold cyan]LoopLab[/bold cyan] [dim]· terminal control plane[/dim]   "
-                           f"[dim]{self.api.base}[/dim]  {live}")
+                           f"[dim]{_esc(self.api.base)}[/dim]  {live}")
         if runs:
             self.console.print(self._runs_table(runs))
         else:
@@ -368,7 +368,7 @@ class Tui:
                 continue
             reply = (r or {}).get("reply") or "(planned — see the card)"
             msgs.append({"role": "assistant", "content": reply})
-            self.console.print(Panel(reply, title="boss", border_style="cyan", expand=True))
+            self.console.print(Panel(_esc(reply), title="boss", border_style="cyan", expand=True))
             new_spec = (r or {}).get("spec")
             # Only adopt a REAL spec — the offline soft-fail returns ok:false with a blank spec, which
             # must not wipe a good draft the user already has.
@@ -383,8 +383,8 @@ class Tui:
         from rich.panel import Panel
         body = "\n".join(spec_lines(spec))
         reason = spec_ready(spec)
-        foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{reason}[/yellow]"
-        self.console.print(Panel(body + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
+        foot = "[green]ready — type [bold]launch[/bold] to start[/green]" if reason is None else f"[yellow]{_esc(reason)}[/yellow]"
+        self.console.print(Panel(_esc(body) + "\n\n" + foot, title="proposed run", border_style="green", expand=True))
 
     def _launch(self, spec: Optional[dict], msgs: list) -> bool:
         reason = spec_ready(spec)
@@ -632,7 +632,7 @@ class Tui:
                 turn["error"] = str(e)
                 if ambiguous:
                     self.console.print(
-                        f"  [yellow]…[/yellow] {label} — response lost; checking the staged command id")
+                        f"  [yellow]…[/yellow] {_esc(label)} — response lost; checking the staged command id")
                 else:
                     self.console.print(_command_failure_line(label, e))
             if staged_index is None:
@@ -716,7 +716,7 @@ class Tui:
             ambiguous = command_error_transient(e)
             self.console.print(
                 f"[yellow]… {etype} response lost — checking the staged command id[/yellow]"
-                if ambiguous else f"[red]{etype} failed: {e}[/red]")
+                if ambiguous else f"[red]{etype} failed: {_esc(e)}[/red]")
             if staged_turn is not None:
                 staged_turn["status"] = "pending" if ambiguous else "failed"
                 staged_turn["error"] = str(e)
