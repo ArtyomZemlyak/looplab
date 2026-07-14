@@ -131,84 +131,77 @@ def _run_tools_for(state):
 def concept_coverage(
     run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
     task_type: Optional[str] = typer.Option(
-        None, help="Concept-graph skeleton to use (e.g. dense-retrieval). Default: inferred from the "
-                   "run's task_id; a generic axis-only graph when unknown."),
-    llm: bool = typer.Option(
-        False, "--llm", help="Tag experiments with the LLM (grounded, grows the vocabulary) instead of "
-                             "the offline alias heuristic. Needs a reachable endpoint."),
-    model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
+        None, help="Curated concept pack to SEED the LLM's build with (e.g. dense-retrieval) — a starting "
+                   "vocabulary the agent verifies/expands. Default: inferred from the run's task_id; the "
+                   "agent builds from scratch when no pack matches."),
+    offline: bool = typer.Option(
+        False, "--offline", help="Skip the LLM and use only the deterministic alias heuristic over the "
+                                 "curated seed pack (a fast, coarse fallback that needs a curated pack and "
+                                 "cannot derive per-task importance). Default is the agentic build."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
     repo: Optional[Path] = typer.Option(
-        None, help="Task repo to ground the UNIVERSAL uncovered-region derivation with a D1 prior-art brief "
-                   "(implies --llm). The derived 'important-but-uncovered' set works on ANY task — it does "
-                   "not need a curated concept pack."),
+        None, help="Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief."),
 ):
-    """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic over a run. Reports
-    per-axis coverage, the dominant concept/axis-clique concentration, and the standing 'uncovered
-    winning-region' alarm ('0 coverage in {X} — go there'). Offline by default (deterministic alias
-    tagging); `--llm` uses the grounded tagger AND derives the important-uncovered set per task (universal —
-    no hardcoded winning region), optionally grounded in `--repo`'s prior-art brief."""
-    from looplab.search.concept_graph import (concept_coverage, concept_report,
-                                              derive_reference_concepts, skeleton_for, tag_nodes_llm)
+    """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
+    the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
+    code/logs), computes the coverage, and derives the important-but-uncovered directions per task (universal:
+    no hardcoded winning region; grounded in `--repo`'s prior-art brief when given). `--offline` forces the
+    deterministic alias-heuristic fallback (needs a curated `--task-type` pack, no importance derivation)."""
+    from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for)
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     resolved_type = task_type or state.task_id or ""
-    if repo is not None:
-        llm = True
-    graph = skeleton_for(resolved_type)
-    # A generic (uncurated) task type has an empty skeleton, so the OFFLINE alias tagger can localize
-    # nothing and the report reads all-uncovered. Tell the user how to get a useful map instead of
-    # silently emitting zeros — pass --llm (grows the vocabulary) or --task-type of a curated pack.
-    if not llm and not graph.concepts():
-        typer.echo(f"note: no curated concept skeleton for task-type '{resolved_type or 'unknown'}', so "
-                   "the offline heuristic can't tag experiments. Pass --llm to tag with the model "
-                   "(it grows the vocabulary), or --task-type <known-pack> (e.g. dense-retrieval).")
-    tags = None
+    # A curated pack is only a SEED / starting vocabulary the agent expands (like agentic_asset_brief's
+    # seed_scan); None => the LLM builds the graph from scratch (works on any task).
+    seed = skeleton_for(resolved_type)
+    seed = seed if seed.concepts() else None
+
     client = None
-    settings = None
-    if llm:
+    if not offline:
         from looplab.core.config import Settings
         settings = Settings()
         if model is not None:
             settings.llm_model = model
         try:
             client = _make_llm_client(settings)
-            tags = tag_nodes_llm(state, graph, client, parser=settings.llm_parser,
-                                 tools=_run_tools_for(state))
-        except Exception as e:  # noqa: BLE001 — fall back to the offline heuristic, note it
-            typer.echo(f"(--llm tagging failed: {e}; using the offline heuristic)")
-            client = None
-    typer.echo(concept_report(state, graph, tags))
-    # UNIVERSAL uncovered-region (§21.13): derive the important-but-uncovered directions per task from the
-    # task goal + explored concepts (+ the D1 prior-art brief when --repo is given), instead of a hardcoded
-    # `key=True` list that only a curated pack has. This is what makes the alarm work on ANY task.
-    if client is not None:
-        brief_text = ""
-        if repo is not None:
-            try:
-                from looplab.tools.asset_brief import asset_brief as _asset_brief
-                brief_text = _asset_brief(str(repo), task_type=resolved_type or None)
-            except Exception as e:  # noqa: BLE001 — grounding is optional; derive from task+coverage alone
-                typer.echo(f"(asset-brief grounding skipped: {e})")
-        cov = concept_coverage(state, graph, tags)
-        missing = derive_reference_concepts(state.goal or "", cov, client=client,
-                                            asset_brief=brief_text, parser=settings.llm_parser)
-        typer.echo("\n  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
-        if missing:
-            for m in missing:
-                typer.echo(f"    · {m['concept_id']}: {m['why']}")
-        else:
-            typer.echo("    (none surfaced — the run's coverage looks complete for this task, or "
-                       "derivation was unavailable)")
-    # The offline alias tagger keys on lineage families (so `dcl-*` variants collapse to one concept), but it
-    # cannot resolve SEMANTIC ambiguity: a node that says "teacher checkpoint" while distilling from its OWN
-    # merged model reads as `teacher-distill`, and a "false negatives" MENTION in a loss-term rationale reads
-    # as `false-neg-handling`. Those over-report coverage and can silence the uncovered-region alarm on the
-    # key concept. The `--llm` (agentic) tagger reads the node's code/logs and discriminates — use it when the
-    # alarm's precision matters, and treat the offline default as a fast, coarse first pass.
-    if not llm and graph.concepts():
-        typer.echo("\nnote: offline alias tagging is coarse — it can over-report coverage on semantically-"
-                   "ambiguous concepts (self- vs teacher-distillation, loss- vs data-side false-negatives). "
-                   "Pass --llm for the higher-precision (agentic, code-reading) alarm.")
+        except Exception as e:  # noqa: BLE001 — no endpoint => fall back to the offline heuristic, note it
+            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
+
+    if client is None:
+        # Deterministic FALLBACK. Needs a curated seed to localize anything.
+        graph = seed or skeleton_for(resolved_type)
+        if not graph.concepts():
+            typer.echo(f"note: no curated concept pack for task-type '{resolved_type or 'unknown'}', so the "
+                       "offline heuristic can't tag experiments. Drop --offline to let the agent build the "
+                       "graph, or pass --task-type <known-pack> (e.g. dense-retrieval).")
+        typer.echo(concept_report(state, graph, None))
+        if graph.concepts():
+            typer.echo("\nnote: --offline alias tagging is coarse (over-reports coverage on semantically-"
+                       "ambiguous concepts). Drop --offline for the agentic, code-reading build + per-task "
+                       "importance.")
+        return
+
+    # PRIMARY: the LLM agent builds the whole map (grows vocab, tags agentically, derives importance).
+    brief_text = ""
+    if repo is not None:
+        try:
+            from looplab.tools.asset_brief import asset_brief as _asset_brief
+            brief_text = _asset_brief(str(repo), client=client, task_type=resolved_type or None)
+        except Exception as e:  # noqa: BLE001 — grounding is optional; derive from task+coverage alone
+            typer.echo(f"(asset-brief grounding skipped: {e})")
+    cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
+                             tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
+                             parser=settings.llm_parser)
+    typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
+    typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
+               f"{len(cmap['graph'].concepts())} concepts grown)")
+    typer.echo("  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
+    if cmap["important_uncovered"]:
+        for m in cmap["important_uncovered"]:
+            typer.echo(f"    · {m['concept_id']}: {m['why']}")
+    else:
+        typer.echo("    (none surfaced — coverage looks complete for this task, or derivation was "
+                   "unavailable)")
 
 
 @app.command(name="asset-brief")

@@ -632,6 +632,42 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
 
 
 # --------------------------------------------------------------------------- #
+# The PRIMARY D5 entry: the LLM agent BUILDS the whole concept map (agentic-first)
+# --------------------------------------------------------------------------- #
+
+def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
+                      seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
+                      parser: str = "tool_call") -> dict:
+    """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
+    concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
+    passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
+    important-but-uncovered set per task (grounded in the optional D1 `asset_brief`). No hardcoded skeleton or
+    `key=True` list is required — `seed_graph` is an OPTIONAL starting vocabulary (e.g. a curated pack for a
+    known task type); the default is an EMPTY graph the LLM fills, so this works on ANY task/domain.
+
+    This mirrors `asset_brief.agentic_asset_brief` being THE D1 primitive: the LLM AGENT is the builder, and
+    the deterministic alias heuristic is only the no-LLM FALLBACK (used when `client is None`, and then a
+    curated `seed_graph` is needed for it to localize anything). Returns
+    `{graph, tags, coverage, important_uncovered, mode}`. Impure (LLM) on the primary path; the coverage it
+    returns is pure and fold-safe. In the live engine the built tags/graph/importance are recorded as events
+    and read deterministically by `fold` (Phase 1/2 wiring) — this primitive is the producer, not the writer."""
+    graph = seed_graph if seed_graph is not None else ConceptGraph(
+        task_type=getattr(state, "task_id", "") or "")
+    if client is None:
+        # Deterministic fallback: alias heuristic over whatever seed vocabulary exists (empty -> nothing to
+        # localize; a curated seed_graph is required for a useful offline map). No importance derivation.
+        tags = tag_nodes_heuristic(state, graph)
+        return {"graph": graph, "tags": tags, "coverage": concept_coverage(state, graph, tags),
+                "important_uncovered": [], "mode": "offline-heuristic"}
+    tags = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True)
+    cov = concept_coverage(state, graph, tags)
+    important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
+                                          client=client, asset_brief=asset_brief, parser=parser)
+    return {"graph": graph, "tags": tags, "coverage": cov, "important_uncovered": important,
+            "mode": "agentic" if tools is not None else "llm"}
+
+
+# --------------------------------------------------------------------------- #
 # Human-readable report (for the CLI diagnostic)
 # --------------------------------------------------------------------------- #
 

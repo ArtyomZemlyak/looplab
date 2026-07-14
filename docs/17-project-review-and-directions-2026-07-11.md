@@ -2762,6 +2762,18 @@ the winning region as *covered*. Fixes landed on the branch:
   vocabulary can fragment — `augmentation` vs `data-augmentation` — so a concept-consolidation pass, reusing
   `hybrid_merge`, is the next universality hardening.)
 
+**LLM-agent-primary (2026-07-14).** Design correction: **the LLM agent BUILDS the concept map by default**,
+matching how D1 (`agentic_asset_brief`) and §12 (agentic `verify`) already work — the deterministic alias
+heuristic + curated skeleton are only the no-LLM FALLBACK, not the primary mechanism (polishing those aliases
+was polishing the fallback). New primitive `concept_graph.build_concept_map(state, task_goal, *, client,
+tools, seed_graph=None, asset_brief=…)`: the agent grows the vocabulary from the actual experiments (agentic —
+reads each node's code/logs), computes the pure coverage, and derives the important-uncovered set. `seed_graph`
+is an OPTIONAL starting vocabulary the agent verifies/expands (mirrors `agentic_asset_brief`'s `seed_scan`);
+default builds from scratch, so it is task-agnostic. `looplab concept-coverage` now defaults to this agentic
+build; `--offline` forces the heuristic fallback. **Replay-safety is unchanged:** `build_concept_map` is a
+PRODUCER (impure), `fold` stays pure — in the live loop its output is recorded as events and read
+deterministically (the lessons/hypotheses pattern), which is the Phase-1 wiring, not Phase 0.
+
 #### 21.15 Phase 1 — implemented (offline analytics on the foundation)
 
 *Landed 2026-07-14. The five Phase-1 levers (1a–1e) ship as **offline analytics / advisory harnesses** on

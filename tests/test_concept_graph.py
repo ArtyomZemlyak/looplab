@@ -310,3 +310,17 @@ def test_derive_reference_concepts_filters_explored(monkeypatch):
     ids = [m["concept_id"] for m in out]
     assert ids == ["data/synthetic-queries"]        # normalized + explored filtered out
     assert out[0]["why"] == "generate queries"
+
+
+def test_build_concept_map_offline_fallback(tmp_path):
+    # No client -> deterministic heuristic build over the seed pack; returns the full map shape, no crash.
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import build_concept_map, dense_retrieval_skeleton
+    st = fold(_store(tmp_path, [("dcl-rdrop", "decoupled contrastive with r-drop", 0.80),
+                                ("dcl-rdrop-ema", "dcl r-drop ema averaging", 0.81),
+                                ("temperature", "tune the contrastive temperature", 0.82)]).read_all())
+    out = build_concept_map(st, "dense retrieval", client=None, seed_graph=dense_retrieval_skeleton())
+    assert out["mode"] == "offline-heuristic"
+    assert set(out) == {"graph", "tags", "coverage", "important_uncovered", "mode"}
+    assert out["important_uncovered"] == []          # no importance derivation without a client
+    assert out["coverage"]["experiments"] == 3
