@@ -1356,3 +1356,18 @@ def test_reconcile_pending_survives_rich_markup_in_persisted_label():
     # Would raise rich.errors.MarkupError before the escape fix.
     assert app._reconcile_pending("demo", history) is True
     assert "tmp" in app.console.file.getvalue()   # label rendered (escaped), not crashed
+
+
+def test_render_chat_survives_rich_markup_in_persisted_content():
+    """Persisted boss-chat content — a user line or an LLM recap that quotes a rich-markup fragment
+    like "[/dim]" — must NOT raise MarkupError. _render_chat re-prints the whole transcript on every
+    chat view, so an unescaped line re-crashed the dashboard on each open (P2, same class as the
+    command-label escape above; the round-2 escape pass had missed the user/summary render paths)."""
+    app = _command_tui(type("_Api", (), {})())
+    history = [
+        {"role": "user", "content": "try [/bold green] and [red]x"},
+        {"role": "summary", "content": "recap [/dim] done"},
+    ]
+    app._render_chat(history)                      # would raise rich.errors.MarkupError before the fix
+    out = app.console.file.getvalue()
+    assert "try" in out and "recap" in out         # both lines rendered (escaped), not crashed

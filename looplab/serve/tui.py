@@ -359,7 +359,7 @@ class Tui:
                 with self.console.status("boss is planning…", spinner="dots"):
                     r = self.api.genesis(msgs, text, spec)
             except ApiError as e:
-                self.console.print(f"[red]planner unreachable: {e}[/red]")
+                self.console.print(f"[red]planner unreachable: {_esc(e)}[/red]")
                 msgs.pop()
                 continue
             except KeyboardInterrupt:
@@ -406,7 +406,7 @@ class Tui:
             if e.status == 409:
                 self.console.print(f"[yellow]a run named “{_esc(rid)}” already exists — rename it (edit the goal) and retry[/yellow]")
             else:
-                self.console.print(f"[red]launch failed: {e}[/red]")
+                self.console.print(f"[red]launch failed: {_esc(e)}[/red]")
             return False
         except KeyboardInterrupt:
             self.console.print("[dim]cancelled.[/dim]")
@@ -480,7 +480,7 @@ class Tui:
     def _draw_run(self, run_id: str, state: Optional[dict], history: list) -> None:
         self.console.clear()
         if state is None:
-            self.console.print(f"[red]could not load {run_id} — is the server still up?[/red]")
+            self.console.print(f"[red]could not load {_esc(run_id)} — is the server still up?[/red]")
         else:
             self.console.print(self._status_panel(run_id, state))
         self._render_chat(history)
@@ -498,14 +498,14 @@ class Tui:
         for m in shown[-tail:]:
             role = m.get("role")
             if role == "user":
-                self.console.print(f"[bold green]you ›[/bold green] {m.get('content', '')}")
+                self.console.print(f"[bold green]you ›[/bold green] {_esc(m.get('content', ''))}")
             elif role == "action":
                 act = m.get("action") or {}
                 mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
                         "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
                 self.console.print(f"  {mark} [cyan]{_esc(act.get('label') or act.get('type', 'action'))}[/cyan]")
             elif role == "summary":
-                self.console.print(f"[dim]— recap: {m.get('content', '')}[/dim]")
+                self.console.print(f"[dim]— recap: {_esc(m.get('content', ''))}[/dim]")
             else:
                 self.console.print("[bold cyan]boss ›[/bold cyan]")
                 self.console.print(Markdown(m.get("content", "")))
@@ -521,7 +521,7 @@ class Tui:
             with self.console.status("boss is reading & deciding…", spinner="dots"):
                 r = self.api.command(run_id, prior, instruction)
         except ApiError as e:
-            self.console.print(f"[red]boss unreachable: {e}[/red]")
+            self.console.print(f"[red]boss unreachable: {_esc(e)}[/red]")
             return                                           # the question stays in the (persisted) history
         except KeyboardInterrupt:
             self.console.print("[dim]cancelled.[/dim]")      # Ctrl-C during the (possibly multi-minute) call
@@ -669,7 +669,7 @@ class Tui:
         try:
             expected_generation = self.api.run_generation(run_id)
         except ApiError as e:
-            self.console.print(f"[red]{etype} failed: {e}[/red]")
+            self.console.print(f"[red]{etype} failed: {_esc(e)}[/red]")
             return {"status": "failed", "error": str(e), "event_type": etype}
         if history is not None:
             key = str(uuid.uuid4())
@@ -700,12 +700,12 @@ class Tui:
             elif status in _COMMAND_PENDING:
                 self.console.print(f"[yellow]… {etype} requested — pending[/yellow]")
             elif status in _COMMAND_FAILED:
-                self.console.print(f"[red]{etype} failed: {_command_error(result)}[/red]")
+                self.console.print(f"[red]{etype} failed: {_esc(_command_error(result))}[/red]")
                 if staged_turn is not None:
                     staged_turn["status"] = "failed"
                     staged_turn["error"] = _command_error(result)
             else:
-                self.console.print(f"[red]{etype} failed: unexpected command status {status or 'missing'}[/red]")
+                self.console.print(f"[red]{etype} failed: unexpected command status {_esc(status or 'missing')}[/red]")
                 if staged_turn is not None:
                     staged_turn["status"] = "failed"
                     staged_turn["error"] = f"unexpected command status: {status or 'missing'}"
@@ -917,9 +917,9 @@ def main(server: Optional[str], run_root: str) -> int:
     console = Console()
     child = None
     try:
-        base, child = ensure_server(server, run_root, log=lambda m: console.print(f"[dim]{m}[/dim]"))
+        base, child = ensure_server(server, run_root, log=lambda m: console.print(f"[dim]{_esc(m)}[/dim]"))
     except ApiError as e:
-        console.print(f"[red]{e}[/red]")
+        console.print(f"[red]{_esc(e)}[/red]")
         return 1
     except KeyboardInterrupt:                               # Ctrl-C while waiting for autostart
         console.print("[dim]bye[/dim]")
