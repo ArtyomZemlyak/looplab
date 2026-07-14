@@ -58,6 +58,17 @@ _node_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_node", defau
 # Copied across task/thread spawns like the other contextvars.
 _phase_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_phase", default=None)
 
+# Prior generation in THIS context, as (span_id, trace_id, full_input_list) — the seam for delta-encoded
+# LLM input (see `generation`). The agent tool-loop re-sends the WHOLE growing conversation on every
+# turn, so storing each generation's full `input` makes ~90% of spans.jsonl a re-send of the same
+# messages. Instead, when a generation STRICTLY EXTENDS the prior one (only appended messages), we store
+# just the appended tail + a back-ref, shrinking spans.jsonl ~6x; the trace views reconstruct the full
+# input from the chain when a single observation is expanded. Copied across task/thread spawns like the
+# other contextvars — but even if a copy is stale, a trace-id mismatch just resets the chain to a full
+# base, so correctness never depends on propagation, only compression does.
+_prev_gen: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_prev_gen", default=None)
+
+
 def _init_otel():  # pragma: no cover - exercised only with the [otel] extra installed
     """Return an OpenTelemetry tracer if the SDK is installed, configuring an OTLP exporter
     from the standard OTEL_* env when an endpoint is set (so `OTEL_EXPORTER_OTLP_ENDPOINT=…`
@@ -253,8 +264,33 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
         attrs["model_parameters"] = model_parameters
     with tr.span("generation", kind="generation", **attrs) as h:
         if messages is not None and _CAPTURE_LLM_IO:
-            h.set("input", [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
-                            for m in messages])
+            cur = [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
+                   for m in messages]
+            # Delta-encode the re-sent history: when this generation STRICTLY EXTENDS the prior one IN
+            # THIS TRACE (only appended to it), store just the appended tail, plus a back-ref
+            # (`input_from`) + carried-prefix count (`input_carry`). A fresh trace / sub-loop whose
+            # history diverges just stores a full base (input_from=None). ~6x smaller spans.jsonl;
+            # `/spans/{sid}` and `/trace/by_trace`
+            # reconstruct the full verbatim input from the chain (traceview.hydrate_inputs). The reader
+            # tolerates old logs (no input_carry ⇒ the `input` IS the full list).
+            prev = _prev_gen.get()
+            tid, sid = h._rec.get("trace_id"), h._rec.get("span_id")
+            # Chain ONLY when this generation STRICTLY EXTENDS the prior one in the same trace (a
+            # tool-loop turn that appended messages to the SAME conversation — the prior input is a full
+            # prefix of this one). A new trace, or a CONTEXT RESET / new sub-loop (propose→implement→
+            # repair: the history shrank or diverged, so it is NOT a strict extension) stores a full
+            # base (input_from=None). This keeps every sub-loop start self-contained: the conversation
+            # view (`_thread_turns`) treats `input_carry == 0` as the request boundary and shows its full
+            # request, and reconstruction never has to cross a reset. Base inputs are the small initial
+            # context (system+user), so compression is unaffected — the grown history stays delta'd.
+            # Require np > 0: a zero-length carry saves nothing and would leave a dangling `input_from`
+            # with carry=0, so `input_from is not None` on disk always implies a real carried prefix.
+            np = len(prev[2]) if prev is not None else 0
+            if prev is not None and prev[1] == tid and np > 0 and len(cur) >= np and cur[:np] == prev[2]:
+                h.set_many(input=cur[np:], input_carry=np, input_from=prev[0])
+            else:
+                h.set_many(input=cur, input_carry=0, input_from=None)
+            _prev_gen.set((sid, tid, cur))
         yield ObservationHandle(h)
 
 
@@ -368,6 +404,12 @@ class Tracer:
         if kind != "operation" and _ph is not None and attributes.get("phase") is None:
             attributes = {**attributes, "phase": _ph[0], "phase_span": _ph[1]}
         _tok_phase = None
+        # Reset the delta-encode chain (`_prev_gen`) at a TRACE boundary: chaining never crosses traces
+        # (generation()'s tid-guard enforces it), so a new trace always starts from a fresh base — and
+        # this bounds the retained full-input list to the trace's lifetime (reset in `finally`), matching
+        # the token discipline of the sibling contextvars above instead of leaking the last generation's
+        # (MB-scale) message list past the run into an idle context.
+        _tok_prev = _prev_gen.set(None) if new_trace else None
         # The context tokens above are reset only in the `finally` below — guard the one OTel call
         # between them so a broken bridged provider can't raise past them and leak a stale
         # node_id/phase onto every later span in this task (spans are diagnostics: degrade, not raise).
@@ -444,6 +486,8 @@ class Tracer:
                 _node_ctx.reset(_tok_node)
             if _tok_phase is not None:
                 _phase_ctx.reset(_tok_phase)
+            if _tok_prev is not None:
+                _prev_gen.reset(_tok_prev)     # restore the outer trace's chain (or None at top level)
             try:
                 self.exporter.export(rec)
             except Exception:  # noqa: BLE001 - spans are diagnostics: an export failure (disk full,

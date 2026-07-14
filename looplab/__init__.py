@@ -156,6 +156,7 @@ _LAYOUT = {
     "server": "serve",
     "settings_store": "serve",
     "shell_tools": "tools",
+    "span_index": "events",   # derived light span index behind the UI trace views (perf)
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
     "strategist": "agents",

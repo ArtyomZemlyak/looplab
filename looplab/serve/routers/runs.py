@@ -376,17 +376,24 @@ def build_router(srv) -> APIRouter:
 
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
-            from looplab.events.traceview import build_trace_view, load_spans
-            st = srv.state(rd)
             # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
             # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
             # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
-            tv = build_trace_view(st, load_spans(rd / "spans.jsonl"), light=True)
+            # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
+            # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
+            tv = srv.node_trace_view(rd, nid)
             return {"nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
                     "summary": tv.get("summary", {})}
         except Exception:  # noqa: BLE001
             return {"nodes": [], "rollup": {}, "summary": {}}
+
+    @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
+    def node_trace(run_id: str, nid: int):
+        """The LIGHT trace tree for ONE node — the hot path for expanding a node's trace card. Reads
+        only that node's spans via the index (O(node)), so the UI can fetch a node's trace lazily on
+        expand instead of loading (and re-rendering) the whole-run timeline for a 4000-node run."""
+        return _node_trace(_run_dir(run_id), nid)
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):
@@ -395,11 +402,37 @@ def build_router(srv) -> APIRouter:
         long run's trace is browser-safe; the complete text lives here and in spans.jsonl. No info lost."""
         rd = _run_dir(run_id)
         try:
-            for s in iter_jsonl(rd / "spans.jsonl"):
-                if s.get("span_id") == sid:
-                    return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
-                            "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
-                            "duration_s": s.get("duration_s"), "status": s.get("status")}
+            # Seek straight to the span's byte offset via the index instead of scanning the whole
+            # (up to 1 GB) spans.jsonl for one span. Falls back to a scan if the index lacks it (a
+            # span past the indexed tail, a foreign/torn file) so nothing is ever unreachable.
+            from looplab.events.span_index import get_index
+            idx = get_index(rd / "spans.jsonl")
+            s = idx.full_span(sid) if idx is not None else None
+            if s is None:
+                for cand in iter_jsonl(rd / "spans.jsonl"):
+                    if cand.get("span_id") == sid:
+                        s = cand
+                        break
+            if s is not None:
+                a = s.get("attributes") or {}
+                # Delta-encoded generation: reconstruct its FULL verbatim input from the trace's chain
+                # (tracing stores only the per-turn delta to keep spans.jsonl ~6x smaller) — so the
+                # expanded observation shows exactly the prompt the LLM received. No-op for tools/old logs.
+                if s.get("kind") == "generation" and "input_carry" in a:
+                    from looplab.events.traceview import hydrate_inputs
+                    tid = s.get("trace_id")
+                    trace_spans = (idx.full_spans_for_trace(tid) if idx is not None
+                                   else [c for c in iter_jsonl(rd / "spans.jsonl") if c.get("trace_id") == tid])
+                    # `s` may be a just-appended span past the indexed tail (found via the scan fallback
+                    # above but absent from the index snapshot) — include it so its own delta joins the
+                    # chain and reconstruction resolves, instead of returning the raw delta until top-up.
+                    if not any(c.get("span_id") == sid for c in trace_spans):
+                        trace_spans = trace_spans + [s]
+                    s = next((h for h in hydrate_inputs(trace_spans) if h.get("span_id") == sid), s)
+                    a = s.get("attributes") or {}
+                return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
+                        "attributes": a, "events": s.get("events") or [],
+                        "duration_s": s.get("duration_s"), "status": s.get("status")}
         except Exception:  # noqa: BLE001
             pass
         return {"span_id": sid, "attributes": {}, "events": []}
@@ -475,7 +508,12 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         try:
             from looplab.events.traceview import build_conversation, load_spans
-            return build_conversation(srv.state(rd), load_spans(rd / "spans.jsonl"), nid)
+            from looplab.events.span_index import get_index
+            # Read only THIS node's traces' spans (by byte offset via the index), not the whole
+            # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
+            idx = get_index(rd / "spans.jsonl")
+            spans = idx.full_spans_for_node(nid) if idx is not None else load_spans(rd / "spans.jsonl")
+            return build_conversation(srv.trace_scalars(rd), spans, nid)
         except Exception:  # noqa: BLE001
             return {"run_id": run_id, "node_id": str(nid), "stages": []}
 
@@ -552,11 +590,12 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/runs/{run_id}/trace")
     def trace(run_id: str):
         rd = _run_dir(run_id)
-        from looplab.events.traceview import build_trace_view, load_spans
         try:
             # light=True: strip prompt/output text — the run-level timeline needs only structure +
-            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser.
-            return build_trace_view(srv.state(rd), load_spans(rd / "spans.jsonl"), light=True)
+            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser. Served
+            # via the light span index + a file-identity cache (`srv.trace_view`): reads ~20 MB of
+            # structure, not the whole (up to 1 GB) spans.jsonl, so the first click is ~1 s not ~15 s.
+            return srv.trace_view(rd)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
             return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
                     "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}
@@ -569,10 +608,16 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
-        from looplab.events.traceview import load_spans, _tree, _cap_span_io
+        from looplab.events.traceview import load_spans, _tree, _cap_span_io, hydrate_inputs
         try:
-            spans = [_cap_span_io(s) for s in load_spans(rd / "spans.jsonl")
-                     if s.get("trace_id") == trace_id]
+            # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
+            from looplab.events.span_index import get_index
+            idx = get_index(rd / "spans.jsonl")
+            raw = (idx.full_spans_for_trace(trace_id) if idx is not None
+                   else [s for s in load_spans(rd / "spans.jsonl") if s.get("trace_id") == trace_id])
+            # Reconstruct delta-encoded generation inputs to the full verbatim prompt before capping,
+            # so this per-op tree shows the real input (no-op on old logs / non-delta spans).
+            spans = [_cap_span_io(s) for s in hydrate_inputs(raw)]
             return {"spans": _tree(spans), "count": len(spans)}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
             return {"spans": [], "count": 0}

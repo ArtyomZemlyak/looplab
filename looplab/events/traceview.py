@@ -110,14 +110,19 @@ def _cap_span_io(s: dict) -> dict:
     return {**s, "attributes": a}
 
 
+_STRIP_IO_KEYS = ("input", "output", "thinking", "input_carry", "input_from")
+
+
 def _strip_span_io(s: dict) -> dict:
     """Drop the heavy I/O entirely — the run-level trace (Dock timeline) needs only structure, timing,
     model + token usage, not the prompts/outputs. Keeps the whole-run payload tiny; the per-node
-    endpoint serves the (capped) full I/O for the Inspector."""
+    endpoint serves the (capped) full I/O for the Inspector. Also drops the delta bookkeeping
+    (`input_carry`/`input_from`): with no `input` they carry no meaning, and leaving them would let a
+    stray `hydrate_inputs` on a light span reconstruct to `[]` (its `input` is gone)."""
     a = s.get("attributes")
     if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
         return s
-    return {**s, "attributes": {k: v for k, v in a.items() if k not in ("input", "output", "thinking")}}
+    return {**s, "attributes": {k: v for k, v in a.items() if k not in _STRIP_IO_KEYS}}
 
 
 # ── linear conversation projection ───────────────────────────────────────────────────────────────
@@ -170,7 +175,17 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
         if kind == "generation":
             inp = a.get("input") if isinstance(a.get("input"), list) else []
             n = len(inp)
-            if prev_in is None or n <= prev_in:      # first call, or a context reset → new sub-loop
+            # A `request` marks a sub-loop start. Delta-encoded logs (tracing.generation) say so
+            # explicitly: a base generation stores `input_carry == 0` (it carried NOTHING from a prior
+            # generation), so its `input` IS the full initial context and the request is shown from it
+            # verbatim; a non-base generation carries a real prefix (carry > 0) and its stored `input` is
+            # only the delta — (correctly) not a boundary. Keying on `input_carry == 0` (not
+            # `input_from is None`) matches `hydrate_inputs`, which likewise treats carry=0 as
+            # self-contained, so a degenerate carry=0-with-back-ref span is still read as a base.
+            # Old full logs have no `input_carry` → fall back to the message-count-drop heuristic.
+            is_base = (a.get("input_carry") == 0) if ("input_carry" in a) \
+                else (prev_in is None or n <= prev_in)
+            if is_base:                              # first call / context reset → new sub-loop
                 turns.append({"type": "request", "label": _seg_label(s, by_id),
                               "messages": [{"role": m.get("role", "user"),
                                             "content": _cap_str(_as_text(m.get("content")))}
@@ -213,6 +228,84 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
                           "status": s.get("status"), "seconds": secs})
         # other operation spans carry structure only — skipped in the linear reading view.
     return turns
+
+
+def hydrate_inputs(spans: list[dict]) -> list[dict]:
+    """Reconstruct the FULL verbatim `input` of every delta-encoded generation in `spans` from its
+    `input_from` chain (see `tracing.generation`): full = reconstruct(input_from)[:input_carry] + delta.
+    Returns spans with `input` expanded and the `input_carry`/`input_from` bookkeeping dropped, so a
+    reader (the single-observation view, the per-op trace tree) sees exactly the prompt the LLM received,
+    with nothing lost. A generation with no `input_carry` (old full logs, or a fresh base) passes through
+    unchanged. Reconstruct within the passed set (a whole trace) — the chain never leaves its trace.
+    If an ANCESTOR span is absent (a torn/offset-skipped line — `span_index._read_full` drops one) the
+    chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
+    stamped `input_partial=True` so a reader never presents a short input as the verbatim prompt."""
+    by_sid = {s.get("span_id"): s for s in spans if s.get("span_id")}
+    memo: dict = {}
+    partial: dict = {}                    # sid -> True when its chain bottomed out at a missing ref/cycle
+
+    def _full(sid) -> list:
+        # Reconstruct iteratively (NOT recursively): a tool-loop can chain thousands of generations in
+        # one sub-loop, and recursion would blow the stack (RecursionError past ~1000) on a deep chain
+        # walked in non-file order. Walk UP the linear input_from chain collecting each delta, stopping
+        # at a base / already-memoized ancestor / missing ref / cycle, then apply the deltas back DOWN.
+        if sid in memo:
+            return memo[sid]
+        chain: list[tuple] = []           # (span_id, carry, delta_input), from `sid` upward
+        seen: set = set()
+        cur_sid = sid
+        base: list = []
+        broke = False                     # True ⇒ a referenced ancestor was missing → prefix is truncated
+        while True:
+            if cur_sid in memo:
+                base = memo[cur_sid]
+                broke = partial.get(cur_sid, False)
+                break
+            if cur_sid is None or cur_sid in seen:    # missing ref / cycle → empty base, INCOMPLETE
+                base = []
+                broke = True
+                break
+            seen.add(cur_sid)
+            s = by_sid.get(cur_sid)
+            if s is None:                             # referenced ancestor absent from the span set
+                base = []
+                broke = True
+                break
+            a = s.get("attributes") or {}
+            cur = a.get("input")
+            if "input_carry" not in a or not isinstance(cur, list):
+                base = cur if isinstance(cur, list) else []
+                break   # old log / non-list → input IS full
+            frm = a.get("input_from")
+            if frm is None:                            # self-contained base: its `input` is the full ctx
+                memo[cur_sid] = list(cur)
+                partial[cur_sid] = False
+                base = memo[cur_sid]
+                break
+            chain.append((cur_sid, a.get("input_carry") or 0, cur))
+            cur_sid = frm
+        full = base
+        for csid, carry, delta in reversed(chain):     # apply deltas base→leaf, memoizing every level
+            full = list(full[:carry]) + list(delta)
+            memo[csid] = full
+            partial[csid] = broke
+        if sid not in memo:
+            memo[sid] = full
+            partial[sid] = broke
+        return memo[sid]
+
+    out: list[dict] = []
+    for s in spans:
+        a = s.get("attributes")
+        if isinstance(a, dict) and "input_carry" in a and s.get("kind") == "generation":
+            na = {k: v for k, v in a.items() if k not in ("input_carry", "input_from")}
+            na["input"] = _full(s.get("span_id"))
+            if partial.get(s.get("span_id")):
+                na["input_partial"] = True             # an ancestor was missing → `input` is truncated
+            out.append({**s, "attributes": na})
+        else:
+            out.append(s)
+    return out
 
 
 def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:

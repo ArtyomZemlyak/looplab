@@ -69,8 +69,24 @@ runs/<name>/
 ├── tree.html             # static lineage view (regenerable)
 ├── trace.json            # derived event/trace projection for the UI
 ├── chat.jsonl            # run-scoped operator/boss transcript sidecar
-└── spans.jsonl           # original diagnostic telemetry; never read by replay
+├── spans.jsonl           # original diagnostic telemetry; never read by replay
+└── spans.index.jsonl     # derived LIGHT span index for the UI trace views (regenerable cache;
+                          #   ~25× smaller than spans.jsonl — see below)
 ```
+
+The **light span index** (`spans.index.jsonl`) is a derived cache the UI's trace views read instead
+of parsing the whole (up to multi-GB) `spans.jsonl` on every click: it holds each span's structural
+fields (ids, kind, timing, token usage) minus the heavy prompt/output/reasoning, plus the byte offset
+of the full span in `spans.jsonl`. The run-level timeline reads only this ~25×-smaller file; a
+per-span/per-node detail view seeks straight to the needed byte range. It is maintained incrementally
+and is *strictly an accelerator* — if it is missing, stale, or corrupt the views transparently rebuild
+it from `spans.jsonl` (the sole source of truth), so results are always identical, never lost.
+
+The agent tool-loop re-sends the whole growing conversation to the LLM every turn, which once made
+each generation's recorded input a near-duplicate of the last. That input is now **delta-encoded** at
+write time — a generation that only appended to the prior turn stores just the appended messages plus a
+back-reference — so `spans.jsonl` itself is ~6× smaller before the index even applies; the trace views
+reconstruct the full verbatim prompt on demand when you expand a single call.
 
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 

@@ -52,6 +52,16 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
   assert.match(dock, /!showControls && \(\(\) => \{[\s\S]*?dock-agent-status/)
 })
 
+test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
+  const dock = await source('Dock.jsx')
+  assert.match(dock, /get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)/)
+  assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?live\.building\.generation[\s\S]*?return \{ nodeId, generation \}/)
+  assert.match(dock, /const exactBuilding =[\s\S]*?traceGeneration === liveBuilding\.generation/)
+  assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce\]/)
+  assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)
+})
+
 test('virtual timeline is bounded, variable-height, generation-scoped, and politely announces unread events', async () => {
   const [virtual, css] = await Promise.all([source('VirtualTimeline.jsx'), source('styles.css')])
   assert.match(virtual, /data-event-row role="listitem"/)

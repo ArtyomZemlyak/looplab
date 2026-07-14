@@ -27,7 +27,7 @@ from looplab.events.eventstore import EventStoreConcurrencyError
 from looplab.events.htmlview import render_html
 from looplab.events.readmodel import build_readmodel
 from looplab.events.replay import fold
-from looplab.events.traceview import build_trace_view, load_spans
+from looplab.events.traceview import build_trace_view, hydrate_inputs, load_spans
 from looplab.events.types import (
     EV_BUDGET,
     EV_DIVERSITY_ARCHIVE,
@@ -517,9 +517,17 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             engine.store.append(EV_READMODEL_SKIPPED, {"error": str(exc)[:300]})
         except Exception:  # noqa: BLE001 - even the diagnostic is best-effort
             pass
-
+    # UI projection (ADR-17): join the research tree (events) to its execution detail
+    # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
+    # Hydrate the delta-encoded generation inputs first (tracing.generation stores only each turn's
+    # delta on disk) so the archived trace.json holds the FULL verbatim prompts — same as the live
+    # `/trace/by_trace` endpoint (hydrate → then build_trace_view caps). Without this the persisted
+    # projection would disagree with the live one (delta vs full input) for any external reader.
     try:
-        trace_view = build_trace_view(final, load_spans(engine.run_dir / "spans.jsonl"))
+        trace_view = build_trace_view(
+            final,
+            hydrate_inputs(load_spans(engine.run_dir / "spans.jsonl")),
+        )
     except Exception:
         if modern_protocol:
             return final

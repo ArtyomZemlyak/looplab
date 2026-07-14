@@ -347,9 +347,9 @@ def build_router(srv) -> APIRouter:
                 # Archive auxiliaries first and the event source of truth last. Command/start records
                 # deliberately survive so lost-response idempotency never re-applies to generation B.
                 names = (
-                    ".llm-usage-outbox", "spans.jsonl", "readmodel.sqlite-wal",
-                    "readmodel.sqlite-shm", "readmodel.sqlite", "nodes", "chat.jsonl",
-                    "events.jsonl",
+                    ".llm-usage-outbox", "spans.jsonl", "spans.index.jsonl",
+                    "readmodel.sqlite-wal", "readmodel.sqlite-shm", "readmodel.sqlite",
+                    "nodes", "chat.jsonl", "events.jsonl",
                 )
 
                 def _present(path: Path) -> bool:
@@ -416,6 +416,11 @@ def build_router(srv) -> APIRouter:
                     if rollback_failures:
                         detail += f"; rollback also failed for {rollback_failures}"
                     raise HTTPException(500, detail) from exc
+
+                # The identity signature already prevents reuse across Replay.  Evict explicitly too:
+                # a light trace for a large run can occupy hundreds of MB and must not linger until the
+                # replacement engine has written enough state for the next trace request.
+                srv.invalidate_trace_view(rd)
 
                 env: Optional[dict] = None
                 snap = rd / "config.snapshot.json"
@@ -493,6 +498,12 @@ def build_router(srv) -> APIRouter:
             if removed:
                 # Atomic temp+rename so a crash mid-write can't truncate spans.jsonl to a partial trace.
                 write_jsonl_atomic(sp, kept)
+                # The persisted index stores byte offsets into spans.jsonl, so any rewrite invalidates
+                # both its in-memory and on-disk representations. Rebuild lazily on the next trace read.
+                from looplab.events.span_index import invalidate
+                invalidate(sp)
+                (rd / "spans.index.jsonl").unlink(missing_ok=True)
+                srv.invalidate_trace_view(rd)
             return {"ok": True, "removed": removed, "kept": len(kept)}
 
     def _start_public(record: dict) -> dict:

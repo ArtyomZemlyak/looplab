@@ -12,6 +12,7 @@ TIME: the test suite (and any operator tooling) monkeypatches `looplab.server.ma
 the flat alias + this late binding keep that single patch point working for every router."""
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -86,6 +87,16 @@ class AppState:
         # the WHOLE events.jsonl on every SSE tick (every ~0.4s per client), O(n²) for a repo run whose
         # node_created events embed full file sets. The live-only `engine_running` is re-stamped on a hit.
         self._state_cache: dict[tuple, tuple] = {}
+        # Run-level light trace-view cache keyed by (spans.jsonl, events.jsonl) file identity. The Dock
+        # refetches /trace on every node add/settle and polls it while a node builds; without this each
+        # fetch rebuilt the view. Combined with the span index (which makes the span read O(new spans)),
+        # an unchanged run's trace is served from here instantly. See `trace_view`.
+        self._trace_view_cache: dict[str, tuple] = {}
+        # Guards the trace-view cache's insert+evict: the FastAPI threadpool runs `trace_view`
+        # concurrently, and `pop(next(iter(dict)))` on a dict another thread is inserting into raises
+        # "dictionary changed size during iteration". Held only around the cheap dict ops, never the
+        # (slow) span read + build below.
+        self._trace_view_lock = threading.Lock()
         self.reports_dir = root / "reports"
         # Late-bound route callables (set by their owning router's build_router; see module docstring).
         self.list_runs_fn: Optional[Callable[[], list]] = None
@@ -194,6 +205,88 @@ class AppState:
         return {"state": d, "seq": last_seq, "max_seq": max_seq,
                 "event_count": event_count,
                 RUN_GENERATION_FIELD: generation or None}
+
+    def trace_scalars(self, rd: Path):
+        """A lightweight state carrying ONLY the three fields the trace projections read
+        (`build_trace_view` → run_id/task_id/total_eval_seconds; `build_conversation` → run_id/task_id).
+        Pulled from the CACHED `state_payload` so the trace hot path never triggers a SECOND full fold
+        of events.jsonl just to read three scalars (the old `/trace` folded the whole 1 GB log for them).
+        Falls back to empty scalars if the log can't be folded — the trace view (spans) still renders."""
+        from types import SimpleNamespace
+        try:
+            s = self.state_payload(rd)["state"]
+        except Exception:  # noqa: BLE001 — a malformed log must not 500 the trace; degrade to spans-only
+            s = {}
+        # Fall back to the run dir name for run_id (rd == root/run_id, so rd.name IS the run id) when the
+        # log can't be folded — so a corrupt-log `/trace` still carries the correct run_id, matching the
+        # pre-index endpoint's degraded response (which returned the URL's run_id) rather than an empty one.
+        return SimpleNamespace(run_id=s.get("run_id") or rd.name, task_id=s.get("task_id") or "",
+                               total_eval_seconds=float(s.get("total_eval_seconds") or 0.0))
+
+    def trace_view(self, rd: Path) -> dict:
+        """The run-level LIGHT trace view (`build_trace_view(light=True)`), read via the incremental
+        span index (`events.span_index`) instead of parsing the whole spans.jsonl, and cached by
+        (spans.jsonl, events.jsonl) file identity so an unchanged run is served instantly on refetch.
+        Degrades to a full `load_spans` read if the index is unavailable (missing/foreign spans file)."""
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import build_trace_view, load_spans
+        sp = rd / "spans.jsonl"
+
+        def _sig(p: Path):
+            try:
+                stt = p.stat()
+                # Reset/clear_trace replace files atomically.  A replacement can deliberately retain
+                # size+mtime, so those two mutable metadata fields are not a file identity.  Match the
+                # reset-safe state/list caches and the span index: include the underlying file identity
+                # and creation/change time as well as the content metadata.
+                return (stt.st_dev, stt.st_ino, stt.st_ctime_ns,
+                        stt.st_size, stt.st_mtime_ns)
+            except OSError:
+                return None
+        key = str(rd)
+        events_path = rd / "events.jsonl"
+        # The first durable event is the run-generation identity.  Reading only that first JSONL line
+        # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
+        generation = run_generation_token(iter_jsonl(events_path))
+        sig = (_sig(sp), _sig(events_path), generation)
+        with self._trace_view_lock:
+            hit = self._trace_view_cache.get(key)
+        if hit is not None and hit[0] == sig:
+            return hit[1]
+        idx = get_index(sp)
+        spans = idx.light_spans() if idx is not None else load_spans(sp)
+        view = build_trace_view(self.trace_scalars(rd), spans, light=True)
+        with self._trace_view_lock:      # only the dict ops — the slow build above ran lock-free
+            self._trace_view_cache[key] = (sig, view)
+            # Keep this SMALL: a 1 GB run's light view is ~200 MB, so cap by count at a few recently-
+            # viewed runs (node-detail clicks on one run all share its single entry). An evicted view
+            # just rebuilds from the still-cached span index (~1 s), never a re-parse of spans.jsonl.
+            while len(self._trace_view_cache) > 4:
+                self._trace_view_cache.pop(next(iter(self._trace_view_cache)))
+        return view
+
+    def invalidate_trace_view(self, rd: Path) -> None:
+        """Explicitly evict a run's large derived trace after reset/rewrite.
+
+        Identity checks remain the correctness boundary; this bounded lock only prevents retaining a
+        now-unreachable (potentially hundreds-of-MB) view until the next request notices the change.
+        """
+        with self._trace_view_lock:
+            self._trace_view_cache.pop(str(rd), None)
+
+    def node_trace_view(self, rd: Path, nid) -> dict:
+        """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
+        — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
+        just that node's traces yields the SAME `nodes[nid]`/`rollups[nid]` as the whole-run view (a
+        span's effective node is N iff it lives in one of N's traces), so nothing is lost; only the
+        run-level `summary` narrows to the node (unused by the node-detail UI). Degrades to the whole-run
+        `trace_view` when the index is unavailable (missing/foreign spans), so the node tree still renders."""
+        from looplab.events.span_index import get_index
+        from looplab.events.traceview import build_trace_view
+        idx = get_index(rd / "spans.jsonl")
+        if idx is None:
+            return self.trace_view(rd)
+        return build_trace_view(self.trace_scalars(rd), idx.light_spans_for_node(nid), light=True)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

@@ -178,7 +178,9 @@ const CLOSED_EXPANSION = Object.freeze({ open: false, touched: false })
 // the feed can surface "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
 function collectThinking(trace, nid) {
   if (nid == null) return []
-  const spans = (trace?.nodes || {})[String(nid)] || []
+  // `trace` here is the PER-NODE trace (/nodes/{nid}/trace), whose `nodes` is already this node's tree
+  // LIST; tolerate the old whole-run shape (a {nid: [...]} map) too so nothing breaks mid-transition.
+  const spans = Array.isArray(trace?.nodes) ? trace.nodes : ((trace?.nodes || {})[String(nid)] || [])
   const out = []
   const walk = (arr) => (arr || []).forEach(s => {
     (s.events || []).forEach(ev => { if (ev.name === 'llm_call' && ev.thinking) out.push({ op: s.name, text: ev.thinking }) })
@@ -419,8 +421,8 @@ function OpTrace({ runId, traceId }) {
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
-function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false,
-  expansion = null, onExpansionChange = null, traceError = false, onRetryTrace = null }) {
+function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuilding = null,
+  expansion = null, onExpansionChange = null }) {
   const [localOpen, setLocalOpen] = useState(autoOpen)
   const localTouched = useRef(false)
   const controlled = expansion != null
@@ -446,8 +448,35 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false,
   const traceNid = TRACE_OWNER_TYPES.has(e.type)
     ? (e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null))
     : null
-  const nodeSpans = traceNid != null ? (trace?.nodes || {})[String(traceNid)] : null
-  const hasTrace = !!(nodeSpans && nodeSpans.length)
+  // LAZY: fetch only THIS node's trace (/nodes/{nid}/trace — reads just the node's spans via the index,
+  // O(node)), and only when the row is expanded. Replaces the old whole-run /trace fetch+4s poll that
+  // shipped (and re-rendered) the entire 4000-node timeline on every node boundary just to back a few
+  // inline "thinking" cards. Full per-observation I/O is still fetched on demand via /spans/{sid}.
+  const [nodeTrace, setNodeTrace] = useState(null)
+  const [nodeTraceError, setNodeTraceError] = useState(false)
+  const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
+  const rawTraceGeneration = Object.hasOwn(e.data || {}, 'generation')
+    ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
+  const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
+    ? rawTraceGeneration : null
+  const exactBuilding = liveBuilding != null && traceNid === liveBuilding.nodeId
+    && traceGeneration != null
+    && traceGeneration === liveBuilding.generation
+  const loadNodeTrace = (alive) => get(`/api/runs/${runId}/nodes/${traceNid}/trace`)
+    .then(d => { if (alive()) setNodeTrace(d) })
+    .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
+  usePoll((alive) => { setNodeTraceError(false); loadNodeTrace(alive) }, 4000,
+    [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce],
+    { enabled: open && !readOnly && traceNid != null && exactBuilding })
+  useEffect(() => {
+    if (!open || readOnly || traceNid == null || exactBuilding) return undefined
+    let alive = true
+    setNodeTraceError(false)
+    loadNodeTrace(() => alive)
+    return () => { alive = false }
+  }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce])
+  const nodeSpans = Array.isArray(nodeTrace?.nodes) ? nodeTrace.nodes : []
+  const hasTrace = !readOnly && traceNid != null
   // A sub-operation event the engine wrapped in its OWN named trace (strategy_decision, hypothesis_
   // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
   // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.
@@ -458,8 +487,7 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false,
   const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
   const omittedBytes = e?._log_page?.truncated ? Number(e._log_page.raw_bytes || 0) : 0
   const hasOmittedDetail = e?._log_page?.truncated === true
-  const traceCapable = !readOnly && traceNid != null
-  const expandable = hasReason || hasTrace || traceCapable || !!opTraceId || hasGeneric || hasOmittedDetail
+  const expandable = hasReason || hasTrace || !!opTraceId || hasGeneric || hasOmittedDetail
   const { group, glyph } = kindOf(e.type)
   const narr = hasOmittedDetail
     ? `${e.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
@@ -484,13 +512,16 @@ function EventRow({ e, trace, onFocusEvent, autoOpen, runId, readOnly = false,
           {hasOmittedDetail && <div className="notice" role="note">
             Event details were not transferred: {omittedBytes.toLocaleString()} source bytes exceed the bounded page response.
           </div>}
-          {hasReason && reasoningDetail(e, trace)}
+          {hasReason && reasoningDetail(e, nodeTrace)}
           {hasGeneric && <GenericDetail e={e} />}
-          {traceCapable && trace == null && !traceError && <div className="muted" role="status">loading node trace…</div>}
-          {traceCapable && traceError && <div className="notice resource-error compact" role="alert">
-            <span>Could not load node trace.</span><button type="button" className="btn sm" onClick={onRetryTrace}>Retry</button>
+          {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">loading node trace…</div>}
+          {hasTrace && nodeTraceError && <div className="notice resource-error compact" role="alert">
+            <span>Could not load node trace.</span><button type="button" className="btn sm"
+              onClick={() => setNodeTraceNonce(value => value + 1)}>Retry</button>
           </div>}
-          {hasTrace && <NodeTrace spans={nodeSpans} runId={runId} />}
+          {hasTrace && nodeTrace != null && (nodeSpans.length
+            ? <NodeTrace spans={nodeSpans} runId={runId} />
+            : <div className="muted">no trace captured for this node</div>)}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
@@ -553,9 +584,6 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   publishTransport = null, filter = '', onFilterChange = null, kindFilters = [],
   onKindFiltersChange = null }) {
   const log = timeline.rows
-  const [trace, setTrace] = useState(null)
-  const [traceError, setTraceError] = useState(false)
-  const [traceNonce, setTraceNonce] = useState(0)
   // URL-owned diagnostic filters: Dock renders them, while RunView commits the canonical fragment
   // state. This lets reload/Back/Forward restore the exact event lens without a second store.
   const kinds = useMemo(() => new Set(kindFilters), [kindFilters])
@@ -621,39 +649,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   useEffect(() => {
     if (filter || kinds.size > 0) setShowControls(true)
   }, [filter, kinds.size])
-  const traceWanted = useMemo(() => log.some(event => {
-    const expansion = eventExpansion.get(timelineEventKey(event))
-    return expansion?.open && TRACE_OWNER_TYPES.has(event.type)
-  }), [log, eventExpansion])
-  // The trace re-folds the whole spans.jsonl server-side. Keep that scale cost lazy: a closed or
-  // merely virtualized timeline does not scan all spans just to decide whether a disclosure exists.
-  const nodeCount = live ? Object.keys(live.nodes || {}).length : 0
-  // Refetch the trace when a node is ADDED or SETTLES (evaluate/repair spans land on a node-in-place,
-  // which doesn't change nodeCount) — so a node's eval/repair waterfall appears on its feed rows
-  // without waiting for the next node. Still not every SSE tick (idle ticks don't change either key).
-  const settledCount = live ? Object.values(live.nodes || {}).filter(n => n.status === 'evaluated' || n.status === 'failed').length : 0
-  // The task/data SETUP phase runs before any node exists (nodeCount 0), so the node-count/settled
-  // triggers never fire and its span tree would sit frozen. While in setup, key the refetch on liveSeq
-  // so the setup trace streams in live (the phase is short; a few small refetches). Once the first node
-  // lands this collapses to 0 and normal node-based refetching resumes.
-  const inSetup = !!live && !live.finished && live.engine_running !== false && nodeCount === 0
-  useEffect(() => {
-    if (readOnly || !traceWanted) { setTrace(null); setTraceError(false); return }
-    let active = true
-    setTraceError(false)
-    get(`/api/runs/${runId}/trace`).then(value => { if (active) setTrace(value) })
-      .catch(() => { if (active) { setTrace(null); setTraceError(true) } })
-    return () => { active = false }
-  }, [runId, nodeCount, settledCount, live?.finished, inSetup ? liveSeq : 0, readOnly, traceWanted, traceNonce])
-  // While a node is BUILDING, its spans stream in but nodeCount/settledCount don't change — so the
-  // fetch above never re-runs and the building node's Trace stays FROZEN (you see spans, but they never
-  // grow). Poll the trace while a node builds so its Trace tab/row fills in live; the poll stops the
-  // moment building ends (node_created clears `building`), and the fetch above does the final refresh.
-  const buildingId = live && !live.finished && live.engine_running !== false && live.building
-    ? live.building.node_id : null
-  usePoll(() => get(`/api/runs/${runId}/trace`).then(value => { setTrace(value); setTraceError(false) })
-    .catch(() => setTraceError(true)),
-    4000, [runId, buildingId, readOnly, traceWanted], { enabled: !readOnly && traceWanted && buildingId != null })
+  // Trace details are fetched per node, only when that row is expanded. This keeps the virtualized,
+  // paged timeline O(visible events) and avoids folding or transferring the whole run trace.
   const atLiveView = viewSeq == null || viewSeq >= liveSeq
   const visiblyLive = atLiveView && timeline.followingTail && timeline.windowAtTail
 
@@ -661,11 +658,14 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
   // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
   // without this guard its node_created row would auto-expand and dump the full span trace forever.
-  const livePendingId = useMemo(() => {
-    if (!live || live.finished || live.engine_running === false) return null
-    const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending').map(n => n.id)
-    return pend.length ? Math.max(...pend) : null
-  }, [live])
+  const liveBuilding = useMemo(() => {
+    if (readOnly || !atLiveView || timeline.generation !== expectedGeneration || !live?.building) return null
+    const nodeId = Number(live.building.node_id)
+    const generation = Object.hasOwn(live.building, 'generation')
+      ? live.building.generation : (live.nodes?.[nodeId]?.attempt ?? 0)
+    if (!Number.isInteger(nodeId) || nodeId < 0 || !Number.isInteger(generation) || generation < 0) return null
+    return { nodeId, generation }
+  }, [readOnly, atLiveView, timeline.generation, expectedGeneration, live])
 
   // Scrubber: pointer/key movement is a LOCAL preview. Commit only on pointer-up/key-up/blur so a
   // 50k-event drag cannot queue a series of expensive historical state folds on the server.
@@ -1123,9 +1123,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
               onJumpToLive={returnToLive}
               renderRow={event => {
                 const key = timelineEventKey(event)
-                return <EventRow e={event} trace={readOnly ? null : trace} onFocusEvent={focusEvent} runId={runId}
-                  readOnly={readOnly} autoOpen={false}
-                  traceError={traceError} onRetryTrace={() => setTraceNonce(value => value + 1)}
+                return <EventRow e={event} onFocusEvent={focusEvent} runId={runId}
+                  readOnly={readOnly} liveBuilding={liveBuilding} autoOpen={false}
                   expansion={eventExpansion.get(key) || CLOSED_EXPANSION}
                   onExpansionChange={next => setEventExpansion(current => {
                     const updated = new Map(current); updated.set(key, next); return updated
