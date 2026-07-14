@@ -2516,3 +2516,40 @@ by a shared hierarchical taxonomy (D5) as substrate, seed-time asset perception 
 layer that stops the loop discarding correct directions (D3/D6), and an operator that lets the loop expand its
 own action space (D7). Most of it is early-lane offline work; the live-steering half inherits the same R-gates
 and mode-gating as §§10–12.
+
+#### 21.10 Offline validation on the `rubertlite` run (measured 2026-07-14)
+
+*Ran each early-lane lever as an offline harness over the run's own `events.jsonl`; LLM judgments used the
+same engine backend (deepseek-v4-flash) via `make_llm_client`. Judgment prompts were **blind** — the proven
+winning recipe was never revealed to the judge. Harness scripts are archived with the run analysis; this is a
+code-confirmed measurement, and it changed two of the designs.*
+
+| Lever | Result | Key measured number |
+|---|---|---|
+| **D5** per-level coverage | **PASS (with refinement)** | Flat `dominant_theme_frac` the Strategist actually saw **fell 0.67→0.03** over the run (entropy stayed ~0.99) — it reported the run as *increasingly diverse*. A lineage taxonomy puts **31 of ~62 themed nodes under `loss/decoupled-contrastive`**; that share **rose 0.10→0.52**, crossed the 0.33 over-investment mark by ~node 30 and 0.50 (axis=`loss`) by node 44; the flat signal **never** crossed 0.5. The two signals move in **opposite directions**. |
+| **D7** action-space lock-in | **PASS (shares D5's taxonomy dependency)** | 14 of node_48's 17 children are DCL-lineage; longest consecutive same-lever streak = 12 (from node_42); a "≥5 consecutive same-lever" detector fires at **node_29**, with ~38 same-lever nodes still to come. |
+| **D1** asset ingestion | **PASS** | With the repo-derived asset brief, the proposer's #1 is grounded in the *exact existing infra + proven params* (`dataset.n_negatives`/`negatives_path`, `loss.type='mnr'`, NV-0.95 filter, distill-from-`e5-base`); without it, it proposes only generic "BM25 hard negatives." |
+| **D6** lesson over-generalization guard | **PASS** | On the real node_63 lesson, the critic flags `over_generalizes=true`, identifies the sound underlying direction (false-negative handling), and rescopes it to "in this specific setup." |
+| **D3** failed-direction re-examination | **CONDITIONAL — the most instructive result** | **Blind, single-shot it FAILS**: it calls node_63 "direction-bound, don't re-examine" — *reproducing the loop's exact original mistake* — and even **contradicts its own D6 answer**. **With prior-art grounding it flips to correct**: `implementation-bound`, `re-examine=true`, and proposes the right data-side false-negative filter. |
+
+**Two design refinements this validation forces:**
+
+1. **The taxonomy (D5/D7) MUST key on primary-lever LINEAGE, not surface tokens.** A naive per-theme LLM
+   classification *re-fragments* the same core method across axes (it filed `dcl-rdrop`→regularization,
+   `dcl-longer-training`→training-schedule, `scale-batch-negatives`→negatives), so per-level concentration and
+   the lock-in detector both looked *diverse* and fired late/never — the flat-slug pathology one level up. Only
+   a lineage-preserving assignment (all `dcl-*` variants → one family regardless of modifier) makes the signal
+   fire early. **Normative:** D5's taxonomy builder is judged by lineage consistency, and the coverage/lock-in
+   signals read the lineage level, not the leaf.
+2. **The graded novelty/critic (D3) MUST be grounded, not blind.** A single-shot LLM critic reproduced the
+   loop's original error *and* self-contradicted between two framings. Grounding it with prior-art (D1 assets /
+   D2 deep-research / Part III-B §17 distance-from-seed) flipped it to the correct verdict *and* the correct
+   fix. **Normative:** D3 re-examination is not a standalone LLM call — it consumes the D1/D2/§17 grounding, and
+   is a prime consumer of §12's repeated-evaluation + criteria-decomposition (single-shot variance is exactly
+   what produced the D3↔D6 contradiction). This is empirical support for §12 over a discrete one-shot judge.
+
+**One cross-cutting finding.** In D1, even the *base model* proposes hard-negative mining unprompted — so the
+loop's failure was **not** base-model ignorance but **orchestration**: the narrowing proposer prompt, greedy
+champion-expansion, the state-narrator research memos, and the absent data-side infra. That is direct evidence
+the highest-leverage fixes are D1 (perception) + D5 (structure) + D7 (capability-expansion), not a stronger
+model — and it reinforces §10's "don't delegate the loop to a bigger backend."
