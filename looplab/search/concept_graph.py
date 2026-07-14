@@ -155,17 +155,40 @@ _DENSE_RETRIEVAL_CONCEPTS: list[Concept] = [
     Concept("negatives/in-batch", "In-batch / cross-batch negatives", ("negatives",),
             ("in-batch negative", "in batch negative", "batch negative", "cross-batch negative",
              "xbm", "memory bank", "gradient cache", "gradcache", "grad-cache")),
+    # In-batch hard-negative selection (top-k / threshold on the batch similarity matrix) is a DISTINCT,
+    # reachable-but-weak cousin of external mining — the run's node_37/58 lived here. Splitting it out keeps
+    # the bare "hard negative mining" phrase (which the run used for its IN-BATCH threshold) OFF the key
+    # external-mining concept, so the §21.11 uncovered-region alarm isn't silenced by an in-batch attempt
+    # (§21.12 refinement: the granularity separating reachable-from-winning is load-bearing — the offline
+    # heuristic over-tagged external-mining onto node_37/58 and falsely reported the winning region covered).
+    Concept("negatives/hard-mining-inbatch", "In-batch hard-negative selection (top-k / threshold)",
+            ("negatives",),
+            ("hard negative mining", "hard-negative mining", "hard neg mining", "hard-neg mining",
+             "top-k negative", "topk negative", "threshold negative", "in-batch hard", "mine the hardest")),
+    # KEY: genuine EXTERNAL/offline mining only — aliases require an external qualifier (offline / ANN / BM25 /
+    # corpus / cross-encoder-mined / "mine negatives"), NOT the bare "hard negative mining" the run used for
+    # its in-batch threshold (that lands on `hard-mining-inbatch` above).
     Concept("negatives/external-mining", "External / offline hard-negative mining", ("negatives",),
-            ("hard negative mining", "hard-negative mining", "mined negative", "mined hard neg",
-             "external negative", "offline mining", "ann mining", "bm25 negative", "teacher-mined",
-             "cross-encoder mined", "retrieved negative", "hard neg mining"), key=True),
+            ("mined negative", "mined hard neg", "mine negatives", "mine hard negative", "external negative",
+             "offline mining", "offline hard negative", "ann mining", "bm25 negative", "teacher-mined",
+             "cross-encoder mined", "cross-encoder to mine", "retrieved negative", "corpus-mined",
+             "index-mined", "faiss negative", "nv-retriever"), key=True),
+    # KEY: DATA-SIDE false-negative filtering/masking only — NOT a mere mention of "false negatives" in a
+    # loss-term rationale (node_63's loss-side debiasing was a different, failed implementation, not the
+    # data-side direction §21.11 marks unused).
     Concept("negatives/false-neg-handling", "False-negative filtering / denoising", ("negatives",),
-            ("false negative", "false-negative", "false neg", "nv-", "nv filter", "denoise negative",
-             "denoised", "positive-aware", "positive aware", "negative filtering"), key=True),
+            ("false-negative filter", "false negative filter", "false-neg filter", "false-negative filtering",
+             "false negative filtering", "false-negative mask", "false negative mask", "false-neg mask",
+             "mask false negative", "nv-style", "positive-aware", "positive aware", "denoise negative",
+             "denoised negative"), key=True),
     # ---- distillation ----
+    # KEY: TEACHER / cross-encoder distillation only — bare "knowledge distillation" / "kd from" ALSO fire on
+    # SELF-distillation (node_36) and are dropped, so the key concept reflects the unused external-teacher
+    # lever, not the run's self-distill attempts.
     Concept("distillation/teacher-distill", "Cross-encoder / teacher distillation", ("distillation",),
-            ("teacher distill", "teacher-distill", "cross-encoder distill", "knowledge distillation",
-             "distill from teacher", "reranker distill", "kd from", "teacher checkpoint"), key=True),
+            ("teacher distill", "teacher-distill", "cross-encoder distill", "distill from teacher",
+             "distill from the teacher", "distill from a larger", "reranker distill", "teacher checkpoint",
+             "margin-mse", "margin mse"), key=True),
     Concept("distillation/self-distill", "Self-distillation from own checkpoints", ("distillation",),
             ("self-distill", "self distill", "self-distillation", "ema teacher")),
     # ---- data ----

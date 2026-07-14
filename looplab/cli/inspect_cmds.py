@@ -167,6 +167,16 @@ def concept_coverage(
         except Exception as e:  # noqa: BLE001 — fall back to the offline heuristic, note it
             typer.echo(f"(--llm tagging failed: {e}; using the offline heuristic)")
     typer.echo(concept_report(state, graph, tags))
+    # The offline alias tagger keys on lineage families (so `dcl-*` variants collapse to one concept), but it
+    # cannot resolve SEMANTIC ambiguity: a node that says "teacher checkpoint" while distilling from its OWN
+    # merged model reads as `teacher-distill`, and a "false negatives" MENTION in a loss-term rationale reads
+    # as `false-neg-handling`. Those over-report coverage and can silence the uncovered-region alarm on the
+    # key concept. The `--llm` (agentic) tagger reads the node's code/logs and discriminates — use it when the
+    # alarm's precision matters, and treat the offline default as a fast, coarse first pass.
+    if not llm and graph.concepts():
+        typer.echo("\nnote: offline alias tagging is coarse — it can over-report coverage on semantically-"
+                   "ambiguous concepts (self- vs teacher-distillation, loss- vs data-side false-negatives). "
+                   "Pass --llm for the higher-precision (agentic, code-reading) alarm.")
 
 
 @app.command(name="asset-brief")
