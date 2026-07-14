@@ -185,17 +185,18 @@ class NoveltyGateMixin:
         # grade_novelty's own dedup (levels 1/2) is PARAM-based, so a proposal whose params are empty or
         # key-disjoint from the tried node structurally SKIPS those levels — a VERBATIM text repeat with no
         # distinguishing params then reaches level 4/5 and would be wrongly short-circuited past the flat
-        # gate. Guard it: when the proposal's idea-TEXT is identical to its near node's (the flat gate's own
-        # notion of identity via `_idea_text`), it is a textual duplicate the param grade couldn't see —
-        # DEFER to the flat gate (which judges text) rather than bypass it. Genuine variants (different
-        # rationale, or a real param tweak that reached level 4 on differing values) are unaffected.
-        near = state.nodes.get(grade.near_node) if grade.near_node is not None else None
-        if near is not None and getattr(near, "idea", None) is not None:
-            def _norm(t: str) -> str:
-                return " ".join((t or "").split()).lower()
-            nt = _norm(self._idea_text(idea))
-            if nt and nt == _norm(self._idea_text(near.idea)):
-                return None                      # verbatim textual duplicate -> defer to the flat gate
+        # gate. Guard it: when the proposal's idea-TEXT is identical to ANY tried node's (the flat gate's own
+        # notion of identity via `_idea_text`), it is a textual duplicate the param grade couldn't see — DEFER
+        # to the flat gate (which judges text) rather than bypass it. Scan ALL nodes, NOT just `grade.near_node`:
+        # for level 4/5 `near_node` is the first concept-sharing / failed-direction node, generally NOT the
+        # verbatim-matching one, so comparing only to it would let a verbatim repeat of a DIFFERENT node slip
+        # through. Genuine variants (different rationale, or a real param tweak on differing values) are unaffected.
+        def _norm(t: str) -> str:
+            return " ".join((t or "").split()).lower()
+        nt = _norm(self._idea_text(idea))
+        if nt and any(getattr(nd, "idea", None) is not None and nt == _norm(self._idea_text(nd.idea))
+                      for nd in state.nodes.values()):
+            return None                          # verbatim textual duplicate -> defer to the flat gate
         self.store.append(EV_NOVELTY_GRADED, {
             # prospective id = max+1, not len() (gap-safe; audit only) — matches the reject events below.
             "node_id": max(state.nodes, default=-1) + 1, "level": grade.level, "grade": grade.name,

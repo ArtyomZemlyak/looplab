@@ -316,7 +316,12 @@ def _alias_index(graph: ConceptGraph, *, allow_plural: bool) -> list[tuple[objec
         for a in c.aliases:
             a = (a or "").strip().lower()
             if a:
-                idx.append((_re.compile(r"(?<![a-z0-9])" + _re.escape(a) + tail), c.id))
+                # An alias ending in a NON-alnum char (`recall@`, `lr=`, `nv-`) was authored to sit in FRONT
+                # of a value (`recall@100`, `lr=2e-5`); an alnum tail-boundary would forbid the very match it
+                # exists for (the digit after `@`/`=` fails the lookahead), silently killing the alias. Only
+                # anchor the tail when the alias ends in an alnum char.
+                t = tail if a[-1].isalnum() else ""
+                idx.append((_re.compile(r"(?<![a-z0-9])" + _re.escape(a) + t), c.id))
     return idx
 
 
@@ -635,33 +640,33 @@ def derive_reference_concepts(task_goal: str, coverage: dict, *, client, asset_b
 # Vocabulary consolidation — keep a freely-grown graph from FRAGMENTING (§21.11 follow-up)
 # --------------------------------------------------------------------------- #
 
-def _axis_rename_from_ids(rename: dict) -> dict:
-    """Derive an axis->canonical-axis map from an id->canonical-id map (the id prefix is the axis)."""
-    out: dict = {}
-    for raw, canon in rename.items():
-        ra, ca = str(raw).split("/", 1)[0], str(canon).split("/", 1)[0]
-        if ra and ca and ra != ca:
-            out[ra] = ca
-    return out
-
-
 def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tuple:
     """Rebuild `(graph, tags)` under an id->canonical-id `rename` map: merge concepts that collapse to the
-    same canonical id (union their axes + key flag), rename axis prefixes, and rewrite every node's tag set
-    to canonical ids (deduped). Pure; identity when `rename` is empty."""
+    same canonical id (union their axes + key flag) and rewrite every node's tag set to canonical ids
+    (deduped). Pure; identity when `rename` is empty.
+
+    A RENAMED concept takes its axis from its OWN canonical id prefix — NOT a global axis-rename map, which
+    is ambiguous when one source axis maps to several targets (`aug/crop→data/crop`, `aug/flip→vision/flip`)
+    and would leave a concept whose id prefix disagrees with its stored axes, or silently rewrite a seeded
+    axis placeholder's axis. A NON-renamed concept keeps its own axes verbatim (so a seeded axis never
+    vanishes because a DIFFERENT concept was merged)."""
     if not rename:
         return graph, tags
-    axis_rename = _axis_rename_from_ids(rename)
     new = ConceptGraph(task_type=graph.task_type)
     for c in graph.concepts():
         cid = rename.get(c.id, c.id)
-        axes = tuple(dict.fromkeys(axis_rename.get(a, a) for a in c.axes)) or (cid.split("/", 1)[0],)
+        # Renamed -> axis is the canonical id's prefix (id/axis consistent by construction). Not renamed ->
+        # keep its own axes (grown concepts are single-axis; skeleton concepts carry their curated axes).
+        axes = (cid.split("/", 1)[0],) if c.id in rename else c.axes
         existing = new.get(cid)
-        merged_axes = tuple(dict.fromkeys((existing.axes if existing else ()) + axes))
+        merged_axes = tuple(dict.fromkeys((existing.axes if existing else ()) + tuple(axes)))
         merged_key = bool(c.key or (existing.key if existing else False))
+        # Prefer the CANONICAL concept's own label (a curated skeleton label must not be overwritten by a
+        # merged-away synonym's) — fall back to any label already accumulated, then this concept's.
+        canon = graph.get(cid)
+        label = (canon.label if canon is not None else (existing.label if existing else c.label))
         # ensure() keeps the first entry, so replace to carry the merged axes/key deterministically.
-        new._concepts[cid] = Concept(id=cid, label=(existing.label if existing else c.label),
-                                     axes=merged_axes, key=merged_key)
+        new._concepts[cid] = Concept(id=cid, label=label, axes=merged_axes, key=merged_key)
     new_tags = {nid: frozenset(rename.get(x, x) for x in cids) for nid, cids in (tags or {}).items()}
     return new, new_tags
 
@@ -733,7 +738,9 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
             _seen.add(x)
             x = rename[x]
         return x
-    rename = {k: _final(k) for k in rename}
+    # Drop identity entries: a rename CYCLE (a->b, b->a) resolves each id to itself (`_final` fail-safe),
+    # and a self-rename would otherwise leak a bogus `a->a` "merge" into the reported map.
+    rename = {k: v for k, v in ((k, _final(k)) for k in rename) if k != v}
     g2, t2 = _apply_consolidation(graph, tags, rename)
     return g2, t2, rename
 

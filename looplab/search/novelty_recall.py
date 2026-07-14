@@ -114,8 +114,10 @@ def paraphrase_leaks(state: RunState, *, client=None, embed=None, parser: str = 
     out["adjudicated"] = True
     out["adjudicated_count"] = min(len(pairs), max_pairs)   # how many of candidate_pairs were LLM-judged
     denom = caught + len(leaks)
-    # Recall over the ADJUDICATED (most-similar) pairs — a bounded estimate; leaks in the un-judged tail
-    # would only LOWER it, so this is an UPPER bound on recall (a lower bound on leakage).
+    # `caught` is the gate's REJECTION count (`novelty_events`), taken as the TP proxy — it assumes gate
+    # precision ~1 (every rejection was a true dup), which INFLATES the numerator, and `leaks` only counts
+    # the adjudicated most-similar tail (un-judged tail leaks would raise the denominator). BOTH push the
+    # ratio up, so `recall` is an UPPER bound (a lower bound on leakage) — a rough estimate, not exact recall.
     out["recall"] = round(caught / denom, 3) if denom else None
     return out
 

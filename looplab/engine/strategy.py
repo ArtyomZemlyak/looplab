@@ -314,6 +314,8 @@ class StrategyCadenceMixin:
         replay stays deterministic even though the producer is impure — the established memo/lessons pattern.
         Deterministic FALLBACK (no client): the alias heuristic over the task-type skeleton (curated pack
         required) — None when neither a client nor a skeleton is available (nothing to steer on)."""
+        import contextlib
+
         from looplab.search.concept_graph import (build_concept_map, concept_coverage, skeleton_for,
                                                   uncovered_regions)
         from looplab.search.lock_in import lock_in_signal
@@ -323,41 +325,49 @@ class StrategyCadenceMixin:
         client = _rc() if callable(_rc) else None
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
-        graph = None
-        tags = None
-        important: list = []
-        mode = "heuristic"
-        if client is not None:
-            try:
+        # ENTIRE computation is guarded: an audit-only snapshot must NEVER perturb the run (the LLM build,
+        # the consolidation, AND the pure rollups over an arbitrary grown graph all sit under one try).
+        try:
+            graph = tags = cov = None
+            important: list = []
+            mode = "heuristic"
+            if client is not None:
                 parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
-                cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
-                                         seed_graph=seed, parser=parser)
-                graph, tags, important = cmap["graph"], cmap["tags"], cmap["important_uncovered"]
+                # Span-scope the concept-map LLM generations (agentic tagging + consolidation + importance)
+                # so they file under a `concept_coverage` op, not the ambient/next-node trace (mirrors
+                # `_maybe_consult_strategist`'s `strategist_consult` span). nullcontext on a spanless self.
+                _span = getattr(self, "_op_span", None)
+                with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
+                    cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
+                                             seed_graph=seed, parser=parser)
+                # Reuse the coverage build_concept_map already computed (no second O(nodes) rollup).
+                graph, tags = cmap["graph"], cmap["tags"]
+                cov, important = cmap["coverage"], cmap["important_uncovered"]
                 mode = cmap.get("mode", "llm")
-            except Exception:  # noqa: BLE001 — agentic build failed => deterministic fallback, no crash
-                graph = tags = None
-                important = []
-        if graph is None:                       # deterministic fallback needs a curated skeleton
-            if seed is None:
+            if graph is None:                   # deterministic fallback needs a curated skeleton
+                if seed is None:
+                    return None
+                graph, tags, mode = seed, None, "heuristic"
+                cov = concept_coverage(state, graph, tags)
+            if not graph.concepts():
                 return None
-            graph, tags, mode = seed, None, "heuristic"
-        if not graph.concepts():
+            lock = lock_in_signal(state, graph, tags=tags)
+            top = cov.get("top_concept") or {}
+            # UNIVERSAL uncovered-region: prefer the LLM-DERIVED importance (any task); else the skeleton's
+            # hardcoded key-concept alarm (deterministic fallback).
+            keys = [str((m or {}).get("concept_id")) for m in (important or [])
+                    if (m or {}).get("concept_id")][:8]
+            if keys:
+                directive = ("0 coverage in {" + ", ".join(keys[:6]) + "} across all "
+                             f"{cov['experiments']} experiments — direct the next proposals there "
+                             "(not just 'broaden').")
+                fired, uncovered_key, uncovered_axes = True, keys, cov["uncovered_axes"]
+            else:
+                alarm = uncovered_regions(state, graph, tags)
+                fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
+                uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
+        except Exception:  # noqa: BLE001 — never let an audit snapshot crash the cadence / the run
             return None
-        cov = concept_coverage(state, graph, tags)
-        lock = lock_in_signal(state, graph, tags=tags)
-        top = cov.get("top_concept") or {}
-        # UNIVERSAL uncovered-region: prefer the LLM-DERIVED importance (any task); else the skeleton's
-        # hardcoded key-concept alarm (deterministic fallback).
-        if important:
-            keys = [m["concept_id"] for m in important][:8]
-            directive = ("0 coverage in {" + ", ".join(keys[:6]) + "} across all "
-                         f"{cov['experiments']} experiments — direct the next proposals there "
-                         "(not just 'broaden').")
-            fired, uncovered_key, uncovered_axes = True, keys, cov["uncovered_axes"]
-        else:
-            alarm = uncovered_regions(state, graph, tags)
-            fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
-            uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
         return {
             "fired": fired,
             "uncovered_key": uncovered_key,
