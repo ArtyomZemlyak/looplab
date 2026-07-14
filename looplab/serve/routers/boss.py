@@ -329,6 +329,19 @@ def _plan_to_actions(plan: "_Plan", st) -> list[dict]:
     return out
 
 
+async def _json_object(request) -> dict:
+    """Parse a request body as a JSON object or fail with 400. Mirrors the guards in
+    ``routers/control.py`` so a non-JSON or non-object body (e.g. a bare ``[]``) yields a clean 400
+    instead of an ``AttributeError``/``JSONDecodeError`` surfacing as a 500."""
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    return body
+
+
 def build_router(srv) -> APIRouter:
     if APIRouter is None:
         raise ModuleNotFoundError(
@@ -368,7 +381,10 @@ def build_router(srv) -> APIRouter:
         per request serialize within the process, so no cross-process lock is needed here."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        turn = await request.json()
+        try:
+            turn = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "chat turn must be valid JSON") from exc
         if not isinstance(turn, dict):
             raise HTTPException(400, "chat turn must be a JSON object")
         path = rd / "chat.jsonl"
@@ -388,7 +404,7 @@ def build_router(srv) -> APIRouter:
         offline — compaction is opt-in, so a missing model just leaves the chat uncompacted."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        body = await request.json()
+        body = await _json_object(request)
         msgs = body.get("messages") or []
         convo = "\n".join(f"{m.get('role')}: {m.get('content', '')}"
                           for m in msgs if str(m.get("content", "")).strip())
@@ -412,7 +428,7 @@ def build_router(srv) -> APIRouter:
         message list each turn. Soft-fails offline so the panel degrades cleanly."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        body = await request.json()
+        body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         st = srv.state(rd)
@@ -447,7 +463,7 @@ def build_router(srv) -> APIRouter:
         Uses structured output so the result is a ready-to-run Idea. Soft-fails offline."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        body = await request.json()
+        body = await _json_object(request)
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()
         history = body.get("messages") or []
@@ -489,7 +505,7 @@ def build_router(srv) -> APIRouter:
         so the confirm-card flow downstream is unchanged."""
         rd = _run_dir(run_id)
         generation = srv.commands.run_generation(rd)
-        body = await request.json()
+        body = await _json_object(request)
         msgs = body.get("messages") or []
         nid = body.get("node_id")
         instruction = (body.get("instruction") or "").strip()

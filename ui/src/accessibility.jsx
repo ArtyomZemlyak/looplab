@@ -34,8 +34,14 @@ export function downloadTableCsv(filename, columns, rows) {
   const anchor = document.createElement('a')
   anchor.href = href
   anchor.download = filename || 'data.csv'
+  // Firefox does not fire a download for a synthetic click on a DETACHED anchor, and revoking the
+  // blob URL on the same tick can abort the download before the stream starts. Attach, click, then
+  // detach and revoke on the next tick.
+  anchor.style.display = 'none'
+  document.body.appendChild(anchor)
   anchor.click()
-  URL.revokeObjectURL(href)
+  document.body.removeChild(anchor)
+  setTimeout(() => URL.revokeObjectURL(href), 0)
   return true
 }
 
@@ -103,7 +109,8 @@ export function ChartFrame({ title, description, columns = [], rows = [], csvNam
     <div className="accessible-chart-actions">
       <button type="button" className="btn xs ghost" aria-expanded={showData}
         aria-label={`${showData ? 'Hide' : 'View'} ${title} data`}
-        aria-controls={`chart-data-${generated}`} onClick={() => setShowData(value => !value)}>
+        aria-controls={showData ? `chart-data-${generated}` : undefined}
+        onClick={() => setShowData(value => !value)}>
         {showData ? 'Hide data' : 'View data'}
       </button>
       {csvName && rows.length > 0 && <button type="button" className="btn xs ghost"

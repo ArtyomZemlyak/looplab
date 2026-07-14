@@ -131,7 +131,9 @@ def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeyp
     assert client.get("/api/review/state?seq=0", headers=review).status_code == 400
     assert client.get("/api/review/nodes/0/metrics", headers=review).status_code == 200
     assert client.get("/api/review/nodes/0", headers=review).status_code == 403
-    assert client.get("/api/review/not-a-route", headers=review).status_code == 404
+    # Unknown review sub-path: 404, or 405 when a wildcard route of another method (misc.py's
+    # PUT /api/{kind}/{name}) partial-matches the path. Either way it is not served to the reviewer.
+    assert client.get("/api/review/not-a-route", headers=review).status_code in (404, 405)
     # A legacy run has no snapshot; never fall back to the current server's Settings.
     assert client.get("/api/review/config", headers=review).status_code == 404
 

@@ -316,7 +316,9 @@ def build_router(srv) -> APIRouter:
             out = {key: dumped[key] for key in _REVIEW_NODE_KEYS if key in dumped}
             # Keep the same short failure summary already present in the light state projection; the
             # unbounded captured process output remains excluded below.
-            out["error"] = redact_secrets(str(dumped.get("error") or "")[:160])
+            # Redact BEFORE truncating: a secret straddling byte 160 would otherwise have its tail
+            # cut, leaving a prefix too short for the pattern/entropy rules to catch (fragment leak).
+            out["error"] = redact_secrets(str(dumped.get("error") or ""))[:160]
             # Evidence is explicit opt-in, but still run the normal secret scrub before disclosure.
             # stdout_tail is captured process output, not source evidence, and is intentionally absent.
             # Do not attach spans.jsonl either: it contains model prompts/tool outputs and is a live

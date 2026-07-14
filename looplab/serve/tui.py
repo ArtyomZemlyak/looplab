@@ -130,6 +130,21 @@ def _observed_command(record: dict, staged: Optional[dict] = None) -> dict:
 
 # ----------------------------------------------------------------------------- the interactive app
 
+def _esc(value) -> str:
+    """Escape one server/LLM/user-supplied value before it enters a rich markup f-string. A stray
+    ``[/tag]`` in a command label, error, run id, or chat line otherwise raises rich ``MarkupError``
+    and aborts the TUI; for a PERSISTED row (``_reconcile_pending``) that re-crashes on every reopen."""
+    from rich.markup import escape
+    return escape(str(value))
+
+
+def _command_failure_line(label, error) -> str:
+    """Escape server/LLM-supplied text before it enters a rich markup string: a stray ``[/tag]`` in a
+    label or error message otherwise raises rich ``MarkupError`` and aborts the TUI — and, because
+    ``_reconcile_pending`` re-prints the persisted row, it re-crashes on every reopen of the run."""
+    return f"  [red]✗[/red] {_esc(label)} — {_esc(error)}"
+
+
 class Tui:
     """The redraw-then-prompt REPL. Holds the rich Console + the Api client; each surface is a method
     that draws itself then reads one line. Kept thin: the heavy lifting is in the pure helpers above and
@@ -339,7 +354,7 @@ class Tui:
                 continue
             # A goal/refinement turn -> the boss (re)plans.
             msgs.append({"role": "user", "content": text})
-            self.console.print(f"[green]you ›[/green] {text}")
+            self.console.print(f"[green]you ›[/green] {_esc(text)}")
             try:
                 with self.console.status("boss is planning…", spinner="dots"):
                     r = self.api.genesis(msgs, text, spec)
@@ -361,7 +376,7 @@ class Tui:
                     new_spec.get("run_id") or new_spec.get("task_file") or (new_spec.get("task") or {}).get("kind")):
                 spec = new_spec
             if (r or {}).get("ok") is False and (r or {}).get("error"):
-                self.console.print(f"[yellow]{r['error']}[/yellow]")
+                self.console.print(f"[yellow]{_esc(r['error'])}[/yellow]")
             self._render_spec(spec)
 
     def _render_spec(self, spec: Optional[dict]) -> None:
@@ -374,7 +389,7 @@ class Tui:
     def _launch(self, spec: Optional[dict], msgs: list) -> bool:
         reason = spec_ready(spec)
         if reason:
-            self.console.print(f"[yellow]can’t launch yet: {reason}[/yellow]")
+            self.console.print(f"[yellow]can’t launch yet: {_esc(reason)}[/yellow]")
             return False
         rid = slug(spec["run_id"])
         body: dict = {"run_id": rid, "settings": spec.get("settings") or {}}
@@ -389,14 +404,14 @@ class Tui:
                 self.api.post("/api/start", body)
         except ApiError as e:
             if e.status == 409:
-                self.console.print(f"[yellow]a run named “{rid}” already exists — rename it (edit the goal) and retry[/yellow]")
+                self.console.print(f"[yellow]a run named “{_esc(rid)}” already exists — rename it (edit the goal) and retry[/yellow]")
             else:
                 self.console.print(f"[red]launch failed: {e}[/red]")
             return False
         except KeyboardInterrupt:
             self.console.print("[dim]cancelled.[/dim]")
             return False
-        self.console.print(f"[green]▶ started [bold]{rid}[/bold][/green]")
+        self.console.print(f"[green]▶ started [bold]{_esc(rid)}[/bold][/green]")
         # The engine is a freshly-spawned subprocess; its events.jsonl appears a beat later, before which
         # /state 404s. Wait briefly so the run view opens on real status instead of a transient error.
         try:
@@ -459,7 +474,7 @@ class Tui:
             user_turn = {"role": "user", "content": raw}
             history.append(user_turn)
             self._persist(run_id, user_turn)                 # save the question too (the web persists it)
-            self.console.print(f"[green]you ›[/green] {raw}")
+            self.console.print(f"[green]you ›[/green] {_esc(raw)}")
             self._boss_turn(run_id, raw, history)
 
     def _draw_run(self, run_id: str, state: Optional[dict], history: list) -> None:
@@ -488,7 +503,7 @@ class Tui:
                 act = m.get("action") or {}
                 mark = {"done": "[green]✓[/green]", "pending": "[yellow]…[/yellow]",
                         "failed": "[red]✗[/red]"}.get(m.get("status"), "[cyan]·[/cyan]")
-                self.console.print(f"  {mark} [cyan]{act.get('label') or act.get('type', 'action')}[/cyan]")
+                self.console.print(f"  {mark} [cyan]{_esc(act.get('label') or act.get('type', 'action'))}[/cyan]")
             elif role == "summary":
                 self.console.print(f"[dim]— recap: {m.get('content', '')}[/dim]")
             else:
@@ -523,7 +538,7 @@ class Tui:
         elif r.get("ok") and r.get("reply"):
             self._append_and_show(run_id, history, {"role": "assistant", "content": r["reply"]})
         elif r.get("error"):
-            self.console.print(f"[yellow]⚠ {r['error']}[/yellow]")
+            self.console.print(f"[yellow]⚠ {_esc(r['error'])}[/yellow]")
         else:
             self.console.print("[yellow]⚠ no reply from the boss[/yellow]")
 
@@ -541,7 +556,7 @@ class Tui:
             label = a.get("label") or a.get("type", "action")
             mark = "[red]⚠[/red]" if is_critical(a) else "[cyan]▸[/cyan]"
             why = a.get("rationale")
-            self.console.print(f"  [bold]{i}[/bold] {mark} {label}" + (f" [dim]— {why}[/dim]" if why else ""))
+            self.console.print(f"  [bold]{i}[/bold] {mark} {_esc(label)}" + (f" [dim]— {_esc(why)}[/dim]" if why else ""))
         while True:
             ans = self._prompt("[green]Apply?[/green] [dim]Enter=all · numbers to pick (e.g. 1,3) · n=cancel[/dim] » ")
             if ans is None:                                  # EOF/^C -> treat as cancel (safe default)
@@ -573,10 +588,10 @@ class Tui:
                         turn["status"] = "failed"
                         error = (result or {}).get("error") if isinstance(result, dict) else None
                         turn["error"] = error or "report refresh returned no confirmed success"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                     else:
                         turn["status"] = "done"
-                        self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]")
+                        self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]")
                 else:
                     key = str(uuid.uuid4())
                     expected_generation = self.api.run_generation(run_id)
@@ -589,7 +604,7 @@ class Tui:
                     if self._persist(run_id, turn) is False:
                         turn["status"] = "failed"
                         turn["error"] = "could not durably stage command identity; nothing was submitted"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                         return
                     result = self.api.run_command(
                         run_id, str(action.get("type") or ""), action.get("data") or {},
@@ -599,18 +614,18 @@ class Tui:
                     if status in _COMMAND_DONE:
                         turn["status"] = "done"
                         suffix = " (already satisfied)" if status == "noop" else ""
-                        self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]{suffix}")
+                        self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]{suffix}")
                     elif status in _COMMAND_PENDING:
                         turn["status"] = "pending"
-                        self.console.print(f"  [yellow]…[/yellow] [cyan]{label}[/cyan] — requested, pending")
+                        self.console.print(f"  [yellow]…[/yellow] [cyan]{_esc(label)}[/cyan] — requested, pending")
                     elif status in _COMMAND_FAILED:
                         turn["status"] = "failed"
                         turn["error"] = _command_error(result)
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                     else:
                         turn["status"] = "failed"
                         turn["error"] = f"unexpected command status: {status or 'missing'}"
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
             except ApiError as e:
                 ambiguous = command_error_transient(e)
                 turn["status"] = "pending" if ambiguous else "failed"
@@ -619,7 +634,7 @@ class Tui:
                     self.console.print(
                         f"  [yellow]…[/yellow] {label} — response lost; checking the staged command id")
                 else:
-                    self.console.print(f"  [red]✗[/red] {label} — {e}")
+                    self.console.print(_command_failure_line(label, e))
             if staged_index is None:
                 history.append(turn)
                 self._persist(run_id, turn)
@@ -732,7 +747,7 @@ class Tui:
                 turn["status"] = "failed"
                 turn["error"] = "pending command has no durable id; its outcome cannot be verified"
                 self._persist_command_status(run_id, turn, action_index=action_index)
-                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                self.console.print(_command_failure_line(label, turn['error']))
                 continue
             try:
                 record = self.api.get_run_command(run_id, command_id)
@@ -755,12 +770,12 @@ class Tui:
                             kind = ("access denied" if retry_exc.status in (401, 403)
                                     else "same-command status unavailable")
                             self.console.print(
-                                f"  [yellow]…[/yellow] {label} — {kind}: {retry_exc}")
+                                f"  [yellow]…[/yellow] {_esc(label)} — {kind}: {_esc(retry_exc)}")
                             continue
                         turn["status"] = "failed"
                         turn["error"] = f"staged command could not be recovered: {retry_exc}"
                         self._persist_command_status(run_id, turn, action_index=action_index)
-                        self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                        self.console.print(_command_failure_line(label, turn['error']))
                         continue
                 elif exc.status in (200, 404):
                     turn["status"] = "failed"
@@ -772,12 +787,12 @@ class Tui:
                         prefix = "command record is unavailable"
                     turn["error"] = f"{prefix}: {exc}"
                     self._persist_command_status(run_id, turn, action_index=action_index)
-                    self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                    self.console.print(_command_failure_line(label, turn['error']))
                     continue
                 if replay is None:
                     unresolved = True
                     kind = "access denied" if exc.status in (401, 403) else "status unavailable"
-                    self.console.print(f"  [yellow]…[/yellow] {label} — {kind}: {exc}")
+                    self.console.print(f"  [yellow]…[/yellow] {_esc(label)} — {kind}: {_esc(exc)}")
                     continue
 
             turn["command"] = _observed_command(record, command)
@@ -787,18 +802,18 @@ class Tui:
                 turn.pop("error", None)
                 self._persist_command_status(run_id, turn, action_index=action_index)
                 suffix = " (already satisfied)" if status == "noop" else ""
-                self.console.print(f"  [green]✓[/green] [cyan]{label}[/cyan]{suffix}")
+                self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]{suffix}")
             elif status in _COMMAND_FAILED:
                 turn["status"] = "failed"
                 turn["error"] = _command_error(record)
                 self._persist_command_status(run_id, turn, action_index=action_index)
-                self.console.print(f"  [red]✗[/red] {label} — {turn['error']}")
+                self.console.print(_command_failure_line(label, turn['error']))
             elif status in _COMMAND_PENDING:
                 unresolved = True
             else:
                 unresolved = True
                 self.console.print(
-                    f"  [yellow]…[/yellow] {label} — unexpected command status {status or 'missing'}")
+                    f"  [yellow]…[/yellow] {_esc(label)} — unexpected command status {status or 'missing'}")
         return not unresolved
 
     def _persist_command_status(self, run_id: str, turn: dict, *, action_index: Optional[int] = None) -> None:
@@ -881,7 +896,7 @@ class Tui:
 
     def _pause(self, msg: str) -> None:
         if msg:
-            self.console.print(f"[yellow]{msg}[/yellow]")
+            self.console.print(f"[yellow]{_esc(msg)}[/yellow]")
         try:
             self.console.input("[dim]press Enter…[/dim]")
         except (EOFError, KeyboardInterrupt):

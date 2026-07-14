@@ -449,6 +449,19 @@ def test_metered_boss_call_lease_blocks_reset_until_provider_returns(tmp_path, m
     assert client.post("/api/runs/demo/reset").status_code == 200
 
 
+def test_boss_endpoints_reject_non_object_body(tmp_path):
+    """VAL-3: the boss chat handlers immediately call `body.get(...)`, so a non-object JSON body
+    (a bare `[]`) must return a clean 400 — not an AttributeError surfacing as a 500."""
+    _seed_finished_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    for path in ("/api/runs/demo/chat", "/api/runs/demo/chat-compact",
+                 "/api/runs/demo/suggest", "/api/runs/demo/command", "/api/runs/demo/chat-log"):
+        # A non-object JSON body (bare list) and a syntactically invalid body must both be 400, never 500.
+        assert client.post(path, json=[]).status_code == 400, path
+        assert client.post(path, content=b"{not json",
+                           headers={"content-type": "application/json"}).status_code == 400, path
+
+
 def test_metered_boss_pending_cost_survives_context_and_flushes_same_id(tmp_path, monkeypatch):
     """A known paid delta outlives its route context without replaying the provider call."""
     from looplab.core.llm import CostAccountant

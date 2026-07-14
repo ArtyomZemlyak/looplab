@@ -30,7 +30,9 @@ test('analytical charts expose named table and CSV alternatives', async () => {
   }
   assert.match(exportedFunction(charts, 'Spark', 'MultiTrajectory'), /role="img"[\s\S]*?aria-label=/)
   assert.match(charts, /<button type="button" key=\{i\}[\s\S]*?aria-pressed=\{active === it\.key\}/)
-  assert.doesNotMatch(charts, /svgActionProps|tabIndex:\s*0/,
+  // Match BOTH the object-property form (tabIndex: 0) and the JSX attribute form (tabIndex={0}) —
+  // an SVG point tab stop would use the latter, so the guard must cover it.
+  assert.doesNotMatch(charts, /svgActionProps|tabIndex:\s*0|tabIndex=\{0\}/,
     'large analytical charts must not create one tab stop per SVG point')
   assert.match(exportedFunction(charts, 'Gantt', 'ParallelCoords'),
     /render: value => onPick[\s\S]*?<button type="button" className="btn xs ghost"/)
@@ -44,7 +46,9 @@ test('shared table/chart contract is responsive and touch targets remain explici
   assert.match(contract, /className="data-table-scroll" role="region" aria-labelledby=\{headingId\} tabIndex=\{0\}/)
   assert.match(contract, /<caption className="sr-only">/)
   assert.match(contract, /data-label=\{column\.label \|\| column\.key\}/)
-  assert.match(contract, /aria-controls=\{`chart-data-\$\{generated\}`\}/)
+  // aria-controls only points at the data panel while it is expanded (it is unmounted when collapsed,
+  // so an always-on aria-controls would dangle at a non-existent id).
+  assert.match(contract, /aria-controls=\{showData \? `chart-data-\$\{generated\}` : undefined\}/)
   assert.match(css, /\.data-table-scroll \{[\s\S]*?overflow: auto;/)
   assert.match(css, /@media \(max-width: 600px\)[\s\S]*?\.data-table\.cardable tbody td::before/)
   assert.match(css, /\.run-menu \.mi, \.tabs \.tab,[\s\S]*?min-height: 44px;/)

@@ -1332,3 +1332,27 @@ def test_genesis_offline_soft_fails(tmp_path, monkeypatch):
     _bind(api, TestClient(make_app(tmp_path)))
     r = api.genesis([{"role": "user", "content": "a toy run"}], "a toy run", None)
     assert isinstance(r, dict) and r.get("ok") is False
+
+
+def test_reconcile_pending_survives_rich_markup_in_persisted_label():
+    """A persisted command label carrying a rich-markup fragment (e.g. a boss directive that quotes
+    "[/tmp]") must NOT raise rich MarkupError and abort the TUI. Because _reconcile_pending re-prints
+    the row on every reopen, an unescaped label re-crashed the dashboard each time it was opened (P2)."""
+    class FakeApi:
+        def run_generation(self, _run_id):
+            return GENERATION
+
+        def get_run_command(self, run_id, command_id):
+            return {"id": command_id, "status": "succeeded"}
+
+    app = _command_tui(FakeApi())
+    app._persist_command_status = lambda *_a, **_k: None
+    history = [{
+        "role": "action",
+        "action": {"type": "set_directive", "data": {}, "label": "use the [/tmp] cache [bold]x"},
+        "status": "pending",
+        "command": {"id": "cmd_" + "a" * 32, "event_type": "set_directive"},
+    }]
+    # Would raise rich.errors.MarkupError before the escape fix.
+    assert app._reconcile_pending("demo", history) is True
+    assert "tmp" in app.console.file.getvalue()   # label rendered (escaped), not crashed

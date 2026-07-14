@@ -41,8 +41,10 @@ function TreeNode({ p, depth, ctx }) {
                      finishProjectRename(p.id, e.currentTarget.value, true)
                    }
                    if (e.key === 'Escape') {
+                     // Cancel: a blank name skips the PATCH (the guard in finishProjectRename), so
+                     // Escape reverts to the current name without a redundant server write + reload.
                      e.preventDefault(); e.currentTarget.dataset.finished = 'true'
-                     finishProjectRename(p.id, p.name, true)
+                     finishProjectRename(p.id, '', true)
                    }
                  }} />
         : <button type="button" className="pname project-choice" aria-pressed={sel === p.id}
@@ -516,6 +518,7 @@ export default function RunList({ onOpen, onSettings }) {
                                 : status === 'paused' ? 'paused intentionally' : undefined}>{status}</span>
               })()}
               <a className="run-card-main" href={`#/run/${encodeURIComponent(r.run_id)}`}
+                   draggable={false}
                    onClick={event => followClientRoute(event, () => onOpen(r.run_id))}
                    aria-label={`Open run ${r.label || r.run_id}`}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>

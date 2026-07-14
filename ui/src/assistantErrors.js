@@ -30,9 +30,11 @@ function infoFor(kind, status = null) {
 export function assistantErrorInfo(value, hintedKind = null) {
   const raw = String(value || '')
   if (KNOWN_KINDS.has(hintedKind)) return infoFor(hintedKind)
-  // Legacy persisted failures predate error_kind. Keep this deliberately anchored to exception-like
-  // shapes so ordinary assistant prose about errors is not replaced by a provider card.
-  if (!/(^\s*(?:\(?error\s*:|\(?assistant error\s*:|couldn['’]t reach the model\s*\(|authenticationerror\b|\d{3}\s+client error\b|http\s+\d{3}\b)|llm request|provider returned error|error code\s*:\s*\d{3}|temporarily rate[- _]limited)/i.test(raw)) return null
+  // Legacy persisted failures predate error_kind. Keep this STRICTLY start-anchored to exception-like
+  // shapes so ordinary assistant prose is never replaced by a provider card. In particular do NOT match
+  // a bare "Error:" prefix or unanchored substrings like "LLM request" / "provider returned error" /
+  // "error code: NNN" / "temporarily rate-limited": those occur in normal ML/LLM answers and hid them.
+  if (!/^\s*(?:\(?assistant error\s*:|couldn['’]t reach the model\s*\(|authenticationerror\b|\d{3}\s+client error\b|http\s+\d{3}\b)/i.test(raw)) return null
   const status = Number(raw.match(/(?:error code\s*:\s*|\bcode['"]?\s*:\s*|\bhttp\s+|^\s*)(\d{3})/i)?.[1] || 0) || null
   if (status === 429 || /rate[- _]limit/i.test(raw)) return infoFor('rate_limit', status)
   if (status === 401 || status === 403 || /authenticationerror|api key|unauthori[sz]ed|credential/i.test(raw)) return infoFor('credentials', status)

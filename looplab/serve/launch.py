@@ -105,12 +105,19 @@ def launch_request_digest(body: dict) -> str:
     return _sha({"version": 1, "request": effect})
 
 
+_MAX_CHAT_TURNS = 500
+_MAX_CHAT_CONTENT = 20_000
+
+
 def _clean_chat(value: Any) -> tuple[dict[str, str], ...]:
     if not isinstance(value, list):
         return ()
+    # Bound both turn count and per-turn content: this seed chat is folded into the SHA validation
+    # token and written verbatim to chat.jsonl, so an unbounded body is a memory/disk amplification
+    # (control text is capped the same way).
     return tuple(
-        {"role": str(turn["role"]), "content": str(turn.get("content", ""))}
-        for turn in value
+        {"role": str(turn["role"]), "content": str(turn.get("content", ""))[:_MAX_CHAT_CONTENT]}
+        for turn in value[:_MAX_CHAT_TURNS]
         if isinstance(turn, dict) and turn.get("role") in {"user", "assistant"}
     )
 
@@ -158,10 +165,27 @@ def _path_stat(path: Path) -> dict:
     }
 
 
+# Task specs are small (a toy dict, a YAML/JSON config). Cap the WHOLE-file reads below — both
+# load_document and _source_fingerprint slurp the file — so an unbounded pseudo-file or a multi-GB
+# regular file cannot hang the preflight worker or exhaust memory. Every other launch input is bounded.
+_MAX_TASK_FILE_BYTES = 8 * 1024 * 1024  # 8 MiB
+
+
+def _require_task_file_size(path: Path) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        _reject(400, "invalid_task_file", f"task_file cannot be read: {exc}", "task_file")
+    if size > _MAX_TASK_FILE_BYTES:
+        _reject(400, "task_file_too_large",
+                f"task_file exceeds the {_MAX_TASK_FILE_BYTES}-byte limit", "task_file")
+
+
 def _source_fingerprint(path: Path | None) -> dict | None:
     if path is None:
         return None
     try:
+        _require_task_file_size(path)
         stat = _path_stat(path)
         stat["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         return stat
@@ -355,6 +379,7 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
         source_path = Path(expanded).resolve()
         if not source_path.exists() or not source_path.is_file():
             _reject(400, "task_file_not_found", f"task_file not found: {source_path}", "task_file")
+        _require_task_file_size(source_path)   # bound the read before load_document slurps the file
         try:
             raw_task, raw_file_settings, _out = load_document(source_path)
         except (OSError, ValueError, TypeError) as exc:

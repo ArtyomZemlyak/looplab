@@ -439,21 +439,20 @@ def bind_cost_accountants(engine: object, *, include_existing: bool = False) -> 
                                     else:
                                         append_error = outbox_error or exc
                                 else:
-                                    try:
-                                        persisted = _event_usage_deltas(
-                                            engine.store.read_all())
-                                    except Exception:  # noqa: BLE001 - fail closed on an unknown winner
-                                        persisted = {}
-                                    if persisted.get(usage_id) != clean:
+                                    # The append committed and `usage_id` is a fresh 128-bit token
+                                    # (secrets.token_hex(16), collision-guarded against `pending`), so
+                                    # no other telemetry can own its identity — this delta is the
+                                    # durable winner. Trust the successful append instead of rescanning
+                                    # the whole log (PERF-1: the rescan was O(K^2) across a run, run for
+                                    # every paid call while holding the engine cost lock). The rescan is
+                                    # still done on the "append raised" branch above, where durability
+                                    # is genuinely ambiguous.
+                                    _record(_binding, clean)
+                                    _binding["pending"].pop(usage_id, None)
+                                    if not _forget_outbox(engine, usage_id, clean):
                                         append_error = _OutboxEvidenceError(
-                                            "usage event identity was won by conflicting telemetry")
-                                    else:
-                                        _record(_binding, clean)
-                                        _binding["pending"].pop(usage_id, None)
-                                        if not _forget_outbox(engine, usage_id, clean):
-                                            append_error = _OutboxEvidenceError(
-                                                "usage event is durable but outbox acknowledgement "
-                                                "conflicts")
+                                            "usage event is durable but outbox acknowledgement "
+                                            "conflicts")
                     callback_error: Exception | None = None
                     if callable(_previous):
                         try:

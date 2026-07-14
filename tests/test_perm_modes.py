@@ -177,3 +177,9 @@ def test_grader_globs_precise_boundary():
         assert not prot(f), f + " should be editable"
     # An operator/manifest that passes its OWN protect list gets NO exception override (intent wins).
     assert SurfacePolicy(None, ["**/upgrade.py"], check_escapes=False).check("upgrade.py") == "protected"
+    # The exception carve-out is scoped to GRADER globs ONLY: a migration-script name inside a
+    # STRUCTURAL protected tree (.git/**, answers/**, held_out/**, private/**, event logs) stays
+    # protected — the exception must never re-open an integrity dir (SEC-1 / "NEVER writable" contract).
+    for f in ("answers/upgrade.py", "held_out/downgrade.py", "private/upgrade_1.py",
+              ".git/hooks/upgrade.py", "runs/x/answers/upgrade_003.py"):
+        assert prot(f), f + " must stay protected despite the grader-glob exception"
