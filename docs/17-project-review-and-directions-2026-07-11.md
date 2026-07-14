@@ -18,7 +18,7 @@
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
-| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier — offline foundation) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics) |
 | **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
@@ -2736,8 +2736,8 @@ suite exercises them without an endpoint.*
   gold label — §12's own evaluation gate — with ready-made `lesson_overgeneralization_criteria` (D6) and
   `reexamination_criteria` (D3) presets. `_agreement` surfaces the single-shot variance §21.12 measured.
 
-Phase 1 (D7 alarm/lock-in, D6/D3 audits, D4/D2) and Phase 2 (live Strategist pivot, capability-expansion
-operator, foresight replacement) build on these and inherit the R-gates + mode-gating as specified above.
+Phase 2 (live Strategist pivot, capability-expansion operator, foresight replacement) builds on these and
+inherits the R-gates + mode-gating as specified above.
 
 **Universality (post-review, 2026-07-14) — derived importance, not a hardcoded winning region.** A review +
 live tests found the keystone signal was accidentally *dense-retrieval-specific*: the uncovered-region alarm
@@ -2761,3 +2761,42 @@ the winning region as *covered*. Fixes landed on the branch:
   per-task derived importance — no domain hardcoding, works on any task. (Known follow-up: the free-grown
   vocabulary can fragment — `augmentation` vs `data-augmentation` — so a concept-consolidation pass, reusing
   `hybrid_merge`, is the next universality hardening.)
+
+#### 21.15 Phase 1 — implemented (offline analytics on the foundation)
+
+*Landed 2026-07-14. The five Phase-1 levers (1a–1e) ship as **offline analytics / advisory harnesses** on
+top of the Phase-0 foundation — still no new `Settings`, no new event types, no live-loop wiring, no
+selection changes (Phase 2). The pure analytics are deterministic over the folded run + concept tags; the
+verifier-backed ones (1b/1c) are strictly audit-only and degrade without a client.*
+
+| Build | Module | CLI | Tests |
+|---|---|---|---|
+| **1a** D7 action-space lock-in detector | `looplab/search/lock_in.py` | `looplab lock-in RUN_DIR` | `tests/test_lock_in.py` |
+| **1b** D6 lesson over-generalization guard | `looplab/trust/lesson_guard.py` | *(library; needs a verifier client)* | `tests/test_lesson_guard.py` |
+| **1c** D3 graded novelty + failed-direction re-exam | `looplab/search/graded_novelty.py` | *(library / advisory)* | `tests/test_graded_novelty.py` |
+| **1d** D4 taxonomy-aware board dedup | `looplab/search/taxonomy_dedup.py` | `looplab board-dedup RUN_DIR` | `tests/test_taxonomy_dedup.py` |
+| **1e** D2 axis-structured research targeting | `looplab/search/research_targeting.py` | `looplab research-targets RUN_DIR` | `tests/test_research_targeting.py` |
+
+- **1a** maps each experiment to the axis-region(s) of the concept DAG it touches (the "lever"/subsystem
+  proxy) and finds the longest run of CONSECUTIVE experiments confined to one axis — the same-lever streak
+  the flat coverage signal was blind to (§21.10: DCL streak = 12; the ≥N detector fires ~node 29). Pure.
+- **1b** grounds each distilled lesson in its evidence node's real outcome and runs the 0c verifier
+  (`lesson_overgeneralization_criteria`) to flag the node_63 mis-lesson pattern (over-generalizes a SOUND
+  direction), attaching the flag to a concept-graph branch (§21.7); `contradiction_scan` finds
+  mutually-inconsistent lesson pairs (§21.12 E4). Audit-only.
+- **1c** is an ADVISORY library (it does NOT modify the live `_llm_novelty_gate`): `grade_novelty` is a
+  deterministic multi-level classifier that uses concept membership to tell "this DCL tweak" from "the whole
+  DCL branch" and to recognize a proposal that RE-OPENS a wrongly-abandoned failed direction (the §21.4
+  levels); `reexamine_failed_direction` runs the 0c verifier grounded in the D1 asset brief (grounding is
+  what flipped the blind critic from wrong to correct, §21.10/§21.12).
+- **1d** tags the hypothesis board, surfaces the dominant within-concept redundancy (§21.12: 63/107 on DCL),
+  and flags cross-branch look-alikes a blind merge would collapse (the protective value; 0 pairs on the
+  `rubertlite` run, §21.12) via the deterministic `HybridRetriever`. Pure.
+- **1e** turns the coverage map into ranked axis-structured research targets — uncovered axes first, failed
+  directions re-framed as "research a different implementation" (avoid re-proposing the failed variant,
+  §21.12), then under-covered axes — optionally grounded in the D1 brief. Pure.
+
+The shared alias-matching rule is centralized in `concept_graph._alias_index` (wrapped by `tag_text` for
+the lesson guard / idea grader / board dedup; the node tagger `tag_nodes_heuristic` uses `_alias_index`
+directly). Phase 2 wires these into live steering (Strategist pivot,
+capability-expansion operator, novelty gate, deep-research targeting) behind the R-gates + mode-gating.

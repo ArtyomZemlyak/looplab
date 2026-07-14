@@ -241,6 +241,61 @@ def asset_brief_cmd(
     typer.echo(asset_brief(repo, client=client, task_type=task_type))
 
 
+@app.command(name="lock-in")
+def lock_in(
+    run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
+    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+    threshold: int = typer.Option(5, help="Consecutive same-lever nodes that trip the alarm."),
+):
+    """PART IV D7 (§21.8): the action-space lock-in detector. Reports the longest run of CONSECUTIVE
+    experiments confined to one axis-region (the 'same-lever streak' the flat coverage signal is blind
+    to) and fires when it exceeds `threshold`. Offline, deterministic; never touches selection."""
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.lock_in import lock_in_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    graph = skeleton_for(task_type or state.task_id or "")
+    typer.echo(lock_in_report(state, graph, streak_threshold=threshold))
+
+
+@app.command(name="board-dedup")
+def board_dedup(
+    run_dir: Path = typer.Argument(..., help="Run dir whose hypothesis board to analyze."),
+    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+):
+    """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
+    within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would
+    wrongly collapse (keep distinct). Offline, deterministic; merges nothing."""
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.taxonomy_dedup import dedup_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    graph = skeleton_for(task_type or state.task_id or "")
+    typer.echo(dedup_report(state, graph))
+
+
+@app.command(name="research-targets")
+def research_targets_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose coverage to turn into research targets."),
+    task_type: Optional[str] = typer.Option(None, help="Concept-graph skeleton (default: run task_id)."),
+    asset_repo: Optional[Path] = typer.Option(
+        None, help="Task repo to ground the queries in the D1 asset brief (offline scan)."),
+):
+    """PART IV D2 (§21.3): axis-structured deep-research targets from the coverage map — uncovered axes
+    first, failed directions re-framed as 'research a different implementation', then under-covered axes.
+    Offline, deterministic; produces the targets, runs no research."""
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.research_targeting import targeting_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    graph = skeleton_for(task_type or state.task_id or "")
+    brief = ""
+    if asset_repo is not None and asset_repo.exists():
+        from looplab.tools.asset_brief import asset_brief
+        brief = asset_brief(asset_repo, task_type=task_type or state.task_id or "")
+    typer.echo(targeting_report(state, graph, asset_brief=brief))
+
+
 @app.command()
 def tensorboard(
     run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),

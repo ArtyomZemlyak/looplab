@@ -15,6 +15,9 @@ looplab replay          Pure fold of the event log → state (read-only)
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
 looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
 looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
+looplab lock-in         Action-space lock-in detector (PART IV D7)
+looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
+looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -259,6 +262,61 @@ looplab asset-brief REPO [--task-type dense-retrieval] [--llm] [--model ID]
 | `--task-type NAME` | generic | Task family whose capability vocabulary to apply (e.g. `dense-retrieval`); omit for a purely generic scan |
 | `--llm` | off (offline scan) | Use the **agentic** brief (an LLM explores the repo with read-only tools) instead of the heuristic scan. Needs a reachable endpoint |
 | `--model ID` | configured model | Override the model for `--llm` |
+
+---
+
+## `lock-in`
+
+PART IV D7 (§21.8) offline analytic. Over the concept graph, finds the longest run of **consecutive**
+experiments confined to one axis-region — the "same-lever streak" the flat coverage signal was blind to
+(on the `rubertlite` replay it trips at ~node 29) — and fires when it exceeds the threshold. Read-only,
+deterministic.
+
+```bash
+looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
+| `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
+
+---
+
+## `board-dedup`
+
+PART IV D4 (§21.5) offline analytic. Tags the hypothesis board and surfaces the dominant **within-concept**
+redundancy (merge aggressively — e.g. the DCL cluster) plus **cross-branch** look-alike pairs a blind
+lexical/vector merge would wrongly collapse (keep distinct). Read-only; merges nothing.
+
+```bash
+looplab board-dedup RUN_DIR [--task-type NAME]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory whose hypothesis board to analyze |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+
+---
+
+## `research-targets`
+
+PART IV D2 (§21.3) offline analytic. Turns the coverage map into a ranked set of axis-structured
+deep-research targets: **uncovered** axes first (the blind regions), **failed directions** re-framed as
+"research a different implementation" (so the loop stops re-proposing the failed variant), then
+**under-covered** axes. Read-only; produces the targets, runs no research.
+
+```bash
+looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory whose coverage to target |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
 
 ---
 

@@ -304,29 +304,45 @@ def _node_text(node) -> str:
     return " ".join(parts).lower()
 
 
+def _alias_index(graph: ConceptGraph, *, allow_plural: bool) -> list[tuple[object, str]]:
+    """Pre-compiled (boundary-anchored alias regex, concept_id) pairs. The lookarounds are alnum-
+    boundaries (not \\b) because aliases legitimately start/end with a hyphen (`r-drop`), where \\b is
+    unreliable. `allow_plural` appends an optional trailing `s` (for natural-language text like lessons /
+    hypotheses, so "false negatives" matches the "false negative" alias)."""
+    import re as _re
+    tail = r"s?(?![a-z0-9])" if allow_plural else r"(?![a-z0-9])"
+    idx: list[tuple[object, str]] = []
+    for c in graph.concepts():
+        for a in c.aliases:
+            a = (a or "").strip().lower()
+            if a:
+                idx.append((_re.compile(r"(?<![a-z0-9])" + _re.escape(a) + tail), c.id))
+    return idx
+
+
+def tag_text(text: str, graph: ConceptGraph, *, allow_plural: bool = False) -> frozenset[str]:
+    """The single-source deterministic alias tagger for ONE piece of text — the SET of concepts whose
+    aliases appear in it, on alnum boundaries (so `ema` does not fire inside `schema`, `dcl` not inside
+    `include`). MULTI-label: text naming both a specific and a generic alias gets BOTH concepts. Used by
+    the lesson guard, the idea grader, and the board dedup; the node tagger (`tag_nodes_heuristic`) shares
+    the SAME rule via the underlying `_alias_index` (the true single-source seam — `tag_text` wraps it for
+    single-text callers). `allow_plural` for natural-language callers."""
+    low = (text or "").lower()
+    return frozenset(cid for pat, cid in _alias_index(graph, allow_plural=allow_plural)
+                     if pat.search(low))
+
+
 def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, frozenset[str]]:
     """Deterministic, no-LLM multi-label tagging by lineage-family alias match (pure — safe in replay
     and tests). Each experiment maps to the SET of concepts whose aliases appear in its text; a node
     matching no alias gets the empty set (tracked as `untagged` by the analytics — real effort not yet
     localized). Keys on lineage families, so all `dcl-*` variants land on the one `decoupled-contrastive`
-    concept and concentration reads the branch (§21.10 refinement 1). This is MULTI-label: an experiment
-    that names both a specific and a generic alias is tagged with BOTH concepts (that is the point of the
-    graph). Aliases match on alnum boundaries (not raw substrings) so `ema` does not fire inside
-    `schema` and `dcl` does not fire inside `include`."""
-    # Pre-index (boundary-anchored alias regex, concept_id) once. The lookarounds are alnum-boundaries
-    # (not \b) because aliases legitimately start/end with a hyphen (`r-drop`), where \b is unreliable.
-    import re as _re
-    index: list[tuple[object, str]] = []
-    for c in graph.concepts():
-        for a in c.aliases:
-            a = (a or "").strip().lower()
-            if a:
-                index.append((_re.compile(r"(?<![a-z0-9])" + _re.escape(a) + r"(?![a-z0-9])"), c.id))
+    concept and concentration reads the branch (§21.10 refinement 1)."""
+    index = _alias_index(graph, allow_plural=False)
     tags: dict[int, frozenset[str]] = {}
     for n in _experiment_nodes(state):
-        text = _node_text(n)
-        hit = {cid for pat, cid in index if pat.search(text)}
-        tags[n.id] = frozenset(hit)
+        low = _node_text(n)
+        tags[n.id] = frozenset(cid for pat, cid in index if pat.search(low))
     return tags
 
 
