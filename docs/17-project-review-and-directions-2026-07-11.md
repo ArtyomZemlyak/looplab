@@ -2899,3 +2899,27 @@ byte-identical. **Known follow-up:** `graded_novelty` (2b, per-proposal) still u
 tagger — making it agentic needs a per-cadence tag CACHE reused across proposals (rebuilding the map per
 proposal is too costly), so it is left for a coordinated pass. Also removed a stray merge-conflict marker
 the landing left at the end of this section.
+
+#### 21.17 E-functions — implemented & measured (2026-07-14)
+
+The three "extra" diagnostics from §21.12, built by composing the keystones (no new infrastructure):
+
+- **E2 — foresight confidence calibration.** *Shipped* as Phase 2c `foresight_verify` (calibrated §12-verifier
+  score replaces the self-reported confidence, measured Pearson≈0). **Evaluation gate — honest negative:** on
+  the `rubertlite` run the verifier's idea-only score correlates **−0.11** with realized recall@100 (n=10) —
+  no better than the self-reported confidence (−0.10), and it scored ~0.50 for almost everything (it can't
+  tell the catastrophic node_25=0.006 from the champion node_48=0.8835). **Conclusion:** predicting a training
+  outcome from a one-line proposal is inherently weak for this task; the §12 verifier's demonstrated value is
+  in *judgment* tasks (the D6 lesson guard: over-generalization std=0), not outcome forecasting. `foresight_verify`
+  should be validated on its *actual* job — ranking candidates / correlating with the eventual winner among a
+  candidate SET — not absolute-outcome prediction; treat it as unproven for foresight until that test passes.
+- **E4 — lesson audit.** The `trust/lesson_guard.py` guard (D6, over-generalization, validated: node_63
+  `over_generalizes=1.0` std=0) + `contradiction_scan` (mutually-inconsistent lessons) are now exposed via
+  `looplab lesson-guard RUN_DIR` (LLM-backed).
+- **E3 — novelty-gate recall (NEW).** `search/novelty_recall.py` + `looplab novelty-recall RUN_DIR`: reuses
+  `hybrid_merge.cluster_near_duplicates` for candidate pairs (sorted by lexical similarity so the LLM budget
+  covers the likeliest dups first) and an LLM adjudicator for paraphrase-vs-variant. **Measured on `rubertlite`
+  (the "сколько шлака" question):** the gate caught 6 near-dups but **leaked ≥4 true paraphrases** in the top-16
+  most-similar pairs (est. recall ≤0.6) — duplicate merge nodes (23≈24, 38≈41), a duplicate loss change
+  (11≈70), and the codebase pair (0≈1). Concrete evidence the flat gate misses paraphrase-level dups,
+  especially near-identical merges — exactly what D3/D4 (graded novelty + taxonomy dedup) target.

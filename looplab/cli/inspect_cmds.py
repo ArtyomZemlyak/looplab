@@ -336,6 +336,69 @@ def research_targets_cmd(
     typer.echo(f"\n  (targets built by: {m['mode']})")
 
 
+@app.command(name="novelty-recall")
+def novelty_recall_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose proposals to check for leaked paraphrases."),
+    offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
+                                                          "paraphrase-vs-variant adjudication — that needs "
+                                                          "the LLM)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
+    BOTH executed and the LLM judges TRUE paraphrases the gate should have deduplicated (the "сколько шлака"
+    / wasted-compute question), and estimates the gate's recall against what it caught. Offline (`--offline`)
+    only clusters candidates; the LLM adjudicates paraphrase vs legitimate variant by default."""
+    from looplab.search.novelty_recall import novelty_recall_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    client = None
+    parser = "tool_call"
+    if not offline:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+            parser = settings.llm_parser
+        except Exception as e:  # noqa: BLE001 — no endpoint => candidates only, noted
+            typer.echo(f"(no LLM endpoint: {e}; showing candidate pairs only)")
+    typer.echo(novelty_recall_report(state, client=client, parser=parser))
+
+
+@app.command(name="lesson-guard")
+def lesson_guard_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose distilled lessons to audit."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV D6/E4 (§21.7/§21.12): audit the run's distilled lessons. Flags lessons that OVER-GENERALIZE a
+    single failed implementation into a whole sound direction (the node_63 pattern), and scans for
+    mutually-CONTRADICTORY lesson pairs. Advisory / LLM-backed (needs a reachable endpoint)."""
+    from looplab.trust.lesson_guard import contradiction_scan, guard_lessons
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    from looplab.core.config import Settings
+    settings = Settings()
+    if model is not None:
+        settings.llm_model = model
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
+        typer.echo(f"lesson-guard needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    g = guard_lessons(state, client=client, parser=settings.llm_parser)
+    typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
+    for f in g["findings"]:
+        if f.get("flagged"):
+            typer.echo(f"  ⚠ over-generalizes: {str(f.get('statement', ''))[:100]}")
+            typer.echo(f"      rescoped: {str(f.get('rescope_hint', ''))[:120]}")
+    c = contradiction_scan(state, client=client, parser=settings.llm_parser)
+    typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons, {len(c['contradictions'])} pairs)")
+    for pair in c["contradictions"][:6]:
+        typer.echo(f"  ⚠ A: {str(pair.get('a', ''))[:80]}")
+        typer.echo(f"    B: {str(pair.get('b', ''))[:80]}  (score {pair.get('score')})")
+
+
 @app.command()
 def tensorboard(
     run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),

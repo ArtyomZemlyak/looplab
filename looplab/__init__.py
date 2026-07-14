@@ -49,6 +49,7 @@ _LAYOUT = {
     "coverage": "search",
     "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)
     "lock_in": "search",   # PART IV D7 action-space lock-in detector (offline)
+    "novelty_recall": "search",   # PART IV E3 novelty-gate recall / paraphrase-leak diagnostic (offline)
     "research_targeting": "search",   # PART IV D2 axis-structured research targeting (offline)
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
