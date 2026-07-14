@@ -10,9 +10,10 @@ in exactly ONE place instead of edited across every ranker. That single seam is 
 Part IV's deferred selection pieces wait on (§21.13/§21.16).
 
 Layering: lives in `core` — duck-typed on nodes (reads only `.metric` / `.id` / `.robust_metric` /
-`.holdout_metric` / `.feasible`) and constructed from a `direction` string, importing nothing from
-`core.models` — so BOTH the fold (`events/replay.py`, which may import only `core`) and the search
-policies can route through it with no layering violation and no import cycle.
+`.holdout_metric` / `.feasible`, plus `.verifier_score` on the R1-c tie-break path) and constructed from
+a `direction` string, importing nothing from `core.models` — so BOTH the fold (`events/replay.py`, which
+may import only `core`) and the search policies can route through it with no layering violation and no
+import cycle.
 
 Purity: it reads, it never mutates or does I/O, so it is safe to call inside the deterministic fold
 (invariant #5). Behavior is BYTE-IDENTICAL to the inlined logic it replaces — this is a refactor seam, not
@@ -72,6 +73,19 @@ class SearchFitness:
         and as the tie-break-OFF path of `promotion_key`."""
         return (node.robust_metric, node.id)
 
+    def _vc(self, node):
+        """The direction-oriented calibrated-verifier tie-break component for `node` (goes BETWEEN the
+        ranked metric and the id). A usable score is a real number in [0,1]; anything else (None, bool —
+        a subclass of int —, NaN, out-of-range) contributes the neutral midpoint. Multiplied by the
+        direction sign so a HIGHER score always wins a tie under the run's chooser (max/min). Self-guarding
+        keeps every key a total, deterministic order regardless of how `verifier_score` was set (no NaN
+        comparison can perturb min/max) — the fold's `_on_node_verified` also enforces the [0,1]-float rule
+        before storing."""
+        vs = node.verifier_score
+        usable = (isinstance(vs, (int, float)) and not isinstance(vs, bool)
+                  and vs == vs and 0.0 <= vs <= 1.0)
+        return self._vsign * (float(vs) if usable else _NEUTRAL_VERIFIER)
+
     def promotion_key(self, node):
         """The mean-pick key `_select_best` ranks by. Plain `(robust_metric, id)` unless the R1-c
         verifier tie-break is on, in which case a direction-oriented calibrated-verifier slot sits BETWEEN
@@ -81,21 +95,17 @@ class SearchFitness:
         truth). An unscored node contributes the neutral midpoint, so it is neither promoted nor penalized."""
         if not self._verifier_tiebreak:
             return (node.robust_metric, node.id)
-        vs = node.verifier_score
-        # A usable score is a real number in [0,1]; anything else (None, bool — a subclass of int —, NaN,
-        # out-of-range) contributes the neutral midpoint. The fold's `_on_node_verified` already enforces
-        # this before storing, but self-guarding here keeps `promotion_key` a total, deterministic order
-        # regardless of how `verifier_score` was set (no NaN comparison can perturb min/max).
-        usable = (isinstance(vs, (int, float)) and not isinstance(vs, bool)
-                  and vs == vs and 0.0 <= vs <= 1.0)
-        vc = self._vsign * (float(vs) if usable else _NEUTRAL_VERIFIER)
-        return (node.robust_metric, vc, node.id)
+        return (node.robust_metric, self._vc(node), node.id)
 
-    @staticmethod
-    def holdout_key(node):
-        """The holdout-promotion key: `(holdout_metric, id)` — the unseen-partition signal that layers
-        ON TOP of `selection_key` when the run recorded `holdout_select`."""
-        return (node.holdout_metric, node.id)
+    def holdout_key(self, node):
+        """The holdout-promotion key: `(holdout_metric, id)`, with the SAME R1-c verifier tie-break slot
+        inserted when enabled — `(holdout_metric, ±verifier_score, id)`. So a tie on the UNSEEN-signal
+        metric is broken by soundness too, consistent with the mean pick; the verifier still only breaks
+        holdout-metric TIES and never overrides a better holdout metric. Layers on top of the mean pick
+        when the run recorded `holdout_select`."""
+        if not self._verifier_tiebreak:
+            return (node.holdout_metric, node.id)
+        return (node.holdout_metric, self._vc(node), node.id)
 
     @staticmethod
     def eligible(node, flagged, aborted) -> bool:

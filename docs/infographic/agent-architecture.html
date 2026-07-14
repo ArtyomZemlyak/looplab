@@ -109,7 +109,8 @@ stack(1360,360,DY,[
  {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
  {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
- {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric→confirmed→holdout→(metric,id)"]},
+ {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["select_verifier off · §12 verifier scores a metric-TIE (node_verified)","breaks mean + holdout ties by soundness · never overrides the metric (§21.7)"]},
+ {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric(+verifier tie)→confirmed→holdout(+verifier tie)→approval"]},
 ]);
 // REFINE
 stack(1760,300,DY,[

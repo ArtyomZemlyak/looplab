@@ -917,6 +917,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         _entry = fold(self.store.read_all())
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
+        # R1-c resume-safety (invariant #6): the fold applies the RECORDED tie-break rule
+        # (`st.select_verifier_tiebreak`, folded from run_started); re-pin the engine's live-verify gate
+        # to match so `_maybe_verify_ties` produces node_verified scores consistently with what the fold
+        # reads — not a possibly-changed live `LOOPLAB_SELECT_VERIFIER`. Its direct peer `holdout_select`
+        # is re-pinned the same way below. Guard on `run_id` (set only by run_started): on a path where
+        # setup hasn't recorded run_started yet, keep the live value rather than zero it from an empty fold.
+        if _entry.run_id:
+            self._select_verifier = _entry.select_verifier_tiebreak
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick

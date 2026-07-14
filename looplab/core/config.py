@@ -419,12 +419,17 @@ class Settings(BaseSettings):
     holdout_top_k: int = Field(default=3, ge=1)
     # R1-c / Part IV — calibrated §12-verifier tie-break in best-selection. When a fresh node's robust
     # metric EXACTLY TIES an already-eligible node, the engine runs the §12 verifier (grounded on each
-    # node's realized result, `selection_criteria`) and records a soundness score per node; the fold's
-    # mean pick then breaks the metric-tie by that score. Strictly a TIE-BREAK — it can NEVER move a node
-    # ahead of a strictly-better robust_metric (§21.7 advisory-never-overrides). Recorded in run_started so
-    # replay applies the same rule; old logs fold to False (legacy pick). Lazy (only fires on an actual
-    # tie) + opt-in (default off); needs a reachable LLM client. Enable only after validating calibration
-    # offline with `verifier.calibrate`. See trust/verifier.py + core/fitness.py.
+    # node's realized result, `selection_criteria`) and records a soundness score per node. The tie-break
+    # then applies across the WHOLE selection path: the mean pick breaks a robust_metric tie by the score,
+    # and — when `holdout_select` is on — the holdout-slot ranking prefers the sounder node so it isn't
+    # denied a holdout eval, and the final holdout override breaks a holdout_metric tie by it too. Strictly
+    # a TIE-BREAK — it can NEVER move a node ahead of a strictly-better metric (§21.7 advisory-never-
+    # overrides). Best-effort: verification is LAZY (only fires on an actual tie) and bounded per cadence,
+    # so an unscored node in a large/late tie group contributes a NEUTRAL midpoint (a fully-scored tie is
+    # resolved by soundness; a partially-scored one degrades to neutral+id). Recorded in run_started so
+    # replay applies the same rule; old logs fold to False (legacy pick). Opt-in (default off); needs a
+    # reachable LLM client. Enable only after validating calibration offline with `verifier.calibrate`.
+    # See trust/verifier.py + core/fitness.py.
     select_verifier: bool = False
     # Verifier sample count for `select_verifier` (the §12 repeated-sampling expectation). 3 tames the
     # single-shot variance; 1 = single-shot (cheaper, noisier).

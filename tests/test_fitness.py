@@ -75,8 +75,18 @@ def test_selection_key_uses_robust_metric():
     assert SearchFitness.selection_key(_node(4, 0.5, confirmed_mean=0.7)) == (0.7, 4)
 
 
-def test_holdout_key_uses_holdout_metric():
-    assert SearchFitness.holdout_key(_node(3, 0.5, holdout_metric=0.42)) == (0.42, 3)
+def test_holdout_key_plain_when_tiebreak_off():
+    assert SearchFitness("max").holdout_key(_node(3, 0.5, holdout_metric=0.42)) == (0.42, 3)
+
+
+def test_holdout_key_inserts_verifier_slot_when_on():
+    n = _node(3, 0.5, holdout_metric=0.42)
+    n.verifier_score = 0.7
+    assert SearchFitness("max", verifier_tiebreak=True).holdout_key(n) == (0.42, 0.7, 3)
+    assert SearchFitness("min", verifier_tiebreak=True).holdout_key(n) == (0.42, -0.7, 3)
+    # unscored -> neutral midpoint, direction-oriented
+    u = _node(4, 0.5, holdout_metric=0.42)
+    assert SearchFitness("max", verifier_tiebreak=True).holdout_key(u) == (0.42, 0.5, 4)
 
 
 def test_promotion_key_plain_when_tiebreak_off():

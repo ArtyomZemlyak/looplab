@@ -441,14 +441,21 @@ class StrategyCadenceMixin:
     def _metric_tie_groups(self, state: RunState) -> list:
         """Eligible-node groups that share an EXACT `robust_metric` and still contain an unscored node —
         the metric-ties the verifier could resolve. Deterministic order (by each group's lowest node id)
-        so the per-cadence budget picks stably. Pure read over folded state."""
+        so the per-cadence budget picks stably. Pure read over folded state.
+
+        Mirrors `_select_best`'s mean-pick pool EXACTLY: when any eligible node is confirmed, only the
+        confirmed subset is ranked (and its tie-break read), so grouping over the full eligible set would
+        burn verifier LLM calls on unconfirmed nodes the fold never consults. Group within the same pool."""
         from looplab.core.fitness import SearchFitness
         from looplab.events.replay import flagged_node_ids
         flagged = flagged_node_ids(state)
+        eligible = [n for n in state.evaluated_nodes()
+                    if SearchFitness.eligible(n, flagged, state.aborted_nodes)]
+        confirmed = [n for n in eligible if n.confirmed_mean is not None]
+        pool = confirmed if confirmed else eligible
         by_metric: dict = {}
-        for n in state.evaluated_nodes():
-            if SearchFitness.eligible(n, flagged, state.aborted_nodes):
-                by_metric.setdefault(n.robust_metric, []).append(n)
+        for n in pool:
+            by_metric.setdefault(n.robust_metric, []).append(n)
         groups = [nodes for nodes in by_metric.values()
                   if len(nodes) >= 2 and any(n.verifier_score is None for n in nodes)]
         groups.sort(key=lambda nodes: min(n.id for n in nodes))

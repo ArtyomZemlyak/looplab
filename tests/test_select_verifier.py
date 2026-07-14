@@ -135,8 +135,64 @@ def test_tiebreak_unscored_node_is_neutral(tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# Fold: the tie-break on the HOLDOUT path (holdout_select on)
+# --------------------------------------------------------------------------- #
+
+def _holdout(s, nid, m):
+    s.append("holdout_evaluated", {"node_id": nid, "generation": 0, "search_epoch": 0, "metric": m})
+
+
+def test_holdout_override_breaks_tie_by_verifier(tmp_path):
+    # holdout_select on: the final champion is the holdout pick. A tie on the UNSEEN-signal metric must
+    # be broken by soundness too — so select_verifier actually influences the champion on this path.
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max",
+                             "select_verifier": True, "holdout_select": True})
+    _add(s, 0, 0.85)
+    _add(s, 1, 0.90)                     # the mean pick alone would prefer #1 (higher search metric)
+    _holdout(s, 0, 0.80)
+    _holdout(s, 1, 0.80)                 # ...but they TIE on the holdout metric
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.9})   # #0 sounder
+    s.append("node_verified", {"node_id": 1, "generation": 0, "score": 0.2})
+    assert fold(s.read_all()).best_node_id == 0     # holdout override breaks the 0.80 tie by soundness
+
+
+def test_holdout_override_tie_falls_to_id_when_verifier_off(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max", "holdout_select": True})
+    _add(s, 0, 0.85)
+    _add(s, 1, 0.90)
+    _holdout(s, 0, 0.80)
+    _holdout(s, 1, 0.80)
+    assert fold(s.read_all()).best_node_id == 1     # flag off -> legacy max-id holdout tie-break
+
+
+# --------------------------------------------------------------------------- #
 # Engine cadence: _maybe_verify_ties / _metric_tie_groups
 # --------------------------------------------------------------------------- #
+
+def test_metric_tie_groups_mirrors_the_confirmed_pool(tmp_path):
+    # when ANY eligible node is confirmed, _select_best ranks ONLY confirmed nodes; the cadence must not
+    # burn verifier calls on unconfirmed ties the fold will never consult.
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)                                  # an UNCONFIRMED tie
+    _add(s, 2, 0.8)
+    st = fold(s.read_all())
+    st.nodes[2].confirmed_mean = 0.8                 # a confirmation exists -> pool = confirmed-only
+    assert Engine._metric_tie_groups(None, st) == []   # the unconfirmed 0.9 tie is NOT surfaced
+
+
+def test_metric_tie_groups_surfaces_confirmed_ties(tmp_path):
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.7)
+    _add(s, 1, 0.7)
+    _add(s, 2, 0.9)                                  # unconfirmed, higher metric — excluded once confirmed exists
+    st = fold(s.read_all())
+    st.nodes[0].confirmed_mean = 0.8                 # #0 and #1 confirmed & TIED on confirmed mean
+    st.nodes[1].confirmed_mean = 0.8
+    groups = Engine._metric_tie_groups(None, st)
+    assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # only the confirmed tie
 
 class _VClient:
     """Fake reflect client: the §12 verifier's tool call returns a fixed verdict per criterion."""
