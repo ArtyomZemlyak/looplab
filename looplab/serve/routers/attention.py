@@ -1,6 +1,7 @@
 """Owner-plane attention feed: bounded, observation-only, and redacted."""
 from __future__ import annotations
 
+import threading
 import time
 
 from fastapi import APIRouter, HTTPException, Query
@@ -19,6 +20,11 @@ def build_router(srv) -> APIRouter:
     # run_id -> (reset-safe file signature, event projection). The live process probe is deliberately
     # not cached: engine liveness can change without appending an event.
     cache: dict[str, tuple[tuple, dict, bool]] = {}
+    # This route is a sync `def` → FastAPI runs concurrent polls on threadpool threads. Guard every
+    # mutation/iteration of the shared cache: an unlocked `set(cache)` racing a concurrent insert
+    # raises "dictionary changed size during iteration" → 500 (the sibling trace_view cache locks for
+    # exactly this). Reads via `.get()` stay lock-free (GIL-atomic; a slightly stale entry is fine).
+    cache_lock = threading.Lock()
 
     @router.get("/api/attention")
     def attention(
@@ -102,8 +108,9 @@ def build_router(srv) -> APIRouter:
                             break
                         if before_sig == after_sig:
                             signature, projection = after_sig, candidate
-                            if rd.name in cache or len(cache) < _MAX_CACHE_ENTRIES:
-                                cache[rd.name] = (signature, projection, False)
+                            with cache_lock:
+                                if rd.name in cache or len(cache) < _MAX_CACHE_ENTRIES:
+                                    cache[rd.name] = (signature, projection, False)
                             break
                     if projection is None:
                         partial = True
@@ -116,7 +123,8 @@ def build_router(srv) -> APIRouter:
                 flags = projection.get("runtime") or {}
                 if (alive is False and flags.get("finished")
                         and not flags.get("finalization_pending") and rd.name in cache):
-                    cache[rd.name] = (signature, projection, True)
+                    with cache_lock:
+                        cache[rd.name] = (signature, projection, True)
                 items.extend(visible_event_attention(projection, engine_running=alive))
                 # Liveness is a derived in-app warning only. This probe never runs resume reconciliation
                 # and never writes events/commands or starts a process.
@@ -126,10 +134,18 @@ def build_router(srv) -> APIRouter:
                 partial = True
                 append_stale(rd.name)
                 continue
-        for stale in set(cache) - present:
-            cache.pop(stale, None)
+        with cache_lock:
+            for stale in set(cache) - present:
+                cache.pop(stale, None)
+
+        def _seq_key(item) -> int:
+            # A genuine seq==0 must not collapse to -1 (`0 or -1 == -1`), which would mis-order an
+            # item anchored at the run's first event relative to its timestamp peers.
+            seq = item.get("seq")
+            return seq if isinstance(seq, int) and not isinstance(seq, bool) else -1
+
         items.sort(key=lambda item: (
-            bool(item.get("active")), float(item.get("created") or 0), int(item.get("seq") or -1),
+            bool(item.get("active")), float(item.get("created") or 0), _seq_key(item),
             str(item.get("id") or "")), reverse=True)
         start = 0
         if cursor is not None:

@@ -244,3 +244,17 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,
     'the timeline must not regress to a whole-run trace fold/poll')
 })
+
+test('R6: attention delivery re-fires on eligibility flip and gates enable on a committed write', async () => {
+  const ac = await source('AttentionCenter.jsx')
+  // deliveryKey must include notifyEligible so a stale→fresh flip (same id+created) re-runs delivery.
+  assert.match(ac, /deliveryItems[\s\S]*?\.map\(item => `\$\{item\.id\}:\$\{item\.created\}:\$\{item\.notifyEligible \? 1 : 0\}`\)/)
+  // enableNotifications must gate valid:true on result.ok (mirroring disableNotifications).
+  assert.match(ac, /if \(result\.state && result\.ok\) setPreferences\(\{ state: result\.state, available: true, valid: true \}\)/)
+})
+
+test('R6: Dock timeline-window note uses a boolean guard so no stray 0 renders', async () => {
+  const dock = await source('Dock.jsx')
+  // The && chain must start from a boolean, not `filter.trim() || kinds.size` (which is 0 when empty).
+  assert.match(dock, /\{\(filter\.trim\(\) !== '' \|\| kinds\.size > 0\) && timeline\.totalEvents != null/)
+})
