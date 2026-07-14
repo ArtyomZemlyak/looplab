@@ -574,14 +574,18 @@ async function main() {
   if (result.violations.length && !reportOnly) process.exitCode = 1
 }
 
-// Resolve symlinks (realpathSync) before comparing: import.meta.url is the realpath, so a symlinked
-// invocation (node_modules/.bin shim, pnpm, a symlinked checkout) would otherwise fail this guard and
-// silently skip main() — a false-green of the entire CI budget gate.
-let invokedPath = ''
-try {
-  invokedPath = process.argv[1] ? pathToFileURL(realpathSync(resolve(process.argv[1]))).href : ''
-} catch { invokedPath = '' }
-if (invokedPath === import.meta.url) {
+// Match import.meta.url against BOTH the raw and the symlink-resolved argv path. Default Node sets
+// import.meta.url to the REALPATH (so a symlinked invocation — a .bin shim, pnpm, a symlinked checkout
+// — only matches once realpathSync resolves it), while `--preserve-symlinks[-main]` keeps the SYMLINK
+// path (so the raw form matches). Checking both avoids a false-green of the CI budget gate under either
+// resolution mode instead of trading one blind spot for another.
+const invokedUrls = new Set()
+if (process.argv[1]) {
+  const rawPath = resolve(process.argv[1])
+  invokedUrls.add(pathToFileURL(rawPath).href)
+  try { invokedUrls.add(pathToFileURL(realpathSync(rawPath)).href) } catch { /* argv path may not exist */ }
+}
+if (invokedUrls.has(import.meta.url)) {
   main().catch(error => {
     console.error(`Bundle budget check could not run: ${error.message}`)
     process.exitCode = 2

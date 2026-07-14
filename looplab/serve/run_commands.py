@@ -2235,7 +2235,12 @@ class RunCommandService:
                 return _error(
                     "comment_id_conflict", "the allocated comment id is already present",
                     "submit a new command with a new idempotency key")
-            if len(state.comments) >= COMMENT_MAX_PER_RUN:
+            # Count only MODERN comments (legacy EV_ANNOTATION notes are uncompactable in an append-only
+            # log): this append-time recheck must match normalize_control's intake cap AND the fold in
+            # comment_projection.apply_comment_event, or a heavily-annotated run accepts a comment at
+            # intake then silently drops it here — the exact bug the modern-count cap fixes.
+            modern_count = sum(1 for item in state.comments.values() if not item.legacy)
+            if modern_count >= COMMENT_MAX_PER_RUN:
                 return _error(
                     "comment_run_limit_reached",
                     f"this run already has {COMMENT_MAX_PER_RUN} projected comments",

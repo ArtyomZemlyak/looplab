@@ -657,3 +657,21 @@ def test_legacy_annotations_do_not_consume_modern_comment_budget():
     row = apply_comment_event(comments, _event(
         COMMENT_MAX_PER_RUN, EV_COMMENT_CREATED, _create_data(cid, node=1, text="modern")))
     assert row is not None and cid in comments and not comments[cid].legacy
+
+
+def test_legacy_annotations_do_not_block_modern_comment_end_to_end(tmp_path):
+    """R8: the APPEND-TIME precondition (_comment_precondition) — not just intake + fold — must count
+    only MODERN comments. Otherwise a run full of legacy notes accepts a comment at intake, then drops
+    it at the append recheck (comment_run_limit_reached) and never appends the domain event. This drives
+    the full command path (submit -> precondition -> append), which the fold-level test does not."""
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    for i in range(COMMENT_MAX_PER_RUN):
+        store.append(EV_ANNOTATION, {"node_id": 0, "text": f"legacy {i}"})
+    client = TestClient(make_app(tmp_path))
+    created = _command(client, EV_COMMENT_CREATED, {
+        "node_id": 0, "node_generation": 0, "text": "modern despite 500 legacy notes",
+    }, "comment-create-past-legacy", generation=_generation(client))
+    assert created.status_code == 200 and created.json()["status"] == "succeeded", created.text
+    modern = [e for e in store.read_all() if e.type == EV_COMMENT_CREATED]
+    assert len(modern) == 1 and modern[0].data["text"] == "modern despite 500 legacy notes"
