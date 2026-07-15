@@ -1069,3 +1069,30 @@ Not changed (recorded): the concept-atlas cosmetic double-listing of a run whose
 now-aliased slugs (n_runs stays correct, display-only); the `cross-run-concepts` CLI not passing `aliases=`
 (a deliberate raw single-dir view); `concept_uid` casefold vs `resolve_slug` strip (concept_uid unused in the
 merge path). Full suite + mkdocs --strict green.
+
+## Round 19 — integrate CR2a retrieval planner + CR1b fuzzy claim merge + Step-7 digest (2026-07-15)
+
+Master shipped 3 commits: **CR2a** (`41ef1e6` — a hybrid retrieval planner `cross_run_retrieve` over cross-run
+knowledge, lexical+BM25+vector reusing the shipped `hybrid_merge`/`vectorstore`, bounded + **receipted**,
+exposed as the `cross_run_search` agent tool + `cross-run-search` CLI), **CR1b + Step 7** (`2d00151` — an
+**opt-in** fuzzy claim merge `_fuzzy_merge_claims` + a recursive concept digest), and a **CR1b live-test fix**
+(`26f408d` — the fuzzy merge over-collapsed a homogeneous corpus, blobbing 73 distinct rubert claims into 1;
+fixed by a strict token-Jaccard ≥ 0.6 identity so only genuine paraphrases merge).
+
+Integrated by merge — **no conflicts**: master's additions are new read-model functions (`cross_run_retrieve`,
+`_fuzzy_merge_claims`, `_stmt_tokens`) + a `fuzzy=` param + the `cross_run_search` tool, all disjoint from my
+Round-18 lock fixes (`record_research_claims`/`record_concept_alias`) and my governance filters, so git combined
+them cleanly and both sides survived (verified: 4 lock refs in claims.py, 2 in concept_registry.py; my three
+governance coverage tests intact; master's CR2a/CR1b functions + tests present).
+
+Reviewed the new code against the invariants: `_fuzzy_merge_claims` is **pure/deterministic** (token-Jaccard
+union-find, no I/O/LLM) and **opt-in** (`fuzzy` defaults False, so `claim_assessments` is byte-identical by
+default); `cross_run_retrieve` reuses the shipped retriever (no new fuser), is advisory + receipted, appends no
+domain event; `cross_run_search` is a read-only agent tool (the provider still exposes no mutation). The CR1b
+over-collapse was already fixed upstream (`26f408d`). Verification: 88 targeted cross-run tests (incl. the new
+`test_cross_run_retrieval.py` + `test_portfolio_digest.py`) + the full suite green (exit 0), `mkdocs --strict`
+green.
+
+**UI-plans docs (doc 18 PART V refresh #6):** §28.3 "Why recalled?" now records its retrieval backend as shipped
+(the receipted hybrid query is a real read-model, not a UI-only construct); the fuller intent-classifier CR2a
+refinement remains deferred.

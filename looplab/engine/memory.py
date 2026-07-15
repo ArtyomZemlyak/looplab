@@ -676,6 +676,25 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     return {"n_runs": len(capsules), "n_concepts": len(concepts), "concepts": concepts, "runs": cards}
 
 
+def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None) -> dict:
+    """PART IV cross-run Step 7 (lean, GATED): a recursive summary LEVEL above the flat concept overview —
+    concepts grouped by their AXIS prefix (the part before '/', e.g. 'data/hard-negative-mining' -> 'data')
+    into clusters with rollup counts. Deterministic, no LLM. Per the §21.20.11 hierarchy gate this ships as
+    DATA only (an inspector rollup); it is NOT wired into any prompt/context until it beats the flat
+    Claim+RunCapsule baseline (≥5 pp grounded-answer gain OR ≥30% token reduction) on the benchmark corpus."""
+    ov = portfolio_concept_overview(capsules, aliases=aliases)
+    clusters: dict[str, dict] = {}
+    for e in ov["concepts"]:
+        axis = e["concept"].split("/", 1)[0] if "/" in e["concept"] else "(ungrouped)"
+        cl = clusters.setdefault(axis, {"axis": axis, "concepts": [], "_runs": set()})
+        cl["concepts"].append(e["concept"])
+        cl["_runs"].update(r["run_id"] for r in e["runs"])
+    axes = [{"axis": c["axis"], "n_concepts": len(c["concepts"]), "n_runs": len(c["_runs"]),
+             "concepts": sorted(c["concepts"])} for c in clusters.values()]
+    axes.sort(key=lambda c: (-c["n_concepts"], -c["n_runs"], c["axis"]))
+    return {"n_axes": len(axes), "n_concepts": ov["n_concepts"], "axes": axes}
+
+
 class CaseLibrary:
     """Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
     callable (see `tools.memora.make_abstractor`) to index each case by a short abstraction + cue

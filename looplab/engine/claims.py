@@ -14,6 +14,7 @@ is neutral (it takes no stance), exactly as on the lesson read/write paths.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from looplab.engine.memory import _NEGATIVE, normalize_statement
@@ -150,10 +151,10 @@ def load_research_claims(memory_dir) -> list[dict]:
     return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
 
 
-def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
+def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently."""
+    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b)."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -162,7 +163,7 @@ def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
     return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
-                             decisions=load_claim_decisions(memory_dir))
+                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
@@ -186,8 +187,71 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
                            aliases=load_concept_aliases(memory_dir))
 
 
+_CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _stmt_tokens(s: str) -> frozenset:
+    return frozenset(w for w in _CLAIM_WORD.findall((s or "").casefold()) if len(w) > 2)
+
+
+def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[dict]:
+    """CR1b (lean, opt-in): merge claims whose STATEMENTS are genuine PARAPHRASES into one. Identity is a
+    strict token-JACCARD test (>= `threshold`) via union-find — deliberately NOT the hybrid top-k
+    clustering, which blobs a HOMOGENEOUS corpus (every claim shares the task's vocabulary) into one giant
+    cluster (verified: it collapsed 73 distinct rubert claims into 1). Jaccard 0.6 requires most words to
+    match, so distinct techniques stay separate and only near-identical restatements merge. Suggestion-grade
+    -> opt-in; the structured semantic claim key is the full CR1b. Unions evidence/runs/scopes/sources,
+    keeps the most-evidenced statement as the label, carries an operator maturity if any member had one."""
+    n = len(claims)
+    if n <= 1:
+        return claims
+    toks = [_stmt_tokens(c["statement"]) for c in claims]
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        if not toks[i]:
+            continue
+        for j in range(i + 1, n):
+            if not toks[j]:
+                continue
+            inter = len(toks[i] & toks[j])
+            if inter and inter / len(toks[i] | toks[j]) >= threshold:
+                parent[_find(i)] = _find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(_find(i), []).append(i)
+
+    out = []
+    for idxs in groups.values():
+        members = [claims[i] for i in idxs]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        sup = sorted({r for m in members for r in m["support"]})
+        opp = sorted({r for m in members for r in m["oppose"]})
+        rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
+        mat = next((m["maturity"] for m in members if m.get("maturity") != "machine-proposed"),
+                   "machine-proposed")
+        out.append({
+            "statement": rep["statement"], "epistemic": _epistemic(sup, opp), "maturity": mat,
+            "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "runs": sorted({r for m in members for r in m["runs"]}),
+            "scopes": sorted({r for m in members for r in m["scopes"]}),
+            "sources": sorted({s for m in members for s in m.get("sources", [])}),
+            "merged_from": sorted(m["statement"] for m in members),
+        })
+    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
+    return out
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None) -> list[dict]:
+                      decisions: Optional[dict] = None, fuzzy: bool = False) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
     contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
@@ -263,7 +327,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    return out
+    return _fuzzy_merge_claims(out) if fuzzy else out
 
 
 # --------------------------------------------------------------------------- #
@@ -331,6 +395,46 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
             "top_concepts": [e["concept"] for e in (concept_overview.get("concepts") or [])[:max_claims]],
         }
     return pack
+
+
+def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None) -> dict:
+    """CR2a retrieval planner (lean, §21.20.5): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
+    (with their epistemic state / operator maturity) + concepts (with #runs) — over the shipped
+    `HybridRetriever` (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), ranked by relevance to
+    `query`, returning a BOUNDED, RECEIPTED result. Advisory. The fuller CR2a (intent-classified
+    eligibility, capped per-channel candidates, contradiction quotas) builds on this ranked hybrid recall;
+    operator-rejected claims are already excluded (they never enter the corpus)."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if capsules is None:
+        cp = base / "concept_capsules.jsonl" if base else None
+        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    claims = [c for c in claims_for_memory(memory_dir, lessons=lessons)
+              if c.get("maturity") != "operator-rejected"]
+    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir))
+    docs: list[tuple[str, str, dict]] = []
+    for c in claims:
+        docs.append(("claim", c["statement"], {"epistemic": c["epistemic"], "n_support": c["n_support"],
+                                               "n_oppose": c["n_oppose"], "maturity": c.get("maturity")}))
+    for e in overview["concepts"]:
+        docs.append(("concept", e["concept"],
+                     {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
+    receipt = {"query": str(query or ""), "k": int(k), "n_corpus": len(docs),
+               "channels": ["lexical", "bm25", "vector"]}
+    if not docs or not str(query or "").strip():
+        return {"results": [], "receipt": {**receipt, "n_hits": 0}}
+    from looplab.search.hybrid_merge import HybridRetriever
+    hits = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=max(1, int(k)))
+    results = [{"kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4), **docs[i][2]}
+               for i, s in hits]
+    return {"results": results, "receipt": {**receipt, "n_hits": len(results)}}
 
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,

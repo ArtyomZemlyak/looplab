@@ -40,7 +40,7 @@ def test_no_memory_dir_offers_no_tools():
 def test_specs_are_read_only():
     t = CrossRunTools("/tmp/whatever")
     names = {s["function"]["name"] for s in t.specs()}
-    assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas"}
+    assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search"}
     # no create/update/delete/ratify tool is exposed — advisory only (§22.4)
     assert not any(re for re in names if any(w in re for w in ("write", "edit", "add", "ratify", "delete")))
 

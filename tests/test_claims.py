@@ -287,3 +287,38 @@ def test_claims_for_memory_applies_decisions_too(tmp_path):
     record_claim_decision(str(tmp_path), statement="x helps", decision="ratified")
     out = claims_for_memory(str(tmp_path))
     assert out[0]["maturity"] == "operator-ratified"
+
+
+# --------------------------------------------------------------------------- #
+# CR1b — opt-in fuzzy/paraphrase claim merge (off by default)
+# --------------------------------------------------------------------------- #
+
+def test_fuzzy_off_is_default_no_merge():
+    lessons = [_lesson("hard negative mining improves recall", "supported", [1]),
+               _lesson("hard-negative mining boosts recall performance", "supported", [2])]
+    out = claim_assessments(lessons)                     # fuzzy defaults off
+    assert len(out) == 2                                 # two distinct normalized statements
+
+
+def test_fuzzy_merges_paraphrases():
+    lessons = [_lesson("hard negative mining improves recall", "supported", [1], run_id="rA"),
+               _lesson("hard negative mining improves recall greatly", "tested", [2], run_id="rB"),
+               _lesson("learning rate warmup stabilizes training", "supported", [3], run_id="rC")]
+    out = claim_assessments(lessons, fuzzy=True)
+    # the two hard-negative paraphrases merge into one (contested: rA supports, rB refutes); the warmup
+    # claim stays separate.
+    hn = [c for c in out if "hard negative" in c["statement"].lower()]
+    assert len(hn) == 1 and hn[0]["epistemic"] == "mixed"
+    assert set(hn[0]["support"]) == {"rA:1"} and set(hn[0]["oppose"]) == {"rB:2"}
+    assert "merged_from" in hn[0] and len(hn[0]["merged_from"]) == 2
+    assert any("warmup" in c["statement"] for c in out)
+
+
+def test_cli_claims_fuzzy_flag(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("distillation improves retrieval recall", "supported", [1]),
+        _lesson("distillation improves retrieval recall a lot", "supported", [2])])
+    r = CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"])
+    assert r.exit_code == 0
