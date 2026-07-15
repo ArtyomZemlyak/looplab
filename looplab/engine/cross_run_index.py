@@ -188,7 +188,6 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
     prior_runs = (prior or {}).get("runs") or {}
     runs: dict[str, dict] = {}
     receipts = {"built": [], "cached": [], "skipped": []}
-    entries: list[tuple[RunState, str, str]] = []
     for ev in sorted(root.glob("*/events.jsonl")):
         name = ev.parent.name                         # stable per-run cache key (the run dir name)
         digest = run_source_digest(ev.parent)
@@ -212,7 +211,6 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
             continue
         runs[name] = {"digest": digest, "facts": facts}
         receipts["built"].append(name)
-        entries.append((st, kind, metric))
     # Rebuild the canonical sorted index from ALL kept facts (cached + freshly built), so the output order is
     # identical to a from-scratch `build_index` regardless of which runs were cached this pass.
     all_facts = [r["facts"] for r in runs.values()]
