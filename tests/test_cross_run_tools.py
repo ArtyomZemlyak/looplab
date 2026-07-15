@@ -102,3 +102,27 @@ def test_execute_never_raises_on_junk(tmp_path):
     t = CrossRunTools(tmp_path)
     assert isinstance(t.execute("nonexistent_tool", {}), str)
     assert isinstance(t.execute("cross_run_claims", {"contested": "not-a-bool"}), str)
+
+
+# --------------------------------------------------------------------------- #
+# Developer-scoped wiring (§22.5) — the repo developer's read-only scouts include the dev-scoped tool
+# --------------------------------------------------------------------------- #
+
+def test_repo_developer_scouts_include_cross_run_when_enabled(tmp_path):
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)      # bare instance (the class's test convention)
+    d._cross_run_read_tools = True
+    d._cross_run_memory_dir = str(tmp_path)
+    d._editables = []
+    tools = d._scout_tools()
+    crt = [t for t in tools if isinstance(t, CrossRunTools)]
+    assert len(crt) == 1 and crt[0].role == "developer"   # role-scoped to the developer
+
+
+def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):
+    from looplab.adapters.repo_developer import LLMRepoDeveloper
+    d = LLMRepoDeveloper.__new__(LLMRepoDeveloper)
+    d._cross_run_read_tools = False
+    d._cross_run_memory_dir = str(tmp_path)
+    d._editables = []
+    assert d._scout_tools() == []                          # off -> byte-identical to before

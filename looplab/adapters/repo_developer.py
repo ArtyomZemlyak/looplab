@@ -238,11 +238,14 @@ class LLMRepoDeveloper:
                  loop_opts: Optional[dict] = None, plan_decompose: bool = True,
                  plan_min_steps: int = 2, plan_max_steps: int = 8,
                  session_max_turns: int = 500, session_time_budget_s: float = 1200.0,
-                 prompts=None):
+                 prompts=None, cross_run_read_tools: bool = False, memory_dir=None):
         self.client = client
         self.task = task
         self.parser = parser
         self.prompts = prompts
+        # PART V §22: read-only cross-run knowledge, ROLE-SCOPED to the developer (repair/impl lessons).
+        self._cross_run_read_tools = bool(cross_run_read_tools)
+        self._cross_run_memory_dir = memory_dir
         self.loop_opts = dict(loop_opts or {})
         # C4 plan decomposition + hard per-session backstop (see Settings.developer_*).
         self._plan_decompose = plan_decompose
@@ -502,17 +505,23 @@ class LLMRepoDeveloper:
         write_file/edit_file). `write.files` is passed as the STAGED overlay so read/grep see the code
         the Developer is currently writing — not the pristine on-disk repo (reading a parent/merge
         source is a separate, secondary concern)."""
+        extra = []
+        # PART V §22 — the Developer's read-only cross-run knowledge (dev-routed lessons: what code
+        # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
+        if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
+            from looplab.tools.cross_run_tools import CrossRunTools
+            extra.append(CrossRunTools(self._cross_run_memory_dir, role="developer"))
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:
-            return []
+            return extra
         from looplab.tools.reposcout import RepoScoutTools
         overlay = write.files if write is not None else None      # live dict the write tools mutate
         deleted = write.deleted if write is not None else None    # staged deletions hidden from read/grep/list
         # (name, path) per editable — MIRRORS RepoWriteTools._roots so a scout hit is rendered/deduped with
         # the SAME `<name>/rel` key the write tools use in a multi-editable repo (round-trips into an edit).
         named = [(e.get("name") or "", e["path"]) for e in (getattr(self, "_editables", None) or []) if e.get("path")]
-        return [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted,
-                               named_roots=named)]
+        return extra + [RepoScoutTools(roots=roots, default_root=roots[0], overlay=overlay, deleted=deleted,
+                                       named_roots=named)]
 
     def _stages_emit_spec(self) -> dict:
         from looplab.tools._base import fn_spec

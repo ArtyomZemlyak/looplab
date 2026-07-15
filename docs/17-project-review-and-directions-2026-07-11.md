@@ -4043,10 +4043,14 @@ audited, reversible act.
 
 #### 22.6 Rollout (each off-by-default + audit-first, merged incrementally)
 
-1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (all reasoning roles).
-2. Developer role-scoped read variant.
-3. Strategist coverage cue + Genesis prior-art (injection, bounded).
-4. Operator ratify/pin/purge control events (the governance substrate; UI deferred).
+1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (all reasoning roles). **DONE.**
+2. Developer role-scoped read variant (into `LLMRepoDeveloper._scout_tools`, `role="developer"`). **DONE.**
+3. Strategist coverage cue + Genesis prior-art (injection, bounded). *(follow-up)*
+4. Operator ratify/pin/purge control events (the governance substrate; UI deferred). *(follow-up)*
+
+Steps 1–2 land the **agentic READ tool for every reasoning role** (Researcher, Strategist, deep-research,
+and the role-scoped Developer), all under the opt-in `cross_run_read_tools` flag — "read for everyone", the
+user's priority. The injected cues (3) and the operator write/ratify path (4) are the remaining slices.
 
 Every step reuses a shipped seam (the tool-provider contract, the role-routed memory, the control-event
 allow-list) and never lets an agent mutate cross-run truth — the analysis's central guarantee.
