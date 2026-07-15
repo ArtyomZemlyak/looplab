@@ -149,3 +149,42 @@ def test_shared_providers_omit_cross_run_tool_when_off(tmp_path):
     from looplab.adapters.tasks import _shared_providers
     provs = _shared_providers(None, _minimal_settings(tmp_path, on=False))
     assert not any(isinstance(p, CrossRunTools) for p in provs)
+
+
+# --------------------------------------------------------------------------- #
+# Scope filter (§22 / live-test finding) — bound to a run, cross-TASK rows don't leak in
+# --------------------------------------------------------------------------- #
+
+def _lz_scoped(statement, task_id, fingerprint, run_id="r1"):
+    return {"statement": statement, "outcome": "supported", "evidence": [1], "run_id": run_id,
+            "task_id": task_id, "role": "", "fingerprint": fingerprint}
+
+
+def test_unbound_is_portfolio_wide(tmp_path):
+    _seed(tmp_path, lessons=[
+        _lz_scoped("about retrieval", "rubert", ["metric:recall", "retrieval", "russian"]),
+        _lz_scoped("about quadratic", "quadratic", ["metric:mse", "quadratic"]),
+    ])
+    out = CrossRunTools(tmp_path).execute("cross_run_claims", {})   # unbound (CLI)
+    assert "about retrieval" in out and "about quadratic" in out   # both — human sees everything
+
+
+def test_bound_scopes_out_foreign_tasks(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, lessons=[
+        _lz_scoped("about retrieval", "rubert", ["metric:recall", "retrieval", "russian"]),
+        _lz_scoped("about quadratic", "quadratic", ["metric:mse", "quadratic"]),
+    ])
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    out = t.execute("cross_run_claims", {})
+    assert "about retrieval" in out          # same task_id OR shared goal term ("retrieval"/"russian")
+    assert "about quadratic" not in out      # the unrelated task no longer leaks (the live-test fix)
+
+
+def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, lessons=[_lz_scoped("legacy lesson", "rubert", ["metric:recall"])])  # no goal terms (ASCII-dropped)
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="плотный поиск"))   # Cyrillic goal
+    assert "legacy lesson" in t.execute("cross_run_claims", {})            # exact task_id still passes
