@@ -668,3 +668,34 @@ correctness edge + doc/comment drift, matching this branch's "stale docs/comment
   diagram in the same change" rule.
 
 Full suite + UI + build + bundle + mkdocs re-run green after the fixes.
+
+---
+
+## Round 10 — integrate 3 more master commits + fix an R1-c soundness gap (2026-07-15)
+
+Master advanced 3 more commits (`3af1c62` → `b53531d`: D7 scored capability-expansion operator, R1-c
+holdout-soundness producer with union-find tie-components, B1-ext hypothesis retro-tag). Integrated via a
+clean three-way merge (no conflicts; the only fold change is the additive `hypothesis_concepts_at_vocab`).
+Verified: full pytest (exit 0), UI 306, build, bundle, mkdocs. The two `test_attention` failures seen once
+under concurrent-agent load were confirmed FLAKY (pass isolated + as a file; the merge touches no attention
+code) — not a regression.
+
+Reviewing the incoming code (5-probe adversarial pass on the union-find) surfaced **one real
+selection-soundness defect** in the R1-c producer and fixed it:
+
+- **`engine/strategy.py::_metric_tie_groups`** (correctness, opt-in path): the producer linked BOTH the
+  robust and the holdout tie over the mean-pick pool (`confirmed if confirmed else eligible`). But
+  `_select_best` ranks the holdout pick over the FULL eligible holdout pool (`hpool`), not the confirmed
+  subset. So with a confirmed node present, an unconfirmed-but-holdout-scored node tied on the holdout
+  metric was never surfaced/scored — it then competed in the holdout tie at the neutral verifier midpoint
+  and could WIN it UNVERIFIED (reproduced: it became `best_node_id` over verified-but-lower siblings — the
+  exact inverse of R1-c's "prefer the sound node" goal). Fixed by linking the holdout metric over the full
+  eligible holdout pool (mirroring `hpool`); robust linking still uses the mean-pick pool. Byte-identical
+  when `holdout_select` (or `select_verifier`) is off. Regression test added
+  (`test_metric_tie_groups_surfaces_unconfirmed_holdout_tie_past_the_confirmed_pool`) — it fails against the
+  merged code and passes after the fix.
+
+The rest of the 3-commit delta is high quality and fully concept-aligned: every lever is gated off-by-default
+(D7's `expand` operator, capability-expansion, graded-novelty all byte-identical on a default run),
+`KIND_EXPAND` is registered in `search/policy.py` and bucketed generically by `operator_yields`, and the
+union-find itself is deterministic/order-independent (verified across all permutations).

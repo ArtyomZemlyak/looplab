@@ -222,6 +222,28 @@ def test_metric_tie_groups_includes_holdout_ties_when_holdout_select(tmp_path):
     assert Engine._metric_tie_groups(None, st) == []
 
 
+def test_metric_tie_groups_surfaces_unconfirmed_holdout_tie_past_the_confirmed_pool(tmp_path):
+    """R1-c completeness gap: the holdout pick ranks the FULL eligible holdout pool, NOT the confirmed
+    subset. A confirmed node coexisting with an UNCONFIRMED node tied on the holdout metric must still
+    surface the unconfirmed node — else it is never scored, stays at the neutral verifier midpoint, and can
+    WIN the holdout tie unverified. Regression for the confirmed-subset vs full-holdout-pool mismatch."""
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.70)                                # UNCONFIRMED (would be dropped by the mean pool)
+    _add(s, 1, 0.85)
+    _add(s, 2, 0.90)                                # distinct robust metrics -> only a HOLDOUT tie
+    st = fold(s.read_all())
+    for nid in (0, 1, 2):
+        st.nodes[nid].holdout_metric = 0.80         # all TIE on the unseen-signal holdout metric
+    st.nodes[1].confirmed_mean = 0.85               # 1,2 confirmed -> mean pool = {1,2} only
+    st.nodes[2].confirmed_mean = 0.90
+
+    class _S:
+        _holdout_select = True
+    groups = Engine._metric_tie_groups(_S(), st)
+    # the unconfirmed node 0 must join the surfaced holdout tie-component, not be dropped with the mean pool
+    assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1, 2}
+
+
 def test_reopen_clears_stale_confirm_override(tmp_path):
     # a best_confirmed from epoch N must NOT keep overriding after a reopen to epoch N+1 — the reopen
     # clears BOTH confirmed_done AND the threaded ctx.best_confirmed the confirm-override reads.
