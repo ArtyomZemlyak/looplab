@@ -174,6 +174,33 @@ def test_inject_node_creates_and_evaluates(tmp_path):
     assert inj.idea.params == {"x": 0.5} and inj.idea.theme == "hand-tuned"
 
 
+def test_inject_node_developer_crash_fails_and_pauses(tmp_path):
+    # An operator inject with NO ready-made code builds via the Developer. If that session CRASHES
+    # (the "(developer error: …)" sentinel — an LLM outage / hard error), the injected node must FAIL
+    # as a developer_crash and trip the circuit-breaker (pause), NOT be created pending and evaluated
+    # with the parent's carried-over solution (a false metric). Mirrors the guard _create_node and
+    # _rerun_node already have.
+    class _CrashingDev:
+        def implement(self, idea):
+            return "(developer error: LLM unreachable)"
+
+    rd = tmp_path / "run"
+    task = ToyTask.load(TASK)
+    r, _ = task.build_roles()
+    eng = Engine(rd, task=task, researcher=r, developer=_CrashingDev(), sandbox=SubprocessSandbox(),
+                 policy=GreedyTree(n_seeds=2, max_nodes=4))
+    eng.store.append("run_started", {"run_id": "run", "task_id": "toy", "direction": "min"})
+    eng._create_injected_node({
+        "idea": {"operator": "manual", "params": {"x": 0.5}, "rationale": "hunch"},
+        "parent_id": None, "code": None})
+    events = eng.store.read_all()
+    assert any(e.type == "node_failed" and e.data.get("reason") == "developer_crash" for e in events), \
+        "a crashed-developer inject must fail as developer_crash, not evaluate a false metric"
+    st = fold(events)
+    assert st.paused, "a developer crash on an inject must trip the circuit-breaker (pause)"
+    assert not any(n.status is NodeStatus.evaluated for n in st.nodes.values())
+
+
 def test_inject_node_with_parent_and_replay_safe(tmp_path):
     rd = tmp_path / "run"
     s1 = _paused(rd)                                  # a paused run with evaluated nodes

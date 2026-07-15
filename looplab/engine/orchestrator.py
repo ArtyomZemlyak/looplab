@@ -1995,6 +1995,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if node_id not in fold(self.store.read_all()).nodes:
                 self._discard_node_build_telemetry()
                 return
+            # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
+            # "(developer error: …)" sentinel as its code (an LLM 401/timeout/hard error). Without
+            # this guard the injected node stays pending and its eval runs the PARENT's carried-over
+            # entrypoint/files and inherits the PARENT's metric — a false success (the exact bug the
+            # two sibling create paths already fix). FAIL it now (node_created → node_failed keeps the
+            # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
+            # inject during an LLM outage can't silently slip a garbage-code node past it.
+            if isinstance(code, str) and code.startswith("(developer error:"):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
+                self.store.append(EV_PAUSE, {
+                    "node_id": node_id, "generation": 0,
+                    "reason": "auto-paused: a Developer session crashed while building an injected node "
+                              "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                              "once it's fixed"})
         if not req.get("code"):
             self._emit_agent_report(node_id)
             # consume predictive telemetry for this node so it can't leak onto the next created node
