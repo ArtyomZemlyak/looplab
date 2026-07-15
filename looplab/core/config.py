@@ -481,6 +481,13 @@ class Settings(BaseSettings):
     # Reads the 2a concept-coverage snapshot, so it needs `concept_pivot` to record one. OPT-IN
     # (default off). See engine/proposal_cues.py + search/lock_in.py.
     capability_expansion: bool = False
+    # PART IV cross-run Step 0 (§21.20.12/§21.20.13). Universal task-fingerprint tokenization: drop the
+    # ASCII-only `[a-z0-9]` allowlist on goal keywords so a non-Latin goal (Russian, CJK, …) is NOT
+    # silently dropped from its cross-run fingerprint (today such a goal keys only on kind/dir/metric and
+    # never reaches SIMILAR-task priors/lessons/cases). Uses `[^\W_]+`/`.casefold()` — same splitting as
+    # before, any script. OPT-IN (default off) because it changes which stored fingerprints a LIVE run
+    # matches; a running portfolio must not silently re-key mid-flight. See engine/memory.py.
+    fingerprint_universal: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external

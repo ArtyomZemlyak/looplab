@@ -1,0 +1,16 @@
+{
+  "kind": "repo",
+  "id": "vec 2",
+  "goal": "optimize recall@100 parameter of embedding model for vector search. firstly you need make test_looplab.py file based on test.py - for save metrics in stdout json format. используй только rubert lite. в README лучший ран помечен через lite - BEST TRAIN там следующей строчкой команда для тренировки. Но проверяй сколько у тебя GPU доступно. Можешь параллельные экспы делать тут как хочешь. Можешь датасет улучшать - но нужно токенизировать первично (и трейн и вал). А ты изучил data/vectorizer/dense-retrieval? тебе все понятно как делать? Это векторная модель и обучается она долго до 2 часов может в зависимости от экспаК примеру вот этот файл нужен для конвертации чекпоинта в sentence transformers data/vectorizer/dense-retrieval/to_stf.py это нужно для тестирования А еще нужно ознакомиться с лучшими экспами которые уже были  вот тут data/vectorizer/dense-retrieval/results_last.xlsx это все нужно учитывать Ну и метрики давай сделаем репорт побольше метрик  Плюс напиши json для таски сам исходя из всей инфы Чтобы мы качественно запустились",
+  "direction": "max",
+  "editable_path": "/home/jovyan/data/vectorizer/dense-retrieval",
+  "eval": {
+    "command": ["python", "/home/jovyan/data/vectorizer/dense-retrieval/test_looplab.py"],
+    "params_style": "cli_overrides",
+    "metric": {"kind": "stdout_json", "key": "recall@100"},
+    "profiles": {
+      "smoke": {"overrides": ["steps=10"], "timeout": 120},
+      "full":  {"overrides": ["steps=200"], "timeout": 7200}
+    }
+  }
+}

@@ -19,18 +19,42 @@ _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "
          "given", "this", "that", "is", "are", "by", "your", "my", "it", "as", "at", "be"}
 
 
+# Goal-keyword tokenizers. LEGACY (default): ASCII `[a-z0-9]+` — the original fingerprint. It has a
+# silent train/serve skew for non-Latin goals: a Russian/CJK goal has ZERO `[a-z0-9]` runs, so its
+# fingerprint collapses to just the kind/dir/metric/param tokens and cross-run transfer never reaches
+# it (verified on the live `rubertlite` Russian run). UNIVERSAL (opt-in, `fingerprint_universal`):
+# `[^\W_]+` under re.UNICODE = word runs of ANY script MINUS underscore — same splitting as the legacy
+# regex (underscore stays a separator), just without the alphabet allowlist, over `.casefold()` for
+# correct cross-script case folding. This is the CR Step-0 fix: remove the hardcoded charset, don't
+# special-case one language. Flagged (not default) because it changes which stored fingerprints a
+# LIVE run matches — a running portfolio must not silently re-key mid-flight (see docs/17 §21.20.12).
+_WORD_ASCII = re.compile(r"[a-z0-9]+")
+_WORD_UNICODE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _goal_tokens(goal: str, *, universal: bool) -> list[str]:
+    r"""Salient goal keywords, filtered to len>2 non-stopwords. `universal=False` is byte-identical to
+    the original `[a-z0-9]+`/`.lower()`; `universal=True` keeps every script via `[^\W_]+`/`.casefold()`."""
+    if universal:
+        return [w for w in _WORD_UNICODE.findall((goal or "").casefold())
+                if len(w) > 2 and w not in _STOP]
+    return [w for w in _WORD_ASCII.findall((goal or "").lower())
+            if len(w) > 2 and w not in _STOP]
+
+
 def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
-                     param_names: Optional[list[str]] = None) -> list[str]:
+                     param_names: Optional[list[str]] = None, *, universal: bool = False) -> list[str]:
     """A cheap, deterministic content fingerprint of a task as a token SET (M2). Cross-run transfer
     should reach a *similar* task, not only the exact same `task_id` — so we key priors/lessons on the
     overlap of these tokens (Jaccard, `fingerprint_similarity`) instead of an exact id match. Tokens:
-    the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names."""
+    the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names.
+    `universal` (opt-in) removes the ASCII-only allowlist on goal keywords so non-Latin goals are not
+    silently dropped; default False keeps the legacy fingerprint byte-identical (see `_goal_tokens`)."""
     toks = {f"kind:{(kind or '').lower()}", f"dir:{(direction or '').lower()}"}
     if metric:
         toks.add(f"metric:{str(metric).lower()}")
-    for w in re.findall(r"[a-z0-9]+", (goal or "").lower()):
-        if len(w) > 2 and w not in _STOP:
-            toks.add(w)
+    for w in _goal_tokens(goal, universal=universal):
+        toks.add(w)
     for p in (param_names or []):
         toks.add(f"param:{str(p).lower()}")
     return sorted(toks)

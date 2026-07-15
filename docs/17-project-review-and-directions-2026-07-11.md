@@ -3820,12 +3820,14 @@ high-ROI items and deferring the expensive index/UI mass until the contracts and
 Every step ships behind a flag, lands **audit-only** first (records what it *would* have supplied/changed),
 and is promoted to live influence only after its gate passes on a **frozen-portfolio replay**.
 
-- **Step 0 — Universal tokenizer + benchmark fixture (near-term, no CR dependency).** (a) Version
-  `task_fingerprint` to Unicode-`\w+`/`casefold` behind a flag (§21.20.12 #1); regression-test that a
-  Russian goal now yields a non-empty fingerprint and that the legacy version is byte-identical when the
-  flag is off. (b) Start the labelled cross-run fixture from §21.20.10 (exact repeats, same-app/diff-domain,
-  incompatible metrics, correlated forks, re-eval flips, concept aliases/splits, deleted/private runs,
-  a 50-run/5k-node tier). Nothing else can be measured without it.
+- **Step 0 — Universal tokenizer + benchmark fixture (near-term, no CR dependency).** (a) **LANDED
+  2026-07-15:** `task_fingerprint` versioned to Unicode `[^\W_]+`/`casefold` behind the
+  `fingerprint_universal` Settings/EngineOptions flag (default off → legacy byte-identical); threaded
+  through `LessonMemory.task_fingerprint`; `tests/test_task_fingerprint_universal.py` pins both halves
+  (legacy byte-identical for ASCII, universal captures Cyrillic/CJK, two Russian goals now
+  distinguishable where legacy collapsed them). (b) TODO: the labelled cross-run fixture from §21.20.10
+  (exact repeats, same-app/diff-domain, incompatible metrics, correlated forks, re-eval flips, concept
+  aliases/splits, deleted/private runs, a 50-run/5k-node tier). Nothing else can be measured without it.
 - **Step 1 — CR0 contracts + migration + deterministic rebuild.** Define `ScopeProfile`, `RunContext`,
   `EvaluationSlice`/`ComparisonContract`, `ExecutionAttempt`/`Measurement`, and the Corpus/Visibility
   snapshot records (§21.20.3) as append-only decision ledgers + a rebuildable SQLite/FTS/vector projection.

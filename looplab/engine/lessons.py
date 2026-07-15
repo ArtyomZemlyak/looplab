@@ -74,7 +74,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
                                 final.goal or getattr(self._e.task, "goal", ""),
                                 metric=str(getattr(self._e.task, "metric", "") or ""),
-                                param_names=pnames)
+                                param_names=pnames,
+                                universal=bool(getattr(self._e, "_fingerprint_universal", False)))
 
     def append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
         """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6

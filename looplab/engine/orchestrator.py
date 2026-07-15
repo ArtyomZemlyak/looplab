@@ -153,6 +153,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concept_pivot = _opt("concept_pivot")
         graded_novelty = _opt("graded_novelty")
         capability_expansion = _opt("capability_expansion")
+        fingerprint_universal = _opt("fingerprint_universal")
         phase_handoff_summary = _opt("phase_handoff_summary")
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
@@ -329,6 +330,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._concept_pivot = bool(concept_pivot)
         self._graded_novelty = bool(graded_novelty)
         self._capability_expansion = bool(capability_expansion)
+        self._fingerprint_universal = bool(fingerprint_universal)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
