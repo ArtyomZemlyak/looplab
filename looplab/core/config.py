@@ -431,6 +431,11 @@ class Settings(BaseSettings):
     # reachable LLM client. Enable only after validating calibration offline with `verifier.calibrate`.
     # See trust/verifier.py + core/fitness.py.
     select_verifier: bool = False
+    # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — two confirmed
+    # means within the confirm-phase noise (|Δ| <= 1.96·SE, SE=confirmed_std/sqrt(confirmed_seeds)) are
+    # tied and broken by soundness. Requires `select_verifier`. NEVER widens past measured noise, so a
+    # SIGNIFICANT difference is never a tie (§21.7). Off -> exact-metric tie only.
+    verifier_ci_tie: bool = False
     # Verifier sample count for `select_verifier` (the §12 repeated-sampling expectation). 3 tames the
     # single-shot variance; 1 = single-shot (cheaper, noisier).
     select_verifier_samples: int = Field(default=3, ge=1)

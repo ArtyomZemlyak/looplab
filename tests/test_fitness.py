@@ -16,6 +16,82 @@ def _node(nid, metric=None, *, feasible=True, confirmed_mean=None, holdout_metri
                 feasible=feasible, confirmed_mean=confirmed_mean, holdout_metric=holdout_metric)
 
 
+def _cn(nid, mean, *, std=None, seeds=None, score=None):
+    """A confirmed node with optional confirm-noise + verifier score, for the R1-d CI-tie tests."""
+    n = Node(id=nid, operator="draft", idea=Idea(operator="draft"), metric=mean,
+             status=NodeStatus.evaluated, feasible=True, confirmed_mean=mean)
+    n.confirmed_std, n.confirmed_seeds, n.verifier_score = std, seeds, score
+    return n
+
+
+# --------------------------------------------------------------------------- #
+# R1-d CI-tie (§21.19) — statistical tie-break, §21.7-safe
+# --------------------------------------------------------------------------- #
+
+def test_ci_tie_off_equals_exact_promotion_pick():
+    f_off = SearchFitness("max", verifier_tiebreak=True, ci_tie=False)
+    nodes = [_cn(0, 0.90, std=0.05, seeds=3, score=0.9), _cn(1, 0.905, std=0.05, seeds=3, score=0.1)]
+    # ci_tie off -> exact-tie: distinct means -> the metric leader (id 1, 0.905) wins regardless of score
+    assert f_off.best_ci(nodes).id == 1
+
+
+def test_ci_tie_never_overrides_a_significant_difference():
+    """§21.7: a mean better by MORE than the confirm noise is NOT tied — a higher soundness cannot steal it."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    # A: mean 0.90, TIGHT noise (std 0.01, 4 seeds -> SE 0.005), LOW soundness 0.1
+    # B: mean 0.80, tight noise, HIGH soundness 0.9. |Δ|=0.10 >> 1.96·√(2·0.005²)=0.014 -> NOT tied.
+    a = _cn(0, 0.90, std=0.01, seeds=4, score=0.1)
+    b = _cn(1, 0.80, std=0.01, seeds=4, score=0.9)
+    assert f.best_ci([a, b]).id == 0            # the significantly-better mean wins; soundness can't override
+
+
+def test_ci_tie_breaks_a_statistical_tie_by_soundness():
+    """Within the confirm noise, the sounder node wins — even if it is NOT the raw metric leader."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    # A is the raw leader (0.905) but LOW soundness; B is 0.90 with HIGH soundness. SE=0.05/√3=0.029,
+    # CI=1.96·√(2·0.029²)=0.080; |Δ|=0.005 <= 0.080 -> statistically TIED -> the sounder B wins.
+    a = _cn(0, 0.905, std=0.05, seeds=3, score=0.2)
+    b = _cn(1, 0.90, std=0.05, seeds=3, score=0.95)
+    assert f.best_ci([a, b]).id == 1
+    # min direction: symmetric — leader is the LOWEST mean, tie broken by soundness
+    fmin = SearchFitness("min", verifier_tiebreak=True, ci_tie=True)
+    assert fmin.best_ci([_cn(0, 0.10, std=0.05, seeds=3, score=0.2),
+                         _cn(1, 0.105, std=0.05, seeds=3, score=0.95)]).id == 1
+
+
+def test_ci_tie_unscored_tieset_falls_back_to_metric_leader():
+    """Review finding #1: an all-UNSCORED (or equal-soundness) statistical tie-set must resolve to the
+    METRIC LEADER, never an arbitrary id — the verifier gives no signal, so it must not move the champion."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    # both within the leader's noise, NEITHER scored -> the metric leader (0.905, id 0) must win, not id 1
+    a = _cn(0, 0.905, std=0.05, seeds=3, score=None)
+    b = _cn(1, 0.90, std=0.05, seeds=3, score=None)
+    assert f.best_ci([a, b]).id == 0
+    # equal EXPLICIT scores -> still the metric leader
+    assert f.best_ci([_cn(0, 0.905, std=0.05, seeds=3, score=0.7),
+                      _cn(1, 0.90, std=0.05, seeds=3, score=0.7)]).id == 0
+
+
+def test_ci_tie_candidate_variance_cannot_widen_the_band():
+    """Review finding #2: a candidate's OWN inflated confirmed_std must NOT drag a genuinely-better tight
+    leader into a tie — the band is anchored on the LEADER's precision only."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    # leader tight (std 0.001), candidate 0.20 worse but wildly noisy (std 5.0) + high soundness.
+    # band = 1.96·SE_leader (tiny) -> |Δ|=0.20 NOT tied -> the leader wins; C's variance can't steal it.
+    leader = _cn(0, 0.90, std=0.001, seeds=4, score=0.1)
+    noisy = _cn(1, 0.70, std=5.0, seeds=3, score=0.9)
+    assert f.best_ci([leader, noisy]).id == 0
+
+
+def test_ci_tie_falls_back_to_exact_without_noise_data():
+    """No confirmed_std/seeds -> no SE -> only EXACT-metric ties are broken (never a fabricated band)."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    # near but distinct means, NO noise data -> not tied -> metric leader (id 1) wins despite lower score
+    assert f.best_ci([_cn(0, 0.90, score=0.9), _cn(1, 0.905, score=0.1)]).id == 1
+    # EXACT tie with no noise data -> still broken by soundness
+    assert f.best_ci([_cn(0, 0.90, score=0.2), _cn(1, 0.90, score=0.9)]).id == 1
+
+
 # --------------------------------------------------------------------------- #
 # Comparator
 # --------------------------------------------------------------------------- #

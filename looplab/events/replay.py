@@ -147,6 +147,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `_select_verifier` gate from this recorded value on resume (orchestrator `_reentry_repin`), so the
     # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
     st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
+    st.verifier_ci_tie = bool(d.get("verifier_ci_tie", False))   # R1-d: absent on old logs -> exact-tie
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Operator edited the run's trust gate after launch (server config edit). Last write
@@ -1818,7 +1819,8 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # R1/SearchFitness: the eligibility predicate, the ranked-scalar keys and the direction chooser are
     # OWNED by core.fitness.SearchFitness — one spelling shared with rank_by_metric / holdout_topk, so a
     # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
-    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak)
+    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak,
+                        ci_tie=st.verifier_ci_tie)
     evaluated = [n for n in st.evaluated_nodes() if fit.eligible(n, flagged, st.aborted_nodes)]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
@@ -1828,7 +1830,10 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
         # on — it resolves metric-EQUAL contests only, never overriding a strictly-better robust_metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
         pool = confirmed if confirmed else evaluated
-        st.best_node_id = fit.best(pool, key=fit.promotion_key).id
+        # R1-d: `best_ci` widens the verifier tie-break to a STATISTICAL tie when `verifier_ci_tie` is on
+        # (grounded in confirmed_std/seeds); it is IDENTICAL to the exact-tie `best(promotion_key)` when the
+        # flag is off (or nodes lack confirm-noise data). §21.7: never picks over a significantly-better mean.
+        st.best_node_id = fit.best_ci(pool).id
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if

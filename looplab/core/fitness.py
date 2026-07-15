@@ -38,13 +38,20 @@ class SearchFitness:
     """The run's ordering owner, built from its optimize `direction`. Stateless beyond `direction`
     (+ the R1-c `verifier_tiebreak` flag); construct one per fold / policy call (cheap)."""
 
-    def __init__(self, direction: str, *, verifier_tiebreak: bool = False):
+    def __init__(self, direction: str, *, verifier_tiebreak: bool = False, ci_tie: bool = False,
+                 ci_z: float = 1.96):
         self.direction = direction
         self._reverse = (direction == "max")     # best-first ordering for `sorted(..., reverse=)`
         # R1-c: when on, the mean-pick key gains a calibrated-verifier tie-break slot BETWEEN the metric
         # and the id, oriented by direction so a HIGHER verifier score always wins a metric-tie under the
         # run's chooser (max picks the larger key, min the smaller). Off -> plain (robust_metric, id).
         self._verifier_tiebreak = bool(verifier_tiebreak)
+        # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — two confirmed
+        # means are "tied" when their difference is within the confirm-phase noise (|Δ| <= ci_z·SE_diff,
+        # SE=confirmed_std/sqrt(confirmed_seeds)). Requires `verifier_tiebreak` too. NEVER widens beyond
+        # measured noise, so a SIGNIFICANT difference is never a tie (§21.7 preserved). Off -> exact-tie.
+        self._ci_tie = bool(ci_tie) and self._verifier_tiebreak
+        self._ci_z = float(ci_z)
         self._vsign = 1.0 if direction == "max" else -1.0
 
     # --- comparator -------------------------------------------------------------------------------
@@ -96,6 +103,51 @@ class SearchFitness:
         if not self._verifier_tiebreak:
             return (node.robust_metric, node.id)
         return (node.robust_metric, self._vc(node), node.id)
+
+    @staticmethod
+    def _se(node):
+        """The standard error of a node's confirmed MEAN = confirmed_std / sqrt(confirmed_seeds), or None
+        when the confirm-noise data is missing/degenerate (single seed / no std -> no usable SE)."""
+        std, n = node.confirmed_std, node.confirmed_seeds
+        if not isinstance(std, (int, float)) or std != std or std < 0:
+            return None
+        if not isinstance(n, int) or n < 1:
+            return None
+        import math
+        return float(std) / math.sqrt(n)
+
+    def _statistically_tied(self, node, leader) -> bool:
+        """Is `node` STATISTICALLY INDISTINGUISHABLE from the metric-leader — does its mean fall within the
+        LEADER's confidence interval, |Δmean| <= ci_z·SE_leader? The band is anchored on the LEADER's own
+        precision ONLY: a candidate's own (possibly inflated) confirmed_std can NOT widen the band, so a lone
+        high-variance node can't drag a genuinely-better tight leader into a tie. When the leader's SE is
+        unknown, fall back to EXACT-metric equality (never a fabricated band). §21.7: a node whose metric is
+        MORE than the leader's noise away is NOT tied and can never be chosen over the leader by soundness."""
+        if node is leader:
+            return True
+        lm, nm = leader.robust_metric, node.robust_metric
+        if lm is None or nm is None:
+            return False
+        lse = self._se(leader)
+        if lse is None:
+            return nm == lm                       # no leader noise estimate -> exact-tie only (conservative)
+        return abs(nm - lm) <= self._ci_z * lse
+
+    def best_ci(self, nodes):
+        """R1-d (§21.19) mean-pick with a STATISTICAL (CI-band) verifier tie-break, when `ci_tie` is on.
+        Two-stage: (1) the metric-leader by `selection_key` (metric-first, id tie-break); (2) among nodes
+        statistically INDISTINGUISHABLE from it (within the leader's CI), pick by soundness THEN the metric
+        THEN id — `(±verifier_score, robust_metric, id)` — so an unscored / equal-soundness tie-set falls
+        back to the METRIC LEADER (not an arbitrary id), while a sounder within-noise node still wins. A
+        significantly-worse node is excluded from the tie-set, so this can NEVER promote a node over a
+        genuinely-better metric (§21.7). Identical to the plain exact-tie pick when ci_tie is off."""
+        if not self._ci_tie:
+            return self.best(nodes, self.promotion_key)
+        leader = self.best(nodes, self.selection_key)   # metric-first leader (soundness-blind)
+        tied = [n for n in nodes if self._statistically_tied(n, leader)]
+        # soundness first (direction-oriented via _vc), then the metric (direction-oriented under the run's
+        # chooser), then id — so a no-signal tie-set resolves to the exact metric leader, as promised.
+        return self.best(tied, key=lambda n: (self._vc(n), n.robust_metric, n.id))
 
     def holdout_key(self, node):
         """The holdout-promotion key: `(holdout_metric, id)`, with the SAME R1-c verifier tie-break slot
