@@ -888,9 +888,13 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 for m in members:
                     if m != canon and m not in decided:   # freeze known raws AND canonicals (see above)
                         rename[m] = canon
-    except Exception:  # noqa: BLE001 — consolidation is best-effort; never break the diagnostic
-        # CODEX AGENT: [P1] This failure path also discards authoritative known_renames, resurrecting raw
-        # ids and contradicting the incremental contract above. Apply and return known_renames on failure.
+    except Exception:  # noqa: BLE001 — deriving NEW merges is best-effort; never break the diagnostic
+        # A failure to derive new merges must NOT discard the AUTHORITATIVE recorded decisions (B3): still
+        # apply + return `known_renames` so the vocabulary stays stable (raw ids don't resurrect). Empty
+        # only when there were no known renames either (CODEX P1).
+        if known_renames:
+            g2, t2 = _apply_consolidation(graph, tags, known_renames)
+            return g2, t2, dict(known_renames)
         return graph, tags, {}
 
     # Resolve transitive chains (a->b, b->c => a->c) so the rename is a single canonical hop.

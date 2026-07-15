@@ -379,11 +379,11 @@ def novelty_recall_cmd(
     offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
                                                           "paraphrase-vs-variant adjudication — that needs "
                                                           "the LLM)."),
-    max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
-                                                          "of the most-similar candidate pairs with the LLM "
-                                                          "(each pair = one call). Lower it to cap cost/data."),
-    # CODEX AGENT: [P1] max_pairs is not constrained: Python's pairs[:-1] makes --max-pairs=-1 process
-    # almost the entire internal pool. Validate this option as a non-negative bounded integer before use.
+    max_pairs: int = typer.Option(60, "--max-pairs", min=0, max=100000,
+                                  help="Call-budget knob: adjudicate at most this many of the most-similar "
+                                       "candidate pairs with the LLM (each pair = one call). Lower it to cap "
+                                       "cost/data. Bounded non-negative: a negative value would slice the "
+                                       "whole internal pool."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that

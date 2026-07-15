@@ -112,11 +112,11 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
                                     client=client, samples=samples, parser=parser)
         og = rep.per_criterion.get("over_generalizes", {}).get("mean")
         ds = rep.per_criterion.get("direction_sound", {}).get("mean")
-        # CODEX AGENT: [P2] Counting a lesson as scored when only over_generalizes is present lets the
-        # aggregate report claim adjudication even though direction_sound (required below) is missing.
-        # Count complete per-lesson verdicts and distinguish partial coverage in the aggregate contract.
-        if og is not None:
-            n_scored += 1               # the verifier graded this lesson (vs a total endpoint failure)
+        # A lesson counts as SCORED only when the verdict is COMPLETE — BOTH criteria graded — since
+        # flagging (below) needs both. An og-only partial verdict would let the aggregate claim adjudication
+        # it can't actually act on (CODEX P2); a partial verdict is not a usable score.
+        if og is not None and ds is not None:
+            n_scored += 1               # a COMPLETE verdict (vs endpoint failure / partial coverage)
         flagged = (og is not None and ds is not None
                    and og >= flag_threshold and ds >= flag_threshold)
         hint = ""

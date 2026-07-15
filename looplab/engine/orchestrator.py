@@ -1466,14 +1466,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
                 idea.operator = "improve"
                 # PART IV D7 (§21.8): under action-space LOCK-IN with the capability_expansion lever on, this
-                # improve proposal was already steered by the "build a new capability" directive
-                # (proposal_cues, SAME gate) — stamp it as its OWN `expand` operator so operator_yields
-                # MEASURES whether expanding paid off (scored, SearchFitness-competing as its own lineage),
-                # not silently as another `improve`. Off (flag default) -> stays `improve`, byte-identical.
-                # CODEX AGENT: [P1] The cue is delivered only for the explore stance, but this relabel runs
-                # for every stance and expand is not a policy candidate. Persist an actual assigned expand
-                # action/cue receipt; otherwise ordinary improve work contaminates expand yield statistics.
-                if getattr(self, "_capability_expansion", False):
+                # improve proposal was already steered by the "build a new capability" directive — stamp it
+                # as its OWN `expand` operator so operator_yields MEASURES whether expanding paid off (scored,
+                # SearchFitness-competing as its own lineage), not silently as another `improve`. The relabel
+                # must fire on the EXACT SAME condition as the directive (proposal_cues `_stamp_novelty_hint`):
+                # flag on + `capability_expansion_due` + the EXPLORE stance. Without the stance gate, a
+                # balanced/exploit improve (which got NO expand directive) would be mislabeled `expand` and
+                # contaminate the expand yield (CODEX P1). Off (flag default) -> stays `improve`, byte-identical.
+                if (getattr(self, "_capability_expansion", False)
+                        and getattr(self, "_novelty_stance", None) == "explore"):
                     from looplab.engine.proposal_cues import _LOCK_IN_STREAK
                     from looplab.search.lock_in import capability_expansion_due
                     if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
