@@ -444,6 +444,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
+    if getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
+        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — read-only cross-run knowledge
+        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
     # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
     # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
     # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
@@ -610,7 +613,9 @@ def make_roles(task: TaskAdapter, settings, run_dir=None):
             plan_min_steps=getattr(settings, "developer_plan_min_steps", 2),
             plan_max_steps=getattr(settings, "developer_plan_max_steps", 8),
             session_max_turns=getattr(settings, "developer_session_max_turns", 500),
-            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0))
+            session_time_budget_s=getattr(settings, "developer_session_time_budget_s", 1200.0),
+            cross_run_read_tools=getattr(settings, "cross_run_read_tools", False),   # PART V §22 (dev-scoped)
+            memory_dir=getattr(settings, "memory_dir", None))
 
     # External coding-agent Developer (ADR-7): an external CLI agent writes/repairs the
     # solution code, reusing the task's brief. Tool-agnostic via cli_agent presets.

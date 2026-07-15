@@ -50,9 +50,10 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
     the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names.
     `universal` (opt-in) removes the ASCII-only allowlist on goal keywords so non-Latin goals are not
     silently dropped; default False keeps the legacy fingerprint byte-identical (see `_goal_tokens`)."""
-    # CODEX AGENT: kind/direction/metric are merely Jaccard tokens, not compatibility gates; reproduced
-    # incompatible min/RMSE and max/recall tasks clear the live 0.3 threshold. Separate immutable hard
-    # facets from fuzzy retrieval text and version the tokenizer/fingerprint/schema.
+    # NOTE (CODEX): kind/direction/metric are Jaccard TOKENS here, not hard compatibility gates — two
+    # incompatible tasks (min/rmse vs max/recall) can clear the fuzzy floor on shared goal words. The live
+    # cross-run consumer therefore applies a HARD `direction` gate on top (engine/novelty._cross_run_prior);
+    # the full immutable-facet ComparisonContract that would make this rigorous is the CR0 TODO (§21.20.13).
     toks = {f"kind:{(kind or '').lower()}", f"dir:{(direction or '').lower()}"}
     if metric:
         toks.add(f"metric:{str(metric).lower()}")
@@ -538,18 +539,25 @@ class JsonlCaseLibrary:
         return list(self.cases)
 
 
+# Schema version for the durable capsule record — bump when the shape changes so a reader can migrate/
+# reject incompatible generations instead of silently mis-reading them (a CODEX finding; the full record
+# — evidence node-refs, visibility/retention/purge key, concept UID+taxonomy version — is the CR1a TODO).
+CONCEPT_CAPSULE_VERSION = 1
+
+
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
-                          concepts, best_metric=None, concept_outcomes: Optional[dict] = None) -> dict:
+                          concepts, best_metric=None, concept_outcomes: Optional[dict] = None,
+                          task_id: str = "") -> dict:
     """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
     concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
     with what result?" and feed `grade_novelty`'s `prior_concepts` (D3 level 3 = surface prior, never
-    reject). Deliberately small and JSON-flat: this is memory-store data, not a fold event."""
-    # CODEX AGENT: This durable cross-run record has no schema/fingerprint/concept version, task/scope,
-    # evidence node refs, visibility/retention policy, or purge key. A deleted/private run keeps affecting
-    # later runs, and readers cannot distinguish or migrate incompatible record generations.
+    reject). Carries a schema `v` + `task_id` scope; deliberately small and JSON-flat (memory-store data,
+    not a fold event)."""
     return {
+        "v": CONCEPT_CAPSULE_VERSION,
         "run_id": str(run_id or ""),
+        "task_id": str(task_id or ""),
         "fingerprint": sorted(set(fingerprint or [])),
         "direction": str(direction or "min"),
         "concepts": sorted({str(c) for c in (concepts or []) if c}),
@@ -572,11 +580,20 @@ class ConceptCapsuleStore:
         self.capsules: list[dict] = []
         self._reload()
 
+    @staticmethod
+    def _valid_capsule(c: dict) -> bool:
+        """Per-row schema guard (CODEX): `dicts_only` alone lets a row with an int `fingerprint` or a
+        string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
+        bad row instead of letting it disable the feature: require the list-typed fields to be lists and
+        `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
+        return (isinstance(c.get("run_id"), str) and c["run_id"]
+                and isinstance(c.get("fingerprint"), list)
+                and isinstance(c.get("concepts"), list)
+                and isinstance(c.get("concept_outcomes", {}), dict))
+
     def _reload(self) -> None:
-        # CODEX AGENT: `dicts_only` is not schema validation. A dict with an integer fingerprint or a
-        # string `concepts` field can poison retrieval (or become character concepts); validate and
-        # quarantine each bounded row rather than letting one row disable the advisory feature.
-        self.capsules = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+        rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+        self.capsules = [c for c in rows if self._valid_capsule(c)]   # drop poisoned rows, keep the rest
 
     def add(self, capsule: dict) -> bool:
         """Upsert by `run_id` under the same interprocess lock the case/lesson stores use, re-reading
@@ -597,9 +614,9 @@ class ConceptCapsuleStore:
         """Prior-run capsules whose fingerprint is at least `min_sim` similar (Jaccard, universal-aware
         because the fingerprint itself already is), most-similar first, excluding this run. Bounded by
         the caller; each tuple is (similarity, capsule) so a surfacing cue can rank + cite by run."""
-        # CODEX AGENT: This materializes and sorts the whole portfolio for every proposal. Combined with
-        # construction-time full-file reload and finalization-time whole-file rewrite, cost grows with
-        # every run; query a bounded indexed snapshot keyed by compatible scope/version instead.
+        # NOTE (CODEX, full-CR TODO §21.20.13 CR2a): O(portfolio) scan+sort per call, on top of the
+        # whole-file reload/rewrite this store inherits from JsonlCaseLibrary — fine at tens–hundreds of
+        # runs, replaced by a bounded scope/version-keyed index snapshot at portfolio scale.
         out = []
         for c in self.capsules:
             if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):

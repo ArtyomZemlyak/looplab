@@ -225,6 +225,9 @@ def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepRe
     if getattr(settings, "knowledge_dir", None):
         from looplab.tools.knowledge_tools import KnowledgeTools
         providers.append(KnowledgeTools(settings.knowledge_dir))
+    if getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
+        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — portfolio unknowns/contradictions
+        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
     if getattr(settings, "literature_search", False):
         from looplab.tools.literature import LiteratureTools
         providers.append(LiteratureTools(enabled=True))

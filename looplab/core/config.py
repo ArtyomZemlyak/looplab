@@ -497,14 +497,13 @@ class Settings(BaseSettings):
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
     # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
     # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
-    # Dependencies (CODEX AGENT: not standalone as documented — the WRITE fires on this flag alone, but
-    # neither half is truly self-sufficient):
-    #   • WRITE: the run-end capsule only carries concepts if `node_concepts` tags exist — normally
-    #     produced by `concept_pivot`; with only this flag the capsule can persist with nothing to surface.
-    #   • READ (surface): the prior SURFACES only when `graded_novelty` is also on — the read lives behind
-    #     that gate, so `cross_run_concepts` alone silently accumulates capsules without ever emitting a
-    #     `cross_run_prior`; and a non-Latin (Russian/CJK) portfolio must also set `fingerprint_universal`,
-    #     else the capsule fingerprint over-matches unrelated tasks and surfaces spurious priors.
+    # PREREQUISITES (CODEX — this flag is NOT standalone): the WRITE needs per-run concept tags
+    # (`node_concepts`, produced by `concept_pivot`/F1 tagging) — no tags => no capsule; the SURFACE path
+    # runs inside the graded-novelty precheck, so it also needs `graded_novelty` on. With only this flag +
+    # `memory_dir` it persists/surfaces nothing. Enable `concept_pivot` + `graded_novelty` alongside it.
+    # A non-Latin (Russian/CJK) portfolio should ALSO set `fingerprint_universal`, else the capsule's goal
+    # tokens are dropped and its fingerprint over-matches on kind/dir/metric alone (the novelty direction
+    # gate narrows this, but goal-word similarity is still lost).
     cross_run_concepts: bool = False
     # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
@@ -760,6 +759,13 @@ class Settings(BaseSettings):
     # `cross_run_tools` (same-task only); the agent decides when a foreign run is relevant. Advisory;
     # never changes best-selection. Needs the run's own dir wired through (no-op for unit-built roles).
     all_runs_tools: bool = True
+    # PART V §22 — read-only CROSS-RUN KNOWLEDGE tool for the reasoning roles (Researcher, Strategist,
+    # deep-research, and a Developer-scoped variant). Adds `cross_run_prior_attempts` / `cross_run_claims`
+    # / `cross_run_atlas` over the §21.20 read-models (concept overview + claim assessments + atlas), read
+    # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). ADVISORY ONLY — an agent may cite what it
+    # finds but never mutates cross-run truth (facts are engine-written, verdicts operator-ratified, §22.4).
+    # OPT-IN (default off) because the cross-run stores only exist once the Part-IV features have run.
+    cross_run_read_tools: bool = False
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))

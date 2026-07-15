@@ -200,21 +200,25 @@ class NoveltyGateMixin:
             client = _rc() if callable(_rc) else None
             idea_tags = (tag_idea_llm(idea, graph, client)
                          if (node_concepts and client is not None) else None)
-            # §21.20 Step 2: feed cross-run priors so grade_novelty can recognize a concept tried in an
-            # EARLIER similar run (level 3). Off unless `cross_run_concepts`; empty set otherwise (no-op).
-            prior_set, prior_caps = self._cross_run_prior(state)
-            # CODEX AGENT: `prior_concepts` changes grade precedence, not just observability: level 3 is
-            # returned before the same-run level-4 branch, so enabling this flag can turn an L4 allow into
-            # a fall-through to the flat gate. Keep cross-run annotation outside the selection grade if
-            # the contract is truly audit-only.
-            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
-                                  prior_concepts=prior_set)
+            # §21.20 Step 2: the gating grade is computed WITHOUT cross-run priors, so enabling the flag is
+            # byte-identical to cross-run-off for SELECTION (grade_novelty checks its level 3 before the
+            # same-run level 4, so feeding priors here would flip an L4 allow into a defer — not audit-only).
+            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags)
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
-        # §21.20 Step 2: a cross-run prior (level 3) SURFACES the earlier outcome as an audit event — it
-        # NEVER gates (unlike levels 4/5 below, it defers to the flat gate). "surface, not reject."
-        if grade.level == 3 and prior_set:
-            self._record_cross_run_prior(state, grade, prior_set, prior_caps)
+        # §21.20 Step 2: cross-run priors are AUDIT-ONLY and computed SEPARATELY from the grade above — we
+        # SURFACE an earlier run's outcome (a `cross_run_prior` event) only when the idea's OWN concepts
+        # overlap a prior run's, and it NEVER changes the selection decision. Best-effort throughout.
+        prior_set, prior_caps = self._cross_run_prior(state)
+        if prior_set:
+            try:
+                from looplab.search.graded_novelty import tag_idea
+                idea_concepts = set(idea_tags) if idea_tags is not None else set(tag_idea(idea, graph))
+            except Exception:  # noqa: BLE001 — a tagger hiccup just means no surfacing
+                idea_concepts = set()
+            matched = idea_concepts & prior_set
+            if matched:
+                self._record_cross_run_prior(state, matched, prior_caps)
         # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
             return None
@@ -252,13 +256,17 @@ class NoveltyGateMixin:
         try:
             from pathlib import Path
             from looplab.engine.memory import ConceptCapsuleStore
-            # CODEX AGENT: This path reloads and scans/sorts the entire JSONL once per proposal. It needs
-            # a validated, versioned query index/cache; today one schema-poisoned row is caught outside
-            # this loop and silently disables every otherwise-valid prior for the proposal.
+            # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
+            # a bounded, versioned, scope-keyed query index replaces it once the retrieval planner lands.
             store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
             fp = self.lessons.task_fingerprint(state, state.best())
-            caps = store.prior_capsules(fp, min_sim=self._CROSS_RUN_MIN_SIM,
-                                        exclude_run_id=getattr(state, "run_id", "") or "")
+            # HARD direction gate (CODEX): a min/rmse task and a max/recall task can share enough goal
+            # tokens to clear the fuzzy Jaccard floor, but their outcomes are not comparable — require the
+            # same optimization direction before a prior counts (a lean stand-in for the full contract).
+            my_dir = str(getattr(state, "direction", "") or "min")
+            caps = [(s, c) for s, c in store.prior_capsules(
+                        fp, min_sim=self._CROSS_RUN_MIN_SIM, exclude_run_id=getattr(state, "run_id", "") or "")
+                    if str(c.get("direction") or "min") == my_dir]
             prior: set[str] = set()
             for _sim, c in caps:
                 prior.update(str(x) for x in (c.get("concepts") or []))
@@ -266,30 +274,32 @@ class NoveltyGateMixin:
         except Exception:  # noqa: BLE001 — cross-run read is advisory; a hiccup just yields no priors
             return set(), []
 
-    def _record_cross_run_prior(self, state: RunState, grade, prior_set, prior_caps) -> None:
-        """SURFACE (never gate) the cross-run prior: which of the idea's concepts were tried before, in
+    def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps) -> None:
+        """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in
         which runs, with the best outcome each — folds into `RunState.cross_run_priors` for the trace/UI
-        ('tried in run X -> metric Y'). Best-effort; audit-only, so a failure never blocks proposing."""
+        ('tried in run X -> metric Y'). Best-effort; audit-only, so a failure never blocks proposing.
+        `matched` is the idea∩prior overlap already computed by the caller (never the gating grade)."""
         try:
-            matched = sorted(set(grade.shared_concepts) & set(prior_set))
+            matched = sorted(matched)
             if not matched:
                 return
+            # Filter capsules to those actually contributing a matched concept FIRST, THEN cap — so a
+            # matching capsule past the top-N is never silently dropped from the receipt (CODEX).
             runs = []
-            # CODEX AGENT: The top-five limit is applied before filtering for `matched`, so a matching
-            # sixth capsule can change the grade while producing no audit receipt. Filter first, add a
-            # deterministic tie-break, and record similarity/fingerprint plus a stable proposal/evidence id.
-            for _sim, c in prior_caps[:5]:
+            for sim, c in prior_caps:
                 shared = sorted(set(str(x) for x in (c.get("concepts") or [])) & set(matched))
                 if not shared:
                     continue
                 oc = c.get("concept_outcomes") or {}
                 runs.append({"run_id": c.get("run_id"), "best_metric": c.get("best_metric"),
+                             "similarity": round(float(sim), 4),
                              "concepts": shared, "outcomes": {k: oc[k] for k in shared if k in oc}})
             if not runs:
                 return
+            runs.sort(key=lambda r: (-r["similarity"], str(r["run_id"])))   # deterministic, most-similar first
             self.store.append(EV_CROSS_RUN_PRIOR, {
                 "node_id": max(state.nodes, default=-1) + 1,
-                "matched_concepts": matched, "prior_runs": runs,
+                "matched_concepts": matched, "prior_runs": runs[:8],
                 "stance": getattr(self, "_novelty_stance", None)})
         except Exception:  # noqa: BLE001 — audit only, never block proposing
             return

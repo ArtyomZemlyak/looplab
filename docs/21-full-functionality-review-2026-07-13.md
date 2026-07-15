@@ -871,3 +871,55 @@ inconsistent. `build.sh` remains a maintainer concern flagged by master's own an
 developer-local transcript with an internal URL); left as-is — not this branch's file to rewrite.
 
 Full suite + mkdocs --strict green after the merge.
+
+## Round 16 — integrate the CR 30-finding fixes + Part-V CrossRunTools + §22 role-access; adapt + mega-review (2026-07-15)
+
+Master shipped four commits: `19efc85` (**resolves the 30 CODEX design-blocker findings** the previous round
+merged as annotations — heavy rewrites of `claims.py`/`novelty.py`/`memory.py`/`lessons.py`/`cross_run_index.py`),
+`f716b99` + `0ab6a1b` (**Part-V role-access §22 + a read-only `CrossRunTools`** wired into Researcher /
+Strategist / deep-research / a role-scoped Developer, under the new off-by-default `cross_run_read_tools`), and
+`7b35d54` (tests). Highlights of master's 30-finding fixes, all adopted as the canonical form:
+
+- **claims.py** — evidence refs are now run-QUALIFIED `"run:node"` strings (`"?:node"` for unknown run); `_slim`
+  keeps `runs`/`scopes` and caps statements; `portfolio_atlas` `n_runs` unions capsule run_ids AND lesson-cited
+  runs (a lesson-only memory is no longer reported as zero runs); `max_items` normalized.
+- **novelty.py** — the gating grade is computed WITHOUT cross-run priors, so `cross_run_concepts` is now truly
+  byte-identical to off for SELECTION; priors are surfaced audit-only on the idea∩prior overlap, with a HARD
+  direction gate (a min/rmse prior can't cross into a max/recall task) and filter-then-cap-top-8.
+- **memory.py** — `CONCEPT_CAPSULE_VERSION` + a per-row `_valid_capsule` quarantine (a string `concepts`
+  field can no longer iterate into character-concepts), `task_id` on the capsule.
+- **lessons.py** — the capsule BUILD stays best-effort but the WRITE moved OUTSIDE the try, so a real
+  persistence failure now reaches finalize's retry handshake instead of being silently swallowed.
+
+**Adaptation (this is where the branch had to give way, synergistically).** My Round-14 lean fix had made the
+same evidence refs run-scoped, but as `(run_id, node_id)` TUPLES; master's independent fix uses `"run:node"`
+STRINGS and does strictly more. I retired my tuple `_refs` helper and adopted master's `_qualify` wholesale
+(claims.py/lessons.py/config.py/test_claims.py resolved to master's canonical form), then re-added my one
+genuinely-additive test — `test_evidence_is_run_scoped_so_cross_run_corroboration_counts` — rewritten to the
+string shape. Preserved one branch-only doc point master's note lacked (a non-Latin portfolio should also set
+`fingerprint_universal`).
+
+**Regression caught + fixed (the load-bearing catch).** Resolving `config.py` with `git checkout --theirs`
+was too blunt: it discarded the whole 3-way merge for that file, silently dropping the *branch's* earlier
+security hardening — the `max_parallel`/`n_seeds`/`max_nodes` upper-bound validators (Round 12: an unbounded
+`max_parallel` from a crafted preflight would fan out that many sandboxes). The full suite caught it
+(`test_config_upper_bounds_reject_resource_exhaustion` + preflight `max_parallel`). Restored the `le=` ceilings
+onto master's canonical file, and audited the other two `--theirs` files (claims.py, lessons.py) to confirm
+they lost only intentionally-superseded content. Full suite green after the restore.
+
+**Mega-review** (6-dimension parallel finders + adversarial verifiers over the new code) confirmed the read-model
+key contracts all match empirically (`portfolio_concept_overview` → `concept/n_runs/runs[{run_id,metric,direction}]`,
+etc.), `CrossRunTools.execute` never raises, the role-scoped CLAIM split is real (not a no-op), and no engine
+invariant is violated. Low-severity observations recorded for follow-up: (a) `delete_run` removes the run dir
+but not the portfolio-shared `memory_dir`, so a deleted run's aggregate lessons/metrics still surface via
+CrossRunTools — the §22.6-step-4 operator purge control-event is the intended (deferred) remedy; (b)
+`_role_lessons` fails OPEN for an unknown role string (documented as "anything else sees all"; not reachable
+today since every call site passes a hardcoded `researcher`/`developer`); (c) the concept-coverage atlas is
+portfolio-wide by design (only the claim stream is role-split). None are regressions from this merge.
+
+**UI-plans docs updated** (doc 18 PART V, per request): §25 gains items (3b)/(3c) — the read-models now have
+live consumers (the advisory prompt path AND the agentic `CrossRunTools`), realizing doc 17 §22's first two of
+three delivery mechanisms; §28.3 anchors Findings to run-qualified citable `"run:node"` refs + role-routed
+claim streams; §28.5 anchors the governance workbench to the shipped `CONTROL_EVENTS` operator-write substrate
+(§22.4: agents READ but never EDIT). The "what remains for the UI" story sharpens to *HTTP serving + Atlas React
+surface + operator governance workbench*. Full suite + mkdocs --strict green.
