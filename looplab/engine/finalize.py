@@ -505,7 +505,11 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 engine._store_case(final)
                 if getattr(engine, "_cross_run_concepts", False):    # §21.20 Step 2: cross-run concept capsule
                     engine._store_concept_capsule(final)             # idempotent upsert, sibling of the case
-                    engine._store_research_claims(final)             # + D8 research claims persisted cross-run
+                # D8 research-claim persistence has its OWN gate (mega-review): it must NOT depend on the
+                # concept-capsule flag — a Deep-Research run with `cross_run_concepts=False` still needs its
+                # verified claims published so `contested` is reachable. It self-guards on memory_dir + memo
+                # claims, so it is a no-op when there is nothing to persist.
+                engine._store_research_claims(final)
                 _mark_finalize_step(engine, scope, "case")
             except Exception:  # noqa: BLE001 - case store is an idempotent upsert
                 pass

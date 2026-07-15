@@ -169,12 +169,22 @@ def load_research_claims(memory_dir) -> list[dict]:
     return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
 
 
+def _scoped_research(memory_dir, scope_task: str) -> list[dict]:
+    """D8 research claims, filtered to a bound task when `scope_task` is set (mega-review: a task-bound tool
+    must not read another task's research claims). Portfolio-wide when scope_task is "" (CLI/unbound)."""
+    research = load_research_claims(memory_dir)
+    st = str(scope_task or "")
+    return [r for r in research if str(r.get("task_id") or "") == st] if st else research
+
+
 def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False,
-                      structured: bool = False) -> list[dict]:
+                      structured: bool = False, scope_task: str = "") -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
     research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b);
-    `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR)."""
+    `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR); `scope_task`
+    filters the D8 research claims to the bound task so a task-scoped caller does not re-read another task's
+    research claims (mega-review) — the decisions overlay is applied scope-safely by `claim_assessments`."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -182,17 +192,17 @@ def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False,
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
-    # CODEX AGENT: callers may pass task/role-filtered `lessons`, but this helper then re-adds ALL D8 rows
-    # and ALL global decisions. Consequently a CrossRunTools instance bound to task A still returns task B's
-    # research claims (and the Developer sees the R&D stream it claims to exclude). Accept already-scoped
-    # research claims/decisions or one shared scope predicate and apply it to every source before joining.
-    return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
+    return claim_assessments(lessons, research_claims=_scoped_research(memory_dir, scope_task),
                              decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy, structured=structured)
 
 
-def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
+def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8,
+                     structured: bool = False, scope_task: str = "") -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
-    claims + operator decisions + concept aliases (CR1a). One call so every atlas surface is consistent."""
+    claims + operator decisions + concept aliases + splits. One call so every atlas surface is consistent.
+    `structured` keeps the claim projection consistent with the researcher advisory; `scope_task` filters
+    the D8 research claims to the bound task so a task-scoped caller does not surface another task's
+    claims/contradictions (mega-review)."""
     from pathlib import Path
 
     from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
@@ -205,9 +215,9 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
-    return portfolio_atlas(lessons, capsules, max_items=max_items,
+    return portfolio_atlas(lessons, capsules, max_items=max_items, structured=structured,
                            decisions=load_claim_decisions(memory_dir),
-                           research_claims=load_research_claims(memory_dir),
+                           research_claims=_scoped_research(memory_dir, scope_task),
                            aliases=load_concept_aliases(memory_dir),
                            splits=load_concept_splits(memory_dir))
 
@@ -459,6 +469,16 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     for key, g in groups.items():
         sup, opp = sorted(g["support"]), sorted(g["oppose"])
         d = (decisions or {}).get(key)
+        # SCOPE GUARD (mega-review): a SCOPED decision (scope != "") governs ONLY a claim whose contributing
+        # task scopes are wholly within that scope — otherwise a reject/ratify scoped to task A leaks onto a
+        # same-worded claim in task B (this lean projection groups by statement across tasks, and it is the
+        # DEFAULT read path for tools/serve/retrieval). A scope-LESS decision still applies everywhere.
+        if d is not None:
+            _dscope = str(d.get("scope") or "")
+            if _dscope:
+                _real = {s for s in g["scopes"] if s}
+                if not _real or not _real <= {_dscope}:
+                    d = None
         # CODEX AGENT: note/by/at are discarded here, so API/CLI/Atlas/tools cannot explain who changed the
         # claim or why after the one write response is gone. Carry the current decision record (and expose
         # append-only history) rather than reducing an auditable governance action to one maturity string.
@@ -504,26 +524,30 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # comment promises is surfaced first. Define explicit pin/ratify/caveat precedence (and an unpin/clear
     # transition) before treating these writes as enforceable governance semantics.
     live = [c for c in (claims or []) if c.get("maturity") != "operator-rejected"]
+    # operator-RATIFIED ("vouched for") and operator-PINNED ("always keep visible") both get retention +
+    # front priority, so a pinned/ratified claim is never evicted by max_claims or the caveat swap
+    # (mega-review: pinned had no retention). ratified leads, then pinned, then contested-first.
+    _kept = ("operator-ratified", "operator-pinned")
     ratified = [c for c in live if c.get("maturity") == "operator-ratified"]
-    rest = [c for c in live if c.get("maturity") != "operator-ratified"]
+    pinned = [c for c in live if c.get("maturity") == "operator-pinned"]
+    rest = [c for c in live if c.get("maturity") not in _kept]
     by_state: dict[str, list] = {"mixed": [], "supported": [], "refuted": [], "inconclusive": []}
     for c in rest:
         by_state.get(c["epistemic"], by_state["inconclusive"]).append(c)
-    # ratified first, then contested (counter-argument), then supported, then remaining caveats.
-    ordered = (ratified + by_state["mixed"] + by_state["supported"]
+    # ratified + pinned first, then contested (counter-argument), then supported, then remaining caveats.
+    ordered = (ratified + pinned + by_state["mixed"] + by_state["supported"]
                + by_state["refuted"] + by_state["inconclusive"])
     picked = ordered[:max_claims]
-    # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest picked
-    # (last, since `ordered` is strongest-first) for the strongest available caveat — opposition is never
-    # crowded out by a full slate of positives.
+    # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest NON-kept
+    # picked (a governance-retained claim is never evicted to make room) for the strongest available caveat —
+    # opposition is never crowded out by a full slate of positives (§20.5). Kept caveats count as caveats too.
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
-        # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
-        # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
-        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect (CODEX).
-        caveats = ([c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
+        caveats = ([c for c in (ratified + pinned) if c["epistemic"] in _CAVEAT_STATES]
                    + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
-        if caveats:
-            picked = picked[:-1] + [caveats[0]]
+        victim = next((i for i in range(len(picked) - 1, -1, -1)
+                       if picked[i].get("maturity") not in _kept), None)
+        if caveats and victim is not None:
+            picked = picked[:victim] + picked[victim + 1:] + [caveats[0]]
 
     def _slim(c: dict) -> dict:
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
@@ -538,7 +562,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         "claims": [_slim(c) for c in picked],
         "n_claims_total": len(claims or []),
         # count contested across BOTH pools — a ratified claim is pulled out of by_state but is still mixed.
-        "n_contested": len(by_state["mixed"]) + sum(1 for c in ratified if c["epistemic"] == "mixed"),
+        # count contested across ALL pools — a ratified/pinned claim is pulled out of by_state but still mixed.
+        "n_contested": len(by_state["mixed"]) + sum(1 for c in (ratified + pinned) if c["epistemic"] == "mixed"),
     }
     if concept_overview:
         pack["coverage"] = {
@@ -703,7 +728,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
-                    aliases: Optional[dict] = None, splits: Optional[dict] = None) -> dict:
+                    aliases: Optional[dict] = None, splits: Optional[dict] = None,
+                    structured: bool = False) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -715,7 +741,8 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
-    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
+    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
+                               structured=structured)
     # A contradiction the operator REJECTED is no longer a live contradiction — honor the verdict here too,
     # consistent with build_context_pack / cross_run_claims which also drop operator-rejected (CODEX). (The
     # companion CODEX note — that `operator-pinned` has no retention semantics in these top-8 slices, so a
@@ -745,9 +772,19 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     }
 
 
+def _safe_text(s, limit: int = 120) -> str:
+    """Sanitize UNTRUSTED memory text (claim statements / concept slugs — LLM/repo-derived) before it enters
+    an agent prompt: strip control chars + collapse newlines/whitespace to a single space, then bound the
+    length. Prevents newline/control-char prompt-injection through the cross-run advisory pack (mega-review)."""
+    t = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(s or ""))
+    return re.sub(r"\s+", " ", t).strip()[:limit]
+
+
 def render_context_pack(pack: dict) -> str:
     """Render a context pack as a compact, bounded text block for a proposing agent (the advisory form).
-    Deterministic; leads with contested evidence so the agent sees counter-arguments, not only positives."""
+    Deterministic; leads with contested evidence so the agent sees counter-arguments, not only positives.
+    All memory-derived text is sanitized (control chars/newlines stripped) — quoted DATA, not instructions
+    (mega-review prompt-injection hardening)."""
     if not pack.get("claims") and not pack.get("coverage"):
         return ""
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
@@ -755,10 +792,10 @@ def render_context_pack(pack: dict) -> str:
              f"{pack.get('n_contested', 0)} contested) — prior experiments, with counter-evidence:"]
     for c in pack.get("claims", []):
         lines.append(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
-                     f"{c['statement'][:120]}")
+                     f"{_safe_text(c['statement'])}")
     cov = pack.get("coverage")
     if cov:
-        top = ", ".join(cov.get("top_concepts", [])[:6])
+        top = ", ".join(_safe_text(t, 60) for t in cov.get("top_concepts", [])[:6])
         lines.append(f"Portfolio coverage: {cov.get('n_runs', 0)} run(s), {cov.get('n_concepts', 0)} "
                      f"concept(s){'; most-explored: ' + top if top else ''}.")
     return "\n".join(lines)

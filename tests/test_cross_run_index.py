@@ -173,6 +173,14 @@ def test_save_and_load_index_round_trip(tmp_path):
     assert load_index(tmp_path / "absent.json") is None
 
 
+def test_load_index_rejects_stale_schema_version(tmp_path):
+    # mega-review regression: a cache written under a different schema version must force a clean rebuild.
+    import orjson as _oj
+    p = tmp_path / "idx.json"
+    p.write_bytes(_oj.dumps({"v": 999, "runs": {"ra": {"digest": "s_x", "facts": {"run_id": "ra"}}}}))
+    assert load_index(p) is None                     # incompatible version -> None (forces full rebuild)
+
+
 def test_cli_cross_run_index_incremental(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app

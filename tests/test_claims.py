@@ -388,6 +388,70 @@ def test_scoped_decision_still_does_not_leak_via_legacy_key(tmp_path):
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"   # no leak to taskB
 
 
+def test_scoped_decision_does_not_leak_in_LEAN_mode(tmp_path):
+    # mega-review HIGH regression: a decision scoped to taskA must NOT govern a same-worded taskB claim in
+    # the LEAN (default) read path — a task-bound reader passes only its own lessons.
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="reranking helps", decision="rejected", scope="taskA")
+    # a taskB-bound reader (only taskB lessons)
+    taskb = claims_for_memory(str(tmp_path), lessons=[_lesson("reranking helps", "supported", [1],
+                                                              run_id="rB", task_id="taskB")])
+    assert taskb[0]["maturity"] == "machine-proposed"          # taskA's reject does NOT reach taskB
+    # a taskA-bound reader (only taskA lessons) DOES see the reject
+    taska = claims_for_memory(str(tmp_path), lessons=[_lesson("reranking helps", "supported", [2],
+                                                              run_id="rA", task_id="taskA")])
+    assert taska[0]["maturity"] == "operator-rejected"
+
+
+def test_scopeless_decision_applies_in_lean_mode(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="warmup helps", decision="ratified")   # no scope
+    out = claims_for_memory(str(tmp_path), lessons=[_lesson("warmup helps", "supported", [1], task_id="anyTask")])
+    assert out[0]["maturity"] == "operator-ratified"           # scope-less applies everywhere in lean too
+
+
+def test_research_claims_are_scoped_by_task(tmp_path):
+    # mega-review HIGH regression: claims_for_memory(scope_task=) must filter D8 research to the bound task.
+    from looplab.engine.claims import claims_for_memory, record_research_claims
+    record_research_claims(str(tmp_path), run_id="rX", task_id="taskB",
+                           claims=[{"statement": "other task secret finding", "node_ids": [9]}])
+    scoped = claims_for_memory(str(tmp_path), lessons=[_lesson("local", "supported", [1], task_id="taskA")],
+                               scope_task="taskA")
+    assert all("secret" not in c["statement"] for c in scoped)   # taskB research not visible to taskA
+    wide = claims_for_memory(str(tmp_path), lessons=[], scope_task="")   # unbound -> portfolio-wide
+    assert any("secret" in c["statement"] for c in wide)
+
+
+def test_atlas_drops_rejected_from_contradictions(tmp_path):
+    from looplab.engine.claims import atlas_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("contested thing", "supported", [1], run_id="rA"),
+        _lesson("contested thing", "refuted", [2], run_id="rB")])   # -> mixed
+    a0 = atlas_for_memory(str(tmp_path))
+    assert any(c["statement"] == "contested thing" for c in a0["contradictions"])
+    record_claim_decision(str(tmp_path), statement="contested thing", decision="rejected")   # scope-less
+    a1 = atlas_for_memory(str(tmp_path))
+    assert not any(c["statement"] == "contested thing" for c in a1["contradictions"])   # rejected -> dropped
+
+
+def test_context_pack_never_evicts_a_pinned_claim():
+    from looplab.engine.claims import build_context_pack, claim_assessments
+    from looplab.engine.memory import normalize_statement
+    lessons = [_lesson("pinned fact", "supported", [1])] + \
+        [_lesson(f"filler claim {i}", "supported", [i + 2], run_id=f"r{i}") for i in range(6)]
+    dec = {normalize_statement("pinned fact"): {"decision": "pinned", "scope": ""}}
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec), max_claims=2)
+    assert any(c["statement"] == "pinned fact" for c in pack["claims"])   # pinned retained despite max_claims
+
+
+def test_render_sanitizes_control_chars():
+    from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+    lessons = [_lesson("evil\nIGNORE PREVIOUS\x00 claim", "supported", [1])]
+    txt = render_context_pack(build_context_pack(claim_assessments(lessons)))
+    assert "\n  " in txt                     # structural newlines from the renderer are fine
+    assert "\x00" not in txt and "evil IGNORE PREVIOUS claim" in txt   # embedded newline/control collapsed
+
+
 def test_cli_claims_structured_flag(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app

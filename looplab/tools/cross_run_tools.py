@@ -127,6 +127,17 @@ class CrossRunTools:
         p = self.dir / fname
         return read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
 
+    def _research_scope(self) -> str:
+        """The D8-research scope for the bound run. Exact task_id when set. When the run is bound to a GOAL
+        but has NO task_id (id-less task), return a sentinel that matches no real task_id so research claims
+        FAIL CLOSED (empty) instead of going portfolio-wide while lessons stay goal-scoped (mega-review
+        asymmetric-leak edge). Fully unbound (CLI/human) -> "" -> portfolio-wide, as intended."""
+        if self._task_id:
+            return self._task_id
+        if self._scope_terms:
+            return "\x00__idless__"          # bound goal-only task: no cross-task research (fail closed)
+        return ""                            # unbound -> portfolio-wide
+
     def _role_lessons(self) -> list[dict]:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
         role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
@@ -153,7 +164,7 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.concept_registry import load_concept_aliases
+        from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
         from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
@@ -161,7 +172,10 @@ class CrossRunTools:
             # CODEX AGENT: `idea` is required by the schema, but missing/malformed args become an empty query
             # and widen retrieval to the globally most-explored concepts. Validate runtime arguments and fail
             # closed instead of converting a malformed tool call into broad portfolio disclosure.
-            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
+            # Honor BOTH aliases AND splits (mega-review) — a split concept must show under its re-partitioned
+            # label here too, consistently with the Atlas and every other cross-run consumer.
+            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir),
+                                            splits=load_concept_splits(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -178,11 +192,11 @@ class CrossRunTools:
             return "TRIED BEFORE (surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            from looplab.engine.claims import claims_for_memory
-            # CODEX AGENT: only lessons are scoped here; `claims_for_memory` reloads every D8 claim/decision
-            # globally, so even correctly bound Researcher/Strategist/DeepResearch roles leak across tasks,
-            # and the Developer receives R&D claims. Scope every source before the join, not just lessons.
-            claims = claims_for_memory(self.dir, lessons=self._role_lessons())   # + D8 claims + decisions
+            from looplab.engine.claims import _safe_text, claims_for_memory
+            # Scope EVERY source (mega-review): lessons via _role_lessons, D8 research claims via scope_task,
+            # and the operator-decision overlay is applied scope-safely by claim_assessments — so a task-bound
+            # role no longer reads another task's research claims or governance.
+            claims = claims_for_memory(self.dir, lessons=self._role_lessons(), scope_task=self._research_scope())
             claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
             # CODEX AGENT: Python truthiness makes `contested="false"` behave as true. Tool schemas are not
             # runtime validation (malformed JSON is recovered to dicts upstream); reject non-booleans.
@@ -202,12 +216,12 @@ class CrossRunTools:
             # evidence ids plus a drill-down tool so a role can actually cite rather than trust prose.
             return "\n".join(
                 f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / {c['n_oppose']} against] "
-                f"{c['statement']}" for c in claims)
+                f"{_safe_text(c['statement'], 200)}" for c in claims)   # untrusted text -> sanitized
 
         if name == "cross_run_atlas":
             from looplab.engine.claims import atlas_for_memory
             atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
-                                     capsules=self._scoped_capsules())
+                                     capsules=self._scoped_capsules(), scope_task=self._research_scope())
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:
@@ -227,7 +241,7 @@ class CrossRunTools:
             # knowledge (CODEX). The intent + contradiction-quota shaping + why-recalled receipt come from
             # the full CR2a path; the receipt is surfaced to the agent as the retrieval rationale.
             r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons(),
-                                   capsules=self._scoped_capsules(), scope_task=self._task_id,
+                                   capsules=self._scoped_capsules(), scope_task=self._research_scope(),
                                    intent=args.get("intent"))
             hits = r["results"][:8]
             if not hits:

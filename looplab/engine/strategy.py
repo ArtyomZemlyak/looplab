@@ -113,12 +113,17 @@ class StrategyCadenceMixin:
             # making API, Researcher/Strategist, and CLI disagree about whether the portfolio has claims.
             if not lessons and not caps:
                 return ""
-            a = atlas_for_memory(base, lessons=lessons, capsules=caps)
+            # Honor `cross_run_structured_claims` (mega-review) so the Strategist and the Researcher advisory
+            # expose the SAME (scope+polarity-safe) claim projection under one `cross_run_advisory` flag.
+            from looplab.engine.claims import _safe_text
+            a = atlas_for_memory(base, lessons=lessons, capsules=caps,
+                                 structured=getattr(self, "_cross_run_structured_claims", False))
             parts = [f"{a['n_runs']} run(s), {a['n_concepts']} concept(s), {a['n_contested']} contested"]
             if a["thin_coverage"]:
-                parts.append("thinly-explored: " + ", ".join(a["thin_coverage"][:6]))
+                parts.append("thinly-explored: " + ", ".join(_safe_text(t, 40) for t in a["thin_coverage"][:6]))
             if a["contradictions"]:
-                parts.append("unresolved: " + "; ".join(c["statement"][:60] for c in a["contradictions"][:2]))
+                parts.append("unresolved: " + "; ".join(_safe_text(c["statement"], 60)
+                                                         for c in a["contradictions"][:2]))
             return " | ".join(parts)
         except Exception:  # noqa: BLE001 — advisory context, never blocks the strategist cadence
             return ""

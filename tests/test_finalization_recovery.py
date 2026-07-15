@@ -54,6 +54,23 @@ class _EngineStub:
     def _store_case(self, _state):
         self.case_calls += 1
 
+    # The finalize cross-run block calls these on the real Engine (D8 claim persistence is now unconditional,
+    # not gated on cross_run_concepts); the stub implements the contract as no-ops.
+    def _store_concept_capsule(self, _state):
+        pass
+
+    def _store_research_claims(self, _state):
+        pass
+
+    def _store_concept_curation(self, _state):
+        pass
+
+    def _store_claim_curation(self, _state):
+        pass
+
+    def _store_task_facets(self, _state):
+        pass
+
     def _write_reflection_note(self, _state):
         self.reflection_calls += 1
 

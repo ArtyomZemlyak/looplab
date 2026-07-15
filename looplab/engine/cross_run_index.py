@@ -237,4 +237,10 @@ def load_index(path: str | Path) -> Optional[dict]:
         payload = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — a torn cache forces a clean rebuild
         return None
-    return {"runs": payload.get("runs") or {}} if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    # Reject a cache written under a DIFFERENT schema version (mega-review): after a facts-format bump the
+    # cached facts blobs are stale, so force a full rebuild rather than reuse incompatible records.
+    if payload.get("v") != SCOPE_SCHEMA_VERSION:
+        return None
+    return {"runs": payload.get("runs") or {}}

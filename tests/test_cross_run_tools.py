@@ -251,6 +251,32 @@ def _genesis_tools(tmp_path, *, on, monkeypatch):
     return flat
 
 
+def test_cross_run_claims_scopes_D8_research_to_bound_task(tmp_path):
+    # mega-review HIGH regression: a task-bound cross_run_claims must NOT read another task's research claims.
+    from types import SimpleNamespace
+    from looplab.engine.claims import record_research_claims
+    _seed(tmp_path, lessons=[_lz_scoped("local finding retrieval", "rubert", ["retrieval", "russian"])])
+    record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask",
+                           claims=[{"statement": "foreign secret research", "node_ids": [9]}])
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    out = t.execute("cross_run_claims", {})
+    assert "foreign secret research" not in out          # other task's D8 research is scoped out
+
+
+def test_prior_attempts_honors_concept_splits(tmp_path):
+    # mega-review regression: cross_run_prior_attempts must apply operator SPLITS like every other consumer.
+    from looplab.engine.concept_registry import record_concept_split
+    from looplab.engine.memory import build_concept_capsule, ConceptCapsuleStore
+    s = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                concepts=["data/aug", "loss/hard-margin"], concept_outcomes={}))
+    record_concept_split(str(tmp_path), from_concept="data/aug",
+                         rules=[{"to": "data/hard-neg", "when_any": ["hard"]}], default="data/aug")
+    out = CrossRunTools(tmp_path).execute("cross_run_prior_attempts", {"idea": "hard negative"})
+    assert "data/hard-neg" in out and "data/aug" not in out   # split re-tag reflected in the tool
+
+
 def test_genesis_gets_cross_run_tool_when_enabled(tmp_path, monkeypatch):
     flat = _genesis_tools(tmp_path, on=True, monkeypatch=monkeypatch)
     assert any(isinstance(p, CrossRunTools) for p in flat)
