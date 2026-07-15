@@ -544,9 +544,13 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
         caveats = ([c for c in (ratified + pinned) if c["epistemic"] in _CAVEAT_STATES]
                    + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
+        # Evict the weakest NON-kept positive if there is one (so a governance-retained claim is protected);
+        # but if EVERY pick is kept, surface opposition anyway by evicting the last (a ratified caveat must
+        # still be able to displace a ratified positive — §20.5 opposition wins). All picks here are
+        # non-caveat (the guard above), so any evicted claim is a positive.
         victim = next((i for i in range(len(picked) - 1, -1, -1)
-                       if picked[i].get("maturity") not in _kept), None)
-        if caveats and victim is not None:
+                       if picked[i].get("maturity") not in _kept), len(picked) - 1)
+        if caveats:
             picked = picked[:victim] + picked[victim + 1:] + [caveats[0]]
 
     def _slim(c: dict) -> dict:
