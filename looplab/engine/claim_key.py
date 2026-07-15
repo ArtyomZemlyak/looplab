@@ -28,7 +28,10 @@ import re
 CLAIM_KEY_VERSION = 1
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
-_NT = re.compile(r"n['’]?t\b", re.UNICODE)   # the "n't" contraction (a negation modifier, tokenizer-split)
+# The "n't" contraction (a negation modifier the tokenizer splits off). The apostrophe is REQUIRED — a
+# `?`-optional apostrophe would match ANY word ending in "nt" (gradient, component, prevent, current, …) and
+# silently flip a claim's polarity (mega-review finding). Matches don't/doesn't/isn't/won't → the "n't" tail.
+_NT = re.compile(r"n['’]t\b", re.UNICODE)
 
 
 def _stem(w: str) -> str:
@@ -80,16 +83,18 @@ def _analyze(statement: str) -> tuple:
     removed), sorted+deduped. Polarity = -1 iff an ODD number of sign-flippers (negation modifiers +
     negative-effect verbs + "n't") applies, else +1; 0 when there is no subject content."""
     low = str(statement or "").casefold()
-    # Keep content words (len>2) AND numeric literals of ANY length — a bare number is distinguishing
-    # content (two parameterized facts differing only in their values are NOT paraphrases), so stripping it
-    # would over-merge (the very failure mode this key exists to prevent).
-    toks = [w for w in _WORD.findall(low) if len(w) > 2 or w.isdigit()]
-    stems = [_stem(w) for w in toks]
-    subject = tuple(sorted({s for s in stems
+    words = _WORD.findall(low)
+    # The SUBJECT keeps content words (len>2) AND numeric literals of ANY length — a bare number is
+    # distinguishing content (two parameterized facts differing only in their values are NOT paraphrases), so
+    # stripping it would over-merge (the very failure mode this key exists to prevent).
+    subject = tuple(sorted({s for s in (_stem(w) for w in words if len(w) > 2 or w.isdigit())
                             if s and s not in _SUBJECT_DROP and (len(s) > 1 or s.isdigit())}))
     if not subject:
         return (), 0
-    flips = sum(1 for s in stems if s in _NEGATE or s in _NEG_EFFECT) + len(_NT.findall(low))
+    # POLARITY flips are counted over EVERY token (not just the >2-char subject tokens), so a short negation
+    # like "no" — dropped from the subject by the length filter — still flips the sign (mega-review finding).
+    flips = sum(1 for s in (_stem(w) for w in words) if s in _NEGATE or s in _NEG_EFFECT) \
+        + len(_NT.findall(low))
     return subject, (-1 if flips % 2 else 1)
 
 

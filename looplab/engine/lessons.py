@@ -296,6 +296,18 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         from looplab.engine.memory import ConceptCapsuleStore
         ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
 
+    def _already_curated(self, log_name: str, final: RunState) -> bool:
+        """True when this run already produced a steward log entry — so a finalize RE-ENTRY (crash+resume)
+        does NOT re-run the LLM and append a duplicate proposal batch to the operator queue (mega-review)."""
+        import json
+        from looplab.events.eventstore import read_jsonl_lenient
+        p = Path(self._e.memory_dir) / log_name
+        if not p.exists():
+            return False
+        rid = str(final.run_id or final.task_id)
+        return any(str(r.get("run_id") or "") == rid
+                   for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True))
+
     def store_concept_curation(self, final: RunState) -> None:
         """PART IV §22.4 — the AGENTIC taxonomy steward at finalize: when `cross_run_curation` is on and an
         LLM client is available (`reflect_client`), let the LLM review the freshly-updated portfolio concept
@@ -308,6 +320,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
         try:
+            if self._already_curated("concept_curation_log.jsonl", final):
+                return                          # idempotent on a finalize re-entry: don't re-run the LLM
             client = self.reflect_client()
             if client is None:
                 return                          # toy backend / no LLM -> steward degrades to empty anyway
@@ -332,6 +346,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
         try:
+            if self._already_curated("claim_curation_log.jsonl", final):
+                return                          # idempotent on a finalize re-entry: don't re-run the LLM
             client = self.reflect_client()
             if client is None:
                 return

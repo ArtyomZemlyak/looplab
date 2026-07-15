@@ -351,6 +351,14 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
                      for og in gs]
         contradicts = sorted({max(o["_ev"], key=lambda s: (o["_ev"][s], s)) for o in opposites if o["_ev"]})
         d = (decisions or {}).get(g["uid"])
+        if d is None:
+            # A SCOPE-LESS operator decision (the default `claim-decide` with no --scope, keyed only by the
+            # legacy normalize_statement) applies to EVERY scope of that statement. A SCOPED decision keeps
+            # its own scope and is NOT applied here via the legacy key, so it never leaks across tasks
+            # (mega-review finding: the default operator path was silently ignored in structured mode).
+            leg = (decisions or {}).get(normalize_statement(rep))
+            if leg and not str(leg.get("scope") or ""):
+                d = leg
         out.append({
             "statement": rep,
             # a polarity contradiction is the strongest contested signal -> mixed even if this side's own
@@ -655,7 +663,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     # has them — swapping the LEAST-relevant non-caveat picks (from the bottom) for the most-relevant unpicked
     # caveats, so the top relevance hit is never displaced and opposition is never crowded out.
     q = 0.5 if intent in ("failed", "contested") else float(contradiction_quota)
-    target = min(int(kk * max(0.0, q) + 0.999), kk)         # ceil(k*q), capped at k
+    # ceil(k*q) caveat slots, but capped at k-1 so the #1 relevance hit is NEVER evicted (at k=1 the target
+    # is 0 — the single slot stays the top hit, as the swap contract promises; mega-review finding).
+    target = min(int(kk * max(0.0, q) + 0.999), max(0, kk - 1))
     have = [h for h in picked if h["kind"] == "claim" and h.get("epistemic") in _CAVEAT]
     if target > len(have):
         picked_ids = {h["idx"] for h in picked}

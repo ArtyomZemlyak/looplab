@@ -43,3 +43,20 @@ def test_uid_is_stable_and_prefixed():
 def test_empty_or_stopword_only_has_no_polarity():
     assert claim_signature("")["polarity"] == 0
     assert claim_signature("the and of to")["polarity"] == 0
+
+
+def test_nt_ending_words_do_not_flip_polarity():
+    # mega-review regression: an optional-apostrophe n't regex would match any word ending in "nt"
+    for s in ["gradient clipping improves recall", "the component helps accuracy",
+              "consistent augmentation improves recall", "the current setup helps"]:
+        assert claim_signature(s)["polarity"] == 1, s
+    # real contractions still negate
+    assert claim_signature("dropout doesn't help")["polarity"] == -1
+    # 'prevent' negates exactly once (was double-counted by the nt-regex before the fix)
+    assert claim_signature("dropout prevents overfitting")["polarity"] == -1
+
+
+def test_short_negation_no_still_flips():
+    # 'no' is 2 chars (dropped from the SUBJECT) but must still flip POLARITY (mega-review regression)
+    assert claim_signature("no improvement from dropout")["polarity"] == -1
+    assert claim_signature("improvement from dropout")["polarity"] == 1

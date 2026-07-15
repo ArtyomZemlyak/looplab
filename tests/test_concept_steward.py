@@ -46,6 +46,14 @@ def test_llm_merge_proposal_is_validated_in_vocabulary():
     assert len(prop["merges"]) == 1 and prop["merges"][0]["from_concept"] == "data/hn"
 
 
+def test_merge_target_must_be_in_vocabulary():
+    # mega-review regression: a merge whose TARGET is not a listed concept is a hallucination -> dropped
+    ov, _ = _overview(["data/hn"], ["data/hard-negative-mining"])
+    client = _Client({"merges": [{"from_concept": "data/hn", "to_concept": "made/up-canonical"}],
+                      "splits": [], "purges": []})
+    assert propose_concept_curation(ov, client)["merges"] == []
+
+
 def test_llm_split_and_purge_validated():
     ov, _ = _overview(["data/augmentation"], ["junk"])
     client = _Client({"merges": [], "purges": ["junk", "unknown-noise"],
@@ -149,6 +157,30 @@ def test_finalize_curation_logs_but_does_not_apply_by_default(tmp_path):
         RunState(run_id="r", task_id="t"))
     assert (mem / "concept_curation_log.jsonl").exists()       # proposal LOGGED for operator
     assert not (mem / "concept_aliases.jsonl").exists()        # but NOT applied (default = ratify path)
+
+
+def test_finalize_curation_is_idempotent_on_reentry(tmp_path):
+    # mega-review regression: a finalize RE-ENTRY must not re-run the LLM or append a duplicate log batch.
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+    mem = tmp_path / "mem"; mem.mkdir()
+    _seed_two_mergeable(mem)
+
+    class _CountingClient(_Client):
+        calls = 0
+
+        def complete_tool(self, m, j):
+            _CountingClient.calls += 1
+            return self._c
+
+    client = _CountingClient({"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+                              "splits": [], "purges": []})
+    eng = _fake_engine_with_client(mem, client, on=True, auto=False)
+    final = RunState(run_id="r-once", task_id="t")
+    LessonMemory(eng).store_concept_curation(final)
+    LessonMemory(eng).store_concept_curation(final)   # re-entry
+    log = (mem / "concept_curation_log.jsonl").read_text().strip().splitlines()
+    assert len(log) == 1 and _CountingClient.calls == 1   # ran once, one log line, no duplicate LLM call
 
 
 def test_finalize_curation_auto_applies(tmp_path):
