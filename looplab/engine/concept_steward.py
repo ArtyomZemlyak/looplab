@@ -94,7 +94,9 @@ def _validate_curation(out, known: set, *, max_proposals: int) -> dict:
 
     for m in (out.merges or []):
         src, dst = normalize_key(m.from_concept), normalize_key(m.to_concept)
-        if src in kn and dst and src != dst and len(merges) + len(splits) + len(purges) < budget:
+        # BOTH ends must be in the known vocabulary — the prompt asks the model to pick a canonical FROM the
+        # list, so a merge target that isn't a listed concept is a hallucination, dropped (mega-review).
+        if src in kn and dst in kn and src != dst and len(merges) + len(splits) + len(purges) < budget:
             merges.append({"from_concept": src, "to_concept": dst, "why": str(m.why or "")[:200]})
     for s in (out.splits or []):
         src = normalize_key(s.from_concept)

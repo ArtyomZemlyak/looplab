@@ -79,21 +79,34 @@ def _scope_of(c: dict) -> str:
 
 
 def _validate(out, known: set, *, max_proposals: int) -> dict:
-    """Guardrails: the decision must be valid, the statement must match a REVIEWED claim (by text; scope is
-    taken from the matching claim so the structured key is exact), and the total is capped."""
+    """Guardrails: the decision must be valid and route to a SPECIFIC reviewed claim by (statement, scope) so
+    the structured claim_uid is exact — a decision must never leak across task scopes (mega-review finding).
+    When a statement exists in several scopes, the LLM's own `scope` disambiguates; if it didn't and the
+    statement is ambiguous, the proposal is SKIPPED rather than misrouted. Deduped by (statement, scope),
+    total capped."""
     from looplab.engine.claims import CLAIM_DECISIONS
-    by_stmt = {}
+    scopes_by_stmt: dict[str, set] = {}
     for (stmt, scope) in known:
-        by_stmt.setdefault(stmt, scope)      # map statement -> its canonical scope
+        scopes_by_stmt.setdefault(stmt, set()).add(scope)
     seen, decisions = set(), []
     for d in (out.decisions or []):
         stmt = str(d.statement or "").strip()
         dec = str(d.decision or "").strip().lower()
-        if stmt not in by_stmt or dec not in CLAIM_DECISIONS or stmt in seen:
+        sc = str(getattr(d, "scope", "") or "")
+        avail = scopes_by_stmt.get(stmt)
+        if not avail or dec not in CLAIM_DECISIONS:
             continue
-        seen.add(stmt)
-        decisions.append({"statement": stmt, "decision": dec, "scope": by_stmt[stmt],
-                          "why": str(d.why or "")[:200]})
+        if sc in avail:
+            chosen = sc                       # the LLM named a real scope for this claim
+        elif len(avail) == 1:
+            chosen = next(iter(avail))        # unambiguous — one scope for this statement
+        else:
+            continue                          # ambiguous scope + LLM didn't disambiguate -> never misroute
+        key = (stmt, chosen)
+        if key in seen:
+            continue
+        seen.add(key)
+        decisions.append({"statement": stmt, "decision": dec, "scope": chosen, "why": str(d.why or "")[:200]})
         if len(decisions) >= max(1, int(max_proposals)):
             break
     return {"decisions": decisions}

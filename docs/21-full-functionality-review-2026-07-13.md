@@ -1385,5 +1385,15 @@ gaps this doc set flagged as open close:
   `cross_run_curation_auto`. **New CLI:** `concept-split`, `concept-steward`, `claim-steward`, `task-facets`
   (each now with a full cli-reference section; `claims --structured` and `claim-decide --scope` documented).
 
-Master was still at `b7ea10c` at integration time (no further advance during the work). Full suite **2909
-passed / 25 skipped**; `mkdocs build --strict` green.
+Full suite **2909 passed / 25 skipped**; `mkdocs build --strict` green.
+
+**Follow-on integration (`fe6727b`).** As the branch went to publish, master landed one more commit —
+"resolve 9 confirmed findings from the adversarial mega-review" — fixing the same steward/claim-key code
+this round integrated (notably: `normalize_key` now strips C0/C1 control chars so no untrusted slug can
+normalize into the `\x00purged` tombstone sentinel and turn a MERGE into a covert PURGE; plus claim-key /
+claim-steward / concept-steward hardening + tests). Merged it in cleanly (no conflicts): git reconciled
+master's fixes with this branch's own additions, and the branch's still-unique improvements survived intact
+— the `record_research_claims` interprocess lock (master left that one annotated-but-unfixed), the
+`build_context_pack` ratified-caveat reserved slot + both-pool `n_contested` count, the `portfolio_atlas`
+operator-rejected contradiction filter + `n_runs` coverage consistency, and the operator-write field caps.
+The branch tip therefore carries master through `fe6727b` plus this branch's extra hardening.

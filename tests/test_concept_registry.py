@@ -33,6 +33,13 @@ def test_normalize_key_is_nfkc_casefold_and_whitespace_collapsed():
     assert normalize_key("ДАННЫЕ") == "данные"                   # casefold non-ASCII (Cyrillic)
 
 
+def test_normalize_key_strips_control_chars_no_tombstone_collision():
+    # mega-review regression: an untrusted slug must not normalize to the '\x00purged' sentinel and turn a
+    # merge into a covert purge.
+    assert "\x00" not in normalize_key("\x00purged")
+    assert normalize_key("\x00purged") == "purged"          # sentinel stripped -> ordinary slug
+
+
 def test_uid_follows_canonical_identity_not_display():
     aliases = {"hn": "hard-neg"}
     assert concept_uid("hn", aliases) == concept_uid("hard-neg", aliases)   # aliased -> same identity

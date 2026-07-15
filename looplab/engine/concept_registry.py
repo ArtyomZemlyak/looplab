@@ -46,6 +46,10 @@ def normalize_key(s: str) -> str:
     slug that differs only by case/spacing/compat-form maps to a single key. Preserves '/', '-' (the slug
     structure); the display label is whatever the caller stored — this is identity, not presentation."""
     t = unicodedata.normalize("NFKC", str(s or "")).casefold().strip()
+    # Strip C0/C1 control chars (except the \t\n\r that the \s+ collapse handles) so NO untrusted slug can
+    # normalize to a string containing the internal tombstone sentinel '\x00purged' and turn a MERGE into a
+    # covert PURGE (mega-review finding). The sentinel is only ever assigned internally, never via this path.
+    t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", t)
     return re.sub(r"\s+", " ", t)
 
 

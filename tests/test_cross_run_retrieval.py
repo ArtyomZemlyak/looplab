@@ -120,6 +120,17 @@ def test_explicit_intent_overrides_the_classifier(tmp_path):
     assert r2["receipt"]["intent"] == "explore"
 
 
+def test_k1_quota_never_evicts_the_top_relevance_hit(tmp_path):
+    # mega-review regression: at k=1 the contradiction quota must NOT displace the single top hit.
+    _seed(tmp_path, lessons=[
+        _lesson("hard negative mining improves recall", "supported", (1,), "r1"),
+        _lesson("unrelated warmup claim", "supported", (2,), "rA"),
+        _lesson("unrelated warmup claim", "tested", (3,), "rB")])   # a contested caveat exists
+    r = cross_run_retrieve(str(tmp_path), "hard negatives for retrieval", k=1, intent="failed")
+    assert r["receipt"]["caveat_target"] == 0                        # nothing reserved at k=1
+    assert "hard negative" in r["results"][0]["text"].lower()        # top relevance hit preserved
+
+
 def test_receipt_is_a_why_recalled_receipt(tmp_path):
     _seed(tmp_path, lessons=[_lesson("hard negative mining improves recall")])
     rc = cross_run_retrieve(str(tmp_path), "hard negatives", k=3)["receipt"]

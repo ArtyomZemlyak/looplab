@@ -366,6 +366,28 @@ def test_structured_governance_is_scope_precise(tmp_path):
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"
 
 
+def test_scopeless_decision_applies_in_structured_mode(tmp_path):
+    # mega-review regression: the DEFAULT `claim-decide` (no --scope) must still overlay in structured mode,
+    # applying to every scope of the statement — but a SCOPED decision must NOT leak across tasks.
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("dense retrieval helps", "supported", [1], run_id="rA", task_id="taskA"),
+        _lesson("dense retrieval helps", "supported", [2], run_id="rB", task_id="taskB")])
+    record_claim_decision(str(tmp_path), statement="dense retrieval helps", decision="rejected")  # NO scope
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    assert out["taskA"] == "operator-rejected" and out["taskB"] == "operator-rejected"   # applies everywhere
+
+
+def test_scoped_decision_still_does_not_leak_via_legacy_key(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("mnr helps", "supported", [1], run_id="rA", task_id="taskA"),
+        _lesson("mnr helps", "supported", [2], run_id="rB", task_id="taskB")])
+    record_claim_decision(str(tmp_path), statement="mnr helps", decision="rejected", scope="taskA")
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"   # no leak to taskB
+
+
 def test_cli_claims_structured_flag(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app

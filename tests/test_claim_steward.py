@@ -46,6 +46,23 @@ def test_llm_decisions_validated_against_listed_claims():
     assert all(d["scope"] == "t" for d in prop["decisions"])
 
 
+def test_decision_does_not_leak_across_same_worded_claims_in_different_scopes():
+    # mega-review regression: two tasks, byte-identical claim text; a decision must route to the SCOPE the
+    # LLM named, never collapse to one arbitrary scope.
+    claims = [_claim("hard negatives improve recall", scopes=("rubert",)),
+              _claim("hard negatives improve recall", scopes=("e5",))]
+    client = _Client([{"statement": "hard negatives improve recall", "decision": "ratified", "scope": "e5"}])
+    prop = propose_claim_curation(claims, client)
+    assert len(prop["decisions"]) == 1 and prop["decisions"][0]["scope"] == "e5"   # routed to e5, not rubert
+
+
+def test_ambiguous_scope_without_disambiguation_is_skipped():
+    # same text in two scopes, LLM gives no scope -> cannot route safely -> skipped (never misrouted)
+    claims = [_claim("x helps", scopes=("a",)), _claim("x helps", scopes=("b",))]
+    prop = propose_claim_curation(claims, _Client([{"statement": "x helps", "decision": "rejected"}]))
+    assert curation_is_empty(prop)
+
+
 def test_already_decided_claims_are_not_re_litigated():
     claims = [_claim("operator ratified this", maturity="operator-ratified")]
     # even if the model proposes a decision, there is nothing REVIEWABLE -> empty (no re-litigation)
