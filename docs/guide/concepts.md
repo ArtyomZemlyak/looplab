@@ -494,6 +494,13 @@ are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge 
 **hypothesis board** is deduped the same way and prioritized by foresight. See
 **[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
+This shipped lesson/case memory should not be confused with the planned **portfolio research index**. At
+present, concept tags and concept coverage are per-run, and cross-run retrieval does not yet maintain a
+versioned technology graph plus application/domain/data/objective applicability. The target CR0–CR3 design
+adds evidence-grounded claims, incremental run/portfolio summaries, structured “tried before” context and a
+Research Atlas for 50–500 heterogeneous runs; see
+[Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
+
 ### Harmonic memory (`memora`, optional)
 
 An idea import from [Memora](https://github.com/microsoft/Memora) (Microsoft Research, ICML'26).
