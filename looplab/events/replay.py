@@ -784,6 +784,15 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.stages = []                # a re-develop discards the old pipeline outcomes too
             n.rerun_from = stage
             n.rerun_stage = None
+            # M1 (§21.18): drop the node's cached concept tags when they go STALE, so the next
+            # concept-coverage cadence re-tags it fresh. Scope is tied to the TAGGER'S INPUTS: the snapshot
+            # tagger reads only the IDEA (theme/rationale/params — `tools=None`, never the code), so tags
+            # staleify only when the idea changes — i.e. `propose` (re-proposes a new idea), NOT `implement`
+            # (re-develops CODE with the idea unchanged) nor `eval` (re-scores, idea+code unchanged). If the
+            # tagger is later made agentic (reads code, `tools!=None`, §21.18 HT/B1), widen this to
+            # `implement` too. No-op on old logs / untagged nodes.
+            if stage == "propose":
+                st.node_concepts.pop(n.id, None)
         else:
             # eval-type reset: pending-with-code, the eval loop re-scores it. `from_stage` names
             # the pipeline stage to RESTART from (Phase 2) — the eval re-runs from there, reusing

@@ -318,6 +318,32 @@ def test_node_concepts_event_round_trips_and_is_replay_safe(tmp_path):
     assert st.node_concepts == {5: ["loss/x", "regularization/y"]}
 
 
+def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
+    """M1 (§21.18): tags staleify only when the IDEA changes. The snapshot tagger reads only the idea
+    (tools=None), so `propose` (re-proposes a new idea) drops the cached tags, while `eval` (re-score) and
+    `implement` (re-develop CODE, idea unchanged) KEEP them — scope tied to the tagger's inputs."""
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 3, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "theme": "x"}})
+    s.append("node_evaluated", {"node_id": 3, "metric": 0.8})
+    s.append("node_concepts", {"node_id": 3, "concepts": ["loss/x"], "mode": "llm"})
+    assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
+    # an EVAL re-score keeps the tags (idea+code unchanged)
+    s.append("node_reset", {"node_id": 3, "from_stage": "eval"})
+    assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
+    # an IMPLEMENT re-develop keeps them too (CODE changes, idea unchanged; the idea-only tagger is stable)
+    s.append("node_reset", {"node_id": 3, "from_stage": "implement"})
+    assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
+    # a PROPOSE re-propose invalidates them (the idea itself is re-generated)
+    s.append("node_reset", {"node_id": 3, "from_stage": "propose"})
+    assert fold(s.read_all()).node_concepts == {}
+    # ...and a fresh re-tag after the rerun repopulates
+    s.append("node_concepts", {"node_id": 3, "concepts": ["negatives/y"], "mode": "llm"})
+    assert fold(s.read_all()).node_concepts == {3: ["negatives/y"]}
+
+
 def test_node_concepts_event_ignores_malformed_payloads(tmp_path):
     from looplab.events.eventstore import EventStore
     s = EventStore(tmp_path / "e.jsonl")
