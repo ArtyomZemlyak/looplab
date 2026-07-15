@@ -223,3 +223,21 @@ def test_cli_concept_steward(tmp_path, monkeypatch):
     r2 = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--apply"])
     assert r2.exit_code == 0 and "applied 1" in r2.stdout
     assert load_concept_aliases(str(tmp_path))["data/hn"] == "data/hard-negative-mining"
+
+
+def test_cli_steward_model_override_reaches_the_client(tmp_path, monkeypatch):
+    # regression (6f6240f): the steward CLIs used model_copy(update={"model":...}) but the field is
+    # `llm_model`, so --model was a silent no-op (ran against the default endpoint). Assert the override
+    # actually reaches make_llm_client's Settings.
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    import looplab.cli as cli
+    s = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                concepts=["data/hn"], concept_outcomes={}))
+    seen = {}
+    monkeypatch.setattr(cli, "make_llm_client",
+                        lambda settings, *a, **k: seen.setdefault("model", settings.llm_model) or _Client(
+                            {"merges": [], "splits": [], "purges": []}))
+    r = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--model", "some-other-model"])
+    assert r.exit_code == 0 and seen.get("model") == "some-other-model"   # --model actually applied
