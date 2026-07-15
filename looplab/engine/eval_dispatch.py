@@ -37,7 +37,9 @@ class EvalDispatchMixin:
         in the first editable repo's SOURCE dir so `-r requirements.txt` resolves; output streams to
         `run_setup.log`. A non-zero/timed-out run_setup ABORTS the run (the env would be unusable).
         Only in trusted_local (an untrusted/docker eval is a fresh container — use per-node `setup`).
-        No-op when `run_setup` is unset. The guard is set BEFORE running so a crash can't retry-loop."""
+        No-op when `run_setup` is unset. The in-process guard is set only AFTER a successful install, so
+        a concurrent worker on the lock-free fast path blocks on the lock rather than racing ahead to
+        evaluate against a half-installed interpreter."""
         if self._run_setup_done:
             return
         # Serialize the check-then-set: parallel eval worker threads would otherwise all see
@@ -57,8 +59,14 @@ class EvalDispatchMixin:
             if run_setup_key(cmd) in fold(self.store.read_all()).run_setup_done:
                 self._run_setup_done = True
                 return
-            self._run_setup_done = True
+            # Set the in-memory guard only AFTER the install SUCCEEDS. The install runs while THIS lock
+            # is held, so a concurrent worker that reached the lock-free fast path (top) still sees the
+            # flag False mid-install and blocks on `_run_setup_lock` here — waiting for the install to
+            # finish instead of racing ahead and evaluating against an unprepared interpreter. A failed
+            # install leaves the flag False and re-runs (a non-zero run_setup aborts the run anyway, and
+            # the fold records run_setup_done only for exit_code==0, so resume also re-runs a failed one).
             self._do_run_setup(cmd)
+            self._run_setup_done = True
 
     def _do_run_setup(self, cmd: list) -> None:
         from looplab.runtime.sandbox import _run_argv
