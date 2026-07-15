@@ -101,6 +101,7 @@ ATTR_BY_FIELD = {
     "research_verify": "_research_verify",
     "workdir_audit": "_workdir_audit",
     "select_verifier": "_select_verifier",
+    "verifier_ci_tie": "_verifier_ci_tie",
     "select_verifier_samples": "_select_verifier_samples",
     "coverage_context": "_coverage_context",
     "concept_pivot": "_concept_pivot",
