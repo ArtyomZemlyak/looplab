@@ -790,3 +790,45 @@ Horizon-A-renderable signal, reframe cross-run concept work from "unbuilt" to "e
 read-model/endpoint + structured bundle + `concept_uid` alignment remain", correct the settings count to six
 booleans, and note the engine emits no typed lateral concept relations yet (so `ConceptFrame.edges[].relation_type`
 needs a new producer). Full suite + mkdocs green after the fixes.
+
+## Round 14 — integrate CR Steps 1/3/4/5/6, review the incoming code, fix a claims under-count, refresh PART V (2026-07-15)
+
+Master shipped the lean cross-run **read-model** slice on top of Steps 0+2: Step 1 CR0
+(`engine/cross_run_index.py` — deterministic run-passport + facts index, `cross-run-index` CLI), Step 3
+(`memory.portfolio_concept_overview` + `cross-run-concepts` CLI), Step 4 (`engine/claims.py::claim_assessments`
++ `claims` CLI), Step 5 (`build_context_pack` — bounded evidence+counter-argument pack) and Step 6 (the Research
+Atlas DATA payload `portfolio_atlas` + `atlas` CLI). Integrated by merge with **no conflicts** (the branch's
+finalize/events changes and master's new pure read-model modules are disjoint). Golden regenerated
+byte-identical (no fold change); the 5 new CR suites + replay pass.
+
+An adversarial review of the incoming CR code confirmed it is correctly built as a **pure read/projection**
+layer: no second event writer (invariant #1 intact — `events/types.py`/`replay.py` untouched, no new event
+type), `fold` never calls it (it is the outer consumer), deterministic rebuild (sorted by `(run_id, task_id)`,
+no time/random), off-by-default (only `cli/inspect_cmds.py` + the shim import it; nothing in
+`orchestrator`/`node_build`/`proposal_cues`/`strategy` touches it), reuse-rules honoured (claims UNIFY with the
+D8 `_ClaimOut` shape, forks no third claim type; overview reuses `ConceptCapsuleStore` fields), and
+malformed/offline/empty safe. One confirmed defect fixed:
+
+- **`engine/claims.py`** (`claim_assessments`): support/oppose evidence were bare **run-local** node-ids
+  unioned across runs. Node ids restart at 0 each run, so two independent runs each citing evidence `[0,1]`
+  for the same statement collapsed to `{0,1}` → `n_support=2`, indistinguishable from a single run — the
+  module's whole purpose (cross-run corroboration) was invisible in the `n_support`/`n_oppose` counts and the
+  ranking key. Fixed by making every evidence ref **run-scoped `(run_id, node_id)`** (new `_refs` helper),
+  which is what the design's `EvidenceRef` (§21.20.14) already specifies; the lean CR0 had flattened it.
+  Bounded blast radius — the CLI/`render_context_pack` display only the counts, so refs surface only in
+  `--json`; only `tests/test_claims.py` pinned the ref shape. Updated those assertions to the run-scoped shape
+  and added `test_evidence_is_run_scoped_so_cross_run_corroboration_counts` (two runs → `n_support=4`, one run
+  → `2`; fails on the old bare-id code, passes on the fix). The `runs`/`scopes` provenance sets and the
+  `epistemic` verdict were already correct, so no claim was ever mis-verdicted — the fix corrects the
+  advisory count/ranking only.
+
+Left as a disclosed lean approximation (not a defect): `portfolio_concept_overview`/`portfolio_atlas` merge
+concepts by **raw slug string** without a `concept_uid` resolver (§21.20.13 lists the resolver as a Step-3
+precondition; this lean CR0 ships none). Slugs come from the already-consolidated per-run graph, so raw-string
+merge under-merges divergent slugs but never over-claims — acceptable for an off-by-default read model, worth
+tracking when the resolver lands.
+
+Refreshed doc 18 PART V (§24.3 / §25 / §28 / §30.1 + the revision header) to record that the cross-run
+**aggregate + Atlas data model now EXIST** as CLI/engine read-models: the story shifts from "engine substrate
+shipped, read-model remains" to "read-models exist; only HTTP serving + React rendering + a `concept_uid`
+resolver remain." Full suite + mkdocs green after the fix.

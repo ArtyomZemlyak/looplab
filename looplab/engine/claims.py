@@ -32,6 +32,16 @@ def _node_ids(raw) -> list:
     return out
 
 
+def _refs(run_id, node_ids) -> list:
+    """Run-SCOPED evidence refs `(run_id, node_id)`. Node ids are RUN-LOCAL — each run numbers its nodes
+    from 0 — so a bare id collides across runs and would hide cross-run corroboration (two runs each citing
+    nodes 0,1 would count as 2, indistinguishable from one). Pairing each id with its contributing run makes
+    support/oppose count DISTINCT cross-run evidence, which is the whole point of a cross-run claim
+    (§21.20.14: an EvidenceRef is run-scoped node-id provenance; the lean CR0 must not flatten it away)."""
+    r = str(run_id or "")
+    return [(r, n) for n in node_ids]
+
+
 def _epistemic(support, oppose) -> str:
     """The evidence's current verdict on a claim. 'mixed' when both sides exist (a scoped disagreement,
     never newest-wins); 'inconclusive' when only neutral/unknown evidence remains — distinct from a
@@ -47,8 +57,9 @@ def _epistemic(support, oppose) -> str:
 
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
-    assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
-    contributing `runs`/`scopes`, and an `epistemic` state. Sorted most-evidenced first. Pure."""
+    assessments. Groups by normalized statement; each claim carries `support`/`oppose` evidence as
+    run-scoped `(run_id, node_id)` refs (so cross-run corroboration counts — see `_refs`), contributing
+    `runs`/`scopes`, and an `epistemic` state. Sorted most-evidenced first. Pure."""
     groups: dict[str, dict] = {}
 
     def _group(stmt: str) -> Optional[dict]:
@@ -63,12 +74,13 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         g = _group(lz.get("statement"))
         if g is None:
             continue
-        if lz.get("run_id"):
-            g["runs"].add(str(lz["run_id"]))
+        run = str(lz.get("run_id") or "")
+        if run:
+            g["runs"].add(run)
         if lz.get("task_id"):
             g["scopes"].add(str(lz["task_id"]))
         outcome = str(lz.get("outcome") or "")
-        ev = _node_ids(lz.get("evidence"))
+        ev = _refs(run, _node_ids(lz.get("evidence")))   # run-scoped so cross-run corroboration COUNTS
         if outcome == "supported":
             g["support"].update(ev)
         elif outcome in _NEGATIVE:
@@ -80,7 +92,10 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         if g is None:
             continue
         # A D8 memo claim CITES the experiments it rests on -> support evidence. URLs are external sources.
-        g["support"].update(_node_ids(rc.get("node_ids")))
+        run = str(rc.get("run_id") or "")               # memos may omit run_id; refs still stay run-scoped
+        if run:
+            g["runs"].add(run)
+        g["support"].update(_refs(run, _node_ids(rc.get("node_ids"))))
         for u in (rc.get("urls") or []):
             if isinstance(u, str) and u:
                 g["sources"].add(u)
