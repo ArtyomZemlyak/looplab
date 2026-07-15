@@ -110,6 +110,16 @@ def test_scope_task_isolates_d8_claims(tmp_path):
     assert any("secret" in h["text"] for h in wide["results"])
 
 
+def test_explicit_intent_overrides_the_classifier(tmp_path):
+    # the AGENT passes intent explicitly — a neutral query text but intent='failed' still raises the quota
+    _seed(tmp_path, lessons=[_lesson(f"topic claim {i}", run_id=f"r{i}") for i in range(4)])
+    r = cross_run_retrieve(str(tmp_path), "topic claim", k=3, intent="failed")
+    assert r["receipt"]["intent"] == "failed" and r["receipt"]["effective_quota"] == 0.5
+    # an unknown intent value falls back to deterministic classification
+    r2 = cross_run_retrieve(str(tmp_path), "topic claim", k=3, intent="nonsense")
+    assert r2["receipt"]["intent"] == "explore"
+
+
 def test_receipt_is_a_why_recalled_receipt(tmp_path):
     _seed(tmp_path, lessons=[_lesson("hard negative mining improves recall")])
     rc = cross_run_retrieve(str(tmp_path), "hard negatives", k=3)["receipt"]

@@ -144,4 +144,35 @@ def build_router(srv) -> APIRouter:
         out = steward_concepts(_memory_dir(), client, apply=apply, by="ui")
         return {"ok": True, **out}
 
+    def _steward_client():
+        try:
+            eng = getattr(srv, "engine", None) or getattr(srv, "_engine", None)
+            c = eng._reflect_client() if eng is not None else None
+            if c is not None:
+                return c
+        except Exception:  # noqa: BLE001
+            pass
+        from looplab.core.llm import make_llm_client
+        return make_llm_client(srv.llm_settings())
+
+    @router.get("/api/cross-run/claim-curation-log")
+    def claim_curation_log(limit: int = 20):
+        """The AGENTIC claim steward's recent proposed decisions (from `claim_curation_log.jsonl`)."""
+        import json
+        from looplab.events.eventstore import read_jsonl_lenient
+        p = Path(_memory_dir()) / "claim_curation_log.jsonl"
+        rows = read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
+        return {"entries": rows[-max(1, int(limit)):][::-1], "n": len(rows)}
+
+    @router.post("/api/cross-run/claim-steward")
+    def claim_steward(apply: bool = False):
+        """Run the AGENTIC claim steward NOW (operator-triggered): the LLM reviews the claims and proposes
+        decisions (ratify/reject/pin). `apply=true` records them through the reversible governance write."""
+        from looplab.engine.claim_steward import steward_claims
+        try:
+            client = _steward_client()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"no LLM client available: {e}")
+        return {"ok": True, **steward_claims(_memory_dir(), client, apply=apply, by="ui")}
+
     return router

@@ -27,6 +27,7 @@ looplab concept-split   Operator split one coarse concept into finer ones, re-ta
 looplab concept-steward AGENTIC taxonomy curator: LLM proposes merge/split/purge (--apply records) (PART IV §22.4)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)
+looplab claim-steward   AGENTIC claim curator: LLM proposes ratify/reject/pin (--apply records) (PART IV §22.4)
 looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)

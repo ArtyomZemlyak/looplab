@@ -722,6 +722,47 @@ def claim_decide_cmd(
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
+@app.command(name="claim-steward")
+def claim_steward_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl)."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the proposed decisions (reversible)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+    max_proposals: int = typer.Option(10, help="Max decision proposals."),
+    as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+):
+    """PART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
+    PROPOSES operator decisions (ratify well-evidenced / reject contradicted-or-noise / pin load-bearing).
+    Advisory by default; `--apply` records them through the SAME reversible governance write as
+    `claim-decide`. Scope-precise via the structured claim key. Needs a reachable LLM."""
+    from looplab.core.config import Settings
+    from looplab.engine.claim_steward import curation_is_empty, steward_claims
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
+        typer.echo(f"claim-steward needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_claims(str(memory_dir), client, apply=apply,
+                         at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    if as_json:
+        typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
+        return
+    prop = out["proposals"]
+    if curation_is_empty(prop):
+        typer.echo("claim-steward: no decisions proposed")
+        return
+    typer.echo(f"claim-steward proposals — {len(prop['decisions'])} decision(s):")
+    for d in prop["decisions"]:
+        typer.echo(f"  {d['decision']:9} {d['statement'][:80]}" + (f"   ({d['why']})" if d.get("why") else ""))
+    if apply and out.get("receipt"):
+        typer.echo(f"applied {len(out['receipt']['applied'])}, skipped {len(out['receipt']['skipped'])}")
+    elif not apply:
+        typer.echo("(dry run — re-run with --apply to record; reversible)")
+
+
 @app.command(name="cross-run-digest")
 def cross_run_digest_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),

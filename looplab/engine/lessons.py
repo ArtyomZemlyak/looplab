@@ -324,6 +324,30 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         except Exception:  # noqa: BLE001 — agentic curation must never fail a run
             return
 
+    def store_claim_curation(self, final: RunState) -> None:
+        """PART IV §22.4 — the AGENTIC CLAIM steward at finalize (companion to `store_concept_curation`):
+        the LLM reviews the evidence-grounded claim assessments and PROPOSES operator decisions
+        (ratify/reject/pin). Proposals are LOGGED to `claim_curation_log.jsonl`; applied when
+        `cross_run_curation_auto`. Same gate/decoupling/best-effort contract as the concept steward."""
+        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
+            return
+        try:
+            client = self.reflect_client()
+            if client is None:
+                return
+            from looplab.engine.claim_steward import curation_is_empty, steward_claims
+            auto = bool(getattr(self._e, "_cross_run_curation_auto", False))
+            out = steward_claims(self._e.memory_dir, client, apply=auto, by="steward")
+            if curation_is_empty(out["proposals"]):
+                return
+            import json
+            rec = {"run_id": final.run_id or final.task_id, "auto": auto,
+                   "proposals": out["proposals"], "receipt": out.get("receipt")}
+            with open(Path(self._e.memory_dir) / "claim_curation_log.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except Exception:  # noqa: BLE001 — agentic curation must never fail a run
+            return
+
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
         cross-run `research_claims.jsonl`, so evidence-backed research findings survive their run and can

@@ -55,6 +55,7 @@ _LAYOUT = {
     "crash_repair": "engine",
     "claims": "engine",          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
     "claim_key": "engine",       # PART IV cross-run §21.20.13: structured scope+polarity-safe claim key
+    "claim_steward": "engine",   # PART IV cross-run §22.4: agentic claim curator (LLM proposes ratify/reject/pin)
     "concept_registry": "engine",# PART IV cross-run CR1a: concept UID + alias resolver (merge/purge/split)
     "concept_steward": "engine", # PART IV cross-run §21.20.13/§22.4: agentic taxonomy curator (LLM proposes)
     "cross_run_index": "engine", # PART IV cross-run Step 1/CR0: run passport + facts, deterministic rebuild

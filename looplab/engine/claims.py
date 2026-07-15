@@ -567,9 +567,12 @@ def _eligible(kind: str, meta: dict, intent: str) -> bool:
     return True
 
 
+_INTENTS = ("failed", "contested", "worked", "explore")
+
+
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        scope_task: str = "", contradiction_quota: float = 0.34,
-                       max_corpus: int = 2000, structured: bool = False) -> dict:
+                       max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
     (epistemic state / operator maturity) + concepts (#runs) — over the shipped `HybridRetriever`
     (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), then shape the ranked recall with:
@@ -620,7 +623,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     truncated = max(0, n_total - max(1, int(max_corpus)))
     if truncated:
         docs = docs[:max(1, int(max_corpus))]     # bounded; truncation is REPORTED below, never silent
-    intent = _classify_intent(query)
+    # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
+    # classify deterministically from the query text. An unknown value falls back to classification.
+    intent = intent if intent in _INTENTS else _classify_intent(query)
     kk = max(1, int(k))                            # normalize k (0/-1 -> 1) before it reaches the receipt
     # A why-recalled receipt: corpus revision (content digest), the degraded vector-channel semantics, the
     # classified intent + quota, and (below) the per-hit rank — enough to explain/reproduce a result.

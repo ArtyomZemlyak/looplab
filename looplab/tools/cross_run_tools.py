@@ -93,8 +93,12 @@ class CrossRunTools:
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
                 "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
-                "free-text idea, when a specific concept lookup isn't enough.",
-                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."}},
+                "free-text idea, when a specific concept lookup isn't enough. Set `intent` to bias results: "
+                "'failed'/'contested' surface counter-evidence and disagreements, 'worked' surfaces proven "
+                "wins, 'explore' is neutral.",
+                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."},
+                 "intent": {"type": "string", "enum": ["worked", "failed", "contested", "explore"],
+                            "description": "Why you're searching — biases eligibility + contradiction quota."}},
                 ["query"]),
         ]
 
@@ -203,7 +207,8 @@ class CrossRunTools:
             # knowledge (CODEX). The intent + contradiction-quota shaping + why-recalled receipt come from
             # the full CR2a path; the receipt is surfaced to the agent as the retrieval rationale.
             r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons(),
-                                   capsules=self._scoped_capsules(), scope_task=self._task_id)
+                                   capsules=self._scoped_capsules(), scope_task=self._task_id,
+                                   intent=args.get("intent"))
             hits = r["results"][:8]
             if not hits:
                 return "(no cross-run knowledge matched)"
