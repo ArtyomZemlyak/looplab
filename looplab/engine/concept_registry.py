@@ -46,8 +46,12 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
     rec = {"from": src, "to": _norm(to_concept), "by": str(by or "operator"), "at": str(at or "")}
     path = Path(memory_dir) / "concept_aliases.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec) + "\n")
+    from looplab.events.eventstore import _interprocess_lock
+    # Same interprocess lock the other operator-write sidecars (claim_decisions) use, so a UI merge racing the
+    # `concept-merge` CLI on one memory_dir can't interleave/tear this append or silently lose an alias (CODEX).
+    with _interprocess_lock(Path(str(path) + ".lock")):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
     return rec
 
 

@@ -115,7 +115,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> 
     Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
     from pathlib import Path
 
-    from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
+    from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient, write_jsonl_atomic
     if not memory_dir:
         return 0
     rid = str(run_id or "")
@@ -128,9 +128,14 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> 
                      "node_ids": list(c.get("node_ids") or []), "urls": list(c.get("urls") or [])})
     path = Path(memory_dir) / "research_claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
-    kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
-    write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
+    # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
+    # so two runs sharing memory_dir don't clobber each other's D8 claims in this whole-file read-modify-write
+    # (write_jsonl_atomic is crash-atomic, NOT concurrency-safe; last-writer-wins would silently drop the
+    # loser's claims and under-count `contested`) (CODEX).
+    with _interprocess_lock(Path(str(path) + ".lock")):
+        existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+        kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
+        write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
     return len(rows)
 
 

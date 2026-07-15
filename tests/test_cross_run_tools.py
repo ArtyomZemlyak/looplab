@@ -87,6 +87,18 @@ def test_claims_are_role_scoped(tmp_path):
     assert "researcher insight" in res and "shared note" in res and "developer fix" not in res
 
 
+def test_agent_tool_honors_operator_rejected_claim(tmp_path):
+    # §22.4: an agent READS claims but must OBEY the operator's verdict — a rejected claim is hidden from
+    # cross_run_claims (guards a regression that drops the maturity filter and leaks the overruled claim).
+    from looplab.engine.claims import record_claim_decision
+    _seed(tmp_path, lessons=[_lesson("hard-neg helps recall", "supported", [1]),
+                             _lesson("dropout helps", "supported", [2])])
+    record_claim_decision(str(tmp_path), statement="hard-neg helps recall", decision="rejected")
+    out = CrossRunTools(tmp_path).execute("cross_run_claims", {})
+    assert "hard-neg helps recall" not in out      # operator overruled -> the agent no longer sees it
+    assert "dropout helps" in out                  # a non-rejected claim still shows
+
+
 def test_atlas_reports_explored_thin_and_contradictions(tmp_path):
     _seed(tmp_path,
           lessons=[_lesson("mnr helps", "supported", [1], run_id="r1"),
@@ -188,6 +200,30 @@ def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
     t = CrossRunTools(tmp_path)
     t.bind_state(SimpleNamespace(task_id="rubert", goal="плотный поиск"))   # Cyrillic goal
     assert "legacy lesson" in t.execute("cross_run_claims", {})            # exact task_id still passes
+
+
+def _cap_scoped(run_id, task_id, concepts, fingerprint):
+    from looplab.engine.memory import build_concept_capsule
+    return build_concept_capsule(run_id=run_id, task_id=task_id, fingerprint=fingerprint, direction="max",
+                                 concepts=concepts, concept_outcomes={c: 0.9 for c in concepts})
+
+
+def test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas(tmp_path):
+    # The c41a5f6 leak fix scopes CAPSULES too (prior_attempts / atlas are the primary anti-duplication
+    # surfaces) — a bound run must not see a foreign task's prior art. Guards a silent capsule-leak regression.
+    from types import SimpleNamespace
+    _seed(tmp_path, capsules=[
+        _cap_scoped("r1", "rubert", ["hard-neg"], ["metric:recall", "retrieval", "russian"]),
+        _cap_scoped("r2", "quadratic", ["quantization"], ["metric:mse", "quadratic"]),
+    ])
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    prior = t.execute("cross_run_prior_attempts", {"idea": "hard-neg or quantization"})
+    assert "hard-neg" in prior and "quantization" not in prior          # foreign-task capsule scoped out
+    atlas = t.execute("cross_run_atlas", {})
+    assert "hard-neg" in atlas and "quantization" not in atlas
+    # unbound (human/CLI) still sees everything
+    assert "quantization" in CrossRunTools(tmp_path).execute("cross_run_atlas", {})
 
 
 # --------------------------------------------------------------------------- #

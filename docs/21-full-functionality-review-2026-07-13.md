@@ -1042,3 +1042,30 @@ graft, the strategy reconciliation) ran alongside; verified findings applied in 
 **UI-plans docs (doc 18 PART V refresh #5):** the `concept_uid` resolver shipping closes the **last engine-layer
 gap this document had tracked** — §24.3/§25/§28/§30.1 now record the Atlas as blocked only on the React surface
 (+ the deferred concept *split*), with a faithful cross-run *identity* view finally buildable.
+
+### Round 18 follow-up — apply the focused-review findings (2026-07-15)
+
+The three focused adversarial reviews (concept registry, D8 persistence + my finalize graft, the strategy
+reconciliation) returned: the **strategy `_metric_tie_groups` reconciliation is CORRECT** (verified: robust ties
+over the mean-pick pool, holdout ties over the FULL eligible holdout pool preserving R1-c, R1-d `ci_tie_set`
+sharing one predicate with `best_ci`, no union-find leftover — and my regression test genuinely discriminates
+the property). The **D8 finalize graft is sound** (idempotent upsert-by-run_id, marker-set-after-all-writes so a
+crash re-entry retries without double-write, gated + best-effort, write/read shapes match). `concept_registry`
+is **sound on all four required properties** (non-destructive append-only aliases, cycle-safe `resolve_slug` via
+a `seen` set, read-only in the agent path, correct alias→union integration). Applied fixes:
+
+- **[medium] `claims.py::record_research_claims`** did an unlocked whole-file read-modify-write — two runs
+  sharing `memory_dir` would clobber each other's D8 claims (last-writer-wins, silently under-counting
+  `contested`). Wrapped in the same `_interprocess_lock` (re-reading inside it) that the case/capsule/decision
+  sidecars use — the same class of bug fixed for `record_claim_decision` last round.
+- **[low] `concept_registry.py::record_concept_alias`** likewise appended without the lock; wrapped it too.
+- **Test-coverage gaps** (from the prior governance review, for code now on the branch): added
+  `test_agent_tool_honors_operator_rejected_claim` (the agent tool hides an operator-rejected claim — the §22.4
+  guarantee, previously proven only at the projection layer), `test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas`
+  (the leak fix's capsule surface — a bound run must not see a foreign task's prior art), and
+  `test_empty_statement_decision_is_400` (the other POST claim-decide validation branch).
+
+Not changed (recorded): the concept-atlas cosmetic double-listing of a run whose capsule carries two
+now-aliased slugs (n_runs stays correct, display-only); the `cross-run-concepts` CLI not passing `aliases=`
+(a deliberate raw single-dir view); `concept_uid` casefold vs `resolve_slug` strip (concept_uid unused in the
+merge path). Full suite + mkdocs --strict green.
