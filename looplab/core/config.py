@@ -497,6 +497,11 @@ class Settings(BaseSettings):
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
     # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
     # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
+    # Dependencies (the WRITE fires on this flag alone, but the visible half has two prerequisites): the
+    # prior SURFACES only when `graded_novelty` is also on — the read lives behind that gate, so
+    # `cross_run_concepts` alone silently accumulates capsules without ever emitting a `cross_run_prior`;
+    # and a non-Latin (Russian/CJK) portfolio must also set `fingerprint_universal`, else the capsule
+    # fingerprint over-matches unrelated tasks and surfaces spurious priors.
     cross_run_concepts: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"

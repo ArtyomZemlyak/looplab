@@ -267,9 +267,10 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             for nd in final.nodes.values():
                 m = getattr(nd, "robust_metric", None)
                 for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
-                    concepts.add(str(c))
-                    if m is not None and (outcomes.get(c) is None or _better(m, outcomes[c])):
-                        outcomes[str(c)] = m
+                    ck = str(c)
+                    concepts.add(ck)
+                    if m is not None and (outcomes.get(ck) is None or _better(m, outcomes[ck])):
+                        outcomes[ck] = m
             if not concepts:
                 return
             best = final.best()
