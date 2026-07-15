@@ -19,18 +19,42 @@ _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "
          "given", "this", "that", "is", "are", "by", "your", "my", "it", "as", "at", "be"}
 
 
+# Goal-keyword tokenizers. LEGACY (default): ASCII `[a-z0-9]+` — the original fingerprint. It has a
+# silent train/serve skew for non-Latin goals: a Russian/CJK goal has ZERO `[a-z0-9]` runs, so its
+# fingerprint collapses to just the kind/dir/metric/param tokens and cross-run transfer never reaches
+# it (verified on the live `rubertlite` Russian run). UNIVERSAL (opt-in, `fingerprint_universal`):
+# `[^\W_]+` under re.UNICODE = word runs of ANY script MINUS underscore — same splitting as the legacy
+# regex (underscore stays a separator), just without the alphabet allowlist, over `.casefold()` for
+# correct cross-script case folding. This is the CR Step-0 fix: remove the hardcoded charset, don't
+# special-case one language. Flagged (not default) because it changes which stored fingerprints a
+# LIVE run matches — a running portfolio must not silently re-key mid-flight (see docs/17 §21.20.12).
+_WORD_ASCII = re.compile(r"[a-z0-9]+")
+_WORD_UNICODE = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _goal_tokens(goal: str, *, universal: bool) -> list[str]:
+    r"""Salient goal keywords, filtered to len>2 non-stopwords. `universal=False` is byte-identical to
+    the original `[a-z0-9]+`/`.lower()`; `universal=True` keeps every script via `[^\W_]+`/`.casefold()`."""
+    if universal:
+        return [w for w in _WORD_UNICODE.findall((goal or "").casefold())
+                if len(w) > 2 and w not in _STOP]
+    return [w for w in _WORD_ASCII.findall((goal or "").lower())
+            if len(w) > 2 and w not in _STOP]
+
+
 def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
-                     param_names: Optional[list[str]] = None) -> list[str]:
+                     param_names: Optional[list[str]] = None, *, universal: bool = False) -> list[str]:
     """A cheap, deterministic content fingerprint of a task as a token SET (M2). Cross-run transfer
     should reach a *similar* task, not only the exact same `task_id` — so we key priors/lessons on the
     overlap of these tokens (Jaccard, `fingerprint_similarity`) instead of an exact id match. Tokens:
-    the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names."""
+    the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names.
+    `universal` (opt-in) removes the ASCII-only allowlist on goal keywords so non-Latin goals are not
+    silently dropped; default False keeps the legacy fingerprint byte-identical (see `_goal_tokens`)."""
     toks = {f"kind:{(kind or '').lower()}", f"dir:{(direction or '').lower()}"}
     if metric:
         toks.add(f"metric:{str(metric).lower()}")
-    for w in re.findall(r"[a-z0-9]+", (goal or "").lower()):
-        if len(w) > 2 and w not in _STOP:
-            toks.add(w)
+    for w in _goal_tokens(goal, universal=universal):
+        toks.add(w)
     for p in (param_names or []):
         toks.add(f"param:{str(p).lower()}")
     return sorted(toks)
@@ -509,6 +533,82 @@ class JsonlCaseLibrary:
 
     def all(self) -> list[dict]:
         return list(self.cases)
+
+
+def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
+                          concepts, best_metric=None, concept_outcomes: Optional[dict] = None) -> dict:
+    """A compact per-run CONCEPT capsule — the cross-run bridge (§21.20 Step 2). It records WHICH
+    concepts a run explored (the shipped per-run `node_concepts` tags — no new tagger) and how it went,
+    keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
+    with what result?" and feed `grade_novelty`'s `prior_concepts` (D3 level 3 = surface prior, never
+    reject). Deliberately small and JSON-flat: this is memory-store data, not a fold event."""
+    return {
+        "run_id": str(run_id or ""),
+        "fingerprint": sorted(set(fingerprint or [])),
+        "direction": str(direction or "min"),
+        "concepts": sorted({str(c) for c in (concepts or []) if c}),
+        "best_metric": best_metric,
+        "concept_outcomes": dict(concept_outcomes or {}),
+    }
+
+
+class ConceptCapsuleStore:
+    """Cross-run CONCEPT memory: one capsule per run (see `build_concept_capsule`), keyed by
+    task-fingerprint similarity rather than exact `task_id` so evidence reaches SIMILAR tasks. Mirrors
+    `JsonlCaseLibrary` exactly — atomic whole-file write, malformed-line-tolerant reload, best-effort
+    interprocess-locked upsert by `run_id` (a re-run REPLACES its own capsule, never duplicates it, and
+    a concurrent run sharing `memory_dir` can't clobber it). Pure store: it does no tagging and holds no
+    engine state, so it is trivially testable and stays off the live path unless a flag wires it in."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.capsules: list[dict] = []
+        self._reload()
+
+    def _reload(self) -> None:
+        self.capsules = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+
+    def add(self, capsule: dict) -> bool:
+        """Upsert by `run_id` under the same interprocess lock the case/lesson stores use, re-reading
+        inside the lock so a concurrent run's capsule survives. Returns True once stored."""
+        from looplab.events.eventstore import _interprocess_lock
+        rid = str(capsule.get("run_id") or "")
+        if not rid:
+            return False
+        with _interprocess_lock(Path(str(self.path) + ".lock")):
+            self._reload()
+            self.capsules = [c for c in self.capsules if str(c.get("run_id") or "") != rid]
+            self.capsules.append(capsule)
+            write_jsonl_atomic(self.path, self.capsules, dumps=json.dumps)
+        return True
+
+    def prior_capsules(self, fingerprint: list[str], *, min_sim: float = 0.3,
+                       exclude_run_id: str = "") -> list[tuple[float, dict]]:
+        """Prior-run capsules whose fingerprint is at least `min_sim` similar (Jaccard, universal-aware
+        because the fingerprint itself already is), most-similar first, excluding this run. Bounded by
+        the caller; each tuple is (similarity, capsule) so a surfacing cue can rank + cite by run."""
+        out = []
+        for c in self.capsules:
+            if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):
+                continue
+            sim = fingerprint_similarity(fingerprint, c.get("fingerprint") or [])
+            if sim >= min_sim:
+                out.append((sim, c))
+        out.sort(key=lambda t: -t[0])
+        return out
+
+    def prior_concepts(self, fingerprint: list[str], *, min_sim: float = 0.3,
+                       exclude_run_id: str = "") -> set[str]:
+        """The UNION of concepts explored by similar prior runs — exactly the `set[str]` shape
+        `grade_novelty(prior_concepts=…)` consumes to fire D3 level 3 ("tried across runs")."""
+        acc: set[str] = set()
+        for _sim, c in self.prior_capsules(fingerprint, min_sim=min_sim, exclude_run_id=exclude_run_id):
+            acc.update(str(x) for x in (c.get("concepts") or []))
+        return acc
+
+    def all(self) -> list[dict]:
+        return list(self.capsules)
 
 
 class CaseLibrary:

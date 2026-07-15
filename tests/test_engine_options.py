@@ -106,6 +106,8 @@ ATTR_BY_FIELD = {
     "concept_pivot": "_concept_pivot",
     "graded_novelty": "_graded_novelty",
     "capability_expansion": "_capability_expansion",
+    "fingerprint_universal": "_fingerprint_universal",
+    "cross_run_concepts": "_cross_run_concepts",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }

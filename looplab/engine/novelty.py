@@ -18,7 +18,7 @@ from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
-from looplab.events.types import EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
+from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
 class NoveltyGateMixin:
@@ -200,9 +200,17 @@ class NoveltyGateMixin:
             client = _rc() if callable(_rc) else None
             idea_tags = (tag_idea_llm(idea, graph, client)
                          if (node_concepts and client is not None) else None)
-            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags)
+            # §21.20 Step 2: feed cross-run priors so grade_novelty can recognize a concept tried in an
+            # EARLIER similar run (level 3). Off unless `cross_run_concepts`; empty set otherwise (no-op).
+            prior_set, prior_caps = self._cross_run_prior(state)
+            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
+                                  prior_concepts=prior_set)
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
+        # §21.20 Step 2: a cross-run prior (level 3) SURFACES the earlier outcome as an audit event — it
+        # NEVER gates (unlike levels 4/5 below, it defers to the flat gate). "surface, not reject."
+        if grade.level == 3 and prior_set:
+            self._record_cross_run_prior(state, grade, prior_set, prior_caps)
         # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
             return None
@@ -228,6 +236,53 @@ class NoveltyGateMixin:
             "shared_concepts": list(grade.shared_concepts), "stance": self._novelty_stance,
             "rationale": str(grade.rationale)[:200]})
         return idea
+
+    _CROSS_RUN_MIN_SIM = 0.3   # task-fingerprint Jaccard floor for a prior run to count as "similar"
+
+    def _cross_run_prior(self, state: RunState):
+        """(prior_concepts:set, ranked_capsules:list[(sim, capsule)]) from the shared ConceptCapsuleStore
+        for tasks SIMILAR to this run's fingerprint. (set(), []) when `cross_run_concepts` is off / no
+        memory dir / store empty. Best-effort — any hiccup yields no priors so proposing is never blocked."""
+        if not getattr(self, "_cross_run_concepts", False) or not getattr(self, "memory_dir", ""):
+            return set(), []
+        try:
+            from pathlib import Path
+            from looplab.engine.memory import ConceptCapsuleStore
+            store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
+            fp = self.lessons.task_fingerprint(state, state.best())
+            caps = store.prior_capsules(fp, min_sim=self._CROSS_RUN_MIN_SIM,
+                                        exclude_run_id=getattr(state, "run_id", "") or "")
+            prior: set[str] = set()
+            for _sim, c in caps:
+                prior.update(str(x) for x in (c.get("concepts") or []))
+            return prior, caps
+        except Exception:  # noqa: BLE001 — cross-run read is advisory; a hiccup just yields no priors
+            return set(), []
+
+    def _record_cross_run_prior(self, state: RunState, grade, prior_set, prior_caps) -> None:
+        """SURFACE (never gate) the cross-run prior: which of the idea's concepts were tried before, in
+        which runs, with the best outcome each — folds into `RunState.cross_run_priors` for the trace/UI
+        ('tried in run X -> metric Y'). Best-effort; audit-only, so a failure never blocks proposing."""
+        try:
+            matched = sorted(set(grade.shared_concepts) & set(prior_set))
+            if not matched:
+                return
+            runs = []
+            for _sim, c in prior_caps[:5]:
+                shared = sorted(set(str(x) for x in (c.get("concepts") or [])) & set(matched))
+                if not shared:
+                    continue
+                oc = c.get("concept_outcomes") or {}
+                runs.append({"run_id": c.get("run_id"), "best_metric": c.get("best_metric"),
+                             "concepts": shared, "outcomes": {k: oc[k] for k in shared if k in oc}})
+            if not runs:
+                return
+            self.store.append(EV_CROSS_RUN_PRIOR, {
+                "node_id": max(state.nodes, default=-1) + 1,
+                "matched_concepts": matched, "prior_runs": runs,
+                "stance": getattr(self, "_novelty_stance", None)})
+        except Exception:  # noqa: BLE001 — audit only, never block proposing
+            return
 
     def _apply_novelty_gate(self, state: RunState, idea: Idea, repropose=None) -> Idea:
         """E1+T5: novelty/dedup gate over fresh proposals, BEFORE any compute is spent.

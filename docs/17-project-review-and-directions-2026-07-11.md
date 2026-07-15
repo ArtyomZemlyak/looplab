@@ -3831,25 +3831,31 @@ high-ROI items and deferring the expensive index/UI mass until the contracts and
 Every step ships behind a flag, lands **audit-only** first (records what it *would* have supplied/changed),
 and is promoted to live influence only after its gate passes on a **frozen-portfolio replay**.
 
-- **Step 0 — Universal tokenizer + benchmark fixture (near-term, no CR dependency).** (a) Version
-  `task_fingerprint` to Unicode-`\w+`/`casefold` behind a flag (§21.20.12 #1); regression-test that a
-  Russian goal now yields a non-empty fingerprint and that the legacy version is byte-identical when the
-  flag is off. (b) Start the labelled cross-run fixture from §21.20.10 (exact repeats, same-app/diff-domain,
-  incompatible metrics, correlated forks, re-eval flips, concept aliases/splits, deleted/private runs,
-  a 50-run/5k-node tier). Nothing else can be measured without it.
+- **Step 0 — Universal tokenizer + benchmark fixture (near-term, no CR dependency).** (a) **LANDED
+  2026-07-15:** `task_fingerprint` versioned to Unicode `[^\W_]+`/`casefold` behind the
+  `fingerprint_universal` Settings/EngineOptions flag (default off → legacy byte-identical); threaded
+  through `LessonMemory.task_fingerprint`; `tests/test_task_fingerprint_universal.py` pins both halves
+  (legacy byte-identical for ASCII, universal captures Cyrillic/CJK, two Russian goals now
+  distinguishable where legacy collapsed them). (b) TODO: the labelled cross-run fixture from §21.20.10
+  (exact repeats, same-app/diff-domain, incompatible metrics, correlated forks, re-eval flips, concept
+  aliases/splits, deleted/private runs, a 50-run/5k-node tier). Nothing else can be measured without it.
 - **Step 1 — CR0 contracts + migration + deterministic rebuild.** Define `ScopeProfile`, `RunContext`,
   `EvaluationSlice`/`ComparisonContract`, `ExecutionAttempt`/`Measurement`, and the Corpus/Visibility
   snapshot records (§21.20.3) as append-only decision ledgers + a rebuildable SQLite/FTS/vector projection.
   Migrate old logs; **gate = incremental projection digest equals a clean full rebuild** at the same
   snapshot (§21.20.11). UI/agent effect: a read-only scope inspector only. Add the **replay test** from
   §21.20.12 #2 here.
-- **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** Replace the raw
-  `prior_concepts: set[str]` with the structured prior-evidence bundle §21.20.5 specifies (concept, scope
-  relation, prior outcomes, representative refs, confidence/freshness, materially-different flag) and wire it
-  into `_graded_novelty_precheck` (`novelty.py`). Level 3 = **surface/reframe**, never cross-scope hard
-  reject; only an exact implementation/data/objective duplicate feeds the existing duplicate policy.
-  **Gate = false hard-reject rate ≈ 0; measured exact-duplicate savings.** Needs the `concept_uid` resolver
-  (§21.20.12 #4), so it lands on top of CR0/CR1a's assignment records.
+- **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** **LANDED 2026-07-15 (lean
+  first slice):** a per-run `ConceptCapsuleStore` (in `engine/memory.py`, mirroring `JsonlCaseLibrary`)
+  persists each run's `node_concepts` tags + best-per-concept outcome to `memory_dir` at finalize, keyed by
+  the universal `task_fingerprint`; `_graded_novelty_precheck` (`novelty.py`) loads similar-run priors into
+  `grade_novelty(prior_concepts=…)` and, on a level-3 hit, records a `cross_run_prior` audit event (folds
+  into `RunState.cross_run_priors`) that SURFACES the prior run + outcome — never rejects. Off-by-default
+  under `cross_run_concepts`; audit-only, off the selection path. Tests: capsule store (7),
+  write+surface+off-switch+replay (8). **Still TODO to reach the full CR2c spec:** upgrade the raw
+  concept-slug set to the structured prior-evidence bundle §21.20.5 specifies (scope relation, freshness,
+  materially-different flag) once the `concept_uid` resolver (§21.20.12 #4) exists; and the exact-duplicate
+  savings gate. Level 3 stays **surface**, never cross-scope hard reject.
 - **Step 3 — CR1a incremental index.** Atoms → `RunCapsule` per run → `PortfolioSummary`/`ConceptDigest`,
   concept assignments over the `concept_uid` resolver, taxonomy releases, and the Atlas metadata journal
   (§21.20.4). **Gate = 50/500-run ingest with 20 concurrent terminal runs producing zero lost/duplicate

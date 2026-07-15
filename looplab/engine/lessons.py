@@ -74,7 +74,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
                                 final.goal or getattr(self._e.task, "goal", ""),
                                 metric=str(getattr(self._e.task, "metric", "") or ""),
-                                param_names=pnames)
+                                param_names=pnames,
+                                universal=bool(getattr(self._e, "_fingerprint_universal", False)))
 
     def append_lessons(self, lessons: list, *, hygiene: bool = True) -> None:
         """Append lessons to the SHARED cross-run store. Used by run-end reflection AND the M6
@@ -243,3 +244,40 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             "metric": best.robust_metric,
             "rationale": best.idea.rationale,
         })
+
+    def store_concept_capsule(self, final: RunState) -> None:
+        """PART IV cross-run Step 2 (§21.20): persist this run's CONCEPT capsule to the shared
+        `memory_dir` so a later SIMILAR run can surface "this was tried before -> outcome". Best-effort
+        and self-contained: reuses the shipped per-run `node_concepts` tags (no new tagger) and the
+        universal-aware `task_fingerprint`; per-concept outcome = the best robust_metric among nodes
+        carrying that concept. Never raises — cross-run memory must never fail a run."""
+        try:
+            if not self._e.memory_dir:
+                return
+            node_concepts = getattr(final, "node_concepts", None) or {}
+            if not node_concepts:
+                return                          # nothing tagged this run -> no capsule (no-op)
+            from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+            direction = final.direction or "min"
+
+            def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
+                return a < b if direction == "min" else a > b
+
+            concepts, outcomes = set(), {}
+            for nd in final.nodes.values():
+                m = getattr(nd, "robust_metric", None)
+                for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
+                    concepts.add(str(c))
+                    if m is not None and (outcomes.get(c) is None or _better(m, outcomes[c])):
+                        outcomes[str(c)] = m
+            if not concepts:
+                return
+            best = final.best()
+            capsule = build_concept_capsule(
+                run_id=final.run_id or final.task_id, direction=direction, concepts=concepts,
+                fingerprint=self.task_fingerprint(final, best),
+                best_metric=(best.robust_metric if best is not None else None),
+                concept_outcomes=outcomes)
+            ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
+        except Exception:  # noqa: BLE001 — cross-run capsule write is best-effort, never fails a run
+            return
