@@ -28,6 +28,11 @@ from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAP
 # HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
 # run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
 _HYP_TAG_CAP = 60
+# B1 (§21.18): a node whose tags were made against < _RETAG_GROWTH of the latest vocabulary is "stale" and
+# gets re-tagged against the grown vocab; at most _RETAG_CAP such nodes per cadence (bounds the LLM cost,
+# the rest refresh over subsequent cadences).
+_RETAG_GROWTH = 0.7
+_RETAG_CAP = 20
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -328,7 +333,7 @@ class StrategyCadenceMixin:
         import contextlib
 
         from looplab.search.concept_graph import (build_concept_map, concept_coverage, skeleton_for,
-                                                  uncovered_regions)
+                                                  stale_tagged_nodes, uncovered_regions)
         from looplab.search.lock_in import lock_in_signal
         # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
         # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
@@ -352,7 +357,16 @@ class StrategyCadenceMixin:
                 # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
                 # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
                 # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
-                known = {int(k): v for k, v in (getattr(state, "node_concepts", None) or {}).items()}
+                all_known = {int(k): v for k, v in (getattr(state, "node_concepts", None) or {}).items()}
+                at_vocab = {int(k): int(v)
+                            for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}
+                # B1 (§21.18): re-tag the most-stale nodes — those tagged against a much smaller vocabulary
+                # than the latest (a concept minted later may now apply to them). Bounded per cadence, and
+                # a strict no-op until the vocabulary has actually grown. Excluding a stale node from `known`
+                # makes build_concept_map re-tag it against the grown vocab.
+                stale = set(stale_tagged_nodes(list(all_known), at_vocab,
+                                               growth=_RETAG_GROWTH, cap=_RETAG_CAP))
+                known = {nid: v for nid, v in all_known.items() if nid not in stale}
                 _span = getattr(self, "_op_span", None)
                 with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
                     cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
@@ -361,13 +375,16 @@ class StrategyCadenceMixin:
                 graph, tags = cmap["graph"], cmap["tags"]
                 cov, important = cmap["coverage"], cmap["important_uncovered"]
                 mode = cmap.get("mode", "llm")
-                # Record each NEW/changed node's RAW tags so the next cadence reuses them (idempotent: LAST
-                # write wins in the fold; only emit when the recorded value differs, to avoid log churn).
+                v_now = len(graph.concepts())    # the vocabulary size THESE tags were produced against
+                # Record a node's RAW tags + at_vocab when it is NEW/re-tagged (not in `known`) OR its tags
+                # changed. Re-recording a staleness-refreshed node even when its tags are unchanged updates
+                # its at_vocab, so it isn't flagged stale (and re-tagged) every cadence — no churn.
                 for nid, ft in (cmap.get("raw_tags") or {}).items():
+                    nid = int(nid)
                     new_ids = sorted(str(c) for c in ft)
-                    if known.get(int(nid)) != new_ids:
-                        self.store.append(EV_NODE_CONCEPTS, {"node_id": int(nid), "concepts": new_ids,
-                                                             "mode": mode})
+                    if nid not in known or known.get(nid) != new_ids:
+                        self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
+                                                             "mode": mode, "at_vocab": v_now})
                 # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
                 # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
                 # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few

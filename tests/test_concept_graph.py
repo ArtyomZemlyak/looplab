@@ -380,6 +380,43 @@ def test_tag_text_llm_shared_tagger(tmp_path):
     assert tag_text_llm(txt, g, None) == tag_text(txt, g)
 
 
+def test_stale_tagged_nodes_selects_the_oldest_vocab_first():
+    """B1 (§21.18): pick items tagged against < growth× the latest vocab, most-stale first, capped;
+    a strict no-op until the vocabulary has grown."""
+    from looplab.search.concept_graph import stale_tagged_nodes
+    # latest vocab = 100; growth 0.7 -> threshold 70. Nodes at 10, 50 are stale; 80, 100 are fresh.
+    at_vocab = {1: 10, 2: 50, 3: 80, 4: 100}
+    assert stale_tagged_nodes([1, 2, 3, 4], at_vocab, growth=0.7, cap=20) == [1, 2]   # oldest-first
+    # cap bounds it (most-stale wins)
+    assert stale_tagged_nodes([1, 2, 3, 4], at_vocab, growth=0.7, cap=1) == [1]
+    # a node with NO recorded at_vocab is treated as 0 (oldest) -> stale
+    assert 9 in stale_tagged_nodes([9, 4], {4: 100}, growth=0.7, cap=20)
+    # no growth yet (all equal / empty) -> nothing stale
+    assert stale_tagged_nodes([1, 2], {1: 5, 2: 5}, growth=0.7) == []
+    assert stale_tagged_nodes([1, 2], {}, growth=0.7) == []
+
+
+def test_node_concepts_at_vocab_folds_and_syncs_with_rerun(tmp_path):
+    """B1: the at_vocab of each node_concepts event folds into node_concepts_at_vocab; a propose rerun
+    invalidates it alongside the tags (M1 sync); a pre-B1 event without at_vocab leaves it unset."""
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "theme": "x"}})
+    s.append("node_evaluated", {"node_id": 2, "metric": 0.8})
+    s.append("node_concepts", {"node_id": 2, "concepts": ["loss/x"], "at_vocab": 12})
+    st = fold(s.read_all())
+    assert st.node_concepts_at_vocab == {2: 12} and st.node_concepts == {2: ["loss/x"]}
+    # a pre-B1 event (no at_vocab) doesn't set the map
+    s.append("node_concepts", {"node_id": 5, "concepts": ["reg/y"]})
+    assert 5 not in fold(s.read_all()).node_concepts_at_vocab
+    # a propose rerun clears BOTH the tags and the at_vocab for node 2
+    s.append("node_reset", {"node_id": 2, "from_stage": "propose"})
+    st2 = fold(s.read_all())
+    assert 2 not in st2.node_concepts and 2 not in st2.node_concepts_at_vocab
+
+
 def test_node_concepts_event_ignores_malformed_payloads(tmp_path):
     from looplab.events.eventstore import EventStore
     s = EventStore(tmp_path / "e.jsonl")

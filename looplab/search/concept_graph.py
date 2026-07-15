@@ -525,6 +525,30 @@ def graph_from_node_concepts(node_concepts, seed_graph: Optional["ConceptGraph"]
     return graph, tags
 
 
+def stale_tagged_nodes(node_ids, at_vocab: dict, *, growth: float = 0.7, cap: int = 20) -> list:
+    """B1 (§21.18): pick the items (from `node_ids`) whose tags are STALE — made against a vocabulary
+    smaller than `growth`× the LATEST recorded vocabulary size — so they should be re-tagged against the
+    grown vocab. `at_vocab` maps id -> vocab-size-at-tag-time (missing -> 0, i.e. oldest, e.g. pre-B1
+    events). Returns the `cap` MOST-stale ids (smallest at_vocab first, id as a deterministic tie-break).
+    A strict no-op (empty) until the vocabulary has grown at all (max==0). Pure/deterministic.
+
+    ASSUMES a roughly-monotonic vocabulary (the reference is `max(at_vocab)`): a re-tagged node records the
+    latest size, so it converges (fresh next round; goes stale again only on >1/growth≈43% growth in one
+    step — implausible). The one non-convergent corner is a PERSISTENT >43% regression below an earlier
+    consolidation peak (consolidate_concepts is LLM-nondeterministic): then nodes below the stale peak
+    re-tag every occurrence — but bounded to `cap`/cadence, gated once per new-node-count by the caller's
+    at_node idempotence check, and the fold stays fully deterministic. A cost corner, not a correctness bug."""
+    at_vocab = at_vocab or {}
+    ids = list(node_ids or [])
+    max_vocab = max((at_vocab.get(i, 0) for i in ids), default=0)
+    if max_vocab <= 0:
+        return []
+    threshold = max_vocab * growth
+    stale = [i for i in ids if at_vocab.get(i, 0) < threshold]
+    stale.sort(key=lambda i: (at_vocab.get(i, 0), i))
+    return stale[:cap]
+
+
 def _normalize_concept_id(raw) -> str:
     s = str(raw or "").strip().lower().replace(" ", "-")
     return s.strip("/")

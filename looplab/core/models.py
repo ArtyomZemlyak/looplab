@@ -450,6 +450,11 @@ class RunState(BaseModel):
     # ~O(nodes) not ~O(nodes x cadences) LLM calls). Populated only when `concept_pivot` is on; audit-only,
     # never affects selection. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
     node_concepts: dict[int, list[str]] = Field(default_factory=dict)
+    # PART IV D5 (§21.18 B1): the concept-graph vocabulary SIZE when each node was last tagged. A node
+    # tagged against a much smaller vocabulary than the current one is STALE (a concept minted by a later
+    # node may now apply to it), so the cadence re-tags the most-stale nodes against the grown vocabulary
+    # (bounded per cadence). Additive/reader-defaulted; empty on old logs / pre-B1 events -> no re-tag.
+    node_concepts_at_vocab: dict[int, int] = Field(default_factory=dict)
     # PART IV D4 (§21.18 HT): per-hypothesis agentic concept tags (hyp_id -> [concept_id]) recorded once by
     # the LLM tagger, reused by taxonomy dedup instead of the tag_text alias heuristic. Populated only when
     # `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on old logs -> byte-identical fold.

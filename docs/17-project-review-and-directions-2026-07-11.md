@@ -2990,8 +2990,13 @@ required tag behaviour:
   `negatives/external-mining` and cluster, which `tag_text` misses. **HT follow-ups still open:**
   creation-time tagging (tag at `hypothesis_added`, not only at the cadence) and merge-time re-derive (on
   `hypothesis_merged`) — the cadence path already covers the incremental workhorse.
-- **B1 (MEDIUM-HIGH):** bounded graph-growth retro-tag (prefilter → LLM-confirm) for nodes + hypotheses +
-  lessons. Live test: mint a late concept, confirm earlier matching items get it without a full re-tag.
+- **B1 (DONE, nodes):** graph-growth retro-tag — each node_concepts event records `at_vocab` (vocab size
+  at tag time); the cadence re-tags the most-stale nodes (tagged against < 0.7× the latest vocabulary) via
+  `stale_tagged_nodes` (pure, cap `_RETAG_CAP`/cadence), recording the new tags at the current vocab so it
+  converges (a refreshed node is no longer stale → no churn). Live-validated: a node that tagged empty
+  against a loss-only vocab recovers `encoder/adapter-tuning` when re-tagged against the grown vocab.
+  Chose vocab-version invalidation over the prefilter→confirm design (simpler, reuses the re-tag machinery,
+  correct). **B1 follow-up:** the same for hypotheses + lessons (nodes are the primary coverage signal).
 - **B3 (MEDIUM):** record the consolidation rename map as an event so coverage is stable across cadences
   (no LLM re-decision flapping). Live test: two cadences → identical canonical mapping.
 - **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.

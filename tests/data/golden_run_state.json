@@ -271,6 +271,7 @@
   ],
   "llm_cost": null,
   "node_concepts": {},
+  "node_concepts_at_vocab": {},
   "nodes": {
     "0": {
       "agent_report": null,

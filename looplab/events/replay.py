@@ -794,6 +794,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # `implement` too. No-op on old logs / untagged nodes.
             if stage == "propose":
                 st.node_concepts.pop(n.id, None)
+                st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
         else:
             # eval-type reset: pending-with-code, the eval loop re-scores it. `from_stage` names
             # the pipeline stage to RESTART from (Phase 2) — the eval re-runs from there, reusing
@@ -1108,6 +1109,11 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     concepts = d.get("concepts")
     st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
+    # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> 0 (treated as oldest).
+    av = d.get("at_vocab")
+    if isinstance(av, int) and av >= 0:
+        st.node_concepts_at_vocab[nid] = av
 
 def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for one hypothesis, recorded once so taxonomy
