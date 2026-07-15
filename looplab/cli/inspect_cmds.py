@@ -143,6 +143,9 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
     # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
         from looplab.core.config import Settings
+        # CODEX AGENT: [P1] Ambient Settings can differ from RUN_DIR/config.snapshot.json, so diagnostics
+        # may send raw run code/logs to a different endpoint than the run was pinned to. Load the run
+        # snapshot first, as resume and the UI already do, and apply only explicit CLI overrides.
         settings = Settings()
         if model is not None:
             settings.llm_model = model
@@ -379,6 +382,8 @@ def novelty_recall_cmd(
     max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
                                                           "of the most-similar candidate pairs with the LLM "
                                                           "(each pair = one call). Lower it to cap cost/data."),
+    # CODEX AGENT: [P1] max_pairs is not constrained: Python's pairs[:-1] makes --max-pairs=-1 process
+    # almost the entire internal pool. Validate this option as a non-negative bounded integer before use.
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that

@@ -112,6 +112,9 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
                                     client=client, samples=samples, parser=parser)
         og = rep.per_criterion.get("over_generalizes", {}).get("mean")
         ds = rep.per_criterion.get("direction_sound", {}).get("mean")
+        # CODEX AGENT: [P2] Counting a lesson as scored when only over_generalizes is present lets the
+        # aggregate report claim adjudication even though direction_sound (required below) is missing.
+        # Count complete per-lesson verdicts and distinguish partial coverage in the aggregate contract.
         if og is not None:
             n_scored += 1               # the verifier graded this lesson (vs a total endpoint failure)
         flagged = (og is not None and ds is not None

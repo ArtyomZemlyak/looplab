@@ -787,6 +787,8 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
     new = ConceptGraph(task_type=graph.task_type)
     for c in graph.concepts():
         cid = rename.get(c.id, c.id)
+        # CODEX AGENT: [P1] For a renamed multi-parent concept, replacing axes with only the id prefix
+        # discards valid DAG parents. Preserve/union the source and canonical parent axes during collapse.
         # Renamed -> axis is the canonical id's prefix (id/axis consistent by construction). Not renamed ->
         # keep its own axes (grown concepts are single-axis; skeleton concepts carry their curated axes).
         axes = (cid.split("/", 1)[0],) if c.id in rename else c.axes
@@ -887,6 +889,8 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                     if m != canon and m not in decided:   # freeze known raws AND canonicals (see above)
                         rename[m] = canon
     except Exception:  # noqa: BLE001 — consolidation is best-effort; never break the diagnostic
+        # CODEX AGENT: [P1] This failure path also discards authoritative known_renames, resurrecting raw
+        # ids and contradicting the incremental contract above. Apply and return known_renames on failure.
         return graph, tags, {}
 
     # Resolve transitive chains (a->b, b->c => a->c) so the rename is a single canonical hop.

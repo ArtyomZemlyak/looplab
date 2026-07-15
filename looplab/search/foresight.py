@@ -444,6 +444,9 @@ class ForesightPanelResearcher:
                          samples=self.verify_samples, parser=self.parser or "tool_call")
             if rep is None or rep.method == "unavailable":
                 return None
+            # CODEX AGENT: [P1] Ranking only improves_objective can assign confidence 1.0 to an experiment
+            # that the same verifier marks unsound/infeasible. Compose sound_and_feasible (plus agreement)
+            # into the gate before this score can prioritize a proposal.
             # The PRIMARY criterion drives the gate; fall back to the weighted overall if it wasn't graded.
             crit = (rep.per_criterion or {}).get("improves_objective") or {}
             score = crit.get("mean")

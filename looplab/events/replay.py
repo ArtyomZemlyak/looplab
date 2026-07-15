@@ -1843,6 +1843,9 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # tie-break. Scope boundary (by design): among confirmed nodes that tie on confirmed_mean the winner
     # is the confirm phase's choice, not the verifier's; the verifier tie-break applies to the mean pick
     # and the holdout pick (both rankings HERE), not to which node the confirm phase certified.
+    # CODEX AGENT: [P1] Normal confirmation always emits best_confirmed, so this unconditional override
+    # erases the best_ci result above and makes R1-d ineffective at final selection. The confirmation
+    # certificate must compose with the same CI/verifier semantics instead of replacing them.
     if (best_confirmed is not None and best_confirmed in st.nodes
             and st.nodes[best_confirmed].status is NodeStatus.evaluated
             and not st.nodes[best_confirmed].tombstoned

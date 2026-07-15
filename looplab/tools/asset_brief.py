@@ -374,6 +374,9 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 brief.truncated = True
                 continue
             reads_left -= 1
+            # CODEX AGENT: [P1] os.walk entries can be symlinks or special files. _read_text follows a
+            # file symlink outside repo_root and can block indefinitely on a POSIX FIFO, then forwards the
+            # result to the LLM. Resolve-and-contain paths and require a regular non-symlink file first.
             text = _read_text(fp, max_bytes)
             if not text:
                 continue

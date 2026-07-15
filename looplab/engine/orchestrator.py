@@ -1470,6 +1470,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # (proposal_cues, SAME gate) — stamp it as its OWN `expand` operator so operator_yields
                 # MEASURES whether expanding paid off (scored, SearchFitness-competing as its own lineage),
                 # not silently as another `improve`. Off (flag default) -> stays `improve`, byte-identical.
+                # CODEX AGENT: [P1] The cue is delivered only for the explore stance, but this relabel runs
+                # for every stance and expand is not a policy candidate. Persist an actual assigned expand
+                # action/cue receipt; otherwise ordinary improve work contaminates expand yield statistics.
                 if getattr(self, "_capability_expansion", False):
                     from looplab.engine.proposal_cues import _LOCK_IN_STREAK
                     from looplab.search.lock_in import capability_expansion_due

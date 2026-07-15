@@ -192,6 +192,9 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
                                 f"same parameters as tried experiment #{nd.id}")
 
     # concept overlap analysis
+    # CODEX AGENT: [P1] Exact concept-id intersection ignores the graph's axes/ancestors: sibling methods
+    # under the same branch appear wholly novel, while a generic shared tag can overstate similarity.
+    # Compare canonical ancestor projections (and make every live consumer use that same projection).
     def overlap(nd) -> set[str]:
         return set(idea_concepts) & set(tags.get(nd.id, frozenset()))
 

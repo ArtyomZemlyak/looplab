@@ -507,6 +507,9 @@ class StrategyCadenceMixin:
             if any((n.id, n.attempt) in attempted for n in group):
                 continue
             todo = [n for n in group if n.verifier_score is None]
+            # CODEX AGENT: [P1] A transitive union-find component can contain more than eight nodes.
+            # This branch then skips that component forever, including exact pairwise ties inside it;
+            # persist/chunk group progress or bound component construction instead of all-or-none skipping.
             if not todo or len(todo) > budget:
                 continue
             verdicts, failed = [], False
@@ -519,6 +522,9 @@ class StrategyCadenceMixin:
                     break
                 verdicts.append((n, v))
             if not failed:                              # atomic commit: every member scored
+                # CODEX AGENT: [P1] This is only atomic in memory: each append is a separate durable
+                # commit. A crash after a prefix leaves a half-scored component whose neutral 0.5 defaults
+                # can decide selection. Persist one versioned group event/transaction instead.
                 for n, v in verdicts:
                     # Persist the score + provenance (n_samples, agreement) so a selection-affecting
                     # decision is auditable; the fold reads only `score` (the rest is audit-only).
@@ -562,6 +568,9 @@ class StrategyCadenceMixin:
             return x
 
         def _link_by(metric_of):
+            # CODEX AGENT: [P1] R1-d consumes near-equal confirmed means as CI ties, but this producer
+            # creates verifier work only for exact metric equality. CI-only candidates therefore never
+            # receive verifier_score in normal runs; producer and consumer must share the tie predicate.
             buckets: dict = {}
             for n in pool:
                 m = metric_of(n)
