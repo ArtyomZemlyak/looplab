@@ -3612,6 +3612,13 @@ the scientific cross-run surface. Current UI “Project” should be relabelled 
 collision with a future owning Project (ACL/budget/data boundary); a many-to-many **Study** replaces
 single-membership super-task when modelling a research programme.
 
+The Atlas here is the *cross-run* destination (Step 6, gated on CR0/CR1a/CR1b). The complementary
+**near-term per-run visibility layer** — surfacing the *already-shipped, already-served* per-run concept
+tags / coverage+uncovered-region / lock-in / graded-novelty / verifier score that the UI currently ignores,
+which also seeds this Atlas's Landscape view — is specified as **Horizon A** in
+[doc 18 §24.1 (PART V)](18-ui-ux-review-2026-07-11.md). It is a pure read/projection layer (no new store),
+consistent with §21.20.14's reuse rules, and ships independently of the cross-run index.
+
 ##### 21.20.8 Concurrency, failure, and lifecycle corners
 
 | Corner | Required behaviour |

@@ -699,3 +699,24 @@ The rest of the 3-commit delta is high quality and fully concept-aligned: every 
 (D7's `expand` operator, capability-expansion, graded-novelty all byte-identical on a default run),
 `KIND_EXPAND` is registered in `search/policy.py` and bucketed generically by `operator_yields`, and the
 union-find itself is deterministic/order-independent (verified across all permutations).
+
+---
+
+## Round 11 — Part-IV UI coverage gap analysis (2026-07-15)
+
+The owner asked to plan how the UI should work with the new Part-IV features, "especially themes, concepts,
+and their graph," and — after a follow-up — how those features would extend cross-run. A five-agent audit
+(per-run backend data surface, UI theme/concept/graph coverage, UI selection/trust levers, cross-run backend
+infra, cross-run UI surfaces) established: the shipped concept-graph / graded-novelty / verifier subsystem is
+rendered **nowhere** in the UI; the UI's "theme" is the legacy flat `idea.theme`, a separate/weaker system the
+concept graph supersedes; all six Part-IV events fall to raw-JSON in the feed and all seven Part-IV settings
+are absent from `settingsSchema.js`; but the per-run data is **already served** on `/state`, so the per-run UI
+is a pure read/projection fix. Cross-run is a genuine engine project — no concept aggregation exists and the
+vocabulary is run-local. This dovetails with the concurrently-authored cross-run design in
+[doc 17 §21.20](17-project-review-and-directions-2026-07-11.md) (Research Atlas, §21.20.7).
+
+No code changed this round. The plan is written up as **PART V (§23–§25) of
+[doc 18](18-ui-ux-review-2026-07-11.md)** — the gap, a two-horizon plan (Horizon A per-run visibility now;
+Horizon B the cross-run Atlas, gated on the CR contracts), and the reuse/naming corrections — with a
+cross-reference added at doc 17 §21.20.7. Two decisions left open for the owner: cross-run vocabulary scope
+(narrow dense-retrieval skeleton vs broad with alignment) and the Horizon-A entry slice.
