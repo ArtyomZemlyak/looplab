@@ -99,8 +99,10 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
 def _global_key(legacy_key: str) -> str:
     """A DISTINCT index (in the same decisions dict) for the last SCOPE-LESS decision on a statement, so
     a later scoped decision that overwrites the plain legacy key can't hide the portfolio-wide verdict
-    from the structured fallback. The control-char prefix can't collide with a normalize_statement key
-    or a claim_uid. The dict is only ever read via `.get(key)`, never iterated, so extra keys are safe."""
+    from the structured fallback. The control-char prefix won't collide with a claim_uid ("clm_"+hex) or,
+    in practice, a normalize_statement key — the only way to collide is a statement literally beginning
+    with a NUL byte, which argv, LLM text and engine-written JSON logs never carry. The dict is only ever
+    read via `.get(key)`, never iterated, so the extra keys are safe."""
     return "\x00global\x00" + legacy_key
 
 
