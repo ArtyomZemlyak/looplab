@@ -92,6 +92,10 @@ class StrategyContext(BaseModel):
     # Strategist tunes `ablate_every`/`merge_mode` but previously judged from priors only; this lets
     # it set cadences from the run's OWN evidence. Empty on an early/degenerate run.
     operator_yields: dict = Field(default_factory=dict)
+    # PART V §22 — a bounded CROSS-RUN coverage note (portfolio explored / thin / contested), populated by
+    # the engine when `cross_run_advisory` is on, so the meta-controller grounds its explore/exploit dial in
+    # what the whole portfolio has covered, not only this run's narrowing. Advisory prose; empty when off.
+    cross_run_note: str = ""
 
 
 class Strategist(Protocol):
@@ -410,7 +414,8 @@ def _strategist_brief(state: RunState, ctx: StrategyContext) -> str:
         f"eval_budget_remaining={ctx.eval_budget_remaining}\n"
         f"available_policies={ctx.available_policies} avg_eval_seconds={ctx.avg_eval_seconds}\n"
         f"coverage (narrowing signal): {_fmt_coverage(ctx.coverage)}\n"
-        f"operator yields (evidence for the operator mix — mean metric gain per eval-second, n tried): "
+        + (f"cross-run coverage (portfolio): {ctx.cross_run_note}\n" if ctx.cross_run_note else "")
+        + f"operator yields (evidence for the operator mix — mean metric gain per eval-second, n tried): "
         f"{_fmt_operator_yields(ctx.operator_yields)}\n"
         "Choose the next strategy (policy from the available list; fidelity smoke|full|adaptive; "
         "novelty_stance explore|balanced|exploit — pick explore when coverage shows the search "

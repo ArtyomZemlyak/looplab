@@ -143,8 +143,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     from looplab.serve.jobs import JobRegistry
     from looplab.serve.routers import (
         assistant as _assistant_router, boss as _boss_router, control as _control_router,
-        genesis as _genesis_router, misc as _misc_router, org as _org_router,
-        reports as _reports_router, runs as _runs_router)
+        cross_run as _cross_run_router, genesis as _genesis_router, misc as _misc_router,
+        org as _org_router, reports as _reports_router, runs as _runs_router)
 
     root = Path(run_root).resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -273,7 +273,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                    _control_router.build_router, _genesis_router.build_router,
                    _assistant_router.build_router, _boss_router.build_router,
                    _jobs_router.build_router, _reports_router.build_router,
-                   _misc_router.build_router):
+                   _cross_run_router.build_router, _misc_router.build_router):
         app.include_router(_build(srv))
 
     # ------------------------------------------------------------------ static React app

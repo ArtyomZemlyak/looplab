@@ -4047,10 +4047,13 @@ audited, reversible act.
    deep-research) + **Genesis** (`author_task`, portfolio-wide/unbound for run planning). **DONE.**
 2. Developer role-scoped read variant (into `LLMRepoDeveloper._scout_tools`, `role="developer"`). **DONE.**
    → READ access now covers EVERY reasoning role: Researcher, Strategist, deep-research, Developer, Genesis.
-3. Strategist coverage cue + Genesis prior-art (proactive INJECTION on top of the pull tool, bounded). *(follow-up — every role can already PULL via the tool; this is the extra unprompted nudge.)*
-4. Operator ratify/reject/pin — `claim_decisions.jsonl` overlay + `looplab claim-decide`, honored across
-   the CLI / atlas / agent context pack / advisory injection (rejected dropped, ratified surfaced first).
-   **DONE (CLI surface; the serve control-event + governance UI + concept merge/split/purge are follow-ups).**
+3. Strategist coverage cue (bounded portfolio note in its brief under `cross_run_advisory`) + Genesis
+   prior-art (proactive prompt-instruction to consult `cross_run_atlas`, on top of the pull tool). **DONE.**
+4. Operator ratify/reject/pin — `claim_decisions.jsonl` overlay + `looplab claim-decide` **and** a serve
+   API (`GET /api/cross-run/atlas` · `/claims` · `POST /api/cross-run/claim-decide`), honored across the
+   CLI / atlas / agent context pack / advisory injection / strategist cue (rejected dropped, ratified
+   surfaced first). **DONE.** Remaining: the governance UI screen + concept merge/split/purge (need the
+   concept-UID/taxonomy layer, CR1a) and a semantic claim key (CR1b).
 
 Steps 1–2 land the **agentic READ tool for every reasoning role** (Researcher, Strategist, deep-research,
 and the role-scoped Developer); step 4 lands the **operator WRITE/ratify path** (the only actor that may

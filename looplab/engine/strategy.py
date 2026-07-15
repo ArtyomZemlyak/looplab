@@ -84,7 +84,37 @@ class StrategyCadenceMixin:
             # cadences from the run's own evidence, not priors. Computed on the (rare) consult
             # cadence only — O(nodes) is fine here, not on the per-proposal path.
             operator_yields=operator_yields(state),
+            cross_run_note=self._cross_run_note_for_ctx(),
         )
+
+    def _cross_run_note_for_ctx(self) -> str:
+        """PART V §22 — a bounded cross-run coverage note (portfolio explored / thin / contested) for the
+        Strategist's brief. On only under `cross_run_advisory` + a memory dir; best-effort ("" on any hiccup
+        or empty store), so it never blocks the cadence. Advisory prose; honors operator claim decisions."""
+        if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+            return ""
+        try:
+            import json
+            from pathlib import Path
+
+            from looplab.engine.claims import load_claim_decisions, portfolio_atlas
+            from looplab.engine.memory import ConceptCapsuleStore
+            from looplab.events.eventstore import read_jsonl_lenient
+            base = Path(self.memory_dir)
+            lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
+            lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
+            if not lessons and not caps:
+                return ""
+            a = portfolio_atlas(lessons, caps, decisions=load_claim_decisions(base))
+            parts = [f"{a['n_runs']} run(s), {a['n_concepts']} concept(s), {a['n_contested']} contested"]
+            if a["thin_coverage"]:
+                parts.append("thinly-explored: " + ", ".join(a["thin_coverage"][:6]))
+            if a["contradictions"]:
+                parts.append("unresolved: " + "; ".join(c["statement"][:60] for c in a["contradictions"][:2]))
+            return " | ".join(parts)
+        except Exception:  # noqa: BLE001 — advisory context, never blocks the strategist cadence
+            return ""
 
     def _coverage_for_ctx(self, state: RunState) -> dict:
         """The breadth read-model for the Strategist's decision context. On the cadence path the
