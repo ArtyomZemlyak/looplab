@@ -176,7 +176,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
     claims + operator decisions + concept aliases (CR1a). One call so every atlas surface is consistent."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
@@ -189,7 +189,8 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
     return portfolio_atlas(lessons, capsules, max_items=max_items,
                            decisions=load_claim_decisions(memory_dir),
                            research_claims=load_research_claims(memory_dir),
-                           aliases=load_concept_aliases(memory_dir))
+                           aliases=load_concept_aliases(memory_dir),
+                           splits=load_concept_splits(memory_dir))
 
 
 _CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
@@ -473,7 +474,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
-                    aliases: Optional[dict] = None) -> dict:
+                    aliases: Optional[dict] = None, splits: Optional[dict] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -484,7 +485,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     a false "never tried" (which needs a reference universe)."""
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
-    overview = portfolio_concept_overview(capsules, aliases=aliases)
+    overview = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
     # CODEX AGENT: rejected claims are filtered out of `build_context_pack`/cross_run_claims, but remain in
     # this list and therefore reappear through Atlas and the Strategist as live "Contradictory" guidance.

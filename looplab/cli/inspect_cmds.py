@@ -575,7 +575,8 @@ def concept_merge_cmd(
     """PART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
     another (they become one across all cross-run views) or PURGE it (empty target → dropped from views).
     Non-destructive + reversible: append-only `concept_aliases.jsonl`, applied at READ time; the raw per-run
-    tags are never rewritten. A concept SPLIT (needs bounded re-tagging) is deferred."""
+    tags are never rewritten. A self-link or cycle-closing edge is rejected. For the inverse (one coarse
+    concept → several finer ones) use `concept-split`."""
     from looplab.engine.concept_registry import record_concept_alias
     import datetime as _dt
     try:
@@ -588,6 +589,37 @@ def concept_merge_cmd(
         typer.echo(f"merged: '{rec['from']}' -> '{rec['to']}'")
     else:
         typer.echo(f"purged: '{rec['from']}'")
+
+
+@app.command(name="concept-split")
+def concept_split_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where concept_splits.jsonl lives)."),
+    from_concept: str = typer.Argument(..., help="The coarse concept slug to split."),
+    rule: list[str] = typer.Option([], "--rule", help="A re-tag rule 'target:term1,term2' — a run whose "
+                                   "sibling concepts contain ANY term is re-tagged to target. Repeatable "
+                                   "(ordered, first match wins)."),
+    default: str = typer.Option("", "--default", help="Fallback target when no rule matches (else the "
+                                "original slug is kept)."),
+):
+    """PART IV cross-run (§21.20.13) — the OPERATOR concept SPLIT: declare one coarse concept really covers
+    several finer ones, RE-TAGGED per each run's OWN sibling concepts. Non-destructive + reversible:
+    append-only `concept_splits.jsonl`, applied at READ time; raw per-run tags are never rewritten.
+    Example: `concept-split MEM data/augmentation --rule 'data/hard-negative-mining:hard,negative' \\
+    --rule 'data/synonym-aug:synonym,eda' --default data/augmentation`."""
+    from looplab.engine.concept_registry import record_concept_split
+    import datetime as _dt
+    rules = []
+    for spec in rule:
+        target, _, terms = spec.partition(":")
+        rules.append({"to": target.strip(), "when_any": [t.strip() for t in terms.split(",") if t.strip()]})
+    try:
+        rec = record_concept_split(str(memory_dir), from_concept=from_concept, rules=rules, default=default,
+                                   at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    tgts = [r["to"] for r in rec["rules"]] + ([rec["default"]] if rec["default"] else [])
+    typer.echo(f"split: '{rec['from']}' -> {{{', '.join(sorted(set(tgts)))}}} ({len(rec['rules'])} rule(s))")
 
 
 @app.command(name="claim-decide")
@@ -626,14 +658,15 @@ def cross_run_digest_cmd(
     """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
-    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
     caps_p = Path(memory_dir) / "concept_capsules.jsonl"
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
     if not caps:
         typer.echo(f"no concept capsules at {memory_dir}")
         raise typer.Exit(1)
-    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)))
+    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)),
+                          splits=load_concept_splits(str(memory_dir)))
     if as_json:
         typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
         return

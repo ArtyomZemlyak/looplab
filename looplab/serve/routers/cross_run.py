@@ -22,6 +22,17 @@ class _ConceptMerge(BaseModel):
     to_concept: str = ""     # "" => purge/tombstone
 
 
+class _ConceptSplitRule(BaseModel):
+    to: str
+    when_any: list[str] = []
+
+
+class _ConceptSplit(BaseModel):
+    from_concept: str
+    rules: list[_ConceptSplitRule] = []
+    default: str = ""
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
 
@@ -88,5 +99,18 @@ def build_router(srv) -> APIRouter:
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"ok": True, "alias": rec}
+
+    @router.post("/api/cross-run/concept-split")
+    def concept_split(body: _ConceptSplit):
+        """OPERATOR concept governance (§21.20.13): split one coarse concept into finer ones, re-tagged at
+        read time from each run's OWN sibling concepts. Non-destructive (append-only splits ledger)."""
+        from looplab.engine.concept_registry import record_concept_split
+        try:
+            rec = record_concept_split(_memory_dir(), from_concept=body.from_concept,
+                                       rules=[r.model_dump() for r in body.rules],
+                                       default=body.default, by="ui")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "split": rec}
 
     return router
