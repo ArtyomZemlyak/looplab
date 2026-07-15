@@ -108,6 +108,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             engine._store_case(fold(engine.store.read_all()))       # cross-run memory (I19)
             if getattr(engine, "_cross_run_concepts", False):        # §21.20 Step 2: cross-run concept capsule
                 engine._store_concept_capsule(fold(engine.store.read_all()))
+                engine._store_research_claims(fold(engine.store.read_all()))   # + D8 claims cross-run
         except Exception:  # noqa: BLE001 - retry on a later finalization re-entry
             complete = False
         try:

@@ -106,8 +106,7 @@ class ProposalCuesMixin:
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import (build_context_pack, claim_assessments,
-                                                load_claim_decisions, render_context_pack)
+            from looplab.engine.claims import build_context_pack, claims_for_memory, render_context_pack
             from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
@@ -116,7 +115,7 @@ class ProposalCuesMixin:
             overview = portfolio_concept_overview(ConceptCapsuleStore(cp).all()) if cp.exists() else None
             if not lessons and not overview:
                 return ""
-            claims = claim_assessments(lessons, decisions=load_claim_decisions(base))   # honor operator verdicts
+            claims = claims_for_memory(base, lessons=lessons)   # lessons + D8 claims + operator decisions
             text = render_context_pack(build_context_pack(claims, concept_overview=overview))
             return ("\n" + text) if text else ""
         except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing

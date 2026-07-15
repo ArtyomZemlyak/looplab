@@ -1332,6 +1332,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     def _store_concept_capsule(self, final: RunState) -> None:
         return self.lessons.store_concept_capsule(final)
 
+    def _store_research_claims(self, final: RunState) -> None:
+        return self.lessons.store_research_claims(final)
+
     @staticmethod
     def _cadence_due(n: int, last: int, every: int) -> bool:
         """The shared since-last node-count gate (report/distill/refresh cadences). Since-last

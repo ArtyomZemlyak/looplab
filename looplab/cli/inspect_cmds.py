@@ -614,7 +614,9 @@ def atlas_cmd(
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
-    atlas = portfolio_atlas(lessons, caps, max_items=max_items, decisions=load_claim_decisions(base))
+    from looplab.engine.claims import load_research_claims
+    atlas = portfolio_atlas(lessons, caps, max_items=max_items, decisions=load_claim_decisions(base),
+                            research_claims=load_research_claims(base))
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
@@ -656,7 +658,8 @@ def claims_cmd(
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-    claims = claim_assessments(lessons, decisions=load_claim_decisions(p if p.is_dir() else p.parent))
+    from looplab.engine.claims import claims_for_memory
+    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons)   # + D8 claims + decisions
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent

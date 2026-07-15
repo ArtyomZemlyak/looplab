@@ -119,7 +119,7 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.claims import claim_assessments, portfolio_atlas
+        from looplab.engine.claims import portfolio_atlas
         from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
@@ -141,8 +141,8 @@ class CrossRunTools:
             return "TRIED BEFORE (surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            from looplab.engine.claims import load_claim_decisions
-            claims = claim_assessments(self._role_lessons(), decisions=load_claim_decisions(self.dir))
+            from looplab.engine.claims import claims_for_memory
+            claims = claims_for_memory(self.dir, lessons=self._role_lessons())   # + D8 claims + decisions
             claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
@@ -159,9 +159,10 @@ class CrossRunTools:
                 f"{c['statement']}" for c in claims)
 
         if name == "cross_run_atlas":
-            from looplab.engine.claims import load_claim_decisions
+            from looplab.engine.claims import load_claim_decisions, load_research_claims
             atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules(),
-                                    decisions=load_claim_decisions(self.dir))
+                                    decisions=load_claim_decisions(self.dir),
+                                    research_claims=load_research_claims(self.dir))
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:

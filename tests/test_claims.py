@@ -207,3 +207,38 @@ def test_cli_claim_decide_requires_exactly_one(tmp_path):
     from looplab.cli import app
     r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "x"])   # none chosen
     assert r.exit_code == 2
+
+
+# --------------------------------------------------------------------------- #
+# D8 research claims persisted cross-run (makes `contested` reachable)
+# --------------------------------------------------------------------------- #
+
+def test_record_and_load_research_claims_upsert(tmp_path):
+    from looplab.engine.claims import load_research_claims, record_research_claims
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t",
+                           claims=[{"statement": "doc2query helps", "node_ids": [5], "urls": ["u"]}, {"statement": ""}])
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t",     # re-run replaces r1's rows
+                           claims=[{"statement": "doc2query helps", "node_ids": [7]}])
+    rows = load_research_claims(str(tmp_path))
+    assert len(rows) == 1 and rows[0]["run_id"] == "r1" and rows[0]["node_ids"] == [7]
+
+
+def test_d8_claim_contests_a_lesson_verdict(tmp_path):
+    # a D8 research claim SUPPORTS a statement a lesson REFUTED -> the portfolio now has a CONTESTED claim
+    # (unreachable from consolidated lessons alone, which carry one verdict per statement).
+    from looplab.engine.claims import claims_for_memory, record_research_claims
+    _write_lessons(tmp_path / "lessons.jsonl", [_lesson("distillation helps", "refuted", [2], run_id="rL")])
+    record_research_claims(str(tmp_path), run_id="rR", task_id="t",
+                           claims=[{"statement": "distillation helps", "node_ids": [9]}])
+    out = {c["statement"]: c for c in claims_for_memory(str(tmp_path))}
+    c = out["distillation helps"]
+    assert c["epistemic"] == "mixed"                       # now contested
+    assert c["support"] == ["rR:9"] and c["oppose"] == ["rL:2"]
+
+
+def test_claims_for_memory_applies_decisions_too(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [_lesson("x helps", "supported", [1])])
+    record_claim_decision(str(tmp_path), statement="x helps", decision="ratified")
+    out = claims_for_memory(str(tmp_path))
+    assert out[0]["maturity"] == "operator-ratified"

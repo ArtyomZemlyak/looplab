@@ -96,6 +96,63 @@ def load_claim_decisions(memory_dir) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# D8 research claims persisted cross-run (§21.20 / CR1b) — so a deep-research memo's evidence-backed
+# claims survive their run and can CONTEST/support lesson verdicts (contested is otherwise unreachable
+# from newest-verdict-wins lessons alone). Written at finalize; read by the claim assessments callers.
+# --------------------------------------------------------------------------- #
+
+def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> int:
+    """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
+    {run_id, task_id, statement, node_ids, urls}. Append-with-replace so a re-run doesn't double-count.
+    Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
+    if not memory_dir:
+        return 0
+    rid = str(run_id or "")
+    rows = []
+    for c in claims or []:
+        stmt = str((c.get("statement") if isinstance(c, dict) else "") or "").strip()
+        if not stmt:
+            continue
+        rows.append({"run_id": rid, "task_id": str(task_id or ""), "statement": stmt,
+                     "node_ids": list(c.get("node_ids") or []), "urls": list(c.get("urls") or [])})
+    path = Path(memory_dir) / "research_claims.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
+    write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
+    return len(rows)
+
+
+def load_research_claims(memory_dir) -> list[dict]:
+    """The persisted cross-run D8 research claims (statement + run-qualified node evidence). [] when none."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    if not memory_dir:
+        return []
+    path = Path(memory_dir) / "research_claims.jsonl"
+    return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+
+
+def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
+    """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
+    the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
+    research claims AND decisions consistently."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
+                             decisions=load_claim_decisions(memory_dir))
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
                       decisions: Optional[dict] = None) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
@@ -239,7 +296,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
 
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
-                    decisions: Optional[dict] = None) -> dict:
+                    decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -251,7 +308,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules)
-    claims = claim_assessments(lessons, decisions=decisions)
+    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
     contested = [c for c in claims if c["epistemic"] == "mixed"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy

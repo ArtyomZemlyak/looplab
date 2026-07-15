@@ -39,17 +39,18 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/cross-run/atlas")
     def atlas():
         """The Research Atlas payload — explored / thin / contradictory + the bounded context pack —
-        with operator decisions overlaid. Read-only, portfolio-wide (the human sees everything)."""
-        from looplab.engine.claims import load_claim_decisions, portfolio_atlas
+        with D8 research claims + operator decisions overlaid. Read-only, portfolio-wide."""
+        from looplab.engine.claims import load_claim_decisions, load_research_claims, portfolio_atlas
         base, lessons, caps = _load()
-        return portfolio_atlas(lessons, caps, decisions=load_claim_decisions(base))
+        return portfolio_atlas(lessons, caps, decisions=load_claim_decisions(base),
+                               research_claims=load_research_claims(base))
 
     @router.get("/api/cross-run/claims")
     def claims(contested: bool = False):
         """Evidence-grounded claims (support/oppose + epistemic + operator maturity)."""
-        from looplab.engine.claims import claim_assessments, load_claim_decisions
+        from looplab.engine.claims import claims_for_memory
         base, lessons, _ = _load()
-        out = claim_assessments(lessons, decisions=load_claim_decisions(base))
+        out = claims_for_memory(base, lessons=lessons)   # + D8 claims + decisions
         if contested:
             out = [c for c in out if c["epistemic"] == "mixed"]
         return {"claims": out, "n": len(out)}
