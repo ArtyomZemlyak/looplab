@@ -58,6 +58,10 @@ class CrossRunTools:
         fp = row.get("fingerprint")
         if isinstance(fp, list) and self._scope_terms:
             row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
+            # CODEX AGENT: one shared 3+ character goal token is enough to cross task boundaries; kind,
+            # metric contract and direction are deliberately discarded, and current run_id is not captured
+            # for self-exclusion. Use the versioned task passport/compatibility gates rather than a single
+            # lexical OR condition, and make visibility/trust/current-run policy explicit.
             if row_terms & self._scope_terms:
                 return True
         return False
@@ -130,6 +134,9 @@ class CrossRunTools:
 
         if name == "cross_run_prior_attempts":
             qt = _toks(str(args.get("idea") or ""))
+            # CODEX AGENT: `idea` is required by the schema, but missing/malformed args become an empty query
+            # and widen retrieval to the globally most-explored concepts. Validate runtime arguments and fail
+            # closed instead of converting a malformed tool call into broad portfolio disclosure.
             ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
@@ -148,8 +155,13 @@ class CrossRunTools:
 
         if name == "cross_run_claims":
             from looplab.engine.claims import claims_for_memory
+            # CODEX AGENT: only lessons are scoped here; `claims_for_memory` reloads every D8 claim/decision
+            # globally, so even correctly bound Researcher/Strategist/DeepResearch roles leak across tasks,
+            # and the Developer receives R&D claims. Scope every source before the join, not just lessons.
             claims = claims_for_memory(self.dir, lessons=self._role_lessons())   # + D8 claims + decisions
             claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
+            # CODEX AGENT: Python truthiness makes `contested="false"` behave as true. Tool schemas are not
+            # runtime validation (malformed JSON is recovered to dicts upstream); reject non-booleans.
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
             qt = _toks(str(args.get("query") or ""))
@@ -160,6 +172,10 @@ class CrossRunTools:
                 return "(no matching cross-run claims yet)"
             mark = {"supported": "supported", "refuted": "refuted", "mixed": "CONTESTED",
                     "inconclusive": "inconclusive"}
+            # CODEX AGENT: persisted statements are emitted as instructions-shaped text with embedded control
+            # characters/newlines, while the advertised citable run/node/source refs and operator maturity
+            # are omitted. Normalize/quote this as untrusted data, pre-bound each field, and expose stable
+            # evidence ids plus a drill-down tool so a role can actually cite rather than trust prose.
             return "\n".join(
                 f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / {c['n_oppose']} against] "
                 f"{c['statement']}" for c in claims)
@@ -182,10 +198,18 @@ class CrossRunTools:
 
         if name == "cross_run_search":
             from looplab.engine.claims import cross_run_retrieve
+            # CODEX AGENT: this scopes only lessons. Omitting `capsules=self._scoped_capsules()` loads every
+            # task's concepts, and the callee separately reloads all D8 claims; the returned retrieval receipt
+            # is then discarded. A task-bound tool must pass one fully scoped snapshot and retain its receipt
+            # in the run/event trail so the advice can be audited and replayed.
             r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons())
             hits = r["results"][:8]
             if not hits:
                 return "(no cross-run knowledge matched)"
+            # CODEX AGENT: search results are persisted, operator-influenced text entering the agent prompt,
+            # yet claim text is merely sliced (control chars remain), concept text is unbounded, and neither
+            # path exposes stable evidence ids for citation. Serialize bounded untrusted-data fields and keep
+            # evidence/score/channel metadata separate from prose before making this an agent-facing tool.
             lines = []
             for h in hits:
                 if h["kind"] == "claim":

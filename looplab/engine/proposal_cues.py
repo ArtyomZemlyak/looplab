@@ -110,9 +110,21 @@ class ProposalCuesMixin:
             from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
+            # CODEX AGENT: `state` is never used below: this live prompt reads the whole mutable portfolio,
+            # including current-run/mismatched-task rows, on every proposal. Nothing records the store
+            # revision, selected evidence, rendered bytes, or prompt digest before the LLM call, so a crash
+            # + resume can re-propose the same slot under different evidence. Scope through one immutable
+            # snapshot and append a retrieval receipt before any cross-run content can influence reasoning.
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            # CODEX AGENT: this raw overview bypasses concept aliases/purges and renders untrusted, unbounded
+            # LLM/repo-derived slugs into the proactive prompt. A purged 100K slug still appeared here in a
+            # repro. Resolve the same taxonomy snapshot as Atlas, normalize control characters, quote memory
+            # as data, and enforce a serialized prompt budget before concatenation.
             overview = portfolio_concept_overview(ConceptCapsuleStore(cp).all()) if cp.exists() else None
+            # CODEX AGENT: `research_claims.jsonl` is a first-class source, but this early return checks only
+            # lessons/capsules. D8-only memory is visible through the API helper yet silently absent from the
+            # Researcher prompt. Centralize source loading/readiness in `claims_for_memory` instead.
             if not lessons and not overview:
                 return ""
             claims = claims_for_memory(base, lessons=lessons)   # lessons + D8 claims + operator decisions

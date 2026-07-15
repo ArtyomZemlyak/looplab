@@ -64,6 +64,10 @@ def build_router(srv) -> APIRouter:
         """OPERATOR governance write (§22.4): ratify / reject / pin a claim. Append-only, reversible."""
         from looplab.engine.claims import record_claim_decision
         try:
+            # CODEX AGENT: authentication (when configured) proves possession of one deployment token, but
+            # this audit record collapses every principal to `ui` with an empty timestamp and has no expected
+            # claim/taxonomy revision. Propagate an authenticated actor/action id/time and require CAS so two
+            # tabs cannot both receive 200 while physical append order arbitrarily decides policy.
             rec = record_claim_decision(_memory_dir(), statement=body.statement,
                                         decision=body.decision, note=body.note, by="ui")
         except ValueError as e:
@@ -76,6 +80,9 @@ def build_router(srv) -> APIRouter:
         (empty to_concept). Non-destructive (append-only aliases, applied at read time)."""
         from looplab.engine.concept_registry import record_concept_alias
         try:
+            # CODEX AGENT: `to_concept` defaults to empty, so an omitted/partial merge request succeeds as a
+            # portfolio-wide purge with no impact preview or explicit purge intent. Split merge vs purge into
+            # typed actions; require expected taxonomy revision and confirmation for the destructive meaning.
             rec = record_concept_alias(_memory_dir(), from_concept=body.from_concept,
                                        to_concept=body.to_concept, by="ui")
         except ValueError as e:

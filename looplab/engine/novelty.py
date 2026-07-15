@@ -268,6 +268,10 @@ class NoveltyGateMixin:
                         fp, min_sim=self._CROSS_RUN_MIN_SIM, exclude_run_id=getattr(state, "run_id", "") or "")
                     if str(c.get("direction") or "min") == my_dir]
             prior: set[str] = set()
+            # CODEX AGENT: this live novelty consumer bypasses the concept registry. An operator-purged
+            # concept disappears from Atlas but still influences graded novelty and is recorded as a prior;
+            # merges likewise compare raw spellings. Resolve every capsule and proposal tag through the
+            # same taxonomy snapshot/UID before any live or audit consumer uses it.
             for _sim, c in caps:
                 prior.update(str(x) for x in (c.get("concepts") or []))
             return prior, caps

@@ -169,6 +169,10 @@ def build_router(srv) -> APIRouter:
             promise. Returns None when the model can't drive tools (caller does a single structured call)."""
             from looplab.agents.agent import drive_tool_loop, loop_opts_from_settings
             from looplab.tools.reposcout import RepoScoutTools
+            # CODEX AGENT: the CLI Genesis path honors `cross_run_read_tools`, but this primary Web Genesis
+            # implementation always builds RepoScoutTools only; memory_dir/the setting are never consumed.
+            # The same UI setting therefore changes CLI behavior but is a no-op here. Share one Genesis tool
+            # assembly implementation and add endpoint coverage before advertising cross-surface parity.
             tools = RepoScoutTools([Path.home(), root, root.parent])
             tool_sys = sys_prompt + (
                 "\n\nYou have READ-ONLY tools to inspect this machine: list_dir(path), read_file(path), "

@@ -123,6 +123,10 @@ def build_index(entries: list[tuple[RunState, str, str]], *, universal: bool = T
     # add a content tie-break (n_attempts, best) so the canonical order is input-order-INDEPENDENT even
     # then, instead of relying on stable-sort to preserve arrival order (CODEX). A source_uid dedup contract
     # is the portfolio-scale TODO (§21.20.3).
+    # CODEX AGENT: this tie-break is still incomplete. Copied logs can share run/task/count/best metric yet
+    # contain different attempts; Python's stable sort then preserves input/traversal order, so rebuilding
+    # [A,B] differs from [B,A]. Include a canonical full-record/source digest and define duplicate identity
+    # rejection/dedup semantics rather than silently publishing two order-dependent versions of one run.
     facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"], f["n_attempts"],
                               str((f.get("best") or {}).get("metric"))))
     return facts

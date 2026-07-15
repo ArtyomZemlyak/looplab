@@ -925,6 +925,11 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if (n is not None and n.status is NodeStatus.evaluated
             and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d, legacy_attempt=True)):
+        # CODEX AGENT: verifier_score was computed from a prompt that includes confirmed/holdout/generalization
+        # evidence when present, yet this event preserves a pre-confirm score and the producer will never
+        # rescore an all-scored tie. A stale single-seed guess can therefore decide the post-confirm champion.
+        # Version the score by an evidence digest/epoch (also invalidate on holdout) and persist criteria,
+        # model and evidence revision in node_verified/group events.
         # A confirmation REFINES this node's result (more seeds → confirmed_mean) rather than DISCARDING
         # it, so its verifier_score (a soundness judgment on the same experiment) is kept as a reasonable
         # estimate — unlike a node_reset, which discards the result entirely and clears verifier_score.

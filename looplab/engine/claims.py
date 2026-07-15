@@ -69,10 +69,18 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         raise ValueError("empty statement")
     if not memory_dir:
         raise ValueError("no memory_dir")
+    # CODEX AGENT: this key is global prose identity: `normalize_statement` truncates to 160 characters
+    # and carries no task/passport, metric, polarity, or schema version. Rejecting a claim in task A can
+    # therefore reject a same-worded claim in task B (and two long claims with the same prefix collide).
+    # Governance writes need a stable structured claim_uid + explicit scope/revision, not display text.
     rec = {"statement": s, "key": normalize_statement(s), "decision": decision,
            "note": str(note or ""), "by": str(by or "operator"), "at": str(at or "")}
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    # CODEX AGENT: this acknowledged governance append has no interprocess lock, fsync, monotonic sequence,
+    # action id, or optimistic revision. Concurrent UI/CLI writers can interleave/reorder physical lines,
+    # yet `load_claim_decisions` lets the last readable line define policy. Reuse the EventStore-style
+    # locked append/CAS contract and return only after a durable, attributable (`by`/`at`) commit.
     with open(path, "a", encoding="utf-8") as f:
         import json as _json
         f.write(_json.dumps(rec) + "\n")
@@ -122,6 +130,11 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> 
                      "node_ids": list(c.get("node_ids") or []), "urls": list(c.get("urls") or [])})
     path = Path(memory_dir) / "research_claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    # CODEX AGENT: this is an unlocked read-modify-replace of a shared cross-run store. Two finalizers can
+    # both read E, publish E+r1 / E+r2, return success, and let the last replace silently erase the other
+    # run; `write_jsonl_atomic` explicitly provides crash atomicity, not concurrency exclusion. Hold the
+    # store's interprocess lock across reload+filter+replace (as ConceptCapsuleStore.add does), or use an
+    # append-only run ledger with idempotent event identities.
     existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
     kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
     write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
@@ -150,6 +163,10 @@ def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    # CODEX AGENT: callers may pass task/role-filtered `lessons`, but this helper then re-adds ALL D8 rows
+    # and ALL global decisions. Consequently a CrossRunTools instance bound to task A still returns task B's
+    # research claims (and the Developer sees the R&D stream it claims to exclude). Accept already-scoped
+    # research claims/decisions or one shared scope predicate and apply it to every source before joining.
     return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
                              decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy)
 
@@ -196,12 +213,22 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
     toks = [_stmt_tokens(c["statement"]) for c in claims]
     parent = list(range(n))
 
+    # CODEX AGENT: token-set overlap is not a safe paraphrase or governance identity. For example,
+    # "dropout improves model generalization" and "dropout never improves model generalization" clear
+    # 0.6 and merge; a ratified member and a rejected member then inherit whichever non-machine maturity
+    # happens to appear first below. Add semantic polarity/qualifier checks and define decision conflicts
+    # explicitly before allowing this projection to combine operator-controlled claims.
+
     def _find(x):
         while parent[x] != x:
             parent[x] = parent[parent[x]]
             x = parent[x]
         return x
 
+    # CODEX AGENT: all-pairs comparison is O(n^2), and union-find turns the threshold into single-linkage:
+    # A~B and B~C merge A with C even when A/C are below 0.6 (reproduced with two one-token substitutions).
+    # Use a bounded candidate index, then require every member to satisfy a representative/complete-link
+    # invariant; otherwise a large or bridge-heavy portfolio can both stall the CLI and over-collapse claims.
     for i in range(n):
         if not toks[i]:
             continue
@@ -290,6 +317,11 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         g = _group(rc.get("statement"))
         if g is None:
             continue
+        # CODEX AGENT: unlike lessons above, D8 rows never add their run_id/task_id to `runs`/`scopes`;
+        # a D8-only Atlas therefore reports zero runs and loses the metadata needed for task filtering.
+        # The row also has no persisted verifier stance, so the mere presence of an integer citation is
+        # counted as support without resolving the node/generation. Preserve provenance + verification and
+        # model unresolved/cited evidence separately from verified positive support.
         # A D8 memo claim CITES the experiments it rests on -> support evidence. URLs are external sources.
         # NOTE (CODEX): citation is not verification — a full claim requires a verified verdict + resolvable
         # run-qualified evidence (CR1b TODO). This unification is exercised via the API/callers that pass
@@ -304,6 +336,9 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     for key, g in groups.items():
         sup, opp = sorted(g["support"]), sorted(g["oppose"])
         d = (decisions or {}).get(key)
+        # CODEX AGENT: note/by/at are discarded here, so API/CLI/Atlas/tools cannot explain who changed the
+        # claim or why after the one write response is gone. Carry the current decision record (and expose
+        # append-only history) rather than reducing an auditable governance action to one maturity string.
         out.append({
             "statement": g["statement"],
             "epistemic": _epistemic(sup, opp),
@@ -339,6 +374,10 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # Operator governance (§22.4): a claim the operator REJECTED is dropped from the agent's context (the
     # human overruled it); a RATIFIED claim is surfaced FIRST (the human vouched for it), ahead of even the
     # contested ones. `machine-proposed` claims keep the default contested-first ordering.
+    # CODEX AGENT: `operator-pinned` receives no retention priority, so a successful pin can fall outside
+    # max_claims. Conversely, with max_claims=1 the caveat swap below can evict the ratified claim that this
+    # comment promises is surfaced first. Define explicit pin/ratify/caveat precedence (and an unpin/clear
+    # transition) before treating these writes as enforceable governance semantics.
     live = [c for c in (claims or []) if c.get("maturity") != "operator-rejected"]
     ratified = [c for c in live if c.get("maturity") == "operator-ratified"]
     rest = [c for c in live if c.get("maturity") != "operator-ratified"]
@@ -399,6 +438,10 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    # CODEX AGENT: caller-supplied `lessons`/`capsules` look like a scoped corpus, but
+    # `claims_for_memory` still reloads every D8 claim/decision from `memory_dir`; when capsules are omitted
+    # they are also loaded portfolio-wide. `CrossRunTools` passes only task-scoped lessons, so a bound agent
+    # can retrieve another task's D8 claims and concepts. Scope every source before constructing the index.
     claims = [c for c in claims_for_memory(memory_dir, lessons=lessons)
               if c.get("maturity") != "operator-rejected"]
     overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir))
@@ -409,11 +452,19 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     for e in overview["concepts"]:
         docs.append(("concept", e["concept"],
                      {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
+    # CODEX AGENT: this is an invocation summary, not a "why-recalled" or replay receipt: it has no corpus
+    # revision/digest, stable evidence ids, per-hit channel ranks/contributions, embedder identity, or alias
+    # and governance versions. It cannot reconstruct or explain a result after append-only stores change.
+    # Also validate `k`: k=0/-1 is recorded here but normalized to one hit below, while huge values are free.
     receipt = {"query": str(query or ""), "k": int(k), "n_corpus": len(docs),
                "channels": ["lexical", "bm25", "vector"]}
     if not docs or not str(query or "").strip():
         return {"results": [], "receipt": {**receipt, "n_hits": 0}}
     from looplab.search.hybrid_merge import HybridRetriever
+    # CODEX AGENT: no embedder is passed, so the advertised semantic/vector channel is the 64-bucket
+    # `hash_embed` bag-of-words (including collision hits), not semantic retrieval. This also rebuilds BM25
+    # and every document vector over the unbounded portfolio on every tool call. Inject/version a configured
+    # index, expose degraded channel semantics in the receipt, and enforce corpus/query/result budgets.
     hits = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=max(1, int(k)))
     results = [{"kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4), **docs[i][2]}
                for i, s in hits]
@@ -435,6 +486,10 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules, aliases=aliases)
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
+    # CODEX AGENT: rejected claims are filtered out of `build_context_pack`/cross_run_claims, but remain in
+    # this list and therefore reappear through Atlas and the Strategist as live "Contradictory" guidance.
+    # Apply one governance projection consistently to every consumer. `operator-pinned` likewise has no
+    # retention semantics here or in the top-8 tool slice, so a successful pin can remain invisible.
     contested = [c for c in claims if c["epistemic"] == "mixed"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy

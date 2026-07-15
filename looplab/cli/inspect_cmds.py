@@ -685,6 +685,9 @@ def atlas_cmd(
     lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
     lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
+    # CODEX AGENT: D8 research_claims are now a valid Atlas source, but this preflight exits before
+    # `atlas_for_memory` can load them. D8-only memory works through the HTTP API yet both CLI and live
+    # cues report it empty. Delegate source readiness to the shared loader and report per-source status.
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
@@ -727,6 +730,9 @@ def claims_cmd(
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     path = p if p.is_file() else p / "lessons.jsonl"
+    # CODEX AGENT: requiring lessons.jsonl makes the claims CLI reject a perfectly valid D8-only store that
+    # `claims_for_memory` and the HTTP API can read. Resolve the memory directory first and let the shared
+    # helper combine whichever versioned sources exist; do not make one optional source a hard prerequisite.
     if not path.exists():
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)

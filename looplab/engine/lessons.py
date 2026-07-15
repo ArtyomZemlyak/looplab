@@ -305,6 +305,12 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         try:
             claims = []
             for memo in (getattr(final, "research", None) or []):
+                # CODEX AGENT: the event carries `memo["verification"]["verdicts"]`, but this projection
+                # drops it and republishes every raw claim. `claim_assessments` then treats every numeric
+                # citation as support, so even a verifier-marked `unsupported` claim (or node 999 that never
+                # existed) becomes globally `supported`. Join claims to their aligned verification verdict,
+                # persist verdict/method + a stable claim id, and never promote unsupported/unclear evidence
+                # into positive epistemic support.
                 for c in (memo.get("claims") if isinstance(memo, dict) else []) or []:
                     claims.append(c)
             if not claims:

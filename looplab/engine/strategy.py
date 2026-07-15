@@ -84,6 +84,10 @@ class StrategyCadenceMixin:
             # cadences from the run's own evidence, not priors. Computed on the (rare) consult
             # cadence only — O(nodes) is fine here, not on the per-proposal path.
             operator_yields=operator_yields(state),
+            # CODEX AGENT: the cross-run note receives no RunState, so unlike the local context above it is
+            # portfolio-wide and cannot exclude this run or enforce task/metric compatibility. This also
+            # silently broadened `cross_run_advisory` from a Researcher cue into a policy-changing Strategist
+            # treatment. Pass state + an immutable scoped receipt and document/gate this consumer separately.
             cross_run_note=self._cross_run_note_for_ctx(),
         )
 
@@ -104,6 +108,8 @@ class StrategyCadenceMixin:
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
             caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
+            # CODEX AGENT: D8-only memory is discarded before `atlas_for_memory` gets a chance to load it,
+            # making API, Researcher/Strategist, and CLI disagree about whether the portfolio has claims.
             if not lessons and not caps:
                 return ""
             a = atlas_for_memory(base, lessons=lessons, capsules=caps)
@@ -145,6 +151,10 @@ class StrategyCadenceMixin:
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
+        # CODEX AGENT: cross_run_note can change the strategy, but this durable event persists only three
+        # unrelated context fields. Replay cannot reconstruct which mutable memory/snapshot influenced the
+        # decision once spans are disabled/rotated. Persist a bounded evidence receipt (revision/digest +
+        # selected refs/render hash) alongside the strategy decision.
         self.store.append(EV_STRATEGY_DECISION, {
             "strategy": strat,
             "at_node": len(state.nodes),
@@ -528,6 +538,11 @@ class StrategyCadenceMixin:
         budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
         done = False
         for group in groups:
+            # CODEX AGENT: groups can overlap, but `todo` is computed from the stale input state while earlier
+            # appends in this loop are not folded back. A robust group [0,1] can commit, then holdout group
+            # [1,2] fail on 2; score 1 still decides the supposedly abstained second group (and on success 1
+            # is called/appended twice with last-sample-wins). Plan one deduplicated cadence transaction with
+            # explicit group membership/composition, then publish only complete groups atomically.
             # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
             # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
             # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
@@ -555,6 +570,11 @@ class StrategyCadenceMixin:
                     break
                 verdicts.append((n, v))
             if not failed:                              # atomic commit: every member scored
+                # CODEX AGENT: the loop below is not durably atomic. A crash/append failure after the first
+                # node leaves a selection-affecting prefix; fold immediately uses that score against an
+                # unscored neutral sibling, and resume may finish without a client/cadence to repair it.
+                # Emit one versioned verifier_group_scored event containing every member/generation/evidence
+                # revision, and have replay ignore incomplete/unknown group records.
                 # KNOWN LIMITATION (CODEX #5, pre-existing since R1-c; off-by-default): the group is atomic
                 # IN MEMORY per cadence, but each score is a separate durable append — a crash BETWEEN them
                 # leaves a durable prefix, so on resume a half-scored tie could be decided by the neutral
@@ -605,6 +625,10 @@ class StrategyCadenceMixin:
                 m = metric_of(n)
                 if m is not None:
                     buckets.setdefault(m, []).append(n)
+            # CODEX AGENT: every lower-score tie bucket is enqueued and groups are later sorted by node id,
+            # so an 8-node losing tie can consume the entire cadence cap before the 2-node champion tie.
+            # If the run then finishes, the actual winner stays on id fallback. Produce/prioritize only the
+            # selector-reachable top robust and top holdout buckets (plus the leader CI band).
             for nodes in buckets.values():
                 _add(nodes)
 
@@ -656,6 +680,9 @@ class StrategyCadenceMixin:
             # Reject a too-noisy verdict (variance is only measurable across >1 sample): if fewer than half
             # the samples agree on the modal verdict, the judgment is unstable — abstain so a coin-flip
             # can't decide the tie (which then falls back to the id tie-break for the whole group).
+            # CODEX AGENT: the prose promises a majority, but agreement==0.5 (e.g. a 1-1 split with two
+            # allowed samples) passes and can choose the champion. Require strict majority (`<= 0.5`
+            # abstains), constrain sample counts to odd values, or use an explicit confidence rule.
             if samples > 1 and rep.agreement < 0.5:
                 return None
             return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement}

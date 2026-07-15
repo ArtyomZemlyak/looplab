@@ -849,6 +849,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # R1-d: statistical (CI) verifier tie-break. Absent in old logs -> False ->
                             # byte-identical exact-tie pick.
                             "verifier_ci_tie": self._verifier_ci_tie,
+                            # CODEX AGENT: selection flags are pinned, but `select_verifier_samples` (plus
+                            # verifier/model/criteria version) is not. Resume can therefore score different
+                            # nodes under different live sampling policies with no recorded policy change.
+                            # Pin the complete selection-treatment descriptor or emit an explicit transition.
                         },
                     )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is

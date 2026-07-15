@@ -24,12 +24,18 @@ _TOMBSTONE = "\x00purged"   # canonical target that marks a concept purged (drop
 
 
 def _norm(s: str) -> str:
+    # CODEX AGENT: alias keys are only stripped while `concept_uid` casefolds. `Hard-Neg` and `hard-neg`
+    # therefore remain two canonical concepts but receive the same UID. Define one versioned Unicode
+    # normalization/key contract (preserving a separate display label) and use it for writes and reads.
     return str(s or "").strip()
 
 
 def concept_uid(slug: str) -> str:
     """A stable opaque UID for a (canonical) concept slug — content-addressed so it never depends on
     insertion order or a counter. Deterministic across runs/machines; NOT the display slug."""
+    # CODEX AGENT: hashing the *current canonical display slug* is not stable identity: rename/merge changes
+    # the UID, and this 40-bit value is not persisted or consumed anywhere outside tests. Assign and persist
+    # a sufficiently wide opaque UID once; make taxonomy-versioned labels/aliases point to it instead.
     return "c_" + hashlib.sha1(_norm(slug).casefold().encode("utf-8")).hexdigest()[:10]
 
 
@@ -43,9 +49,17 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
         raise ValueError("empty from_concept")
     if not memory_dir:
         raise ValueError("no memory_dir")
+    # CODEX AGENT: this accepts self-links/cycles, and an omitted target silently means a global purge.
+    # With x→y,y→x, resolve_slug(x)==x while resolve_slug(y)==y, so the claimed merge has no canonical
+    # result. Require an explicit purge action/impact confirmation and reject any edge that closes a cycle
+    # (or resolve every SCC to one stable UID) before acknowledging the governance mutation.
     rec = {"from": src, "to": _norm(to_concept), "by": str(by or "operator"), "at": str(at or "")}
     path = Path(memory_dir) / "concept_aliases.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
+    # CODEX AGENT: like claim decisions, this policy ledger has no locked durable append, sequence/action
+    # id, actor identity, revision/CAS, or taxonomy snapshot. Concurrent HTTP/CLI actions can race and
+    # physical last-line order retroactively changes every historical view. Persist a versioned governance
+    # event under interprocess exclusion and include the resolved precondition + resulting revision.
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(rec) + "\n")
     return rec

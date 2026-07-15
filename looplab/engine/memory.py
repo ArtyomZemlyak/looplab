@@ -586,6 +586,10 @@ class ConceptCapsuleStore:
         string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
         bad row instead of letting it disable the feature: require the list-typed fields to be lists and
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
+        # CODEX AGENT: `CONCEPT_CAPSULE_VERSION` is decorative here: missing v and unknown v=999 are both
+        # accepted as current records. The row also cannot declare legacy vs universal fingerprint mode,
+        # although those algorithms produce incompatible scopes. Enforce/migrate known schema+fingerprint
+        # versions (or quarantine with an explicit receipt) before treating the capsule as comparable.
         return (isinstance(c.get("run_id"), str) and c["run_id"]
                 and isinstance(c.get("fingerprint"), list)
                 and isinstance(c.get("concepts"), list)
@@ -659,6 +663,10 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
             if not key:
                 continue                          # purged concept -> dropped from cross-run views
             e = per_concept.setdefault(key, {"concept": key, "runs": []})
+            # CODEX AGENT: when two raw concepts from the same capsule alias to `key`, this appends two
+            # rows for one run (possibly with conflicting metrics) while n_runs below reports 1. Preserve
+            # raw evidence refs but define a deterministic per-(canonical UID, run) aggregation instead of
+            # returning an internally contradictory overview card.
             e["runs"].append({"run_id": rid, "metric": oc.get(concept), "direction": direction})
     concepts = []
     for e in per_concept.values():
@@ -685,6 +693,10 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None) ->
     ov = portfolio_concept_overview(capsules, aliases=aliases)
     clusters: dict[str, dict] = {}
     for e in ov["concepts"]:
+        # CODEX AGENT: despite the "recursive summary" contract this is one `split` over an unenforced label
+        # convention, not a hierarchy: every unprefixed concept collapses into one bucket and changing a
+        # display slug can move an entire evidence history between axes. Persist a versioned concept taxonomy
+        # (with stable UIDs and provenance) and benchmark that hierarchy; do not infer semantics from `/`.
         axis = e["concept"].split("/", 1)[0] if "/" in e["concept"] else "(ungrouped)"
         cl = clusters.setdefault(axis, {"axis": axis, "concepts": [], "_runs": set()})
         cl["concepts"].append(e["concept"])

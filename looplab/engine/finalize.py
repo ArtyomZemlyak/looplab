@@ -106,6 +106,11 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # from the terminal run state, but don't claim the durable marker until both completed.
         try:
             engine._store_case(fold(engine.store.read_all()))       # cross-run memory (I19)
+            # CODEX AGENT: `_store_research_claims` is accidentally gated by the unrelated concept-capsule
+            # flag below. A run can enable Deep Research + `cross_run_read_tools`/advisory, successfully
+            # verify D8 claims, and still finalize forever without publishing any of them when
+            # `cross_run_concepts=False`. Give D8 persistence its own explicit gate (or persist whenever a
+            # memory_dir + memo exist) and cover the concepts-off/read-tools-on finalization combination.
             if getattr(engine, "_cross_run_concepts", False):        # §21.20 Step 2: cross-run concept capsule
                 engine._store_concept_capsule(fold(engine.store.read_all()))
                 engine._store_research_claims(fold(engine.store.read_all()))   # + D8 claims cross-run

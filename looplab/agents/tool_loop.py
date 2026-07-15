@@ -421,6 +421,10 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                 # under the active operation span next to the generations that decided the call.
                 with tracing.tool(name, args) as _tool_obs:
                     result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
+                    # CODEX AGENT: the 4K model cap is applied only after this trace write. A 250K persisted
+                    # claim produced a 250K spans.jsonl observation (then 4K to the model); repeated calls
+                    # amplify disk/serialization and preserve the hostile payload. Bound/sanitize result and
+                    # args before tracing, with an explicit original-size/hash marker for observability.
                     _tool_obs.output(result)
                 # Cap once, up front — appending an explicit truncation marker when the cap actually
                 # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
