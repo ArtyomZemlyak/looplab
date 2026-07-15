@@ -3853,11 +3853,15 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   incremental materialized read-models over the `concept_uid` resolver, taxonomy releases, and the Atlas
   metadata journal (§21.20.4); the 50/500-run concurrency + order-independent-digest + re-eval/archive/
   purge/ACL gates.
-- **Step 4 — CR1b durable claims + assessments.** `ClaimDefinition`/`ClaimRevision`,
-  `ClaimEvidenceLink`, `ClaimDecision`, rebuildable `ClaimAssessment` with independence families and proof
-  trails (§21.20.5). Migrate `lessons.jsonl` to machine-proposed claims **without** breaking the legacy path
-  (§21.20.12 #3). **Gate = citation/numeric verifier passes; contradiction/scope/causality gold set.**
-  Effect: a read-only Findings view.
+- **Step 4 — CR1b durable claims + assessments.** **LANDED 2026-07-15 (lean first slice):**
+  `claim_assessments` (`engine/claims.py`) is a pure read-model that projects the shipped distilled lessons
+  (+ optional D8 research-memo claims) into evidence-grounded claims — grouping by the lesson
+  `normalize_statement` identity, mapping the lesson verdict vocabulary to **support/oppose** node-id
+  evidence, and computing an epistemic state (`supported`/`refuted`/`mixed`/`inconclusive`). Unifies with
+  the D8 `{statement, node_ids}` shape (no forked claim type); read-only, no migration, legacy lessons
+  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--json]`. Tests: 13. **TODO to reach
+  full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence families +
+  proof trails (§20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
 - **Step 5 — CR2a/CR2b retrieval + bounded context packs.** The query planner of §21.20.5 (intent →
   eligibility → capped multi-channel candidates → scope-aware RRF rerank → contradiction bundle →
   progressive disclosure → receipt), then the bounded context packs at Genesis/run-start/proposal/Strategist

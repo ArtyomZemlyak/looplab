@@ -19,6 +19,7 @@ looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
+looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -347,6 +348,27 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` (or the file itself) |
 | `--top N` | `20` | How many most-explored concepts to list |
 | `--json` | off | Emit the full overview (concepts + per-run cards) as JSON |
+
+---
+
+## `claims`
+
+PART IV cross-run Step 4 (§21.20). Projects the distilled `lessons.jsonl` into **evidence-grounded claims**:
+each claim groups a statement's support vs oppose node-id evidence and an epistemic state — `supported`,
+`refuted`, `mixed` (the portfolio disagrees with itself), or `inconclusive`. Identity reuses the shipped
+lesson `normalize_statement`, and the shape unifies with the D8 research-claim `{statement, node_ids}` —
+no forked claim type. Pure read; no LLM/endpoint.
+
+```bash
+looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (or the file itself) |
+| `--top N` | `20` | How many most-evidenced claims to list |
+| `--contested` | off | Show only `mixed` (support **and** oppose) claims |
+| `--json` | off | Emit the full assessments as JSON |
 
 ---
 

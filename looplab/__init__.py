@@ -53,6 +53,7 @@ _LAYOUT = {
     "research_targeting": "search",   # PART IV D2 axis-structured research targeting (offline)
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
+    "claims": "engine",          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
     "assistant": "serve",
     "assistant_commands": "serve",
     "atomicio": "core",

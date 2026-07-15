@@ -523,3 +523,37 @@ def cross_run_concepts_cmd(
         runs = ", ".join(_fmt(r) for r in e["runs"][:6])
         more = "" if len(e["runs"]) <= 6 else f" (+{len(e['runs']) - 6} more)"
         typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}   [{runs}{more}]")
+
+
+@app.command(name="claims")
+def claims_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl), or the "
+                                                "lessons file itself."),
+    top: int = typer.Option(20, help="How many most-evidenced claims to show."),
+    contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
+):
+    """PART IV cross-run Step 4 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
+    each with support vs oppose node-id evidence and an epistemic state (supported/refuted/mixed/
+    inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. Pure read of
+    `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
+    from looplab.engine.claims import claim_assessments
+    from looplab.events.eventstore import read_jsonl_lenient
+    p = Path(memory_dir)
+    path = p if p.is_file() else p / "lessons.jsonl"
+    if not path.exists():
+        typer.echo(f"no lessons at {path}")
+        raise typer.Exit(1)
+    lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+    claims = claim_assessments(lessons)
+    if contested_only:
+        claims = [c for c in claims if c["epistemic"] == "mixed"]
+    if as_json:
+        typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
+        return
+    _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
+    typer.echo(f"Claims ({len(claims)} shown{' — contested only' if contested_only else ''}): "
+               "✓ supported  ✗ refuted  ⚖ mixed  · inconclusive")
+    for c in claims[: max(0, top)]:
+        typer.echo(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
+                   f"{c['statement'][:100]}")
