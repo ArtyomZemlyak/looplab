@@ -86,6 +86,12 @@ class CrossRunTools:
                 "thinly explored (a single run — a gap to consider), and which claims are contradictory. "
                 "Use it to pick an under-explored or unresolved direction.",
                 {}, []),
+            fn_spec("cross_run_search",
+                "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
+                "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
+                "free-text idea, when a specific concept lookup isn't enough.",
+                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."}},
+                ["query"]),
         ]
 
     def _load(self, fname: str) -> list[dict]:
@@ -119,12 +125,12 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.claims import claim_assessments, portfolio_atlas
+        from looplab.engine.concept_registry import load_concept_aliases
         from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
             qt = _toks(str(args.get("idea") or ""))
-            ov = portfolio_concept_overview(self._scoped_capsules())
+            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -141,8 +147,8 @@ class CrossRunTools:
             return "TRIED BEFORE (surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            from looplab.engine.claims import load_claim_decisions
-            claims = claim_assessments(self._role_lessons(), decisions=load_claim_decisions(self.dir))
+            from looplab.engine.claims import claims_for_memory
+            claims = claims_for_memory(self.dir, lessons=self._role_lessons())   # + D8 claims + decisions
             claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
@@ -159,9 +165,9 @@ class CrossRunTools:
                 f"{c['statement']}" for c in claims)
 
         if name == "cross_run_atlas":
-            from looplab.engine.claims import load_claim_decisions
-            atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules(),
-                                    decisions=load_claim_decisions(self.dir))
+            from looplab.engine.claims import atlas_for_memory
+            atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
+                                     capsules=self._scoped_capsules())
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:
@@ -172,6 +178,20 @@ class CrossRunTools:
             if atlas["contradictions"]:
                 lines.append("Contradictory: "
                              + "; ".join(c["statement"][:80] for c in atlas["contradictions"][:4]))
+            return "\n".join(lines)
+
+        if name == "cross_run_search":
+            from looplab.engine.claims import cross_run_retrieve
+            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons())
+            hits = r["results"][:8]
+            if not hits:
+                return "(no cross-run knowledge matched)"
+            lines = []
+            for h in hits:
+                if h["kind"] == "claim":
+                    lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:120]}")
+                else:
+                    lines.append(f"[concept ×{h['n_runs']} run(s)] {h['text']}")
             return "\n".join(lines)
 
         return f"(unknown cross-run tool: {name})"

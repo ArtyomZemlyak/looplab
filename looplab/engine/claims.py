@@ -14,6 +14,7 @@ is neutral (it takes no stance), exactly as on the lesson read/write paths.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from looplab.engine.memory import _NEGATIVE, normalize_statement
@@ -68,13 +69,20 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         raise ValueError("empty statement")
     if not memory_dir:
         raise ValueError("no memory_dir")
-    rec = {"statement": s, "key": normalize_statement(s), "decision": decision,
-           "note": str(note or ""), "by": str(by or "operator"), "at": str(at or "")}
+    # Bound the stored fields so a single operator write can't bloat the shared sidecar (the `key` — the
+    # claim identity — is `normalize_statement`, which already caps internally, so the caps don't shift it).
+    rec = {"statement": s[:2000], "key": normalize_statement(s), "decision": decision,
+           "note": str(note or "")[:4000], "by": str(by or "operator")[:120], "at": str(at or "")}
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        import json as _json
-        f.write(_json.dumps(rec) + "\n")
+    import json as _json
+
+    from looplab.events.eventstore import _interprocess_lock
+    # Same interprocess lock the lesson/capsule sidecar stores use: a concurrent operator write (a second
+    # UI tab, or the CLI racing the POST) must not interleave/tear this append (CODEX).
+    with _interprocess_lock(Path(str(path) + ".lock")):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
     return rec
 
 
@@ -96,8 +104,154 @@ def load_claim_decisions(memory_dir) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# D8 research claims persisted cross-run (§21.20 / CR1b) — so a deep-research memo's evidence-backed
+# claims survive their run and can CONTEST/support lesson verdicts (contested is otherwise unreachable
+# from newest-verdict-wins lessons alone). Written at finalize; read by the claim assessments callers.
+# --------------------------------------------------------------------------- #
+
+def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> int:
+    """Upsert (by run_id) a run's D8 research claims into `research_claims.jsonl`. Each row:
+    {run_id, task_id, statement, node_ids, urls}. Append-with-replace so a re-run doesn't double-count.
+    Returns how many rows were written. Best-effort atomicity via the shared whole-file writer."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient, write_jsonl_atomic
+    if not memory_dir:
+        return 0
+    rid = str(run_id or "")
+    rows = []
+    for c in claims or []:
+        stmt = str((c.get("statement") if isinstance(c, dict) else "") or "").strip()
+        if not stmt:
+            continue
+        rows.append({"run_id": rid, "task_id": str(task_id or ""), "statement": stmt,
+                     "node_ids": list(c.get("node_ids") or []), "urls": list(c.get("urls") or [])})
+    path = Path(memory_dir) / "research_claims.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
+    # so two runs sharing memory_dir don't clobber each other's D8 claims in this whole-file read-modify-write
+    # (write_jsonl_atomic is crash-atomic, NOT concurrency-safe; last-writer-wins would silently drop the
+    # loser's claims and under-count `contested`) (CODEX).
+    with _interprocess_lock(Path(str(path) + ".lock")):
+        existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+        kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
+        write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
+    return len(rows)
+
+
+def load_research_claims(memory_dir) -> list[dict]:
+    """The persisted cross-run D8 research claims (statement + run-qualified node evidence). [] when none."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    if not memory_dir:
+        return []
+    path = Path(memory_dir) / "research_claims.jsonl"
+    return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+
+
+def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[dict]:
+    """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
+    the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
+    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b)."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
+                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy)
+
+
+def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
+    """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
+    claims + operator decisions + concept aliases (CR1a). One call so every atlas surface is consistent."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    if capsules is None:
+        cp = base / "concept_capsules.jsonl" if base else None
+        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    return portfolio_atlas(lessons, capsules, max_items=max_items,
+                           decisions=load_claim_decisions(memory_dir),
+                           research_claims=load_research_claims(memory_dir),
+                           aliases=load_concept_aliases(memory_dir))
+
+
+_CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _stmt_tokens(s: str) -> frozenset:
+    return frozenset(w for w in _CLAIM_WORD.findall((s or "").casefold()) if len(w) > 2)
+
+
+def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[dict]:
+    """CR1b (lean, opt-in): merge claims whose STATEMENTS are genuine PARAPHRASES into one. Identity is a
+    strict token-JACCARD test (>= `threshold`) via union-find — deliberately NOT the hybrid top-k
+    clustering, which blobs a HOMOGENEOUS corpus (every claim shares the task's vocabulary) into one giant
+    cluster (verified: it collapsed 73 distinct rubert claims into 1). Jaccard 0.6 requires most words to
+    match, so distinct techniques stay separate and only near-identical restatements merge. Suggestion-grade
+    -> opt-in; the structured semantic claim key is the full CR1b. Unions evidence/runs/scopes/sources,
+    keeps the most-evidenced statement as the label, carries an operator maturity if any member had one."""
+    n = len(claims)
+    if n <= 1:
+        return claims
+    toks = [_stmt_tokens(c["statement"]) for c in claims]
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        if not toks[i]:
+            continue
+        for j in range(i + 1, n):
+            if not toks[j]:
+                continue
+            inter = len(toks[i] & toks[j])
+            if inter and inter / len(toks[i] | toks[j]) >= threshold:
+                parent[_find(i)] = _find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(_find(i), []).append(i)
+
+    out = []
+    for idxs in groups.values():
+        members = [claims[i] for i in idxs]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        sup = sorted({r for m in members for r in m["support"]})
+        opp = sorted({r for m in members for r in m["oppose"]})
+        rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
+        mat = next((m["maturity"] for m in members if m.get("maturity") != "machine-proposed"),
+                   "machine-proposed")
+        out.append({
+            "statement": rep["statement"], "epistemic": _epistemic(sup, opp), "maturity": mat,
+            "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "runs": sorted({r for m in members for r in m["runs"]}),
+            "scopes": sorted({r for m in members for r in m["scopes"]}),
+            "sources": sorted({s for m in members for s in m.get("sources", [])}),
+            "merged_from": sorted(m["statement"] for m in members),
+        })
+    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
+    return out
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None) -> list[dict]:
+                      decisions: Optional[dict] = None, fuzzy: bool = False) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
     contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
@@ -173,7 +327,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    return out
+    return _fuzzy_merge_claims(out) if fuzzy else out
 
 
 # --------------------------------------------------------------------------- #
@@ -211,7 +365,11 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # (last, since `ordered` is strongest-first) for the strongest available caveat — opposition is never
     # crowded out by a full slate of positives.
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
-        caveats = by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"]
+        # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
+        # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
+        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect (CODEX).
+        caveats = ([c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
+                   + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
         if caveats:
             picked = picked[:-1] + [caveats[0]]
 
@@ -227,7 +385,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     pack = {
         "claims": [_slim(c) for c in picked],
         "n_claims_total": len(claims or []),
-        "n_contested": len(by_state["mixed"]),
+        # count contested across BOTH pools — a ratified claim is pulled out of by_state but is still mixed.
+        "n_contested": len(by_state["mixed"]) + sum(1 for c in ratified if c["epistemic"] == "mixed"),
     }
     if concept_overview:
         pack["coverage"] = {
@@ -238,8 +397,49 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     return pack
 
 
+def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None) -> dict:
+    """CR2a retrieval planner (lean, §21.20.5): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
+    (with their epistemic state / operator maturity) + concepts (with #runs) — over the shipped
+    `HybridRetriever` (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), ranked by relevance to
+    `query`, returning a BOUNDED, RECEIPTED result. Advisory. The fuller CR2a (intent-classified
+    eligibility, capped per-channel candidates, contradiction quotas) builds on this ranked hybrid recall;
+    operator-rejected claims are already excluded (they never enter the corpus)."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if capsules is None:
+        cp = base / "concept_capsules.jsonl" if base else None
+        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    claims = [c for c in claims_for_memory(memory_dir, lessons=lessons)
+              if c.get("maturity") != "operator-rejected"]
+    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir))
+    docs: list[tuple[str, str, dict]] = []
+    for c in claims:
+        docs.append(("claim", c["statement"], {"epistemic": c["epistemic"], "n_support": c["n_support"],
+                                               "n_oppose": c["n_oppose"], "maturity": c.get("maturity")}))
+    for e in overview["concepts"]:
+        docs.append(("concept", e["concept"],
+                     {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
+    receipt = {"query": str(query or ""), "k": int(k), "n_corpus": len(docs),
+               "channels": ["lexical", "bm25", "vector"]}
+    if not docs or not str(query or "").strip():
+        return {"results": [], "receipt": {**receipt, "n_hits": 0}}
+    from looplab.search.hybrid_merge import HybridRetriever
+    hits = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=max(1, int(k)))
+    results = [{"kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4), **docs[i][2]}
+               for i, s in hits]
+    return {"results": results, "receipt": {**receipt, "n_hits": len(results)}}
+
+
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
-                    decisions: Optional[dict] = None) -> dict:
+                    decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
+                    aliases: Optional[dict] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -250,9 +450,11 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     a false "never tried" (which needs a reference universe)."""
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
-    overview = portfolio_concept_overview(capsules)
-    claims = claim_assessments(lessons, decisions=decisions)
-    contested = [c for c in claims if c["epistemic"] == "mixed"]
+    overview = portfolio_concept_overview(capsules, aliases=aliases)
+    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
+    # A contradiction the operator REJECTED is no longer a live contradiction — honor the verdict here too,
+    # consistent with build_context_pack / cross_run_claims which also drop operator-rejected (CODEX).
+    contested = [c for c in claims if c["epistemic"] == "mixed" and c.get("maturity") != "operator-rejected"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
     # memory (no opt-in capsules) is not reported as zero runs (CODEX). The authoritative scoped corpus

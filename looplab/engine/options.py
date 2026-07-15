@@ -113,6 +113,8 @@ class EngineOptions:
     holdout_top_k: int = 3
     # R1-c: calibrated §12-verifier metric-tie-break in best-selection (opt-in, lazy; needs a client).
     select_verifier: bool = False
+    # R1-d: widen that tie-break to a statistical (CI) tie grounded in confirm noise (needs select_verifier).
+    verifier_ci_tie: bool = False
     select_verifier_samples: int = 3
     # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
     # rebuild policies with the same run-wide settings.

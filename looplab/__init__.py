@@ -55,6 +55,7 @@ _LAYOUT = {
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
     "claims": "engine",          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
+    "concept_registry": "engine",# PART IV cross-run CR1a: concept UID + alias resolver (merge/purge)
     "cross_run_index": "engine", # PART IV cross-run Step 1/CR0: run passport + facts, deterministic rebuild
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",

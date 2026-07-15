@@ -100,13 +100,17 @@ def hard_flagged_ids(st: RunState) -> set:
 class _FoldCtx:
     """Cross-arm state for selection, accounting de-dup, and finish/report adjacency."""
     __slots__ = (
-        "best_confirmed", "llm_usage_seen", "llm_usage_ids",
+        "best_confirmed", "best_confirmed_significant", "llm_usage_seen", "llm_usage_ids",
         "charged_terminal_generations", "charged_confirm_seeds", "charged_ablation_ids",
         "pending_finish_report", "event_index",
     )
 
     def __init__(self):
         self.best_confirmed: int | None = None
+        # R1-d: whether the confirm certificate found a SIGNIFICANT winner. Only consulted when a
+        # best_confirmed is set; defaults True so legacy events / the ci_tie-off path keep the unconditional
+        # override (byte-identical). A non-significant confirm under `verifier_ci_tie` must NOT erase best_ci.
+        self.best_confirmed_significant: bool = True
         # Legacy summaries are last-write-wins only until the durable delta ledger begins.
         self.llm_usage_seen = False
         # New ledgers retry an ambiguously acknowledged append with the same identity. Replay is
@@ -156,6 +160,7 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # `_select_verifier` gate from this recorded value on resume (orchestrator `_reentry_repin`), so the
     # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
     st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
+    st.verifier_ci_tie = bool(d.get("verifier_ci_tie", False))   # R1-d: absent on old logs -> exact-tie
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Operator edited the run's trust gate after launch (server config edit). Last write
@@ -1437,7 +1442,12 @@ def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if not _generation_map_matches(st, d):
         return
     nid = _coerce_node_id(d)
-    ctx.best_confirmed = nid if "node_id" in d else ctx.best_confirmed
+    if "node_id" in d:
+        ctx.best_confirmed = nid
+        # R1-d: record whether this certificate is a SIGNIFICANT winner (default True: legacy events with no
+        # `significant` field keep the unconditional override). A non-significant certificate is a STATISTICAL
+        # tie the verifier CI-tie may resolve instead — see _select_best.
+        ctx.best_confirmed_significant = bool(d.get("significant", True))
     st.confirmed_done = True   # the confirmation phase ran to completion
 
 def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1912,7 +1922,7 @@ def fold(events: Iterable[Event]) -> RunState:
             h(st, e, e.data, ctx)
 
     flagged = _apply_trust_gate(st)
-    _select_best(st, flagged, ctx.best_confirmed)
+    _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
     _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
     return st
@@ -1938,7 +1948,8 @@ def _apply_trust_gate(st: RunState) -> set:
     return flagged
 
 
-def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None:
+def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
+                 best_confirmed_significant: bool = True) -> None:
     """Best-selection post-pass: derive `best_node_id` (mean-based pick -> variance-gated confirm
     override -> holdout-gated promotion) plus the audit-only generalization gap. Pure and
     deterministic over the folded state — the tail of `fold`, extracted verbatim."""
@@ -1951,7 +1962,8 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # R1/SearchFitness: the eligibility predicate, the ranked-scalar keys and the direction chooser are
     # OWNED by core.fitness.SearchFitness — one spelling shared with rank_by_metric / holdout_topk, so a
     # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
-    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak)
+    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak,
+                        ci_tie=st.verifier_ci_tie)
     evaluated = [n for n in st.evaluated_nodes() if fit.eligible(n, flagged, st.aborted_nodes)]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
@@ -1961,17 +1973,24 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
         # on — it resolves metric-EQUAL contests only, never overriding a strictly-better robust_metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
         pool = confirmed if confirmed else evaluated
-        st.best_node_id = fit.best(pool, key=fit.promotion_key).id
+        # R1-d: `best_ci` widens the verifier tie-break to a STATISTICAL tie when `verifier_ci_tie` is on
+        # (grounded in confirmed_std/seeds); it is IDENTICAL to the exact-tie `best(promotion_key)` when the
+        # flag is off (or nodes lack confirm-noise data). §21.7: never picks over a significantly-better mean.
+        st.best_node_id = fit.best_ci(pool).id
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
     # The confirm certificate is the confirm phase's OWN authoritative winner (robust_selection over the
-    # multi-seed means + a significance test), so it overrides the mean pick — including its verifier
-    # tie-break. Scope boundary (by design): among confirmed nodes that tie on confirmed_mean the winner
-    # is the confirm phase's choice, not the verifier's; the verifier tie-break applies to the mean pick
-    # and the holdout pick (both rankings HERE), not to which node the confirm phase certified.
+    # multi-seed means + a significance test), so it overrides the mean pick. R1-d COMPOSITION (CODEX #7):
+    # the certificate overrides only when it found a SIGNIFICANT winner — OR when verifier_ci_tie is off
+    # (then it overrides unconditionally, byte-identical to before). When the confirm found NO significant
+    # winner (a statistical tie) AND ci_tie is on, the `best_ci` soundness pick above STANDS, because that
+    # tie is EXACTLY what the CI-tie exists to resolve — an unconditional override would erase it and make
+    # R1-d a no-op. Scope boundary (unchanged): among nodes the confirm DID significantly separate, the
+    # winner is the confirm phase's, not the verifier's.
     if (best_confirmed is not None and best_confirmed in st.nodes
+            and (best_confirmed_significant or not st.verifier_ci_tie)
             and st.nodes[best_confirmed].status is NodeStatus.evaluated
             and not st.nodes[best_confirmed].tombstoned
             and st.nodes[best_confirmed].robust_metric is not None
@@ -1990,7 +2009,13 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
         if hpool:
             # holdout_key carries the SAME verifier tie-break slot (when select_verifier is on): a tie on
             # the unseen-signal holdout metric is broken by soundness too, so the stronger holdout signal
-            # decides first and the verifier only resolves a holdout tie (never overrides it).
+            # decides first and the verifier only resolves a holdout tie (never overrides it). R1-d SCOPE:
+            # the holdout pick uses the EXACT-tie holdout_key, NOT the CI widening — the holdout metric is a
+            # single unseen-partition score with no multi-seed std, so there is no confirm-noise CI to widen
+            # with, and the unseen signal is deliberately stronger than a search-metric soundness tie-break.
+            # So `verifier_ci_tie` refines only the confirmed-MEAN pick (above); when holdout_select is on
+            # (default) the holdout exact-tie pick is the final word — R1-d's CI widening is effective on the
+            # champion only when holdout_select is OFF.
             st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch

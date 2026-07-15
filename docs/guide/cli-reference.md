@@ -19,7 +19,10 @@ looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
-looplab cross-run-concepts Valid-capsule concept overview (PART IV cross-run Step 3)
+looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
+looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
+looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
+looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
@@ -374,16 +377,82 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 
 ---
 
+## `concept-merge`
+
+PART IV CR1a. Appends an exact-slug alias (`FROM_CONCEPT → TO_CONCEPT`) to
+`concept_aliases.jsonl`; omitting the target writes a purge/tombstone overlay. Raw per-run tags are not
+rewritten. Alias writes append under the shared interprocess lock; selected Atlas, digest and agent-tool reads
+load the latest overlay and resolve its chain without claiming a read lock. The `cross-run-concepts` CLI
+intentionally remains a raw-capsule view.
+
+This is a **lean alias overlay**, not full taxonomy governance: the content-addressed `concept_uid` helper is
+not carried in overview/Atlas responses and changes with spelling; source/target existence, self/cycle/case,
+scope, release revision and expected version are not validated; split/backfill, impact preview and history API
+are absent. Do not describe a re-decision as a versioned or audited taxonomy release.
+
+```bash
+looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
+```
+
+| Argument | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir where `concept_aliases.jsonl` is appended |
+| `FROM_CONCEPT` | *(required)* | Exact stored slug to alias or tombstone |
+| `TO_CONCEPT` | `""` | Exact canonical display slug; omitted/empty means purge from alias-aware reads |
+
+---
+
+## `cross-run-digest`
+
+PART IV Step 7. Builds a deterministic **one-level axis-prefix rollup**: each concept is grouped by the text
+before its first `/`, with concept/run counts. Despite the historical “recursive digest” name, the current
+payload is not a hierarchy/tree and has no scope, snapshot, completeness, proof or eligible-outcome contract.
+It is inspector data only and is not injected into prompts.
+
+```bash
+looplab cross-run-digest MEMORY_DIR [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` and optional aliases |
+| `--json` | off | Emit `{n_axes, n_concepts, axes[]}` instead of the compact text rollup |
+
+---
+
+## `cross-run-search`
+
+PART IV CR2a. Runs a bounded hybrid recall over statement-grouped claims plus alias-aware concept labels and
+excludes operator-rejected claims. The JSON result includes result scores and a **minimal** receipt
+(`query`, requested `k`, corpus/hit counts and advertised channels). It does not explain each hit's channel
+contribution, carry evidence refs/source/scope/snapshot/index-health, enforce a ComparisonContract, or persist a
+derivation receipt. The vector channel uses the default deterministic hash embedding and the corpus is rebuilt
+per call; this is an experimental portfolio recall, not the “Why recalled?” proof contract in doc 18. There is
+no matching HTTP query route yet.
+
+```bash
+looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir; CLI reads are intentionally portfolio-wide |
+| `QUERY` | *(required)* | Free-text idea, technique or question |
+| `--k N` | `8` | Requested result count; no product-level maximum/paging contract exists yet |
+| `--json` | off | Emit results plus the minimal receipt |
+
+---
+
 ## `claims`
 
 PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` into a **statement-grouped lean claim view** with
 provisional support/oppose references and `supported`/`refuted`/`mixed`/`inconclusive` labels. This is not yet a
-verified independent-evidence assessment: negative-action polarity can invert a factual statement, D8 citation
-is not verifier approval, and refs are attempts rather than evidence families. Identity is normalized statement
-text; no forked claim type. Pure read; no LLM/endpoint.
+verified independent-evidence assessment: negative-action polarity can invert a factual statement, persisted D8
+claims lose their verifier verdict/proper scope provenance, and refs are attempts rather than evidence families.
+Identity is normalized statement text. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--json]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--json]
 ```
 
 | Option | Default | Description |
@@ -392,11 +461,16 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--json]
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the claim-count-bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a lean portfolio line |
+| `--fuzzy` | off | Suggestion-grade token-Jaccard paraphrase merge; transitive and scope-agnostic, so inspect `merged_from` and do not use it as claim identity |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
 
-Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown,
-a rejected claim is dropped from this agent context pack, and a ratified one is surfaced first. The lean Atlas
-contradictions/Strategist path does not yet exclude rejected claims; see [doc 17 §22.7](../17-project-review-and-directions-2026-07-11.md) before enabling advisory.
+Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown.
+A rejected claim remains human-visible in the unfiltered claims CLI/API and can still contribute to Atlas
+top-level `n_claims`/`n_claims_total`; it is excluded from the **active** context pack, Atlas contradictions,
+agent-tool projection and hybrid retrieval. A ratified claim is surfaced first in the context pack. This closes
+the earlier steering leak without pretending rejection deletes evidence or history; scope, D8-verification and
+stable-identity gates in [doc 17 §22.7](../17-project-review-and-directions-2026-07-11.md) still block production
+advisory.
 
 ---
 
@@ -404,9 +478,10 @@ contradictions/Strategist path does not yet exclude rejected claims; see [doc 17
 
 PART V §22.4 — the **lean operator decision overlay**: ratify / reject / pin a cross-run claim. Agents have no
 matching mutation tool. Records append to `claim_decisions.jsonl`, keyed by normalized statement text, and the
-latest matching record wins. This is not full governance: it has no clear/undo verb, stable claim UID, scope or
-evidence revision, CAS, authenticated actor/history endpoint, or durable concurrent append guarantee. A later
-decision can replace the badge, but that must not be described as audited/reversible undo.
+latest matching record wins. The append now uses an interprocess lock, but this is not full governance: it has
+no clear/undo verb, stable claim UID, scope/evidence revision, fsync/idempotency/CAS, server-derived actor/time
+or history endpoint. A later decision can replace the badge, but that must not be described as audited or
+reversible undo.
 
 ```bash
 looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."]
@@ -417,7 +492,7 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `claim_decisions.jsonl` is written) |
 | `STATEMENT` | *(required)* | The claim statement (matched by normalized text) |
 | `--ratify` | — | Mark `operator-ratified`; surfaced first in the current context-pack projection |
-| `--reject` | — | Mark `operator-rejected`; dropped from context pack and agentic `cross_run_claims`, but not yet every Atlas/Strategist consumer |
+| `--reject` | — | Mark `operator-rejected`; remains human-visible and may remain in top-level claim totals, but is excluded from active context, Atlas contradictions, agent-tool and hybrid-retrieval projections |
 | `--pin` | — | Mark `operator-pinned`; no additional ordering/retention behavior is currently defined |
 | `--note` | `""` | Optional rationale recorded with the decision |
 
@@ -425,12 +500,17 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 
 ## `atlas`
 
-PART IV cross-run Step 6 (§21.20). A **lean Research Atlas summary** — one capped payload that composes the concept
+PART IV cross-run Step 6 (§21.20). A **capped Experimental portfolio summary** exposed by the historical
+`atlas` command — one payload that composes the concept
 overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into *what's been
 explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
-false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). Pure read
-of `lessons.jsonl` + `concept_capsules.jsonl`. It has no saved-scope, comparison, snapshot/health, pagination,
-stable identity or CoverageFrame contract; it is not the full backend in [doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
+false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). It reads the
+available `lessons.jsonl`, `concept_capsules.jsonl`, persisted `research_claims.jsonl`,
+`claim_decisions.jsonl` and `concept_aliases.jsonl` sidecars; active contradictions exclude operator-rejected
+claims, while top-level raw claim totals may still include them.
+Aggregate concept buckets apply exact-slug aliases, but responses still carry display slugs and raw run cards
+can disagree after a merge. It has no saved-scope, comparison, snapshot/health, pagination, stable versioned
+identity or CoverageFrame contract; it is not the full backend in [doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
 
 ```bash
 looplab atlas MEMORY_DIR [--max-items 8] [--json]
@@ -438,7 +518,7 @@ looplab atlas MEMORY_DIR [--max-items 8] [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `concept_capsules.jsonl` |
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding lessons/capsules and optional research-claim, decision and concept-alias sidecars |
 | `--max-items N` | `8` | Cap per section (explored / contested / thin) |
 | `--json` | off | Emit the capped lean Atlas-summary payload as JSON |
 

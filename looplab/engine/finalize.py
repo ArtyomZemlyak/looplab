@@ -505,6 +505,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 engine._store_case(final)
                 if getattr(engine, "_cross_run_concepts", False):    # §21.20 Step 2: cross-run concept capsule
                     engine._store_concept_capsule(final)             # idempotent upsert, sibling of the case
+                    engine._store_research_claims(final)             # + D8 research claims persisted cross-run
                 _mark_finalize_step(engine, scope, "case")
             except Exception:  # noqa: BLE001 - case store is an idempotent upsert
                 pass

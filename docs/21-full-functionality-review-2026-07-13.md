@@ -1,4 +1,4 @@
-# Full functionality review — branch `claude/full-functionality-review-c0z0e3` (2026-07-13)
+# Full functionality review — historical origin `claude/full-functionality-review-c0z0e3`, current addendum on `codex/ui-ux-overhaul-20260712` (2026-07-13–15)
 
 Scope: everything this branch adds on top of `origin/master` (merge-base `edf06f7`): **10 commits,
 144 files, ~32.7k insertions**. This is a large UI/UX overhaul plus substantial backend work — a
@@ -6,6 +6,10 @@ durable LLM cost-accounting ledger, crash-idempotent finalization/resume, read-o
 capabilities, a generation-fenced run-command service, log pagination, and a big React control
 plane. The review covers correctness, validation, security, replay/idempotency invariants, corner
 cases, and code/decision quality.
+
+Rounds 1–17 retain the historical branch chronology above. Rounds 18A–20 review and reconcile the current
+`codex/ui-ux-overhaul-20260712` feature branch through incoming tip `0e45bd3`; Round 20 is the current maturity
+verdict where earlier round notes conflict.
 
 ## Method
 
@@ -975,16 +979,41 @@ What landed, reviewed against the invariants:
   never touch selection, best-effort.
 
 Verification: 98 targeted cross-run/server/strategist tests + the full suite green (exit 0), `mkdocs --strict`
-green. An adversarial mega-review (6-dimension finders + verifiers, focused on the governance write-path
-security + serve auth surface) ran alongside; its verified findings are applied in the follow-up.
+green. An adversarial mega-review (6-dimension finders, focused on the governance write-path security + serve
+auth surface) ran alongside; its orchestrator stalled before the verifier stage, so the findings were
+self-verified against the code (all self-evident code facts) before applying. **Confirmed + fixed:**
 
-**UI-plans docs updated** (doc 18 PART V, refresh #4): the Atlas UI is now **no longer blocked on any backend**
-— read-models + HTTP endpoints + operator write all ship, only the React surface remains (§24.3/§25(4)); §28.3
+- **[medium] `record_claim_decision` was not interprocess-locked** — the sibling lesson/capsule sidecar stores
+  append under `_interprocess_lock`, but the decision write used a bare `open(...,"a")`, so two concurrent
+  operator writes (a UI tab + the CLI) could interleave/tear. Wrapped the append in the same lock, and bounded
+  the stored `statement`/`note`/`by` fields so one write can't bloat the shared sidecar.
+- **[medium] `build_context_pack` reserved caveat slot could be starved by the ratified reordering** — the
+  fallback caveat pool only looked in the non-ratified `by_state`, so when operator-ratified *supported* claims
+  filled `max_claims` and the only caveat was a ratified *mixed* claim pushed past the cut, no caveat was
+  surfaced (regressing the §20.5 "opposition never crowded out" rule). Fixed by including ratified caveats in
+  the fallback pool; pinned by `test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat`.
+- **[low] `n_contested` under-counted** ratified mixed claims (they're pulled out of `by_state`); now counted
+  across both pools. **[low] `portfolio_atlas` contradictions surfaced operator-rejected** mixed claims that
+  the context pack + `cross_run_claims` already drop; now consistent. Both pinned by
+  `test_ratified_mixed_counts_as_contested_and_rejected_dropped_from_atlas`.
+
+**Not changed (recorded):** the serve POST auth (verified NOT a defect — default-denied like every write); the
+task-scoping of `cross_run_atlas`/`cross_run_prior_attempts` to similar tasks (the deliberate intent of the
+`c41a5f6` leak fix — a bound in-run agent sees same-task/overlapping-goal scope, the unbound CLI/human stays
+portfolio-wide); the goal-token scope heuristic looseness (the acknowledged CR2a index TODO); the
+`portfolio_atlas` coverage n_runs (master's `cfa1f86` dropped my Round-16 pack_overview fix, but the merge
+auto-restored it — a finder flagged it as "already re-fixed by HEAD"). The two dimensions the stalled
+orchestrator didn't reach (Genesis/Strategist wiring, test coverage) were checked manually: both consumers are
+off-by-default (`cross_run_read_tools` / `cross_run_advisory`), read-only, advisory, and append no domain event.
+
+**Historical UI-plan update (superseded by Rounds 18A/20):** refresh #4 had concluded that the Atlas UI was
+**no longer blocked on any backend** and only the React surface remained; the later global review disproved that
+completion boundary. At this checkpoint §28.3
 gains the four `maturity` badge states; §28.5 is **corrected** from the earlier "governance via `CONTROL_EVENTS`"
 assumption to the shipped mechanism (a token-guarded serve `POST` → append-only sidecar `claim_decisions.jsonl`,
 deliberately outside the replay/fold path).
 
-## Round 18 — pull 26 commits, global adversarial/UI re-review, and status correction (2026-07-15)
+## Round 18A — pull 26 commits, global adversarial/UI re-review, and status correction (2026-07-15)
 
 Fast-forwarded `codex/ui-ux-overhaul-20260712` from `85959f7` to `08bf868` (26 commits, 46 files, roughly
 3.5k changed lines). The branch matched `origin/codex/ui-ux-overhaul-20260712` after the pull; there were no
@@ -1006,7 +1035,7 @@ Research Atlas specified in docs 17/18.
 | paid OpenRouter `minimax/minimax-m3` smoke | PASS: text response `ready`; structured parse returned `operator=user-proposed`, params `x=1.0`, `y=2.0` |
 | `git diff --check 85959f7..08bf868` | PASS |
 | browser walk-through against local API (57 runs) | completed: List, Map, run Report, 131-node Search/timeline and Settings |
-| focused adversarial diagnostics | confirmed one-word cross-scope match, rejected-claim Atlas leak, 160-character claim-key collision and index tie order dependence |
+| focused adversarial diagnostics | at `08bf868`, confirmed one-word cross-scope match, rejected-claim Atlas leak, 160-character claim-key collision and index tie order dependence; the rejected leak is later closed by `0e45bd3` |
 
 The full and targeted suites being green means the incoming slice is regression-compatible with its current
 tests. It does not invalidate the confirmed edge/contract failures; those scenarios were absent from the suite.
@@ -1032,8 +1061,9 @@ not “audited/reversible governance.”
 1. **Scope leak:** `CrossRunTools` admits a foreign row after one shared goal word; proactive Researcher and
    Strategist read all of `memory_dir`; Repo Developer never binds its provider. Require a fail-closed immutable
    `CrossRunScope` with namespace/project, run exclusion, hard task/metric/direction/dataset/eval compatibility.
-2. **Rejected-claim leak:** context packs drop operator-rejected claims, but Atlas contradictions, the tool and
-   Strategist still surface them. Split human history from the agent-safe active projection.
+2. **Rejected-claim leak at `08bf868` (closed by `0e45bd3`):** context packs dropped operator-rejected claims,
+   but Atlas contradictions, the tool and Strategist still surfaced them. The incoming regression fix now
+   excludes them from all active projections; Round 20 retains human-history separation as an API gap.
 3. **Durable prompt injection/secrets:** model-authored statements/concepts/run IDs pass into prompts and traces
    without redaction/trust envelope, including a Developer loop with write/edit tools. Cap/redact before trace,
    model and UI; quote as data; retain provenance; test injections, credentials and ANSI/OSC controls.
@@ -1049,8 +1079,8 @@ not “audited/reversible governance.”
 
 ### P2 findings that affect product truth/scale
 
-- decision writes are unlocked/non-fsynced last-write-wins appends with no server actor/time, sequence,
-  idempotency, revision, reset or history API;
+- at `08bf868`, decision writes were unlocked/non-fsynced last-write-wins appends. `0e45bd3` adds the shared
+  interprocess lock; fsync, server actor/time, sequence, idempotency, revision, reset and history API remain;
 - routes and tools scan whole stores, have no cursor/resource contract, and decision text lacks length limits;
 - malformed rows silently disappear, so unknown/partial/corrupt can look like an honest empty 200;
 - context packs are claim-count/field-capped, not token-bounded;
@@ -1079,3 +1109,198 @@ canonical snapshot-fenced routes, per-run Research Space, Direction×Concept cro
 bounded focused graph, responsive/accessibility/state grammar, governance conflict UX and dependency gates
 G0–G6. Doc 17 §21.20.13 and §22 now reflect actual lean behavior and safety/promotion gates. User-facing config
 and CLI reference wording is corrected in the same round.
+## Round 18B — integrate R1-d verifier CI-tie + CR1a concept UID/alias resolver + D8 persistence (2026-07-15)
+
+Master shipped 9 commits extending the lean cross-run engine slice: **R1-d verifier CI-tie** (§21.19 — a
+statistical, noise-grounded soundness tie-break), a batch of **CODEX audit fixes**, **D8 research claims
+persisted cross-run** (makes `contested` reachable from real machine claims), and **CR1a — the `concept_uid` +
+alias resolver** (`engine/concept_registry.py`: operator merge/purge, non-destructive). Five conflicts, each
+resolved to preserve BOTH sides:
+
+- **replay.py** — UNION of the branch's LLM cost-ledger `_FoldCtx` fields (`llm_usage_seen`/`llm_usage_ids`) and
+  master's R1-d `best_confirmed_significant`. The R1-d fold is additive (`verifier_ci_tie` defaults False on old
+  logs → byte-identical; the golden gained only `verifier_ci_tie:false`), and the confirm-override is gated
+  `(best_confirmed_significant or not verifier_ci_tie)` so a non-significant certificate can't erase best_ci.
+- **strategy.py `_metric_tie_groups`** — the trickiest: master REWROTE it from union-find to SEPARATE groups
+  (CODEX #4: a small exact tie is never blocked behind a large one) AND added the R1-d `ci_tie_set(pool)` group.
+  I reconciled it to keep my earlier **R1-c** fix — the holdout exact-ties group over the FULL eligible holdout
+  pool (`holdout_pool`), not the confirmed subset — while adopting master's separate-groups structure and R1-d
+  group. Verified my R1-c regression test (`test_metric_tie_groups_surfaces_unconfirmed_holdout_tie_past_the_confirmed_pool`)
+  still passes and genuinely exercises the property; no leftover `_find`/union-find reference.
+- **finalize.py** — master added `_store_research_claims` next to the old inline `_store_case`/capsule; the branch
+  had the scoped-marker architecture. Grafted `engine._store_research_claims(final)` into the branch's scoped
+  `case` step (next to `_store_concept_capsule`, gated on `_cross_run_concepts`), same pattern as Round 13.
+- **claims.py `portfolio_atlas`** — combined master's `aliases=` (concept UID resolver) + `research_claims=` (D8)
+  with my Round-17 operator-rejected filter on `contested`.
+- **configuration.md** — kept the branch's enhanced `select_verifier` row + added master's new `verifier_ci_tie` row.
+
+Verification: 170 targeted tests (select_verifier/fitness/concept_registry/claims/replay/options) + the full
+suite green (exit 0), `mkdocs --strict` green. `concept_registry.resolve_slug` is cycle-safe (a `seen` set),
+non-destructive (append-only aliases, raw per-run tags kept), and pure — safe inside the read-models. Focused
+adversarial reviews of the three highest-risk new subsystems (concept registry, D8 persistence + my finalize
+graft, the strategy reconciliation) ran alongside; verified findings applied in the follow-up.
+
+**Historical UI-plan conclusion (superseded by Round 20):** refresh #5 treated the `concept_uid` helper/alias
+resolver as the last engine gap and called a faithful identity view buildable. The global re-review later found
+that production payloads do not carry the UID, rename changes it, aliases are not release/snapshot-fenced and
+full scope/comparison/evidence contracts remain open.
+
+### Round 18B follow-up — apply the focused-review findings (2026-07-15)
+
+The three focused adversarial reviews (concept registry, D8 persistence + my finalize graft, the strategy
+reconciliation) returned: the **strategy `_metric_tie_groups` reconciliation is CORRECT** (verified: robust ties
+over the mean-pick pool, holdout ties over the FULL eligible holdout pool preserving R1-c, R1-d `ci_tie_set`
+sharing one predicate with `best_ci`, no union-find leftover — and my regression test genuinely discriminates
+the property). The **D8 finalize graft is sound** (idempotent upsert-by-run_id, marker-set-after-all-writes so a
+crash re-entry retries without double-write, gated + best-effort, write/read shapes match). `concept_registry`
+is **sound on all four required properties** (non-destructive append-only aliases, cycle-safe `resolve_slug` via
+a `seen` set, read-only in the agent path, correct alias→union integration). Applied fixes:
+
+- **[medium] `claims.py::record_research_claims`** did an unlocked whole-file read-modify-write — two runs
+  sharing `memory_dir` would clobber each other's D8 claims (last-writer-wins, silently under-counting
+  `contested`). Wrapped in the same `_interprocess_lock` (re-reading inside it) that the case/capsule/decision
+  sidecars use — the same class of bug fixed for `record_claim_decision` last round.
+- **[low] `concept_registry.py::record_concept_alias`** likewise appended without the lock; wrapped it too.
+- **Test-coverage gaps** (from the prior governance review, for code now on the branch): added
+  `test_agent_tool_honors_operator_rejected_claim` (the agent tool hides an operator-rejected claim — the §22.4
+  guarantee, previously proven only at the projection layer), `test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas`
+  (the leak fix's capsule surface — a bound run must not see a foreign task's prior art), and
+  `test_empty_statement_decision_is_400` (the other POST claim-decide validation branch).
+
+Not changed (recorded): the concept-atlas cosmetic double-listing of a run whose capsule carries two
+now-aliased slugs (n_runs stays correct, display-only); the `cross-run-concepts` CLI not passing `aliases=`
+(a deliberate raw single-dir view); `concept_uid` casefold vs `resolve_slug` strip (concept_uid unused in the
+merge path). Full suite + mkdocs --strict green.
+
+## Round 19 — integrate CR2a retrieval planner + CR1b fuzzy claim merge + Step-7 digest (2026-07-15)
+
+Master shipped 3 commits: **CR2a** (`41ef1e6` — a hybrid retrieval planner `cross_run_retrieve` over cross-run
+knowledge, lexical+BM25+vector reusing the shipped `hybrid_merge`/`vectorstore`, bounded + **receipted**,
+exposed as the `cross_run_search` agent tool + `cross-run-search` CLI), **CR1b + Step 7** (`2d00151` — an
+**opt-in** fuzzy claim merge `_fuzzy_merge_claims` + a recursive concept digest), and a **CR1b live-test fix**
+(`26f408d` — the fuzzy merge over-collapsed a homogeneous corpus, blobbing 73 distinct rubert claims into 1;
+fixed by a strict token-Jaccard ≥ 0.6 identity so only genuine paraphrases merge).
+
+Integrated by merge — **no conflicts**: master's additions are new read-model functions (`cross_run_retrieve`,
+`_fuzzy_merge_claims`, `_stmt_tokens`) + a `fuzzy=` param + the `cross_run_search` tool, all disjoint from my
+Round-18 lock fixes (`record_research_claims`/`record_concept_alias`) and my governance filters, so git combined
+them cleanly and both sides survived (verified: 4 lock refs in claims.py, 2 in concept_registry.py; my three
+governance coverage tests intact; master's CR2a/CR1b functions + tests present).
+
+Reviewed the new code against the invariants: `_fuzzy_merge_claims` is **pure/deterministic** (token-Jaccard
+union-find, no I/O/LLM) and **opt-in** (`fuzzy` defaults False, so `claim_assessments` is byte-identical by
+default); `cross_run_retrieve` reuses the shipped retriever (no new fuser), is advisory + receipted, appends no
+domain event; `cross_run_search` is a read-only agent tool (the provider still exposes no mutation). The CR1b
+over-collapse was already fixed upstream (`26f408d`). Verification: 88 targeted cross-run tests (incl. the new
+`test_cross_run_retrieval.py` + `test_portfolio_digest.py`) + the full suite green (exit 0), `mkdocs --strict`
+green.
+
+**Historical UI-plan conclusion (superseded by Round 20):** refresh #6 treated the hybrid query as the
+“Why recalled?” backend. The final review narrows this to experimental recall with a minimal query/count
+receipt; per-hit reason/source, scope/snapshot/health and persisted derivation attribution remain deferred.
+
+## Round 20 — reconcile through `0e45bd3`, repeat the global review, and rebaseline the Part-IV UI concept (2026-07-15)
+
+This round supersedes the maturity conclusions in Rounds 17–19 while retaining their implementation chronology.
+The branch first fast-forwarded `85959f7 → 08bf868`; the reviewed doc checkpoint was committed as `643d6db`;
+then origin advanced another 17 commits (`08bf868..0e45bd3`, 36 files). The final merge conflicted only in
+docs 18/21 and the CLI/config guides. Each conflict was resolved as a semantic union: R1-d, CR1a, D8, CR1b,
+CR2a and Step 7 all survive, but the repeated “last backend gap closed / only React remains” conclusion does
+not. The incoming 17 commits contain no `ui/` file, so the browser-observed visual baseline did not change.
+
+### What the incoming delta genuinely improves
+
+- operator-rejected claims are now consistently absent from active context packs, Atlas contradictions, agent
+  tools and hybrid retrieval; the earlier steering leak is closed and regression-tested;
+- decision/alias appends and the D8 whole-file rewrite use the shared interprocess lock, closing the immediate
+  interleaving/lost-update class;
+- exact-slug alias/purge resolution is used by selected Atlas/tool/digest reads without rewriting raw history;
+- D8 claim rows can persist (under the `cross_run_concepts` finalize gate); optional strict token-Jaccard fuzzy
+  grouping, a hybrid search CLI/tool and a one-level axis-prefix digest add useful diagnostic seams;
+- R1-d's confidence-interval verifier tie mode is additive/off by default and preserves the earlier full-pool
+  R1-c reconciliation.
+
+### Global review: open P1 findings
+
+1. **Scope remains fail-open and has two new bypasses.** One shared generic goal word admits a foreign row;
+   Researcher/Strategist automatic reads remain portfolio-wide; Repo Developer is unbound. In addition,
+   bound `cross_run_claims` scopes only lessons before `claims_for_memory` reloads every D8 claim, and bound
+   `cross_run_search` passes scoped lessons but lets `cross_run_retrieve` reload every capsule. Reproductions
+   surfaced a foreign D8 statement and foreign concept to a bound tool.
+2. **D8 evidence truth is lost.** Finalization extracts claim text/node IDs/URLs but discards the memo's
+   verification verdict. `claim_assessments` turns every numeric D8 node ref into support and does not add the
+   D8 row's run/task to `runs/scopes`. A verifier-unsupported foreign claim can therefore look supported.
+3. **Concept identity is not production-ready.** `concept_uid(slug)` is never emitted/consumed by production
+   read models and changes when the label changes. Alias keys are case-sensitive; self/cycles/nonexistent
+   targets are accepted; a cycle resolves input-dependently; canonical aggregate buckets can disagree with raw
+   run-card counts and contain duplicate same-run outcomes after a merge. Live novelty/coverage remains raw.
+4. **Claim identity/governance remains global and colliding.** The key is normalized statement text capped at
+   160 characters; arbitrary/nonexistent/future claims can be decided with no scope, evidence revision,
+   existence check or CAS/409.
+5. **Negative facts are still inverted.** A confirmed factual negative such as “raising LR regressed
+   validation” is mapped to opposition/refuted because action utility and proposition truth share one field.
+6. **Persisted content is still an injection/secret channel.** Raw D8 statements, concept labels, URLs and
+   run IDs flow through search/context/tool text and traces without a trust envelope or control/secret
+   redaction, including beside Developer write/edit tools.
+7. **Capsule outcomes and index health still overstate truth.** Capsules may include infeasible, aborted,
+   tombstoned or trust-flagged metric nodes without comparison/split receipts; corrupt valid-prefix logs,
+   invalid snapshots and collapsed generations remain unmarked in the lean index.
+
+### P2/product-truth corrections
+
+- CR2a's receipt is only `{query,k,n_corpus,channels,n_hits}` plus fused result scores. It has no per-hit channel
+  contribution/reason, evidence/source/scope/comparison, snapshot/digest/health, eligibility/exclusions or
+  consumer attribution; it always names three channels, uses the default deterministic hash embedding, rebuilds
+  the full corpus per call, and records `k=0` while returning one normalized hit. The agent tool further renders
+  only hit text and drops both fused scores and the receipt. It is experimental recall, not the doc-18 “Why
+  recalled?” proof contract.
+- CR1b fuzzy merge remains suggestion-grade: transitive union-find over scope-agnostic token Jaccard can merge
+  distinct generic statements and collapses conflicting operator maturity to one representative. It is safely
+  opt-in/CLI-only today and must never become identity implicitly.
+- Step 7 is one grouping by the first slash prefix, not recursive hierarchy. It carries no UID, release,
+  snapshot, proof or eligible-outcome contract.
+- The shared write lock is a real fix. Claim/alias appends still lack flush/fsync; the D8 atomic rewrite has
+  best-effort data-file fsync but no journal/directory-sync contract. Governance still lacks server-derived
+  actor/time, sequence, idempotency, claim/taxonomy revision, expected-version conflict handling,
+  reset-to-machine and history API.
+- D8 persistence is gated by `cross_run_concepts=false` by default and stores unbounded statement/node/URL data;
+  current product copy must show effective state and not imply every research memo enters the portfolio.
+- Full-store scans, no cursor/filter/resource contract, unknown-as-empty behavior, count-not-token envelopes,
+  correlated-attempt evidence counts, unpinned fingerprint/taxonomy versions, index equal-key order dependence,
+  prospective `cross_run_prior` attribution, Genesis capability-copy mismatch and invalid flag no-ops remain.
+
+### Final UI/UX concept verdict
+
+The global UI decision remains and is stronger after the second review: do **not** put portfolio concepts into
+the existing Map or the already-dense run lineage. Use one per-run **Research** container with coordinated
+Overview / Lineage / Directions / Crosswalk / Landscape / Intersections / Journey / Focus lenses, and a
+separate global matrix-first **Research Atlas**. A topology view is secondary, concept-only and bounded to one
+selected concept; its complete typed relationship table carries overflow. Axis selection is explicit
+`exact|descendants(release)`, inspect and re-root are separate actions, and compare changes only concept or
+scope at once. Scope is an applied immutable snapshot; proof, compare and share are fenced to
+scope/snapshot/taxonomy/access. Coverage phase, evidence design, frame quality, claim stance, operator maturity,
+decision freshness, concept lifecycle, relation-layer status and experiment status remain orthogonal. The
+implementation-independent interaction contract, responsive
+composition, graph budgets, missing functionality and R0–R3/G0–G6 gates are now consolidated in doc 18 §33.
+
+The shipped backend may support an explicitly labelled **Experimental portfolio diagnostic**. It must not be
+called the Research Atlas until fail-closed scope/comparison, verified D8 provenance, stable versioned
+claim/concept/attempt identity, eligible evidence families, snapshot/health/completeness, cursor paging,
+resource bounds and revisioned governance have landed.
+
+### Final merged-tree validation
+
+| Check | Result |
+|---|---|
+| incoming CR1a/CR1b/CR2a/D8 focused suite | **72/72 PASS** |
+| complete Python suite | **PASS**, exit 0 in 259.8 s; only the existing FastAPI/Starlette lifecycle/deprecation warnings |
+| React/node suite | **306/306 PASS** |
+| production Vite build | **PASS**, 270 modules transformed |
+| static closure and gzip bundle budgets | **PASS**, every size/reachability budget satisfied |
+| `mkdocs build --strict` | **PASS** |
+| paid OpenRouter MiniMax M3 smoke | **PASS** earlier in the same global review: text `ready`; structured `operator=user-proposed`, `x=1.0`, `y=2.0`; the final incoming range does not touch the LLM client/provider path |
+| Browser walk-through | retained from the real local API/57-run pass; the final 17-commit range contains no `ui/` files, so no changed screen was left unrendered |
+
+The first parallel MkDocs attempt failed only because a newly named `C:\tmp` output directory inherited a
+Windows access denial. Re-running the identical strict build in the already approved temp directory passed;
+this was a validation-harness path permission, not a documentation failure.

@@ -204,6 +204,37 @@ def test_pack_drops_rejected_and_leads_with_ratified():
     assert "rejected claim" not in stmts                # operator-rejected dropped from the pack
 
 
+def test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat():
+    from looplab.engine.claims import build_context_pack, claim_assessments
+    from looplab.engine.memory import normalize_statement
+    # 3 ratified positives (more evidence -> rank first) fill max_claims; a ratified MIXED caveat has less
+    # evidence so it is pushed PAST the cutoff. The reserved caveat slot must still pull it in — before the
+    # fix `caveats` looked only in the NON-ratified pool and this ratified caveat was starved (§20.5).
+    lessons = [_lesson("pos0", "supported", [1, 2, 3]),
+               _lesson("pos1", "supported", [1, 2, 3]),
+               _lesson("pos2", "supported", [1, 2, 3]),
+               _lesson("contested", "supported", [5], run_id="rA"),
+               _lesson("contested", "tested", [6], run_id="rB")]        # mixed, lower evidence -> ranks last
+    dec = {normalize_statement(s): {"decision": "ratified"} for s in ("pos0", "pos1", "pos2", "contested")}
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec), max_claims=3)
+    assert len(pack["claims"]) == 3
+    assert any(c["epistemic"] == "mixed" and c["statement"] == "contested" for c in pack["claims"])
+
+
+def test_ratified_mixed_counts_as_contested_and_rejected_dropped_from_atlas():
+    from looplab.engine.claims import build_context_pack, claim_assessments, portfolio_atlas
+    from looplab.engine.memory import normalize_statement
+    lessons = [_lesson("cA", "supported", [1], run_id="rA"), _lesson("cA", "tested", [2], run_id="rB"),  # mixed
+               _lesson("cB", "supported", [1], run_id="rA"), _lesson("cB", "tested", [2], run_id="rB")]  # mixed
+    dec = {normalize_statement("cA"): {"decision": "ratified"},   # a ratified contradiction is still contested
+           normalize_statement("cB"): {"decision": "rejected"}}   # a rejected contradiction is NOT live
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec))
+    assert pack["n_contested"] == 1                               # cA counts (ratified mixed); cB excluded
+    atlas = portfolio_atlas(lessons, [], decisions=dec)
+    stmts = [c["statement"] for c in atlas["contradictions"]]
+    assert "cA" in stmts and "cB" not in stmts                    # operator-rejected contradiction dropped
+
+
 def test_cli_claim_decide_and_reflect(tmp_path):
     import orjson
     from typer.testing import CliRunner
@@ -221,3 +252,73 @@ def test_cli_claim_decide_requires_exactly_one(tmp_path):
     from looplab.cli import app
     r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "x"])   # none chosen
     assert r.exit_code == 2
+
+
+# --------------------------------------------------------------------------- #
+# D8 research claims persisted cross-run (makes `contested` reachable)
+# --------------------------------------------------------------------------- #
+
+def test_record_and_load_research_claims_upsert(tmp_path):
+    from looplab.engine.claims import load_research_claims, record_research_claims
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t",
+                           claims=[{"statement": "doc2query helps", "node_ids": [5], "urls": ["u"]}, {"statement": ""}])
+    record_research_claims(str(tmp_path), run_id="r1", task_id="t",     # re-run replaces r1's rows
+                           claims=[{"statement": "doc2query helps", "node_ids": [7]}])
+    rows = load_research_claims(str(tmp_path))
+    assert len(rows) == 1 and rows[0]["run_id"] == "r1" and rows[0]["node_ids"] == [7]
+
+
+def test_d8_claim_contests_a_lesson_verdict(tmp_path):
+    # a D8 research claim SUPPORTS a statement a lesson REFUTED -> the portfolio now has a CONTESTED claim
+    # (unreachable from consolidated lessons alone, which carry one verdict per statement).
+    from looplab.engine.claims import claims_for_memory, record_research_claims
+    _write_lessons(tmp_path / "lessons.jsonl", [_lesson("distillation helps", "refuted", [2], run_id="rL")])
+    record_research_claims(str(tmp_path), run_id="rR", task_id="t",
+                           claims=[{"statement": "distillation helps", "node_ids": [9]}])
+    out = {c["statement"]: c for c in claims_for_memory(str(tmp_path))}
+    c = out["distillation helps"]
+    assert c["epistemic"] == "mixed"                       # now contested
+    assert c["support"] == ["rR:9"] and c["oppose"] == ["rL:2"]
+
+
+def test_claims_for_memory_applies_decisions_too(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [_lesson("x helps", "supported", [1])])
+    record_claim_decision(str(tmp_path), statement="x helps", decision="ratified")
+    out = claims_for_memory(str(tmp_path))
+    assert out[0]["maturity"] == "operator-ratified"
+
+
+# --------------------------------------------------------------------------- #
+# CR1b — opt-in fuzzy/paraphrase claim merge (off by default)
+# --------------------------------------------------------------------------- #
+
+def test_fuzzy_off_is_default_no_merge():
+    lessons = [_lesson("hard negative mining improves recall", "supported", [1]),
+               _lesson("hard-negative mining boosts recall performance", "supported", [2])]
+    out = claim_assessments(lessons)                     # fuzzy defaults off
+    assert len(out) == 2                                 # two distinct normalized statements
+
+
+def test_fuzzy_merges_paraphrases():
+    lessons = [_lesson("hard negative mining improves recall", "supported", [1], run_id="rA"),
+               _lesson("hard negative mining improves recall greatly", "tested", [2], run_id="rB"),
+               _lesson("learning rate warmup stabilizes training", "supported", [3], run_id="rC")]
+    out = claim_assessments(lessons, fuzzy=True)
+    # the two hard-negative paraphrases merge into one (contested: rA supports, rB refutes); the warmup
+    # claim stays separate.
+    hn = [c for c in out if "hard negative" in c["statement"].lower()]
+    assert len(hn) == 1 and hn[0]["epistemic"] == "mixed"
+    assert set(hn[0]["support"]) == {"rA:1"} and set(hn[0]["oppose"]) == {"rB:2"}
+    assert "merged_from" in hn[0] and len(hn[0]["merged_from"]) == 2
+    assert any("warmup" in c["statement"] for c in out)
+
+
+def test_cli_claims_fuzzy_flag(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("distillation improves retrieval recall", "supported", [1]),
+        _lesson("distillation improves retrieval recall a lot", "supported", [2])])
+    r = CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"])
+    assert r.exit_code == 0

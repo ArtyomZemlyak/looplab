@@ -1,8 +1,8 @@
-# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled 2026-07-12)
+# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled through 2026-07-15)
 
-> Current-state strategic synthesis for executable revision
-> `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`; documentation/UI reconciliation is included through
-> `89af408`. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
+> Strategic synthesis pinned to historical executable revision
+> `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`, with the current Part-IV/consumer/UI addendum reviewed on
+> `codex/ui-ux-overhaul-20260712` through incoming tip `0e45bd3`. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
 > finding/reproduction ledger. This revision adds the implementation disposition of the subsequent
 > fix series and supersedes the first version of doc 17 in `32dc6c0`.
 
@@ -12,6 +12,7 @@
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
 | **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §14.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
+| **Current Part-IV reviewed range** | `codex/ui-ux-overhaul-20260712` through `0e45bd3`; global correction in §22.7 and doc 18 §33. Historical core counts remain pinned to the commits named beside them. |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
 | **Current implementation disposition** | §6.3 and §14.2 of this document |
@@ -19,7 +20,7 @@
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
 | **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
-| **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
+| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-15 (Part III-B/IV and cross-run/UI addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -3005,7 +3006,8 @@ required tag behaviour:
 - **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
 
 **CURRENT CROSS-RUN CORRECTION (2026-07-15).** The per-run taxonomy/graph remains run-local. Lean cross-run
-projections now ship: fingerprinting, capsules, raw-slug overview, statement/ref claim and context summaries,
+projections now ship: fingerprinting, capsules, a raw-capsule overview plus selected alias-resolved reads,
+statement/ref claim and context summaries,
 capped Atlas summary, HTTP routes and opt-in consumers. Full identity/scope/comparison/snapshot/governance does
 not. `grade_novelty(prior_concepts=…)` remains deliberately unpopulated; similar-capsule overlap is recorded
 separately as the non-gating `cross_run_prior` audit receipt. The former CR1–CR3 bullets are historical and are
@@ -3024,17 +3026,15 @@ per-feature adversarial mega-review, all OFF BY DEFAULT (so the live rubertlite 
 - **F1** incremental node tagging · **M1** rerun tag-invalidation · **F2** agentic graded-novelty ·
   **HT** agentic hypothesis tagging (+ B1-ext hypothesis retro-tag) · **B1** graph-growth retro-tagging ·
   **B3** stable/incremental consolidation · **D7** scored capability-expansion operator ·
-  **R1-c holdout-soundness producer** (union-find tie-components).
+  **R1-c holdout-soundness producer** (full eligible holdout-pool tie groups) · **R1-d opt-in CI-band tie**.
+
+**R1-d LANDED (opt-in, exact tie remains the default).** `verifier_ci_tie=false` preserves the prior exact-
+metric-tie behavior. When effective with `select_verifier`, confirmed candidates enter the verifier tie-break
+only when each candidate lies within the metric leader's `1.96·SE` band; the leader's precision anchors
+the band, so a noisy challenger cannot widen it and a statistically significant better metric is never
+overridden. The mode is recorded at run start and replayed; separate tie groups avoid non-transitive chaining.
 
 **Deferred with rationale (NOT rushed — each is genuinely a decision/design task, not a quick win):**
-
-- **verifier CI/ε-tie** (widen the soundness tie-break from EXACT to a noise band). Nodes DO carry
-  `confirmed_std`, so a noise-grounded band is *possible* and would be §21.7-safe (never wider than measured
-  noise). BUT a tolerance-based "tie" is **NON-TRANSITIVE** (A~B, B~C, yet A≁C), so it CANNOT be a sort key
-  like today's `(metric, ±score, id)` — it requires a two-stage **metric-leader → CI-band** selection, an
-  architecture change to the core `_select_best` path. For an off-by-default sub-feature that is a
-  deliberate, separately-scoped change (with a conservative-band validation), not a late-session edit to
-  §21.7 selection. Design recorded here; awaiting a decision.
 - **mode-gating** (gate breadth/QD on an objective MODE, not task name). On inspection there is **no
   task-name-gated instance** to fix — breadth/QD is already SIGNAL-driven (the strategist's
   stagnation/budget/failure-rate reads), i.e. effectively mode-adaptive. Nothing to un-hardcode; an explicit
@@ -3802,10 +3802,11 @@ task/technology lists). **Nothing in the design needs to be reversed.** The refi
 4. **`concept_uid` ↔ the shipped per-run graph is the first real integration seam.** The already-merged
    per-run machinery (F1 incremental tagging, M1 rerun-invalidation, F2 graded-novelty, HT hypothesis
    tagging, B1 retro-tag, B3 consolidation) emits **display slugs** on `node_concepts` /
-   `hypothesis_concepts` / `concept_consolidation` events. CR1a needs a **stable opaque `concept_uid`**, so
-   ingest requires a slug→uid resolver (a per-run B3 rename is *evidence for* a global alias per §21.20.3,
-   never authoritative by itself). Build this resolver as the bridge from the per-run layer to the shared
-   TaxonomyRelease — it is where the two designs physically meet.
+   `hypothesis_concepts` / `concept_consolidation` events. A lean content-addressed `concept_uid(slug)` helper
+   and exact-slug alias resolver now exist, but production ingest/read payloads still carry resolved display
+   slugs rather than a release-pinned entity UID, and rename changes the helper value. The next bridge is to
+   integrate opaque entity identity + revisioned aliases into ingest and the shared `TaxonomyRelease`; a
+   per-run B3 rename remains evidence for a global alias, never authoritative by itself.
 5. **Honest scale framing.** §21.20 is a **multi-month subsystem (nine phases)**, not a Part-IV keystone.
    The millisecond / ≤2 GB targets in §21.20.11 are reference-host aspirations to *ratify*, not gates; the
    real go/no-go is the frozen-replay A/B in §21.20.10 (≥15% duplicate-eval spend reduction with no
@@ -3839,7 +3840,8 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   append-only-ledger-first foundation the design sanctions. **TODO to reach full CR0:** the agentic
   `ScopeProfile` **facets** (interaction/domain/language/dataset-lineage — §21.20.2) beyond the universal
   fingerprint; `ComparisonContract`/`EvaluationSlice`; the Corpus/Visibility snapshot records; and the
-  INCREMENTAL projection + `concept_uid` resolver whose "incremental digest == clean rebuild" is the
+  INCREMENTAL projection + production-carried, release-pinned concept identity built over (not confused with)
+  the lean helper/alias overlay, whose "incremental digest == clean rebuild" is the
   stronger gate (this slice proves the clean-rebuild determinism the incremental path must match).
 - **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** **LANDED 2026-07-15 (lean
   first slice):** a per-run `ConceptCapsuleStore` (in `engine/memory.py`, mirroring `JsonlCaseLibrary`)
@@ -3851,13 +3853,18 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   under `cross_run_concepts`; audit-only, off the selection path. Tests: capsule store (7),
   write+surface+off-switch+replay (8). **Still TODO to reach the full CR2c spec:** upgrade the raw
   concept-slug set to the structured prior-evidence bundle §21.20.5 specifies (scope relation, freshness,
-  materially-different flag) once the `concept_uid` resolver (§21.20.12 #4) exists; and the exact-duplicate
+  materially-different flag) once production identity is integrated with the lean resolver (§21.20.12 #4);
+  and the exact-duplicate
   savings gate. Level 3 stays **surface**, never cross-scope hard reject.
 - **Step 3 — CR1a incremental index.** **LANDED 2026-07-15 (lean first slice):** `portfolio_concept_overview`
   (`engine/memory.py`) aggregates the Step-2 concept capsules into a portfolio view — per-concept: which runs
   explored it, each with its OWN outcome (raw metrics deliberately NOT compared across tasks) — plus per-run
   cards; surfaced by the `looplab cross-run-concepts` CLI (`--top`, `--json`). Pure read, no LLM. Tests:
-  read-model + CLI (8). **TODO to reach full CR1a:** `RunCapsule`/`ConceptDigest`/`PortfolioSummary` as
+  read-model + CLI (8). **Lean CR1a follow-up:** `concept_uid(slug)` plus an interprocess-locked append-only
+  exact-slug alias/purge overlay landed; selected Atlas/tool/digest reads canonicalize display slugs at read
+  time and raw tags stay unchanged. The UID helper is not emitted/consumed by production payloads, changes
+  after rename, and the overlay has no release/revision/scope/existence/cycle contract. **TODO to reach full
+  CR1a:** `RunCapsule`/`ConceptDigest`/`PortfolioSummary` as
   incremental materialized read-models over the `concept_uid` resolver, taxonomy releases, and the Atlas
   metadata journal (§21.20.4); the 50/500-run concurrency + order-independent-digest + re-eval/archive/
   purge/ACL gates.
@@ -3867,9 +3874,12 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   action-outcome→support/oppose mapping to compute (`supported`/`refuted`/`mixed`/`inconclusive`). These are not
   yet verified independent-evidence assessments. It unifies with
   the D8 `{statement, node_ids}` shape (no forked claim type); read-only, no migration, legacy lessons
-  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--pack] [--json]`. Tests: 13. **TODO to reach
-  full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence families +
-  proof trails (§21.20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
+  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--pack] [--fuzzy] [--json]`.
+  **Lean follow-ups:** D8 rows persist at finalize when `cross_run_concepts` is enabled, and `--fuzzy` offers an
+  opt-in token-Jaccard grouping with `merged_from`. The persistence currently drops the memo verifier verdict/
+  grouped run-task scope, while fuzzy union is transitive and scope-agnostic; neither is structured identity.
+  **TODO to reach full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence
+  families + proof trails (§21.20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
 - **Step 5 — CR2a/CR2b retrieval + bounded context packs.** **LANDED 2026-07-15 (bounded-pack first
   slice):** `build_context_pack` / `render_context_pack` (`engine/claims.py`) assemble a **claim-count-bounded**
   cross-run pack from the Step-4 claims (+ Step-3 concept overview): contested (`mixed`) claims lead and a
@@ -3879,8 +3889,12 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   proposal prompt exactly like the E4 prior note — advisory only, never touches selection (§21.7), "" when
   the store is empty or the flag is off (prompt byte-identical). This is the gated flip of Step 2 from
   audit-only to a live prompt cue; measure via a frozen A/B before defaulting on. Tests: 9 (pack) + 7
-  (advisory wiring). **TODO to reach full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware-RRF query planner
-  (reusing `hybrid_merge`) + why-recalled receipts; the bounded packs at Genesis/run-start/proposal/
+  (advisory wiring). **Lean CR2a follow-up:** `cross_run_retrieve` plus the `cross-run-search` CLI and
+  `cross_run_search` agent tool now run fused lexical/BM25/default-hash-vector recall and return a minimal
+  query/requested-k/corpus/hit/channel receipt. It is not scope-safe in the bound capsule path and has no
+  per-hit reason/source/evidence, comparison, snapshot/health or persisted consumer receipt. **TODO to reach
+  full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware query planner and complete
+  why-recalled/derivation receipts; the bounded packs at Genesis/run-start/proposal/
   Strategist with measured token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B**
   (≥15% lower duplicate spend, no trust/exploration regression). The current proactive path is an
   off-by-default experimental live injection; the A/B must pass before default-on or broader rollout.
@@ -3894,15 +3908,15 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   server-filtered/cursor-paged; the coverage-counts-reproduce-raw-evidence gate. A later lean HTTP surface
   exposes this capped summary at `/api/cross-run/atlas`, but it has no scope/snapshot/filter/cursor contract and
   therefore does not close full CR3a. The React screen remains deferred.
-- **Step 7 — CR3b/CR3c, both gated. DELIBERATELY NOT BUILT (per the §21.20.11 hierarchy gate).** Optional
-  recursive/community summaries ship **only** if they clear the gate (≥5 pp grounded-answer gain **or** ≥30%
-  token reduction at equal quality). The flat Claim+RunCapsule architecture that Steps 4/5 (`claim_assessments`
-  + `build_context_pack`) already embody is the **current final design** — recursion is not built until it
-  proves out on the benchmark corpus, exactly as the gate requires (building it now would be the speculative
-  feature-creep the design warns against). The governance workbench (taxonomy merge/split dry-run, claim
-  lifecycle, reversible publish) likewise waits for the taxonomy-release substrate (full CR1a).
+- **Step 7 — CR3b/CR3c, both gated. LEAN INSPECTOR/ALIAS SLICES LANDED.** `portfolio_digest` /
+  `cross-run-digest` group concepts **one level** by the text before the first slash and return axis/concept/run
+  counts. This is data-only, not wired into prompts and not recursive/community hierarchy; the original gate
+  (≥5 pp grounded-answer gain **or** ≥30% token reduction at equal quality) still blocks richer summaries.
+  `concept-merge` and `POST /api/cross-run/concept-merge` append exact-slug merge/purge aliases, but there is no
+  taxonomy release, split/re-parent/backfill, impact preview, revision/CAS or history API. The full governance
+  workbench therefore still waits for full CR1a/G1.
 
-**Current critical path & parallelism.** Lean slices of Steps 0–6 now exist. Per-run `ConceptFrame` and safe
+**Current critical path & parallelism.** Lean/diagnostic slices of Steps 0–7 now exist. Per-run `ConceptFrame` and safe
 Horizon-A visibility can proceed independently. The cross-run critical path is now §22.7 G0/G1: fail-closed
 scope/comparison and untrusted-data handling → stable identities/eligible evidence/snapshot health → paged API
 and revisioned governance. Only then should the lean summary become the B1 Atlas or broader live advisory.
@@ -3977,7 +3991,8 @@ LLM personas plus deterministic actors and the human operator; this section is t
 - **Developer** (`agents/roles.py::LLMDeveloper`) — writes/repairs the solution code.
 - **Deep-research** (`agents/deep_research.py`, D8) — periodic portfolio review; emits D8 `Claim`s.
 - **Evaluator / trust gates** (`trust/`) — score the current node; no cross-run need (they judge THIS result).
-- **Engine** (`engine/`) — the deterministic loop; the sole writer of run events + cross-run capsules/facts.
+- **Engine** (`engine/`) — the deterministic loop and sole writer of run events; finalize writes capsules and
+  gated D8 rows, while run facts remain rebuildable CLI/index projections rather than finalize writes.
 - **Operator / UI** (`serve/`, CLIs) — the human; inspects everything and is the only ratifier.
 
 #### 22.2 Three delivery mechanisms (they are NOT interchangeable)
@@ -3990,8 +4005,10 @@ LLM personas plus deterministic actors and the human operator; this section is t
    tool plus an instruction to consult it, not pushed Atlas/prior data. Off by default, but enabled automatic
    consumers are live prompt influence; the full scope/token/redaction and
    frozen-A/B gates remain open.
-3. **API / CLI** (human) — `looplab cross-run-concepts / claims / atlas / cross-run-index` plus lean summary,
-   claims and decision routes. They are not yet the scoped/paged/snapshot-consistent Research Atlas query API.
+3. **API / CLI** (human) — `cross-run-index`, `cross-run-concepts`, `claims`, `atlas`, `cross-run-search`,
+   `cross-run-digest`, `claim-decide` and `concept-merge`, plus two lean GET and two operator-overlay POST
+   routes. Search/digest have no HTTP query route. None is the scoped/paged/snapshot-consistent Research Atlas
+   query API.
 
 The provider is wired to the in-house reasoning roles; external coding-agent Developer backends do not
 automatically receive it. Injection is reserved for the few moments where unprompted grounding pays for its
@@ -4007,8 +4024,8 @@ tokens; the rich human Atlas surface remains unbuilt.
 | Developer | ✓ (lesson-role-filtered, task-unbound today) | — (no safe injected summary) | — | via dev lessons | — |
 | Deep-research | ✓ | — | — | ✓ D8 `Claim`s (machine-proposed) | — |
 | Evaluator / trust | — | — | — | — | — |
-| Engine (finalize) | — | — | ✓ capsules + run facts | ✓ lessons→claims (projection) | — |
-| Operator (human) | ✓ (CLI + lean GETs; Atlas UI absent) | — | — | — | ✓ ratify/reject/pin overlay; merge/split/tombstone/purge are target-only |
+| Engine (finalize) | — | — | ✓ capsules + gated D8 rows; run facts remain rebuildable CLI/index projections | ✓ lessons/D8→claims (machine projection) | — |
+| Operator (human) | ✓ (CLI + lean GETs; Atlas UI absent) | — | — | — | ✓ ratify/reject/pin overlay + exact-slug merge/purge alias overlay; split/re-parent/release governance remains target-only |
 
 #### 22.4 Why agents READ but never EDIT (the load-bearing conclusion)
 
@@ -4025,13 +4042,15 @@ opinion must never rewrite portfolio truth. Therefore:
   must not be described as immutable atoms themselves.
 - **The operator is the sole intended EDITOR.** The shipped claim ratify/reject/pin slice writes
   `memory_dir/claim_decisions.jsonl` through `record_claim_decision` / `claim-decide` /
-  `POST /api/cross-run/claim-decide`; it does **not** use per-run `CONTROL_EVENTS`. Concept merge/split,
-  scope aliases and run tombstone/purge remain unbuilt CR3c operations. The sidecar is a lean last-write-wins
-  overlay, not yet revisioned/audited governance.
+  `POST /api/cross-run/claim-decide`; it does **not** use per-run `CONTROL_EVENTS`. The sidecar is a lean
+  last-write-wins overlay, not yet revisioned/audited governance. The shipped concept merge/purge slice similarly appends
+  exact-slug aliases through `concept_aliases.jsonl` / `concept-merge` /
+  `POST /api/cross-run/concept-merge`; it does not publish a versioned taxonomy release or split/backfill.
 
 This preserves the important direction — agents have no cross-run mutation tool — but does **not** make reads
-unpoisonable. Stored strings are still untrusted prompt data; scope and rejected-claim leaks are confirmed, and
-the operator overlay lacks stable identity, CAS and audit history. Full safety requires the §22.7 gates.
+unpoisonable. Stored strings are still untrusted prompt data and several scope paths remain fail-open. The
+earlier rejected-claim active-projection leak is now closed in context, Atlas, tools and retrieval, while the
+operator overlay still lacks stable identity, CAS and audit history. Full safety requires the §22.7 gates.
 
 #### 22.5 Delivery-per-role, concretely
 
@@ -4059,11 +4078,11 @@ the operator overlay lacks stable identity, CAS and audit history. Full safety r
    prior-art (proactive prompt-instruction to consult `cross_run_atlas`, on top of the pull tool).
    **LEAN SLICE DONE; both automatic consumers are currently unscoped.**
 4. Operator ratify/reject/pin — `claim_decisions.jsonl` overlay + `looplab claim-decide` **and** a serve
-   API (`GET /api/cross-run/atlas` · `/claims` · `POST /api/cross-run/claim-decide`). The overlay is read by
-   CLI/claims/context-pack paths, but suppression is inconsistent. **LEAN OVERLAY DONE.** Rejected claims still
-   remain in Atlas contradictions/Strategist
-   cues; stable claim identity/revision, durable append, actor/time/history/reset/CAS, governance UI and
-   concept merge/split/purge remain.
+   API (`GET /api/cross-run/atlas` · `/claims` · `POST /api/cross-run/claim-decide` ·
+   `POST /api/cross-run/concept-merge`). Rejected claims are now consistently excluded from active agent
+   context, Atlas contradictions, tools and hybrid retrieval; decision/alias appends use the shared
+   interprocess lock. **LEAN OVERLAYS DONE.** Stable claim/taxonomy identity and evidence revision, fsync/CAS,
+   server actor/time, history/reset, governance UI and concept split/backfill remain.
 
 Steps 1–2 land an **agentic READ tool across reasoning roles** (Researcher, Strategist, deep-research,
 Genesis, and a lesson-role-filtered but task-unbound Developer); step 4 lands the **operator WRITE/ratify path** (the only actor that may
@@ -4078,32 +4097,50 @@ The post-merge adversarial review resets the status from “consumer model compl
 full contract open**. This subsection supersedes stronger completion wording in the historical implementation
 notes above. The UI/interaction consequence is specified in [doc 18 §33](18-ui-ux-review-2026-07-11.md).
 
+**Closed since the initial checkpoint:** operator-rejected claims are now excluded from the active context pack,
+Atlas contradictions, agent tools and hybrid retrieval. Keep the regression tests; human decision history is
+still a separate missing projection.
+
 **Confirmed P1 blockers:**
 
 1. Scope is not fail-closed. `CrossRunTools` accepts one shared bare goal token; automatic Researcher and
-   Strategist advisory ignore state; Repo Developer is unbound. A `CrossRunScope` must hard-gate namespace,
-   task/run identity, kind, direction, metric and dataset/eval contract before any similarity widening.
-2. Rejected claims still appear in `portfolio_atlas.contradictions` and reach `cross_run_atlas` / Strategist.
-   Human history and agent-safe active projections must be separate.
+   Strategist advisory ignore state; Repo Developer is unbound. Worse, bound claim/search calls scope only the
+   lesson input: persisted D8 claims and search capsules are reloaded portfolio-wide. A `CrossRunScope` must
+   hard-gate every source by namespace, task/run identity, kind, direction, metric and dataset/eval contract
+   before any similarity widening.
+2. Persisted D8 claims lose the memo verification verdict and do not populate their run/task provenance in the
+   claim projection. A cited or verifier-unsupported foreign claim can therefore become `supported` and bypass
+   a bound tool's lesson filter. Persist and consume the complete memo envelope; unsupported/unclear evidence
+   is not support, and scope must be applied before grouping.
 3. Cross-run text is untrusted model-authored data. It currently reaches prompts and traces without secret/
-   control-character redaction or a trust envelope, including a Developer loop with write/edit tools. Apply
-   field caps and redaction before trace/model/UI, quote it as data, retain provenance and add injection tests.
+   control-character redaction or a trust envelope, including the new D8/search paths and a Developer loop with
+   write/edit tools. Apply field caps and redaction before trace/model/UI, quote it as data, retain provenance
+   and add injection tests.
 4. Statement-only identity (`normalize_statement`, 160-character cap) collides across scopes and long prefixes.
    A decision may target a nonexistent/future claim and never becomes stale when evidence changes. Introduce a
    structured, versioned `claim_uid`, evidence revision and existence/CAS checks.
-5. Claim polarity is incorrect for negative factual lessons: a confirmed failed action is mapped to opposition
+5. The new `concept_uid(slug)` helper is content-addressed to spelling, is not emitted by overview/Atlas, and
+   changes across rename. Alias resolution is case-sensitive, accepts self/cycles/nonexistent slugs and leaves
+   canonical aggregate rows inconsistent with raw run cards. A release-pinned concept entity/revision model,
+   validation and snapshot-fenced alias history are still required for graph identity and deep links.
+6. Claim polarity is incorrect for negative factual lessons: a confirmed failed action is mapped to opposition
    to its statement. Store proposition stance separately from action effect/utility.
-6. Concept outcomes can include ineligible/tombstoned/trust-flagged metric nodes and carry no metric/split/
+7. Concept outcomes can include ineligible/tombstoned/trust-flagged metric nodes and carry no metric/split/
    comparison contract. Publish attempts and eligible measurements separately under the evaluation/trust rules.
-7. A corrupt event-log prefix or invalid snapshot can be indexed without a degraded marker, and reset
+8. A corrupt event-log prefix or invalid snapshot can be indexed without a degraded marker, and reset
    generations collapse. Index receipts must expose source digest/sequence/generation and partial/corrupt state.
 
-**Confirmed P2 gates:** revisioned durable decision append/history; body/row/byte limits; cursor paging and
-digest caching; token rather than count envelopes; independent evidence-family counts; D8 verifier verdicts;
-actual-node attribution for `cross_run_prior`; pinned fingerprint/taxonomy/schema versions; deterministic tie
-ordering; exact Genesis capability copy; validation for invalid feature combinations; and a persisted
-`DerivationReceipt` for each live prompt influence (scope/snapshot/query/result digest, consumer, turn and
-redaction policy). The current Researcher/Strategist advisory has no such receipt.
+**Confirmed P2 gates:** the decision/alias append lock has landed, but those appends lack flush/fsync; the
+D8 atomic rewrite has best-effort data-file fsync but no journal/directory-sync contract. Revision,
+idempotency/history and server-derived actor/time have not landed; nor have request/row/byte limits; cursor paging and digest caching; token rather than
+count envelopes; independent evidence-family counts; actual-node attribution for `cross_run_prior`; pinned
+fingerprint/taxonomy/schema versions; deterministic tie ordering; exact Genesis capability copy; validation for
+invalid feature combinations; and a persisted `DerivationReceipt` for each live prompt influence
+(scope/snapshot/query/result digest, consumer, turn and redaction policy). CR2a's engine/CLI returns only a
+minimal query/count receipt — no per-hit channel contribution, source/scope/snapshot/completeness — and
+re-reads the whole corpus; the agent tool drops even that receipt and the fused scores. The opt-in fuzzy claim
+merge is transitive and scope-agnostic; Step 7 is a one-level slash-prefix
+rollup rather than a recursive hierarchy. The current Researcher/Strategist advisory has no persisted receipt.
 
 Promotion order is therefore:
 

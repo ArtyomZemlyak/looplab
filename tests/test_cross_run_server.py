@@ -56,6 +56,15 @@ def test_invalid_decision_is_400(tmp_path):
     assert r.status_code == 400
 
 
+def test_empty_statement_decision_is_400(tmp_path):
+    # the other record_claim_decision guard (ValueError 'empty statement') must surface as a clean 400,
+    # not a 500 — the operator write validates both the decision AND the statement.
+    _seed_memory()
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/cross-run/claim-decide", json={"statement": "   ", "decision": "ratified"})
+    assert r.status_code == 400
+
+
 def test_contested_filter(tmp_path):
     md = Path(os.environ["LOOPLAB_MEMORY_DIR"]); md.mkdir(parents=True, exist_ok=True)
     (md / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(x) for x in [
