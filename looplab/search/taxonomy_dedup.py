@@ -53,7 +53,13 @@ def dedup_analysis(state: RunState, graph: ConceptGraph, *,
                 "top_cluster": None, "redundancy_frac": 0.0, "compression": 0,
                 "false_merge_risks": [], "false_merge_count": 0}
     if tags is None:
-        tags = {h.id: tag_text(h.statement, graph, allow_plural=True) for h in hyps}
+        # HT (§21.18): prefer the recorded AGENTIC hypothesis tags (`hypothesis_concepts`, the LLM tagger)
+        # over the tag_text alias heuristic — per hypothesis, falling back to tag_text for any not yet
+        # tagged (a board entry newer than the last cadence). Stays PURE (no LLM here; the tagging happened
+        # at the cadence). No cache -> the deterministic alias tagger, exactly as before.
+        cache = getattr(state, "hypothesis_concepts", None) or {}
+        tags = {h.id: (frozenset(cache[h.id]) if h.id in cache
+                       else tag_text(h.statement, graph, allow_plural=True)) for h in hyps}
 
     # within-concept clusters (a hypothesis with several concepts appears in each) — the merge groups
     by_concept: dict[str, list[str]] = defaultdict(list)

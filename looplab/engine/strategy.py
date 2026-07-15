@@ -22,7 +22,12 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
 from looplab.core.models import RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT,
-                                  EV_NODE_CONCEPTS, EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
+                                  EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS, EV_NODE_VERIFIED,
+                                  EV_STRATEGY_DECISION)
+
+# HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
+# run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
+_HYP_TAG_CAP = 60
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -363,6 +368,26 @@ class StrategyCadenceMixin:
                     if known.get(int(nid)) != new_ids:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": int(nid), "concepts": new_ids,
                                                              "mode": mode})
+                # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
+                # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
+                # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
+                # cadences instead of exploding one. Isolated try: a tagging hiccup must not lose the snapshot.
+                try:
+                    from looplab.search.concept_graph import tag_text_llm
+                    known_h = getattr(state, "hypothesis_concepts", None) or {}
+                    tagged_this_cadence = 0
+                    for h in (state.hypotheses or {}).values():
+                        if h.id in known_h or not getattr(h, "statement", ""):
+                            continue
+                        if tagged_this_cadence >= _HYP_TAG_CAP:
+                            break
+                        htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
+                                                    allow_plural=True))
+                        self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
+                                                                   "mode": mode})
+                        tagged_this_cadence += 1
+                except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
+                    pass
             if graph is None:                   # deterministic fallback needs a curated skeleton
                 if seed is None:
                     return None

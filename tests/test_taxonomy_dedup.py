@@ -36,6 +36,40 @@ def test_empty_board_is_zeros():
     assert a["n_hypotheses"] == 0 and a["top_cluster"] is None and a["false_merge_count"] == 0
 
 
+def test_dedup_prefers_recorded_agentic_hypothesis_tags(tmp_path):
+    """HT (§21.18): dedup_analysis uses the recorded `hypothesis_concepts` (agentic) over the tag_text
+    heuristic — here two hypotheses whose TEXT shares no alias are still clustered because the agentic
+    tagger recorded them under the SAME concept (only knowable via the cache)."""
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    # two statements with NO shared alias/word that the heuristic could match to one concept
+    s.append("hypothesis_added", {"id": "h0", "statement": "reweight the anchors by inverse frequency"})
+    s.append("hypothesis_added", {"id": "h1", "statement": "scale gradients per query bucket"})
+    # ...but the agentic tagger recorded BOTH under one grown concept
+    s.append("hypothesis_concepts", {"hyp_id": "h0", "concepts": ["optimization/grad-reweighting"]})
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["optimization/grad-reweighting"]})
+    st = fold(s.read_all())
+    assert st.hypothesis_concepts == {"h0": ["optimization/grad-reweighting"],
+                                      "h1": ["optimization/grad-reweighting"]}
+    a = dedup_analysis(st, skeleton_for("dense-retrieval"))
+    # both tagged (via cache) and clustered together under the agentic concept
+    assert a["tagged"] == 2
+    assert a["top_cluster"]["concept"] == "optimization/grad-reweighting" and a["top_cluster"]["count"] == 2
+
+
+def test_dedup_falls_back_to_heuristic_for_uncached_hypotheses(tmp_path):
+    """A hypothesis with NO recorded agentic tag still gets the deterministic tag_text tagging (per-item
+    fallback), so a partially-tagged board mixes cache + heuristic without dropping anyone."""
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("hypothesis_added", {"id": "h0", "statement": "decoupled contrastive with r-drop"})   # heuristic-taggable
+    s.append("hypothesis_added", {"id": "h1", "statement": "reweight anchors"})                     # only via cache
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["optimization/grad-reweighting"]})
+    st = fold(s.read_all())
+    a = dedup_analysis(st, skeleton_for("dense-retrieval"))
+    assert a["tagged"] == 2      # h0 via tag_text (loss/decoupled-contrastive), h1 via the cache
+
+
 def test_dcl_cluster_is_the_dominant_redundancy(tmp_path):
     st = _board(tmp_path, _DCL_BOARD)
     a = dedup_analysis(st, skeleton_for("dense-retrieval"))

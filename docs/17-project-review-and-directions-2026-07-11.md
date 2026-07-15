@@ -2979,13 +2979,17 @@ required tag behaviour:
 
 **C. Backlog (prioritised, each ships with live eval tests + a mega-review, §concept discipline).**
 
-- **M1 (HIGH, correctness):** invalidate `node_concepts` on `node_reset`/rerun so a re-developed node is
-  re-tagged, not left with stale frozen tags. Live test: reset a node, confirm re-tag on next cadence.
-- **F2 (in progress):** agentic graded-novelty on the cached tags (§21.4 D3).
-- **HT (NEW, the user ask):** agentic **hypothesis** tagging (D4) — creation-time record + merge-time
-  re-derive, reusing the Feature-1 event/cache pattern (a `hypothesis_concepts` event). Replaces the
-  `tag_text` alias heuristic as primary; heuristic stays the fallback. Live test: warm-pass call count,
-  merge re-tag, coverage of new-vocabulary phrasings vs the alias baseline.
+- **M1 (DONE):** invalidate `node_concepts` on a `propose` rerun (idea change) so a re-proposed node is
+  re-tagged, not left with stale frozen tags — scope tied to the idea-only tagger's inputs.
+- **F2 (DONE):** agentic graded-novelty on the cached tags (§21.4 D3) — reconstruct graph+tags from
+  `node_concepts`, LLM-tag the proposal (`tag_idea_llm` → shared `tag_text_llm`), heuristic fallback.
+- **HT (DONE, the user ask):** agentic **hypothesis** tagging (D4) — a `hypothesis_concepts` event, tagged
+  incrementally at the concept cadence (capped `_HYP_TAG_CAP`/cadence) via the shared `tag_text_llm`;
+  taxonomy dedup + `board-dedup` consume the cache (per-hypothesis cache-or-`tag_text` fallback). Replaces
+  the alias heuristic as primary. Live-validated: two hard-neg hypotheses with NO shared words both tag
+  `negatives/external-mining` and cluster, which `tag_text` misses. **HT follow-ups still open:**
+  creation-time tagging (tag at `hypothesis_added`, not only at the cadence) and merge-time re-derive (on
+  `hypothesis_merged`) — the cadence path already covers the incremental workhorse.
 - **B1 (MEDIUM-HIGH):** bounded graph-growth retro-tag (prefilter → LLM-confirm) for nodes + hypotheses +
   lessons. Live test: mint a late concept, confirm earlier matching items get it without a full re-tag.
 - **B3 (MEDIUM):** record the consolidation rename map as an event so coverage is stable across cadences

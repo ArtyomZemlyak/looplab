@@ -308,15 +308,41 @@ def board_dedup(
     """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
     within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would wrongly
     collapse (keep distinct). Agentic tags by default (`--offline` forces the heuristic); merges nothing."""
+    from looplab.search.concept_graph import tag_text, tag_text_llm
     from looplab.search.taxonomy_dedup import dedup_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
     # dedup works over HYPOTHESIS tags (keyed by hypothesis id), NOT the node tags in m["tags"] (keyed by
-    # node id) — passing node tags would leave every hypothesis untagged. Let dedup_analysis tag the
-    # hypotheses itself via the (agent-BUILT, alias-carrying) graph.
-    typer.echo(dedup_report(state, m["graph"]))
-    typer.echo(f"\n  (concept graph built by: {m['mode']})")
+    # node id). HT (§21.18) hypothesis-tag precedence:
+    #   --offline           -> force the deterministic tag_text heuristic (bypass any recorded cache);
+    #   recorded cache covers the board -> use it (tags=None -> dedup_analysis reads hypothesis_concepts);
+    #   otherwise + a client -> tag the board LIVE agentically against the agent-built graph;
+    #   else                 -> tag_text heuristic.
+    hyps = list((state.hypotheses or {}).values())
+    cache = getattr(state, "hypothesis_concepts", None) or {}
+    board_cached = any(h.id in cache for h in hyps)     # cache covers at least one CURRENT-board hypothesis
+    tags, label = None, "heuristic"
+    if offline:
+        tags = {h.id: tag_text(h.statement, m["graph"], allow_plural=True) for h in hyps}
+        label = "heuristic (--offline)"
+    elif board_cached:
+        label = "recorded/agentic"                      # dedup_analysis reads the cache (per-item fallback)
+    elif hyps:
+        client = None
+        try:
+            from looplab.core.config import Settings
+            settings = Settings()
+            if model is not None:
+                settings.llm_model = model
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
+            typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
+        if client is not None:
+            tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True) for h in hyps}
+            label = "live-agentic"
+    typer.echo(dedup_report(state, m["graph"], tags=tags))
+    typer.echo(f"\n  (concept graph built by: {m['mode']}; hypothesis tags: {label})")
 
 
 @app.command(name="research-targets")

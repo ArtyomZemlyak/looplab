@@ -337,6 +337,52 @@ def tag_text(text: str, graph: ConceptGraph, *, allow_plural: bool = False) -> f
                      if pat.search(low))
 
 
+def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_call",
+                 allow_plural: bool = False) -> frozenset[str]:
+    """AGENTIC single-TEXT tagger — the LLM counterpart of `tag_text`, shared by the F2 idea-grader and the
+    HT hypothesis tagger. The LLM assigns the text the SET of concept ids from the graph's grown vocabulary
+    (the SAME rule the node tagger uses, so texts are tagged CONSISTENTLY with the cached node tags), with
+    `grow=False`: this text is a PROPOSAL/HYPOTHESIS, not an executed result, so it must NOT mint new
+    vocabulary. Degrades to the deterministic `tag_text` on no client / any failure; RESPECTS an empty LLM
+    verdict (the model naming nothing = 'fits no known concept', kept empty), but recovers via `tag_text`
+    when the model named only UNKNOWN ids. Never raises, never blocks the caller."""
+    if client is None:
+        return tag_text(text, graph, allow_plural=allow_plural)
+    try:
+        from pydantic import BaseModel, Field
+
+        from looplab.core.parse import parse_structured
+
+        class TagOut(BaseModel):
+            concept_ids: list[str] = Field(default_factory=list)
+
+        known = [c for c in graph.concepts() if not c.id.endswith("/*")]
+        # PROMPT CONTRACT (CLAUDE.md): this is a DELIBERATE generalization of F2's experiment-specific
+        # tagging prompt so ONE tagger serves both proposed experiments (F2) and hypotheses (HT) — the
+        # framing is "research item (proposed experiment or a hypothesis)". Tags shift only negligibly vs
+        # the old idea-only wording, and this path is off-by-default + audit-only + can only flip a novelty
+        # defer->allow (never a wrong reject), so the change is low-risk and intentional, not a cleanup.
+        system = (
+            "You tag a machine-learning research item (a proposed experiment or a hypothesis) with the "
+            "CONCEPTS it touches, choosing ONLY from the KNOWN VOCABULARY below (do NOT invent ids — this is "
+            "not an executed result). Assign every concept that applies (an item usually touches several). "
+            "Key on the underlying METHOD/family, not the surface name. Call `emit` once with `concept_ids` "
+            "(a subset of the known ids, possibly empty if none fits).\n\nKNOWN VOCABULARY:\n"
+            + ("\n".join(f"- {c.id}: {c.label}" for c in known) or "(empty)"))
+        msgs = [{"role": "system", "content": system},
+                {"role": "user", "content": f"ITEM:\n{text}\n\nWhich KNOWN concepts does it touch? "
+                                            "Emit their ids."}]
+        out = parse_structured(client, msgs, TagOut, parser)
+        raw_ids = list(out.concept_ids or [])
+        keep = frozenset(cid for cid in (_normalize_concept_id(x) for x in raw_ids) if cid and cid in graph)
+        if keep:
+            return keep
+        # named-only-unknowns -> recover a known alias; named-NOTHING -> respect the empty 'novel' verdict.
+        return tag_text(text, graph, allow_plural=allow_plural) if raw_ids else frozenset()
+    except Exception:  # noqa: BLE001 — agentic tagging is best-effort; never block the caller
+        return tag_text(text, graph, allow_plural=allow_plural)
+
+
 def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, frozenset[str]]:
     """Deterministic, no-LLM multi-label tagging by lineage-family alias match (pure — safe in replay
     and tests). Each experiment maps to the SET of concepts whose aliases appear in its text; a node

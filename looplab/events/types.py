@@ -96,6 +96,12 @@ EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
 # purely each cadence). Recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
 # RunState.node_concepts. See looplab/search/concept_graph.py::tag_nodes_llm (known_tags).
 EV_NODE_CONCEPTS = "node_concepts"
+# PART IV D4 (§21.18 HT): the LLM tagger's concept ids for ONE hypothesis on the board, recorded the first
+# time it is tagged so later cadences REUSE it (incremental, ~O(hypotheses) not per-cadence) — the agentic
+# replacement for the `tag_text` alias heuristic in taxonomy dedup. Hypothesis-scoped (keyed by the
+# statement-slug id); recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
+# RunState.hypothesis_concepts. See looplab/search/concept_graph.py::tag_text_llm.
+EV_HYPOTHESIS_CONCEPTS = "hypothesis_concepts"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"

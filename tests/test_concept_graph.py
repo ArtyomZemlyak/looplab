@@ -344,6 +344,42 @@ def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
     assert fold(s.read_all()).node_concepts == {3: ["negatives/y"]}
 
 
+def test_hypothesis_concepts_event_round_trips_and_is_replay_safe(tmp_path):
+    """HT (§21.18): hypothesis_concepts folds into RunState.hypothesis_concepts (str-keyed, last-write-wins,
+    malformed-safe); a log without them folds to {} (additive / byte-identical on old logs)."""
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    assert fold(s.read_all()).hypothesis_concepts == {}          # old-log shape
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["loss/x"], "mode": "llm"})
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["loss/x", "reg/y"], "mode": "llm"})  # re-derive
+    s.append("hypothesis_concepts", {"concepts": ["z"]})         # no hyp_id -> ignored
+    s.append("hypothesis_concepts", {"hyp_id": "h2", "concepts": "notalist"})  # bad concepts -> []
+    st = fold(s.read_all())
+    assert st.hypothesis_concepts == {"h1": ["loss/x", "reg/y"], "h2": []}
+
+
+def test_tag_text_llm_shared_tagger(tmp_path):
+    """The shared agentic single-text tagger: pins to KNOWN ids (grow=False), respects an empty verdict,
+    recovers via tag_text on all-unknown / no client. `tag_idea_llm` now delegates to it."""
+    from looplab.search.concept_graph import skeleton_for, tag_text, tag_text_llm
+
+    class _C:
+        def __init__(self, ids): self.ids = ids
+        def complete_tool(self, m, j): return {"concept_ids": self.ids}
+        def complete_text(self, m): return "x"
+    g = skeleton_for("dense-retrieval")
+    txt = "decoupled contrastive with r-drop"
+    # known + unknown -> only known kept, graph not grown
+    assert tag_text_llm(txt, g, _C(["loss/decoupled-contrastive", "made/up"])) == frozenset({"loss/decoupled-contrastive"})
+    assert "made/up" not in g
+    # empty verdict respected (even though tag_text WOULD tag it)
+    assert tag_text(txt, g) and tag_text_llm(txt, g, _C([])) == frozenset()
+    # all-unknown -> recover via heuristic; no client -> heuristic
+    assert tag_text_llm(txt, g, _C(["only/unknown"])) == tag_text(txt, g)
+    assert tag_text_llm(txt, g, None) == tag_text(txt, g)
+
+
 def test_node_concepts_event_ignores_malformed_payloads(tmp_path):
     from looplab.events.eventstore import EventStore
     s = EventStore(tmp_path / "e.jsonl")
