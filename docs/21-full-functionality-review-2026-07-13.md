@@ -573,3 +573,31 @@ round-7 realpath-only form would false-green under `--preserve-symlinks`).
   + `accessibility` DataTable key (cosmetic); `llm` stream budget-in-`finally` (documented-accepted).
 
 Full suite green after these fixes; UI 306 pass (commentsContract no longer hangs); build + mkdocs OK.
+
+---
+
+## Round 8 follow-up — owner-delegated fixes (2026-07-14)
+
+The owner asked me to fix the documented round-8 findings at my discretion. Applied:
+
+- **P1 (reproduced): scoped error-finish recovery loop** (`engine/finalize.py`). A scoped error finish
+  (the guarded-abort path stages `{"reason":"error"}` in the begun marker, then a
+  `run_finished(reason=error, finalize_scope=S)`) never converged: `_terminal_data_for_scope` returned
+  that error payload, `_recover_scoped_terminal` re-materialized it, and an error finish is never an
+  "effective terminal", so the scope never gained a complete/abandoned marker and a DUPLICATE error
+  `run_finished` (+ report clone) was appended on **every resume** (unbounded growth; invariants #2/#3).
+  Reproduced (2→3→4→5→6 across resumes) and fixed: when the recovery TARGET is itself an error terminal,
+  close the scope idempotently (ack the finish + mark abandoned) instead of re-materializing; a
+  non-error target still re-materializes and converges. `test_scoped_error_finish_converges_and_does_not_loop`.
+- **500→400 hygiene**: `assistant.py` (turn/stream/revert/session-create) + `genesis.py`
+  (`/api/research`, `/api/genesis`) now guard the body via a shared `_json_object` (a non-object body
+  was a 500). `assistant._public_scope` now redacts before truncating.
+- **UI**: bounded the `observedRunGenerations` map (`api.js`); `SettingsForm` sets `aria-controls` only
+  on the active tab; `accessibility.jsx` `React.Children.toArray`s the wrapped table (no key warning);
+  `package.json` runs `node --test --test-timeout=30000` so a wedged test fails with attribution.
+
+**Deliberately left as-is** (documented, not bugs to silently flip): `_engine_liveness` `ENOTSUP→None`
+(the tri-state fail-closed is intentional double-spawn safety — the right fix is a lock-less
+PID/heartbeat path, a feature); the non-modern finalize `raise` (intended + tested); the streaming
+budget-in-`finally` (accepted); `failure_spike_seq` staleness (audit-only). Remaining items are latent
+(abort-recovery CAS, `_finish_if_quiescent` `next()` default) or test-coverage/test-infra notes.
