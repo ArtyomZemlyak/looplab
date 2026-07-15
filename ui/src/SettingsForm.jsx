@@ -149,7 +149,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, only, age
   return <div className="settings-form tabbed" role="form" aria-label="Settings fields">
     <div className="tabs sf-tabs" role="tablist" aria-label="Settings sections">
       {groups.map((gr, index) => <button key={gr.title} type="button" role="tab"
-        id={`${idPrefix}-tab-${index}`} aria-controls={`${idPrefix}-panel-${index}`}
+        id={`${idPrefix}-tab-${index}`}
+        aria-controls={index === idx ? `${idPrefix}-panel-${index}` : undefined}
         aria-selected={index === idx} tabIndex={index === idx ? 0 : -1}
         className={'tab' + (index === idx ? ' active' : '')}
         onClick={() => setActive(index)} onKeyDown={event => onTabKeyDown(event, index)}

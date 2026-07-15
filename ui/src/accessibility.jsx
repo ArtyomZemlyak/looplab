@@ -77,7 +77,12 @@ export function DataTable({ caption, columns = null, rows = [], rowKey = null,
   } else if (React.isValidElement(children)) {
     table = React.cloneElement(children, {
       className: `${children.props.className || 'tbl'} data-table${card ? ' cardable' : ''}`,
-      children: [<caption className="sr-only" key="caption">{caption}</caption>, children.props.children],
+      children: [
+        <caption className="sr-only" key="caption">{caption}</caption>,
+        // toArray assigns stable keys to the wrapped table's thead/tbody so reparenting them into
+        // this array doesn't emit a React "missing key" warning for every DataTable-wrapped table.
+        ...React.Children.toArray(children.props.children),
+      ],
     })
   }
   return <section className={`data-table-region ${className}`.trim()}>

@@ -40,6 +40,19 @@ from looplab.tools.perm_modes import (
 from looplab.trust.redact import redact_secrets
 
 
+async def _json_object(request: Request) -> dict:
+    """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
+    non-JSON / non-object body (e.g. a bare ``[]``) yields a clean 400 instead of a 500 from a later
+    ``body.get(...)``."""
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    return body
+
+
 def _shared_text(value) -> str:
     from looplab.trust.redact import redact_secrets
     return redact_secrets(str(value or ""))
@@ -133,14 +146,16 @@ def build_router(srv) -> APIRouter:
             if _SENSITIVE_SCOPE_KEY.search(safe_key) and not safe_key.lower().endswith("_digest"):
                 continue
             if isinstance(value, str):
-                public[safe_key] = redact_secrets(value[:4000], entropy=False)
+                # Redact BEFORE truncating so a pattern-shaped secret straddling the length bound
+                # can't lose its tail and evade the match (the reviews-surface discipline).
+                public[safe_key] = redact_secrets(value, entropy=False)[:4000]
             elif value is None or isinstance(value, (bool, int)):
                 public[safe_key] = value
             elif isinstance(value, float) and math.isfinite(value):
                 public[safe_key] = value
             elif isinstance(value, list):
                 public[safe_key] = [
-                    redact_secrets(str(item)[:1000], entropy=False)
+                    redact_secrets(str(item), entropy=False)[:1000]
                     for item in value[:200] if isinstance(item, (str, bool, int, float))]
         return public
 
@@ -327,7 +342,7 @@ def build_router(srv) -> APIRouter:
     @router.post("/api/assistant/revert")
     async def assistant_revert(request: Request):
         """Undo the assistant's most recent change to a file (restore the pre-edit snapshot)."""
-        body = await request.json()
+        body = await _json_object(request)
         path = (body.get("path") or "").strip()
         if not path:
             raise HTTPException(400, "path is required")
@@ -371,7 +386,7 @@ def build_router(srv) -> APIRouter:
 
     @router.post("/api/assistant/sessions")
     async def assistant_create(request: Request):
-        body = await request.json()
+        body = await _json_object(request)
         meta = _asst.create(title=(body.get("title") or ""),
                             mode=body.get("mode") or "plan")
         return meta
@@ -610,7 +625,7 @@ def build_router(srv) -> APIRouter:
         """One assistant turn. Persists the user turn, drives the read-only tool loop as a BACKGROUND
         JOB (so a long turn returns {status:'running', job_id} the UI awaits via jobAwait instead of
         504ing), then persists the assistant reply. Soft-fails offline."""
-        body = await request.json()
+        body = await _json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch) = _begin_turn(sid, body)
         try:
@@ -649,7 +664,7 @@ def build_router(srv) -> APIRouter:
         full result) — real token streaming for the Claude-Desktop feel. HITL still works: a mutating
         action pauses the worker on the permission registry while the client polls /permissions."""
         import queue as _queue
-        body = await request.json()
+        body = await _json_object(request)
         (instruction, eff_mode, history, cancel_ev, s, turn_id, recover_turn,
          turn_epoch) = _begin_turn(sid, body)
         q: "_queue.Queue" = _queue.Queue()

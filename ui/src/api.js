@@ -54,6 +54,7 @@ const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
 const validRunGeneration = value => typeof value === 'string' && RUN_GENERATION_RE.test(value)
 const observedRunGenerations = new Map()
+const MAX_OBSERVED_RUN_GENERATIONS = 512   // exceeds any realistic in-view working set; bounds the map
 const STORED_COMMAND_STATUSES = new Set(['submitting', ...COMMAND_STATUSES])
 const OBSERVATION_KINDS = new Set([null, 'transport', 'access', 'protocol', 'missing', 'request'])
 const TRANSPORT_EVENT_BY_ACTION = Object.freeze({ stop: 'pause', finalize: 'run_abort', resume: 'resume' })
@@ -135,7 +136,14 @@ export function observeRunGeneration(runId, generation) {
   if (!key) return null
   const normalized = normalizeRunGeneration(generation)
   if (normalized) {
+    // Bound the map so a long owner session navigating many runs can't grow it without limit: on
+    // overflow drop the oldest entry (Map preserves insertion order). Re-set to move a live run to
+    // the newest slot so the run currently in view is never the one evicted.
+    observedRunGenerations.delete(key)
     observedRunGenerations.set(key, normalized)
+    if (observedRunGenerations.size > MAX_OBSERVED_RUN_GENERATIONS) {
+      observedRunGenerations.delete(observedRunGenerations.keys().next().value)
+    }
     return normalized
   }
   observedRunGenerations.delete(key)

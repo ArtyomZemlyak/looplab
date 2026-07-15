@@ -775,3 +775,20 @@ def test_subagent_task_honors_cancel(tmp_path):
     st = SubagentTools(_Client(), tmp_path, cancel_check=lambda: True)
     out = st.execute("task", {"prompt": "do something big"})
     assert "cancel" in out.lower()
+
+
+def test_assistant_and_genesis_reject_non_object_body_with_400(tmp_path):
+    """R8-A6: a valid-JSON but NON-object body (a bare list) must yield a clean 400, not a 500 from a
+    later ``body.get(...)`` — the guard the sibling permission-resolve endpoint already had, now shared
+    across the assistant turn/revert/session-create and genesis research/genesis endpoints."""
+    client = TestClient(make_app(tmp_path))
+    sid = client.post("/api/assistant/sessions", json={"title": "t"}).json()["id"]
+    for method, url in [
+        ("post", f"/api/assistant/sessions/{sid}/message"),
+        ("post", "/api/assistant/revert"),
+        ("post", "/api/assistant/sessions"),
+        ("post", "/api/research"),
+        ("post", "/api/genesis"),
+    ]:
+        r = client.post(url, json=[])           # valid JSON, not an object
+        assert r.status_code == 400, f"{url} -> {r.status_code} (expected 400): {r.text[:200]}"

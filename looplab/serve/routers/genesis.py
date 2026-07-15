@@ -22,6 +22,17 @@ from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
 from looplab.serve.routers.control import _defaults_backend_llm
 from looplab.serve.routers.reports import _prior_learnings_index
 
+async def _json_object(request: Request) -> dict:
+    """Parse a request body as a JSON object or fail with 400 (mirrors routers/boss + control), so a
+    non-JSON / non-object body yields a clean 400 instead of a 500 from a later ``body.get(...)``."""
+    try:
+        body = await request.json()
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    return body
+
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
@@ -33,7 +44,7 @@ def build_router(srv) -> APIRouter:
         """Best-effort LLM brief for a research topic, to prime a run. Optionally saved as a
         knowledge note (markdown) so the agentic-retrieval Researcher can read it (ADR-16).
         Degrades cleanly when no model endpoint is reachable."""
-        body = await request.json()
+        body = await _json_object(request)
         topic = (body.get("topic") or "").strip()
         if not topic:
             raise HTTPException(400, "topic is required")
@@ -126,7 +137,7 @@ def build_router(srv) -> APIRouter:
         /api/start, never here (creating a run spends real tokens). Refinement turns pass the prior
         `draft` so the boss edits it in place. Degrades cleanly when no model is reachable."""
         from looplab.adapters.tasks import kinds
-        body = await request.json()
+        body = await _json_object(request)
         msgs = body.get("messages") or []
         instruction = (body.get("instruction") or "").strip()
         draft = body.get("draft") or {}
