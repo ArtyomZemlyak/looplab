@@ -24,6 +24,7 @@ looplab cross-run-search Relevance-ranked hybrid search over cross-run knowledge
 looplab cross-run-digest Recursive axis-cluster summary of explored concepts (PART IV cross-run Step 7)
 looplab concept-merge   Operator merge/purge a cross-run concept slug (PART IV cross-run CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
+looplab concept-steward AGENTIC taxonomy curator: LLM proposes merge/split/purge (--apply records) (PART IV §22.4)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)
 looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)

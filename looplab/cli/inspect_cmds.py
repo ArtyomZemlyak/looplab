@@ -641,6 +641,57 @@ def concept_split_cmd(
     typer.echo(f"split: '{rec['from']}' -> {{{', '.join(sorted(set(tgts)))}}} ({len(rec['rules'])} rule(s))")
 
 
+@app.command(name="concept-steward")
+def concept_steward_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the proposals (merge/split/purge) instead of "
+                               "just showing them. Reversible (append-only governance ledger)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+    max_proposals: int = typer.Option(12, help="Max curation proposals."),
+    as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+):
+    """PART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
+    concept graph and PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise).
+    Advisory by default (shows proposals for operator ratification); `--apply` records them through the SAME
+    reversible governance writes as the manual `concept-merge`/`concept-split`. Needs a reachable LLM."""
+    from looplab.core.config import Settings
+    from looplab.engine.concept_steward import curation_is_empty, steward_concepts
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
+        typer.echo(f"concept-steward needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_concepts(str(memory_dir), client, apply=apply,
+                           at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    if as_json:
+        typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
+        return
+    prop = out["proposals"]
+    if curation_is_empty(prop):
+        typer.echo("steward: no curation proposed (graph already clean)")
+        return
+    typer.echo(f"steward proposals — {len(prop['merges'])} merge(s), {len(prop['splits'])} split(s), "
+               f"{len(prop['purges'])} purge(s):")
+    for m in prop["merges"]:
+        typer.echo(f"  merge  '{m['from_concept']}' -> '{m['to_concept']}'"
+                   + (f"   ({m['why']})" if m.get("why") else ""))
+    for s in prop["splits"]:
+        typer.echo(f"  split  '{s['from_concept']}' -> {{{', '.join(r['to'] for r in s['rules'])}}}")
+    for p in prop["purges"]:
+        typer.echo(f"  purge  '{p['from_concept']}'")
+    if apply and out.get("receipt"):
+        rc = out["receipt"]
+        typer.echo(f"applied {len(rc['applied'])}, skipped {len(rc['skipped'])}")
+        for s in rc["skipped"]:
+            typer.echo(f"  skip {s['action']} {s.get('from_concept')}: {s['reason']}")
+    elif not apply:
+        typer.echo("(dry run — re-run with --apply to record; reversible)")
+
+
 @app.command(name="claim-decide")
 def claim_decide_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where claim_decisions.jsonl lives)."),
