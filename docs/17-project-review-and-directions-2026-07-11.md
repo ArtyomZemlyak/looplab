@@ -3020,3 +3020,35 @@ Backlog (not started):
 The through-line: the **LLM decides semantics** (which concept, when to split/merge), **deterministic code
 maintains the record** (events, fold, redistribution, prefilter), each step keeps a heuristic fallback, and
 every write is an additive, replay-safe event so resume stays deterministic.
+
+#### 21.19 Roadmap completion status (2026-07-15)
+
+The PART IV build is substantially complete. Shipped + merged to master, each with live eval tests + a
+per-feature adversarial mega-review, all OFF BY DEFAULT (so the live rubertlite resume is unaffected):
+
+- **D1–D6, E2–E4** (Phase 0/1/2 + E-functions) — offline foundation, analytics, live steering.
+- **F1** incremental node tagging · **M1** rerun tag-invalidation · **F2** agentic graded-novelty ·
+  **HT** agentic hypothesis tagging (+ B1-ext hypothesis retro-tag) · **B1** graph-growth retro-tagging ·
+  **B3** stable/incremental consolidation · **D7** scored capability-expansion operator ·
+  **R1-c holdout-soundness producer** (union-find tie-components).
+
+**Deferred with rationale (NOT rushed — each is genuinely a decision/design task, not a quick win):**
+
+- **verifier CI/ε-tie** (widen the soundness tie-break from EXACT to a noise band). Nodes DO carry
+  `confirmed_std`, so a noise-grounded band is *possible* and would be §21.7-safe (never wider than measured
+  noise). BUT a tolerance-based "tie" is **NON-TRANSITIVE** (A~B, B~C, yet A≁C), so it CANNOT be a sort key
+  like today's `(metric, ±score, id)` — it requires a two-stage **metric-leader → CI-band** selection, an
+  architecture change to the core `_select_best` path. For an off-by-default sub-feature that is a
+  deliberate, separately-scoped change (with a conservative-band validation), not a late-session edit to
+  §21.7 selection. Design recorded here; awaiting a decision.
+- **mode-gating** (gate breadth/QD on an objective MODE, not task name). On inspection there is **no
+  task-name-gated instance** to fix — breadth/QD is already SIGNAL-driven (the strategist's
+  stagnation/budget/failure-rate reads), i.e. effectively mode-adaptive. Nothing to un-hardcode; an explicit
+  objective-mode toggle would be speculative feature-creep absent a concrete need.
+- **E2 ranking validation** (validate foresight on candidate RANKING, its real job). **Not cleanly doable
+  offline:** only the EXECUTED candidate's outcome exists — there are no counterfactual outcomes for the
+  unchosen candidates, so "did foresight rank the eventual winner highest" is unmeasurable without a
+  controlled all-candidates experiment. The E2 honest-negative (weak at absolute-outcome prediction) stands.
+
+**Parked pending the user's decision:** cross-run support (CR1/CR2/CR3, §21.18) — the concept machinery is
+per-run today; only distilled lessons cross runs.

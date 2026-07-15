@@ -1211,6 +1211,9 @@ def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") ->
         return
     concepts = d.get("concepts")
     st.hypothesis_concepts[str(hid)] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    av = d.get("at_vocab")   # B1-ext: staleness reference (absent on pre-B1 events -> 0/oldest)
+    if isinstance(av, int) and av >= 0:
+        st.hypothesis_concepts_at_vocab[str(hid)] = av
 
 def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 B3 (§21.18): ACCUMULATE the consolidation rename map so decisions stay fixed across

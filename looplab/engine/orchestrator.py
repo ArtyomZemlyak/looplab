@@ -71,7 +71,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.operators import merge_idea
-from looplab.search.policy import SearchPolicy
+from looplab.search.policy import KIND_EXPAND, SearchPolicy
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
 # / run_phase / operator_yields / NOVELTY_STANCES …) moved to engine/strategy.py (StrategyCadenceMixin),
 # which imports those symbols from their canonical sources — so they are no longer imported here.
@@ -1694,6 +1694,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 idea = self._apply_novelty_gate(
                     state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
                 idea.operator = "improve"
+                # PART IV D7 (§21.8): under action-space LOCK-IN with the capability_expansion lever on, this
+                # improve proposal was already steered by the "build a new capability" directive
+                # (proposal_cues, SAME gate) — stamp it as its OWN `expand` operator so operator_yields
+                # MEASURES whether expanding paid off (scored, SearchFitness-competing as its own lineage),
+                # not silently as another `improve`. Off (flag default) -> stays `improve`, byte-identical.
+                if getattr(self, "_capability_expansion", False):
+                    from looplab.engine.proposal_cues import _LOCK_IN_STREAK
+                    from looplab.search.lock_in import capability_expansion_due
+                    if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:
+                        idea.operator = KIND_EXPAND
                 parents = [parent.id]
                 with self.tracer.span("implement"):
                     code = self._implement(self._directed_idea(idea, state), parent)

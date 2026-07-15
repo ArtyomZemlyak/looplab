@@ -432,6 +432,23 @@ def test_hypothesis_concepts_event_round_trips_and_is_replay_safe(tmp_path):
     assert st.hypothesis_concepts == {"h1": ["loss/x", "reg/y"], "h2": []}
 
 
+def test_hypothesis_concepts_at_vocab_folds_and_staleness_works_on_str_ids(tmp_path):
+    """B1-ext (§21.18): hypothesis_concepts events carry at_vocab -> folds into
+    hypothesis_concepts_at_vocab; the shared staleness helper works on STRING hypothesis ids too."""
+    from looplab.events.eventstore import EventStore
+    from looplab.search.concept_graph import stale_tagged_nodes
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("hypothesis_concepts", {"hyp_id": "h0", "concepts": ["loss/x"], "at_vocab": 3})
+    s.append("hypothesis_concepts", {"hyp_id": "h1", "concepts": ["reg/y"], "at_vocab": 30})
+    s.append("hypothesis_concepts", {"hyp_id": "h2", "concepts": ["z"]})   # pre-B1: no at_vocab
+    st = fold(s.read_all())
+    assert st.hypothesis_concepts_at_vocab == {"h0": 3, "h1": 30}
+    # h0 tagged at vocab 3 << latest 30 -> stale; h1 (30) fresh; h2 (missing -> 0) stale
+    stale = stale_tagged_nodes(["h0", "h1", "h2"], st.hypothesis_concepts_at_vocab, growth=0.7, cap=20)
+    assert "h0" in stale and "h2" in stale and "h1" not in stale
+
+
 def test_tag_text_llm_shared_tagger(tmp_path):
     """The shared agentic single-text tagger: pins to KNOWN ids (grow=False), respects an empty verdict,
     recovers via tag_text on all-unknown / no client. `tag_idea_llm` now delegates to it."""

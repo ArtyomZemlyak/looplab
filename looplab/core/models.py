@@ -496,6 +496,10 @@ class RunState(BaseModel):
     # the LLM tagger, reused by taxonomy dedup instead of the tag_text alias heuristic. Populated only when
     # `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
     hypothesis_concepts: dict[str, list[str]] = Field(default_factory=dict)
+    # PART IV D4 (§21.18 B1-ext): concept-graph vocabulary SIZE when each hypothesis was tagged — a
+    # hypothesis tagged against a much smaller vocabulary is STALE and gets re-tagged against the grown one
+    # (bounded per cadence), mirroring node_concepts_at_vocab. Additive/reader-defaulted; empty on old logs.
+    hypothesis_concepts_at_vocab: dict[str, int] = Field(default_factory=dict)
     # PART IV D5 (§21.18 B3): the accumulated concept-consolidation rename map (raw_id -> canonical_id).
     # Reused by later cadences so consolidation decisions stay FIXED (stable vocabulary, no flapping / B1
     # churn). Populated only when `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on

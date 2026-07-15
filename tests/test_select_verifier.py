@@ -203,6 +203,25 @@ def test_metric_tie_groups_surfaces_confirmed_ties(tmp_path):
     groups = Engine._metric_tie_groups(None, st)
     assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # only the confirmed tie
 
+def test_metric_tie_groups_includes_holdout_ties_when_holdout_select(tmp_path):
+    """R1-c holdout completeness (§21.18): nodes tied on holdout_metric but NOT on robust_metric form a
+    tie-COMPONENT when holdout_select is on, so their holdout_key verifier slot finally gets produced. With
+    holdout_select off, the holdout tie is not surfaced (byte-identical to the old robust-only grouping)."""
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.7)
+    _add(s, 1, 0.8)                              # DIFFERENT robust metrics -> no robust tie
+    st = fold(s.read_all())
+    st.nodes[0].holdout_metric = 0.5             # ...but TIED on the unseen-signal holdout metric
+    st.nodes[1].holdout_metric = 0.5
+
+    class _S:
+        _holdout_select = True
+    groups = Engine._metric_tie_groups(_S(), st)
+    assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # holdout tie surfaced
+    # holdout_select off -> no holdout linking -> the (robust-distinct) nodes are not a tie
+    assert Engine._metric_tie_groups(None, st) == []
+
+
 def test_reopen_clears_stale_confirm_override(tmp_path):
     # a best_confirmed from epoch N must NOT keep overriding after a reopen to epoch N+1 — the reopen
     # clears BOTH confirmed_done AND the threaded ctx.best_confirmed the confirm-override reads.
