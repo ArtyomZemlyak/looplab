@@ -3004,19 +3004,700 @@ required tag behaviour:
   `build_concept_map`; the strategy snapshot records only NEW decisions. Off-by-default.
 - **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
 
-**CROSS-RUN (CR) — the concept machinery is currently PER-RUN (user-flagged 2026-07-15; design parked
-pending the user's decision).** node_concepts / hypothesis_concepts / concept_consolidation / coverage all
-live in one run's RunState and rebuild from scratch each run; only DISTILLED LESSONS (D6/E4) cross runs
-today (LoopLab's existing `memory.py`/`lessons_*`). `graded_novelty.prior_concepts` (D3 level-3
-"tried_across_runs") is a STUB — the param exists but no caller populates it, so level-3 never fires.
-Backlog (not started):
-- **CR1:** persist the concept vocabulary + consolidation map + per-concept outcomes across runs (seed a new
-  run's graph so the agent doesn't re-learn the coordinate system; global-stable consolidation). B3's rename
-  map is the natural substrate.
-- **CR2:** populate `prior_concepts` from cross-run memory so D3 level-3 finally fires (surface "tried in
-  run X, outcome Y").
-- **CR3:** cross-run coverage — "was concept Z ever touched in ANY run".
+**CROSS-RUN status (CR, user-flagged 2026-07-15).** The concept machinery is currently PER-RUN:
+`node_concepts`, `hypothesis_concepts`, `concept_consolidation`, and coverage all live in one run's
+`RunState` and rebuild from scratch in the next run. Only distilled lessons/cases/meta-notes/skills cross
+runs today. `graded_novelty.prior_concepts` (D3 level 3, `tried_across_runs`) is a stub: the parameter
+exists, but no production caller populates it. The target architecture and the replacement for the former
+three-line CR1–CR3 backlog are specified in §21.19.
 
-The through-line: the **LLM decides semantics** (which concept, when to split/merge), **deterministic code
-maintains the record** (events, fold, redistribution, prefilter), each step keeps a heuristic fallback, and
-every write is an additive, replay-safe event so resume stays deterministic.
+The through-line: the **LLM proposes semantics** (concept assignment, split/merge candidates, claims and
+summaries); deterministic code owns identity, scope, provenance, versioning, invalidation, ranking inputs,
+and replay. Every derived answer must be drillable to immutable attempt/measurement/event atoms.
+
+<a id="cross-run-research-architecture"></a>
+
+#### 21.19 Cross-run research memory — faceted scope + concept graph + incremental summaries (design, 2026-07-15)
+
+##### 21.19.0 The actual problem and the architectural decision
+
+The motivating scale is not “compare two sweeps.” It is **50–500 runs, thousands to tens of thousands of
+nodes**, with related but non-equivalent applications of a broad field. “Text vectorization” can mean
+item↔item, query↔item, comment/review classification, multilingual retrieval, a universal encoder, or a
+multi-domain system. The same technology can help one slice and hurt another; two tasks can share no metric
+scale while sharing a useful method; a failed experiment can mean “bad idea,” “bad implementation,” “wrong
+data regime,” “insufficient budget,” or simply “not tested.” A 51st run must learn from the first 50 without
+reading all their event logs and without treating a lossy summary as fact.
+
+**Decision:** build a **cross-run research index** with four distinct layers, not one global vector store and
+not one global tree:
+
+1. **Immutable evidence atoms** — execution attempts, measurements and append-only events remain facts;
+   “current outcome” is a projection over generations, never an atom rewritten in place.
+2. **A faceted scope algebra** — task/application/data/objective/runtime predicates describe *where* an
+   observation may transfer. Scopes overlap and compose with explicit AND/OR/subset operations; they are not
+   forced into one parent-child hierarchy.
+3. **A versioned concept/technology graph** — multi-label concepts describe *what* was tried and how
+   technologies relate. This graph is orthogonal to applicability.
+4. **Derived claim assessments and hierarchical materialized summaries** — cheap, incremental read models
+   for agents and UI. Assessments/rollups are disposable and rebuildable; operator-ratified claim
+   definitions and decisions are versioned durable records; every assessment/summary cites evidence.
+
+The distinction is essential:
+
+```text
+where it may transfer                    what was tried
+─────────────────────                    ──────────────
+application: query→item  ─┐              data/hard-negative-mining ─┐
+domain: marketplace       ├─ Evidence ─▶ loss/mnr                    ├─ outcomes
+language: multilingual    │              encoder/adapter-tuning      │
+objective: recall@100     ┘              serving/quantization       ┘
+```
+
+A technology is **not** a task scope, a project folder is **not** scientific applicability, and a textual
+similarity score is **not** evidence of transferability. The UI may present tree-like navigation, but the
+canonical model is a typed graph plus facets.
+
+**Current-system audit — reuse the seams, do not overstate them:**
+
+| Shipped seam | What it genuinely provides | Gap CR must close |
+|---|---|---|
+| per-run `events.jsonl` + pure fold | replayable node/evaluation truth and outcome signatures | no portfolio index or cross-run snapshot watermark |
+| `SiblingRunTools` | read-only drill-down into same-`task_id` siblings, cached by log fingerprint | exact ID is too narrow; query cost still grows with sibling logs |
+| machine-wide run tools | agent can inspect any local run | discovery is broad but unscoped; the agent must infer applicability ad hoc |
+| `cases.jsonl` | retain-on-improvement exemplar per exact task | one winner hides alternatives, failures, scope and metric compatibility |
+| lessons/meta-notes/skills | cross-run distilled memory, role routing, reconciliation/hygiene | fingerprint/statement scope is insufficient for concept×application evidence |
+| per-run concept events | incremental node/hypothesis tags, stable run-local consolidation | no shared concept identity/revision or cross-run outcomes/coverage |
+| `/api/runs` + theme rollup | cheap cached run inventory and Researcher-assigned theme counts | themes are free text, not the D5 concept graph; metrics may be incomparable |
+| projects + super-tasks | useful non-destructive operator grouping | organizational membership is not scientific transferability |
+| on-demand scope report | portfolio prose over per-run reports with bounded drill-down | lossy input, no claim/evidence dependency graph, expensive/stale at scale |
+| Cross-run Sweep / Map / Memory UI | exact-task leaderboard, run provenance, raw memory inspection | no coordinated scope×concept×claim evidence exploration |
+| Genesis prior-report index | cross-run prose can influence run planning | no retrieval receipt, applicability proof, contradiction bundle or freshness contract |
+
+Verified sharp edges make this more than a theoretical scale concern: the current task/lesson tokenization is
+ASCII-oriented (non-Latin goal cues such as Russian can disappear); a case omits run/node/artifact/env
+provenance; active `search_lessons` is weaker than passive routing (full lexical scan without the same
+fingerprint/role/contradiction/trust contract); concept coverage can look complete when tagging is partial;
+and the current outcome signature omits claim-relevant confirmed/holdout/trust/env fields. Scope-report input
+is an unbounded concatenation of per-run reports and its fallback can order incompatible raw metrics. In the
+UI, the visible RunList can combine folder+task+super-task+query filters while Report chooses only one scope
+axis, so “report what I see” is not guaranteed. Those uncited/stale report headlines are also automatically
+fed to Genesis today; treat that as **legacy unsafe influence** until CR2 receipts/eligibility replace it.
+
+The new index therefore sits **beside** the engine and fold as a read/projection subsystem. It consumes run
+events and operator metadata; the engine may read a bounded context snapshot but never imports the
+portfolio index into replay. The first implementation should reuse the existing traversal guards, outcome
+signatures, role routing, W3C-PROV export, and atomic file primitives while replacing whole-portfolio folds
+and flat JSONL rewrites with an idempotent incremental projection.
+
+##### 21.19.1 Non-goals and invariants
+
+**Non-goals.** CR does not replace per-run `events.jsonl`, automatically declare causal truth, compare raw
+metrics across incompatible tasks, collapse all hypotheses into global beliefs, or inject the whole
+portfolio into every prompt. It does not make an LLM-authored report canonical.
+
+**Hard invariants:**
+
+- **Evidence before synthesis.** A claim with no resolvable evidence refs is an ungrounded note, never a
+  trusted lesson or novelty signal.
+- **Abstention before false transfer.** Unknown applicability produces “possibly related / inspect,” not
+  “tried before” and never an automatic rejection.
+- **Scope is explicit and multi-valued.** Exact-task, application, domain, modality/language, dataset family,
+  objective/metric, constraints, codebase, and environment may each match or conflict independently.
+- **Metrics are comparable only inside a declared comparison contract/group.** Outside it, use qualitative
+  outcomes; normalized effects or ranks are allowed only against an explicit shared baseline/population.
+  Ranks from unrelated adaptive searches are not magically comparable.
+- **Absence is not failure.** Zero coverage means “no eligible evidence found,” distinct from attempted,
+  failed, inconclusive, contradicted, stale, or inaccessible.
+- **Negative knowledge keeps conditions.** “MNR failed on 2k noisy labels under a 20-minute budget” must not
+  become “MNR fails.”
+- **Summaries never sever provenance.** Any sentence shown to a user or agent has a proof trail to
+  `{run_id, node_id, event seq/outcome signature}` and, where applicable, artifact/data/env versions.
+- **Derived state is rebuildable.** The event logs and explicit operator-authored metadata survive index
+  deletion; embeddings, clusters, rollups, and summaries do not become hidden truth.
+- **Taxonomy changes do not rewrite history.** Aliases/merges/splits are versioned mappings; evidence keeps
+  the concept revision under which it was tagged.
+- **Online reads are snapshot-consistent.** One decision sees one index watermark. Concurrent runs may add
+  evidence after it, but cannot mutate the context halfway through a proposal.
+- **Agent influence is visible.** A proposal/novelty/strategy decision records which cross-run claims were
+  supplied and why they ranked, then separately links observable agent citations, explicit dismissals and
+  downstream actions; it never invents an unknowable “internally used” flag.
+- **Permission closure.** A derived claim, count, summary, embedding and retrieval receipt may reveal only
+  evidence visible to that principal. Removing access invalidates dependent projections; even aggregate
+  counts must not disclose the existence of hidden runs.
+
+##### 21.19.2 Scope algebra: not `task_id` and not one “topic” field
+
+The current exact-`task_id` sibling boundary is too narrow; the current fingerprint token Jaccard is too
+coarse to be the scientific applicability model. Define a structured `ScopeProfile` (agent-suggested,
+operator-confirmable) whose facets are independently indexed:
+
+| Facet | Examples | Why it matters |
+|---|---|---|
+| interaction / application | item→item, query→item, text→class, universal embedding | strongest boundary on which results transfer |
+| entity + modality | product text, query, review, image+text | distinguishes superficially similar “vectorization” tasks |
+| domain / subdomain | marketplace/electronics, support, legal | data distribution and vocabulary |
+| language / locale | ru, en, multilingual, code-switching | tokenizer/model/data transfer |
+| dataset lineage | snapshot/hash, label policy, split generation, parent dataset | prevents leakage and stale comparisons |
+| objective contract | retrieval, ranking, classification; metric name/direction/unit | determines valid comparisons |
+| constraints | latency, memory, model size, privacy, offline-only | changes whether a technique is usable |
+| implementation context | repo/codebase, framework, base model, dependency family | separates idea failure from integration failure |
+| temporal/environment | time, library/CUDA/hardware fingerprint | makes drift and reproducibility visible |
+| operator organization | folder/collection, super-task, tags | UI organization, not inferred science |
+
+Facet values themselves need stable UID/version/provenance/confidence rather than free-text strings. Each
+facet comparison first produces a factual directional relation from evidence scope → target scope:
+`exact`, `subsumes`, `subsumed_by`, `overlaps`, `disjoint`, or `unknown`. An intent-specific transfer policy
+then produces an `ApplicabilityAssessment` conditioned on the claim/concept, retrieval intent and policy
+version, with matched/conflicting facets and hard/soft reasons. “Compatible” is not a fact independent of the
+question: language may be load-bearing for tokenizer claims, hardware for quantization, and interaction type
+for hard-negative mining. `ANY/wildcard`, `UNKNOWN`, `NOT_APPLICABLE`, and `REDACTED` are explicit values;
+missing never means universal. Evidence from a broad multilingual benchmark may support a narrower language
+slice differently from a narrow Russian-only result supporting a universal claim. ACL/tenant is not a facet:
+`VisibilityPolicy` filters first. Trust/leakage and comparison-contract rules then apply; soft scope match
+ranks what remains. Every widening step stays labelled.
+
+`ScopeProfile` is the run default, not the only scope unit. A multi-domain/universal run needs an
+`EvaluationSlice` / `ObservationProfile` for each reported domain, segment, interaction and metric. An
+aggregate score over domains A+B+C supports only the declared aggregate scope; it is not evidence that the
+method helped A, B and C independently unless slice metrics exist. Each slice points to a first-class
+`ComparisonContract`: dataset/split lineage, population/filter, metric UID/unit/direction/aggregation,
+baseline, constraints, evaluation code/version and uncertainty protocol. This contract — not a matching
+metric name — decides whether two numeric outcomes are comparable.
+
+**Why not a single hierarchy?** One run can be marketplace + multilingual + query→item + quantized serving;
+another can share only multilingual data, only query→item, or only quantization. Placing both under a single
+“text vectorization” parent either hides useful lateral transfer or mixes incompatible results. The current
+UI “projects” are folders/collections and super-tasks are single-membership navigation overlays;
+`ScopeProfile` is the scientific scope and `VisibilityPolicy` is the authorization boundary.
+
+##### 21.19.3 Canonical records
+
+Names below are conceptual. Storage may begin as append-only decision ledgers + a rebuildable transactional
+SQLite/FTS/vector projection before an external database is justified. The important boundary is durable
+facts/decisions versus rebuildable assessments/indexes.
+
+**0. Corpus, policy and snapshot records.** A `CorpusSource` gives every run a collision-safe identity
+`{source_uid, run_id}` across run roots/machines. `CorpusSnapshot` / `IndexCommit` records the source cursors,
+global `index_epoch`, taxonomy release, vector/FTS build versions and completeness. `VisibilityPolicy` is a
+separate policy envelope — not a task facet — inherited by evidence and every derived object. `UNKNOWN`,
+`ANY`, `REDACTED` and `INACCESSIBLE` are different states.
+
+**1. Scientific scope and comparison records.** Separate the relatively stable `TaskDefinition` and
+versioned `ScopeProfile` (application/domain/entity/language/constraints) from immutable per-execution
+`RunContext` (dataset/code/environment snapshots). `EvaluationSlice` identifies a population/domain/
+segment. `ComparisonContract` defines dataset + split/candidate-pool lineage, evaluator/version, population,
+metric UID/unit/direction/cutoff/aggregation, baseline, constraints and uncertainty protocol. Two values are
+numerically comparable only when this contract (or an explicit conversion/effect contract) says so.
+
+**2. Immutable empirical atoms and pointers.**
+
+```text
+ExecutionAttempt
+  source_key = (source_uid, run_id, search_epoch, node_id, generation, event_seq)
+  started/ended, parent/import lineage, intervention signature, RunContext, terminal outcome
+
+Measurement
+  measurement_id, attempt source_key, EvaluationSlice, ComparisonContract
+  phase = trial | raw | holdout | cross-validation | confirmed | resource
+  value/vector, uncertainty/seeds, cost, observed_at
+  supersedes_measurement_id (optional; old atoms remain queryable)
+
+TrustAssessment
+  assessment_id, subject attempt/measurement/artifact, detector/policy/version, result/reasons
+  supersedes_assessment_id (optional; trust changes append, never rewrite a Measurement)
+
+EvidenceRef
+  stable pointer to attempt/measurement/artifact/event; no copied conclusion
+```
+
+The source key is the idempotency identity; a separate `content_hash` detects identical payloads. Never use
+content hash as identity or two genuine replications collapse. Re-evaluation/reset/reopen adds a new
+generation/measurement and supersedes the old current projection; it does not mutate the earlier fact. The
+existing rounded `outcome_signature` is useful for shipped lesson reconciliation but is insufficient here:
+the CR evidence digest covers all claim-relevant raw/confirmed/holdout values, feasibility/trust, evaluator,
+data/code/environment, generation and comparison contract.
+
+**3. Concepts and consistent taxonomy releases.**
+
+```text
+concept_uid                         # stable opaque identity; never the display slug
+ConceptRevision(label, aliases, definition, kind, namespace, status, provenance)
+ConceptEdgeRevision(type, source_uid, target_uid, lifecycle, provenance)
+TaxonomyRelease(release_id, exact node/edge revisions, created_at)
+ConceptAssignment(evidence/item ref, concept_uid, release, confidence, rationale, tagger/version/source)
+```
+
+A B3 run-local rename is **evidence for** a global alias, not globally authoritative by itself. Promotion
+requires repeated agreement across eligible runs or operator ratification. A merge preserves both UIDs; a
+split creates new UIDs and queues bounded re-tagging. The registry is federated: a small cross-domain core,
+domain/application namespaces and task-local proposals. Kinds include `method`, `model`, `data`, `loss`,
+`framework`, `infrastructure`, `evaluation`, `constraint`, and `failure-mode`; typed edges include `is_a`,
+`part_of`, `uses`, `requires`, `alternative_to`, `conflicts_with`, and `related_to`. Hierarchical edges remain
+acyclic; the complete typed graph may cycle. A tagger retrieves a bounded relevant vocabulary neighbourhood
+plus an explicit “new/unknown concept” option — it never puts the whole global registry in one prompt.
+Governance also has ownership namespaces (`personal`, owning-project, `team`, `global`): a run-local/personal
+proposal can be promoted after review, but cannot silently mutate a broader namespace.
+
+**4. Intervention, dependence and effect records.** `InterventionSignature` captures the parent diff,
+relevant code/config/data fingerprints and changed concepts, separating exact replication, extension,
+ablation and coincidental concept overlap. `EvidenceDependency` / `IndependenceGroup` records shared run
+lineage, dataset, seed family, base checkpoint and imports. `EffectEstimate` always names the comparator and
+contract; it may be direct, paired, ablation, confounded or unavailable. A node changing X+Y+Z remains joint
+evidence — it does not become three causal wins.
+
+**5. Durable claims versus rebuildable assessments.**
+
+```text
+ClaimDefinition / ClaimRevision
+  stable semantic key = {claim_kind, subject/intervention/concept bundle, predicate,
+                         comparator, outcome/comparison contract, scope predicate}
+  immutable prose revisions + role/audience
+  asserted relation = helps | hurts | requires | conflicts | equivalent
+
+ClaimEvidenceLink
+  one row per claim revision + evidence/effect ref
+  stance = support | oppose | confounded; include/exclude reason, rationale/version
+
+ClaimDecision
+  maturity = machine-proposed | verified | operator-ratified | rejected
+  lifecycle = live | superseded | retired
+
+ClaimAssessment                         # rebuildable at one CorpusSnapshot
+  epistemic = supported | mixed | refuted | inconclusive
+  supporting/opposing/unknown families, freshness/completeness, confidence components, derivation receipt
+```
+
+“Hurts” is a supported negative-effect claim, not a refuted positive claim. Confidence is not one LLM float:
+expose evidence independence, directness, trust/reproducibility, consistency, recency, completeness and scope
+match. Five nodes in one lineage are one correlated family. Summaries of summaries are never new evidence;
+aggregation deduplicates to leaf attempts/measurements. Statement text is not identity, and “X helps” without
+a comparator/outcome contract is not testable. Do not eagerly instantiate every concept×scope claim: create
+definitions for observed interventions/effects, repeated or contradictory bundles, operator pins and hot
+queries; compute the rest as coverage/search results.
+
+**6. Coverage, exemplars and read models.** A `CoverageFrame` defines the reference universe: scope
+predicate, taxonomy release, coverage level (`mentioned`, `proposed`, `implemented`, `evaluated`, `trusted`,
+`replicated`), corpus snapshot, tagging/index completeness and temporal cutoff. Only relative to that frame
+can CR say “covered” or “not observed.” A concept minted after old runs makes those untagged runs `unknown`
+until backfill, not zero. `SolutionExemplar` / Pareto registry points to complete comparable solutions;
+`RunCapsule` projects one run's scope, evidence, coverage, claims, caveats and representative nodes.
+
+**7. Materialized summaries and derivation receipts.** `PortfolioSummary` / `ConceptDigest` records a
+normalized scope predicate, immutable membership manifest or content-addressed canonical member set (not
+only an unrecoverable hash), taxonomy/corpus snapshots,
+summarizer/prompt version, citations, visibility closure and freshness. A reusable `DerivationReceipt`
+connects evidence → assignment/effect → assessment → summary/context pack. These objects accelerate
+navigation; they never become the only copy of a fact or claim decision.
+
+| Owner | Canonical | Rebuildable |
+|---|---|---|
+| run | append-only attempt/evaluation events, artifacts/snapshots | folded current node state, RunCapsule |
+| Atlas control plane | confirmed profiles/scopes/studies, taxonomy and claim decision events, policies/tombstones | memberships, assessments, coverage and governance previews |
+| retrieval plane | immutable context/derivation receipts required for audit | SQLite/FTS/vector/graph indexes, rankings and caches |
+| narrative plane | operator-authored KB sources + immutable generated audit artifacts when cited (not scientific truth) | current claim cards, concept/portfolio summaries |
+
+##### 21.19.4 Incremental hierarchy: how the 51st run avoids reading 50 full logs
+
+Use a **map → reduce → drill-down** pipeline:
+
+```text
+attempt/measurement events (canonical, O(all evidence))
+        │ incremental tail / changed full evidence digests
+        ▼
+RunCapsule per run (hundreds of tokens + structured fields)
+        │ route by facets + concepts; update only affected buckets
+        ├───────────────┐
+        ▼               ▼
+PortfolioSummary   ConceptDigest     (application/domain/objective and technology views)
+        └───────┬───────┘
+                ▼
+query-focused synthesis / context pack
+                │ citations + retrieval reasons
+                ▼
+        selected claims → evidence → node/code/log drill-down
+```
+
+The reducer never concatenates 50 reports on each query. When run 50 changes, the indexer recomputes its
+capsule and only summaries whose membership or cited outcomes changed. Store forward **and reverse** typed
+dependencies `measurement → assignment/effect → assessment → capsule/digest/summary/context`. Factual
+counters update in the index commit; narrative projections are marked dirty and regenerate async/lazily.
+Large non-sensitive buckets may serve the previous version with a stale banner. An ACL/visibility revocation
+is different: affected prose/counts are withheld immediately and regenerated from eligible evidence — stale
+private-derived text is never served.
+
+One query snapshot is created in a **short** read transaction (e.g. SQLite WAL initially) and pins
+`index_commit_id`, per-source cursors `{last_event_seq, byte_offset, terminal/event digest}`,
+`taxonomy_release`, policy/ACL epoch, corpus-discovery watermark/completeness, and lexical/vector index
+versions. The retrieval session then holds immutable/versioned candidates or its manifest — never a DB read
+transaction across LLM turns. All coordinated UI views and the agent context use that token.
+New commits appear as “N new observations — refresh,” never mutate a decision halfway through. Incremental
+result must equal a clean rebuild at the same snapshot.
+
+Operator-confirmed scope values, Saved Scopes/Studies, taxonomy releases, claim reviews, policy decisions
+and tombstones require a canonical **Atlas metadata journal** (append-only + interprocess lock locally;
+transactional/optimistic revisions in multi-user deployment). They cannot live only in rebuildable SQLite.
+Run logs remain truth for empirical attempts/measurements; the Atlas journal is truth for cross-run
+operator-authored metadata. Derived assignments, assessments, embeddings and summaries stay rebuildable.
+
+Do **not** precompute every combination of ten facets: that creates an exponential summary cube and many
+one-run pseudo-insights. Materialize only stable anchors (exact task/comparison group, explicit Collection/
+Study, frequent application/domain slices, active concepts and reviewed Saved Scopes). Arbitrary scope
+intersections are computed deterministically from structured observations, optionally summarized at query
+time, and cached by normalized scope predicate + entitlement set + source/taxonomy watermarks. Promote a
+query scope to a maintained view only after repeated use or an explicit pin. Summary aggregation always
+deduplicates to immutable leaf evidence families; a summary citing another summary does not add support.
+
+This borrows the useful part of recursive-summary retrieval (multiple abstraction levels) and graph
+community summaries, but replaces blind clustering with typed applicability/concept routing and preserves
+first-class evidence. See [RAPTOR](https://openreview.net/pdf?id=GN921JHCRw),
+[GraphRAG's indexing/query model](https://microsoft.github.io/graphrag/), and
+[W3C PROV](https://www.w3.org/TR/prov-overview/) for the architectural influences — not dependencies.
+
+**Complexity target.** Ingest is O(changed events + concepts on changed nodes), not O(all historic nodes).
+A normal proposal query performs **zero full event-log folds**, touches bounded candidate pools and returns a
+bounded context pack with no required LLM call. Full portfolio regeneration is an explicit background/
+rebuild operation. Semantic enrichment may lag factual indexing; its completeness is visible.
+
+**Invalidation contract:**
+
+| Change | Same short transaction | Dirty / async work |
+|---|---|---|
+| attempt/measurement appended | atom, current projection, factual counters/capsule | affected assignments/effects/assessments/digests |
+| reset/re-eval | add generation; supersede active projection; `-old/+new` counters | dependants citing the old active result |
+| trust/confirmation/feasibility | eligibility/quality projection | assessments/summaries/context cards |
+| scope/slice/contract revision | membership and comparison relations | scoped assessments + Saved Scope summaries |
+| concept label/alias | release/display/FTS mapping | usually no re-tag |
+| concept merge/split | publish revision mapping; old assignments interpretable | bounded retag/backfill; affected views partial |
+| collection/study membership | named-scope membership | only that named summary |
+| ACL revoke/purge | visibility and cache denial immediately | entitlement-homogeneous projections rebuild |
+| embedding model/change | facts unchanged; new index generation staged | atomic generation publish, never mixed vectors |
+| summarizer/prompt change | facts unchanged | narrative versions dirty only |
+
+Never hold a file/DB lock during an LLM or embedding call. A short transactional projector tails complete
+JSONL records, publishes factual deltas, then queues semantic work. Torn tails wait; truncation/hash mismatch
+rebuilds one run partition in staging. Full rebuild publishes SQL/FTS/vector generations behind one atomic
+manifest switch.
+
+##### 21.19.5 Retrieval and the 51st-run context contract
+
+Retrieval is a query plan, not `top_k(vector_similarity)`:
+
+1. **Intent:** classify the caller (`genesis`, run-start plan, proposal, novelty, strategist, developer
+   repair, deep research, human UI) and requested decision (`replicate`, `extend`, `ablate`, `compare`,
+   `technology research`, `coverage`). An intentional replication is not a duplicate to suppress.
+2. **Eligibility:** apply an intent-versioned hard-filter matrix. Objective/contract conflict is hard for
+   metric comparison/exact-duplicate detection but may remain useful for technology research. ACL is always
+   hard; trust/leakage, temporal cutoff and scope policies are explicit reason codes.
+3. **Candidate generation:** union exact structured filters, lexical/BM25, embeddings, concept/graph
+   neighbours, proven lineage/import links, and optionally summary/community hits. Cap each channel before
+   fusion so one unbounded all-runs/lessons scan cannot dominate or be silently tail-truncated.
+4. **Fusion + scope-aware rerank:** RRF the bounded channels, then combine directional applicability,
+   concept match, evidence quality, freshness, independence, outcome informativeness, and diversity with a
+   versioned intent-specific policy. Similarity is only one feature.
+5. **Contradiction bundle:** retrieve supporting, opposing and mixed evidence families together with quotas;
+   never return only the most positive cluster. “Not yet tested here” is computed from a complete-enough
+   `CoverageFrame`, not retrieved as a document.
+6. **Progressive disclosure:** return a manifest first, then claim cards/run capsules, then exact
+   nodes/code/logs only if needed.
+7. **Context assembly:** allocate explicit token slots and deduplicate by claim/evidence family.
+8. **Receipt:** before the decision, persist the query, target profile, entitlement/ACL view, index/taxonomy watermarks, selected
+   and excluded IDs, scores/reasons, truncation, and downstream decision link. The exact redacted context
+   manifest/rendered blob is immutable or content-addressed; a text hash alone cannot reconstruct what the
+   agent actually saw. Later record only observable states: `supplied`, `agent-cited`, `acted-on`, explicit
+   `rejected`, `ignored/undeclared`, and `not-seen-due-to-budget`; causal “used internally” is unknowable.
+
+The engine links the committed receipt **before** injecting the pack; if the audit write fails, it emits
+`context_unavailable` and continues without silently unaudited cross-run influence. Tool-loop retrievals add
+child receipts; the final proposal/strategy/novelty event references the set. Genesis receipts live in the
+Atlas journal before a run exists and transfer into launch provenance on confirmation. Security overrides
+snapshot repeatability: recheck the policy epoch before injection and cancel/re-filter an active session on
+revocation.
+
+**Default context pack (bounded):**
+
+- 1 scope header: what matched exactly, adjacently, conflicted, or is unknown;
+- 3–5 strongest actionable claims, with both support and opposition;
+- 2–3 relevant failed/inconclusive directions with applicability conditions;
+- 1 portfolio coverage/unknowns block (“well explored / weak evidence / untouched here”);
+- 1–3 representative runs/nodes for drill-down;
+- a compact taxonomy alias note only if it affects interpretation.
+
+The proposal/novelty/Strategist hot path assembles this pack deterministically from precomputed claim cards,
+coverage and evidence refs. Query-time LLM synthesis is reserved for deep research or an explicit human
+portfolio question; a model outage must not add latency or change basic eligibility. Embedding models and
+dimensions are versioned per index generation; hits from different vector spaces are never mixed. If the
+semantic channel fails, fail that channel closed and continue with structured + lexical retrieval — never
+pad fallback/hash vectors into a live semantic space.
+
+No raw global “prior_concepts: set[str]” is sufficient. D3 level 3 must receive structured prior evidence:
+concept, scope relation, prior outcomes, representative refs, confidence/freshness, and whether this proposal
+is materially different. Level 3 means **surface prior**, not reject. Only an exact implementation/data/
+objective duplicate with strong evidence may feed the existing duplicate policy; adjacent-domain evidence
+is advisory. `replicate` / `extend` / `ablate` intent bypasses duplicate suppression while retaining the
+prior bundle as experimental context.
+
+Expose structured query primitives before a generic chat endpoint: `find_prior_attempts(target, idea)`,
+`coverage(scope, concepts, level)`, `search_claims(scope, query)`, `compare_evidence(contract, ids)`,
+`trace_claim(claim_id)`, `get_run_capsule(run_id)`, and `explain_recall(receipt_id)`. This lets both UI and
+agents ask bounded questions and makes retrieval quality testable without judging free-form prose.
+
+One versioned `QuerySpec` carries intent/caller/decision attempt, target scope + evaluation slices,
+text/idea/concept/intervention signature, outcome polarity, knowledge cutoff + pinned index snapshot,
+trust/visibility and widening policy, and candidate/latency/token/LLM budgets. Initial caps to benchmark (not
+magic product constants): structured 100, lexical 80, dense 80, graph 80, lineage 40, summaries 20, fused
+union ≤400. Each truncation reports hidden count and a continuation cursor/tool.
+
+Initial cross-run token envelopes are likewise explicit and subordinate to current-run evidence: Genesis
+1,600; run start 1,200; proposal 900; novelty 600; Strategist 800; Developer repair 900; deep research 3,000;
+UI synthesis 2,000/page, additionally capped at 10–15% of remaining input budget. Support/opposition and
+scope/freshness headers are reserved slots, so positive hits cannot crowd out caveats.
+
+**Where it is used online:**
+
+| Moment | Cross-run input | Permitted effect |
+|---|---|---|
+| Genesis / run creation | related portfolios, gaps, proven setup constraints | propose scope/settings and disclose prior art |
+| run start | scope-confirmed manifest + vocabulary seed | initialize coordinate system; never silently inherit conclusions |
+| Researcher proposal | actionable claims, counterevidence, uncovered regions | prompt grounding and hypothesis formation |
+| D3 novelty | structured attempted-before bundle | surface/reframe/re-propose; no cross-scope hard reject |
+| Strategist | coverage by eligible scope + expected information gain | choose exploit/explore/research emphasis |
+| Developer/repair | codebase/framework-compatible repair claims | implementation guidance only; role routing preserved |
+| deep research | portfolio unknowns/contradictions + evidence map | target unresolved questions, avoid report duplication |
+| finalize/re-eval | changed evidence and candidate claims | update/reconcile affected projections |
+
+Strategist/coverage context keeps three layers separate: `current run`, `prior exact scope`, and `prior
+adjacent scope`; combining them into one count would make a heavily explored neighbouring domain hide a gap
+in the current task. Any expected-information-gain heuristic is versioned and uses uncertainty ×
+applicability × decision relevance / expected evaluation cost only as advisory context.
+
+“Real-time everywhere” still needs a reproducibility policy. `frozen_at_run_start` pins the knowledge cutoff
+for controlled benchmarks; `live_share` lets concurrent runs see newly committed evidence **at the next
+decision boundary**, never midway through one. The UI may show newer snapshots immediately, but each agent
+decision remains pinned and receipted. Switching mode/cutoff is explicit run provenance, and temporal replay
+cannot see future evidence.
+
+##### 21.19.6 How concepts, hypotheses, lessons, memory, and KB coexist
+
+These stores must be connected by IDs, not collapsed into one blob:
+
+| Object | Question it answers | Truth / scope | Cross-run treatment |
+|---|---|---|---|
+| experiment evidence | what actually happened? | immutable attempt/measurement/event atoms | canonical evidence leaf |
+| concept graph | what family of method/asset/constraint is this? | versioned shared vocabulary | navigation, coverage, retrieval |
+| hypothesis | what should this run test next? | mutable per-run work item | may be seeded from a claim, remains a new local hypothesis |
+| claim / lesson | what does the accumulated evidence suggest, and where? | evidence-backed + applicability | shared synthesis with support/opposition |
+| case | what complete solution won for a comparable contract? | exact/declared comparison group | exemplar; never the whole knowledge model |
+| meta-note | why did one run appear to win? | run-level interpretation | input to a claim, not automatically trusted truth |
+| skill | how do we implement a repeated technique? | code + compatibility + evidence | procedural memory |
+| KB note | operator/external domain knowledge | authored source with provenance | searchable context; cannot masquerade as experimental evidence |
+| portfolio summary | what does this selected body of work say overall? | derived materialized view | UI/global retrieval entry point |
+
+Existing `lessons.jsonl` can migrate into machine-proposed `ClaimDefinition`s with evidence links and current fingerprints,
+but missing applicability becomes `unknown`, not guessed. Existing Markdown KB stays human-editable. A claim
+may cite a KB source and experimental evidence separately; UI labels them “external/operator knowledge” and
+“observed in runs.” Skills keep the Researcher/Developer role split and add framework/runtime compatibility.
+
+In the target model, a **lesson is a role-routed rendering/projection of a ClaimAssessment**, not a second
+competing truth store. During migration, current `lessons.jsonl` remains a legacy compatibility source; new
+logic must not independently update both a lesson verdict and a claim assessment with different conflict
+rules. Cases become `SolutionExemplar`s, while meta-notes remain run interpretations feeding — never
+overriding — evidence links.
+
+Maturity and epistemic state stay separate: a claim moves `machine-proposed → verified/operator-ratified` by
+review decision, while its current assessment becomes `supported/mixed/refuted/inconclusive` from eligible
+independent evidence. Contradictions produce scoped `mixed` assessments, not newest-row-wins across domains.
+Re-evaluation/data/trust changes append new measurements or policy facts, supersede the active projection and
+mark dependent assessments/summaries dirty through the full evidence digest; old empirical atoms remain
+historical. Deleted/inaccessible evidence leaves only a policy-compliant tombstone.
+
+##### 21.19.7 UI / information architecture
+
+Do not extend the current flat Memory tabs and 57-run spatial Map into one enormous hairball. Add a
+**Research Atlas** as one snapshot-consistent evidence workspace, not eight peer panels.
+
+**Persistent shell:** a `SavedScope`/inline predicate bar (application, domain, dataset/version, objective,
+constraints, time, collection/study, trust and widening policy), concept navigator, compare tray, proof drawer,
+`as of` snapshot/freshness and index-health banner. It states `N visible runs / M measurements / K comparison
+groups` plus profile/index completeness, not one misleading total. A Saved Scope stores the whole predicate
+and a membership preview; `supertask > task > folder` priority is not a scope model.
+
+Four coordinated views share that shell:
+
+1. **Landscape** — structured overview, gaps/contradictions, a sparse virtualized coverage matrix and a
+   focused concept neighbourhood. Show ~10–40 top axes/clusters, then semantic zoom
+   `axis → concept → variant`; never render every run/concept as one global force graph.
+2. **Findings** — scoped claim assessments and role-routed lessons with applicability, independent support
+   vs opposition, direct/confounded evidence, freshness and one-click proof trail.
+3. **Evidence** — cursor-paged runs, evidence families and nodes; comparison groups, compare tray,
+   cost/convergence/reproducibility and exact drill-down to run/node/code/log.
+4. **Changes** — re-evaluations, data/environment drift, claim/taxonomy history and current-vs-prior snapshot.
+
+Taxonomy/claim/scope **Governance** is a separate role-gated workspace with merge/split dry-run, affected
+assignments/coverage/claims, migration cost, optimistic base revision, accept/reject and reversible publish.
+Operational rebuild/index controls stay outside the research views; Atlas shows only health/degraded state.
+
+**Core interactions:**
+
+- Clicking a coverage cell filters claims and evidence to that concept×scope intersection.
+- Clicking a claim opens a proof drawer: statement → applicability → aggregation → supporting/opposing
+  evidence families → node details.
+- “Why recalled?” shows exact/adjacent facet matches, graph path, quality/freshness, and excluded conflicts.
+- “Use in new run” creates a draft hypothesis/context pin with citations; it does not copy a conclusion as
+  established local truth.
+- “Compare” enables raw ranking only for compatible contracts. With an explicit shared baseline/effect
+  contract it may show normalized effects; otherwise it stays qualitative and explains incompatibility.
+- Every summary shows `as of watermark`, taxonomy revision, coverage of indexed runs, and stale/partial badge.
+
+Coverage cells use an accessible state grammar, not colour alone: attempted, evaluated, direct/ablation,
+confounded, support, opposition, inconclusive, stale, partial, known zero, unknown profile, not applicable and
+restricted. `0` is valid only for a complete eligible `CoverageFrame`; `?`, `N/A`, partial and inaccessible
+are distinct. Routes preserve/share scope, concept, view, comparison group and snapshot. Tables/matrices are
+server-filtered, cursor-paged and virtualized; the browser never fetches every run state.
+
+The existing Run List/Map remains operational navigation and provenance; Cross-run Sweep remains legacy
+exact-task comparison only after contract validation; Memory remains a raw-store/admin view. The Atlas is
+the scientific cross-run surface. Current UI “Project” should be relabelled **Collection/Folder** to avoid
+collision with a future owning Project (ACL/budget/data boundary); a many-to-many **Study** replaces
+single-membership super-task when modelling a research programme.
+
+##### 21.19.8 Concurrency, failure, and lifecycle corners
+
+| Corner | Required behaviour |
+|---|---|
+| 20 runs finish concurrently | idempotent atom source keys + append/transactional projection updates; no whole-file lost update |
+| live run changes after capsule read | watermark makes partial state explicit; next incremental update supersedes it |
+| node re-evaluated / outcome flips | append a new generation/measurement; supersede active projection and dirty dependants; retain history |
+| run reopened / new search epoch | epoch is part of attempt identity; prior final capsule becomes historical, not silently extended |
+| trials vs raw/holdout/confirmed values | distinct measurement phases; claims declare which phase supports them and avoid repeated-holdout leakage |
+| archive vs delete vs privileged purge | archive hides operationally; purge revokes content, invalidates dependants and leaves only policy-safe tombstone |
+| ACL revoked | immediately withhold affected prose/counts/caches and rebuild from eligible evidence; never serve private-derived stale text |
+| import/fork duplicates evidence | lineage-aware independence groups prevent double-counting descendants as confirmations |
+| same dataset under renamed task IDs | dataset lineage/profile links them; task name alone does not |
+| same metric name, different evaluator/split/pool | separate comparison contracts; never rank together by name |
+| aggregate multi-domain metric | evidence for the aggregate slice only; do not clone it into domain-level support |
+| same concept label, different meaning | opaque UID + scope-qualified definitions; do not auto-merge on string/embedding similarity |
+| one concept splits into two | new release + bounded re-tag queue; old assignments stay on parent/unresolved until retagged, never double-counted |
+| taxonomy grows at same vocabulary size | release/digest change drives staleness; size threshold alone is insufficient |
+| conflicting domains | keep scoped claim clusters and an overall `mixed`; never newest-wins globally |
+| mixed min/max or metric units | separate comparison groups; normalize only with an explicit baseline/effect definition |
+| multi-objective/Pareto runs | store objective vector + feasibility/constraints; no scalar global champion unless policy declared |
+| failed infrastructure vs failed science | outcome taxonomy separates build/runtime/trust/infeasible/scientific regression |
+| adaptive search / winner's curse | distinguish exploratory from confirmatory evidence; correct interpretation for selection/multiple testing |
+| aggregate trend hides slice reversals | inspect EvaluationSlices for Simpson's paradox; never infer homogeneous effect from aggregate alone |
+| only successful/finalized runs indexed | expose survivorship/completeness; partial/live/failed runs are not silently absent |
+| untrusted/leaky champion | visible but excluded from trusted claims/default recall; trust filter is part of eligibility |
+| LLM/vector/index unavailable | structured+lexical evidence path works when possible; otherwise explicit `context_unavailable`, never empty=current |
+| summarizer hallucinates | verifier checks cited IDs and numeric statements; failure keeps prior summary or metrics-only fallback |
+| taxonomy/index version mismatch | translate through explicit revision map or abstain; never silently compare slugs |
+| poisoned KB/note | source-type/ACL/trust labels; authored prose cannot promote an experimental claim |
+| prompt injection in code/log/KB/memory | retrieve as quoted untrusted data, never instructions; sanitize/tool-bound drill-down and record source |
+| very popular concept dominates top-k | per-concept/per-run diversity caps and evidence-family dedup |
+| “never tried” query | answer only relative to CoverageFrame + corpus/tagging completeness; otherwise unknown/partial |
+| cost/token pressure | reuse capsules/digests, progressive disclosure, hard context budgets; no all-run prompt concatenation |
+
+##### 21.19.9 Alternatives considered
+
+| Alternative | Benefit | Why it is insufficient alone |
+|---|---|---|
+| read/fold all sibling runs on every query | simplest source access | O(total history), prompt explosion, inconsistent snapshots |
+| one summary per run + one mega-summary | easy to build | lossy, weak invalidation, no concept×scope questions, summary becomes hidden truth |
+| vector store over nodes/reports | flexible semantic search | ignores applicability, metric contracts, temporal contradictions, evidence independence |
+| one global concept tree | readable navigation | multi-domain/multi-label knowledge is a graph; forced parentage breaks lateral transfer |
+| fully normalized knowledge graph first | expressive | ontology and operational cost too high before retrieval/value is measured |
+| only existing lessons/fingerprints | reuses shipped memory | claim scope is under-specified; no portfolio coverage, taxonomy versions, or proof-oriented UI |
+| rebuild every aggregate at run end | simple consistency | concurrency/cost cliff and stale reads at scale |
+
+**Chosen minimum:** append-only empirical atoms + structured profiles/concepts/claims, a local transactional projection
+and hybrid indexes, then incremental capsules/digests. A dedicated graph/vector service is a scale-driven
+backend substitution behind the same records, not a Phase-1 prerequisite.
+
+##### 21.19.10 CR rollout — replacement for CR1/CR2/CR3
+
+Each phase first ships audit-only and is evaluated on a frozen portfolio replay before influencing prompts.
+
+| Phase | Deliverable | Agent/UI effect | Gate |
+|---|---|---|---|
+| **CR0 — contract** | `ScopeProfile`, `RunContext`, `EvaluationSlice`/`ComparisonContract`, `ExecutionAttempt`/`Measurement`, Corpus/Visibility snapshots | scope inspector only | old-log migration + deterministic full rebuild |
+| **CR1a — index** | incremental atoms, capsules, concept assignments, taxonomy releases and Atlas journal | fast portfolio inventory | 50/500-run ingest, concurrency, re-eval/archive/purge/ACL correctness |
+| **CR1b — claims** | durable definitions/decisions + scoped assessments, independence families and proof trails | read-only Findings view | citation/numeric verifier; contradiction/scope/causality gold set |
+| **CR2a — retrieval** | hybrid query planner + manifests + why-recalled receipts | tools and UI search, no automatic injection | Recall@K/nDCG + false-transfer rate + latency/token budget |
+| **CR2b — online context** | bounded context packs at Genesis/run-start/proposal/Strategist | advisory prompt grounding | frozen A/B: quality/breadth/cost; no trust regression |
+| **CR2c — D3 wiring** | structured prior-attempt bundle, materially-different logic | level 3 surfaces prior/reframes | false hard-reject rate ≈ 0; exact duplicate savings measured |
+| **CR3a — coverage** | concept×scope coverage matrix, unknown/stale semantics | Research Atlas coverage | counts reproduce raw evidence; completeness disclosed |
+| **CR3b — optional hierarchy** | selective portfolio/concept/community summaries + dependency invalidation | global/holistic questions | must beat flat claims/capsules on quality or token use; otherwise do not ship recursion |
+| **CR3c — governance** | taxonomy workbench, merge/split preview, claim lifecycle | operator control | reversible revision replay + ACL/audit review |
+
+**Benchmark corpus.** Build a labelled fixture with: exact repeats; same application/different domain;
+same domain/different interaction; universal/multi-domain runs; incompatible metrics; multi-objective runs;
+positive and negative replications; correlated forks; reopened/search-epoch runs; intra-node trials plus
+raw/holdout/confirmed measurements; repeated holdout exposure/winner's curse; Simpson reversals; censored
+budgets/survivorship; re-evaluation flips; data/env drift; concept aliases, same-size definition revisions,
+splits and homonyms; taxonomy-growth backfill; deleted/private/untrusted runs; missing reports; and a
+50-run/5k-node plus synthetic 500-run/50k-evidence tier. Measure retrieval relevance and **false transfer**,
+abstention/calibration, evidence citation validity, coverage accuracy/completeness, contradiction handling,
+incremental-vs-clean-rebuild equivalence, ACL non-disclosure, staleness latency, online p50/p95, token/LLM
+cost, and whether the 51st run improves without collapsing exploration.
+
+**Stop/go rule.** CR does not influence selection until audit receipts show what it would have supplied and
+the frozen A/B proves lower duplicate spend or better outcomes without cross-scope suppression. The first
+live effects are contextual/advisory. Automatic rejection, claim review promotion, or global taxonomy
+mutation requires a separate ratified gate.
+
+##### 21.19.11 Acceptance contract (initial thresholds; ratify on a pinned reference host)
+
+**Correctness / reproducibility:**
+
+- after every mutation fixture, incremental projection digest equals a clean full rebuild at the same
+  Corpus/Taxonomy/Policy snapshot;
+- 100% of cited evidence resolves to its immutable atom or an explicit policy-safe tombstone/inaccessible
+  state; 100% of numeric claim/summary statements validate against structured measurements;
+- no raw metric ranking outside a `ComparisonContract`; re-eval correctly supersedes the active projection,
+  changes support/opposition/counters, and preserves the historical version;
+- 20 concurrent terminal runs produce zero lost/duplicate atoms and the same final index digest regardless
+  of ingestion order; taxonomy merge/split replay is reversible;
+- partial/stale/inaccessible/tagging-incomplete corpora produce zero false “never tried” answers.
+
+**Retrieval on the labelled portfolio:**
+
+- exact + paraphrased prior-attempt Recall@20 ≥0.95 and nDCG@10 ≥0.85;
+- actionable false-transfer ≤1%; cross-scope/unknown hard rejects = 0;
+- when both sides exist, support+opposition evidence-family recall ≥0.95;
+- every widening, exclusion and abstention has a stable reason code; replication intent is never suppressed
+  as an accidental duplicate.
+
+**Performance / cost on the 500-run, 50k-evidence fixture:**
+
+- after index readiness, an online query reads 0 bytes from historic `events.jsonl`; fused candidates ≤400;
+- initial reference-host goals: p95 manifest ≤250 ms, assembled deterministic pack ≤750 ms, one-node factual
+  ingest ≤2 s, local factual index lag ≤5 s; semantic/narrative enrichment may lag visibly;
+- first useful Atlas paint ≤2 s and proof-family expansion p95 ≤500 ms on that fixture; the browser fetches
+  one bounded page, not the portfolio;
+- every view is server-filtered/cursor-paged; context obeys intent token caps; unchanged rebuild/query causes
+  zero embedding/LLM calls; no lock is held during a model call;
+- index generation is bounded (initial target ≤2 GB at this fixture) and SQL/FTS/vector generations publish
+  atomically rather than mix versions.
+
+**Receipts / security:**
+
+- 100% of online decisions receiving cross-run context have a reconstructible immutable receipt/body,
+  snapshot + planner/index/policy versions and downstream event link; `supplied`, `agent-cited` and
+  `acted-on` are never conflated;
+- ACL tests show zero leakage through text, embeddings, counts, receipts, “why recalled,” caches or hidden
+  membership; revocation withholds dependent output in the same policy/index transaction;
+- stale narrative never drives a hard action; poisoned KB/log/code text cannot promote experimental
+  evidence or become instructions.
+
+**UI journeys:** from a mixed finding to one opposing exact node ≤3 interactions; “why recalled” for a
+proposal ≤2; incompatible comparison explains the blocked rank; keyboard/table access exposes the same
+zero/unknown/partial/stale semantics as the matrix; a temporal snapshot never sees future evidence.
+
+**Online A/B:** begin with shadow receipts. Before broader advisory rollout, target ≥15% lower duplicate
+evaluation spend, predeclared task-normalized non-inferiority, ≤5% loss of unique-concept coverage, no
+trust/failure regression, and ≤20% latency/token overhead. Measure saved exact repeats separately from any
+suppression of exploration.
+
+**Hierarchy gate:** recursive/community summaries ship only if, against the flat Claim+RunCapsule baseline,
+they improve grounded-answer score by ≥5 percentage points **or** reduce context tokens by ≥30% at equal
+answer/citation quality without worse freshness or latency. Otherwise the flat evidence/claim architecture
+is the final design, not an incomplete intermediate.

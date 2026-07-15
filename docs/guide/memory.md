@@ -30,6 +30,33 @@ In-run **working memory** (rebuilt from the event log each turn, never persisted
 tried), `lineage_lessons` (subtree outcomes ranked by |Δ|), `ancestral_repair_chain` (prior repairs).
 The single source of truth for everything in-run is the append-only `events.jsonl`.
 
+## Current cross-run boundary and the planned Research Atlas
+
+The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.
+Today, sibling tools primarily use exact `task_id`; cases retain one best solution per task; lesson transfer
+uses a compact token fingerprint; the concept graph and its coverage are per-run; and an on-demand scope
+report summarizes per-run reports. This is intentionally different from claiming that LoopLab can already
+answer “what has ever been tried for this technology across 50 heterogeneous applications?”
+
+The Part-IV design now specifies that larger system as a **cross-run research index** and a UI **Research
+Atlas**. Its core distinction is:
+
+- a faceted applicability profile says **where** evidence may transfer (application, entities/modalities,
+  domain, language, dataset lineage, objective/metric, constraints, codebase and environment);
+- a versioned concept/technology graph says **what** was tried;
+- immutable run events/attempt measurements say **what actually happened**; the current node outcome is a
+  projection over generations;
+- scoped claims say **what the evidence currently suggests**, including opposition, uncertainty and
+  freshness;
+- incremental run capsules and portfolio/concept summaries make 50–500 runs cheap to navigate, while every
+  result remains drillable to the exact run/node evidence.
+
+This is deliberately not one global vector store or one topic tree. Projects/super-tasks remain user
+organization; task applicability and technology concepts are orthogonal. A cross-run novelty hit will
+surface prior outcomes and their conditions, not automatically reject an adjacent-domain idea. The target
+schema, retrieval/context contract, UI, lifecycle corners, alternatives and CR0–CR3 rollout are in
+[Project review §21.19](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
+
 ## Methodologies (how memory moves)
 
 | Methodology | What it does | Touches |
