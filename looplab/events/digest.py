@@ -71,6 +71,8 @@ def theme_rollup(state: RunState) -> dict:
     better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
     out: dict[str, dict] = {}
     for n in state.nodes.values():
+        if n.tombstoned:                        # §6.3: a logically-deleted node must not skew theme counts/bests
+            continue
         theme = getattr(n.idea, "theme", None)
         if not theme:
             continue
@@ -330,7 +332,11 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
         return ""
     if char_cap <= 0:
         char_cap = auto_char_cap(state)
-    n_fail = sum(1 for n in nodes.values() if n.status is NodeStatus.failed)
+    # Tombstoned (§6.3 logically-deleted) nodes are invisible to selection via feasible_nodes(); the
+    # always-on context must hide them too, or a deleted dead-end keeps steering the Researcher (the
+    # winners path already excludes them through top_nodes → feasible_nodes; the failure/theme paths
+    # below did not).
+    n_fail = sum(1 for n in nodes.values() if n.status is NodeStatus.failed and not n.tombstoned)
     lines = [f"\nSearch so far — {len(nodes)} experiment(s), {n_fail} failed:"]
 
     winners = top_nodes(state, top_k)
@@ -354,7 +360,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
 
     # Weakest feasible + the most recent failures — the "avoid repeating this" set.
     weak = [n for n in top_nodes(state, worst_n, worst=True) if n not in winners]
-    fails = sorted((n for n in nodes.values() if n.status is NodeStatus.failed),
+    fails = sorted((n for n in nodes.values() if n.status is NodeStatus.failed and not n.tombstoned),
                    key=lambda n: n.id, reverse=True)[:worst_n]
     avoid = weak + [f for f in fails if f not in weak]
     if avoid:

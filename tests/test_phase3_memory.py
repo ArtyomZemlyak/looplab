@@ -119,6 +119,22 @@ def test_ablation_attribution_aggregates_across_probes():
     assert "Component attribution" in out
 
 
+def test_experiments_digest_excludes_tombstoned_nodes():
+    # §6.3: tombstoned (logically-deleted) nodes are invisible to selection; the always-on Researcher
+    # context (fail count, failures list, theme rollup) must hide them too — else a deleted dead-end
+    # keeps steering proposals. The winners path already excludes them via feasible_nodes().
+    from looplab.events.digest import theme_rollup
+    live_fail = _node(1, op="improve", status=NodeStatus.failed)
+    dead_fail = _node(2, op="improve", status=NodeStatus.failed)
+    dead_fail.tombstoned = True
+    st = _state([_node(0, metric=1.0), live_fail, dead_fail])
+    st.best_node_id = 0
+    st.nodes[1].idea.theme = "beta"
+    st.nodes[2].idea.theme = "beta"          # tombstoned -> must NOT add to the 'beta' rollup
+    assert "1 failed" in experiments_digest(st).splitlines()[1]     # only the live failure counted
+    assert theme_rollup(st).get("beta", {}).get("count") == 1       # tombstoned 'beta' node excluded
+
+
 # --------------------------------------------------------------------------- #
 # D2 memory hygiene
 # --------------------------------------------------------------------------- #
