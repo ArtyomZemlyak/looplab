@@ -81,6 +81,39 @@ def test_level5_wrongly_abandoned_is_allowed_and_audited(tmp_path):
     assert "negatives/false-neg-handling" in st.novelty_grades[0]["shared_concepts"]
 
 
+class _IdeaReflectClient:
+    """Fake reflect client the F2 agentic idea-tagger calls; returns a fixed grown concept id."""
+    def __init__(self, ids): self.ids = ids
+    def complete_tool(self, messages, json_schema): return {"concept_ids": self.ids}
+    def complete_text(self, messages): return "x"
+
+
+def test_f2_grades_from_the_cached_llm_tags_and_agentic_idea_tag(tmp_path):
+    """F2 (§21.4): when node tags are cached as node_concepts (Feature 1) and a reflect client is wired, the
+    grade uses the AGENTIC vocabulary — here a GROWN concept absent from any skeleton, so a level-4 ALLOW on
+    it is only reachable via the cache + the LLM idea-tag, not the alias heuristic."""
+    s = _run(tmp_path, task_id="totally-unknown-task")     # no curated skeleton -> vocab must come from cache
+    # the agentic node tagger (Feature 1) assigned node 0 a grown concept the skeleton never had:
+    s.append("node_concepts", {"node_id": 0, "concepts": ["encoderarch/adapter-tuning"], "mode": "llm"})
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    # a materially-different proposal on that SAME grown direction (different params + rationale)
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="a different adapter bottleneck size")
+    out = eng._graded_novelty_precheck(fold(s.read_all()), idea)
+    assert out is idea                                     # level-4 ALLOW short-circuit
+    g = fold(s.read_all()).novelty_grades[-1]
+    assert g["level"] == 4 and "encoderarch/adapter-tuning" in g["shared_concepts"]
+
+
+def test_f2_no_cache_no_client_is_the_heuristic_fallback(tmp_path):
+    """With no node_concepts cache and no reflect client, F2 degrades to the skeleton + heuristic path —
+    byte-identical behaviour to pre-F2 (a level-4 on the curated DCL branch still fires)."""
+    store = _run(tmp_path)                                 # dense-retrieval skeleton, no node_concepts
+    eng = _GateEngine(store, graded=True)                  # no _reflect_client attribute -> client None
+    out = eng._graded_novelty_precheck(fold(store.read_all()), _LEVEL4)
+    assert out is _LEVEL4 and fold(store.read_all()).novelty_grades[-1]["level"] == 4
+
+
 def test_verbatim_text_duplicate_with_empty_params_defers(tmp_path):
     # a VERBATIM rationale repeat of node 0 with EMPTY params grades level 4 (grade_novelty's param-based
     # dedup is structurally skipped for empty/key-disjoint params) — but it is a true duplicate, so the

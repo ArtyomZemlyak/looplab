@@ -165,19 +165,43 @@ class NoveltyGateMixin:
             The flat gate has NO re-open path; it would treat a sound-but-killed direction as a dead end.
         Returns None (defer to the flat gate, UNCHANGED behavior) for every other grade: level 0 (novel,
         the flat gate passes it anyway) and levels 1/2/3 (identical / near-dup / prior-run, which the flat
-        gate legitimately dedups). Deterministic (heuristic tagger — no LLM, no client) and audit-only: the
-        allow is recorded as a `novelty_graded` event, never a selection change. No-op (returns None) with
-        the flag off, an empty run, or a task with no skeleton — so the default path is byte-identical."""
+        gate legitimately dedups). Audit-only: the allow is recorded as a `novelty_graded` event, never a
+        selection change. No-op (returns None) with the flag off, an empty run, or no vocabulary — so the
+        default path is byte-identical.
+
+        AGENTIC-FIRST (§21.4 F2): when the LLM node tags are cached as `node_concepts` (Feature 1), the
+        grade uses THOSE (reconstructed deterministically — no re-tag) instead of alias-matching a curated
+        skeleton, and the proposed idea is tagged by the LLM against the same vocabulary (`tag_idea_llm`), so
+        idea and node tags are consistent. Degrades to the skeleton + deterministic heuristic when the cache
+        is empty (concept_pivot off) or no reflect client — the flag still works standalone."""
         if not getattr(self, "_graded_novelty", False) or not state.nodes:
             return None
-        from looplab.search.concept_graph import skeleton_for
-        graph = skeleton_for(state.task_id or "")
-        if not graph.concepts():
-            return None
-        from looplab.search.graded_novelty import grade_novelty
+        from looplab.search.concept_graph import graph_from_node_concepts, skeleton_for
+        from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
+        seed = skeleton_for(state.task_id or "")
+        seed = seed if seed.concepts() else None
+        node_concepts = getattr(state, "node_concepts", None) or {}
+        # Everything below is guarded: a reconstruction / tagger / grader hiccup must NEVER block proposing.
         try:
-            grade = grade_novelty(state, idea, graph)
-        except Exception:  # noqa: BLE001 — a grader hiccup must never block proposing; fall through
+            if node_concepts:                     # AGENTIC: reuse the cached LLM node tags (no re-tag)
+                graph, tags = graph_from_node_concepts(node_concepts, seed_graph=seed)
+            elif seed is not None:                # FALLBACK: curated skeleton + heuristic node tags
+                graph, tags = seed, None
+            else:
+                return None                       # no vocabulary at all -> nothing to grade
+            if not graph.concepts():
+                return None
+            # Tag the PROPOSED idea CONSISTENTLY with the node tags: only go agentic when the node tags are
+            # agentic (the cache is present) so idea+node tags share one production rule; without the cache,
+            # node tags are heuristic, so tag the idea heuristically too (idea_tags=None -> tag_idea inside
+            # grade_novelty). This keeps the no-cache path fully deterministic (byte-identical to pre-F2) and
+            # avoids a per-proposal LLM call that would have nothing agentic to be consistent with.
+            _rc = getattr(self, "_reflect_client", None)
+            client = _rc() if callable(_rc) else None
+            idea_tags = (tag_idea_llm(idea, graph, client)
+                         if (node_concepts and client is not None) else None)
+            grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags)
+        except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
             return None
         # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):

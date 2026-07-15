@@ -132,3 +132,64 @@ def test_tag_idea_pins_the_concept_set(tmp_path):
     idea = Idea(operator="improve", params={}, rationale="decoupled contrastive with r-drop")
     assert tag_idea(idea, g) == frozenset({"loss/decoupled-contrastive", "loss/contrastive",
                                            "regularization/r-drop"})
+
+
+# --------------------------------------------------------------------------- #
+# F2 (§21.4): agentic graded-novelty — reuse cached LLM node tags + LLM-tag the idea
+# --------------------------------------------------------------------------- #
+
+def test_graph_from_node_concepts_rebuilds_deterministically():
+    """The cached LLM tags reconstruct into a graph + tags with NO LLM (Feature-1 reuse)."""
+    from looplab.search.concept_graph import graph_from_node_concepts
+    g, tags = graph_from_node_concepts({0: ["loss/decoupled-contrastive"], 1: ["negatives/external-mining"]})
+    assert sorted(c.id for c in g.concepts()) == ["loss/decoupled-contrastive", "negatives/external-mining"]
+    assert tags == {0: frozenset({"loss/decoupled-contrastive"}), 1: frozenset({"negatives/external-mining"})}
+    # a grown id's axis comes from its prefix; malformed/empty ids are dropped
+    g2, t2 = graph_from_node_concepts({5: ["", "badnoslash", "axis/ok"]})
+    assert t2 == {5: frozenset({"axis/ok"})} and "axis/ok" in g2
+
+
+class _IdeaTagClient:
+    """Fake LLM idea-tagger returning a fixed id set (tool_call)."""
+    def __init__(self, ids): self.ids = ids; self.calls = 0
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        return {"concept_ids": self.ids}
+    def complete_text(self, messages): return "x"
+
+
+def test_tag_idea_llm_pins_to_known_ids_and_never_grows():
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.graded_novelty import tag_idea_llm
+    g = skeleton_for("dense-retrieval")
+    idea = Idea(operator="improve", params={}, rationale="some hard negative mining")
+    # the LLM names a KNOWN id + an UNKNOWN one -> only the known survives, graph is NOT grown
+    c = _IdeaTagClient(["negatives/external-mining", "totally/new-unknown"])
+    tags = tag_idea_llm(idea, g, c)
+    assert c.calls == 1
+    assert tags == frozenset({"negatives/external-mining"})
+    assert "totally/new-unknown" not in g            # a proposal must not mint vocabulary
+
+
+def test_tag_idea_llm_falls_back_to_heuristic():
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.graded_novelty import tag_idea, tag_idea_llm
+    g = skeleton_for("dense-retrieval")
+    idea = Idea(operator="improve", params={}, rationale="decoupled contrastive with r-drop")
+    # no client -> heuristic tag_idea
+    assert tag_idea_llm(idea, g, None) == tag_idea(idea, g)
+    # LLM NAMED ids but none are known -> fall back to the alias tagger rather than empty
+    assert tag_idea_llm(idea, g, _IdeaTagClient(["nope/unknown"])) == tag_idea(idea, g)
+
+
+def test_tag_idea_llm_respects_an_empty_novel_verdict():
+    """When the LLM names NOTHING (concept_ids=[]) it is deliberately saying 'fits no known concept ->
+    novel'; respect the empty set (NOT the alias heuristic, which could fire a spurious partial-word match
+    and wrongly force an overlap)."""
+    from looplab.search.concept_graph import skeleton_for
+    from looplab.search.graded_novelty import tag_idea, tag_idea_llm
+    g = skeleton_for("dense-retrieval")
+    # a rationale whose text WOULD trip a heuristic alias, but the LLM (correctly) returns [] -> stay empty
+    idea = Idea(operator="improve", params={}, rationale="decoupled contrastive with r-drop")
+    assert tag_idea(idea, g)                                    # heuristic WOULD tag it
+    assert tag_idea_llm(idea, g, _IdeaTagClient([])) == frozenset()   # empty verdict respected

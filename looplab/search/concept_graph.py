@@ -453,6 +453,32 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     return tags
 
 
+def graph_from_node_concepts(node_concepts, seed_graph: Optional["ConceptGraph"] = None):
+    """DETERMINISTICALLY rebuild `(graph, tags)` from recorded `node_concepts` (the LLM tagger's raw ids,
+    the Feature-1 §21.16 cache) — NO LLM: the model already assigned these ids, this only re-materializes the
+    vocabulary so a later consumer (graded-novelty, coverage) reuses the AGENTIC tags without re-tagging.
+    `seed_graph` optionally supplies curated multi-parent DAG structure; grown `axis/slug` ids are ensured
+    under their prefix axis. Returns `(graph, {node_id: frozenset(concept_id)})`; ids that can't be placed
+    are dropped (best-effort, never raises)."""
+    graph = seed_graph if seed_graph is not None else ConceptGraph(task_type="")
+    tags: dict[int, frozenset[str]] = {}
+    for nid, ids in (node_concepts or {}).items():
+        got: set[str] = set()
+        for raw in ids or ():
+            cid = _normalize_concept_id(raw)
+            if not cid:
+                continue
+            if cid not in graph and "/" in cid:
+                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+            if cid in graph:
+                got.add(cid)
+        try:
+            tags[int(nid)] = frozenset(got)
+        except (TypeError, ValueError):  # a non-int node id in a malformed cache -> skip
+            continue
+    return graph, tags
+
+
 def _normalize_concept_id(raw) -> str:
     s = str(raw or "").strip().lower().replace(" ", "-")
     return s.strip("/")

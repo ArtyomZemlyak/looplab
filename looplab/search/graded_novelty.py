@@ -48,6 +48,53 @@ def tag_idea(idea: Idea, graph: ConceptGraph) -> frozenset[str]:
     return tag_text(_idea_text(idea), graph)
 
 
+def tag_idea_llm(idea: Idea, graph: ConceptGraph, client, *, parser: str = "tool_call") -> frozenset[str]:
+    """AGENTIC single-idea tagger (§21.4 F2): the LLM assigns the proposed idea the SET of concept ids from
+    the graph's grown vocabulary — the SAME rule the node tagger uses, so a proposal is tagged CONSISTENTLY
+    with the cached node tags (`node_concepts`), not by a divergent alias match. `grow=False` on purpose: a
+    not-yet-run PROPOSAL must NOT mint new vocabulary (an idea that fits no known concept gets empty tags ->
+    grade_novelty reads it as level-0 novel, correctly). Degrades to the deterministic `tag_idea` on no
+    client / any failure — never raises, never blocks proposing."""
+    if client is None:
+        return tag_idea(idea, graph)
+    try:
+        from pydantic import BaseModel, Field
+
+        from looplab.core.parse import parse_structured
+
+        class TagOut(BaseModel):
+            concept_ids: list[str] = Field(default_factory=list)
+
+        known = [c for c in graph.concepts() if not c.id.endswith("/*")]
+        system = (
+            "You tag a PROPOSED machine-learning experiment with the research CONCEPTS it touches, choosing "
+            "ONLY from the KNOWN VOCABULARY below (do NOT invent new ids — this is a proposal, not a result). "
+            "Assign every concept that applies (an experiment usually touches several). Key on the underlying "
+            "METHOD/family, not the surface name. Call `emit` once with `concept_ids` (a subset of the known "
+            "ids, possibly empty if none fits).\n\nKNOWN VOCABULARY:\n"
+            + ("\n".join(f"- {c.id}: {c.label}" for c in known) or "(empty)"))
+        msgs = [{"role": "system", "content": system},
+                {"role": "user", "content": f"PROPOSED EXPERIMENT:\n{_idea_text(idea)}\n\n"
+                                            "Which KNOWN concepts does it touch? Emit their ids."}]
+        out = parse_structured(client, msgs, TagOut, parser)
+        raw_ids = list(out.concept_ids or [])
+        keep = frozenset(cid for cid in (_normalize_id(x) for x in raw_ids) if cid and cid in graph)
+        if keep:
+            return keep
+        # DISTINGUISH the two empty-`keep` cases (else a genuinely novel proposal is mislabelled):
+        #  * the model named ids but NONE are known -> recover a known alias via the heuristic tagger;
+        #  * the model named NOTHING ([]) -> that IS its "fits no known concept" verdict; RESPECT it as
+        #    empty (grade_novelty reads level-0 novel and defers to the flat gate) instead of letting the
+        #    alias tagger fire a spurious partial-word match and wrongly force an overlap/level-4.
+        return tag_idea(idea, graph) if raw_ids else frozenset()
+    except Exception:  # noqa: BLE001 — agentic tagging is best-effort; never block a proposal
+        return tag_idea(idea, graph)
+
+
+def _normalize_id(raw) -> str:
+    return str(raw or "").strip().lower().replace(" ", "-").strip("/")
+
+
 def _params_identical(a: dict, b: dict, *, tol: float = 1e-9) -> bool:
     """Same param KEYS and values (within tol). An empty-vs-empty pair is identical (a structural idea)."""
     if set(a or {}) != set(b or {}):
