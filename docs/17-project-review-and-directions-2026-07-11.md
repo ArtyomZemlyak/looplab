@@ -2923,3 +2923,75 @@ The three "extra" diagnostics from §21.12, built by composing the keystones (no
   most-similar pairs (est. recall ≤0.6) — duplicate merge nodes (23≈24, 38≈41), a duplicate loss change
   (11≈70), and the codebase pair (0≈1). Concrete evidence the flat gate misses paraphrase-level dups,
   especially near-identical merges — exactly what D3/D4 (graded novelty + taxonomy dedup) target.
+
+#### 21.18 Concept-graph maintenance & agentic tagging — lifecycle analysis + backlog (2026-07-15)
+
+Feature 1 (Phase 2c, §21.16) made **node** tagging incremental — each node's raw tags are recorded once
+(`node_concepts` event) and reused. That is the right efficiency move, but it surfaces a design space the
+first implementation deliberately froze: **once you cache a tag, you own its lifecycle.** This section
+enumerates every graph-mutation action, defines the correct behaviour, and lists the backlog. Two consumers
+are in scope: the **agentic tagger** (which item gets which concept) and the **graph itself** (which concepts
+exist). Both must stay universal + agentic-first + replay-safe.
+
+**A. When does the agent tag? (the timing design space).** An item (node / hypothesis / lesson) can be
+tagged at several lifecycle points. They are not exclusive — the shipped design should combine them:
+
+| When | Pro | Con | Verdict |
+|---|---|---|---|
+| **At creation** (hypothesis_added, node first-eval, lesson distilled) | cheap, incremental, one call per item | tags against an *immature* early vocabulary; a concept minted later never back-applies | **primary** — record as an event like `node_concepts` |
+| **At merge/consolidation** (hypothesis_merged, node confirm-refine) | the merged representative now stands for several items → its tags must be re-derived | extra call per merge | **yes** — re-tag the surviving representative |
+| **On graph growth** (a new concept is minted mid-run) | keeps *earlier* items comparable against the richer vocabulary | naively O(items) LLM re-tag per new concept | **yes, but BOUNDED** — see B1 (cheap prefilter → LLM-confirm only candidates) |
+| **On rerun/reset** (the item's idea/code changed) | correctness — stale tags otherwise | — | **required** (M1, correctness bug today) |
+| **Lazily, on analysis** (tag only what a diagnostic needs) | zero cost until used | re-does work each analysis; no durable record | fallback only |
+| **Never re-tag** (freeze at creation) | cheapest | stale vs grown vocab (today's node behaviour) | insufficient alone |
+
+Recommended composite: **creation-time record + merge-time re-derive + reset-time invalidate + a bounded
+graph-growth refresh.** Applies uniformly to nodes, hypotheses (D4, the immediate ask), and lessons (D6).
+
+**B. Graph-maintenance actions (the lifecycle matrix).** Every way the graph or an item can change, and the
+required tag behaviour:
+
+1. **New concept minted** (a later item introduces `axis/slug`). *Today:* frozen items never see it. *Want*
+   (**B1**): a bounded retro-pass — cheap `tag_text` alias prefilter over all items to find *candidates*
+   whose text plausibly matches the new concept, then LLM-confirm only those (not a full O(n) re-tag).
+   Trigger: at consolidation, or every K new concepts. Record refreshed tags as new `node_concepts`/
+   hypothesis-tag events (last-write-wins fold already supports this).
+2. **Concept removed / consolidated (A→B).** *Today:* handled correctly — `_apply_consolidation` renames A→B
+   and rewrites every item's tags to the canonical, so items auto-redistribute (deterministic, pure). ✔
+   *Gap* (**B2**): an *explicit* delete (an empty/erroneous concept, not a synonym-merge) has no policy —
+   define: merge into parent axis, else drop to the `untagged` bucket. Also record the consolidation mapping
+   as an event (**B3**) so re-derivation each cadence is *stable*, not a flapping LLM re-decision.
+3. **Concept split** (one coarse concept should become two). *Today:* unsupported (only merge exists). *Want*
+   (**B4**): detect an over-broad concept (high count + internally dissimilar via retrieval) and re-tag its
+   items across the two children (LLM). Lower priority.
+4. **Node full rerun / reset** (`node_reset` → 2nd `node_created`; idea/code can change). *Today:* frozen
+   `node_concepts` keeps the pre-rerun tags → **stale (M1, correctness)**. *Want:* `_on_node_reset` /
+   the rerun path invalidates the node's recorded concepts so the next cadence re-tags it fresh.
+5. **Node metric/status change** (evaluated→failed, re-evaluated). Tags key on the *method* (idea text), not
+   the metric → **no action** (verified: tagger reads idea/params, never the metric). ✔
+6. **Hypothesis merge** (several → one). Re-derive the representative's tags (union is the cheap floor; an
+   LLM re-tag is the accurate version) — part of A/"at merge".
+7. **Hypothesis promoted to a node.** Re-tag from the *executed* code (richer than the hypothesis text);
+   may seed from the hypothesis tags to save a call.
+8. **Lesson distilled / reconciled.** Same lifecycle as nodes; lessons are few → refresh is cheap.
+9. **Axis (DAG) restructuring.** Axes are id-prefix-derived today; if we ever re-parent a concept, coverage
+   rollups shift — needs explicit axis events. Lowest priority (no re-parenting today).
+
+**C. Backlog (prioritised, each ships with live eval tests + a mega-review, §concept discipline).**
+
+- **M1 (HIGH, correctness):** invalidate `node_concepts` on `node_reset`/rerun so a re-developed node is
+  re-tagged, not left with stale frozen tags. Live test: reset a node, confirm re-tag on next cadence.
+- **F2 (in progress):** agentic graded-novelty on the cached tags (§21.4 D3).
+- **HT (NEW, the user ask):** agentic **hypothesis** tagging (D4) — creation-time record + merge-time
+  re-derive, reusing the Feature-1 event/cache pattern (a `hypothesis_concepts` event). Replaces the
+  `tag_text` alias heuristic as primary; heuristic stays the fallback. Live test: warm-pass call count,
+  merge re-tag, coverage of new-vocabulary phrasings vs the alias baseline.
+- **B1 (MEDIUM-HIGH):** bounded graph-growth retro-tag (prefilter → LLM-confirm) for nodes + hypotheses +
+  lessons. Live test: mint a late concept, confirm earlier matching items get it without a full re-tag.
+- **B3 (MEDIUM):** record the consolidation rename map as an event so coverage is stable across cadences
+  (no LLM re-decision flapping). Live test: two cadences → identical canonical mapping.
+- **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
+
+The through-line: the **LLM decides semantics** (which concept, when to split/merge), **deterministic code
+maintains the record** (events, fold, redistribution, prefilter), each step keeps a heuristic fallback, and
+every write is an additive, replay-safe event so resume stays deterministic.
