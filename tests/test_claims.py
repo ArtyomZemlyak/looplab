@@ -204,6 +204,37 @@ def test_pack_drops_rejected_and_leads_with_ratified():
     assert "rejected claim" not in stmts                # operator-rejected dropped from the pack
 
 
+def test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat():
+    from looplab.engine.claims import build_context_pack, claim_assessments
+    from looplab.engine.memory import normalize_statement
+    # 3 ratified positives (more evidence -> rank first) fill max_claims; a ratified MIXED caveat has less
+    # evidence so it is pushed PAST the cutoff. The reserved caveat slot must still pull it in — before the
+    # fix `caveats` looked only in the NON-ratified pool and this ratified caveat was starved (§20.5).
+    lessons = [_lesson("pos0", "supported", [1, 2, 3]),
+               _lesson("pos1", "supported", [1, 2, 3]),
+               _lesson("pos2", "supported", [1, 2, 3]),
+               _lesson("contested", "supported", [5], run_id="rA"),
+               _lesson("contested", "tested", [6], run_id="rB")]        # mixed, lower evidence -> ranks last
+    dec = {normalize_statement(s): {"decision": "ratified"} for s in ("pos0", "pos1", "pos2", "contested")}
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec), max_claims=3)
+    assert len(pack["claims"]) == 3
+    assert any(c["epistemic"] == "mixed" and c["statement"] == "contested" for c in pack["claims"])
+
+
+def test_ratified_mixed_counts_as_contested_and_rejected_dropped_from_atlas():
+    from looplab.engine.claims import build_context_pack, claim_assessments, portfolio_atlas
+    from looplab.engine.memory import normalize_statement
+    lessons = [_lesson("cA", "supported", [1], run_id="rA"), _lesson("cA", "tested", [2], run_id="rB"),  # mixed
+               _lesson("cB", "supported", [1], run_id="rA"), _lesson("cB", "tested", [2], run_id="rB")]  # mixed
+    dec = {normalize_statement("cA"): {"decision": "ratified"},   # a ratified contradiction is still contested
+           normalize_statement("cB"): {"decision": "rejected"}}   # a rejected contradiction is NOT live
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec))
+    assert pack["n_contested"] == 1                               # cA counts (ratified mixed); cB excluded
+    atlas = portfolio_atlas(lessons, [], decisions=dec)
+    stmts = [c["statement"] for c in atlas["contradictions"]]
+    assert "cA" in stmts and "cB" not in stmts                    # operator-rejected contradiction dropped
+
+
 def test_cli_claim_decide_and_reflect(tmp_path):
     import orjson
     from typer.testing import CliRunner

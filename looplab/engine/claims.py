@@ -68,13 +68,20 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         raise ValueError("empty statement")
     if not memory_dir:
         raise ValueError("no memory_dir")
-    rec = {"statement": s, "key": normalize_statement(s), "decision": decision,
-           "note": str(note or ""), "by": str(by or "operator"), "at": str(at or "")}
+    # Bound the stored fields so a single operator write can't bloat the shared sidecar (the `key` — the
+    # claim identity — is `normalize_statement`, which already caps internally, so the caps don't shift it).
+    rec = {"statement": s[:2000], "key": normalize_statement(s), "decision": decision,
+           "note": str(note or "")[:4000], "by": str(by or "operator")[:120], "at": str(at or "")}
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        import json as _json
-        f.write(_json.dumps(rec) + "\n")
+    import json as _json
+
+    from looplab.events.eventstore import _interprocess_lock
+    # Same interprocess lock the lesson/capsule sidecar stores use: a concurrent operator write (a second
+    # UI tab, or the CLI racing the POST) must not interleave/tear this append (CODEX).
+    with _interprocess_lock(Path(str(path) + ".lock")):
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(rec) + "\n")
     return rec
 
 
@@ -211,7 +218,11 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # (last, since `ordered` is strongest-first) for the strongest available caveat — opposition is never
     # crowded out by a full slate of positives.
     if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
-        caveats = by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"]
+        # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
+        # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
+        # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect (CODEX).
+        caveats = ([c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
+                   + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
         if caveats:
             picked = picked[:-1] + [caveats[0]]
 
@@ -227,7 +238,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     pack = {
         "claims": [_slim(c) for c in picked],
         "n_claims_total": len(claims or []),
-        "n_contested": len(by_state["mixed"]),
+        # count contested across BOTH pools — a ratified claim is pulled out of by_state but is still mixed.
+        "n_contested": len(by_state["mixed"]) + sum(1 for c in ratified if c["epistemic"] == "mixed"),
     }
     if concept_overview:
         pack["coverage"] = {
@@ -252,7 +264,9 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules)
     claims = claim_assessments(lessons, decisions=decisions)
-    contested = [c for c in claims if c["epistemic"] == "mixed"]
+    # A contradiction the operator REJECTED is no longer a live contradiction — honor the verdict here too,
+    # consistent with build_context_pack / cross_run_claims which also drop operator-rejected (CODEX).
+    contested = [c for c in claims if c["epistemic"] == "mixed" and c.get("maturity") != "operator-rejected"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
     # memory (no opt-in capsules) is not reported as zero runs (CODEX). The authoritative scoped corpus

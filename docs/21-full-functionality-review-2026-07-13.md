@@ -975,8 +975,32 @@ What landed, reviewed against the invariants:
   never touch selection, best-effort.
 
 Verification: 98 targeted cross-run/server/strategist tests + the full suite green (exit 0), `mkdocs --strict`
-green. An adversarial mega-review (6-dimension finders + verifiers, focused on the governance write-path
-security + serve auth surface) ran alongside; its verified findings are applied in the follow-up.
+green. An adversarial mega-review (6-dimension finders, focused on the governance write-path security + serve
+auth surface) ran alongside; its orchestrator stalled before the verifier stage, so the findings were
+self-verified against the code (all self-evident code facts) before applying. **Confirmed + fixed:**
+
+- **[medium] `record_claim_decision` was not interprocess-locked** — the sibling lesson/capsule sidecar stores
+  append under `_interprocess_lock`, but the decision write used a bare `open(...,"a")`, so two concurrent
+  operator writes (a UI tab + the CLI) could interleave/tear. Wrapped the append in the same lock, and bounded
+  the stored `statement`/`note`/`by` fields so one write can't bloat the shared sidecar.
+- **[medium] `build_context_pack` reserved caveat slot could be starved by the ratified reordering** — the
+  fallback caveat pool only looked in the non-ratified `by_state`, so when operator-ratified *supported* claims
+  filled `max_claims` and the only caveat was a ratified *mixed* claim pushed past the cut, no caveat was
+  surfaced (regressing the §20.5 "opposition never crowded out" rule). Fixed by including ratified caveats in
+  the fallback pool; pinned by `test_reserved_caveat_slot_can_be_filled_by_a_ratified_caveat`.
+- **[low] `n_contested` under-counted** ratified mixed claims (they're pulled out of `by_state`); now counted
+  across both pools. **[low] `portfolio_atlas` contradictions surfaced operator-rejected** mixed claims that
+  the context pack + `cross_run_claims` already drop; now consistent. Both pinned by
+  `test_ratified_mixed_counts_as_contested_and_rejected_dropped_from_atlas`.
+
+**Not changed (recorded):** the serve POST auth (verified NOT a defect — default-denied like every write); the
+task-scoping of `cross_run_atlas`/`cross_run_prior_attempts` to similar tasks (the deliberate intent of the
+`c41a5f6` leak fix — a bound in-run agent sees same-task/overlapping-goal scope, the unbound CLI/human stays
+portfolio-wide); the goal-token scope heuristic looseness (the acknowledged CR2a index TODO); the
+`portfolio_atlas` coverage n_runs (master's `cfa1f86` dropped my Round-16 pack_overview fix, but the merge
+auto-restored it — a finder flagged it as "already re-fixed by HEAD"). The two dimensions the stalled
+orchestrator didn't reach (Genesis/Strategist wiring, test coverage) were checked manually: both consumers are
+off-by-default (`cross_run_read_tools` / `cross_run_advisory`), read-only, advisory, and append no domain event.
 
 **UI-plans docs updated** (doc 18 PART V, refresh #4): the Atlas UI is now **no longer blocked on any backend**
 — read-models + HTTP endpoints + operator write all ship, only the React surface remains (§24.3/§25(4)); §28.3
