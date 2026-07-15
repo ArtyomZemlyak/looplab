@@ -97,8 +97,7 @@ class StrategyCadenceMixin:
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import (load_claim_decisions, load_research_claims,
-                                                portfolio_atlas)
+            from looplab.engine.claims import atlas_for_memory
             from looplab.engine.memory import ConceptCapsuleStore
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
@@ -107,8 +106,7 @@ class StrategyCadenceMixin:
             caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
             if not lessons and not caps:
                 return ""
-            a = portfolio_atlas(lessons, caps, decisions=load_claim_decisions(base),
-                                research_claims=load_research_claims(base))
+            a = atlas_for_memory(base, lessons=lessons, capsules=caps)
             parts = [f"{a['n_runs']} run(s), {a['n_concepts']} concept(s), {a['n_contested']} contested"]
             if a["thin_coverage"]:
                 parts.append("thinly-explored: " + ", ".join(a["thin_coverage"][:6]))

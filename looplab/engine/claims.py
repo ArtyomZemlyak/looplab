@@ -153,6 +153,27 @@ def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
                              decisions=load_claim_decisions(memory_dir))
 
 
+def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
+    """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
+    claims + operator decisions + concept aliases (CR1a). One call so every atlas surface is consistent."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    if capsules is None:
+        cp = base / "concept_capsules.jsonl" if base else None
+        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    return portfolio_atlas(lessons, capsules, max_items=max_items,
+                           decisions=load_claim_decisions(memory_dir),
+                           research_claims=load_research_claims(memory_dir),
+                           aliases=load_concept_aliases(memory_dir))
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
                       decisions: Optional[dict] = None) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
@@ -296,7 +317,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
 
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
-                    decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None) -> dict:
+                    decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
+                    aliases: Optional[dict] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -307,7 +329,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     a false "never tried" (which needs a reference universe)."""
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
-    overview = portfolio_concept_overview(capsules)
+    overview = portfolio_concept_overview(capsules, aliases=aliases)
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
     contested = [c for c in claims if c["epistemic"] == "mixed"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]

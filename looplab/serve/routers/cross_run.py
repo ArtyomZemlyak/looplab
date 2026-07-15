@@ -17,6 +17,11 @@ class _ClaimDecision(BaseModel):
     note: str = ""
 
 
+class _ConceptMerge(BaseModel):
+    from_concept: str
+    to_concept: str = ""     # "" => purge/tombstone
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
 
@@ -40,10 +45,9 @@ def build_router(srv) -> APIRouter:
     def atlas():
         """The Research Atlas payload — explored / thin / contradictory + the bounded context pack —
         with D8 research claims + operator decisions overlaid. Read-only, portfolio-wide."""
-        from looplab.engine.claims import load_claim_decisions, load_research_claims, portfolio_atlas
+        from looplab.engine.claims import atlas_for_memory
         base, lessons, caps = _load()
-        return portfolio_atlas(lessons, caps, decisions=load_claim_decisions(base),
-                               research_claims=load_research_claims(base))
+        return atlas_for_memory(base, lessons=lessons, capsules=caps)
 
     @router.get("/api/cross-run/claims")
     def claims(contested: bool = False):
@@ -65,5 +69,17 @@ def build_router(srv) -> APIRouter:
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"ok": True, "decision": rec}
+
+    @router.post("/api/cross-run/concept-merge")
+    def concept_merge(body: _ConceptMerge):
+        """OPERATOR concept governance (CR1a §22.4): merge one concept slug into another, or purge it
+        (empty to_concept). Non-destructive (append-only aliases, applied at read time)."""
+        from looplab.engine.concept_registry import record_concept_alias
+        try:
+            rec = record_concept_alias(_memory_dir(), from_concept=body.from_concept,
+                                       to_concept=body.to_concept, by="ui")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "alias": rec}
 
     return router

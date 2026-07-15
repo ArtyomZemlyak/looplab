@@ -566,6 +566,30 @@ def cross_run_index_cmd(
                    f"{f['n_attempts']:2d} attempt(s)  {bm}")
 
 
+@app.command(name="concept-merge")
+def concept_merge_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where concept_aliases.jsonl lives)."),
+    from_concept: str = typer.Argument(..., help="The concept slug to merge away (or purge)."),
+    to_concept: str = typer.Argument("", help="The canonical slug it becomes. Empty = PURGE (tombstone)."),
+):
+    """PART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
+    another (they become one across all cross-run views) or PURGE it (empty target → dropped from views).
+    Non-destructive + reversible: append-only `concept_aliases.jsonl`, applied at READ time; the raw per-run
+    tags are never rewritten. A concept SPLIT (needs bounded re-tagging) is deferred."""
+    from looplab.engine.concept_registry import record_concept_alias
+    import datetime as _dt
+    try:
+        rec = record_concept_alias(str(memory_dir), from_concept=from_concept, to_concept=to_concept,
+                                   at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    if rec["to"]:
+        typer.echo(f"merged: '{rec['from']}' -> '{rec['to']}'")
+    else:
+        typer.echo(f"purged: '{rec['from']}'")
+
+
 @app.command(name="claim-decide")
 def claim_decide_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where claim_decisions.jsonl lives)."),
@@ -604,7 +628,7 @@ def atlas_cmd(
     """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
     it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
     (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
-    from looplab.engine.claims import load_claim_decisions, portfolio_atlas
+    from looplab.engine.claims import atlas_for_memory
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir)
@@ -614,9 +638,7 @@ def atlas_cmd(
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
-    from looplab.engine.claims import load_research_claims
-    atlas = portfolio_atlas(lessons, caps, max_items=max_items, decisions=load_claim_decisions(base),
-                            research_claims=load_research_claims(base))
+    atlas = atlas_for_memory(base, lessons=lessons, capsules=caps, max_items=max_items)
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return

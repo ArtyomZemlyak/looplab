@@ -119,12 +119,12 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.claims import portfolio_atlas
+        from looplab.engine.concept_registry import load_concept_aliases
         from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
             qt = _toks(str(args.get("idea") or ""))
-            ov = portfolio_concept_overview(self._scoped_capsules())
+            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -159,10 +159,9 @@ class CrossRunTools:
                 f"{c['statement']}" for c in claims)
 
         if name == "cross_run_atlas":
-            from looplab.engine.claims import load_claim_decisions, load_research_claims
-            atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules(),
-                                    decisions=load_claim_decisions(self.dir),
-                                    research_claims=load_research_claims(self.dir))
+            from looplab.engine.claims import atlas_for_memory
+            atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
+                                     capsules=self._scoped_capsules())
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:
