@@ -5,7 +5,7 @@ import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunCon
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
-import Markdown from './markdown.jsx'
+import Markdown, { safeHref } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
@@ -109,9 +109,13 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
                 <button className="btn sm ghost" title="steer the next proposal toward this direction (posts a hint)"
                         onClick={() => steer(d)}>steer →</button></li>))}</ul></>}
           {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
-            <ul className="bul">{m.sources.map((s, j) => (
-              <li key={j}>{s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || 'source')}
-                {s.snippet && <div className="muted">{String(s.snippet).slice(0, 160)}</div>}</li>))}</ul></>}
+            <ul className="bul">{m.sources.map((s, j) => {
+              // A deep-research memo source URL is LLM/tool-authored — gate it through safeHref (same as
+              // MemoCard) so a `javascript:`/`data:` source can't run script in the app origin on click.
+              const href = safeHref(s.url)
+              return <li key={j}>{href ? <a href={href} target="_blank" rel="noreferrer noopener">{s.title || s.url}</a> : (s.title || s.url || 'source')}
+                {s.snippet && <div className="muted">{String(s.snippet).slice(0, 160)}</div>}</li>
+            })}</ul></>}
           {m.reasoning && <details className="rsch-reasoning"><summary>reasoning (debug)</summary>
             <Markdown className="think-body" text={m.reasoning} /></details>}
         </div>
