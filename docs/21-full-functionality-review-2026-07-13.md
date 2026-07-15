@@ -601,3 +601,65 @@ The owner asked me to fix the documented round-8 findings at my discretion. Appl
 PID/heartbeat path, a feature); the non-modern finalize `raise` (intended + tested); the streaming
 budget-in-`finally` (accepted); `failure_spike_seq` staleness (audit-only). Remaining items are latent
 (abort-recovery CAS, `_finish_if_quiescent` `next()` default) or test-coverage/test-infra notes.
+
+---
+
+## Round 9 — integrate master (Part IV concept graph) + review the incoming code (2026-07-15)
+
+The owner asked to bring this branch up to date with `master` (30 new "Part IV" concept-graph commits),
+verify nothing regressed, and confirm the incoming code matches this branch's reviewed quality/concepts —
+fixing anything substandard — with the constraint "no loss of functionality, quality, or security; a
+synergistic union" and "push only to this branch, never master".
+
+**Integration method — a MERGE, not a linear rebase.** A `git rebase origin/master` was attempted and
+abandoned: this branch already integrates master through seven prior merge commits, and master had
+independently evolved the *same* security middleware (`serve/server.py` default-deny auth + the review
+capability) and `events/replay.py::fold` paths this branch spent rounds 1–8 hardening. A 27-commit replay
+reconstructs each of those security-critical intermediate states (the very first replayed commit already
+forced a hand-reconstruction of the `assistant_shared` allow-list and, at commit 2, the whole
+`_require_token` middleware) — precisely the regression risk the owner forbade. The three-way merge, by
+contrast, conflicted in only **two** files, leaving the branch's reviewed code intact. Merge commit
+`0c099f0` (signed, two parents; master is now an ancestor).
+
+- **`events/replay.py`** (union): kept the branch's LLM cost/usage fold helpers AND master's four
+  concept-graph handlers (`_on_node_concepts`, `_on_concept_consolidation`, `_on_hypothesis_concepts`,
+  `_on_concept_coverage_snapshot`); the fold dispatch registers both, and the import list carries
+  `EV_LLM_USAGE` + `EV_{CONCEPT_CONSOLIDATION,HYPOTHESIS_CONCEPTS,NODE_CONCEPTS}`.
+- **`tests/data/golden_run_state.json`**: regenerated deterministically from the merged fold.
+
+**Verification (all green):** full `pytest` (exit 0), UI `node --test` 306 pass, `vite build`,
+`check-bundle.mjs` PASS, `mkdocs build --strict`, and an offline `looplab run` smoke + `looplab replay`
+(8/8 nodes, deterministic rebuild). The merge preserved the branch's security model unchanged
+(`server.py` did not conflict; the 30 new commits do not touch it), and master had correctly followed the
+branch conventions it inherited (all new modules registered in the `looplab/__init__.py` `_LAYOUT` shim;
+all seven new `Settings` fields carry `configuration.md` rows with correct defaults; new event types in
+the registry; `BACKGROUND_APPENDABLE` gains only the selection-neutral `EV_LLM_USAGE`).
+
+**Incoming Part-IV review (five parallel finders + adversarial verification).** The new ~4.4k lines
+(`search/concept_graph.py`, `trust/verifier.py`, `core/fitness.py`, `tools/asset_brief.py`,
+`search/{graded_novelty,novelty_recall,lock_in,research_targeting,taxonomy_dedup}.py`,
+`engine/{strategy,novelty,proposal_cues}.py`, `cli/inspect_cmds.py`) are high-quality, deterministic,
+offline-safe, and invariant-respecting. `SearchFitness` is byte-identical to the old inlined ordering on
+the default (`select_verifier` off) path; the epoch-stamped `best_confirmed` guard is airtight; the
+concept fold handlers are audit-only and never touch selection. Fixes applied (all low-severity — a
+correctness edge + doc/comment drift, matching this branch's "stale docs/comments = a bug" rule):
+
+- **`search/graded_novelty.py`** (correctness): level-2 "same concept-set" used subset containment
+  (`idea ∩ tags == idea`, true whenever `idea ⊆ tags`) where the comment specifies a *full-profile*
+  match. An idea that DROPS a concept was mis-graded level-2 "already tried" instead of level-4
+  "same-direction / new implementation". Changed to set equality (the safe direction — no selection
+  impact, since the live precheck acts only on levels 4/5).
+- **`tools/asset_brief.py`** (offline fallback parser): a raw count `> 100` can no longer head the "best
+  result" line ahead of a genuine `[0,1]` metric; the checkpoint value regex now captures sci-notation
+  (`mse=1.2e-5` no longer truncates to `1`) and negative metrics (`spearman=-0.3`); `@`-scores keep the
+  MAX, not the first (`a@0.85_b@0.90` → `0.90`). The underscore-glued anchor case is preserved.
+- **Docs/comments**: `core/fitness.py` `selection_key`/`eligible` docstrings (holdout_topk now ranks by
+  `promotion_key`); `search/concept_graph.py` touch-fraction denominator ("TAGGED experiments");
+  `configuration.md` `select_verifier` holdout scope (verification fires on mean-metric ties, holdout
+  keys reuse those scores); `cli/inspect_cmds.py` module docstring (some diagnostics invoke an LLM but
+  none mutate a run); and the **process diagram** gained an "off"-tagged Concept-graph (Part IV) node
+  under the Strategist column (`concept_pivot` / `graded_novelty` / `capability_expansion`), mirroring
+  how the sibling verifier tie-break was added — closing the branch's "add a subsystem → update the
+  diagram in the same change" rule.
+
+Full suite + UI + build + bundle + mkdocs re-run green after the fixes.

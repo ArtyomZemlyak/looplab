@@ -195,7 +195,11 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
     def overlap(nd) -> set[str]:
         return set(idea_concepts) & set(tags.get(nd.id, frozenset()))
 
-    same_concept_nodes = [nd for nd in nodes if idea_concepts and overlap(nd) == set(idea_concepts)]
+    # SAME concept-set means the tried node's tags EQUAL the idea's (a true full-profile match), not merely
+    # a superset: an idea that DROPS a concept (idea_concepts ⊂ node tags) is a narrower, materially-different
+    # experiment and must fall through to level 4 (same direction, new implementation), not level 2.
+    same_concept_nodes = [nd for nd in nodes
+                          if idea_concepts and set(tags.get(nd.id, frozenset())) == set(idea_concepts)]
 
     # 2) same full concept-set AND trivially-close params -> near-duplicate in run -> re-propose
     for nd in same_concept_nodes:

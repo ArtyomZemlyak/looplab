@@ -1,7 +1,8 @@
 """Read-only inspection commands: `replay` / `timings` / `inspect` / `tensorboard`.
 
-Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2). All pure folds of the event log
-(or viewers over run-dir sidecars) — nothing here mutates a run.
+Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2). Read-only over a run: pure folds of
+the event log, viewers over run-dir sidecars, and (the Part IV concept/novelty diagnostics) offline
+analyses that may invoke an LLM to tag/grade — but nothing here mutates a run.
 """
 from __future__ import annotations
 

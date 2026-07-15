@@ -90,7 +90,11 @@ def _named_metric_re(extra: tuple[str, ...] = ()) -> "re.Pattern":
     # filename)". Underscore-as-separator is the whole point of surfacing a checkpoint's score.
     return re.compile(
         rf"(?<![a-z0-9])((?:val[_\-]?|test[_\-]?|dev[_\-]?)?(?:{fam})(?:@\d+)?)\s*[=:_\-]\s*"
-        r"(0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})(?![a-z0-9])", re.I)
+        # value: an optional sign, a fraction/integer, and an optional sci-notation exponent. The exponent
+        # branch keeps `mse=1.2e-5` from truncating to `1`; the leading `-?` keeps a negative metric
+        # (e.g. a correlation `spearman=-0.3`) from being dropped. The separator above is consumed FIRST,
+        # so a bare dash there stays a separator and only a sign directly on the number is taken as negative.
+        r"(-?(?:0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})(?:[eE][+\-]?\d+)?)(?![a-z0-9])", re.I)
 
 
 # --------------------------------------------------------------------------- #
@@ -348,9 +352,12 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 metrics = _extract_metrics(stem_text, named_re=named_re)
                 for at in _AT_METRIC.findall(stem_text):
                     try:
-                        metrics.setdefault("score@", float(at))
+                        score = float(at)
                     except ValueError:
-                        pass
+                        continue
+                    # keep the BEST (max) @-score, mirroring _extract_metrics' max-per-name convention:
+                    # `model_a@0.85_b@0.90.ckpt` must surface 0.90, not whichever token happened to be first.
+                    metrics["score@"] = max(metrics.get("score@", float("-inf")), score)
                 detail = _fmt_metrics(metrics) or "(no metric in filename)"
                 brief.checkpoints.append(AssetFinding("checkpoint", rel, detail, metrics))
                 caps |= _detect_capabilities(fn, lex.capability_patterns)
@@ -441,7 +448,12 @@ def _best_known(brief: AssetBrief) -> Optional[dict]:
                 if any(s in low for s in _LOWER_IS_BETTER):
                     continue                     # lower-is-better: a max is meaningless, skip the headline
                 # normalize a percentage (1 < v <= 100) to a fraction for comparison only — score-family
-                # metrics are in [0,1], so a value above 1 is a percent spelling of the same quantity.
+                # metrics are in [0,1], so a value above 1 is a percent spelling of the same quantity. A
+                # value ABOVE 100, though, is not a percent but a raw count (steps/hits/examples counted by
+                # a same-named field); it is not a comparable [0,1] score, so it must never head the
+                # "best result" line ahead of a genuine fractional metric.
+                if val > 100.0:
+                    continue
                 cmp = val / 100.0 if 1.0 < val <= 100.0 else val
                 if cmp > best_cmp:
                     best_cmp = cmp

@@ -13,7 +13,7 @@ axes (a DAG, not a tree — `dcl-rdrop` is BOTH `loss/decoupled-contrastive` AND
 and forcing one parent is exactly what re-fragmented the signal, §21.10 refinement 1). Over that graph,
 deterministic analytics surface three signals the flat vocabulary cannot:
 
-  * **top-concept touch-fraction** — the single most-touched concept's share of experiments;
+  * **top-concept touch-fraction** — the single most-touched concept's share of TAGGED experiments;
   * **dominant axis-clique share** — the most-common co-occurring AXIS pair's share (the run lived
     inside the tiny `loss × regularization` clique — 0 → 0.27);
   * **count of uncovered key concept-regions** — the decisive *uncovered winning-region* alarm: the

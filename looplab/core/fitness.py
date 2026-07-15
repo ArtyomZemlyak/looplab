@@ -69,8 +69,9 @@ class SearchFitness:
     @staticmethod
     def selection_key(node):
         """The PLAIN promotion ranked-scalar key: `(robust_metric, id)`. `robust_metric` is the multi-seed
-        confirmed mean when present, else the raw metric (`models.Node.robust_metric`). Used by holdout_topk
-        and as the tie-break-OFF path of `promotion_key`."""
+        confirmed mean when present, else the raw metric (`models.Node.robust_metric`). Byte-identical to
+        the verifier-tie-break-OFF path of `promotion_key`/`holdout_key`; retained as the plain-tuple
+        reference (no non-test callers today — holdout_topk now ranks by `promotion_key`)."""
         return (node.robust_metric, node.id)
 
     def _vc(self, node):
@@ -112,6 +113,7 @@ class SearchFitness:
         """The "can this node be selected best" predicate `_select_best` filters its mean-pick pool by:
         feasible, not trust-flagged, not aborted, and carrying a usable `robust_metric`. (`holdout_topk`
         expresses the same eligibility through a different-but-agreeing base — `feasible_nodes()` + the
-        flagged filter — and shares only the ranked-scalar `selection_key`, not this predicate.)"""
+        flagged filter — and ranks by `promotion_key` (the plain `(robust_metric, id)` when the verifier
+        tie-break is off), not this predicate.)"""
         return (node.feasible and node.id not in flagged and node.id not in aborted
                 and node.robust_metric is not None)
