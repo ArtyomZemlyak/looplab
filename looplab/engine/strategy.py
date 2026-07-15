@@ -49,7 +49,12 @@ class StrategyCadenceMixin:
         REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
         if not s:
             return {}
-        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "novelty_stance", "request_research")}
+        # `timeout`/`max_parallel` are here because _apply_strategy applies them (resource-budget retune);
+        # omitting them meant a decision that changed ONLY one of them was never seen as a change, so it
+        # was never recorded or applied (the P8 live-budget retune silently no-op'd unless bundled with a
+        # change to another tracked field).
+        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
+                                      "novelty_stance", "request_research", "timeout", "max_parallel")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
