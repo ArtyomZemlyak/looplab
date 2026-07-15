@@ -50,6 +50,9 @@ def task_fingerprint(kind: str, direction: str, goal: str, metric: str = "",
     the kind/direction/metric (weighted by prefixing), plus salient goal keywords and param names.
     `universal` (opt-in) removes the ASCII-only allowlist on goal keywords so non-Latin goals are not
     silently dropped; default False keeps the legacy fingerprint byte-identical (see `_goal_tokens`)."""
+    # CODEX AGENT: kind/direction/metric are merely Jaccard tokens, not compatibility gates; reproduced
+    # incompatible min/RMSE and max/recall tasks clear the live 0.3 threshold. Separate immutable hard
+    # facets from fuzzy retrieval text and version the tokenizer/fingerprint/schema.
     toks = {f"kind:{(kind or '').lower()}", f"dir:{(direction or '').lower()}"}
     if metric:
         toks.add(f"metric:{str(metric).lower()}")
@@ -542,6 +545,9 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     keyed by `task_fingerprint`, so a later SIMILAR run can answer "was this tried across runs, and
     with what result?" and feed `grade_novelty`'s `prior_concepts` (D3 level 3 = surface prior, never
     reject). Deliberately small and JSON-flat: this is memory-store data, not a fold event."""
+    # CODEX AGENT: This durable cross-run record has no schema/fingerprint/concept version, task/scope,
+    # evidence node refs, visibility/retention policy, or purge key. A deleted/private run keeps affecting
+    # later runs, and readers cannot distinguish or migrate incompatible record generations.
     return {
         "run_id": str(run_id or ""),
         "fingerprint": sorted(set(fingerprint or [])),
@@ -567,6 +573,9 @@ class ConceptCapsuleStore:
         self._reload()
 
     def _reload(self) -> None:
+        # CODEX AGENT: `dicts_only` is not schema validation. A dict with an integer fingerprint or a
+        # string `concepts` field can poison retrieval (or become character concepts); validate and
+        # quarantine each bounded row rather than letting one row disable the advisory feature.
         self.capsules = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
 
     def add(self, capsule: dict) -> bool:
@@ -588,6 +597,9 @@ class ConceptCapsuleStore:
         """Prior-run capsules whose fingerprint is at least `min_sim` similar (Jaccard, universal-aware
         because the fingerprint itself already is), most-similar first, excluding this run. Bounded by
         the caller; each tuple is (similarity, capsule) so a surfacing cue can rank + cite by run."""
+        # CODEX AGENT: This materializes and sorts the whole portfolio for every proposal. Combined with
+        # construction-time full-file reload and finalization-time whole-file rewrite, cost grows with
+        # every run; query a bounded indexed snapshot keyed by compatible scope/version instead.
         out = []
         for c in self.capsules:
             if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):

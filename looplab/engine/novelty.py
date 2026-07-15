@@ -203,6 +203,10 @@ class NoveltyGateMixin:
             # §21.20 Step 2: feed cross-run priors so grade_novelty can recognize a concept tried in an
             # EARLIER similar run (level 3). Off unless `cross_run_concepts`; empty set otherwise (no-op).
             prior_set, prior_caps = self._cross_run_prior(state)
+            # CODEX AGENT: `prior_concepts` changes grade precedence, not just observability: level 3 is
+            # returned before the same-run level-4 branch, so enabling this flag can turn an L4 allow into
+            # a fall-through to the flat gate. Keep cross-run annotation outside the selection grade if
+            # the contract is truly audit-only.
             grade = grade_novelty(state, idea, graph, tags=tags, idea_tags=idea_tags,
                                   prior_concepts=prior_set)
         except Exception:  # noqa: BLE001 — a grader/tagger/reconstruction hiccup must never block proposing
@@ -248,6 +252,9 @@ class NoveltyGateMixin:
         try:
             from pathlib import Path
             from looplab.engine.memory import ConceptCapsuleStore
+            # CODEX AGENT: This path reloads and scans/sorts the entire JSONL once per proposal. It needs
+            # a validated, versioned query index/cache; today one schema-poisoned row is caught outside
+            # this loop and silently disables every otherwise-valid prior for the proposal.
             store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
             fp = self.lessons.task_fingerprint(state, state.best())
             caps = store.prior_capsules(fp, min_sim=self._CROSS_RUN_MIN_SIM,
@@ -268,6 +275,9 @@ class NoveltyGateMixin:
             if not matched:
                 return
             runs = []
+            # CODEX AGENT: The top-five limit is applied before filtering for `matched`, so a matching
+            # sixth capsule can change the grade while producing no audit receipt. Filter first, add a
+            # deterministic tie-break, and record similarity/fingerprint plus a stable proposal/evidence id.
             for _sim, c in prior_caps[:5]:
                 shared = sorted(set(str(x) for x in (c.get("concepts") or [])) & set(matched))
                 if not shared:

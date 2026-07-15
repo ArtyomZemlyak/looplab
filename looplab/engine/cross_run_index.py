@@ -31,6 +31,9 @@ def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric:
     Deterministic and universal (no hardcoded facet lists). `param_names` (the winner's params) sharpen the
     fingerprint exactly as in `task_fingerprint`."""
     from looplab.engine.memory import _goal_tokens, task_fingerprint
+    # CODEX AGENT: CR0 defaults to universal tokenization, while live capsules default to legacy
+    # tokenization (`fingerprint_universal=False`). The same task can therefore have incompatible join
+    # keys; persist one configured/versioned mode rather than silently changing it by read path.
     return {
         "task_id": str(task_id or ""),
         "kind": str(kind or ""),
@@ -47,11 +50,18 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     `task.snapshot.json` (not carried on `RunState`); everything else is folded. Deterministic: attempts are
     emitted in node-id order, all sets sorted. This is `ExecutionAttempt`/`Measurement` in lean JSON form."""
     best = state.best()
+    # CODEX AGENT: A winner is mutable output, so injecting its parameter names makes the task passport
+    # change after a new winner/re-evaluation. Scope identity must derive only from the immutable task and
+    # comparison contract; attach winner features to facts instead.
     pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
     scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction, goal=state.goal,
                           metric=metric, param_names=pnames, universal=universal)
     node_concepts = getattr(state, "node_concepts", None) or {}
     attempts = []
+    # CODEX AGENT: Folded nodes contain only the latest generation. `node_reset` replaces the prior
+    # terminal measurement, so a .1 -> reset -> .9 history becomes one attempt at .9. Build immutable
+    # attempt/measurement facts from event generations/seqs and retain trust, feasibility, holdout,
+    # confirmation, tombstone/abort, uncertainty, and measurement identity.
     for nid in sorted(state.nodes):
         nd = state.nodes[nid]
         idea = getattr(nd, "idea", None)
@@ -60,8 +70,12 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
             "node_id": nid,
             "operator": str(getattr(idea, "operator", "") or "") if idea is not None else "",
             "params": dict(getattr(idea, "params", {}) or {}) if idea is not None else {},
+            # CODEX AGENT: `str(NodeStatus.evaluated)` emits "NodeStatus.evaluated", not "evaluated".
+            # Serialize `.value` under a versioned output schema so fixing this does not silently break consumers.
             "status": str(getattr(nd, "status", "") or ""),
             "metric": getattr(nd, "robust_metric", None),
+            # CODEX AGENT: Raw per-run labels ignore `concept_consolidation`; this preserves neither a
+            # canonical cross-run concept UID nor the taxonomy version needed to interpret it later.
             "concepts": sorted(str(c) for c in concepts),
         })
     return {
@@ -79,7 +93,12 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
     try:
         snap = json.loads((run_dir / "task.snapshot.json").read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — a missing/garbled snapshot just yields empty facets
+        # CODEX AGENT: Blank identity is indistinguishable from a real empty facet. Return explicit
+        # degraded/error provenance so an incomplete passport cannot be treated as compatible evidence.
         return "", ""
+    # CODEX AGENT: Shipped tasks store the scorer under `eval.metric` or `cmd.metric`; reading only the
+    # fabricated top-level `metric` used in this feature's tests yields blank metrics for real snapshots.
+    # Parse the adapter contracts (including reader/key semantics), not a test-only shape.
     kind = str(snap.get("kind") or "")
     m = snap.get("metric")
     if isinstance(m, dict):
@@ -93,6 +112,9 @@ def build_index(entries: list[tuple[RunState, str, str]], *, universal: bool = T
     """Project (state, kind, metric) triples into run-facts records, sorted by run_id for a stable,
     order-independent index (the same set of runs always yields the same index)."""
     facts = [run_facts(st, kind=kind, metric=metric, universal=universal) for st, kind, metric in entries]
+    # CODEX AGENT: Python's stable sort preserves input order when `(run_id, task_id)` collides; reversing
+    # two duplicate identities changes canonical output bytes. Reject duplicate stable run identities or
+    # include source identity/content digest as a deterministic tie-break and deduplication contract.
     facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"]))
     return facts
 
@@ -104,10 +126,16 @@ def rebuild_index_from_run_root(run_root: str | Path, *, universal: bool = True)
     from looplab.events.replay import fold
     root = Path(run_root)
     entries = []
+    # CODEX AGENT: This retains every full folded state (including code/files/log tails/trials) until the
+    # scan ends, then discards it. Project one run at a time and persist an atomic incremental index keyed
+    # by source digest/watermark; the current command is a full-memory inspector, not a CR0 index substrate.
     for ev in sorted(root.glob("*/events.jsonl")):
         try:
             st = fold(EventStore(ev).read_all())
         except Exception:  # noqa: BLE001 — one unreadable run must not sink the whole rebuild
+            # CODEX AGENT: Thrown failures are silently omitted, while the lenient reader can stop at a
+            # torn/corrupt line without throwing and empty logs become phantom blank runs. Return skipped/
+            # incomplete receipts plus seq/digest/finished watermarks; never present a partial corpus as complete.
             continue
         kind, metric = _snapshot_kind_metric(ev.parent)
         entries.append((st, kind, metric))

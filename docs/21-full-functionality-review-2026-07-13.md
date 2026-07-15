@@ -832,3 +832,42 @@ Refreshed doc 18 PART V (§24.3 / §25 / §28 / §30.1 + the revision header) to
 **aggregate + Atlas data model now EXIST** as CLI/engine read-models: the story shifts from "engine substrate
 shipped, read-model remains" to "read-models exist; only HTTP serving + React rendering + a `concept_uid`
 resolver remain." Full suite + mkdocs green after the fix.
+
+## Round 15 — integrate CR Step 5 advisory (first live-loop wiring) + master's design-blocker annotations (2026-07-15)
+
+Master shipped two commits: `11c6d36` (**CR Step 5 advisory** — the gated flip of the cross-run context pack
+from audit-only to a LIVE prompt cue) and `027704e` (**design-blocker annotations** — `# CODEX AGENT:` review
+comments across `claims.py` / `novelty.py` / `lessons.py` / `memory.py` / `cross_run_index.py` / `config.py` /
+`build.sh`, plus a `build.sh` whitespace fix). Integrated by merge; three conflicts, each resolved to KEEP the
+branch's functional fix AND master's still-valid annotation (synergy, no loss either way):
+
+- **`claims.py`** — my run-scoped `(run_id, node_id)` evidence fix (Round 14) vs master's annotations. Kept the
+  fix in both loops; kept master's *lesson-outcome-vs-polarity* and *citation-is-not-verification* annotations
+  (separate, still-open blockers); and **reconciled** the one annotation my fix resolves ("bare `set[int]`
+  collapses run-local ids — use run-qualified refs") into a "fixed + still-open" note (run scoped now; a full
+  `EvidenceRef` would also carry generation / measurement id / trust provenance).
+- **`config.py`** — my Round-13 dependency doc (READ needs `graded_novelty`; non-Latin needs
+  `fingerprint_universal`) vs master's annotation, which added a THIRD prerequisite I'd missed: the WRITE side
+  needs `node_concepts` (normally from `concept_pivot`). Merged into one WRITE/READ dependency note.
+- **`lessons.py`** — my Round-13 `str(c)` read/write-consistency fix vs master's annotation that the
+  whole-node-score-to-every-concept outcome is confounded. Kept both.
+
+**Reviewed the one functional change (`11c6d36`) against the engine invariants:** `_cross_run_advisory_text`
+folds `render_context_pack` into the Researcher hint EXACTLY like the shipped E4 prior note; it is gated on the
+new off-by-default `cross_run_advisory` flag, returns `""` on flag-off / no `memory_dir` / empty store / ANY
+exception (prompt byte-identical when off), is advisory-only (never touches node selection, §21.7), and appends
+no domain event (replay-safe). It composes cleanly with my ref fix — `render_context_pack` shows only the
+counts, which are now the *correct* cross-run corroboration counts. New `test_cross_run_advisory.py` (7 tests)
+pins the off-switch, on-path, coverage line, malformed-never-raises, and flag-defaults-off. `memory.py` /
+`cross_run_index.py` master changes are annotation-only (verified: no code lines changed).
+
+Docs: added §25 item (3b) to doc 18 noting the Step-5 pack now has an off-by-default *live-loop* path (so the
+read-models are no longer purely off-loop for the engine, only unserved for the UI); doc 17's "NOT wired into
+any live prompt" auto-merged to "Advisory wiring also LANDED"; `configuration.md` gained the `cross_run_advisory`
+row (default off). Deliberately did **not** add `cross_run_advisory` to the process diagram: the diagram depicts
+neither its sibling `cross_run_concepts`/`cross_run_prior` nor the E4 prior note (this whole off-by-default
+cross-run prompt-cue family sits above the flowchart's granularity), so adding only this one would be
+inconsistent. `build.sh` remains a maintainer concern flagged by master's own annotation (committed
+developer-local transcript with an internal URL); left as-is — not this branch's file to rewrite.
+
+Full suite + mkdocs --strict green after the merge.

@@ -77,6 +77,7 @@ class ProposalCuesMixin:
                      "cross-validation gates them — KEEP a feature only if it improves CV; drop any "
                      "that don't (feature engineering is non-universal).")
         hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
+        hint += self._cross_run_advisory_text(state)   # §21.20 Step 5: cross-run context pack (empty unless enabled)
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001
@@ -92,6 +93,32 @@ class ProposalCuesMixin:
         except Exception:  # noqa: BLE001
             pass
         self._stamp_novelty_hint(state, self._novelty_stance)
+
+    def _cross_run_advisory_text(self, state: RunState) -> str:
+        """§21.20 Step 5 (advisory): the bounded cross-run CONTEXT PACK for the Researcher prompt —
+        evidence-grounded claims with BOTH support and counter-evidence (Step 4) plus a portfolio-coverage
+        line (Step 3), rendered as a short prose block. Folded into the prompt hint EXACTLY like the E4
+        prior note; advisory only, NEVER touches node selection (§21.7). Off unless `cross_run_advisory`;
+        returns "" on no memory dir / empty store / any hiccup, so the prompt is byte-identical when off."""
+        if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+            return ""
+        try:
+            import json
+            from pathlib import Path
+
+            from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+            from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+            from looplab.events.eventstore import read_jsonl_lenient
+            base = Path(self.memory_dir)
+            lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
+            lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            overview = portfolio_concept_overview(ConceptCapsuleStore(cp).all()) if cp.exists() else None
+            if not lessons and not overview:
+                return ""
+            text = render_context_pack(build_context_pack(claim_assessments(lessons), concept_overview=overview))
+            return ("\n" + text) if text else ""
+        except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing
+            return ""
 
     def _stamp_novelty_hint(self, state: RunState, stance: str) -> None:
         """Stamp the Strategist's novelty dial onto the ACTIVE researcher (slice 2/4): a prose

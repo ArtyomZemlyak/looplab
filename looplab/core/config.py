@@ -497,12 +497,22 @@ class Settings(BaseSettings):
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
     # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
     # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
-    # Dependencies (the WRITE fires on this flag alone, but the visible half has two prerequisites): the
-    # prior SURFACES only when `graded_novelty` is also on — the read lives behind that gate, so
-    # `cross_run_concepts` alone silently accumulates capsules without ever emitting a `cross_run_prior`;
-    # and a non-Latin (Russian/CJK) portfolio must also set `fingerprint_universal`, else the capsule
-    # fingerprint over-matches unrelated tasks and surfaces spurious priors.
+    # Dependencies (CODEX AGENT: not standalone as documented — the WRITE fires on this flag alone, but
+    # neither half is truly self-sufficient):
+    #   • WRITE: the run-end capsule only carries concepts if `node_concepts` tags exist — normally
+    #     produced by `concept_pivot`; with only this flag the capsule can persist with nothing to surface.
+    #   • READ (surface): the prior SURFACES only when `graded_novelty` is also on — the read lives behind
+    #     that gate, so `cross_run_concepts` alone silently accumulates capsules without ever emitting a
+    #     `cross_run_prior`; and a non-Latin (Russian/CJK) portfolio must also set `fingerprint_universal`,
+    #     else the capsule fingerprint over-matches unrelated tasks and surfaces spurious priors.
     cross_run_concepts: bool = False
+    # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
+    # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
+    # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
+    # prompt-grounding, never touches node selection (§21.7). Reads `memory_dir` (lessons.jsonl +
+    # concept_capsules.jsonl); "" when empty. OPT-IN (default off) — the gated flip of Step 2 from audit-only
+    # to a live prompt cue; measure the effect via a frozen A/B before defaulting on. See engine/proposal_cues.py.
+    cross_run_advisory: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
