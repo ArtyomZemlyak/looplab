@@ -1338,3 +1338,52 @@ nuance, not a contradiction. Full suite (37 targeted claims/context-pack) + mkdo
 **Note:** master has advanced 8 commits past `0e45bd3` (agentic concept steward, concept SPLIT, full CR2a
 intent-eligibility, structured claim key, incremental index rebuild) — NOT yet integrated into this branch tip;
 a future rebase would pull them and let the docs mark those "full-CR" slices as landed.
+
+## Round 22 — integrate master `b7ea10c` (agentic stewards + concept SPLIT + structured claim key + full CR2a), adapt + mega-review (2026-07-15)
+
+Executed the rebase the Round-21 note anticipated: merged master's 10-commit advance (`26f408d..b7ea10c`,
++2620 lines) into the branch. The "full-CR" slices the earlier rounds marked *deferred* now LAND, so several
+gaps this doc set flagged as open close:
+
+- **New master features integrated.** Concept **SPLIT** (`record_concept_split` + read-time re-tag, versioned
+  key contract); the **structured scope+polarity-safe claim key** (`engine/claim_key.py` — opposite-polarity
+  assertions no longer merge, they surface as a contradiction; same words in two tasks are two claims;
+  governance is scope-precise via `claim_uid`); the **full CR2a** intent→eligibility→contradiction-quota
+  retrieval planner (scopes every source, closes the cross-task leak, emits a why-recalled receipt);
+  **incremental digest-cached index rebuild**; and the three **AGENTIC stewards at finalize** — concept
+  (merge/split/purge), claim (ratify/reject/pin), task-faceting — each an LLM that only PROPOSES, every write
+  routed through the same reversible append-only governance path (`concept_aliases`/`concept_splits`/
+  `claim_decisions`/`task_facets` sidecars), never a domain event.
+
+- **Conflicts resolved (8 files), preserving BOTH the branch's defensive fixes and master's features.**
+  `finalize.py` — kept the scoped finalize-step structure and grafted the three steward calls in as a
+  DECOUPLED best-effort block after the case step (not a finalize requirement, no scoped marker, guarded so
+  `cross_run_curation=off` ⇒ byte-identical finalize with zero extra fold). `claims.py` — unioned the branch
+  field-caps with master's structured `claim_uid`/scope/metric (identity derives from the FULL statement, so
+  caps can't orphan a decision), adopted master's `_append_governance` (locked **+ fsynced**) over the manual
+  lock for `record_claim_decision`, kept the branch's `record_research_claims` interprocess lock (dropping
+  master's stale "unlocked" annotation the fix resolves), kept the `portfolio_atlas` operator-rejected
+  contradiction filter. `concept_registry.py` — adopted `_append_governance` for `record_concept_alias`.
+  `strategy.py` — kept the reconciled tie-group loop, preserved master's review annotation. Docs
+  17/cli-reference/configuration — kept the honest rebaseline framing, threaded each of my flagged gaps to
+  "SUPERSEDED by the follow-up below", and added the new rows/commands.
+
+- **Adversarial mega-review (3 independent verifiers) found NO invariant regressions.** (1) finalize/steward
+  wiring: off-by-default byte-identical finalize confirmed; all steward writes are sidecar-only (never
+  `store.append`) so `fold` stays pure; the block cannot block `_publish_completion` and re-runs at most once
+  per incomplete-finalize re-entry, idempotently. (2) claims.py: the field-cap-vs-structured-identity split
+  does not orphan decisions (uid/key derive from the uncapped statement; nothing recomputes from the capped
+  display field); the `operator-rejected` filter is consistent across every consumer. (3) strategy tie-groups
+  clean (no union-find remnants); `concept_registry` guards-before-append + cycle-safe; **all 164 Settings
+  fields have a configuration.md row with the correct default** (the 3 new ones — `cross_run_structured_claims`,
+  `cross_run_curation`, `cross_run_curation_auto` — present, all default off). Two applied follow-ups from the
+  review: guarded the finalize steward block so the default path does zero extra fold; and completed the
+  **process diagram** (`agent-architecture.html`) — master's edit added only the concept steward, so the claim
+  steward + task-faceting were added to the cross-run box (CLAUDE.md diagram-sync rule).
+
+- **New Settings (all default False, opt-in):** `cross_run_structured_claims`, `cross_run_curation`,
+  `cross_run_curation_auto`. **New CLI:** `concept-split`, `concept-steward`, `claim-steward`, `task-facets`
+  (each now with a full cli-reference section; `claims --structured` and `claim-decide --scope` documented).
+
+Master was still at `b7ea10c` at integration time (no further advance during the work). Full suite **2909
+passed / 25 skipped**; `mkdocs build --strict` green.

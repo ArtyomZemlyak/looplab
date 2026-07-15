@@ -517,6 +517,25 @@ class Settings(BaseSettings):
     # concept_capsules.jsonl); "" when empty. OPT-IN (default off) — the gated flip of Step 2 from audit-only
     # to a live prompt cue; measure the effect via a frozen A/B before defaulting on. See engine/proposal_cues.py.
     cross_run_advisory: bool = False
+    # PART IV cross-run §21.20.13 (full CR of the lean fuzzy claim merge). Switch the claim read-model to the
+    # SCOPE+POLARITY-safe STRUCTURED claim key (engine/claim_key.py): claims from different tasks never
+    # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
+    # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
+    # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
+    # Affects the `cross_run_advisory` context pack only; OPT-IN (default off). See engine/claims.py.
+    cross_run_structured_claims: bool = False
+    # PART IV cross-run §22.4 (AGENTIC taxonomy steward). At finalize, when an LLM client is available, let
+    # the concept steward (engine/concept_steward.py) review the freshly-updated portfolio concept graph and
+    # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
+    # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
+    # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
+    # retries finalize). OPT-IN (default off); needs `memory_dir` + an LLM backend. See engine/lessons.py.
+    cross_run_curation: bool = False
+    # Companion to `cross_run_curation`: also APPLY the steward's proposals automatically (through the same
+    # reversible append-only governance writes), instead of only logging them for operator ratification. The
+    # "fully agentic" mode — the append-only reversibility is the safety net. OPT-IN (default off); inert
+    # unless `cross_run_curation` is also on.
+    cross_run_curation_auto: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external

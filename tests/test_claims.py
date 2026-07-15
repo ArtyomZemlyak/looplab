@@ -322,3 +322,55 @@ def test_cli_claims_fuzzy_flag(tmp_path):
         _lesson("distillation improves retrieval recall a lot", "supported", [2])])
     r = CliRunner().invoke(app, ["claims", str(tmp_path), "--fuzzy"])
     assert r.exit_code == 0
+
+
+# --------------------------------------------------------------------------- #
+# Structured semantic claim key (§21.20.13, full CR of the lean fuzzy merge)
+# --------------------------------------------------------------------------- #
+
+def test_structured_merges_paraphrases_within_a_scope():
+    out = claim_assessments([
+        _lesson("hard negative mining improves recall", "supported", [1], run_id="rA"),
+        _lesson("hard negative mining improved recall greatly", "supported", [2], run_id="rB"),
+    ], structured=True)
+    assert len(out) == 1 and out[0]["n_support"] == 2 and out[0]["runs"] == ["rA", "rB"]
+
+
+def test_structured_does_not_merge_opposite_polarity_it_contradicts():
+    out = claim_assessments([
+        _lesson("dropout improves generalization", "supported", [1], run_id="rA"),
+        _lesson("dropout never improves generalization", "supported", [2], run_id="rB"),
+    ], structured=True)
+    assert len(out) == 2                              # two SEPARATE assertions, not one merged claim
+    # each is marked contested and names the other as a contradiction (unreachable from the lean merge)
+    assert all(c["epistemic"] == "mixed" and c["contradicts"] for c in out)
+
+
+def test_structured_scope_separates_same_words_across_tasks():
+    out = claim_assessments([
+        _lesson("distillation helps", "supported", [1], run_id="rA", task_id="retrieval"),
+        _lesson("distillation helps", "refuted", [2], run_id="rB", task_id="classification"),
+    ], structured=True)
+    assert len(out) == 2                              # different tasks => different claims (not a mixed merge)
+    assert {c["epistemic"] for c in out} == {"supported", "refuted"}
+
+
+def test_structured_governance_is_scope_precise(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("adapter tuning helps", "supported", [1], run_id="rA", task_id="taskA"),
+        _lesson("adapter tuning helps", "supported", [2], run_id="rB", task_id="taskB")])
+    # reject the claim ONLY in taskA
+    record_claim_decision(str(tmp_path), statement="adapter tuning helps", decision="rejected", scope="taskA")
+    out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
+    assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"
+
+
+def test_cli_claims_structured_flag(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("mnr loss helps", "supported", [1], run_id="rA"),
+        _lesson("mnr loss never helps", "supported", [2], run_id="rB")])
+    r = CliRunner().invoke(app, ["claims", str(tmp_path), "--structured"])
+    assert r.exit_code == 0 and "mnr loss" in r.stdout

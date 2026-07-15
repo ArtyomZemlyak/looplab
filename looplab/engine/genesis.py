@@ -205,6 +205,10 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     if memory_dir and cross_run_read_tools:
         from looplab.agents.agent import CompositeTools
         from looplab.tools.cross_run_tools import CrossRunTools
+        # CODEX AGENT: Genesis receives this provider unbound, before a task passport exists, so it exposes
+        # the entire machine-wide portfolio and is the broadest persistent-injection surface. At minimum bind
+        # a temporary goal-derived scope with hard kind/metric/visibility gates, and require the same bounded
+        # untrusted-data/receipt contract as in-run consumers before letting memory author the task itself.
         crt = CrossRunTools(memory_dir, role="researcher")
         tools = CompositeTools([tools, crt]) if tools is not None else crt
         sys_prompt += (

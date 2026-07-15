@@ -18,6 +18,7 @@ logs yields a byte-identical result (the §21.20.10 CR0 gate, pinned by `tests/t
 """
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional
@@ -33,14 +34,18 @@ SCOPE_SCHEMA_VERSION = 1
 
 
 def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric: str = "",
-                  universal: bool = True) -> dict:
+                  universal: bool = True, facets: Optional[dict] = None) -> dict:
     """The task PASSPORT (§21.20.3): an IMMUTABLE task identity + fingerprint + salient goal terms.
     Deliberately derives ONLY from the immutable task (kind/direction/metric/goal) — NOT the winner's
     params, which are outcome-derived and would make identity shift when a new node wins or a run extends
     (CODEX). Result features belong on `run_facts` attempts, not the passport. `fp_mode`/`v` version the
-    tokenizer+schema so records built under different modes are never silently joined."""
+    tokenizer+schema so records built under different modes are never silently joined.
+
+    `facets` (from the AGENTIC `task_facets`, §21.20.2) is an OPTIONAL advisory overlay — a "facets" key is
+    added ONLY when passed. The FINGERPRINT never depends on it, and the deterministic index path
+    (`build_index`/`rebuild_index_from_run_root`) never passes it, so CR0 rebuild stays byte-identical."""
     from looplab.engine.memory import _goal_tokens, task_fingerprint
-    return {
+    out = {
         "v": SCOPE_SCHEMA_VERSION,
         "fp_mode": "universal" if universal else "legacy",
         "task_id": str(task_id or ""),
@@ -50,6 +55,9 @@ def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric:
         "fingerprint": task_fingerprint(kind, direction, goal, metric, universal=universal),
         "goal_terms": sorted(set(_goal_tokens(goal, universal=universal))),
     }
+    if facets:
+        out["facets"] = {k: str(v) for k, v in facets.items() if v}   # advisory overlay only
+    return out
 
 
 def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: bool = True) -> dict:
@@ -115,36 +123,120 @@ def _snapshot_kind_metric(run_dir: Path) -> tuple[str, str]:
     return kind, metric
 
 
+def _content_digest(record: dict) -> str:
+    """A canonical content hash of a full facts record — the FINAL sort tie-break so two runs that are
+    otherwise identical on (run_id, task_id, n_attempts, best-metric) but differ in their attempts still
+    order deterministically by content, never by input/traversal order (CODEX)."""
+    return hashlib.sha1(json.dumps(record, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def build_index(entries: list[tuple[RunState, str, str]], *, universal: bool = True) -> list[dict]:
     """Project (state, kind, metric) triples into run-facts records, sorted by run_id for a stable,
     order-independent index (the same set of runs always yields the same index)."""
     facts = [run_facts(st, kind=kind, metric=metric, universal=universal) for st, kind, metric in entries]
     # `run_id` is the unique run identity, but two folded logs COULD carry the same run_id (a copied dir);
-    # add a content tie-break (n_attempts, best) so the canonical order is input-order-INDEPENDENT even
-    # then, instead of relying on stable-sort to preserve arrival order (CODEX). A source_uid dedup contract
-    # is the portfolio-scale TODO (§21.20.3).
+    # sort by (run_id, task_id, n_attempts, best) and then the FULL-RECORD content digest so the canonical
+    # order is input-order-INDEPENDENT even when copies share all coarse keys but differ in their attempts
+    # (CODEX: stable-sort would otherwise leak traversal order). A source_uid dedup contract is the
+    # portfolio-scale TODO (§21.20.3); this at least makes the published order content-deterministic.
     facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"], f["n_attempts"],
-                              str((f.get("best") or {}).get("metric"))))
+                              str((f.get("best") or {}).get("metric")), _content_digest(f)))
     return facts
 
 
 def rebuild_index_from_run_root(run_root: str | Path, *, universal: bool = True) -> list[dict]:
     """Migration/rebuild over EXISTING runs: fold every `<run_root>/*/events.jsonl` and project it. Pure and
-    deterministic — this is the CR0 'rebuild from scratch' path; running it twice yields the same index."""
+    deterministic — this is the CR0 'rebuild from scratch' path; running it twice yields the same index.
+    For the digest-cached, receipted variant see `build_index_incremental`."""
+    return build_index_incremental(run_root, universal=universal)["index"]
+
+
+# --------------------------------------------------------------------------- #
+# Incremental rebuild (full-CR §21.20.13) — source-digest cached, receipted, atomically persistable.
+# Only runs whose event log / snapshot CHANGED are re-folded; unchanged runs reuse cached facts, and a
+# torn/unreadable run produces an explicit SKIP receipt instead of vanishing silently (CODEX).
+# --------------------------------------------------------------------------- #
+
+def run_source_digest(run_dir: str | Path) -> str:
+    """A content digest over the two files a run's facts derive from — `events.jsonl` (folded) and
+    `task.snapshot.json` (kind/metric) — so a change to either invalidates the cache. "" if no event log.
+    Content-addressed (not size+mtime) so it is deterministic and copy-stable; hashing bytes is far cheaper
+    than re-folding, which is what the cache actually saves."""
+    d = Path(run_dir)
+    ev = d / "events.jsonl"
+    if not ev.exists():
+        return ""
+    h = hashlib.sha1()
+    h.update(ev.read_bytes())
+    h.update(b"\x00snapshot\x00")
+    snap = d / "task.snapshot.json"
+    if snap.exists():
+        h.update(snap.read_bytes())
+    return "s_" + h.hexdigest()
+
+
+def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = None,
+                            universal: bool = True) -> dict:
+    """Rebuild the portfolio index over `<run_root>/*/events.jsonl`, REUSING cached facts for runs whose
+    `run_source_digest` is unchanged vs `prior` (from a previous `build_index_incremental`/`load_index`).
+    Returns `{"index", "runs": {dir: {digest, facts}}, "receipts": {"built", "cached", "skipped"}}` where
+    `skipped` is a list of `{dir, reason}` for torn/unreadable/empty runs (explicit, not silent — CODEX).
+    Pure w.r.t. the on-disk logs + the passed `prior`; deterministic (index is `build_index`-sorted)."""
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
     root = Path(run_root)
-    entries = []
-    # NOTE (CODEX, full-CR TODO §21.20.13): this projects one folded state at a time but holds them all
-    # until build_index runs (fine for an on-demand inspector at tens–hundreds of runs); the INCREMENTAL,
-    # atomic, source-digest/watermark-keyed index that streams per-run and carries skipped/incomplete
-    # receipts is the CR1a substrate. Today an unreadable/torn run is SILENTLY skipped (best-effort);
-    # a production rebuild must instead return explicit skip receipts so a partial corpus isn't read as complete.
+    prior_runs = (prior or {}).get("runs") or {}
+    runs: dict[str, dict] = {}
+    receipts = {"built": [], "cached": [], "skipped": []}
+    entries: list[tuple[RunState, str, str]] = []
     for ev in sorted(root.glob("*/events.jsonl")):
+        name = ev.parent.name                         # stable per-run cache key (the run dir name)
+        digest = run_source_digest(ev.parent)
+        cached = prior_runs.get(name)
+        if digest and cached and cached.get("digest") == digest and cached.get("facts"):
+            runs[name] = {"digest": digest, "facts": cached["facts"]}
+            receipts["cached"].append(name)
+            continue
         try:
             st = fold(EventStore(ev).read_all())
-        except Exception:  # noqa: BLE001 — one unreadable run must not sink the whole rebuild (see NOTE)
+        except Exception as e:  # noqa: BLE001 — an unreadable run becomes an explicit skip receipt, not a gap
+            receipts["skipped"].append({"dir": name, "reason": f"{type(e).__name__}: {e}"[:200]})
             continue
         kind, metric = _snapshot_kind_metric(ev.parent)
+        facts = run_facts(st, kind=kind, metric=metric, universal=universal)
+        # A torn log folds LENIENTLY to an identity-less empty state (no run_started parsed): the lenient
+        # reader never raised, but a run with no run_id AND no attempts cannot be joined/deduped and would
+        # otherwise index as a phantom "" run (CODEX). Report it as a skip, not silent portfolio evidence.
+        if not facts["run_id"] and facts["n_attempts"] == 0:
+            receipts["skipped"].append({"dir": name, "reason": "empty/unreadable projection (no run identity)"})
+            continue
+        runs[name] = {"digest": digest, "facts": facts}
+        receipts["built"].append(name)
         entries.append((st, kind, metric))
-    return build_index(entries, universal=universal)
+    # Rebuild the canonical sorted index from ALL kept facts (cached + freshly built), so the output order is
+    # identical to a from-scratch `build_index` regardless of which runs were cached this pass.
+    all_facts = [r["facts"] for r in runs.values()]
+    all_facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"], f["n_attempts"],
+                                  str((f.get("best") or {}).get("metric")), _content_digest(f)))
+    return {"index": all_facts, "runs": runs, "receipts": receipts}
+
+
+def save_index(path: str | Path, result: dict) -> None:
+    """Persist an incremental-index result (`{"index","runs","receipts"}`) atomically as JSON — the cache a
+    later `build_index_incremental(prior=load_index(path))` reads to skip unchanged runs."""
+    from looplab.core.atomicio import atomic_write_bytes
+    payload = {"v": SCOPE_SCHEMA_VERSION, "runs": result.get("runs") or {}}
+    atomic_write_bytes(Path(path), json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+
+def load_index(path: str | Path) -> Optional[dict]:
+    """Load a persisted incremental-index cache as a `prior` for `build_index_incremental`. None if absent
+    or unreadable (a corrupt cache just forces a full rebuild — it is never a source of truth)."""
+    p = Path(path)
+    if not p.exists():
+        return None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 — a torn cache forces a clean rebuild
+        return None
+    return {"runs": payload.get("runs") or {}} if isinstance(payload, dict) else None

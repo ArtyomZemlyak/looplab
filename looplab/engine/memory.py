@@ -586,6 +586,10 @@ class ConceptCapsuleStore:
         string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
         bad row instead of letting it disable the feature: require the list-typed fields to be lists and
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
+        # CODEX AGENT: `CONCEPT_CAPSULE_VERSION` is decorative here: missing v and unknown v=999 are both
+        # accepted as current records. The row also cannot declare legacy vs universal fingerprint mode,
+        # although those algorithms produce incompatible scopes. Enforce/migrate known schema+fingerprint
+        # versions (or quarantine with an explicit receipt) before treating the capsule as comparable.
         return (isinstance(c.get("run_id"), str) and c["run_id"]
                 and isinstance(c.get("fingerprint"), list)
                 and isinstance(c.get("concepts"), list)
@@ -640,26 +644,39 @@ class ConceptCapsuleStore:
         return list(self.capsules)
 
 
-def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] = None) -> dict:
+def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] = None,
+                               splits: Optional[dict] = None) -> dict:
     """A cross-run portfolio read-model over concept capsules (§21.20 Step 3 — 'what has been tried across
     the portfolio'). Pure/deterministic, no LLM/IO, drillable to `run_id`. For each concept it lists the
     runs that explored it with THEIR OWN outcome (run_id, metric, direction) — deliberately NOT a single
     cross-run 'best', because raw metrics from different tasks/directions are not comparable without a
     shared contract (§21.20.1). Also emits a per-run card (concept count + the run's own best_metric).
     `aliases` (from `load_concept_aliases`, CR1a) canonicalizes concept slugs at read time: merged aliases
-    collapse to one concept and purged concepts drop — the raw per-run tags are untouched (non-destructive)."""
-    from looplab.engine.concept_registry import resolve_slug
+    collapse to one concept and purged concepts drop; `splits` (from `load_concept_splits`) re-tags a coarse
+    concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
+    from looplab.engine.concept_registry import _ctx_tokens, resolve_slug, resolve_split
     per_concept: dict[str, dict] = {}
     for c in capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
         direction = str(c.get("direction") or "min")
-        for concept in (c.get("concepts") or []):
-            key = resolve_slug(concept, aliases) if aliases else str(concept)
+        raw = list(c.get("concepts") or [])
+        ctx = _ctx_tokens(raw) if splits else set()
+        # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug (split then alias),
+        # then collapse the run's raw concepts that map to the SAME canonical into ONE run-row, so a run
+        # never appears twice for one concept (CODEX). The row's metric is the outcome of the sorted-first
+        # raw concept that HAS an outcome (deterministic tie-break), else None.
+        by_canon: dict[str, list] = {}
+        for concept in raw:
+            s = resolve_split(concept, ctx, splits) if splits else concept
+            key = resolve_slug(s, aliases) if aliases else str(s)
             if not key:
                 continue                          # purged concept -> dropped from cross-run views
+            by_canon.setdefault(key, []).append(concept)
+        for key, raws in by_canon.items():
+            metric = next((oc.get(r) for r in sorted(raws) if oc.get(r) is not None), None)
             e = per_concept.setdefault(key, {"concept": key, "runs": []})
-            e["runs"].append({"run_id": rid, "metric": oc.get(concept), "direction": direction})
+            e["runs"].append({"run_id": rid, "metric": metric, "direction": direction})
     concepts = []
     for e in per_concept.values():
         e["runs"].sort(key=lambda r: r["run_id"])
@@ -676,15 +693,20 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     return {"n_runs": len(capsules), "n_concepts": len(concepts), "concepts": concepts, "runs": cards}
 
 
-def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None) -> dict:
+def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
+                     splits: Optional[dict] = None) -> dict:
     """PART IV cross-run Step 7 (lean, GATED): a recursive summary LEVEL above the flat concept overview —
     concepts grouped by their AXIS prefix (the part before '/', e.g. 'data/hard-negative-mining' -> 'data')
     into clusters with rollup counts. Deterministic, no LLM. Per the §21.20.11 hierarchy gate this ships as
     DATA only (an inspector rollup); it is NOT wired into any prompt/context until it beats the flat
     Claim+RunCapsule baseline (≥5 pp grounded-answer gain OR ≥30% token reduction) on the benchmark corpus."""
-    ov = portfolio_concept_overview(capsules, aliases=aliases)
+    ov = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
     clusters: dict[str, dict] = {}
     for e in ov["concepts"]:
+        # CODEX AGENT: despite the "recursive summary" contract this is one `split` over an unenforced label
+        # convention, not a hierarchy: every unprefixed concept collapses into one bucket and changing a
+        # display slug can move an entire evidence history between axes. Persist a versioned concept taxonomy
+        # (with stable UIDs and provenance) and benchmark that hierarchy; do not infer semantics from `/`.
         axis = e["concept"].split("/", 1)[0] if "/" in e["concept"] else "(ungrouped)"
         cl = clusters.setdefault(axis, {"axis": axis, "concepts": [], "_runs": set()})
         cl["concepts"].append(e["concept"])

@@ -107,15 +107,30 @@ class ProposalCuesMixin:
             from pathlib import Path
 
             from looplab.engine.claims import build_context_pack, claims_for_memory, render_context_pack
+            from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
+            # CODEX AGENT: `state` is never used below: this live prompt reads the whole mutable portfolio,
+            # including current-run/mismatched-task rows, on every proposal. Nothing records the store
+            # revision, selected evidence, rendered bytes, or prompt digest before the LLM call, so a crash
+            # + resume can re-propose the same slot under different evidence. Scope through one immutable
+            # snapshot and append a retrieval receipt before any cross-run content can influence reasoning.
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
-            overview = portfolio_concept_overview(ConceptCapsuleStore(cp).all()) if cp.exists() else None
+            # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
+            # concept never leaks into the proactive prompt through this raw overview (CODEX).
+            overview = (portfolio_concept_overview(ConceptCapsuleStore(cp).all(),
+                        aliases=load_concept_aliases(base), splits=load_concept_splits(base))
+                        if cp.exists() else None)
+            # CODEX AGENT: `research_claims.jsonl` is a first-class source, but this early return checks only
+            # lessons/capsules. D8-only memory is visible through the API helper yet silently absent from the
+            # Researcher prompt. Centralize source loading/readiness in `claims_for_memory` instead.
             if not lessons and not overview:
                 return ""
-            claims = claims_for_memory(base, lessons=lessons)   # lessons + D8 claims + operator decisions
+            # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
+            claims = claims_for_memory(base, lessons=lessons,
+                                       structured=getattr(self, "_cross_run_structured_claims", False))
             text = render_context_pack(build_context_pack(claims, concept_overview=overview))
             return ("\n" + text) if text else ""
         except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing

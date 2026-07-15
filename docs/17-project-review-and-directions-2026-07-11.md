@@ -3004,6 +3004,10 @@ required tag behaviour:
   vocabulary stops flapping (fixes the coverage jitter + the B1 churn corner). Threaded through
   `build_concept_map`; the strategy snapshot records only NEW decisions. Off-by-default.
 - **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
+  **Concept split LANDED 2026-07-15** (`record_concept_split`/`resolve_split`, `engine/concept_registry.py`):
+  one coarse concept re-tagged into finer ones deterministically at read time from each run's own sibling
+  concept tokens, non-destructive (append-only `concept_splits.jsonl`), reversible; plus the versioned
+  NFKC-casefold key contract + alias cycle/self-link rejection. `concept-split` CLI + serve route.
 
 **CURRENT CROSS-RUN CORRECTION (2026-07-15).** The per-run taxonomy/graph remains run-local. Lean cross-run
 projections now ship: fingerprinting, capsules, a raw-capsule overview plus selected alias-resolved reads,
@@ -3623,7 +3627,7 @@ and the per-run projection still ships independently of the cross-run index.
 | same metric name, different evaluator/split/pool | separate comparison contracts; never rank together by name |
 | aggregate multi-domain metric | evidence for the aggregate slice only; do not clone it into domain-level support |
 | same concept label, different meaning | opaque UID + scope-qualified definitions; do not auto-merge on string/embedding similarity |
-| one concept splits into two | new release + bounded re-tag queue; old assignments stay on parent/unresolved until retagged, never double-counted |
+| one concept splits into two | new release + bounded re-tag queue; old assignments stay on parent/unresolved until retagged, never double-counted — **LANDED 2026-07-15**: `record_concept_split` (`engine/concept_registry.py`) with DETERMINISTIC read-time re-tagging from each run's OWN sibling concept tokens (non-destructive; raw tags untouched), `concept-split` CLI + serve route |
 | taxonomy grows at same vocabulary size | release/digest change drives staleness; size threshold alone is insufficient |
 | conflicting domains | keep scoped claim clusters and an overall `mixed`; never newest-wins globally |
 | mixed min/max or metric units | separate comparison groups; normalize only with an explicit baseline/effect definition |
@@ -3867,19 +3871,35 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   CR1a:** `RunCapsule`/`ConceptDigest`/`PortfolioSummary` as
   incremental materialized read-models over the `concept_uid` resolver, taxonomy releases, and the Atlas
   metadata journal (§21.20.4); the 50/500-run concurrency + order-independent-digest + re-eval/archive/
-  purge/ACL gates.
+  purge/ACL gates. **FOLLOW-UP LANDED 2026-07-15 (incremental index):** `build_index_incremental`
+  (`engine/cross_run_index.py`) rebuilds the portfolio index reusing a per-run `run_source_digest`
+  (content hash of events.jsonl + task.snapshot.json) — only CHANGED runs re-fold — with explicit
+  built/cached/**skipped** receipts (a torn log that folds to an identity-less empty state is reported, not
+  a phantom "" run), atomic `save_index`/`load_index` persistence, and a full-record content-digest sort
+  tie-break so copied runs order by content not traversal. `cross-run-index --incremental`. The CR0
+  clean-rebuild gate still holds and incremental == full rebuild. Tests: 6. Still TODO: the materialized
+  RunCapsule/ConceptDigest read-models + taxonomy releases + the 50/500-run concurrency/ACL gates.
 - **Step 4 — CR1b durable claims + assessments.** **LANDED 2026-07-15 (lean first slice):**
   `claim_assessments` (`engine/claims.py`) is a pure, statement-grouped lean projection over distilled lessons
   (+ optional D8 research-memo references), using `normalize_statement` identity and provisional
   action-outcome→support/oppose mapping to compute (`supported`/`refuted`/`mixed`/`inconclusive`). These are not
   yet verified independent-evidence assessments. It unifies with
   the D8 `{statement, node_ids}` shape (no forked claim type); read-only, no migration, legacy lessons
-  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--pack] [--fuzzy] [--json]`.
+  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--pack] [--fuzzy] [--structured] [--json]`.
   **Lean follow-ups:** D8 rows persist at finalize when `cross_run_concepts` is enabled, and `--fuzzy` offers an
   opt-in token-Jaccard grouping with `merged_from`. The persistence currently drops the memo verifier verdict/
-  grouped run-task scope, while fuzzy union is transitive and scope-agnostic; neither is structured identity.
-  **TODO to reach full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence
-  families + proof trails (§21.20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
+  grouped run-task scope, and the fuzzy union is transitive and scope-agnostic (its identity gap is now
+  SUPERSEDED by the structured-key follow-up below).
+  **FOLLOW-UP LANDED 2026-07-15 (structured claim key):** `engine/claim_key.py` +
+  `claim_assessments(structured=)` replace the display-prose identity with a SCOPE+POLARITY-safe structured
+  key — subject-stems + scope(task) + metric + polarity. Opposite-polarity assertions ("X helps" vs "X
+  never helps") no longer merge; they share a `contra_key` and are surfaced as a CONTRADICTION (contested).
+  Same words in two tasks are two claims; operator governance is scope-precise (a reject in task A cannot
+  reach task B — `record_claim_decision` carries a `claim_uid`+scope, `load_claim_decisions` indexes both).
+  O(n) exact-key grouping, no transitive over-merge (vs the fuzzy path that collapsed 73→1). Flag
+  `cross_run_structured_claims` (off) + `claims --structured`. Tests: 6 (key) + 5 (integration). Still TODO
+  to reach full CR1b: durable `ClaimRevision` records + independence families + proof trails (§21.20.5); the
+  citation/numeric verifier + contradiction/scope/causality gold-set gates.
 - **Step 5 — CR2a/CR2b retrieval + bounded context packs.** **LANDED 2026-07-15 (bounded-pack first
   slice):** `build_context_pack` / `render_context_pack` (`engine/claims.py`) assemble a **claim-count-bounded**
   cross-run pack from the Step-4 claims (+ Step-3 concept overview): contested (`mixed`) claims lead and a
@@ -3890,14 +3910,21 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   the store is empty or the flag is off (prompt byte-identical). This is the gated flip of Step 2 from
   audit-only to a live prompt cue; measure via a frozen A/B before defaulting on. Tests: 9 (pack) + 7
   (advisory wiring). **Lean CR2a follow-up:** `cross_run_retrieve` plus the `cross-run-search` CLI and
-  `cross_run_search` agent tool now run fused lexical/BM25/default-hash-vector recall and return a minimal
-  query/requested-k/corpus/hit/channel receipt. It is not scope-safe in the bound capsule path and has no
-  per-hit reason/source/evidence, comparison, snapshot/health or persisted consumer receipt. **TODO to reach
-  full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware query planner and complete
-  why-recalled/derivation receipts; the bounded packs at Genesis/run-start/proposal/
-  Strategist with measured token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B**
-  (≥15% lower duplicate spend, no trust/exploration regression). The current proactive path is an
-  off-by-default experimental live injection; the A/B must pass before default-on or broader rollout.
+  `cross_run_search` agent tool now run fused lexical/BM25/default-hash-vector recall and return a
+  query/requested-k/corpus/hit/channel receipt. The lean slice was not scope-safe in the bound capsule path
+  and lacked per-hit reason/source receipts — both are now CLOSED by the intent→eligibility→quota follow-up
+  below.
+  **FOLLOW-UP LANDED 2026-07-15 (intent→eligibility→quota planner):** `cross_run_retrieve`
+  (`engine/claims.py`) now classifies query INTENT (failed/contested/worked/explore) deterministically,
+  applies a soft eligibility priority (on-intent claims float up, counter-evidence never hidden), reserves
+  a CONTRADICTION QUOTA of caveat slots (raised for failed/contested), SCOPES every source (`scope_task`
+  filters D8 to the bound task — closes the cross-task leak), bounds the corpus (truncation reported), and
+  emits a why-recalled RECEIPT (intent, base+effective quota, caveat target, per-hit rank, corpus digest,
+  honest degraded-channel note). CrossRunTools passes one fully-scoped snapshot. Tests: +6. **Still TODO to
+  reach full CR2a/CR2b:** the capped-multi-channel semantic embedder; the bounded packs at
+  Genesis/run-start/proposal/Strategist with measured token envelopes; the Recall@20/nDCG/false-transfer
+  gates and the **frozen A/B** (≥15% lower duplicate spend, no trust/exploration regression). The proactive
+  path stays an off-by-default experimental live injection; the A/B must pass before default-on or broader rollout.
 - **Step 6 — CR3a coverage + Research Atlas UI.** **LANDED 2026-07-15 (Atlas DATA slice):**
   `portfolio_atlas` (`engine/claims.py`) composes the Step 3-5 read-models into one payload — *explored*
   (concept × #runs), *thin_coverage* (single-run concepts — a lean gap proxy, deliberately NOT a false

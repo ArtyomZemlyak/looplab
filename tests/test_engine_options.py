@@ -110,6 +110,9 @@ ATTR_BY_FIELD = {
     "fingerprint_universal": "_fingerprint_universal",
     "cross_run_concepts": "_cross_run_concepts",
     "cross_run_advisory": "_cross_run_advisory",
+    "cross_run_structured_claims": "_cross_run_structured_claims",
+    "cross_run_curation": "_cross_run_curation",
+    "cross_run_curation_auto": "_cross_run_curation_auto",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }

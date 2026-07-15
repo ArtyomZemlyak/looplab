@@ -136,6 +136,12 @@ class SearchFitness:
         lse = self._se(leader)
         if lse is None:
             return nm == lm                       # no leader noise estimate -> exact-tie only (conservative)
+        # CODEX AGENT: this 1.96*leader-SE policy conflicts with confirm's `significant` certificate, which
+        # fires at >1 pooled SE. In the ordinary 1..1.96-SE region best_ci selects the sounder tied node, then
+        # replay sees `significant=True` and overwrites it with the mean winner. Use one shared paired decision
+        # certificate/predicate across confirm and selection. Also, with n≈3 a fixed normal z, leader-only
+        # variance and winner selection are not the advertised 95% confidence test; retain per-seed deltas
+        # for a paired t/bootstrap interval or name this honestly as a heuristic leader margin.
         return abs(nm - lm) <= self._ci_z * lse
 
     def ci_tie_set(self, nodes):

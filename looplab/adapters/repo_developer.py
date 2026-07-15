@@ -510,6 +510,11 @@ class LLMRepoDeveloper:
         # change fixed a crash across runs). Advisory only; role-scoped so it doesn't see the R&D claims.
         if getattr(self, "_cross_run_read_tools", False) and getattr(self, "_cross_run_memory_dir", None):
             from looplab.tools.cross_run_tools import CrossRunTools
+            # CODEX AGENT: unlike Researcher/Strategist providers, this newly-created tool is never
+            # `bind_state`-ed before run_phase. Its empty scope takes the portfolio-wide branch, so ordinary
+            # developer lessons from unrelated tasks leak too (independent of the D8 leak), contradicting
+            # the comment above. Construct it with a task passport/run id or bind a shared provider before
+            # every Developer phase; role routing alone is not task scoping.
             extra.append(CrossRunTools(self._cross_run_memory_dir, role="developer"))
         roots = [e["path"] for e in (getattr(self, "_editables", None) or []) if e.get("path")]
         if not roots:

@@ -23,8 +23,12 @@ looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cros
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
+looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
+looplab concept-steward AGENTIC taxonomy curator: LLM proposes merge/split/purge (--apply records) (PART IV §22.4)
+looplab task-facets     AGENTIC task faceting: LLM classifies a goal into domain/language/... facets (PART IV §21.20.2)
 looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
+looplab claim-steward   AGENTIC claim curator: LLM proposes ratify/reject/pin (--apply records) (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
@@ -402,6 +406,49 @@ looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
 
 ---
 
+## `concept-split`
+
+PART IV §21.20.13 — the OPERATOR concept **SPLIT**: declare one coarse concept really covers several finer
+ones, RE-TAGGED per each run's OWN sibling concepts. Non-destructive and reversible — append-only
+`concept_splits.jsonl`, applied at READ time; raw per-run tags are never rewritten. For a given run the FIRST
+rule whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise `--default` (or the
+original slug). Rejects an empty source, a rule targeting its own source, and an empty ruleset with no default.
+
+```bash
+looplab concept-split MEMORY_DIR FROM_CONCEPT --rule 'TARGET:term1,term2' [--rule ...] [--default TARGET]
+```
+
+| Argument / Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir where `concept_splits.jsonl` is appended |
+| `FROM_CONCEPT` | *(required)* | The coarse concept slug to split |
+| `--rule 'TARGET:t1,t2'` | `[]` | A re-tag rule — a run whose sibling concepts contain ANY term is re-tagged to `TARGET`. Repeatable (ordered, first match wins) |
+| `--default` | `""` | Fallback target when no rule matches (else the original slug is kept) |
+
+---
+
+## `concept-steward`
+
+PART IV §21.20.13 / §22.4 — the **AGENTIC taxonomy steward**: an LLM reviews the cross-run concept graph and
+PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise). Advisory by default (shows
+proposals for operator ratification); `--apply` records them through the SAME reversible append-only governance
+writes as the manual `concept-merge`/`concept-split` (the LLM only proposes — it never mutates `fold()` state).
+Needs a reachable LLM. This is the on-demand CLI companion to the finalize-time `cross_run_curation` flag.
+
+```bash
+looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` |
+| `--apply` | off | RECORD the proposals instead of only showing them (reversible append-only ledger) |
+| `--model` | *(config)* | Override the LLM model id |
+| `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
+| `--json` | off | Emit `{proposals, receipt}` as JSON |
+
+---
+
 ## `cross-run-digest`
 
 PART IV Step 7. Builds a deterministic **one-level axis-prefix rollup**: each concept is grouped by the text
@@ -452,7 +499,7 @@ claims lose their verifier verdict/proper scope provenance, and refs are attempt
 Identity is normalized statement text. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--json]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--json]
 ```
 
 | Option | Default | Description |
@@ -462,6 +509,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--json]
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the claim-count-bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a lean portfolio line |
 | `--fuzzy` | off | Suggestion-grade token-Jaccard paraphrase merge; transitive and scope-agnostic, so inspect `merged_from` and do not use it as claim identity |
+| `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
 
 Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown.
@@ -484,7 +532,7 @@ or history endpoint. A later decision can replace the badge, but that must not b
 reversible undo.
 
 ```bash
-looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."]
+looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."] [--scope TASK_ID]
 ```
 
 | Option | Default | Description |
@@ -495,6 +543,54 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 | `--reject` | — | Mark `operator-rejected`; remains human-visible and may remain in top-level claim totals, but is excluded from active context, Atlas contradictions, agent-tool and hybrid-retrieval projections |
 | `--pin` | — | Mark `operator-pinned`; no additional ordering/retention behavior is currently defined |
 | `--note` | `""` | Optional rationale recorded with the decision |
+| `--scope` | `""` | Task scope for the **structured claim key**: the decision is scope-precise (it won't reach a same-worded claim in another task). The record carries a `claim_uid`+scope so the structured projection (`claims --structured`) overlays it exactly; the legacy normalized-statement overlay still applies for the lean view |
+
+---
+
+## `claim-steward`
+
+PART IV §22.4 — the **AGENTIC claim steward**: an LLM reviews the evidence-grounded claim assessments (with
+their support/oppose counts and epistemic state) and PROPOSES operator decisions — ratify a well-evidenced
+consistent claim, reject a contradicted/over-generalized/noise claim, pin a load-bearing one. It reviews ONLY
+machine-proposed claims (never re-litigates a human verdict). Advisory by default; `--apply` records the
+decisions through the SAME reversible `claim-decide` governance write (scope-precise via the structured key —
+the LLM only proposes). Needs a reachable LLM. The on-demand companion to the finalize-time `cross_run_curation`.
+
+```bash
+looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (+ persisted claims) |
+| `--apply` | off | RECORD the proposed decisions instead of only showing them (reversible) |
+| `--model` | *(config)* | Override the LLM model id |
+| `--max-proposals` | `10` | Cap the total ratify/reject/pin proposals per pass |
+| `--json` | off | Emit `{proposals, receipt}` as JSON |
+
+---
+
+## `task-facets`
+
+PART IV §21.20.2 — **AGENTIC task FACETING**: an LLM classifies a task's goal into a small fixed set of facets
+(`domain` / `language` / `modality` / `interaction` / `objective`) so the system can recognize when two
+differently-worded tasks are the same KIND of problem. An advisory OVERLAY only — it never touches the
+deterministic passport fingerprint (`scope_profile`); facets live in their own append-only `task_facets.jsonl`
+and are carried into scope matching only when explicitly passed, so `build_index` stays byte-identical
+rebuildable. `--apply` records the facets for `--task-id` (last write per task wins). Needs a reachable LLM.
+
+```bash
+looplab task-facets MEMORY_DIR "GOAL" [--task-id ID] [--kind K] [--apply] [--model M]
+```
+
+| Argument / Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `task_facets.jsonl` lives) |
+| `GOAL` | *(required)* | The task goal to classify |
+| `--task-id` | `""` | Task id to record facets under (required for `--apply`) |
+| `--kind` | `""` | Task kind (dataset/repo/…) — a hint for the classifier |
+| `--apply` | off | RECORD the classified facets for `--task-id` |
+| `--model` | *(config)* | Override the LLM model id |
 
 ---
 

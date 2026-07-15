@@ -36,6 +36,8 @@ class CrossRunTools:
         self.role = str(role or "researcher")
         self._task_id = ""
         self._scope_terms: set[str] = set()
+        self._task_facets: dict = {}
+        self._my_facets: dict = {}
 
     def bind_state(self, state, parent=None) -> None:
         """Learn the CURRENT run's scope so queries reach SIMILAR tasks, not the whole portfolio (the
@@ -45,6 +47,15 @@ class CrossRunTools:
             return
         self._task_id = str(getattr(state, "task_id", "") or "")
         self._scope_terms = _toks(getattr(state, "goal", "") or "")
+        # AGENTIC faceting overlay (§21.20.2): if the portfolio has facets, learn the bound task's facets so
+        # a candidate row from a DIFFERENT task_id that shares ≥2 facet axes (e.g. two retrieval tasks with
+        # different ids) is recognized as in-scope — a semantic match the lexical goal-term OR would miss.
+        try:
+            from looplab.engine.task_facets import load_task_facets
+            self._task_facets = load_task_facets(self.dir)
+            self._my_facets = self._task_facets.get(self._task_id, {})
+        except Exception:  # noqa: BLE001 — faceting is an optional overlay; scope still works without it
+            self._task_facets, self._my_facets = {}, {}
 
     def _in_scope(self, row: dict) -> bool:
         """True when the row belongs to the bound run's scope (same task, or overlapping goal terms), or
@@ -55,9 +66,22 @@ class CrossRunTools:
             return True                                        # unbound -> portfolio-wide
         if self._task_id and str(row.get("task_id") or "") == self._task_id:
             return True
+        # Facet overlap (agentic §21.20.2): a row from a different task that shares ≥2 facet axes with the
+        # bound task is in-scope — recognizes semantically-similar tasks the lexical goal-term OR misses.
+        my_facets = getattr(self, "_my_facets", None)
+        if my_facets:
+            other = getattr(self, "_task_facets", {}).get(str(row.get("task_id") or ""))
+            if other:
+                from looplab.engine.task_facets import facet_overlap
+                if facet_overlap(my_facets, other) >= 2:
+                    return True
         fp = row.get("fingerprint")
         if isinstance(fp, list) and self._scope_terms:
             row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
+            # CODEX AGENT: one shared 3+ character goal token is enough to cross task boundaries; kind,
+            # metric contract and direction are deliberately discarded, and current run_id is not captured
+            # for self-exclusion. Use the versioned task passport/compatibility gates rather than a single
+            # lexical OR condition, and make visibility/trust/current-run policy explicit.
             if row_terms & self._scope_terms:
                 return True
         return False
@@ -89,8 +113,12 @@ class CrossRunTools:
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
                 "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
-                "free-text idea, when a specific concept lookup isn't enough.",
-                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."}},
+                "free-text idea, when a specific concept lookup isn't enough. Set `intent` to bias results: "
+                "'failed'/'contested' surface counter-evidence and disagreements, 'worked' surfaces proven "
+                "wins, 'explore' is neutral.",
+                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."},
+                 "intent": {"type": "string", "enum": ["worked", "failed", "contested", "explore"],
+                            "description": "Why you're searching — biases eligibility + contradiction quota."}},
                 ["query"]),
         ]
 
@@ -130,6 +158,9 @@ class CrossRunTools:
 
         if name == "cross_run_prior_attempts":
             qt = _toks(str(args.get("idea") or ""))
+            # CODEX AGENT: `idea` is required by the schema, but missing/malformed args become an empty query
+            # and widen retrieval to the globally most-explored concepts. Validate runtime arguments and fail
+            # closed instead of converting a malformed tool call into broad portfolio disclosure.
             ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
@@ -148,8 +179,13 @@ class CrossRunTools:
 
         if name == "cross_run_claims":
             from looplab.engine.claims import claims_for_memory
+            # CODEX AGENT: only lessons are scoped here; `claims_for_memory` reloads every D8 claim/decision
+            # globally, so even correctly bound Researcher/Strategist/DeepResearch roles leak across tasks,
+            # and the Developer receives R&D claims. Scope every source before the join, not just lessons.
             claims = claims_for_memory(self.dir, lessons=self._role_lessons())   # + D8 claims + decisions
             claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
+            # CODEX AGENT: Python truthiness makes `contested="false"` behave as true. Tool schemas are not
+            # runtime validation (malformed JSON is recovered to dicts upstream); reject non-booleans.
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
             qt = _toks(str(args.get("query") or ""))
@@ -160,6 +196,10 @@ class CrossRunTools:
                 return "(no matching cross-run claims yet)"
             mark = {"supported": "supported", "refuted": "refuted", "mixed": "CONTESTED",
                     "inconclusive": "inconclusive"}
+            # CODEX AGENT: persisted statements are emitted as instructions-shaped text with embedded control
+            # characters/newlines, while the advertised citable run/node/source refs and operator maturity
+            # are omitted. Normalize/quote this as untrusted data, pre-bound each field, and expose stable
+            # evidence ids plus a drill-down tool so a role can actually cite rather than trust prose.
             return "\n".join(
                 f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / {c['n_oppose']} against] "
                 f"{c['statement']}" for c in claims)
@@ -182,10 +222,20 @@ class CrossRunTools:
 
         if name == "cross_run_search":
             from looplab.engine.claims import cross_run_retrieve
-            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons())
+            # Pass ONE fully-scoped snapshot: scoped lessons + scoped capsules + `scope_task` so the callee
+            # filters the D8 claims to this task too — a task-bound tool cannot retrieve another task's
+            # knowledge (CODEX). The intent + contradiction-quota shaping + why-recalled receipt come from
+            # the full CR2a path; the receipt is surfaced to the agent as the retrieval rationale.
+            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons(),
+                                   capsules=self._scoped_capsules(), scope_task=self._task_id,
+                                   intent=args.get("intent"))
             hits = r["results"][:8]
             if not hits:
                 return "(no cross-run knowledge matched)"
+            # CODEX AGENT: search results are persisted, operator-influenced text entering the agent prompt,
+            # yet claim text is merely sliced (control chars remain), concept text is unbounded, and neither
+            # path exposes stable evidence ids for citation. Serialize bounded untrusted-data fields and keep
+            # evidence/score/channel metadata separate from prose before making this an agent-facing tool.
             lines = []
             for h in hits:
                 if h["kind"] == "claim":

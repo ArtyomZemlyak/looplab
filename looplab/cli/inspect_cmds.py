@@ -546,12 +546,31 @@ def cross_run_concepts_cmd(
 def cross_run_index_cmd(
     run_root: Path = typer.Argument(..., help="Directory holding run subdirs (each with events.jsonl)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full run-facts index as JSON."),
+    incremental: bool = typer.Option(False, "--incremental", help="Reuse a persisted source-digest cache "
+                                     "(<run_root>/.cross_run_index.json); only re-fold CHANGED runs and "
+                                     "report built/cached/skipped receipts."),
 ):
     """PART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
     + FACTS (attempts/measurements) — by folding every `<run_root>/*/events.jsonl` (the migration over
-    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. No LLM/endpoint."""
-    from looplab.engine.cross_run_index import rebuild_index_from_run_root
-    idx = rebuild_index_from_run_root(run_root)
+    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. With `--incremental`
+    an on-disk cache skips unchanged runs and torn runs surface as explicit skip receipts. No LLM/endpoint."""
+    from looplab.engine.cross_run_index import (
+        build_index_incremental, load_index, rebuild_index_from_run_root, save_index,
+    )
+    if incremental:
+        cache = run_root / ".cross_run_index.json"
+        res = build_index_incremental(run_root, prior=load_index(cache))
+        idx = res["index"]
+        if idx:
+            save_index(cache, res)
+        rc = res["receipts"]
+        if not as_json:
+            skipped = f", {len(rc['skipped'])} skipped" if rc["skipped"] else ""
+            typer.echo(f"(incremental: {len(rc['built'])} built, {len(rc['cached'])} cached{skipped})")
+            for s in rc["skipped"]:
+                typer.echo(f"  skip {s['dir']}: {s['reason']}")
+    else:
+        idx = rebuild_index_from_run_root(run_root)
     if not idx:
         typer.echo(f"no runs with events.jsonl under {run_root}")
         raise typer.Exit(1)
@@ -576,7 +595,8 @@ def concept_merge_cmd(
     """PART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
     another (they become one across all cross-run views) or PURGE it (empty target → dropped from views).
     Non-destructive + reversible: append-only `concept_aliases.jsonl`, applied at READ time; the raw per-run
-    tags are never rewritten. A concept SPLIT (needs bounded re-tagging) is deferred."""
+    tags are never rewritten. A self-link or cycle-closing edge is rejected. For the inverse (one coarse
+    concept → several finer ones) use `concept-split`."""
     from looplab.engine.concept_registry import record_concept_alias
     import datetime as _dt
     try:
@@ -591,6 +611,88 @@ def concept_merge_cmd(
         typer.echo(f"purged: '{rec['from']}'")
 
 
+@app.command(name="concept-split")
+def concept_split_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where concept_splits.jsonl lives)."),
+    from_concept: str = typer.Argument(..., help="The coarse concept slug to split."),
+    rule: list[str] = typer.Option([], "--rule", help="A re-tag rule 'target:term1,term2' — a run whose "
+                                   "sibling concepts contain ANY term is re-tagged to target. Repeatable "
+                                   "(ordered, first match wins)."),
+    default: str = typer.Option("", "--default", help="Fallback target when no rule matches (else the "
+                                "original slug is kept)."),
+):
+    """PART IV cross-run (§21.20.13) — the OPERATOR concept SPLIT: declare one coarse concept really covers
+    several finer ones, RE-TAGGED per each run's OWN sibling concepts. Non-destructive + reversible:
+    append-only `concept_splits.jsonl`, applied at READ time; raw per-run tags are never rewritten.
+    Example: `concept-split MEM data/augmentation --rule 'data/hard-negative-mining:hard,negative' \\
+    --rule 'data/synonym-aug:synonym,eda' --default data/augmentation`."""
+    from looplab.engine.concept_registry import record_concept_split
+    import datetime as _dt
+    rules = []
+    for spec in rule:
+        target, _, terms = spec.partition(":")
+        rules.append({"to": target.strip(), "when_any": [t.strip() for t in terms.split(",") if t.strip()]})
+    try:
+        rec = record_concept_split(str(memory_dir), from_concept=from_concept, rules=rules, default=default,
+                                   at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    tgts = [r["to"] for r in rec["rules"]] + ([rec["default"]] if rec["default"] else [])
+    typer.echo(f"split: '{rec['from']}' -> {{{', '.join(sorted(set(tgts)))}}} ({len(rec['rules'])} rule(s))")
+
+
+@app.command(name="concept-steward")
+def concept_steward_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the proposals (merge/split/purge) instead of "
+                               "just showing them. Reversible (append-only governance ledger)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+    max_proposals: int = typer.Option(12, help="Max curation proposals."),
+    as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+):
+    """PART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
+    concept graph and PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise).
+    Advisory by default (shows proposals for operator ratification); `--apply` records them through the SAME
+    reversible governance writes as the manual `concept-merge`/`concept-split`. Needs a reachable LLM."""
+    from looplab.core.config import Settings
+    from looplab.engine.concept_steward import curation_is_empty, steward_concepts
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
+        typer.echo(f"concept-steward needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_concepts(str(memory_dir), client, apply=apply,
+                           at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    if as_json:
+        typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
+        return
+    prop = out["proposals"]
+    if curation_is_empty(prop):
+        typer.echo("steward: no curation proposed (graph already clean)")
+        return
+    typer.echo(f"steward proposals — {len(prop['merges'])} merge(s), {len(prop['splits'])} split(s), "
+               f"{len(prop['purges'])} purge(s):")
+    for m in prop["merges"]:
+        typer.echo(f"  merge  '{m['from_concept']}' -> '{m['to_concept']}'"
+                   + (f"   ({m['why']})" if m.get("why") else ""))
+    for s in prop["splits"]:
+        typer.echo(f"  split  '{s['from_concept']}' -> {{{', '.join(r['to'] for r in s['rules'])}}}")
+    for p in prop["purges"]:
+        typer.echo(f"  purge  '{p['from_concept']}'")
+    if apply and out.get("receipt"):
+        rc = out["receipt"]
+        typer.echo(f"applied {len(rc['applied'])}, skipped {len(rc['skipped'])}")
+        for s in rc["skipped"]:
+            typer.echo(f"  skip {s['action']} {s.get('from_concept')}: {s['reason']}")
+    elif not apply:
+        typer.echo("(dry run — re-run with --apply to record; reversible)")
+
+
 @app.command(name="claim-decide")
 def claim_decide_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where claim_decisions.jsonl lives)."),
@@ -599,6 +701,8 @@ def claim_decide_cmd(
     reject: bool = typer.Option(False, "--reject", help="Operator REJECTS it (dropped from agent context)."),
     pin: bool = typer.Option(False, "--pin", help="Operator PINS it (kept, marked operator-pinned)."),
     note: str = typer.Option("", help="Optional rationale recorded with the decision."),
+    scope: str = typer.Option("", "--scope", help="Task scope for the structured claim key (a decision is "
+                              "scope-precise: it won't reach a same-worded claim in another task)."),
 ):
     """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin a cross-run claim. This is the
     ONLY way to change cross-run MEANING by hand (agents can only read + cite). Append-only, overlaid on
@@ -612,11 +716,89 @@ def claim_decide_cmd(
     import datetime as _dt
     try:
         rec = record_claim_decision(str(memory_dir), statement=statement, decision=picked[0], note=note,
-                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
+                                    scope=scope, at=_dt.datetime.now().isoformat(timespec="seconds"))
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
+
+
+@app.command(name="task-facets")
+def task_facets_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where task_facets.jsonl lives)."),
+    goal: str = typer.Argument(..., help="The task goal to classify."),
+    task_id: str = typer.Option("", "--task-id", help="Task id to record facets under (needed for --apply)."),
+    kind: str = typer.Option("", "--kind", help="Task kind (dataset/repo/...) — a hint for the classifier."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the facets for --task-id."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM classifies a task's goal into facets
+    (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
+    tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
+    fingerprint); used as an extra cross-task scope-match signal. `--apply` records for `--task-id`."""
+    from looplab.core.config import Settings
+    from looplab.engine.task_facets import steward_task_facets
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"task-facets needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_task_facets(str(memory_dir), client, task_id=task_id, goal=goal, kind=kind, apply=apply,
+                              at=_dt.datetime.now().isoformat(timespec="seconds"))
+    if not out["facets"]:
+        typer.echo("task-facets: none classified")
+        return
+    for ax, v in out["facets"].items():
+        typer.echo(f"  {ax:12} {v}")
+    if apply and out["recorded"]:
+        typer.echo(f"recorded for task '{task_id}'")
+    elif apply and not task_id:
+        typer.echo("(pass --task-id to record)")
+
+
+@app.command(name="claim-steward")
+def claim_steward_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl)."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the proposed decisions (reversible)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+    max_proposals: int = typer.Option(10, help="Max decision proposals."),
+    as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
+):
+    """PART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
+    PROPOSES operator decisions (ratify well-evidenced / reject contradicted-or-noise / pin load-bearing).
+    Advisory by default; `--apply` records them through the SAME reversible governance write as
+    `claim-decide`. Scope-precise via the structured claim key. Needs a reachable LLM."""
+    from looplab.core.config import Settings
+    from looplab.engine.claim_steward import curation_is_empty, steward_claims
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — the steward is LLM-only
+        typer.echo(f"claim-steward needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_claims(str(memory_dir), client, apply=apply,
+                         at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    if as_json:
+        typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
+        return
+    prop = out["proposals"]
+    if curation_is_empty(prop):
+        typer.echo("claim-steward: no decisions proposed")
+        return
+    typer.echo(f"claim-steward proposals — {len(prop['decisions'])} decision(s):")
+    for d in prop["decisions"]:
+        typer.echo(f"  {d['decision']:9} {d['statement'][:80]}" + (f"   ({d['why']})" if d.get("why") else ""))
+    if apply and out.get("receipt"):
+        typer.echo(f"applied {len(out['receipt']['applied'])}, skipped {len(out['receipt']['skipped'])}")
+    elif not apply:
+        typer.echo("(dry run — re-run with --apply to record; reversible)")
 
 
 @app.command(name="cross-run-digest")
@@ -627,14 +809,15 @@ def cross_run_digest_cmd(
     """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
-    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
     caps_p = Path(memory_dir) / "concept_capsules.jsonl"
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
     if not caps:
         typer.echo(f"no concept capsules at {memory_dir}")
         raise typer.Exit(1)
-    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)))
+    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)),
+                          splits=load_concept_splits(str(memory_dir)))
     if as_json:
         typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
         return
@@ -660,7 +843,9 @@ def cross_run_search_cmd(
         typer.echo(orjson.dumps(r, option=orjson.OPT_INDENT_2).decode())
         return
     rc = r["receipt"]
-    typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']} "
+    trunc = f", {rc['truncated']} dropped" if rc.get("truncated") else ""
+    typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']}{trunc} "
+               f"[intent={rc.get('intent', '?')}, {rc.get('n_caveats', 0)} caveat(s) reserved] "
                f"(channels: {', '.join(rc['channels'])})")
     for h in r["results"]:
         if h["kind"] == "claim":
@@ -686,6 +871,9 @@ def atlas_cmd(
     lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
     lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
+    # CODEX AGENT: D8 research_claims are now a valid Atlas source, but this preflight exits before
+    # `atlas_for_memory` can load them. D8-only memory works through the HTTP API yet both CLI and live
+    # cues report it empty. Delegate source readiness to the shared loader and report per-source status.
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
@@ -715,6 +903,8 @@ def claims_cmd(
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
     fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
+    structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
+                                    "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
 ):
     """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
@@ -728,12 +918,16 @@ def claims_cmd(
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     path = p if p.is_file() else p / "lessons.jsonl"
+    # CODEX AGENT: requiring lessons.jsonl makes the claims CLI reject a perfectly valid D8-only store that
+    # `claims_for_memory` and the HTTP API can read. Resolve the memory directory first and let the shared
+    # helper combine whichever versioned sources exist; do not make one optional source a hard prerequisite.
     if not path.exists():
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
     from looplab.engine.claims import claims_for_memory
-    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy)   # +D8 +decisions
+    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy,
+                               structured=structured)   # +D8 +decisions
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent

@@ -22,6 +22,17 @@ class _ConceptMerge(BaseModel):
     to_concept: str = ""     # "" => purge/tombstone
 
 
+class _ConceptSplitRule(BaseModel):
+    to: str
+    when_any: list[str] = []
+
+
+class _ConceptSplit(BaseModel):
+    from_concept: str
+    rules: list[_ConceptSplitRule] = []
+    default: str = ""
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
 
@@ -64,6 +75,10 @@ def build_router(srv) -> APIRouter:
         """OPERATOR governance write (§22.4): ratify / reject / pin a claim. Append-only, reversible."""
         from looplab.engine.claims import record_claim_decision
         try:
+            # CODEX AGENT: authentication (when configured) proves possession of one deployment token, but
+            # this audit record collapses every principal to `ui` with an empty timestamp and has no expected
+            # claim/taxonomy revision. Propagate an authenticated actor/action id/time and require CAS so two
+            # tabs cannot both receive 200 while physical append order arbitrarily decides policy.
             rec = record_claim_decision(_memory_dir(), statement=body.statement,
                                         decision=body.decision, note=body.note, by="ui")
         except ValueError as e:
@@ -76,10 +91,88 @@ def build_router(srv) -> APIRouter:
         (empty to_concept). Non-destructive (append-only aliases, applied at read time)."""
         from looplab.engine.concept_registry import record_concept_alias
         try:
+            # CODEX AGENT: `to_concept` defaults to empty, so an omitted/partial merge request succeeds as a
+            # portfolio-wide purge with no impact preview or explicit purge intent. Split merge vs purge into
+            # typed actions; require expected taxonomy revision and confirmation for the destructive meaning.
             rec = record_concept_alias(_memory_dir(), from_concept=body.from_concept,
                                        to_concept=body.to_concept, by="ui")
         except ValueError as e:
             raise HTTPException(400, str(e))
         return {"ok": True, "alias": rec}
+
+    @router.post("/api/cross-run/concept-split")
+    def concept_split(body: _ConceptSplit):
+        """OPERATOR concept governance (§21.20.13): split one coarse concept into finer ones, re-tagged at
+        read time from each run's OWN sibling concepts. Non-destructive (append-only splits ledger)."""
+        from looplab.engine.concept_registry import record_concept_split
+        try:
+            rec = record_concept_split(_memory_dir(), from_concept=body.from_concept,
+                                       rules=[r.model_dump() for r in body.rules],
+                                       default=body.default, by="ui")
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        return {"ok": True, "split": rec}
+
+    @router.get("/api/cross-run/curation-log")
+    def curation_log(limit: int = 20):
+        """The AGENTIC taxonomy steward's recent proposals (from `concept_curation_log.jsonl`) — what the
+        LLM suggested merging/splitting/purging, for operator review. Read-only."""
+        import json
+        from looplab.events.eventstore import read_jsonl_lenient
+        p = Path(_memory_dir()) / "concept_curation_log.jsonl"
+        rows = read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
+        return {"entries": rows[-max(1, int(limit)):][::-1], "n": len(rows)}
+
+    @router.post("/api/cross-run/concept-steward")
+    def concept_steward(apply: bool = False):
+        """Run the AGENTIC concept steward NOW (operator-triggered): the LLM reviews the portfolio concept
+        graph and proposes a curation. `apply=true` records it through the reversible governance writes.
+        The LLM only proposes; writes go through the same append-only path as manual merge/split."""
+        from looplab.engine.concept_steward import steward_concepts
+        client = None
+        try:
+            eng = getattr(srv, "engine", None) or getattr(srv, "_engine", None)
+            client = eng._reflect_client() if eng is not None else None
+        except Exception:  # noqa: BLE001 — fall back to building one from settings
+            client = None
+        if client is None:
+            try:
+                from looplab.core.llm import make_llm_client
+                client = make_llm_client(srv.llm_settings())
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(400, f"no LLM client available: {e}")
+        out = steward_concepts(_memory_dir(), client, apply=apply, by="ui")
+        return {"ok": True, **out}
+
+    def _steward_client():
+        try:
+            eng = getattr(srv, "engine", None) or getattr(srv, "_engine", None)
+            c = eng._reflect_client() if eng is not None else None
+            if c is not None:
+                return c
+        except Exception:  # noqa: BLE001
+            pass
+        from looplab.core.llm import make_llm_client
+        return make_llm_client(srv.llm_settings())
+
+    @router.get("/api/cross-run/claim-curation-log")
+    def claim_curation_log(limit: int = 20):
+        """The AGENTIC claim steward's recent proposed decisions (from `claim_curation_log.jsonl`)."""
+        import json
+        from looplab.events.eventstore import read_jsonl_lenient
+        p = Path(_memory_dir()) / "claim_curation_log.jsonl"
+        rows = read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
+        return {"entries": rows[-max(1, int(limit)):][::-1], "n": len(rows)}
+
+    @router.post("/api/cross-run/claim-steward")
+    def claim_steward(apply: bool = False):
+        """Run the AGENTIC claim steward NOW (operator-triggered): the LLM reviews the claims and proposes
+        decisions (ratify/reject/pin). `apply=true` records them through the reversible governance write."""
+        from looplab.engine.claim_steward import steward_claims
+        try:
+            client = _steward_client()
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"no LLM client available: {e}")
+        return {"ok": True, **steward_claims(_memory_dir(), client, apply=apply, by="ui")}
 
     return router
