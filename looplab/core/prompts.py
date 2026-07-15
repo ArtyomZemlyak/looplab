@@ -25,7 +25,10 @@ class PromptStore:
     def __init__(self, directory: Optional[str] = None):
         self.dir = Path(directory) if directory else None
 
-    def get(self, name: str, default: str = "", **vars) -> str:
+    def get(self, name: str, default: str = "", /, **vars) -> str:
+        # `name`/`default` are positional-only (the `/`): otherwise a template variable named `name`
+        # or `default` passed through **vars collides with these params and raises TypeError instead
+        # of substituting `$name`/`$default`. Positional-only frees the whole **vars namespace.
         text = default
         if self.dir is not None:
             f = self.dir / f"{name}.md"
@@ -54,8 +57,10 @@ PROMPT_KEYS: tuple[str, ...] = (
 # with no PromptStore handle wired; route it through render() when that wiring exists.
 
 
-def render(store: Optional[PromptStore], name: str, default: str, **vars) -> str:
+def render(store: Optional[PromptStore], name: str, default: str, /, **vars) -> str:
     """Resolve a prompt via the store (if any) or the inline default; render $vars."""
+    # `store`/`name`/`default` positional-only (the `/`) for the same reason as PromptStore.get:
+    # a `$name`/`$default`/`$store` template variable must be free to pass through **vars.
     if store is not None:
-        return store.get(name, default=default, **vars)
+        return store.get(name, default, **vars)          # positional: default is positional-only now
     return string.Template(default).safe_substitute(vars)
