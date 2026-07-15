@@ -420,6 +420,23 @@ class Settings(BaseSettings):
     holdout_select: bool = True
     # How many val-leaders get a holdout evaluation at finish (host-graded tasks).
     holdout_top_k: int = Field(default=3, ge=1)
+    # R1-c / Part IV — calibrated §12-verifier tie-break in best-selection. When a fresh node's robust
+    # metric EXACTLY TIES an already-eligible node, the engine runs the §12 verifier (grounded on each
+    # node's realized result, `selection_criteria`) and records a soundness score per node. The tie-break
+    # then applies across the WHOLE selection path: the mean pick breaks a robust_metric tie by the score,
+    # and — when `holdout_select` is on — the holdout-slot ranking prefers the sounder node so it isn't
+    # denied a holdout eval, and the final holdout override breaks a holdout_metric tie by it too. Strictly
+    # a TIE-BREAK — it can NEVER move a node ahead of a strictly-better metric (§21.7 advisory-never-
+    # overrides). Best-effort: verification is LAZY (only fires on an actual tie) and bounded per cadence,
+    # so an unscored node in a large/late tie group contributes a NEUTRAL midpoint (a fully-scored tie is
+    # resolved by soundness; a partially-scored one degrades to neutral+id). Recorded in run_started so
+    # replay applies the same rule; old logs fold to False (legacy pick). Opt-in (default off); needs a
+    # reachable LLM client. Enable only after validating calibration offline with `verifier.calibrate`.
+    # See trust/verifier.py + core/fitness.py.
+    select_verifier: bool = False
+    # Verifier sample count for `select_verifier` (the §12 repeated-sampling expectation). 3 tames the
+    # single-shot variance; 1 = single-shot (cheaper, noisier).
+    select_verifier_samples: int = Field(default=3, ge=1)
     # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
     max_seconds: float | None = None
     # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
@@ -439,6 +456,34 @@ class Settings(BaseSettings):
     # Deterministic, cheap, and purely additive context — no search-behavior change on its own. On by
     # default (like the rest of the always-on situational context). See search/coverage.py.
     coverage_context: bool = True
+    # PART IV Phase 2a live steering (§21.11/§21.13). When on, the strategist cadence records a
+    # concept-graph coverage + uncovered-region snapshot (deterministic heuristic tagger over the
+    # task-type skeleton) and, on an `explore` stance, the Researcher's novelty hint names the exact
+    # uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead
+    # of the vague "broaden". OPT-IN (default off): it only enriches an already-mode-gated explore
+    # hint, never forces exploration, and no-ops for a task with no curated concept skeleton. Audit +
+    # prompt-cue only; never touches selection. See search/concept_graph.py.
+    concept_pivot: bool = False
+    # PART IV Phase 2b — D3 graded novelty into the LIVE novelty gate (§21.4/§21.13). When on and the
+    # task has a curated concept skeleton, the novelty gate first grades a proposal over the concept
+    # graph: a level-4 "same direction, DIFFERENT implementation" or a level-5 "re-opens a
+    # wrongly-abandoned FAILED direction" proposal is ALLOWED through unchanged — the flat LLM/semantic
+    # dedup gate can't tell "this DCL tweak" from "the whole DCL branch" and would wrongly reject a
+    # legitimate variant or never re-open a sound-but-killed direction (the node_63 archetype). Levels
+    # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Deterministic
+    # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. OPT-IN (default off);
+    # no-ops for a task with no skeleton. See search/graded_novelty.py.
+    graded_novelty: bool = False
+    # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
+    # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
+    # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
+    # ESCALATES from "broaden" to "expand the ACTION SPACE — build the missing infra (external mining,
+    # a new data pipeline, a different eval), do NOT swap another {locked} lever." Prompt-cue only, on
+    # top of the already-mode-gated explore hint; never adds a scored policy action and never touches
+    # selection (the SCORED capability-expansion operator waits on the R1/SearchFitness gates, §21.13).
+    # Reads the 2a concept-coverage snapshot, so it needs `concept_pivot` to record one. OPT-IN
+    # (default off). See engine/proposal_cues.py + search/lock_in.py.
+    capability_expansion: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external
@@ -478,6 +523,18 @@ class Settings(BaseSettings):
     # make the world model defer when it isn't sure. Pairs with the foresight track record (§1) the
     # predictor is now primed with. Range 0.0-1.0.
     foresight_min_confidence: float = 0.0
+    # PART IV Phase 2c — replace the world model's SELF-REPORTED confidence (measured Pearson≈0 with the
+    # realized outcome, §21.12) with a CALIBRATED §12-verifier score. When on and a client is available,
+    # after the K-idea ranker picks the predicted-best candidate the §12 verifier scores it (grounded +
+    # repeated + criteria-decomposed: `foresight_criteria` — likely to improve the objective, and
+    # sound/feasible) and THAT calibrated score becomes the confidence the `foresight_min_confidence` gate
+    # and the telemetry use. Degrades to the self-reported confidence without a client or on any verifier
+    # error (the telemetry records which source was used). OPT-IN (default off); a few extra LLM calls per
+    # acted-on proposal. See looplab/trust/verifier.py + search/foresight.py.
+    foresight_verify: bool = False
+    # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
+    # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
+    foresight_verify_samples: int = 3
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

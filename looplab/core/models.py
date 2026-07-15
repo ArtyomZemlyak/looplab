@@ -7,6 +7,11 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
+# The single direction-comparator owner. fitness.py imports nothing from models (duck-typed on nodes),
+# so this top-level import is cycle-free and keeps RunState.is_better a one-hop delegation, not a
+# per-call import (R1/SearchFitness).
+from looplab.core.fitness import is_better as _is_better
+
 
 class NodeStatus(str, Enum):
     pending = "pending"      # node_created seen, not yet evaluated (resume re-entry point)
@@ -166,6 +171,12 @@ class Node(BaseModel):
     # overperformed on the signal the search optimized — the overfitting indicator the Trust
     # panel surfaces. Audit-only.
     generalization_gap: Optional[float] = None
+    # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result (set by a
+    # `node_verified` event, generation-scoped, only when `select_verifier` is on and a metric-tie needs
+    # breaking). Used ONLY as a tie-break among metric-EQUAL feasible nodes (SearchFitness.promotion_key)
+    # — it can never override a strictly-better robust_metric (§21.7 advisory-never-overrides). None
+    # otherwise; additive/reader-defaulted so old logs fold byte-identically.
+    verifier_score: Optional[float] = None
     eval_seconds: Optional[float] = None     # wall-clock of this node's eval (cost accounting #2)
     # Multi-objective (#5): extra reported metrics + unmet hard constraints. `feasible` is
     # False when any constraint was violated — such a node keeps its metric (for the audit
@@ -385,6 +396,10 @@ class RunState(BaseModel):
     # The reserved-holdout fraction the run committed to at start (None in old logs / when off).
     # The engine re-uses this on resume so the split every metric was scored against never changes.
     holdout_fraction: Optional[float] = None
+    # R1-c (folded from run_started; False for old logs -> byte-identical legacy selection). When True,
+    # best-selection's mean pick breaks a metric-EQUAL tie by the calibrated §12-verifier soundness score
+    # (Node.verifier_score) — advisory, never overriding a strictly-better robust_metric (§21.7).
+    select_verifier_tiebreak: bool = False
     nodes: dict[int, Node] = Field(default_factory=dict)
     # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
     # reset/abort from regrouping old failures into a brand-new browser notification identity.
@@ -462,6 +477,30 @@ class RunState(BaseModel):
     # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each
     # entry carries `at_node` so the emission gate is idempotent on resume. See search/coverage.py.
     coverage_snapshots: list[dict] = Field(default_factory=list)
+    # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshots (the "0 coverage in {X}"
+    # pivot signal) recorded at the strategist cadence when `concept_pivot` is on. Audit-only — never
+    # affects selection; each entry carries `at_node` so the emission gate is idempotent on resume.
+    # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.
+    concept_coverage_snapshots: list[dict] = Field(default_factory=list)
+    # PART IV D5 (§21.16, Phase 2c): per-node RAW concept tags (node_id -> [concept_id]) recorded once by
+    # the LLM tagger, so later strategist cadences reuse them and only tag NEW nodes (incremental tagging,
+    # ~O(nodes) not ~O(nodes x cadences) LLM calls). Populated only when `concept_pivot` is on; audit-only,
+    # never affects selection. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
+    node_concepts: dict[int, list[str]] = Field(default_factory=dict)
+    # PART IV D5 (§21.18 B1): the concept-graph vocabulary SIZE when each node was last tagged. A node
+    # tagged against a much smaller vocabulary than the current one is STALE (a concept minted by a later
+    # node may now apply to it), so the cadence re-tags the most-stale nodes against the grown vocabulary
+    # (bounded per cadence). Additive/reader-defaulted; empty on old logs / pre-B1 events -> no re-tag.
+    node_concepts_at_vocab: dict[int, int] = Field(default_factory=dict)
+    # PART IV D4 (§21.18 HT): per-hypothesis agentic concept tags (hyp_id -> [concept_id]) recorded once by
+    # the LLM tagger, reused by taxonomy dedup instead of the tag_text alias heuristic. Populated only when
+    # `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
+    hypothesis_concepts: dict[str, list[str]] = Field(default_factory=dict)
+    # PART IV D5 (§21.18 B3): the accumulated concept-consolidation rename map (raw_id -> canonical_id).
+    # Reused by later cadences so consolidation decisions stay FIXED (stable vocabulary, no flapping / B1
+    # churn). Populated only when `concept_pivot` is on; audit-only. Additive/reader-defaulted: empty on
+    # old logs -> byte-identical fold.
+    concept_consolidation: dict[str, str] = Field(default_factory=dict)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.
     proposed_spec: Optional[dict] = None  # {eval_spec, adapter_files, goal} from the agent
@@ -585,6 +624,10 @@ class RunState(BaseModel):
     foresight_selected: list[dict] = Field(default_factory=list)
     # E1 novelty/dedup gate: near-duplicate proposals that were nudged off {node_id, near_node, ...}.
     novelty_events: list[dict] = Field(default_factory=list)
+    # PART IV D3 (Phase 2b): the live gate's GRADED-ALLOW decisions — proposals allowed despite a
+    # concept overlap the flat gate would reject (level-4 same-direction-new-impl, level-5 re-open of a
+    # wrongly-abandoned direction). Audit-only sidecar; never read by best-selection. Additive.
+    novelty_grades: list[dict] = Field(default_factory=list)
     # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`
     # is the timeline of completed memos (each a ResearchMemo dump); `research_requests` are pending
     # manual `deep_research` control events and `research_served` how many have been fulfilled (the
@@ -685,4 +728,6 @@ class RunState(BaseModel):
         )
 
     def is_better(self, a: float, b: float) -> bool:
-        return a < b if self.direction == "min" else a > b
+        # Delegates to the single comparator owner (core/fitness.py) so "better" has ONE spelling
+        # across the fold, the policies and this convenience primitive (R1/SearchFitness).
+        return _is_better(self.direction, a, b)

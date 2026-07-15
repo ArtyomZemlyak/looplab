@@ -161,6 +161,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         require_approval = _opt("require_approval")
         archive_resolution = _opt("archive_resolution")
         coverage_context = _opt("coverage_context")
+        concept_pivot = _opt("concept_pivot")
+        graded_novelty = _opt("graded_novelty")
+        capability_expansion = _opt("capability_expansion")
         phase_handoff_summary = _opt("phase_handoff_summary")
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
@@ -212,6 +215,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         holdout_fraction = _opt("holdout_fraction")
         holdout_select = _opt("holdout_select")
         holdout_top_k = _opt("holdout_top_k")
+        select_verifier = _opt("select_verifier")
+        select_verifier_samples = _opt("select_verifier_samples")
         debug_depth = _opt("debug_depth")
         operator_bandit = _opt("operator_bandit")
         novelty_semantic = _opt("novelty_semantic")
@@ -332,6 +337,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._research_verify = bool(research_verify)
         self._workdir_audit = bool(workdir_audit)
         self._coverage_context = bool(coverage_context)
+        self._concept_pivot = bool(concept_pivot)
+        self._graded_novelty = bool(graded_novelty)
+        self._capability_expansion = bool(capability_expansion)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
@@ -446,6 +454,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.confirm_seed_base = max(0, int(confirm_seed_base))
         self._holdout_select = bool(holdout_select)
         self._holdout_top_k = max(1, int(holdout_top_k))
+        self._select_verifier = bool(select_verifier)
+        self._select_verifier_samples = max(1, int(select_verifier_samples))
         # The FRACTION defines the split every search metric is scored against, so it must be pinned
         # in the event log (like trust_gate / holdout_select) — on resume the recorded value is
         # re-used (see run()), so a changed live setting can't silently make pre/post-resume metrics
@@ -1047,6 +1057,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # pinned too so a resume re-uses the exact split every metric was scored on.
                             "holdout_select": self._holdout_select,
                             "holdout_fraction": self._holdout_fraction,
+                            # R1-c: calibrated-verifier metric-tie-break, recorded at start so replay
+                            # applies the same rule. Absent in old logs -> False -> byte-identical pick.
+                            "select_verifier": self._select_verifier,
                         },
                     )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -1135,6 +1148,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # with it WITHOUT re-consulting the Strategist (the decision lives in the event log).
         if _entry.active_strategy:
             self._apply_strategy(_entry.active_strategy)
+        # R1-c resume-safety (invariant #6): the fold applies the RECORDED tie-break rule
+        # (`st.select_verifier_tiebreak`, folded from run_started); re-pin the engine's live-verify gate
+        # to match so `_maybe_verify_ties` produces node_verified scores consistently with what the fold
+        # reads — not a possibly-changed live `LOOPLAB_SELECT_VERIFIER`. Its direct peer `holdout_select`
+        # is re-pinned the same way below. Guard on `run_id` (set only by run_started): on a path where
+        # setup hasn't recorded run_started yet, keep the live value rather than zero it from an empty fold.
+        if _entry.run_id:
+            self._select_verifier = _entry.select_verifier_tiebreak
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick
@@ -1279,6 +1300,17 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # context and (b) lands in the log for the UI / historical-replay measurement. Audit-only,
         # replay-safe (at_node gate); no-op when coverage_context is off. See search/coverage.py.
         state = self._maybe_snapshot_coverage(state)
+
+        # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshot (the "0 coverage in {X}"
+        # pivot signal). Deterministic, replay-safe (at_node gate); no-op when concept_pivot is off or
+        # the task has no curated concept skeleton. Feeds the explore-stance novelty hint below.
+        state = self._maybe_snapshot_concept_coverage(state)
+
+        # R1-c: calibrated §12-verifier metric-tie-break. When select_verifier is on and eligible nodes
+        # TIE on the ranked metric, verify the tied nodes (grounded on their realized result) so the
+        # fold's mean pick breaks the tie by soundness. Lazy (only real ties), replay-safe (persists
+        # node_verified), advisory (never overrides a strictly-better metric). No-op when off.
+        state = self._maybe_verify_ties(state)
 
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
         # the policy proposes the next actions. No-op when strategist is off (== today).

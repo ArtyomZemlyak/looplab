@@ -22,7 +22,18 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
 from looplab.core.models import RunState
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
-from looplab.events.types import EV_COVERAGE_SNAPSHOT, EV_STRATEGY_DECISION
+from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
+                                  EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
+                                  EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
+
+# HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
+# run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
+_HYP_TAG_CAP = 60
+# B1 (§21.18): a node whose tags were made against < _RETAG_GROWTH of the latest vocabulary is "stale" and
+# gets re-tagged against the grown vocab; at most _RETAG_CAP such nodes per cadence (bounds the LLM cost,
+# the rest refresh over subsequent cadences).
+_RETAG_GROWTH = 0.7
+_RETAG_CAP = 20
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -286,6 +297,301 @@ class StrategyCadenceMixin:
         self.store.append(EV_COVERAGE_SNAPSHOT, {
             "at_node": n, **coverage_signal(state, resolution=self.archive_resolution)})
         return fold(self.store.read_all())
+
+    def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
+        """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
+        strategist cadence when `concept_pivot` is on. Deterministic (heuristic tagger over the task-type
+        skeleton) -> replay-reproducible; audit-only + the source of the explore-stance pivot directive.
+        Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op off-cadence / mid-eval / when
+        the flag is off / when the task has no curated concept skeleton (so it never perturbs a generic
+        task). Never affects selection."""
+        if not getattr(self, "_concept_pivot", False) or not self._should_consult(state):
+            return state
+        n = len(state.nodes)
+        # `at_node == n` is a monotonic-progress gate, not a lifecycle identity: node records are
+        # append-only (a reset/abort reopens but never REMOVES nodes from the log/fold), so len(state.nodes)
+        # only grows. Skipping a cadence whose n already has a snapshot is therefore self-healing — the very
+        # next node bumps n and refreshes the snapshot; it can never leave one "permanently stale".
+        if any((c or {}).get("at_node") == n for c in state.concept_coverage_snapshots):
+            return state
+        snap = self._concept_coverage_snapshot(state)
+        if snap is None:
+            return state
+        self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {"at_node": n, **snap})
+        return fold(self.store.read_all())
+
+    def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
+        """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).
+
+        AGENTIC + UNIVERSAL when a reflect client is wired (§21.13): the LLM agent BUILDS the concept graph
+        from the actual experiments' RECORDED text (`build_concept_map` with `tools=None`, mode="llm" — it
+        tags from each node's captured idea/params/result/log excerpts, works on ANY task, no curated
+        skeleton needed; wiring run tools would make it fully agentic with live code/log reads but heavier),
+        and the uncovered-region directive comes from the per-task DERIVED importance
+        (`derive_reference_concepts`), not a hardcoded `key=True` list. This is produced ONCE per strategist
+        cadence and RECORDED as an event; `fold` only reads it (the at_node gate makes resume idempotent), so
+        replay stays deterministic even though the producer is impure — the established memo/lessons pattern.
+        Deterministic FALLBACK (no client): the alias heuristic over the task-type skeleton (curated pack
+        required) — None when neither a client nor a skeleton is available (nothing to steer on)."""
+        import contextlib
+
+        from looplab.search.concept_graph import (build_concept_map, concept_coverage, skeleton_for,
+                                                  stale_tagged_nodes, uncovered_regions)
+        from looplab.search.lock_in import lock_in_signal
+        # Defensive: a bare/None `self` (e.g. a unit test calling this as a pure helper) has no reflect
+        # client -> deterministic fallback, unchanged behaviour. Real engines get the agentic path.
+        _rc = getattr(self, "_reflect_client", None)
+        client = _rc() if callable(_rc) else None
+        seed = skeleton_for(state.task_id or "")
+        seed = seed if seed.concepts() else None
+        # ENTIRE computation is guarded: an audit-only snapshot must NEVER perturb the run (the LLM build,
+        # the consolidation, AND the pure rollups over an arbitrary grown graph all sit under one try).
+        try:
+            graph = tags = cov = None
+            important: list = []
+            mode = "heuristic"
+            if client is not None:
+                parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
+                # INCREMENTAL (§21.16, Phase 2c): reuse per-node tags already recorded as `node_concepts`
+                # events and only LLM-tag NEW nodes, so per-run tagging is ~O(nodes) not ~O(nodes × cadences).
+                # Bounded further by `_concept_pivot` being OFF by default (the method early-returns when the
+                # flag is off, §295). The audit snapshot stays lightweight: `tools=None` tags from the node's
+                # RECORDED text (idea/params/result/log excerpts in state), i.e. mode="llm", NOT a live
+                # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
+                # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
+                # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
+                all_known = {int(k): v for k, v in (getattr(state, "node_concepts", None) or {}).items()}
+                at_vocab = {int(k): int(v)
+                            for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}
+                # B1 (§21.18): re-tag the most-stale nodes — those tagged against a much smaller vocabulary
+                # than the latest (a concept minted later may now apply to them). Bounded per cadence, and
+                # a strict no-op until the vocabulary has actually grown. Excluding a stale node from `known`
+                # makes build_concept_map re-tag it against the grown vocab.
+                stale = set(stale_tagged_nodes(list(all_known), at_vocab,
+                                               growth=_RETAG_GROWTH, cap=_RETAG_CAP))
+                known = {nid: v for nid, v in all_known.items() if nid not in stale}
+                known_renames = {str(k): str(v)
+                                 for k, v in (getattr(state, "concept_consolidation", None) or {}).items()}
+                _span = getattr(self, "_op_span", None)
+                with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
+                    cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
+                                             seed_graph=seed, parser=parser, known_tags=known,
+                                             known_renames=known_renames)
+                # B3 (§21.18): record only the NEW consolidation decisions so later cadences keep them FIXED
+                # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
+                new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()
+                               if known_renames.get(k) != v}
+                if new_renames:
+                    self.store.append(EV_CONCEPT_CONSOLIDATION,
+                                      {"rename": new_renames, "mode": cmap.get("mode", "llm")})
+                # Reuse the coverage build_concept_map already computed (no second O(nodes) rollup).
+                graph, tags = cmap["graph"], cmap["tags"]
+                cov, important = cmap["coverage"], cmap["important_uncovered"]
+                mode = cmap.get("mode", "llm")
+                v_now = len(graph.concepts())    # the vocabulary size THESE tags were produced against
+                # Record a node's RAW tags + at_vocab when it is NEW/re-tagged (not in `known`) OR its tags
+                # changed. Re-recording a staleness-refreshed node even when its tags are unchanged updates
+                # its at_vocab, so it isn't flagged stale (and re-tagged) every cadence — no churn.
+                for nid, ft in (cmap.get("raw_tags") or {}).items():
+                    nid = int(nid)
+                    new_ids = sorted(str(c) for c in ft)
+                    if nid not in known or known.get(nid) != new_ids:
+                        self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
+                                                             "mode": mode, "at_vocab": v_now})
+                # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
+                # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
+                # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
+                # cadences instead of exploding one. Isolated try: a tagging hiccup must not lose the snapshot.
+                try:
+                    from looplab.search.concept_graph import tag_text_llm
+                    known_h = getattr(state, "hypothesis_concepts", None) or {}
+                    tagged_this_cadence = 0
+                    for h in (state.hypotheses or {}).values():
+                        if h.id in known_h or not getattr(h, "statement", ""):
+                            continue
+                        if tagged_this_cadence >= _HYP_TAG_CAP:
+                            break
+                        htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
+                                                    allow_plural=True))
+                        self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
+                                                                   "mode": mode})
+                        tagged_this_cadence += 1
+                except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
+                    pass
+            if graph is None:                   # deterministic fallback needs a curated skeleton
+                if seed is None:
+                    return None
+                graph, tags, mode = seed, None, "heuristic"
+                cov = concept_coverage(state, graph, tags)
+            if not graph.concepts():
+                return None
+            lock = lock_in_signal(state, graph, tags=tags)
+            top = cov.get("top_concept") or {}
+            # UNIVERSAL uncovered-region: prefer the LLM-DERIVED importance (any task); else the skeleton's
+            # hardcoded key-concept alarm (deterministic fallback).
+            keys = [str((m or {}).get("concept_id")) for m in (important or [])
+                    if (m or {}).get("concept_id")][:8]
+            if keys:
+                directive = ("0 coverage in {" + ", ".join(keys[:6]) + "} across all "
+                             f"{cov['experiments']} experiments — direct the next proposals there "
+                             "(not just 'broaden').")
+                fired, uncovered_key, uncovered_axes = True, keys, cov["uncovered_axes"]
+            else:
+                alarm = uncovered_regions(state, graph, tags)
+                fired, uncovered_key = alarm["fired"], alarm["uncovered_key"]
+                uncovered_axes, directive = alarm["uncovered_axes"], alarm["directive"]
+        except Exception:  # noqa: BLE001 — never let an audit snapshot crash the cadence / the run
+            return None
+        return {
+            "fired": fired,
+            "uncovered_key": uncovered_key,
+            "uncovered_axes": uncovered_axes,
+            "directive": directive,
+            "experiments": cov["experiments"],
+            "top_concept": top.get("id"),
+            "top_concept_frac": top.get("frac", 0.0),
+            "locked_axis": lock["locked_axis"],
+            "streak": lock["streak"],                  # longest same-lever run (diagnostic)
+            # current_streak = the same-lever run ENDING at the latest experiment; recent_axis = the axis
+            # the last few experiments concentrate on. The capability-expansion directive gates on
+            # current_streak (not the longest-ever streak) and names recent_axis, so a successful pivot to
+            # a different axis drops both and CLEARS the "expand the action space" cue — it fires only while
+            # the search is STILL locked in right now, not forever after a past lock-in.
+            "current_streak": lock["current_streak"],
+            "recent_axis": lock["recent_axis"],
+            "tag_mode": mode,
+        }
+
+    # --- R1-c: calibrated-verifier metric-tie-break -------------------------------------------------
+    def _maybe_verify_ties(self, state: RunState) -> RunState:
+        """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find eligible nodes that TIE on
+        the ranked scalar (`robust_metric`) where the tie is not yet resolvable — a group of ≥2 nodes with
+        ≥1 lacking a `verifier_score` — and verify the unscored ones (grounded on their realized result,
+        `selection_criteria`) so the fold's mean pick can break the tie by soundness. Lazy (only real,
+        exact ties), bounded per cadence, best-effort (no client / any failure -> skip). Emits
+        `node_verified` (generation-scoped); the fold reads it ONLY as a tie-break — it can never override
+        a strictly-better metric (§21.7). No-op when `select_verifier` is off. Runs in the sync cadence
+        (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
+        if not getattr(self, "_select_verifier", False):
+            return state
+        groups = self._metric_tie_groups(state)
+        if not groups:
+            return state
+        try:
+            client = self._reflect_client()
+        except Exception:  # noqa: BLE001
+            client = None
+        if client is None:
+            return state
+        # Process-local FAILURE guard: a (node, generation) whose verify returned None is recorded so a
+        # degraded client can't re-verify the same tie every cadence (a success sets verifier_score, which
+        # _metric_tie_groups already excludes). In-memory only (verify is live, never replayed); a fresh
+        # process on resume may retry, which is fine (bounded).
+        attempted = getattr(self, "_verify_attempted", None)
+        if attempted is None:
+            attempted = self._verify_attempted = set()
+        budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
+        done = False
+        for group in groups:
+            # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
+            # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
+            # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
+            # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
+            # falls back to the id tie-break), and a group larger than the cadence budget is left for a
+            # later cadence (a group larger than the cap is never verified — honest + bounded).
+            if any((n.id, n.attempt) in attempted for n in group):
+                continue
+            todo = [n for n in group if n.verifier_score is None]
+            if not todo or len(todo) > budget:
+                continue
+            verdicts, failed = [], False
+            for n in todo:
+                v = self._verifier_soundness(state, n, client)
+                budget -= 1
+                if v is None:
+                    attempted.add((n.id, n.attempt))   # a failure abstains the WHOLE group hereafter
+                    failed = True
+                    break
+                verdicts.append((n, v))
+            if not failed:                              # atomic commit: every member scored
+                for n, v in verdicts:
+                    # Persist the score + provenance (n_samples, agreement) so a selection-affecting
+                    # decision is auditable; the fold reads only `score` (the rest is audit-only).
+                    self.store.append(EV_NODE_VERIFIED, {
+                        "node_id": n.id, "generation": n.attempt, "score": round(v["score"], 4),
+                        "n_samples": v["n_samples"], "agreement": v["agreement"]})
+                done = True
+            if budget <= 0:
+                break
+        return fold(self.store.read_all()) if done else state
+
+    def _metric_tie_groups(self, state: RunState) -> list:
+        """Eligible-node groups that share an EXACT `robust_metric` and still contain an unscored node —
+        the metric-ties the verifier could resolve. Deterministic order (by each group's lowest node id)
+        so the per-cadence budget picks stably. Pure read over folded state.
+
+        Mirrors `_select_best`'s mean-pick pool EXACTLY: when any eligible node is confirmed, only the
+        confirmed subset is ranked (and its tie-break read), so grouping over the full eligible set would
+        burn verifier LLM calls on unconfirmed nodes the fold never consults. Group within the same pool."""
+        from looplab.core.fitness import SearchFitness
+        from looplab.events.replay import flagged_node_ids
+        flagged = flagged_node_ids(state)
+        eligible = [n for n in state.evaluated_nodes()
+                    if SearchFitness.eligible(n, flagged, state.aborted_nodes)]
+        confirmed = [n for n in eligible if n.confirmed_mean is not None]
+        pool = confirmed if confirmed else eligible
+        by_metric: dict = {}
+        for n in pool:
+            by_metric.setdefault(n.robust_metric, []).append(n)
+        groups = [nodes for nodes in by_metric.values()
+                  if len(nodes) >= 2 and any(n.verifier_score is None for n in nodes)]
+        groups.sort(key=lambda nodes: min(n.id for n in nodes))
+        return groups
+
+    def _verifier_soundness(self, state: RunState, node, client) -> Optional[dict]:
+        """The calibrated §12-verifier soundness verdict for a node's REALIZED result, or None on any
+        failure / too-noisy a verdict. Returns `{score, n_samples, agreement}` — `score` is the
+        `result_sound` criterion mean in [0,1] (grounded on the node's idea + metric + confirm/holdout
+        signals); the provenance rides on the audit event. Best-effort — never raises.
+
+        ABSTAINS (None) when cross-sample AGREEMENT is below a majority (only measurable with >1 sample):
+        a high-variance verdict — the single-shot noise §21.12 measured — must not decide a tie. Evidence
+        is scalar-summary only (the hard leakage/gaming/overfit signals stay the job of the trust layer's
+        reward-hack / leakage detectors); this advisory tie-break asks only "does the reported result look
+        sound", and abstains rather than over-claiming when the judgment is unstable."""
+        try:
+            from looplab.trust.verifier import selection_criteria, verify
+            r = getattr(self, "researcher", None)
+            parser = next((p for o in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
+                                       getattr(self, "developer", None)) if (p := getattr(o, "parser", None))),
+                          "tool_call")
+            subject = (f"Experiment #{node.id} reported metric={node.metric} on the task (optimize "
+                       f"direction: {state.direction}); its result is genuinely sound and will hold up.")
+            evidence = (f"What it did: {' '.join((getattr(node.idea, 'rationale', '') or '').split())[:250]}\n"
+                        f"Metric: {node.metric}"
+                        + (f"; confirmed mean over {node.confirmed_seeds} seeds: {node.confirmed_mean}"
+                           if node.confirmed_mean is not None else "")
+                        + (f"; holdout metric: {node.holdout_metric}" if node.holdout_metric is not None else "")
+                        + (f"; generalization gap: {node.generalization_gap}"
+                           if node.generalization_gap is not None else ""))
+            samples = getattr(self, "_select_verifier_samples", 3)
+            rep = verify(subject, evidence, selection_criteria(), client=client,
+                         samples=samples, parser=parser)
+            if rep is None or rep.method == "unavailable":
+                return None
+            crit = (rep.per_criterion or {}).get("result_sound") or {}
+            m = crit.get("mean")
+            score = float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
+            if score is None:
+                return None
+            # Reject a too-noisy verdict (variance is only measurable across >1 sample): if fewer than half
+            # the samples agree on the modal verdict, the judgment is unstable — abstain so a coin-flip
+            # can't decide the tie (which then falls back to the id tie-break for the whole group).
+            if samples > 1 and rep.agreement < 0.5:
+                return None
+            return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement}
+        except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
+            return None
 
     def _maybe_consult_strategist(self, state: RunState) -> RunState:
         """Operator/boss pin first (HITL parity), then the bounded-cadence Strategist consult.

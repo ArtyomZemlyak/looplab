@@ -100,7 +100,12 @@ ATTR_BY_FIELD = {
     "novelty_semantic_threshold": "_novelty_semantic_threshold",
     "research_verify": "_research_verify",
     "workdir_audit": "_workdir_audit",
+    "select_verifier": "_select_verifier",
+    "select_verifier_samples": "_select_verifier_samples",
     "coverage_context": "_coverage_context",
+    "concept_pivot": "_concept_pivot",
+    "graded_novelty": "_graded_novelty",
+    "capability_expansion": "_capability_expansion",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }

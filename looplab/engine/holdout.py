@@ -141,13 +141,19 @@ class HoldoutGrader:
         flagged node can't consume a holdout slot the legitimate runner-up needs (else, under
         `gate`, the winner is flagged, fold drops it from the holdout pool, and no clean node ever
         received a holdout eval → the discipline silently no-ops)."""
+        from looplab.core.fitness import SearchFitness
         from looplab.events.replay import flagged_node_ids
         flagged = flagged_node_ids(state)
-
-        def _key(n):
-            return (n.robust_metric, n.id)
+        # Same ranked-scalar key as the fold's mean pick — `promotion_key` owns the `(robust_metric, id)`
+        # tuple (plus the R1-c verifier tie-break slot when `select_verifier` is on) so this holdout-slot
+        # ranking can't drift from `_select_best`. Crucially, with the verifier tie-break on, a
+        # robust_metric-tied but verifier-PREFERRED leader must not be denied a holdout slot (else the
+        # holdout override would pick a winner from a pool that excluded the sound node — the very node the
+        # mean pick chose). Byte-identical to `selection_key` when the flag is off. The pool base
+        # (feasible_nodes + flagged) is a different-but-agreeing spelling of the same eligibility.
+        fit = SearchFitness(state.direction, verifier_tiebreak=state.select_verifier_tiebreak)
         pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
-                      key=_key, reverse=(state.direction == "max"))
+                      key=fit.promotion_key, reverse=(state.direction == "max"))
         return [n.id for n in pool[: self._e._holdout_top_k]]
 
     def holdout_pending(self, state: RunState) -> bool:

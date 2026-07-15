@@ -18,7 +18,7 @@
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
-| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7) |
+| **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
 | **Last verified** | 2026-07-12 (core); 2026-07-14 (Part III-B and Part IV addenda) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
@@ -96,7 +96,7 @@ run-instance, and manifest boundaries.
 
 | Axis | Verdict |
 |---|---|
-| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, the reopen-search-epoch + subject-bound approval, several permission/path boundaries, and event-log repair landed. Full search-epoch stamping (promotion/finalization and per-epoch hidden holdout), complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
+| **Architecture** | **Strong substrate, partially contained lifecycle model.** Setup completion, terminal-attempt generation, the reopen-search-epoch + subject-bound approval, the per-epoch freshly-hidden holdout, `best_confirmed` epoch-stamping, a single `SearchFitness` ordering owner, several permission/path boundaries, and event-log repair landed. Complete attempt/request identity, immutable run manifests, hard budget reservation, and one control writer remain missing. |
 | **Code & tests** | **Substantial, disciplined, and green in validation CI.** The remediation series added focused regressions and the full suite passes for validation commit `89af408`; green examples do not prove the remaining interleavings, fail-open-lock behavior, object authorization, unpolled deadlines, or workspace identity. |
 | **Functionality** | **Broad, unevenly production-ready.** The default trust posture is mostly audit/off, temporal CV has no shipped caller, six adapters are synthetic/harness-oriented, and the isolated real-task path is under-validated. |
 | **Directions** | **Finish residual stabilization, then promote features through gates.** Offline discovery may continue, but live production activation still waits for the relevant identity, policy, budget, and provenance contracts. |
@@ -108,9 +108,10 @@ Four incomplete identity families explain much of the residual defect cluster:
    forced-operation, artifact, and cost effects are not all scoped to that generation, so P0-1 is partial.
 2. **`SearchEpoch`** — reopening a *finished* run now bumps `search_epoch` and re-opens confirmation and
    subject-bound approval for the new candidate set (`931c28b`), so an older champion no longer locks
-   selection. The residual is partial: holdout is not re-hidden per epoch, and promotion/finalization outputs
-   are not yet epoch-stamped, so a reopened run still scores against an already-disclosed holdout — P0-2
-   partial (§14.6).
+   selection. Holdout is now re-hidden per epoch (`e111bf5`, epoch-salted split) and `best_confirmed` is
+   epoch-stamped so a stale-epoch confirmation can't authorize selection (R1-b); the residual is the broader
+   identity family (run instances, event/evaluation IDs, request/subject revisions, transition validator,
+   append CAS on engine appends) — P0-2 partial (§14.6).
 3. **`RequestId` + `SubjectHash`** — permission resolution now uses pending→resolved CAS and centrally gates
    MCP/background kill (`87dfc7e`), but approvals, aborts, forced operations, and promotion/finalization
    decisions are not all bound to the exact request and subject revision.
@@ -445,7 +446,7 @@ fail-closed behavior so safety does not depend on an operator remembering this l
 | Workstream | Primary finding IDs | Status | Scope | Depends on | Exit gate |
 |---|---|---|---|---|---|
 | **R0 — fail-closed containment** | P0-4, P0-6, P0-7; P1-3, P1-6, P1-7, P1-11, P1-12 | **in progress · release blocker** | **Landed:** known corrupt-tail refusal/repair, permission CAS and MCP/kill gates, stage/path/timeout containment, tri-state workdir audit, named leakage fixes, strategy-param guard, event partition, aggregate-context fix. **Remaining:** recheck divergence under writer coordination, fail on unsupported locks, default-deny route/object scopes, one ToolSpec/effect inventory, global PathPolicy/fresh artifacts, calibrated advisory policy, durable wakeup | none | every known and newly identified bypass is red before and green after; unambiguous v1 logs still read; no unsupported shared mode starts |
-| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, full search-epoch stamping of promotion/finalization plus a per-epoch hidden holdout, request/subject revisions on all forced/control requests, transition validator, append CAS, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
+| **R1 — event/state identity** | P0-1, P0-2; P1-12 | **in progress · release blocker** | **Landed:** node attempt generation for eval/fail terminals; reopen-of-finished `search_epoch` bump with confirmation/approval re-open and subject-bound (existence-checked) approval (P0-2 partial, `931c28b`); per-epoch freshly-hidden holdout (`e111bf5`); `best_confirmed` epoch-stamping so a stale-epoch confirmation can't authorize selection, with `run_finished` (`after_seq` CAS) + `finalization_finished` (`finished`-check) already reopen-safe (R1-b); a single `SearchFitness` ordering owner (R1-a). **Remaining:** run instances, event/evaluation IDs, attempt scope for all effects, request/subject revisions on all forced/control requests, transition validator, append CAS on engine appends, typed payload/upcaster registry | R0 | model-based stale-event/reset/reopen/approval tests; exactly one terminal per attempt; no old instance/attempt/epoch can mutate, promote, or finalize |
 | **R2 — durability/reproducibility** | P0-3, P0-5; replay extensions in §14.2 | **in progress · release blocker** | **Landed:** folded setup completion/re-entry, different-task and alias refusal, corrupt-log repair. **Remaining:** content-addressed setup steps; RunManifest/InputSnapshot; attempt-scoped clean workdirs and ArtifactManifests; strict `run` vs `resume`; repair generation/digest provenance | R1 | crash at every setup/effect boundary converges or fails closed; dirty inputs and stale outputs cannot masquerade as current |
 | **R3 — execution infrastructure** | P1-2, P1-4, P1-5, P1-8 | **in progress · stabilization blocker** | **Landed:** ablation cost accounting, explicit background tree kill/wait, finite timeout/path fixes, `--mount` Windows grammar. **Remaining:** multidimensional reserve-before-spawn BudgetLedger; session-owned deadline watcher; bounded logs/readers/regex; stable cross-platform input mapping; physical token/deadline/OS quotas | R0–R2 | no over-admission; incurred stale-worker cost is settled once; no orphan tree after kill; memory/disk bounds; real Windows/Linux matrix green |
 | **R4 — typed domain services** | P0-2; P1-7, P1-9, P1-11 | **in progress · post-stabilization polish — only versioned TrustEvidence binding is release-relevant; see §6.6** | **Landed:** parent-aware wrapper forwarding and the concrete strategy-param bypass fix. **Remaining:** TaskSpec/capabilities; DevelopmentRequest/Result; ToolSpec/Result/ExecutionContext; SearchFitness/PromotionFitness; versioned TrustEvidence/Decision; lifecycle/evaluation/promotion/strategy services | R1–R3 | wrappers preserve typed capabilities/failures; one policy gate and one fitness owner; Engine remains a compatible facade |
@@ -1357,7 +1358,7 @@ to **partial** in the follow-on increment at `931c28b` — see §14.6):
 | Finding | Status | Landed containment | Residual exit gate |
 |---|---|---|---|
 | P0-1 attempt identity | **partial** | `47f786a`: attempt generation rejects stale eval/fail terminals | bind confirm/holdout/trust/abort/repair/forced/cost/artifact effects |
-| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§14.6) | stamp `search_epoch` on promotion/finalization outputs; subject/`expected_seq` on all forced/control requests; epoch-specific still-hidden holdout |
+| P0-2 epoch/subject identity | **partial** | `a23ca92`+`daf585d` (increment tip `931c28b`): reopen-of-finished bumps `search_epoch` and re-opens confirmation + approval for the new candidate set; subject-bound (existence-checked) approval; `spec_approved` requires a proposal (§14.6); per-epoch freshly-hidden holdout (`e111bf5`); `best_confirmed` epoch-stamped (R1-b) | subject/`expected_seq` on all forced/control requests; broader run/event/evaluation identity |
 | P0-3 setup crash window | **partial** | `5f5ce46`: folded completion and crash re-entry | content-addressed step state and manifest digest |
 | P0-4 invisible event tail | **partial** | `57e6312`, `13f087c`: JSON/Event-envelope refusal and repair | recheck under writer coordination; serialize repair; collision-safe digest provenance |
 | P0-5 run/task/workspace mixing | **partial** | `4c6c59f`: different-task and conflicting-alias refusal | canonical config/source/dirty-bytes/environment InputSnapshot |
@@ -1503,12 +1504,17 @@ locking, or ownership); a partial version risks breaking the replay/single-write
 rests on, so they are sequenced as dedicated workstreams with their own verification rather than shipped as
 risky slices:
 
-1. **P0-2 residual — full epoch stamping + epoch-specific hidden holdout.** The increment re-opens the
-   confirmation/approval gates but does not yet stamp `search_epoch` onto promotion/finalization outputs, nor
-   give a reopened epoch a *freshly hidden* holdout partition. A reopened run re-scores new candidates on the
-   *same* holdout that was already disclosed at the first finish — comparable and non-crashing, but no longer a
-   truly unseen signal (an "already-seen exam"). Fix: reserve a still-hidden per-epoch partition (or start a
-   fresh run) and carry the epoch on every promotion/finalization record. (§14.2 P0-2 residual.)
+1. **P0-2 residual — full epoch stamping (mostly landed).** The epoch-specific *freshly-hidden* holdout
+   landed (`e111bf5`): `_holdout_indices` salts the partition by `search_epoch`, the engine rebuilds
+   `_holdout_idx` on every epoch, and a reopen clears the disclosed holdout so a new epoch re-scores on an
+   unseen split — no "already-seen exam" (see the ✅ P0-2 row in §14.5). Promotion/finalization epoch
+   stamping is also now covered: `best_confirmed` carries `search_epoch` and the fold rejects a stale-epoch
+   confirmation, so an epoch-(N-1) certificate can't authorize `confirmed_done`/the confirm-override in a
+   fresh epoch (R1-b); `run_finished` is already protected by its `after_seq` CAS and `finalization_finished`
+   by its `st.finished`/`last_finish_seq` check (a reopen clears `finished`), so both reject the stale-reopen
+   race without a separate epoch stamp. What remains of the identity family is the broader R1 work below
+   (run instances, event/evaluation IDs, request/subject revisions on all forced/control requests, a
+   transition validator, append CAS on the engine's own domain appends, a typed payload/upcaster registry).
 2. **P1-1 zombie run (open).** The resume/finalize handoff on the server has a race that can leave a run
    marked live with no engine driving it. Fix: an atomic durable command intent plus an
    `EngineSupervisor`/reconciler that owns lock acquisition and pending wakeup, so clients never assemble the
@@ -2703,3 +2709,314 @@ prerequisites (§6.5) — and breadth/QD-flavoured parts stay open-ended-mode on
 (`dataset.n_negatives`/`negatives_path`, `loss.type='mnr'`), τ→0.005, optionally distilling from the on-disk
 `nomic-moe@0.899`/`e5-base@0.90` teachers — into `dense-retrieval/train.py`. That is a task deliverable, not an
 agent change, and needs none of the D-program.
+
+#### 21.14 Phase 0 — implemented (the offline foundation)
+
+*Landed 2026-07-14. The three keystone-independent Phase-0 pieces (0a/0b/0c) ship as **offline diagnostics /
+library primitives** — no new `Settings` fields, no new event types, no change to the live loop or selection
+(that is Phase 2). All three are LLM/AGENTIC-first with deterministic, no-network fallbacks so the offline
+suite exercises them without an endpoint.*
+
+| Build | Module | CLI | Tests |
+|---|---|---|---|
+| **0a** concept graph + coverage + uncovered-region | `looplab/search/concept_graph.py` | `looplab concept-coverage RUN_DIR [--llm]` | `tests/test_concept_graph.py` |
+| **0b** D1 asset/prior-art brief | `looplab/tools/asset_brief.py` | `looplab asset-brief REPO [--llm]` | `tests/test_asset_brief.py` |
+| **0c** §12 advisory verifier + calibration | `looplab/trust/verifier.py` | *(library primitive; consumed by D3/D6/foresight in Ph.1/2)* | `tests/test_verifier.py` |
+
+- **0a** is a **multi-label concept DAG** (§21.11) sitting beside the flat `coverage.py`. The pure analytics
+  (`concept_coverage`/`uncovered_regions`/`concept_report`) mirror `coverage.py`'s deterministic, fold-derived
+  discipline; the impure step is only *tagging* — `tag_nodes_llm` (the primary, optionally agentic, grows the
+  vocabulary for ANY task) with `tag_nodes_heuristic` (alias/lineage, deterministic) as the offline fallback.
+  The concept skeleton is a **pluggable per-task-type pack** (`skeleton_for`; dense-retrieval is the one
+  validated pack, generic-graph fallback otherwise), so nothing is hardcoded to the `rubertlite` case. A
+  replay of a DCL-heavy run fires the uncovered-region alarm on `negatives/external-mining`,
+  `false-neg-handling`, `distillation/teacher-distill`, `data/*` — the §21.11 decisive signal.
+- **0b** is **agentic-first**: `agentic_asset_brief` runs an LLM over `RepoScoutTools` (read-only
+  list/grep/read) to write a grounded brief; `scan_assets`/`format_brief` is the bounded, task-AGNOSTIC
+  offline fallback + seed hint. Domain capability vocabulary lives only in a pluggable `AssetLexicon`
+  (`lexicon_for`); metric-name recognition is cross-domain. Read-only local I/O (mirrors `env_inspect`).
+- **0c** mirrors `trust/verify.py::verify_memo`: **criteria-decomposed** (named `Criterion`s), **repeated**
+  (N samples → sample-mean = the sampling-based expectation §12's logit-expectation needs on a
+  no-logprob backend), **grounded** (optional run tools → `agentic_struct`). Strictly advisory; degrades to
+  `method="unavailable"` without a client. `calibrate` reports Pearson/threshold/agreement of the score vs a
+  gold label — §12's own evaluation gate — with ready-made `lesson_overgeneralization_criteria` (D6) and
+  `reexamination_criteria` (D3) presets. `_agreement` surfaces the single-shot variance §21.12 measured.
+
+Phase 2 (live Strategist pivot, capability-expansion operator, foresight replacement) builds on these and
+inherits the R-gates + mode-gating as specified above.
+
+**Universality (post-review, 2026-07-14) — derived importance, not a hardcoded winning region.** A review +
+live tests found the keystone signal was accidentally *dense-retrieval-specific*: the uncovered-region alarm
+fired off hand-marked `key=True` concepts, which literally encode the `rubertlite` answer, and the offline
+alias heuristic over-tagged those key concepts (external-mining fired on 15 in-batch nodes) so the alarm read
+the winning region as *covered*. Fixes landed on the branch:
+- **Discriminative offline aliases + an `in-batch-hard-mining` split** (external/data-side/teacher aliases now
+  require the genuine qualifier), dropping external-mining over-tagging 15→1 — but the offline heuristic has an
+  inherent ceiling on semantic collisions (self- vs teacher-distillation), documented, with a CLI caveat.
+- **D1 metric-parsing fix** (word-boundary `\b` → an alnum-only lookbehind/lookahead, so `_` counts as a
+  separator): checkpoint scores glued by underscores (`..._val_recall@100=0.902.ckpt`) now parse, so the brief
+  headlines the strongest teacher and ranks all.
+- **The universal mechanism — `concept_graph.derive_reference_concepts(task_goal, coverage, client,
+  asset_brief=…)`**: the "important-but-uncovered" set is now **derived per task** from the goal + explored
+  concepts + the D1 prior-art brief, with **no hardcoded key list**. Validated on two unrelated domains with
+  zero curated pack: on **image-classification** it surfaced ViT/Swin, EfficientNet, SAM, knowledge-
+  distillation, stochastic-depth, EMA, ConvNeXt, model-soups; on **dense-retrieval** (D1-grounded) it surfaced
+  synthetic-query generation + data-quality + schedule. **Normative:** the curated dense-retrieval skeleton /
+  `key=True` list is demoted to an OPTIONAL offline seed pack (a fast path for a registered task type, like the
+  adapters registry); the universal core is the LLM-grown concept graph + the pure coverage math + the
+  per-task derived importance — no domain hardcoding, works on any task.
+- **Vocabulary consolidation (2026-07-14, DONE)** — the last universality hardening: a freely-grown vocabulary
+  otherwise FRAGMENTS into synonyms (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`),
+  re-splitting the concentration signal one level up. `concept_graph.consolidate_concepts(graph, tags, *,
+  client=…)` canonicalizes it — agentic-first (one LLM call merges synonymous concepts/axes to one id each,
+  keeping distinct methods apart: `mixup`≠`cutmix`), with `hybrid_merge.cluster_near_duplicates` as the no-LLM
+  fallback; fail-open (returns the graph unchanged on any error). `build_concept_map` runs it after the agent
+  grows the graph and before measuring. Validated live on the image-classification vocabulary: it merged
+  `data-augmentation`→`augmentation` and `optimization`→`optimizer` (8 axes → 6), so the grown graph is a
+  stable coordinate system on any task.
+
+**LLM-agent-primary (2026-07-14).** Design correction: **the LLM agent BUILDS the concept map by default**,
+matching how D1 (`agentic_asset_brief`) and §12 (agentic `verify`) already work — the deterministic alias
+heuristic + curated skeleton are only the no-LLM FALLBACK, not the primary mechanism (polishing those aliases
+was polishing the fallback). New primitive `concept_graph.build_concept_map(state, task_goal, *, client,
+tools, seed_graph=None, asset_brief=…)`: the agent grows the vocabulary from the actual experiments (agentic —
+reads each node's code/logs), computes the pure coverage, and derives the important-uncovered set. `seed_graph`
+is an OPTIONAL starting vocabulary the agent verifies/expands (mirrors `agentic_asset_brief`'s `seed_scan`);
+default builds from scratch, so it is task-agnostic. `looplab concept-coverage` now defaults to this agentic
+build; `--offline` forces the heuristic fallback. **Replay-safety is unchanged:** `build_concept_map` is a
+PRODUCER (impure), `fold` stays pure — in the live loop its output is recorded as events and read
+deterministically (the lessons/hypotheses pattern), which is the Phase-1 wiring, not Phase 0.
+
+#### 21.15 Phase 1 — implemented (offline analytics on the foundation)
+
+*Landed 2026-07-14. The five Phase-1 levers (1a–1e) ship as **offline analytics / advisory harnesses** on
+top of the Phase-0 foundation — still no new `Settings`, no new event types, no live-loop wiring, no
+selection changes (Phase 2). The pure analytics are deterministic over the folded run + concept tags; the
+verifier-backed ones (1b/1c) are strictly audit-only and degrade without a client.*
+
+| Build | Module | CLI | Tests |
+|---|---|---|---|
+| **1a** D7 action-space lock-in detector | `looplab/search/lock_in.py` | `looplab lock-in RUN_DIR` | `tests/test_lock_in.py` |
+| **1b** D6 lesson over-generalization guard | `looplab/trust/lesson_guard.py` | *(library; needs a verifier client)* | `tests/test_lesson_guard.py` |
+| **1c** D3 graded novelty + failed-direction re-exam | `looplab/search/graded_novelty.py` | *(library / advisory)* | `tests/test_graded_novelty.py` |
+| **1d** D4 taxonomy-aware board dedup | `looplab/search/taxonomy_dedup.py` | `looplab board-dedup RUN_DIR` | `tests/test_taxonomy_dedup.py` |
+| **1e** D2 axis-structured research targeting | `looplab/search/research_targeting.py` | `looplab research-targets RUN_DIR` | `tests/test_research_targeting.py` |
+
+- **1a** maps each experiment to the axis-region(s) of the concept DAG it touches (the "lever"/subsystem
+  proxy) and finds the longest run of CONSECUTIVE experiments confined to one axis — the same-lever streak
+  the flat coverage signal was blind to (§21.10: DCL streak = 12; the ≥N detector fires ~node 29). Pure.
+- **1b** grounds each distilled lesson in its evidence node's real outcome and runs the 0c verifier
+  (`lesson_overgeneralization_criteria`) to flag the node_63 mis-lesson pattern (over-generalizes a SOUND
+  direction), attaching the flag to a concept-graph branch (§21.7); `contradiction_scan` finds
+  mutually-inconsistent lesson pairs (§21.12 E4). Audit-only.
+- **1c** is an ADVISORY library (it does NOT modify the live `_llm_novelty_gate`): `grade_novelty` is a
+  deterministic multi-level classifier that uses concept membership to tell "this DCL tweak" from "the whole
+  DCL branch" and to recognize a proposal that RE-OPENS a wrongly-abandoned failed direction (the §21.4
+  levels); `reexamine_failed_direction` runs the 0c verifier grounded in the D1 asset brief (grounding is
+  what flipped the blind critic from wrong to correct, §21.10/§21.12).
+- **1d** tags the hypothesis board, surfaces the dominant within-concept redundancy (§21.12: 63/107 on DCL),
+  and flags cross-branch look-alikes a blind merge would collapse (the protective value; 0 pairs on the
+  `rubertlite` run, §21.12) via the deterministic `HybridRetriever`. Pure.
+- **1e** turns the coverage map into ranked axis-structured research targets — uncovered axes first, failed
+  directions re-framed as "research a different implementation" (avoid re-proposing the failed variant,
+  §21.12), then under-covered axes — optionally grounded in the D1 brief. Pure.
+
+The shared alias-matching rule is centralized in `concept_graph._alias_index` (wrapped by `tag_text` for
+the lesson guard / idea grader / board dedup; the node tagger `tag_nodes_heuristic` uses `_alias_index`
+directly). Phase 2 wires these into live steering (Strategist pivot,
+capability-expansion operator, novelty gate, deep-research targeting) behind the R-gates + mode-gating.
+
+**Agentic-first adaptation (2026-07-14).** Phase 1 originally sourced its tags from the deterministic alias
+heuristic. Per the §21.13 conclusions (LLM-agent-primary + universal), the analytics stay pure but their
+INPUT is now the agentic build: a shared CLI helper `_concept_map_for` builds the concept map with the LLM
+agent by default (`build_concept_map`) and feeds the resulting tags + derived importance into `lock_in` /
+`dedup_analysis` / `research_targets`; `--offline` forces the heuristic. `research_targets` now takes
+`important_uncovered` (the universal per-task derivation) as its TOP-priority targets, so D2 works on any task
+without the hardcoded `key=True` list; `grade_novelty` takes optional `idea_tags` so the branch-vs-leaf
+decision can use the LLM's tagging (consistent with the LLM novelty gate). This matters in practice: on the
+`rubertlite` run the offline heuristic mis-attributed the lock-in axis to `hyperparameter` (it tags
+"temperature" on nearly every node) and tagged 0/147 board hypotheses — the agentic tagger fixes both. The
+deterministic paths remain the no-LLM fallback and the pure/replay-safe read layer.
+
+#### 21.16 Phase 2 — implemented (live steering on the foundation)
+
+*Landed 2026-07-14. Phase 2 is the FIRST part of the D-program that touches the live loop — but every
+lever is **opt-in (default off)**, **replay-safe** (deterministic classifiers run live, never in the
+fold; the only new persisted events are additive audit sidecars), and **selection-neutral** (all three
+steer PROMPTS or a pre-eval gate; none change how a node is scored or which node wins). This honors the
+§21.13 discipline "nothing in Phase 2 changes selection before its R1/SearchFitness/eval-trust gates":
+the parts that would touch selection (a scored capability-expansion policy action; feeding the verifier
+score into best-selection) are deliberately DEFERRED — see the scoping note below.*
+
+| Build | Lever | Module(s) | Settings flag | Tests |
+|---|---|---|---|---|
+| **2a** | Strategist concept-pivot directive | `engine/strategy.py` + `engine/proposal_cues.py` (`search/concept_graph.py`, `search/lock_in.py`) | `concept_pivot` | `tests/test_concept_pivot.py` |
+| **2b·D3** | Graded novelty into the LIVE gate | `engine/novelty.py` (`search/graded_novelty.py`) | `graded_novelty` | `tests/test_graded_novelty_gate.py` |
+| **2b·D7** | Capability-expansion forced-jump directive | `engine/proposal_cues.py` (`search/lock_in.py`) | `capability_expansion` | `tests/test_graded_novelty_gate.py` |
+| **2c** | Calibrated foresight confidence | `search/foresight.py` + `trust/verifier.py::foresight_criteria` | `foresight_verify` (`foresight_verify_samples`) | `tests/test_foresight_verify.py` |
+
+- **2a** records a deterministic concept-graph coverage + uncovered-region snapshot
+  (`concept_coverage_snapshot`, audit-only, `at_node`-idempotent) at the strategist cadence, and on an
+  `explore` stance the Researcher's novelty hint names the exact uncovered regions
+  ("0 coverage in {negatives/external-mining, distillation} — go there") instead of the vague "broaden"
+  (§21.11). No-op for a task with no curated skeleton; never touches selection.
+- **2b·D3** grades a fresh proposal over the concept graph BEFORE the flat dedup gate (`_apply_novelty_gate`
+  pre-check). A level-4 "same direction, DIFFERENT implementation" or a level-5 "re-opens a
+  wrongly-abandoned FAILED direction" (§21.4) is ALLOWED through — recorded as a `novelty_graded` audit
+  event — where the flat LLM/semantic gate would wrongly reject it ("this DCL tweak" vs "the whole DCL
+  branch", the node_63 archetype). Levels 1/2/3 (identical / near-dup / prior-run) still defer to the flat
+  gate. Deterministic heuristic tagger, no LLM.
+- **2b·D7** escalates the `explore`-stance hint from "broaden" to a forced-JUMP "expand the ACTION SPACE /
+  build the missing infra (external mining, a new data pipeline, a different eval), do NOT swap another
+  '{locked}' lever" once the 2a cadence reports action-space LOCK-IN (a long consecutive same-lever streak;
+  §21.8, issue #7). Prompt-cue only — it reads the 2a snapshot (so it needs `concept_pivot` to record one).
+- **2c** replaces the world model's SELF-REPORTED foresight confidence — measured Pearson≈0 with the
+  realized outcome (§21.12) — with a CALIBRATED §12-verifier score: after the K-idea ranker picks the
+  predicted-best candidate, the grounded + repeated + criteria-decomposed verifier (`foresight_criteria`:
+  `improves_objective` primary + `sound_and_feasible` guard) scores it, and that becomes the confidence the
+  `foresight_min_confidence` gate and the `foresight_selected` telemetry (`confidence_source`) read.
+  Degrades to the self-reported confidence without a client or on any verifier error.
+
+**Deliberately deferred (needs the R-gates, §21.13).** Two selection-touching pieces are scoped OUT of
+this landing and left for when their prerequisites exist: (1) the **SCORED** capability-expansion policy
+operator (a new action-kind in `search/operators.py`/`policy.py`, scored against `improve`/`merge`) — it
+changes selection and is gated behind R1 epoch-id + SearchFitness + trustworthy eval (§21.13 row for D7);
+2b ships only its DIRECTIVE (prompt) form. (2) Feeding the 2c verifier score into **best-selection** — it
+stays advisory (confidence gate + telemetry) exactly as §12's normative "strictly advisory, never
+overrides the ground-truth metric" (§21.7) requires. When R1/SearchFitness land, both promote off the same
+verifier + concept-graph substrate already shipped here.
+
+**Agentic + universal adaptation (2026-07-14, review).** As landed, Phase 2's live snapshot was
+skeleton-only + heuristic + hardcoded-`key`, so the pivot was a no-op on any non-dense-retrieval task and
+used the coarse tagger that mis-attributes the lock-in axis. `strategy._concept_coverage_snapshot` now
+**builds the map with the LLM agent when a reflect client is wired** (`build_concept_map` +
+`derive_reference_concepts`): universal (any task, no curated skeleton), accurate tags, and the "0 coverage
+in {X}" directive names the per-task DERIVED importance — fixing BOTH `concept_pivot` and (via the
+`locked_axis`/`streak` it records) `capability_expansion`. It is produced ONCE per strategist cadence and
+recorded, so `fold` only reads it and replay stays deterministic (the memo/lessons producer pattern); the
+deterministic heuristic+skeleton path remains the no-client fallback, and with the flags off behaviour is
+byte-identical. **Known follow-up:** `graded_novelty` (2b, per-proposal) still uses the skeleton+heuristic
+tagger — making it agentic needs a per-cadence tag CACHE reused across proposals (rebuilding the map per
+proposal is too costly), so it is left for a coordinated pass. Also removed a stray merge-conflict marker
+the landing left at the end of this section.
+
+#### 21.17 E-functions — implemented & measured (2026-07-14)
+
+The three "extra" diagnostics from §21.12, built by composing the keystones (no new infrastructure):
+
+- **E2 — foresight confidence calibration.** *Shipped* as Phase 2c `foresight_verify` (calibrated §12-verifier
+  score replaces the self-reported confidence, measured Pearson≈0). **Evaluation gate — honest negative:** on
+  the `rubertlite` run the verifier's idea-only score correlates **−0.11** with realized recall@100 (n=10) —
+  no better than the self-reported confidence (−0.10), and it scored ~0.50 for almost everything (it can't
+  tell the catastrophic node_25=0.006 from the champion node_48=0.8835). **Conclusion:** predicting a training
+  outcome from a one-line proposal is inherently weak for this task; the §12 verifier's demonstrated value is
+  in *judgment* tasks (the D6 lesson guard: over-generalization std=0), not outcome forecasting. `foresight_verify`
+  should be validated on its *actual* job — ranking candidates / correlating with the eventual winner among a
+  candidate SET — not absolute-outcome prediction; treat it as unproven for foresight until that test passes.
+- **E4 — lesson audit.** The `trust/lesson_guard.py` guard (D6, over-generalization, validated: node_63
+  `over_generalizes=1.0` std=0) + `contradiction_scan` (mutually-inconsistent lessons) are now exposed via
+  `looplab lesson-guard RUN_DIR` (LLM-backed).
+- **E3 — novelty-gate recall (NEW).** `search/novelty_recall.py` + `looplab novelty-recall RUN_DIR`: reuses
+  `hybrid_merge.cluster_near_duplicates` for candidate pairs (sorted by lexical similarity so the LLM budget
+  covers the likeliest dups first) and an LLM adjudicator for paraphrase-vs-variant. **Measured on `rubertlite`
+  (the "сколько шлака" question):** the gate caught 6 near-dups but **leaked ≥4 true paraphrases** in the top-16
+  most-similar pairs (est. recall ≤0.6) — duplicate merge nodes (23≈24, 38≈41), a duplicate loss change
+  (11≈70), and the codebase pair (0≈1). Concrete evidence the flat gate misses paraphrase-level dups,
+  especially near-identical merges — exactly what D3/D4 (graded novelty + taxonomy dedup) target.
+
+#### 21.18 Concept-graph maintenance & agentic tagging — lifecycle analysis + backlog (2026-07-15)
+
+Feature 1 (Phase 2c, §21.16) made **node** tagging incremental — each node's raw tags are recorded once
+(`node_concepts` event) and reused. That is the right efficiency move, but it surfaces a design space the
+first implementation deliberately froze: **once you cache a tag, you own its lifecycle.** This section
+enumerates every graph-mutation action, defines the correct behaviour, and lists the backlog. Two consumers
+are in scope: the **agentic tagger** (which item gets which concept) and the **graph itself** (which concepts
+exist). Both must stay universal + agentic-first + replay-safe.
+
+**A. When does the agent tag? (the timing design space).** An item (node / hypothesis / lesson) can be
+tagged at several lifecycle points. They are not exclusive — the shipped design should combine them:
+
+| When | Pro | Con | Verdict |
+|---|---|---|---|
+| **At creation** (hypothesis_added, node first-eval, lesson distilled) | cheap, incremental, one call per item | tags against an *immature* early vocabulary; a concept minted later never back-applies | **primary** — record as an event like `node_concepts` |
+| **At merge/consolidation** (hypothesis_merged, node confirm-refine) | the merged representative now stands for several items → its tags must be re-derived | extra call per merge | **yes** — re-tag the surviving representative |
+| **On graph growth** (a new concept is minted mid-run) | keeps *earlier* items comparable against the richer vocabulary | naively O(items) LLM re-tag per new concept | **yes, but BOUNDED** — see B1 (cheap prefilter → LLM-confirm only candidates) |
+| **On rerun/reset** (the item's idea/code changed) | correctness — stale tags otherwise | — | **required** (M1, correctness bug today) |
+| **Lazily, on analysis** (tag only what a diagnostic needs) | zero cost until used | re-does work each analysis; no durable record | fallback only |
+| **Never re-tag** (freeze at creation) | cheapest | stale vs grown vocab (today's node behaviour) | insufficient alone |
+
+Recommended composite: **creation-time record + merge-time re-derive + reset-time invalidate + a bounded
+graph-growth refresh.** Applies uniformly to nodes, hypotheses (D4, the immediate ask), and lessons (D6).
+
+**B. Graph-maintenance actions (the lifecycle matrix).** Every way the graph or an item can change, and the
+required tag behaviour:
+
+1. **New concept minted** (a later item introduces `axis/slug`). *Today:* frozen items never see it. *Want*
+   (**B1**): a bounded retro-pass — cheap `tag_text` alias prefilter over all items to find *candidates*
+   whose text plausibly matches the new concept, then LLM-confirm only those (not a full O(n) re-tag).
+   Trigger: at consolidation, or every K new concepts. Record refreshed tags as new `node_concepts`/
+   hypothesis-tag events (last-write-wins fold already supports this).
+2. **Concept removed / consolidated (A→B).** *Today:* handled correctly — `_apply_consolidation` renames A→B
+   and rewrites every item's tags to the canonical, so items auto-redistribute (deterministic, pure). ✔
+   *Gap* (**B2**): an *explicit* delete (an empty/erroneous concept, not a synonym-merge) has no policy —
+   define: merge into parent axis, else drop to the `untagged` bucket. Also record the consolidation mapping
+   as an event (**B3**) so re-derivation each cadence is *stable*, not a flapping LLM re-decision.
+3. **Concept split** (one coarse concept should become two). *Today:* unsupported (only merge exists). *Want*
+   (**B4**): detect an over-broad concept (high count + internally dissimilar via retrieval) and re-tag its
+   items across the two children (LLM). Lower priority.
+4. **Node full rerun / reset** (`node_reset` → 2nd `node_created`; idea/code can change). *Today:* frozen
+   `node_concepts` keeps the pre-rerun tags → **stale (M1, correctness)**. *Want:* `_on_node_reset` /
+   the rerun path invalidates the node's recorded concepts so the next cadence re-tags it fresh.
+5. **Node metric/status change** (evaluated→failed, re-evaluated). Tags key on the *method* (idea text), not
+   the metric → **no action** (verified: tagger reads idea/params, never the metric). ✔
+6. **Hypothesis merge** (several → one). Re-derive the representative's tags (union is the cheap floor; an
+   LLM re-tag is the accurate version) — part of A/"at merge".
+7. **Hypothesis promoted to a node.** Re-tag from the *executed* code (richer than the hypothesis text);
+   may seed from the hypothesis tags to save a call.
+8. **Lesson distilled / reconciled.** Same lifecycle as nodes; lessons are few → refresh is cheap.
+9. **Axis (DAG) restructuring.** Axes are id-prefix-derived today; if we ever re-parent a concept, coverage
+   rollups shift — needs explicit axis events. Lowest priority (no re-parenting today).
+
+**C. Backlog (prioritised, each ships with live eval tests + a mega-review, §concept discipline).**
+
+- **M1 (DONE):** invalidate `node_concepts` on a `propose` rerun (idea change) so a re-proposed node is
+  re-tagged, not left with stale frozen tags — scope tied to the idea-only tagger's inputs.
+- **F2 (DONE):** agentic graded-novelty on the cached tags (§21.4 D3) — reconstruct graph+tags from
+  `node_concepts`, LLM-tag the proposal (`tag_idea_llm` → shared `tag_text_llm`), heuristic fallback.
+- **HT (DONE, the user ask):** agentic **hypothesis** tagging (D4) — a `hypothesis_concepts` event, tagged
+  incrementally at the concept cadence (capped `_HYP_TAG_CAP`/cadence) via the shared `tag_text_llm`;
+  taxonomy dedup + `board-dedup` consume the cache (per-hypothesis cache-or-`tag_text` fallback). Replaces
+  the alias heuristic as primary. Live-validated: two hard-neg hypotheses with NO shared words both tag
+  `negatives/external-mining` and cluster, which `tag_text` misses. **HT follow-ups still open:**
+  creation-time tagging (tag at `hypothesis_added`, not only at the cadence) and merge-time re-derive (on
+  `hypothesis_merged`) — the cadence path already covers the incremental workhorse.
+- **B1 (DONE, nodes):** graph-growth retro-tag — each node_concepts event records `at_vocab` (vocab size
+  at tag time); the cadence re-tags the most-stale nodes (tagged against < 0.7× the latest vocabulary) via
+  `stale_tagged_nodes` (pure, cap `_RETAG_CAP`/cadence), recording the new tags at the current vocab so it
+  converges (a refreshed node is no longer stale → no churn). Live-validated: a node that tagged empty
+  against a loss-only vocab recovers `encoder/adapter-tuning` when re-tagged against the grown vocab.
+  Chose vocab-version invalidation over the prefilter→confirm design (simpler, reuses the re-tag machinery,
+  correct). **B1 follow-up:** the same for hypotheses + lessons (nodes are the primary coverage signal).
+- **B3 (DONE):** record the consolidation rename map as a `concept_consolidation` event
+  (RunState.concept_consolidation, accumulated). `consolidate_concepts(known_renames=…)` treats recorded
+  decisions as AUTHORITATIVE (never re-decided) and skips the LLM when nothing is undecided, so the
+  vocabulary stops flapping (fixes the coverage jitter + the B1 churn corner). Threaded through
+  `build_concept_map`; the strategy snapshot records only NEW decisions. Off-by-default.
+- **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
+
+**CROSS-RUN (CR) — the concept machinery is currently PER-RUN (user-flagged 2026-07-15; design parked
+pending the user's decision).** node_concepts / hypothesis_concepts / concept_consolidation / coverage all
+live in one run's RunState and rebuild from scratch each run; only DISTILLED LESSONS (D6/E4) cross runs
+today (LoopLab's existing `memory.py`/`lessons_*`). `graded_novelty.prior_concepts` (D3 level-3
+"tried_across_runs") is a STUB — the param exists but no caller populates it, so level-3 never fires.
+Backlog (not started):
+- **CR1:** persist the concept vocabulary + consolidation map + per-concept outcomes across runs (seed a new
+  run's graph so the agent doesn't re-learn the coordinate system; global-stable consolidation). B3's rename
+  map is the natural substrate.
+- **CR2:** populate `prior_concepts` from cross-run memory so D3 level-3 finally fires (surface "tried in
+  run X, outcome Y").
+- **CR3:** cross-run coverage — "was concept Z ever touched in ANY run".
+
+The through-line: the **LLM decides semantics** (which concept, when to split/merge), **deterministic code
+maintains the record** (events, fold, redistribution, prefilter), each step keeps a heuristic fallback, and
+every write is an additive, replay-safe event so resume stays deterministic.

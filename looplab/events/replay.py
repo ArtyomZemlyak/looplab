@@ -7,6 +7,7 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
+from looplab.core.fitness import SearchFitness
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
                      hypothesis_id, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
@@ -15,14 +16,16 @@ from looplab.events.types import (
     EV_APPROVAL_REQUESTED, EV_BEST_CONFIRMED, EV_BUDGET_EXTEND, EV_CONFIRM_DONE,
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONFIRM_EVAL, EV_DATA_LEAKAGE, EV_DATA_PROFILED, EV_DATA_PROVENANCE, EV_ENV_CHANGED,
-    EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE, EV_FINALIZATION_FINISHED,
+    EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT, EV_DEEP_RESEARCH, EV_DIVERSITY_ARCHIVE,
+    EV_FINALIZATION_FINISHED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM,
     EV_FORESIGHT_SELECTED, EV_FORK,
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
+    EV_CONCEPT_CONSOLIDATION, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
-    EV_NODE_TOMBSTONED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
+    EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
@@ -146,6 +149,12 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # setting can't make pre/post-resume metrics incomparable.
     _hf = d.get("holdout_fraction")
     st.holdout_fraction = float(_hf) if isinstance(_hf, (int, float)) else None
+    # R1-c: recorded at start so replay applies the same selection rule (config isn't available to the
+    # pure fold). Absent in old logs -> False -> byte-identical legacy selection.
+    # The fold stays pinned to the RECORDED value (never a live re-read); the engine re-pins its own
+    # `_select_verifier` gate from this recorded value on resume (orchestrator `_reentry_repin`), so the
+    # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
+    st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Operator edited the run's trust gate after launch (server config edit). Last write
@@ -620,6 +629,7 @@ def _requeue_partition_bound_results(st: RunState, *, fresh_node_ids: set[int]) 
         n.confirmed_seeds = None
         n.holdout_metric = None
         n.generalization_gap = None
+        n.verifier_score = None   # R1-c: a soundness score judged the OLD attempt's result — discard it
         n.stages = []
         n.failed_stage = None
         n.rerun_from = None
@@ -802,8 +812,11 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         # Finish-time scores computed on the NOW-discarded code must not survive the reset, or a
         # holdout-gated best pick / generalization-gap audit keeps using a stale number the node
         # can no longer reproduce (holdout is append-only + skips already-scored ids, so it would
-        # never be recomputed for this node).
+        # never be recomputed for this node). R1-c's verifier_score is exactly such a finish-time
+        # score (a soundness judgment on the OLD attempt's result) — it must reset too, else the
+        # tie-break would rank the new attempt by a score for a realization it no longer produces.
         n.holdout_metric = None
+        n.verifier_score = None
         if n.id in st.holdout_evaluated_ids:
             st.holdout_evaluated_ids.remove(n.id)
         if stage in ("implement", "propose"):
@@ -813,6 +826,16 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             n.stages = []                # a re-develop discards the old pipeline outcomes too
             n.rerun_from = stage
             n.rerun_stage = None
+            # M1 (§21.18): drop the node's cached concept tags when they go STALE, so the next
+            # concept-coverage cadence re-tags it fresh. Scope is tied to the TAGGER'S INPUTS: the snapshot
+            # tagger reads only the IDEA (theme/rationale/params — `tools=None`, never the code), so tags
+            # staleify only when the idea changes — i.e. `propose` (re-proposes a new idea), NOT `implement`
+            # (re-develops CODE with the idea unchanged) nor `eval` (re-scores, idea+code unchanged). If the
+            # tagger is later made agentic (reads code, `tools!=None`, §21.18 HT/B1), widen this to
+            # `implement` too. No-op on old logs / untagged nodes.
+            if stage == "propose":
+                st.node_concepts.pop(n.id, None)
+                st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
         else:
             # eval-type reset: pending-with-code, the eval loop re-scores it. `from_stage` names
             # the pipeline stage to RESTART from (Phase 2) — the eval re-runs from there, reusing
@@ -937,6 +960,11 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if (n is not None and n.status is NodeStatus.evaluated
             and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d, legacy_attempt=True)):
+        # A confirmation REFINES this node's result (more seeds → confirmed_mean) rather than DISCARDING
+        # it, so its verifier_score (a soundness judgment on the same experiment) is kept as a reasonable
+        # estimate — unlike a node_reset, which discards the result entirely and clears verifier_score.
+        # (A confirmed_mean tie that newly emerges is still re-surfaced by _metric_tie_groups, which keys
+        # on robust_metric = confirmed_mean, so any UNSCORED confirmed node in the tie is verified.)
         n.confirmed_mean = d.get("mean")
         n.confirmed_std = d.get("std")
         n.confirmed_seeds = d.get("seeds")
@@ -1154,6 +1182,46 @@ def _clean_llm_totals(d: dict | None) -> dict:
     return out
 
 
+def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV Phase 2a: audit-only concept-graph coverage / uncovered-region curve; the at_node gate
+    # dedups on resume. NEVER touches selection (mirrors _on_coverage_snapshot).
+    st.concept_coverage_snapshots.append(d)
+
+def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV D5 Phase 2c: the LLM tagger's RAW tags for one node, recorded once so later cadences reuse
+    # them. Node-scoped; LAST write wins (a re-tag after graph growth may refine a node's tags). Audit-only
+    # — feeds the concept snapshot / graded-novelty, NEVER selection. Order-tolerant + idempotent.
+    nid = _coerce_node_id(d, "node_id")
+    if nid is None:
+        return
+    concepts = d.get("concepts")
+    st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
+    # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> 0 (treated as oldest).
+    av = d.get("at_vocab")
+    if isinstance(av, int) and av >= 0:
+        st.node_concepts_at_vocab[nid] = av
+
+def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for one hypothesis, recorded once so taxonomy
+    # dedup reuses them. Hypothesis-scoped (str id); LAST write wins (a merge may re-derive the survivor's
+    # tags). Audit-only — NEVER selection. Order-tolerant + idempotent + malformed-safe.
+    hid = d.get("hyp_id")
+    if not hid:
+        return
+    concepts = d.get("concepts")
+    st.hypothesis_concepts[str(hid)] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+
+def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV D5 B3 (§21.18): ACCUMULATE the consolidation rename map so decisions stay fixed across
+    # cadences (stable vocabulary). Audit-only. Order-tolerant + idempotent (dict update); malformed-safe.
+    rename = d.get("rename")
+    if isinstance(rename, dict):
+        for raw, canon in rename.items():
+            if raw and canon:
+                st.concept_consolidation[str(raw)] = str(canon)
+
+
 def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if not ctx.llm_usage_seen:
         # Compatibility base: latest legacy summary before the new ledger. Once a usage delta is
@@ -1275,6 +1343,9 @@ def _on_foresight_selected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
 def _on_novelty_rejected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.novelty_events.append(d)   # E1: a near-duplicate proposal nudged off (audit)
 
+def _on_novelty_graded(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.novelty_grades.append(d)   # D3: a graded-ALLOW (level-4/5) the flat gate would reject (audit)
+
 def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1+: engine-written agentic merge — fold alias hypotheses into a canonical. Collected
     # here, APPLIED deterministically in `_derive_hypotheses` (no LLM in the fold). A malformed
@@ -1325,7 +1396,37 @@ def _on_proxy_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if d.get("skipped") and nid is not None and nid not in st.proxy_skipped:
         st.proxy_skipped.append(nid)
 
+def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # R1-c: freeze a node's calibrated §12-verifier soundness score (the LLM output can't be recomputed
+    # in the deterministic fold). Generation-scoped exactly like proxy_scored: a score computed against a
+    # reset-abandoned attempt (stale generation) is dropped, so a stale-attempt verification can't bias
+    # selection. Audit sidecar — read ONLY as a metric-tie-break in _select_best; never a raw override.
+    nid = _coerce_node_id(d)
+    n = st.nodes.get(nid) if nid is not None else None
+    if n is None or n.id in st.aborted_nodes:
+        return
+    # node_verified is a BRAND-NEW selection-affecting event — no legacy log carries it, and the engine
+    # always stamps `generation` (n.attempt) at emit — so REQUIRE the stamp (reject a missing OR mismatched
+    # generation) rather than accept-a-missing-one as current. A forged/hand-edited unscoped score can't
+    # then bias selection; this is strictly tighter than the additive-legacy pattern the older per-node
+    # events must keep for their pre-generation logs.
+    if _event_generation(d) is _MISSING or not _generation_matches(n, d):
+        return
+    score = d.get("score")
+    if isinstance(score, (int, float)) and not isinstance(score, bool) and 0.0 <= float(score) <= 1.0:
+        n.verifier_score = float(score)
+
 def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # R1 epoch identity: a confirmation certificate authorizes selection state (confirmed_done + the
+    # confirm-override in _select_best), so it must be bound to the candidate-set epoch it was computed
+    # against. A best_confirmed STAMPED with a stale epoch — e.g. an in-flight confirm pass that appends
+    # AFTER a cross-writer reopen bumped search_epoch — is rejected, so an epoch-(N-1) confirmation can't
+    # authorize state a fresh epoch N must re-decide. Additive/reader-defaulted: a missing stamp (legacy
+    # logs / manual events) is treated as legacy-current, so old logs fold byte-identically. The
+    # requeuing-reopen case is already caught by _generation_map_matches; this closes the NON-requeuing
+    # reopen (no disclosed holdout), which leaves generations unchanged but still bumps the epoch.
+    if "search_epoch" in d and d.get("search_epoch") != st.search_epoch:
+        return
     if not _generation_map_matches(st, d):
         return
     nid = _coerce_node_id(d)
@@ -1410,7 +1511,13 @@ def _on_resume_or_run_reopened(st: RunState, e: Event, d: dict, ctx: "_FoldCtx")
             _rotate_search_epoch(st, requeue_partition_scores=st.holdout_epoch_aware)
         else:
             _rotate_search_epoch(st, requeue_partition_scores=False)
+        # A reopen begins a new candidate epoch, so the prior epoch's confirmation certificate must not
+        # keep authorizing selection. Clear BOTH the folded flag AND the threaded ctx.best_confirmed the
+        # `_select_best` confirm-override reads — every other invalidation site (node_reset, tombstone,
+        # new-candidate) pairs these two, and omitting the ctx clear here let an epoch-(N-1) certificate
+        # keep overriding epoch-N's metric winner after confirmed_done reset.
         st.confirmed_done = False
+        ctx.best_confirmed = None
         st.approved = False
         st.awaiting_approval = False
         st.approval_subject = None
@@ -1734,6 +1841,10 @@ _HANDLERS = {
     EV_ENV_CHANGED: _on_env_changed,
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
+    EV_CONCEPT_COVERAGE_SNAPSHOT: _on_concept_coverage_snapshot,
+    EV_NODE_CONCEPTS: _on_node_concepts,
+    EV_HYPOTHESIS_CONCEPTS: _on_hypothesis_concepts,
+    EV_CONCEPT_CONSOLIDATION: _on_concept_consolidation,
     EV_LLM_COST: _on_llm_cost,
     EV_LLM_USAGE: _on_llm_usage,
     EV_ABLATE: _on_ablate,
@@ -1745,6 +1856,8 @@ _HANDLERS = {
     EV_REWARD_HACK_SUSPECTED: _on_reward_hack_suspected,
     EV_FORESIGHT_SELECTED: _on_foresight_selected,
     EV_NOVELTY_REJECTED: _on_novelty_rejected,
+    EV_NOVELTY_GRADED: _on_novelty_graded,
+    EV_NODE_VERIFIED: _on_node_verified,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
@@ -1827,26 +1940,29 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # Exclude nodes with no usable metric: a hand-edited / BYO-script node_evaluated event can carry
     # metric=null yet fold to status=evaluated, and comparing None vs a float in the chooser below
     # would raise TypeError and brick every re-fold/resume. Such a node simply can't be "best".
-    evaluated = [n for n in st.evaluated_nodes()
-                 if n.feasible and n.id not in flagged and n.id not in st.aborted_nodes
-                 and n.robust_metric is not None]
+    # R1/SearchFitness: the eligibility predicate, the ranked-scalar keys and the direction chooser are
+    # OWNED by core.fitness.SearchFitness — one spelling shared with rank_by_metric / holdout_topk, so a
+    # later scored tie-break (R1-c) composes in exactly one place. Byte-identical to the inlined logic.
+    fit = SearchFitness(st.direction, verifier_tiebreak=st.select_verifier_tiebreak)
+    evaluated = [n for n in st.evaluated_nodes() if fit.eligible(n, flagged, st.aborted_nodes)]
     if evaluated:
         # If any node has been confirmed (multi-seed), the final answer must be the
         # robust winner: rank confirmed nodes by confirmed_mean. With no confirmations
         # this is identical to ranking all evaluated nodes by their single metric.
+        # R1-c: promotion_key adds a calibrated-verifier tie-break slot when select_verifier_tiebreak is
+        # on — it resolves metric-EQUAL contests only, never overriding a strictly-better robust_metric.
         confirmed = [n for n in evaluated if n.confirmed_mean is not None]
         pool = confirmed if confirmed else evaluated
-        chooser = min if st.direction == "min" else max
-
-        def _key(n):
-            v = n.robust_metric
-            return (v, n.id)
-
-        st.best_node_id = chooser(pool, key=_key).id
+        st.best_node_id = fit.best(pool, key=fit.promotion_key).id
 
     # The variance-gated confirmation decision (I10) overrides the mean-based pick — but never
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
+    # The confirm certificate is the confirm phase's OWN authoritative winner (robust_selection over the
+    # multi-seed means + a significance test), so it overrides the mean pick — including its verifier
+    # tie-break. Scope boundary (by design): among confirmed nodes that tie on confirmed_mean the winner
+    # is the confirm phase's choice, not the verifier's; the verifier tie-break applies to the mean pick
+    # and the holdout pick (both rankings HERE), not to which node the confirm phase certified.
     if (best_confirmed is not None and best_confirmed in st.nodes
             and st.nodes[best_confirmed].status is NodeStatus.evaluated
             and not st.nodes[best_confirmed].tombstoned
@@ -1864,8 +1980,10 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     if st.holdout_select and evaluated:
         hpool = [n for n in evaluated if n.holdout_metric is not None]
         if hpool:
-            chooser = min if st.direction == "min" else max
-            st.best_node_id = chooser(hpool, key=lambda n: (n.holdout_metric, n.id)).id
+            # holdout_key carries the SAME verifier tie-break slot (when select_verifier is on): a tie on
+            # the unseen-signal holdout metric is broken by soundness too, so the stronger holdout signal
+            # decides first and the verifier only resolves a holdout tie (never overrides it).
+            st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch
     # that authorizes publication of some OTHER algorithmic best. Honor it last; if the chosen node is

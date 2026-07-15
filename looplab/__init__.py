@@ -44,8 +44,15 @@ _LAYOUT = {
     "attention": "serve",
     "archive": "search",
     "artifacts": "serve",
+    "asset_brief": "tools",   # PART IV D1 seed-time asset/prior-art brief (offline)
     "audit": "engine",   # engine audit/trust-emitter mixin
+    "concept_graph": "search",   # PART IV D5 concept-graph coverage diagnostic (offline)
     "coverage": "search",
+    "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)
+    "lock_in": "search",   # PART IV D7 action-space lock-in detector (offline)
+    "novelty_recall": "search",   # PART IV E3 novelty-gate recall / paraphrase-leak diagnostic (offline)
+    "research_targeting": "search",   # PART IV D2 axis-structured research targeting (offline)
+    "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
     "assistant": "serve",
     "assistant_commands": "serve",
@@ -73,6 +80,7 @@ _LAYOUT = {
     "env_inspect": "tools",
     "errors": "core",
     "eval_dispatch": "engine",
+    "fitness": "core",
     "eval_stages": "engine",
     "eventstore": "events",
     "evaluate": "engine",
@@ -94,6 +102,7 @@ _LAYOUT = {
     "knowledge_tools": "tools",
     "launch": "serve",
     "leakage": "trust",
+    "lesson_guard": "trust",   # PART IV D6 lesson over-generalization guard (advisory)
     "lessons": "engine",
     "lessons_distill": "engine",
     "lessons_priors": "engine",
@@ -180,6 +189,7 @@ _LAYOUT = {
     "uibuild": "serve",
     "validate": "core",
     "vectorstore": "tools",
+    "verifier": "trust",   # PART IV keystone-B §12 advisory verifier (offline/library)
     "verify": "trust",
     "web": "tools",
     "workspace": "engine",

@@ -82,6 +82,32 @@ EV_DIVERSITY_ARCHIVE = "diversity_archive"
 # affects node selection; folded ONLY so the at_node gate makes resume idempotent and the UI/replay
 # can plot coverage over time. See looplab/search/coverage.py.
 EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
+# PART IV D5/D7 (§21.11/§21.8, Phase 2a): concept-graph coverage + uncovered-region snapshot recorded
+# at the strategist cadence when `concept_pivot` is on. Audit-only + the source of the Strategist's
+# "0 coverage in {X} — go there" pivot directive; folded (at_node gate) exactly like coverage_snapshot.
+# Produced ONCE per cadence (agentic build when a reflect client is wired -> universal, any task, derived
+# importance; heuristic+skeleton fallback otherwise) and RECORDED; fold only READS it, so replay preserves
+# the recorded snapshot deterministically. See looplab/search/concept_graph.py.
+EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
+# PART IV D5 (§21.16, Phase 2c): the LLM tagger's RAW concept ids for ONE experiment node, recorded the
+# first time that node is tagged so later strategist cadences REUSE it instead of re-tagging the whole
+# history (turns per-run tagging from ~O(nodes x cadences) LLM calls into ~O(nodes)). Node-scoped and
+# STABLE (a node's raw tags don't change once assigned; consolidation/coverage are re-derived cheaply and
+# purely each cadence). Recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
+# RunState.node_concepts. See looplab/search/concept_graph.py::tag_nodes_llm (known_tags).
+EV_NODE_CONCEPTS = "node_concepts"
+# PART IV D4 (§21.18 HT): the LLM tagger's concept ids for ONE hypothesis on the board, recorded the first
+# time it is tagged so later cadences REUSE it (incremental, ~O(hypotheses) not per-cadence) — the agentic
+# replacement for the `tag_text` alias heuristic in taxonomy dedup. Hypothesis-scoped (keyed by the
+# statement-slug id); recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
+# RunState.hypothesis_concepts. See looplab/search/concept_graph.py::tag_text_llm.
+EV_HYPOTHESIS_CONCEPTS = "hypothesis_concepts"
+# PART IV D5 (§21.18 B3): the concept-vocabulary consolidation rename map (raw_id -> canonical_id) decided
+# by the LLM, recorded so LATER cadences REUSE the decisions instead of re-deciding them (LLM-nondeterministic
+# -> flapping coverage + B1 churn). Fixing known renames makes the vocabulary a STABLE coordinate system and
+# only new concepts are consolidated. Recorded only when `concept_pivot` is on; additive, reader-defaulted;
+# folds (accumulated) into RunState.concept_consolidation. See looplab/search/concept_graph.py.
+EV_CONCEPT_CONSOLIDATION = "concept_consolidation"
 EV_LLM_COST = "llm_cost"
 EV_LLM_USAGE = "llm_usage"  # durable sanitized provider-call delta; folded cumulatively
 EV_ABLATE = "ablate"
@@ -92,6 +118,17 @@ EV_RUNG_PROMOTED = "rung_promoted"
 EV_AGENT_DECISION = "agent_decision"
 EV_REWARD_HACK_SUSPECTED = "reward_hack_suspected"
 EV_NOVELTY_REJECTED = "novelty_rejected"
+# PART IV D3 (§21.4, Phase 2b): the LIVE novelty gate GRADED a proposal over the concept graph and
+# ALLOWED it despite a concept overlap the flat dedup gate would have rejected — a level-4 "same
+# direction, different implementation" or a level-5 "re-opens a wrongly-abandoned failed direction".
+# Audit-only (records the grade + near-node); recorded only when `graded_novelty` is on. Additive,
+# reader-defaulted; folds into RunState.novelty_grades. See looplab/search/graded_novelty.py.
+EV_NOVELTY_GRADED = "novelty_graded"
+# R1-c: a calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result, computed live
+# by the engine (an LLM output can't live in the deterministic fold) and frozen here. Generation-scoped
+# and read ONLY as a metric-tie-break in best-selection (never overrides ground truth, §21.7). Additive;
+# folds into Node.verifier_score. Emitted only when `select_verifier` is on. See trust/verifier.py.
+EV_NODE_VERIFIED = "node_verified"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"

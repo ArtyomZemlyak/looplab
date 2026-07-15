@@ -87,6 +87,8 @@
   "building": null,
   "champion": null,
   "comments_revision": -1,
+  "concept_consolidation": {},
+  "concept_coverage_snapshots": [],
   "config_hash": "1f0bc827ac74",
   "confirm_request_generations": [],
   "confirm_requests": [],
@@ -144,6 +146,7 @@
   "hypotheses_added": [],
   "hypotheses_deleted": [],
   "hypotheses_merged": [],
+  "hypothesis_concepts": {},
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
@@ -269,6 +272,8 @@
     }
   ],
   "llm_cost": null,
+  "node_concepts": {},
+  "node_concepts_at_vocab": {},
   "nodes": {
     "0": {
       "agent_report": null,
@@ -314,6 +319,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "1": {
@@ -360,6 +366,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "2": {
@@ -409,6 +416,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "3": {
@@ -460,6 +468,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "4": {
@@ -508,6 +517,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "5": {
@@ -559,6 +569,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "6": {
@@ -611,6 +622,7 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     },
     "7": {
@@ -659,10 +671,12 @@
       "tombstoned": false,
       "triage_rationale": "",
       "trials": [],
+      "verifier_score": null,
       "violations": []
     }
   },
   "novelty_events": [],
+  "novelty_grades": [],
   "pause_generation": null,
   "pause_node_id": null,
   "paused": false,
@@ -726,6 +740,7 @@
   "run_setup_done": [],
   "rungs": [],
   "search_epoch": 0,
+  "select_verifier_tiebreak": false,
   "setup_done": true,
   "setup_manifest": "",
   "spec_approval_requested": false,

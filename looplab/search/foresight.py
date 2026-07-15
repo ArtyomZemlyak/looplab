@@ -305,12 +305,18 @@ class ForesightPanelResearcher:
 
     def __init__(self, base, k: int = 2, *, client=None, bounds=None,
                  parser: Optional[str] = None, prompts=None, tools=None,
-                 min_confidence: float = 0.0):
+                 min_confidence: float = 0.0, verify_score: bool = False,
+                 verify_samples: int = 3):
         self.base = base
         self.k = max(1, k)
         # §1 confidence gate: below this predicted confidence the K->1 pick is NOT acted on (fall back
         # to the first proposal). 0.0 (default) = off — byte-identical to the historical behavior.
         self.min_confidence = max(0.0, float(min_confidence))
+        # PART IV 2c: replace the world model's self-reported confidence (Pearson≈0 with outcome, §21.12)
+        # with a CALIBRATED §12-verifier score for the chosen candidate. Opt-in; degrades to the
+        # self-reported confidence without a client or on any verifier error.
+        self.verify_score = bool(verify_score)
+        self.verify_samples = max(1, int(verify_samples))
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         # The panel must reflect the base's configured structured-output parser (mirroring the
@@ -414,6 +420,38 @@ class ForesightPanelResearcher:
             "ranked": [{"id": hyps[i].id, "statement": hyps[i].statement} for i in order],
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the hypothesis_ranked event by the engine
 
+    def _verifier_confidence(self, state, idea, report: str) -> Optional[float]:
+        """PART IV 2c: a CALIBRATED confidence-of-improvement for the chosen idea via the §12 verifier —
+        replacing the world model's own (Pearson≈0, §21.12) self-reported confidence. Runs the grounded +
+        repeated + criteria-decomposed scorer over the idea text + the Verified Data Analysis Report;
+        returns the `improves_objective` criterion mean in [0,1], or None to DEGRADE to the self-reported
+        confidence (no client, verifier unavailable, or any error). Best-effort — never raises."""
+        if self.client is None:
+            return None
+        try:
+            from looplab.trust.verifier import foresight_criteria, verify
+            subject = ("This proposed experiment will improve the objective metric over the current best "
+                       f"result (optimize direction: {state.direction}).")
+            evidence = _idea_text(idea) + (("\n\n" + report) if report else "")
+            # Grounding + repetition ARE applied: `samples=self.verify_samples` runs the criteria-decomposed
+            # verifier repeatedly (agreement/spread is captured in each criterion's mean), over the idea text
+            # + the Verified Data Analysis REPORT (already-grounded evidence). No live run-tools by design —
+            # this scores a PRE-EXECUTION proposal, so there is nothing built yet to read. This score is
+            # ADVISORY: E2 (§21.12) found even the verifier's foresight barely correlates with realized
+            # outcome, so it only ever REPLACES the (equally weak) self-reported confidence — it never
+            # overrides ground truth in selection (§21.7).
+            rep = verify(subject, evidence, foresight_criteria(), client=self.client,
+                         samples=self.verify_samples, parser=self.parser or "tool_call")
+            if rep is None or rep.method == "unavailable":
+                return None
+            # The PRIMARY criterion drives the gate; fall back to the weighted overall if it wasn't graded.
+            crit = (rep.per_criterion or {}).get("improves_objective") or {}
+            score = crit.get("mean")
+            return float(score) if score is not None else (
+                float(rep.score) if rep.score is not None else None)
+        except Exception:  # noqa: BLE001 — advisory: degrade to the self-reported confidence
+            return None
+
     def propose(self, state, parent):
         # Forward hints FIRST, even on the no-client pass-through: the engine setattrs them on THIS
         # wrapper (the active researcher), so skipping the mirror would shadow them (P2).
@@ -440,6 +478,17 @@ class ForesightPanelResearcher:
             self.last_foresight = None
             return ideas[0]
         order, conf, reason = r
+        best = ideas[order[0]]
+        # PART IV 2c: replace the self-reported confidence (Pearson≈0 with outcome, §21.12) with a
+        # CALIBRATED §12-verifier score for the CHOSEN candidate, so the gate + telemetry read a signal
+        # that tracks the realized outcome. Computed here (before the gate) so it drives the abstain too;
+        # degrades to the self-reported `conf` when the verifier is unavailable. Recorded as
+        # `confidence_source` so the track record shows which signal was in force.
+        conf_source = "self"
+        if self.verify_score:
+            vconf = self._verifier_confidence(state, best, report)
+            if vconf is not None:
+                conf, conf_source = vconf, "verifier"
         # §1 confidence gate: below the configured threshold the predictor ABSTAINS (fall back to the
         # first proposal, record nothing) — mirroring the `r is None` abstain above, so only picks the
         # model actually committed to are recorded and later scored by the foresight track record.
@@ -447,7 +496,6 @@ class ForesightPanelResearcher:
         if conf is not None and conf < self.min_confidence:
             self.last_foresight = None
             return ideas[0]
-        best = ideas[order[0]]
         # Telemetry the engine reads after propose() to emit `foresight_selected` (engine = sole event
         # writer): WHICH of the K generated ideas won + the discarded alternatives + confidence + the
         # model's analysis trace + the novelty stance in force. Without it only the winner survives.
@@ -455,7 +503,7 @@ class ForesightPanelResearcher:
         self.last_foresight = {
             "kind": "idea", "method": "foresight", "n": len(ideas), "k": self.k,
             "chosen": order[0], "order": order, "confidence": conf, "reason": reason,
-            "novelty_stance": stance,
+            "confidence_source": conf_source, "novelty_stance": stance,
             "candidates": [" ".join(_idea_text(i).split())[:160] for i in ideas],
             "_trace_id": _tid, "_span_id": _sid}   # stamped onto the foresight_selected event by the engine
         best.rationale = (best.rationale

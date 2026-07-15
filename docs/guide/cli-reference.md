@@ -13,6 +13,11 @@ looplab repair-log      Repair a mid-file-corrupted event log (FUSE/NFS/S3)
 looplab inspect         Show the resolved config + best result
 looplab replay          Pure fold of the event log → state (read-only)
 looplab timings         Per-node wall-clock breakdown (LLM / eval / repair / tools)
+looplab concept-coverage Concept-graph coverage + uncovered-region alarm (PART IV D5)
+looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV D1)
+looplab lock-in         Action-space lock-in detector (PART IV D7)
+looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
+looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -211,6 +216,116 @@ looplab timings RUN_DIR [--node N]
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory (reads its `spans.jsonl`) |
 | `--node N` | all nodes | Restrict the breakdown to a single node id |
+
+---
+
+## `concept-coverage`
+
+PART IV D5 (§21.11) read-only diagnostic. Folds a run's event log and tags each experiment with the
+research **concepts** it touches over a concept **axis-DAG** (multi-label — one experiment can touch
+`loss/decoupled-contrastive` *and* `regularization/r-drop`), then reports per-axis coverage, the dominant
+concept / axis-clique **concentration**, and the standing **uncovered-region alarm** — the regions the
+search footprint never entered (e.g. *"0 coverage in {negatives/external-mining, distillation/teacher-distill,
+data/synthetic-queries} across all N experiments — direct the next proposals there (not just 'broaden')"*),
+which fires from the first node rather than waiting for narrowing to accumulate. Read-only; never touches
+selection.
+
+**Agentic by default** (agentic-first concept): the LLM builds the map — it grows the concept vocabulary
+from the actual experiments (reading each node's code/logs), so **it sends node code/logs to the configured
+LLM endpoint by default**. Pass `--offline` for the fully local, no-network deterministic heuristic (coarser:
+needs a curated `--task-type` pack and cannot derive per-task importance). The five other Part IV diagnostics
+below (`lock-in`, `board-dedup`, `research-targets`, `novelty-recall`, `lesson-guard`) share this
+`--offline` opt-out contract; `asset-brief` is the exception — it stays offline-by-default (`--llm` opt-in)
+because its agentic path is a heavier full tool-loop.
+
+```bash
+looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--model ID] [--repo PATH]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
+| `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
+| `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
+| `--model ID` | configured model | Override the model for the agentic build |
+| `--repo PATH` | — | Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief |
+
+---
+
+## `asset-brief`
+
+PART IV D1 (§21.2) offline diagnostic. Produces the seed-time **prior-art & available-assets brief** for
+a task repo — the on-disk result tables, sibling checkpoints (metrics carried in their filenames), and
+reusable trainer capabilities a fresh proposer would otherwise miss. The primary path (`--llm`) is an
+**agent** that explores the repo with read-only tools and writes a grounded brief; the default is a
+bounded, task-agnostic heuristic scan (its domain vocabulary is a pluggable per-task-type pack, opted in
+via `--task-type`). Read-only — nothing is executed or written.
+
+```bash
+looplab asset-brief REPO [--task-type dense-retrieval] [--llm] [--model ID]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `REPO` | *(required)* | Task repo to sweep for prior art & on-disk assets |
+| `--task-type NAME` | generic | Task family whose capability vocabulary to apply (e.g. `dense-retrieval`); omit for a purely generic scan |
+| `--llm` | off (offline scan) | Use the **agentic** brief (an LLM explores the repo with read-only tools) instead of the heuristic scan. Needs a reachable endpoint |
+| `--model ID` | configured model | Override the model for `--llm` |
+
+---
+
+## `lock-in`
+
+PART IV D7 (§21.8) offline analytic. Over the concept graph, finds the longest run of **consecutive**
+experiments confined to one axis-region — the "same-lever streak" the flat coverage signal was blind to
+(on the `rubertlite` replay it trips at ~node 29) — and fires when it exceeds the threshold. Read-only,
+deterministic.
+
+```bash
+looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
+| `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
+
+---
+
+## `board-dedup`
+
+PART IV D4 (§21.5) offline analytic. Tags the hypothesis board and surfaces the dominant **within-concept**
+redundancy (merge aggressively — e.g. the DCL cluster) plus **cross-branch** look-alike pairs a blind
+lexical/vector merge would wrongly collapse (keep distinct). Read-only; merges nothing.
+
+```bash
+looplab board-dedup RUN_DIR [--task-type NAME]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory whose hypothesis board to analyze |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+
+---
+
+## `research-targets`
+
+PART IV D2 (§21.3) offline analytic. Turns the coverage map into a ranked set of axis-structured
+deep-research targets: **uncovered** axes first (the blind regions), **failed directions** re-framed as
+"research a different implementation" (so the loop stops re-proposing the failed variant), then
+**under-covered** axes. Read-only; produces the targets, runs no research.
+
+```bash
+looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run directory whose coverage to target |
+| `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
 
 ---
 

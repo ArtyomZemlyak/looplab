@@ -9,6 +9,11 @@ from __future__ import annotations
 
 from looplab.core.models import NodeStatus, RunState
 
+# PART IV Phase 2b: the streak length at which the capability-expansion directive treats the run as
+# action-space LOCKED-IN. Matches `search/lock_in.py::lock_in_signal`'s default `streak_threshold` (the
+# 2a concept snapshot records the raw streak LENGTH, so the fire test lives here). Kept in sync with it.
+_LOCK_IN_STREAK = 5
+
 
 class ProposalCuesMixin:
     """The engine's proposal-cue cluster. See the module docstring for the mixin convention
@@ -106,9 +111,46 @@ class ProposalCuesMixin:
             spread = (f" So far the search concentrates on '{top[0][0]}' "
                       f"({cov.get('dominant_theme_frac', 0.0):.0%} of experiments); "
                       f"themes tried: {[t for t, _ in top]}." if top else "")
-            nov_hint = ("\nNovelty stance: EXPLORE — the search is narrowing." + spread +
-                        " Propose a MEANINGFULLY DIFFERENT direction (a new theme / approach / "
-                        "component), not a variation of the current leader — broaden the space.")
+            nov_hint = "\nNovelty stance: EXPLORE — the search is narrowing." + spread
+            # PART IV Phase 2a: when the concept-graph pivot is on and its cadence recorded an
+            # uncovered-region alarm, name the SPECIFIC regions ("0 coverage in {X} — go there") instead
+            # of the vague "broaden" — a far more actionable directive (§21.11). Falls back to the generic
+            # broaden directive when the pivot is off or no region is uncovered.
+            pivot = ""
+            if getattr(self, "_concept_pivot", False):
+                csnaps = state.concept_coverage_snapshots
+                cs = csnaps[-1] if csnaps else {}
+                if cs.get("fired") and cs.get("directive"):
+                    pivot = ("\nConcept-graph pivot — " + cs["directive"] +
+                             " Propose an experiment in one of those uncovered regions.")
+            nov_hint += pivot or (
+                " Propose a MEANINGFULLY DIFFERENT direction (a new theme / approach / component), not "
+                "a variation of the current leader — broaden the space.")
+            # PART IV Phase 2b (D7, §21.8, issue #7): when the capability-expansion lever is on and the
+            # concept-graph cadence detected action-space LOCK-IN (a long consecutive same-lever streak),
+            # ESCALATE past "broaden" to a forced-JUMP directive — expand the action space / build the
+            # missing infra, do NOT swap another variant of the saturated lever (the node_63/rubertlite
+            # failure: 12 consecutive loss-only experiments while the metric plateaued). Prose form of the
+            # D7 forced jump; prompt-cue only — the SCORED capability-expansion policy operator waits on
+            # the R1/SearchFitness gates (§21.13). Reads the 2a snapshot, so it no-ops without `concept_pivot`.
+            if getattr(self, "_capability_expansion", False):
+                csnaps = state.concept_coverage_snapshots
+                cs = csnaps[-1] if csnaps else {}
+                # Gate on the CURRENT streak (clears after a successful pivot), name the CURRENTLY-locked
+                # axis (recent_axis, falling back to the longest-streak axis).
+                streak = cs.get("current_streak", 0)
+                axis = cs.get("recent_axis") or cs.get("locked_axis")
+                if axis and streak >= _LOCK_IN_STREAK:
+                    nov_hint += (
+                        f"\nCapability expansion — the search is still confined to ONE subsystem "
+                        f"('{axis}'): {streak} consecutive experiments there (action-space lock-in). Do "
+                        f"NOT propose another variant of the '{axis}' lever. EXPAND THE ACTION SPACE: "
+                        # Task-AGNOSTIC categories (no domain-specific prescription): the concrete build
+                        # is the researcher's to derive from THIS task's assets/uncovered regions.
+                        "build a capability the run has never had — new data / inputs, a different model "
+                        "or representation, or a different evaluation — that reaches a region the current "
+                        "lever can't. You have full file freedom; a genuinely new capability beats another "
+                        "tweak of the saturated one.")
         elif stance == "exploit":
             nov_hint = ("\nNovelty stance: EXPLOIT — refine and deepen the current best line of "
                         "attack; a focused improvement beats opening a new direction now.")

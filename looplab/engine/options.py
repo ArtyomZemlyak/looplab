@@ -111,6 +111,9 @@ class EngineOptions:
     holdout_fraction: float = 0.25
     holdout_select: bool = True
     holdout_top_k: int = 3
+    # R1-c: calibrated §12-verifier metric-tie-break in best-selection (opt-in, lazy; needs a client).
+    select_verifier: bool = False
+    select_verifier_samples: int = 3
     # Phase 2 (D3/D4/T10/P4) knobs — kept on the engine so strategist-driven policy swaps
     # rebuild policies with the same run-wide settings.
     debug_depth: int = 1                 # T10: debug-lineage bound for every policy
@@ -126,6 +129,9 @@ class EngineOptions:
     research_verify: bool = True         # D8: verify memo claims against cited evidence
     workdir_audit: bool = True           # 4.4: flag unexpected writes in the eval workdir
     coverage_context: bool = True        # narrowing signal: coverage_snapshot at the strategist cadence
+    concept_pivot: bool = False          # PART IV 2a: concept-graph uncovered-region pivot (opt-in)
+    graded_novelty: bool = False         # PART IV 2b: D3 graded novelty into the live gate (level-4/5 allow)
+    capability_expansion: bool = False   # PART IV 2b: D7 capability-expansion forced-jump directive on lock-in
     phase_handoff_summary: bool = True   # per-phase handoff briefs across a node build (propose→…→implement)
 
     @classmethod

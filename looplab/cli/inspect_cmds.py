@@ -107,6 +107,364 @@ def inspect(run_dir: Path = typer.Argument(...)):
         _print_result(fold(EventStore(events).read_all()))
 
 
+def _make_llm_client(*args, **kwargs):
+    """Late-bound `make_llm_client` (mirrors export_cmds) so a test patching `looplab.cli.make_llm_client`
+    also stubs these diagnostics — a frozen `from looplab.cli import make_llm_client` would not."""
+    from looplab import cli
+    return cli.make_llm_client(*args, **kwargs)
+
+
+def _run_tools_for(state):
+    """Read-only run tools bound to `state` for AGENTIC tagging/briefing (mirrors trust.verify._verify_tools).
+    None on any failure -> the caller runs the plain (non-agentic) LLM path."""
+    try:
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.run_tools import RunTools
+        rt = RunTools()
+        rt.bind_state(state, None)
+        return CompositeTools([rt])
+    except Exception:  # noqa: BLE001 — no tools => degrade to the plain structured call
+        return None
+
+
+def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
+    """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
+    per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
+    fallback. Returns {graph, tags, important_uncovered, mode, brief}. This is what makes every Phase-1
+    diagnostic (lock-in / board-dedup / research-targets) agentic-first and universal, not
+    heuristic-hardcoded (§21.13/§21.15 correction)."""
+    from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
+    seed = skeleton_for(resolved_type)
+    seed = seed if seed.concepts() else None
+    # Agentic-BY-DEFAULT (the agentic-first concept, §21.13/§21.15): the map is LLM-built unless the caller
+    # passes --offline, so this path DOES send node code/logs to the configured endpoint by default. The
+    # cost/privacy contract is stated up front in each command's --offline help + docs/guide/cli-reference.md
+    # ("Agentic by default … sends node code/logs … pass --offline for the local heuristic"). `asset-brief`
+    # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
+    if not offline:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic fallback, noted
+            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
+            client = None
+        if client is not None:
+            brief = ""
+            if repo is not None and Path(repo).exists():
+                try:
+                    from looplab.tools.asset_brief import asset_brief as _ab
+                    brief = _ab(str(repo), client=client, task_type=resolved_type or None)
+                except Exception as e:  # noqa: BLE001 — grounding optional
+                    typer.echo(f"(asset-brief grounding skipped: {e})")
+            cmap = build_concept_map(state, task_goal=getattr(state, "goal", "") or "", client=client,
+                                     tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief,
+                                     parser=settings.llm_parser)
+            cmap["brief"] = brief
+            return cmap
+    graph = seed or skeleton_for(resolved_type)
+    return {"graph": graph, "tags": tag_nodes_heuristic(state, graph), "important_uncovered": [],
+            "mode": "offline-heuristic", "brief": ""}
+
+
+@app.command(name="concept-coverage")
+def concept_coverage(
+    run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
+    task_type: Optional[str] = typer.Option(
+        None, help="Curated concept pack to SEED the LLM's build with (e.g. dense-retrieval) — a starting "
+                   "vocabulary the agent verifies/expands. Default: inferred from the run's task_id; the "
+                   "agent builds from scratch when no pack matches."),
+    offline: bool = typer.Option(
+        False, "--offline", help="Skip the LLM and use only the deterministic alias heuristic over the "
+                                 "curated seed pack (a fast, coarse fallback that needs a curated pack and "
+                                 "cannot derive per-task importance). Default is the agentic build."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+    repo: Optional[Path] = typer.Option(
+        None, help="Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief."),
+):
+    """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
+    the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
+    code/logs), computes the coverage, and derives the important-but-uncovered directions per task (universal:
+    no hardcoded winning region; grounded in `--repo`'s prior-art brief when given). `--offline` forces the
+    deterministic alias-heuristic fallback (needs a curated `--task-type` pack, no importance derivation)."""
+    from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for)
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    resolved_type = task_type or state.task_id or ""
+    # A curated pack is only a SEED / starting vocabulary the agent expands (like agentic_asset_brief's
+    # seed_scan); None => the LLM builds the graph from scratch (works on any task).
+    seed = skeleton_for(resolved_type)
+    seed = seed if seed.concepts() else None
+
+    client = None
+    if not offline:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — no endpoint => fall back to the offline heuristic, note it
+            typer.echo(f"(no LLM endpoint: {e}; using the offline heuristic fallback)")
+
+    if client is None:
+        # Deterministic FALLBACK. Needs a curated seed to localize anything.
+        graph = seed or skeleton_for(resolved_type)
+        if not graph.concepts():
+            typer.echo(f"note: no curated concept pack for task-type '{resolved_type or 'unknown'}', so the "
+                       "offline heuristic can't tag experiments. Drop --offline to let the agent build the "
+                       "graph, or pass --task-type <known-pack> (e.g. dense-retrieval).")
+        typer.echo(concept_report(state, graph, None))
+        if graph.concepts():
+            typer.echo("\nnote: --offline alias tagging is coarse (over-reports coverage on semantically-"
+                       "ambiguous concepts). Drop --offline for the agentic, code-reading build + per-task "
+                       "importance.")
+        return
+
+    # PRIMARY: the LLM agent builds the whole map (grows vocab, tags agentically, derives importance).
+    brief_text = ""
+    if repo is not None:
+        try:
+            from looplab.tools.asset_brief import asset_brief as _asset_brief
+            brief_text = _asset_brief(str(repo), client=client, task_type=resolved_type or None)
+        except Exception as e:  # noqa: BLE001 — grounding is optional; derive from task+coverage alone
+            typer.echo(f"(asset-brief grounding skipped: {e})")
+    cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
+                             tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
+                             parser=settings.llm_parser)
+    typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
+    typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
+               f"{len(cmap['graph'].concepts())} concepts grown)")
+    typer.echo("  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
+    if cmap["important_uncovered"]:
+        for m in cmap["important_uncovered"]:
+            typer.echo(f"    · {m['concept_id']}: {m['why']}")
+    else:
+        typer.echo("    (none surfaced — coverage looks complete for this task, or derivation was "
+                   "unavailable)")
+
+
+@app.command(name="asset-brief")
+def asset_brief_cmd(
+    repo: Path = typer.Argument(..., help="Task repo to sweep for prior art & on-disk assets."),
+    task_type: Optional[str] = typer.Option(
+        None, help="Task family (e.g. dense-retrieval) to name domain capabilities. Default: generic."),
+    llm: bool = typer.Option(
+        False, "--llm", help="Use the agentic brief (an LLM explores the repo with read-only tools) "
+                             "instead of the offline heuristic scan. Needs a reachable endpoint."),
+    model: Optional[str] = typer.Option(None, help="Override model id for --llm."),
+):
+    """PART IV D1 (§21.2): the seed-time prior-art & available-assets brief for a task repo — the
+    on-disk result tables, sibling checkpoints (metrics in filenames), and reusable trainer capabilities
+    the search would otherwise miss. Offline heuristic scan by default; `--llm` runs the agentic sweep."""
+    from looplab.tools.asset_brief import asset_brief
+    if not repo.exists():
+        typer.echo(f"no such repo: {repo}")
+        raise typer.Exit(2)
+    client = None
+    if llm:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — degrade to the offline scan
+            typer.echo(f"(--llm unavailable: {e}; using the offline scan)")
+    typer.echo(asset_brief(repo, client=client, task_type=task_type))
+
+
+@app.command(name="lock-in")
+def lock_in(
+    run_dir: Path = typer.Argument(..., help="Run dir whose event log to fold and diagnose."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
+    threshold: int = typer.Option(5, help="Consecutive same-lever nodes that trip the alarm."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic instead of the "
+                                                          "agentic build (default is the LLM agent build)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV D7 (§21.8): the action-space lock-in detector. Reports the longest run of CONSECUTIVE
+    experiments confined to one axis-region (the 'same-lever streak' the flat coverage signal is blind to)
+    and fires when it exceeds `threshold`. The LLM agent builds the concept tags by default (`--offline`
+    forces the heuristic). Deterministic detection; never touches selection."""
+    from looplab.search.lock_in import lock_in_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    typer.echo(lock_in_report(state, m["graph"], tags=m["tags"], streak_threshold=threshold))
+    typer.echo(f"\n  (concept tags built by: {m['mode']})")
+
+
+@app.command(name="board-dedup")
+def board_dedup(
+    run_dir: Path = typer.Argument(..., help="Run dir whose hypothesis board to analyze."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic instead of the "
+                                                          "agentic build (default is the LLM agent build)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV D4 (§21.5): taxonomy-aware hypothesis-board dedup analysis. Surfaces the dominant
+    within-concept redundancy (merge aggressively) and cross-branch look-alikes a blind merge would wrongly
+    collapse (keep distinct). Agentic tags by default (`--offline` forces the heuristic); merges nothing."""
+    from looplab.search.concept_graph import tag_text, tag_text_llm
+    from looplab.search.taxonomy_dedup import dedup_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    # dedup works over HYPOTHESIS tags (keyed by hypothesis id), NOT the node tags in m["tags"] (keyed by
+    # node id). HT (§21.18) hypothesis-tag precedence:
+    #   --offline           -> force the deterministic tag_text heuristic (bypass any recorded cache);
+    #   recorded cache covers the board -> use it (tags=None -> dedup_analysis reads hypothesis_concepts);
+    #   otherwise + a client -> tag the board LIVE agentically against the agent-built graph;
+    #   else                 -> tag_text heuristic.
+    hyps = list((state.hypotheses or {}).values())
+    cache = getattr(state, "hypothesis_concepts", None) or {}
+    board_cached = any(h.id in cache for h in hyps)     # cache covers at least one CURRENT-board hypothesis
+    tags, label = None, "heuristic"
+    if offline:
+        tags = {h.id: tag_text(h.statement, m["graph"], allow_plural=True) for h in hyps}
+        label = "heuristic (--offline)"
+    elif board_cached:
+        label = "recorded/agentic"                      # dedup_analysis reads the cache (per-item fallback)
+    elif hyps:
+        client = None
+        try:
+            from looplab.core.config import Settings
+            settings = Settings()
+            if model is not None:
+                settings.llm_model = model
+            client = _make_llm_client(settings)
+        except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
+            typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
+        if client is not None:
+            tags = {h.id: tag_text_llm(h.statement, m["graph"], client, allow_plural=True) for h in hyps}
+            label = "live-agentic"
+    typer.echo(dedup_report(state, m["graph"], tags=tags))
+    typer.echo(f"\n  (concept graph built by: {m['mode']}; hypothesis tags: {label})")
+
+
+@app.command(name="research-targets")
+def research_targets_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose coverage to turn into research targets."),
+    task_type: Optional[str] = typer.Option(None, help="Curated concept pack to SEED the agent's build."),
+    asset_repo: Optional[Path] = typer.Option(
+        None, help="Task repo to ground the derived importance + queries in the D1 asset brief."),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic heuristic + axis targets "
+                                                          "only (no LLM-derived importance)."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV D2 (§21.3): axis-structured deep-research targets from the coverage map. The LLM agent
+    derives the per-task IMPORTANT-but-uncovered directions (universal — no hardcoded winning region) as the
+    top targets, then uncovered axes, failed directions re-framed as 'research a different implementation',
+    and under-covered axes. `--offline` drops to deterministic axis targets only. Produces targets, runs no
+    research."""
+    from looplab.search.research_targeting import targeting_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         repo=asset_repo)
+    typer.echo(targeting_report(state, m["graph"], tags=m["tags"],
+                                important_uncovered=m["important_uncovered"], asset_brief=m.get("brief", "")))
+    typer.echo(f"\n  (targets built by: {m['mode']})")
+
+
+@app.command(name="novelty-recall")
+def novelty_recall_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose proposals to check for leaked paraphrases."),
+    offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
+                                                          "paraphrase-vs-variant adjudication — that needs "
+                                                          "the LLM)."),
+    max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
+                                                          "of the most-similar candidate pairs with the LLM "
+                                                          "(each pair = one call). Lower it to cap cost/data."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
+    BOTH executed and the LLM judges TRUE paraphrases the gate should have deduplicated (the "сколько шлака"
+    / wasted-compute question), and estimates the gate's recall against what it caught. Offline (`--offline`)
+    only clusters candidates; the LLM adjudicates paraphrase vs legitimate variant by default."""
+    from looplab.search.novelty_recall import novelty_recall_report
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    client = None
+    parser = "tool_call"
+    # Agentic-by-default (§21.13); the cost is BOUNDED and TUNABLE: at most `--max-pairs` LLM calls (the
+    # most-similar candidate pairs), each sending two truncated idea texts. `--offline` skips the LLM
+    # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
+    if not offline:
+        from looplab.core.config import Settings
+        settings = Settings()
+        if model is not None:
+            settings.llm_model = model
+        try:
+            client = _make_llm_client(settings)
+            parser = settings.llm_parser
+        except Exception as e:  # noqa: BLE001 — no endpoint => candidates only, noted
+            typer.echo(f"(no LLM endpoint: {e}; showing candidate pairs only)")
+    typer.echo(novelty_recall_report(state, client=client, parser=parser, max_pairs=max_pairs))
+
+
+@app.command(name="lesson-guard")
+def lesson_guard_cmd(
+    run_dir: Path = typer.Argument(..., help="Run dir whose distilled lessons to audit."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV D6/E4 (§21.7/§21.12): audit the run's distilled lessons. Flags lessons that OVER-GENERALIZE a
+    single failed implementation into a whole sound direction (the node_63 pattern), and scans for
+    mutually-CONTRADICTORY lesson pairs. Advisory / LLM-backed (needs a reachable endpoint)."""
+    from looplab.trust.lesson_guard import contradiction_scan, guard_lessons
+    store = _require_run_dir(run_dir)
+    state = fold(store.read_all())
+    from looplab.core.config import Settings
+    settings = Settings()
+    if model is not None:
+        settings.llm_model = model
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
+        typer.echo(f"lesson-guard needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    # A cheap DETERMINISTIC skeleton graph (no LLM) so the taxonomy attachment (which concept a lesson
+    # over-generalizes) is populated instead of always empty — inferred from the run's task_id; None-safe.
+    graph = None
+    try:
+        from looplab.search.concept_graph import skeleton_for
+        sk = skeleton_for(state.task_id or "")
+        graph = sk if sk.concepts() else None
+    except Exception:  # noqa: BLE001 — taxonomy attach is best-effort enrichment, never blocks the guard
+        graph = None
+    g = guard_lessons(state, client=client, parser=settings.llm_parser, graph=graph)
+    # Constructing a client does NOT prove a sample succeeded: guard_lessons reports adjudicated=False when
+    # NOTHING actually scored (no client, or a wired client whose every verify sample failed/abstained), so
+    # say INCONCLUSIVE rather than printing a false "0 flagged / all clean".
+    if not g.get("adjudicated", True):
+        typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons) — "
+                   "verifier could not grade any lesson; results INCONCLUSIVE.")
+    else:
+        typer.echo(f"Lesson over-generalization guard  ({g['n_lessons']} lessons, {g['n_flagged']} flagged)")
+        for f in g["findings"]:
+            if f.get("flagged"):
+                typer.echo(f"  ⚠ over-generalizes: {str(f.get('statement', ''))[:100]}")
+                typer.echo(f"      rescoped: {str(f.get('rescope_hint', ''))[:120]}")
+    c = contradiction_scan(state, client=client, parser=settings.llm_parser)
+    # Be HONEST about the scan's methodology and degraded states: it grades pairs with a single sample and
+    # bounds the pair count, so surface truncation, and — critically — DON'T print "0 pairs" as a clean
+    # bill of health when nothing was actually judged (adjudicated=False => total endpoint failure).
+    if not c.get("adjudicated", True):
+        typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons) — verifier could not grade any pair; "
+                   "INCONCLUSIVE (not 'no contradictions').")
+    else:
+        note = "  [truncated: only the first pairs were scanned]" if c.get("truncated") else ""
+        judged = f", {c['n_judged']} pairs judged" if "n_judged" in c else ""
+        typer.echo(f"\nContradiction scan  ({c['n_lessons']} lessons{judged}, "
+                   f"{len(c['contradictions'])} contradictory pairs, 1 sample/pair){note}")
+        for pair in c["contradictions"][:6]:
+            typer.echo(f"  ⚠ A: {str(pair.get('a', ''))[:80]}")
+            typer.echo(f"    B: {str(pair.get('b', ''))[:80]}  (score {pair.get('score')})")
+
+
 @app.command()
 def tensorboard(
     run_dir: Path = typer.Argument(..., help="Run dir; its nodes/ hold each experiment's training logs."),
