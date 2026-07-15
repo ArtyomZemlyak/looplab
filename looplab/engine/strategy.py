@@ -523,9 +523,10 @@ class StrategyCadenceMixin:
         return fold(self.store.read_all()) if done else state
 
     def _metric_tie_groups(self, state: RunState) -> list:
-        """Eligible-node groups that share an EXACT `robust_metric` and still contain an unscored node —
-        the metric-ties the verifier could resolve. Deterministic order (by each group's lowest node id)
-        so the per-cadence budget picks stably. Pure read over folded state.
+        """Eligible-node tie-COMPONENTS (union-find over an EXACT `robust_metric`, plus `holdout_metric`
+        when `holdout_select` is on) that still contain an unscored node — the metric-ties the verifier
+        could resolve for EITHER promotion_key or holdout_key. Deterministic order (by each component's
+        lowest node id) so the per-cadence budget picks stably. Pure read over folded state.
 
         Mirrors `_select_best`'s mean-pick pool EXACTLY: when any eligible node is confirmed, only the
         confirmed subset is ranked (and its tie-break read), so grouping over the full eligible set would
@@ -537,10 +538,38 @@ class StrategyCadenceMixin:
                     if SearchFitness.eligible(n, flagged, state.aborted_nodes)]
         confirmed = [n for n in eligible if n.confirmed_mean is not None]
         pool = confirmed if confirmed else eligible
-        by_metric: dict = {}
+        # UNION-FIND tie-components: nodes tied on `robust_metric` — and, when the holdout tie-break can
+        # actually fire (`holdout_select` on; the verifier slot in holdout_key is already gated on
+        # select_verifier, which gates this whole method) — ALSO on `holdout_metric`, belong to ONE
+        # component. A node's SINGLE verifier_score serves BOTH promotion_key AND holdout_key, so scoring a
+        # component atomically resolves either tie without half-scoring (R1-c §21.7 completeness: the
+        # holdout-metric tie-break was previously never produced). Keys stay metric-first — soundness only
+        # breaks an EXACT tie, never overrides a better metric.
+        parent = {n.id: n.id for n in pool}
+
+        def _find(x):
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        def _link_by(metric_of):
+            buckets: dict = {}
+            for n in pool:
+                m = metric_of(n)
+                if m is not None:
+                    buckets.setdefault(m, []).append(n)
+            for nodes in buckets.values():
+                for n in nodes[1:]:
+                    parent[_find(nodes[0].id)] = _find(n.id)
+
+        _link_by(lambda n: n.robust_metric)
+        if getattr(self, "_holdout_select", False):
+            _link_by(lambda n: n.holdout_metric)
+        comps: dict = {}
         for n in pool:
-            by_metric.setdefault(n.robust_metric, []).append(n)
-        groups = [nodes for nodes in by_metric.values()
+            comps.setdefault(_find(n.id), []).append(n)
+        groups = [nodes for nodes in comps.values()
                   if len(nodes) >= 2 and any(n.verifier_score is None for n in nodes)]
         groups.sort(key=lambda nodes: min(n.id for n in nodes))
         return groups
