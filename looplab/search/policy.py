@@ -34,6 +34,16 @@ KIND_DEBUG = "debug"
 KIND_MERGE = "merge"
 KIND_EVALUATE = "evaluate"
 KIND_ABLATE = "ablate"
+# PART IV D7 (§21.8, §21.13): capability-EXPANSION — an improve proposal made under action-space LOCK-IN,
+# where the directive is "build a capability the run never had" rather than tweak the saturated lever.
+# Stamped as its OWN operator (vs a plain `improve`) so `operator_yields` MEASURES whether expanding pays
+# off (SCORED, SearchFitness-competing as its own lineage) — the meta-learning plateau-escape needs. Emitted
+# only when `capability_expansion` is on; a plain improve otherwise. See engine/proposal_cues.py.
+# NOTE: like `refine_block`, `expand` appears as its own bucket in `operator_yields` but is NOT itself a
+# `_bandit_pick` candidate, so (only when operator_bandit AND capability_expansion are BOTH on) it shifts the
+# UCB normalization reference — the intended "scored distinctly" behavior, consistent with the existing
+# non-candidate operators. `expand` still counts as improve-FAMILY in the generation/cadence bookkeeping.
+KIND_EXPAND = "expand"
 # Engine-facing action meta keys (see the module docstring).
 META_SCORES = "_scores"
 META_CHOSEN = "_chosen"
@@ -235,7 +245,10 @@ class GreedyTree:
             return [{"kind": KIND_DRAFT}]
 
         evaluated = state.breedable_nodes()   # never breed from constraint-violating nodes (#5)
-        n_improve = sum(1 for n in state.nodes.values() if n.operator == "improve")
+        # D7: `expand` is an improve-VARIANT (an improve proposal under lock-in) -> count it as improve for
+        # the cadence, so the capability-expansion lever doesn't undercount refinement effort. No expand
+        # nodes exist unless the flag is on, so this is byte-identical on a default run.
+        n_improve = sum(1 for n in state.nodes.values() if n.operator in ("improve", KIND_EXPAND))
         n_merge = sum(1 for n in state.nodes.values() if n.operator == "merge")
         n_refine = sum(1 for n in state.nodes.values() if n.operator == "refine_block")
 
@@ -332,7 +345,7 @@ class EvolutionaryPolicy:
         # Offspring index = how many generation-producing operators (improve/merge) already
         # exist — NOT total node count, so inserted debug/failed nodes can't perturb the
         # crossover/mutate parity or the elite rotation (deterministic w.r.t. eval failures).
-        gen = sum(1 for n in state.nodes.values() if n.operator in ("improve", "merge"))
+        gen = sum(1 for n in state.nodes.values() if n.operator in ("improve", "merge", KIND_EXPAND))
 
         # Even generations crossover two elites; odd generations mutate a WEIGHTED parent:
         # fitness-rank × under-expansion over the WHOLE feasible archive (not just elites) —

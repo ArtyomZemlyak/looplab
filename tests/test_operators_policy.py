@@ -39,6 +39,38 @@ def test_policy_debugs_failed_leaf_then_stops():
     assert all(a["kind"] != "debug" for a in pol.next_actions(st))
 
 
+def test_d7_expand_operator_is_yield_tracked_and_counts_as_improve_family():
+    """D7 (§21.8): an `expand` node is its OWN operator in operator_yields (SCORED — its Δmetric/eval-sec
+    measured distinctly) yet counts as improve-family in the generation/cadence bookkeeping (it IS a
+    generation-producing refinement, so it must not perturb the QD parity)."""
+    from looplab.search.policy import KIND_EXPAND, operator_yields
+    st = RunState(direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 0.0}),
+                       metric=0.80, status=NodeStatus.evaluated)
+    # an expand node built FROM node 0, improving it
+    st.nodes[1] = Node(id=1, operator=KIND_EXPAND, parent_ids=[0],
+                       idea=Idea(operator=KIND_EXPAND, params={"x": 1.0}),
+                       metric=0.90, status=NodeStatus.evaluated, eval_seconds=1.0)
+    y = operator_yields(st)
+    assert KIND_EXPAND in y and y[KIND_EXPAND]["n"] == 1 and y[KIND_EXPAND]["gain"] > 0   # scored distinctly
+    # generation parity counts expand as improve-family (gen = improve+merge+expand)
+    gen = sum(1 for n in st.nodes.values() if n.operator in ("improve", "merge", KIND_EXPAND))
+    assert gen == 1
+
+
+def test_d7_capability_expansion_due_helper():
+    """D7 gate: due only when the latest concept snapshot's lock-in streak >= threshold; self-resets."""
+    from looplab.search.lock_in import capability_expansion_due
+    st = RunState()
+    st.concept_coverage_snapshots = [{"current_streak": 6, "recent_axis": "loss/decoupled-contrastive"}]
+    assert capability_expansion_due(st, streak_threshold=5) == (True, "loss/decoupled-contrastive", 6)
+    st.concept_coverage_snapshots = [{"current_streak": 2, "recent_axis": "loss/x"}]
+    assert capability_expansion_due(st, streak_threshold=5)[0] is False        # streak too short
+    st.concept_coverage_snapshots = [{"current_streak": 9}]                    # no axis
+    assert capability_expansion_due(st, streak_threshold=5)[0] is False
+    assert capability_expansion_due(RunState(), streak_threshold=5) == (False, None, 0)   # no snapshot
+
+
 def test_policy_merges_after_improves():
     st = RunState(direction="min")
     # 3 evaluated nodes incl. some 'improve' ops to trigger the merge cadence.

@@ -130,17 +130,17 @@ class ProposalCuesMixin:
             # concept-graph cadence detected action-space LOCK-IN (a long consecutive same-lever streak),
             # ESCALATE past "broaden" to a forced-JUMP directive — expand the action space / build the
             # missing infra, do NOT swap another variant of the saturated lever (the node_63/rubertlite
-            # failure: 12 consecutive loss-only experiments while the metric plateaued). Prose form of the
-            # D7 forced jump; prompt-cue only — the SCORED capability-expansion policy operator waits on
-            # the R1/SearchFitness gates (§21.13). Reads the 2a snapshot, so it no-ops without `concept_pivot`.
+            # failure: 12 consecutive loss-only experiments while the metric plateaued). This is the
+            # PROMPT half; the SCORED half now ships too (§21.13) — orchestrator stamps this proposal's
+            # operator `expand` on the SAME `capability_expansion_due` gate, so operator_yields measures
+            # whether it paid off. Reads the 2a snapshot, so it no-ops without `concept_pivot`.
             if getattr(self, "_capability_expansion", False):
-                csnaps = state.concept_coverage_snapshots
-                cs = csnaps[-1] if csnaps else {}
                 # Gate on the CURRENT streak (clears after a successful pivot), name the CURRENTLY-locked
-                # axis (recent_axis, falling back to the longest-streak axis).
-                streak = cs.get("current_streak", 0)
-                axis = cs.get("recent_axis") or cs.get("locked_axis")
-                if axis and streak >= _LOCK_IN_STREAK:
+                # axis — via the shared `capability_expansion_due` helper the D7 operator stamp also uses,
+                # so the prose directive and the `expand` operator fire on EXACTLY the same condition.
+                from looplab.search.lock_in import capability_expansion_due
+                due, axis, streak = capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)
+                if due:
                     nov_hint += (
                         f"\nCapability expansion — the search is still confined to ONE subsystem "
                         f"('{axis}'): {streak} consecutive experiments there (action-space lock-in). Do "

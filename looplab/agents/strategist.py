@@ -122,7 +122,7 @@ def improves_since_best(state: RunState) -> int:
     if best_id is None:
         return 0
     return sum(1 for n in state.nodes.values()
-               if n.id > best_id and n.operator in ("improve", "refine_block", "merge"))
+               if n.id > best_id and n.operator in ("improve", "refine_block", "merge", "expand"))
 
 
 def is_numeric_space(state: RunState) -> bool:
