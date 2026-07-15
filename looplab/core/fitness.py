@@ -46,10 +46,12 @@ class SearchFitness:
         # and the id, oriented by direction so a HIGHER verifier score always wins a metric-tie under the
         # run's chooser (max picks the larger key, min the smaller). Off -> plain (robust_metric, id).
         self._verifier_tiebreak = bool(verifier_tiebreak)
-        # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — two confirmed
-        # means are "tied" when their difference is within the confirm-phase noise (|Δ| <= ci_z·SE_diff,
-        # SE=confirmed_std/sqrt(confirmed_seeds)). Requires `verifier_tiebreak` too. NEVER widens beyond
-        # measured noise, so a SIGNIFICANT difference is never a tie (§21.7 preserved). Off -> exact-tie.
+        # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — a node is
+        # "tied" with the metric-leader when its mean is within the LEADER's confirm-noise CI (|Δ| <=
+        # ci_z·SE_leader, SE=confirmed_std/sqrt(confirmed_seeds)). Anchored on the LEADER's SE only (not a
+        # pooled SE_diff), so a noisy candidate's own variance can't widen the band. Requires
+        # `verifier_tiebreak`. NEVER widens beyond the leader's measured noise, so a SIGNIFICANT difference
+        # is never a tie (§21.7 preserved). Off -> exact-tie.
         self._ci_tie = bool(ci_tie) and self._verifier_tiebreak
         self._ci_z = float(ci_z)
         self._vsign = 1.0 if direction == "max" else -1.0
@@ -107,11 +109,13 @@ class SearchFitness:
     @staticmethod
     def _se(node):
         """The standard error of a node's confirmed MEAN = confirmed_std / sqrt(confirmed_seeds), or None
-        when the confirm-noise data is missing/degenerate (single seed / no std -> no usable SE)."""
+        when the confirm-noise data is missing/degenerate (single seed / no std -> no usable SE). Rejects
+        `bool` explicitly (it is an `int`/`float`-passing subclass): a foreign/hand-edited `confirmed_std:
+        true` must NOT become std=1.0 and inflate the band into a §21.7 violation (mirrors `_vc`'s guard)."""
         std, n = node.confirmed_std, node.confirmed_seeds
-        if not isinstance(std, (int, float)) or std != std or std < 0:
+        if isinstance(std, bool) or not isinstance(std, (int, float)) or std != std or std < 0:
             return None
-        if not isinstance(n, int) or n < 1:
+        if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             return None
         import math
         return float(std) / math.sqrt(n)

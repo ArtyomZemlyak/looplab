@@ -192,6 +192,12 @@ class AssetBrief:
 
 def _read_text(path: Path, max_bytes: int) -> str:
     try:
+        # CONTAINMENT + robustness (CODEX #12): only read a REGULAR, NON-symlink file. `os.walk` does not
+        # follow DIRECTORY symlinks by default, but a file ENTRY can still be a symlink (which could point
+        # OUTSIDE the scanned repo) or a special file — `open()` on a POSIX FIFO blocks indefinitely. Reject
+        # any symlink (never follow one out of the repo) and require a plain file (skips FIFO/device/socket).
+        if path.is_symlink() or not path.is_file():
+            return ""
         # Read-then-REDACT at the boundary: the returned lines can be copied verbatim into the agentic
         # LLM seed prompt (Phase 2), so scrub credentials HERE — any key/token in a scanned config/log
         # is masked before it can reach a finding, a snippet, or the seed. `redact_secrets` masks known
@@ -374,9 +380,8 @@ def scan_assets(repo_root, *, task_type: Optional[str] = None, lexicon: Optional
                 brief.truncated = True
                 continue
             reads_left -= 1
-            # CODEX AGENT: [P1] os.walk entries can be symlinks or special files. _read_text follows a
-            # file symlink outside repo_root and can block indefinitely on a POSIX FIFO, then forwards the
-            # result to the LLM. Resolve-and-contain paths and require a regular non-symlink file first.
+            # `_read_text` now rejects symlinks (containment) + non-regular files / FIFOs (hang) at the
+            # boundary — see its guard (CODEX #12 addressed).
             text = _read_text(fp, max_bytes)
             if not text:
                 continue

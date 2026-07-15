@@ -1876,7 +1876,13 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
         if hpool:
             # holdout_key carries the SAME verifier tie-break slot (when select_verifier is on): a tie on
             # the unseen-signal holdout metric is broken by soundness too, so the stronger holdout signal
-            # decides first and the verifier only resolves a holdout tie (never overrides it).
+            # decides first and the verifier only resolves a holdout tie (never overrides it). R1-d SCOPE:
+            # the holdout pick uses the EXACT-tie holdout_key, NOT the CI widening — the holdout metric is a
+            # single unseen-partition score with no multi-seed std, so there is no confirm-noise CI to widen
+            # with, and the unseen signal is deliberately stronger than a search-metric soundness tie-break.
+            # So `verifier_ci_tie` refines only the confirmed-MEAN pick (above); when holdout_select is on
+            # (default) the holdout exact-tie pick is the final word — R1-d's CI widening is effective on the
+            # champion only when holdout_select is OFF.
             st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch

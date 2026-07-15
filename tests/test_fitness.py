@@ -83,6 +83,16 @@ def test_ci_tie_candidate_variance_cannot_widen_the_band():
     assert f.best_ci([leader, noisy]).id == 0
 
 
+def test_ci_tie_rejects_boolean_confirmed_std_no_21_7_violation():
+    """Workflow finding: a foreign/hand-edited `confirmed_std: true` (bool is an int/float subclass) must
+    NOT become std=1.0 and inflate the band to swallow a genuinely-better metric — §21.7. `_se` rejects it,
+    so the pair falls back to exact-tie: the metric leader wins despite a lower-metric node's high soundness."""
+    f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
+    leader = _cn(0, 0.90, std=0.01, seeds=4, score=0.1)
+    bogus = _cn(1, 0.70, std=True, seeds=True, score=0.9)      # boolean noise data
+    assert f.best_ci([leader, bogus]).id == 0                  # leader wins; bool std can't widen the band
+
+
 def test_ci_tie_falls_back_to_exact_without_noise_data():
     """No confirmed_std/seeds -> no SE -> only EXACT-metric ties are broken (never a fabricated band)."""
     f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)

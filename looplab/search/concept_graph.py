@@ -787,10 +787,13 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
     new = ConceptGraph(task_type=graph.task_type)
     for c in graph.concepts():
         cid = rename.get(c.id, c.id)
-        # CODEX AGENT: [P1] For a renamed multi-parent concept, replacing axes with only the id prefix
-        # discards valid DAG parents. Preserve/union the source and canonical parent axes during collapse.
-        # Renamed -> axis is the canonical id's prefix (id/axis consistent by construction). Not renamed ->
-        # keep its own axes (grown concepts are single-axis; skeleton concepts carry their curated axes).
+        # DELIBERATE (CODEX #10, design-tension): a RENAMED concept takes its axis from the CANONICAL id's
+        # prefix, NOT a union of source+canonical parents. This keeps id/axis CONSISTENT — a global
+        # axis-rename is ambiguous when one source axis maps to several targets (`aug/crop→data/crop`,
+        # `aug/flip→vision/flip`) and would leave a concept whose id prefix disagrees with its stored axes.
+        # A renamed concept is a GROWN one (single-axis by construction: the LLM proposes `axis/slug`), so
+        # there are no curated multi-parent DAG parents to lose; a non-renamed concept keeps its own axes
+        # verbatim (so a seeded multi-parent axis never vanishes because a DIFFERENT concept was merged).
         axes = (cid.split("/", 1)[0],) if c.id in rename else c.axes
         existing = new.get(cid)
         merged_axes = tuple(dict.fromkeys((existing.axes if existing else ()) + tuple(axes)))

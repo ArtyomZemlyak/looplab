@@ -191,10 +191,12 @@ def grade_novelty(state: RunState, idea: Idea, graph: ConceptGraph, *,
             return NoveltyGrade(1, _LEVELS[1], _RECO[1], nd.id, sorted(idea_concepts),
                                 f"same parameters as tried experiment #{nd.id}")
 
-    # concept overlap analysis
-    # CODEX AGENT: [P1] Exact concept-id intersection ignores the graph's axes/ancestors: sibling methods
-    # under the same branch appear wholly novel, while a generic shared tag can overstate similarity.
-    # Compare canonical ancestor projections (and make every live consumer use that same projection).
+    # concept overlap analysis. NOTE (CODEX #8, off-by-default refinement): this is EXACT concept-id
+    # intersection. It is coarse ON PURPOSE — the tagger keys on lineage FAMILY (all `dcl-*` map to the one
+    # `loss/decoupled-contrastive` concept, §21.10 refinement 1), so genuine sibling-method variants already
+    # share a concept id here. A finer AXIS-ANCESTOR projection (two different leaves under one branch also
+    # counting as overlap) would strengthen the branch-vs-leaf signal further; deferred as a refinement,
+    # and it must be applied to EVERY consumer consistently if adopted.
     def overlap(nd) -> set[str]:
         return set(idea_concepts) & set(tags.get(nd.id, frozenset()))
 

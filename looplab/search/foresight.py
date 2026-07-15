@@ -444,14 +444,17 @@ class ForesightPanelResearcher:
                          samples=self.verify_samples, parser=self.parser or "tool_call")
             if rep is None or rep.method == "unavailable":
                 return None
-            # CODEX AGENT: [P1] Ranking only improves_objective can assign confidence 1.0 to an experiment
-            # that the same verifier marks unsound/infeasible. Compose sound_and_feasible (plus agreement)
-            # into the gate before this score can prioritize a proposal.
-            # The PRIMARY criterion drives the gate; fall back to the weighted overall if it wasn't graded.
-            crit = (rep.per_criterion or {}).get("improves_objective") or {}
-            score = crit.get("mean")
-            return float(score) if score is not None else (
-                float(rep.score) if rep.score is not None else None)
+            # `improves_objective` is the primary signal, but COMPOSE `sound_and_feasible` so a
+            # plausible-but-broken proposal (high improves, low soundness/feasibility) can't earn a top
+            # confidence (CODEX #9): dampen multiplicatively — confidence = improves × feasible, both in
+            # [0,1]. A missing feasibility grade (criterion not scored) leaves improves undampened rather
+            # than penalizing an ungraded proposal. Falls back to the weighted overall if improves wasn't
+            # graded at all.
+            imp = ((rep.per_criterion or {}).get("improves_objective") or {}).get("mean")
+            feas = ((rep.per_criterion or {}).get("sound_and_feasible") or {}).get("mean")
+            if imp is None:
+                return float(rep.score) if rep.score is not None else None
+            return float(imp) * float(feas) if feas is not None else float(imp)
         except Exception:  # noqa: BLE001 — advisory: degrade to the self-reported confidence
             return None
 

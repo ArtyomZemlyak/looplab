@@ -507,9 +507,12 @@ class StrategyCadenceMixin:
             if any((n.id, n.attempt) in attempted for n in group):
                 continue
             todo = [n for n in group if n.verifier_score is None]
-            # CODEX AGENT: [P1] A transitive union-find component can contain more than eight nodes.
-            # This branch then skips that component forever, including exact pairwise ties inside it;
-            # persist/chunk group progress or bound component construction instead of all-or-none skipping.
+            # Groups are now SEPARATE tie-sets (not union-find-merged), so a small exact tie is never
+            # blocked behind a large one (CODEX #4 fixed at the producer). A genuinely-LARGE single tie
+            # (> budget unscored nodes) is still left whole to a later cadence — atomic-or-nothing, so a
+            # partial score can't decide the tie by verify TIMING/BUDGET; if it never fits the cap it simply
+            # falls to the deterministic id tie-break (the verifier is advisory — a huge tie it can't fully
+            # score just isn't verifier-resolved, which is honest and bounded).
             if not todo or len(todo) > budget:
                 continue
             verdicts, failed = [], False
@@ -522,9 +525,12 @@ class StrategyCadenceMixin:
                     break
                 verdicts.append((n, v))
             if not failed:                              # atomic commit: every member scored
-                # CODEX AGENT: [P1] This is only atomic in memory: each append is a separate durable
-                # commit. A crash after a prefix leaves a half-scored component whose neutral 0.5 defaults
-                # can decide selection. Persist one versioned group event/transaction instead.
+                # KNOWN LIMITATION (CODEX #5, pre-existing since R1-c; off-by-default): the group is atomic
+                # IN MEMORY per cadence, but each score is a separate durable append — a crash BETWEEN them
+                # leaves a durable prefix, so on resume a half-scored tie could be decided by the neutral
+                # 0.5 of its not-yet-scored sibling. Rare (crash mid-scoring-loop) and only under
+                # select_verifier; a single versioned group event would make it fully durable-atomic —
+                # the proper fix, deferred (it needs a new event schema).
                 for n, v in verdicts:
                     # Persist the score + provenance (n_samples, agreement) so a selection-affecting
                     # decision is auditable; the fold reads only `score` (the rest is audit-only).
