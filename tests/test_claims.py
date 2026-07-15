@@ -131,3 +131,79 @@ def test_cli_claims_missing_file_is_clean_error(tmp_path):
     from looplab.cli import app
     res = CliRunner().invoke(app, ["claims", str(tmp_path)])
     assert res.exit_code == 1 and "no lessons" in res.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Operator claim DECISIONS (§22.4) — the governance overlay
+# --------------------------------------------------------------------------- #
+
+def test_record_and_load_decisions(tmp_path):
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="hard-neg helps", decision="ratified", note="proven")
+    record_claim_decision(str(tmp_path), statement="bad idea", decision="rejected")
+    d = load_claim_decisions(str(tmp_path))
+    from looplab.engine.memory import normalize_statement
+    assert d[normalize_statement("hard-neg helps")]["decision"] == "ratified"
+    assert d[normalize_statement("bad idea")]["decision"] == "rejected"
+
+
+def test_decisions_last_write_wins(tmp_path):
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="x", decision="ratified")
+    record_claim_decision(str(tmp_path), statement="x", decision="rejected")   # operator changed their mind
+    from looplab.engine.memory import normalize_statement
+    assert load_claim_decisions(str(tmp_path))[normalize_statement("x")]["decision"] == "rejected"
+
+
+def test_invalid_decision_raises(tmp_path):
+    import pytest
+    from looplab.engine.claims import record_claim_decision
+    with pytest.raises(ValueError):
+        record_claim_decision(str(tmp_path), statement="x", decision="bogus")
+    with pytest.raises(ValueError):
+        record_claim_decision(str(tmp_path), statement="", decision="ratified")
+
+
+def test_maturity_overlay_on_assessments():
+    from looplab.engine.claims import claim_assessments
+    from looplab.engine.memory import normalize_statement
+    lessons = [_lesson("hard-neg helps", "supported", [1]), _lesson("noise", "supported", [2])]
+    dec = {normalize_statement("hard-neg helps"): {"decision": "ratified"}}
+    out = {c["statement"]: c["maturity"] for c in claim_assessments(lessons, decisions=dec)}
+    assert out["hard-neg helps"] == "operator-ratified" and out["noise"] == "machine-proposed"
+
+
+def test_pack_drops_rejected_and_leads_with_ratified():
+    from looplab.engine.claims import build_context_pack, claim_assessments
+    from looplab.engine.memory import normalize_statement
+    lessons = [
+        _lesson("ratified claim", "supported", [1]),
+        _lesson("rejected claim", "supported", [2]),
+        _lesson("contested", "supported", [3], run_id="rA"),
+        _lesson("contested", "tested", [4], run_id="rB"),
+    ]
+    dec = {normalize_statement("ratified claim"): {"decision": "ratified"},
+           normalize_statement("rejected claim"): {"decision": "rejected"}}
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec), max_claims=5)
+    stmts = [c["statement"] for c in pack["claims"]]
+    assert stmts[0] == "ratified claim"                 # operator-ratified surfaced FIRST
+    assert "rejected claim" not in stmts                # operator-rejected dropped from the pack
+
+
+def test_cli_claim_decide_and_reflect(tmp_path):
+    import orjson
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(_lesson("some finding", "supported", [1])) + b"\n")
+    r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "some finding", "--reject", "--note", "wrong"])
+    assert r.exit_code == 0 and "rejected" in r.stdout
+    # the claims view now marks it REJECTED
+    out = CliRunner().invoke(app, ["claims", str(tmp_path)])
+    assert "[REJECTED]" in out.stdout
+
+
+def test_cli_claim_decide_requires_exactly_one(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    r = CliRunner().invoke(app, ["claim-decide", str(tmp_path), "x"])   # none chosen
+    assert r.exit_code == 2

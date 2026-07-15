@@ -550,6 +550,34 @@ def cross_run_index_cmd(
                    f"{f['n_attempts']:2d} attempt(s)  {bm}")
 
 
+@app.command(name="claim-decide")
+def claim_decide_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where claim_decisions.jsonl lives)."),
+    statement: str = typer.Argument(..., help="The claim statement to decide on (matched by normalized text)."),
+    ratify: bool = typer.Option(False, "--ratify", help="Operator RATIFIES the claim (surfaced first)."),
+    reject: bool = typer.Option(False, "--reject", help="Operator REJECTS it (dropped from agent context)."),
+    pin: bool = typer.Option(False, "--pin", help="Operator PINS it (kept, marked operator-pinned)."),
+    note: str = typer.Option("", help="Optional rationale recorded with the decision."),
+):
+    """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin a cross-run claim. This is the
+    ONLY way to change cross-run MEANING by hand (agents can only read + cite). Append-only, overlaid on
+    the machine-proposed assessment by normalized statement; a rejected claim is dropped from agent
+    context packs, a ratified one is surfaced first. Reversible (re-decide; last write wins)."""
+    from looplab.engine.claims import record_claim_decision
+    picked = [d for d, on in (("ratified", ratify), ("rejected", reject), ("pinned", pin)) if on]
+    if len(picked) != 1:
+        typer.echo("choose exactly one of --ratify / --reject / --pin")
+        raise typer.Exit(2)
+    import datetime as _dt
+    try:
+        rec = record_claim_decision(str(memory_dir), statement=statement, decision=picked[0], note=note,
+                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
+
+
 @app.command(name="atlas")
 def atlas_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "
@@ -560,7 +588,7 @@ def atlas_cmd(
     """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
     it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
     (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
-    from looplab.engine.claims import portfolio_atlas
+    from looplab.engine.claims import load_claim_decisions, portfolio_atlas
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir)
@@ -570,7 +598,7 @@ def atlas_cmd(
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
-    atlas = portfolio_atlas(lessons, caps, max_items=max_items)
+    atlas = portfolio_atlas(lessons, caps, max_items=max_items, decisions=load_claim_decisions(base))
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
@@ -602,7 +630,8 @@ def claims_cmd(
     inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
     renders the bounded agent context pack (contested-first, caveat slot reserved). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
-    from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+    from looplab.engine.claims import (build_context_pack, claim_assessments,
+                                        load_claim_decisions, render_context_pack)
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
@@ -611,7 +640,7 @@ def claims_cmd(
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-    claims = claim_assessments(lessons)
+    claims = claim_assessments(lessons, decisions=load_claim_decisions(p if p.is_dir() else p.parent))
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent
@@ -628,8 +657,9 @@ def claims_cmd(
         typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
         return
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
+    _mat = {"operator-ratified": " [RATIFIED]", "operator-rejected": " [REJECTED]", "operator-pinned": " [PINNED]"}
     typer.echo(f"Claims ({len(claims)} shown{' — contested only' if contested_only else ''}): "
                "✓ supported  ✗ refuted  ⚖ mixed  · inconclusive")
     for c in claims[: max(0, top)]:
-        typer.echo(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
-                   f"{c['statement'][:100]}")
+        typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_mat.get(c.get('maturity'), '')} "
+                   f"[{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")

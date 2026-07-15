@@ -141,7 +141,9 @@ class CrossRunTools:
             return "TRIED BEFORE (surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            claims = claim_assessments(self._role_lessons())
+            from looplab.engine.claims import load_claim_decisions
+            claims = claim_assessments(self._role_lessons(), decisions=load_claim_decisions(self.dir))
+            claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
             qt = _toks(str(args.get("query") or ""))
@@ -157,7 +159,9 @@ class CrossRunTools:
                 f"{c['statement']}" for c in claims)
 
         if name == "cross_run_atlas":
-            atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules())
+            from looplab.engine.claims import load_claim_decisions
+            atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules(),
+                                    decisions=load_claim_decisions(self.dir))
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:
