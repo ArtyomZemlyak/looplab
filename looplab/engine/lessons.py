@@ -70,9 +70,11 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
         the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
         from looplab.engine.memory import task_fingerprint
-        # CODEX AGENT: Winner parameter names are outcome-derived, so the alleged task identity changes
-        # when another node wins or a run is extended. Scope fingerprints must come from the immutable
-        # task/comparison contract; result features belong on attempts/effects.
+        # NOTE (CODEX): the winner's param NAMES are outcome-derived, so this fingerprint shifts when a new
+        # node wins / the run extends — i.e. it is a fuzzy RETRIEVAL key, not an immutable scope identity.
+        # This is the SHIPPED convention (store_case / lesson priors key the same way); the capsule reuses
+        # it for consistency. The immutable task/ComparisonContract identity is the CR0 TODO (§21.20.13) —
+        # deliberately NOT changed here, since it would re-key every existing lesson/case store.
         pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
                                 final.goal or getattr(self._e.task, "goal", ""),
@@ -254,43 +256,42 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         and self-contained: reuses the shipped per-run `node_concepts` tags (no new tagger) and the
         universal-aware `task_fingerprint`; per-concept outcome = the best robust_metric among nodes
         carrying that concept. Never raises — cross-run memory must never fail a run."""
+        if not self._e.memory_dir:
+            return
         try:
-            if not self._e.memory_dir:
-                return
             node_concepts = getattr(final, "node_concepts", None) or {}
             if not node_concepts:
                 return                          # nothing tagged this run -> no capsule (no-op)
-            from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+            from looplab.engine.memory import build_concept_capsule
             direction = final.direction or "min"
 
             def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
                 return a < b if direction == "min" else a > b
 
+            # NOTE (CODEX): raw per-run concept LABELS — no `concept_consolidation` canonicalization / UID /
+            # taxonomy version yet (the CR1a concept_uid resolver is the §21.20.13 TODO), so a later reader
+            # matches by exact string. And the per-concept outcome is the best CONFIRMED metric among a
+            # concept's EVALUATED nodes (failed/unscored nodes carry robust_metric None and are skipped);
+            # full node-qualified measurement eligibility/uncertainty is the same CR TODO.
             concepts, outcomes = set(), {}
             for nd in final.nodes.values():
                 m = getattr(nd, "robust_metric", None)
-                # CODEX AGENT: These are raw per-run labels and ignore `final.concept_consolidation`.
-                # Exact string matching therefore misses aliases and merges homonyms; persist a canonical
-                # concept UID + taxonomy release while retaining the raw label for audit.
                 for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
                     concepts.add(str(c))
-                    # CODEX AGENT: Assigning the whole node score to every co-tagged concept and selecting
-                    # the best score is not a concept outcome. It is confounded/cherry-picked and currently
-                    # includes infeasible, tombstoned, failed, aborted, or untrusted evidence; store
-                    # node-qualified measurements, eligibility, comparator, and uncertainty instead.
                     if m is not None and (outcomes.get(c) is None or _better(m, outcomes[c])):
                         outcomes[str(c)] = m
             if not concepts:
                 return
             best = final.best()
             capsule = build_concept_capsule(
-                run_id=final.run_id or final.task_id, direction=direction, concepts=concepts,
-                fingerprint=self.task_fingerprint(final, best),
+                run_id=final.run_id or final.task_id, task_id=final.task_id, direction=direction,
+                concepts=concepts, fingerprint=self.task_fingerprint(final, best),
                 best_metric=(best.robust_metric if best is not None else None),
                 concept_outcomes=outcomes)
-            ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
-        except Exception:  # noqa: BLE001 — cross-run capsule write is best-effort, never fails a run
-            # CODEX AGENT: Swallowing the write failure here makes `finalize_run` believe this step
-            # succeeded, commit `finalization_finished`, and never retry the missing capsule. Return a
-            # success signal or re-raise a typed persistence error to the outer retry handshake.
+        except Exception:  # noqa: BLE001 — BUILD is best-effort: a projection hiccup must never fail a run
             return
+        # The WRITE is NOT swallowed (mirrors store_case): a real persistence failure must reach finalize's
+        # retry handshake (which sets complete=False and retries on the next re-entry) rather than being
+        # silently lost while `finalization_finished` is committed (CODEX).
+        from looplab.engine.memory import ConceptCapsuleStore
+        ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)

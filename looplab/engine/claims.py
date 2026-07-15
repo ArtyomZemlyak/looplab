@@ -55,15 +55,19 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         s = str(stmt or "").strip()
         if not s:
             return None
-        # CODEX AGENT: Normalized prose alone is not claim identity. This merges incompatible tasks,
-        # metrics, roles, subjects, and interventions (and the 160-char normalizer creates deterministic
-        # collisions). Scope/claim structure must be part of the key, not detached metadata.
+        # NOTE (CODEX): identity here is the normalized STATEMENT (the shipped lesson `normalize_statement`
+        # key) — it can merge same-worded claims across incompatible scopes and the 160-char cap can
+        # collide. A structured semantic claim key (subject/intervention/comparator/scope) is the CR1b TODO
+        # (§21.20.13); this lean projection keeps scope/runs as metadata on the claim.
         return groups.setdefault(normalize_statement(s), {
-            # CODEX AGENT: Node ids are run-local. Bare `set[int]` collapses (r1,node0) with (r2,node0)
-            # and cannot resolve evidence after the run sets are detached; use run-qualified refs with
-            # generation, measurement/event id, and trust/eligibility provenance.
             "statement": s, "support": set(), "oppose": set(),
             "runs": set(), "scopes": set(), "sources": set()})
+
+    def _qualify(run_id, node_ids) -> list[str]:
+        # Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse (CODEX): a bare node id is
+        # run-local. "?" marks a ref whose run is unknown (e.g. a D8 claim without a run_id).
+        r = str(run_id or "?")
+        return [f"{r}:{n}" for n in node_ids]
 
     for lz in lessons or []:
         g = _group(lz.get("statement"))
@@ -74,16 +78,16 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         if lz.get("task_id"):
             g["scopes"].add(str(lz["task_id"]))
         outcome = str(lz.get("outcome") or "")
-        ev = _node_ids(lz.get("evidence"))
-        # CODEX AGENT: A lesson outcome is a verdict on the lesson/action, not the logical polarity of
-        # arbitrary prose. For example, "changing X regressed the metric" with a failed outcome supports
-        # that negative-effect statement but is put in `oppose`; persist an explicit claim stance/polarity.
-        # Consolidated rows' `evidence_count` is also ignored, so production agreement/contradiction counts
-        # cannot be recovered from the actual newest-verdict-wins lesson store.
+        refs = _qualify(lz.get("run_id"), _node_ids(lz.get("evidence")))
+        # NOTE (CODEX): the lesson OUTCOME is a verdict on the action, mapped here to support/oppose of the
+        # STATEMENT. A negative-effect statement whose verdict confirms the regression ("changing X hurt")
+        # is therefore filed as oppose; an explicit claim POLARITY (and honoring a consolidated row's
+        # `evidence_count`) is the CR1b TODO. Lean mapping: supported→support, {tested/abandoned/failed/
+        # refuted}→oppose, noted/unknown→neutral.
         if outcome == "supported":
-            g["support"].update(ev)
+            g["support"].update(refs)
         elif outcome in _NEGATIVE:
-            g["oppose"].update(ev)
+            g["oppose"].update(refs)
         # "noted"/unknown -> neutral: still registers the run/scope, but takes NO stance.
 
     for rc in research_claims or []:
@@ -91,10 +95,10 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         if g is None:
             continue
         # A D8 memo claim CITES the experiments it rests on -> support evidence. URLs are external sources.
-        # CODEX AGENT: Citation is not verification: unsupported/unresolved D8 claims (even invented node
-        # ids) become supported here. Require a verified verdict and resolvable run-qualified evidence;
-        # the shipped CLI/Atlas also never supplies `research_claims`, despite advertising D8 unification.
-        g["support"].update(_node_ids(rc.get("node_ids")))
+        # NOTE (CODEX): citation is not verification — a full claim requires a verified verdict + resolvable
+        # run-qualified evidence (CR1b TODO). This unification is exercised via the API/callers that pass
+        # `research_claims`; the shipped CLIs read lessons only (they do not fabricate D8 claims).
+        g["support"].update(_qualify(rc.get("run_id"), _node_ids(rc.get("node_ids"))))
         for u in (rc.get("urls") or []):
             if isinstance(u, str) and u:
                 g["sources"].add(u)
@@ -130,8 +134,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     least one mixed/refuted/inconclusive claim is included whenever one exists. Pure/deterministic and
     'silent' by construction — it just returns structured data; promoting it to advisory prompt-grounding
     is a separate, gated step (never wired here). No LLM, no I/O."""
-    # CODEX AGENT: A row-count cap is not a token/byte bound: statements, concepts, and nested fields are
-    # unbounded, while max_claims=0 is forced to one. Enforce an actual serialized budget and field caps.
+    # NOTE (CODEX): this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
+    # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
     max_claims = max(1, int(max_claims))
     by_state: dict[str, list] = {"mixed": [], "supported": [], "refuted": [], "inconclusive": []}
     for c in claims or []:
@@ -148,11 +152,12 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
             picked = picked[:-1] + [caveats[0]]
 
     def _slim(c: dict) -> dict:
-        # CODEX AGENT: Dropping runs/scopes/sources leaves the retained node ids ambiguous and uncitable.
-        # Keep a bounded set of complete evidence refs rather than independent truncated id arrays.
-        return {"statement": c["statement"], "epistemic": c["epistemic"],
+        # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
+        # keep runs/scopes too so a reader can resolve the claim's provenance (CODEX).
+        return {"statement": c["statement"][:300], "epistemic": c["epistemic"],
                 "n_support": c["n_support"], "n_oppose": c["n_oppose"],
-                "support": c["support"][:6], "oppose": c["oppose"][:6]}
+                "support": c["support"][:6], "oppose": c["oppose"][:6],
+                "runs": c.get("runs", [])[:6], "scopes": c.get("scopes", [])[:6]}
 
     pack = {
         "claims": [_slim(c) for c in picked],
@@ -178,19 +183,20 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     frame (§20.6, unknown-vs-zero) is the deferred full-CR3a; this deliberately reports thin-coverage, not
     a false "never tried" (which needs a reference universe)."""
     from looplab.engine.memory import portfolio_concept_overview
+    max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules)
-    # CODEX AGENT: Atlas is disconnected from `cross_run_index`; its run count and thinness come only
-    # from opt-in capsules. Valid lesson-only/legacy memory therefore reports zero runs and presents an
-    # incomplete opt-in sample as portfolio coverage. Join against the authoritative scoped run corpus.
     claims = claim_assessments(lessons)
     contested = [c for c in claims if c["epistemic"] == "mixed"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
+    # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy
+    # memory (no opt-in capsules) is not reported as zero runs (CODEX). The authoritative scoped corpus
+    # join (cross_run_index) is the full-CR TODO; this at least unions what the two memory stores know.
+    run_ids = {c.get("run_id") for c in capsules if c.get("run_id")}
+    for cl in claims:
+        run_ids.update(cl.get("runs") or [])
     return {
-        "n_runs": overview["n_runs"], "n_concepts": overview["n_concepts"],
+        "n_runs": len(run_ids), "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
-        # CODEX AGENT: `max_items` is neither validated nor a nested payload cap: zero conflicts with the
-        # context pack's minimum one, negative values use Python's N-1 slicing, and each selected concept
-        # or claim can still carry every nested run/ref. Normalize it and cap serialized nested output.
         "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
         "thin_coverage": thin[:max_items],                   # explored only once — thin evidence (lean gap)
         "contradictions": contested[:max_items],             # where the portfolio disagrees with itself

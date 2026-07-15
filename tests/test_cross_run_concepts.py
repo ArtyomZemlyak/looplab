@@ -112,26 +112,43 @@ def _seed_prior(memory_dir, concept, *, goal="dense retrieval", metric=0.88, run
 _CONCEPT = "data/hard-negative-mining"
 
 
-def test_cross_run_prior_surfaces_and_defers(tmp_path):
+def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
     mem = tmp_path / "mem"; mem.mkdir()
     _seed_prior(mem, _CONCEPT)
-    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)               # node 0 tagged _CONCEPT
     eng = _GateEngine(s, mem)
     eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])   # idea tags to the SAME concept
-    # materially-different params (not close to node 0) so it isn't a level-1/2 dup -> reaches level 3
     idea = Idea(operator="improve", params={"rank": 8.0}, rationale="a materially different hard-neg scheme")
 
     out = eng._graded_novelty_precheck(fold(s.read_all()), idea)
-    assert out is None                               # SURFACE, not an allow-override -> defers
-
+    # the idea shares _CONCEPT with node 0 -> a level-4 same-direction ALLOW; cross-run NEVER changes that.
+    assert out is idea
     st = fold(s.read_all())
-    assert st.novelty_grades == []                   # NOT recorded as a graded allow
+    # ...but the cross-run prior is SURFACED as a separate audit event alongside the (unchanged) grade.
     assert len(st.cross_run_priors) == 1
     cp = st.cross_run_priors[0]
     assert _CONCEPT in cp["matched_concepts"]
     assert cp["prior_runs"][0]["run_id"] == "prior-1"
     assert cp["prior_runs"][0]["outcomes"][_CONCEPT] == 0.88
+    assert "similarity" in cp["prior_runs"][0]        # receipt carries the ranking similarity
     assert cp["stance"] == "balanced"
+
+
+def test_cross_run_prior_never_changes_the_gate_decision(tmp_path):
+    # §21.7 / CODEX #13: the SELECTION decision must be byte-identical whether or not a matching prior
+    # capsule exists — cross-run is audit-only. Same run + idea; only the presence of a prior differs.
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="a materially different hard-neg scheme")
+
+    def _decide(with_prior):
+        mem = tmp_path / ("w" if with_prior else "wo"); mem.mkdir()
+        if with_prior:
+            _seed_prior(mem, _CONCEPT)
+        eng = _GateEngine(s, mem)
+        eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+        return eng._graded_novelty_precheck(fold(s.read_all()), idea)
+
+    assert _decide(with_prior=True) is _decide(with_prior=False)   # decision independent of the prior
 
 
 def test_cross_run_flag_off_is_a_no_op(tmp_path):

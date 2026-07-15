@@ -494,9 +494,10 @@ class Settings(BaseSettings):
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
     # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
     # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
-    # CODEX AGENT: This is not standalone as documented: reads are behind `graded_novelty`, while writes
-    # need `node_concepts` (normally produced by `concept_pivot`). With only this flag + memory_dir, the
-    # feature can silently persist and surface nothing; validate or explicitly wire its prerequisites.
+    # PREREQUISITES (CODEX — this flag is NOT standalone): the WRITE needs per-run concept tags
+    # (`node_concepts`, produced by `concept_pivot`/F1 tagging) — no tags => no capsule; the SURFACE path
+    # runs inside the graded-novelty precheck, so it also needs `graded_novelty` on. With only this flag +
+    # `memory_dir` it persists/surfaces nothing. Enable `concept_pivot` + `graded_novelty` alongside it.
     cross_run_concepts: bool = False
     # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —

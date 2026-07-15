@@ -18,14 +18,14 @@ def test_supported_lesson_becomes_a_supported_claim():
     out = claim_assessments([_lesson("hard-neg mining helps recall", "supported", [3, 5])])
     assert len(out) == 1
     c = out[0]
-    assert c["epistemic"] == "supported" and c["support"] == [3, 5] and c["oppose"] == []
+    assert c["epistemic"] == "supported" and c["support"] == ["r1:3", "r1:5"] and c["oppose"] == []
     assert c["runs"] == ["r1"] and c["scopes"] == ["t"]
 
 
 def test_negative_verdicts_map_to_oppose():
     for verdict in ("tested", "abandoned", "failed", "refuted"):
         out = claim_assessments([_lesson("X helps", verdict, [7])])
-        assert out[0]["epistemic"] == "refuted" and out[0]["oppose"] == [7]
+        assert out[0]["epistemic"] == "refuted" and out[0]["oppose"] == ["r1:7"]
 
 
 def test_conflicting_verdicts_make_a_mixed_claim_not_newest_wins():
@@ -37,7 +37,7 @@ def test_conflicting_verdicts_make_a_mixed_claim_not_newest_wins():
     assert len(out) == 1
     c = out[0]
     assert c["epistemic"] == "mixed"
-    assert c["support"] == [1, 2] and c["oppose"] == [9]
+    assert c["support"] == ["rA:1", "rA:2"] and c["oppose"] == ["rB:9"]
     assert c["runs"] == ["rA", "rB"]
 
 
@@ -54,7 +54,7 @@ def test_research_claims_contribute_support_and_sources():
         research_claims=[{"statement": "doc2query expands recall", "node_ids": [11, 12],
                           "urls": ["http://x"]}])
     c = out[0]
-    assert c["epistemic"] == "supported" and c["support"] == [11, 12]
+    assert c["epistemic"] == "supported" and c["support"] == ["?:11", "?:12"]
     assert c["sources"] == ["http://x"]
 
 
@@ -66,7 +66,7 @@ def test_lesson_and_research_claim_unify_on_the_same_statement():
         research_claims=[{"statement": "distillation helps", "node_ids": [8]}])
     assert len(out) == 1                              # normalized statement collapses them
     c = out[0]
-    assert c["epistemic"] == "mixed" and c["support"] == [8] and c["oppose"] == [2]
+    assert c["epistemic"] == "mixed" and c["support"] == ["?:8"] and c["oppose"] == ["r1:2"]
 
 
 def test_identity_matches_the_shipped_lesson_normalizer_punctuation_is_significant():
@@ -93,7 +93,7 @@ def test_urls_are_not_treated_as_node_evidence():
     out = claim_assessments(
         [], research_claims=[{"statement": "s", "node_ids": ["4", "bad", True], "urls": ["u"]}])
     # "4" coerces to node 4; "bad"/bool dropped; url goes to sources not support
-    assert out[0]["support"] == [4] and out[0]["sources"] == ["u"]
+    assert out[0]["support"] == ["?:4"] and out[0]["sources"] == ["u"]
 
 
 def test_empty_input_is_empty():
