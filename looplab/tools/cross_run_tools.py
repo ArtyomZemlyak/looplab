@@ -86,6 +86,12 @@ class CrossRunTools:
                 "thinly explored (a single run — a gap to consider), and which claims are contradictory. "
                 "Use it to pick an under-explored or unresolved direction.",
                 {}, []),
+            fn_spec("cross_run_search",
+                "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
+                "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
+                "free-text idea, when a specific concept lookup isn't enough.",
+                {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."}},
+                ["query"]),
         ]
 
     def _load(self, fname: str) -> list[dict]:
@@ -172,6 +178,20 @@ class CrossRunTools:
             if atlas["contradictions"]:
                 lines.append("Contradictory: "
                              + "; ".join(c["statement"][:80] for c in atlas["contradictions"][:4]))
+            return "\n".join(lines)
+
+        if name == "cross_run_search":
+            from looplab.engine.claims import cross_run_retrieve
+            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons())
+            hits = r["results"][:8]
+            if not hits:
+                return "(no cross-run knowledge matched)"
+            lines = []
+            for h in hits:
+                if h["kind"] == "claim":
+                    lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:120]}")
+                else:
+                    lines.append(f"[concept ×{h['n_runs']} run(s)] {h['text']}")
             return "\n".join(lines)
 
         return f"(unknown cross-run tool: {name})"

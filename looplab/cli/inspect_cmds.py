@@ -618,6 +618,31 @@ def claim_decide_cmd(
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
+@app.command(name="cross-run-search")
+def cross_run_search_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir."),
+    query: str = typer.Argument(..., help="Free-text query (idea / technique / question)."),
+    k: int = typer.Option(8, help="How many results."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full result + receipt as JSON."),
+):
+    """PART IV cross-run CR2a (§21.20.5): relevance-ranked hybrid SEARCH over the cross-run knowledge
+    (claims + concepts) via the shipped lexical+BM25+vector RRF retriever, with a why-recalled receipt.
+    Operator-rejected claims are excluded. Pure read; no endpoint."""
+    from looplab.engine.claims import cross_run_retrieve
+    r = cross_run_retrieve(str(memory_dir), query, k=k)
+    if as_json:
+        typer.echo(orjson.dumps(r, option=orjson.OPT_INDENT_2).decode())
+        return
+    rc = r["receipt"]
+    typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']} "
+               f"(channels: {', '.join(rc['channels'])})")
+    for h in r["results"]:
+        if h["kind"] == "claim":
+            typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:100]}")
+        else:
+            typer.echo(f"  concept ×{h['n_runs']}  {h['text']}")
+
+
 @app.command(name="atlas")
 def atlas_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "

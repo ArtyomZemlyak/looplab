@@ -316,6 +316,46 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     return pack
 
 
+def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None) -> dict:
+    """CR2a retrieval planner (lean, §21.20.5): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
+    (with their epistemic state / operator maturity) + concepts (with #runs) — over the shipped
+    `HybridRetriever` (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), ranked by relevance to
+    `query`, returning a BOUNDED, RECEIPTED result. Advisory. The fuller CR2a (intent-classified
+    eligibility, capped per-channel candidates, contradiction quotas) builds on this ranked hybrid recall;
+    operator-rejected claims are already excluded (they never enter the corpus)."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir) if memory_dir else None
+    if capsules is None:
+        cp = base / "concept_capsules.jsonl" if base else None
+        capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    if lessons is None:
+        lp = base / "lessons.jsonl" if base else None
+        lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    claims = [c for c in claims_for_memory(memory_dir, lessons=lessons)
+              if c.get("maturity") != "operator-rejected"]
+    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir))
+    docs: list[tuple[str, str, dict]] = []
+    for c in claims:
+        docs.append(("claim", c["statement"], {"epistemic": c["epistemic"], "n_support": c["n_support"],
+                                               "n_oppose": c["n_oppose"], "maturity": c.get("maturity")}))
+    for e in overview["concepts"]:
+        docs.append(("concept", e["concept"],
+                     {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
+    receipt = {"query": str(query or ""), "k": int(k), "n_corpus": len(docs),
+               "channels": ["lexical", "bm25", "vector"]}
+    if not docs or not str(query or "").strip():
+        return {"results": [], "receipt": {**receipt, "n_hits": 0}}
+    from looplab.search.hybrid_merge import HybridRetriever
+    hits = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=max(1, int(k)))
+    results = [{"kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4), **docs[i][2]}
+               for i, s in hits]
+    return {"results": results, "receipt": {**receipt, "n_hits": len(results)}}
+
+
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
                     aliases: Optional[dict] = None) -> dict:
