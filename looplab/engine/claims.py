@@ -496,6 +496,12 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
                 _real = {s for s in g["scopes"] if s}
                 if not _real or not _real <= {_dscope}:
                     d = None
+        if d is None:
+            # Fall back to the DISTINCT global index: a scope-LESS decision applies to EVERY scope, and it
+            # must survive a LATER scoped decision that overwrote the plain legacy key last-wins — the same
+            # global-then-scoped bug the structured path fixed, which the lean path shared (a global reject
+            # was silently dropped for other scopes once any scoped decision on that statement landed).
+            d = (decisions or {}).get(_global_key(key))
         # CODEX AGENT: note/by/at are discarded here, so API/CLI/Atlas/tools cannot explain who changed the
         # claim or why after the one write response is gone. Carry the current decision record (and expose
         # append-only history) rather than reducing an auditable governance action to one maturity string.

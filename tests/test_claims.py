@@ -403,6 +403,21 @@ def test_scoped_decision_does_not_leak_in_LEAN_mode(tmp_path):
     assert taska[0]["maturity"] == "operator-rejected"
 
 
+def test_global_decision_survives_a_later_scoped_one_in_LEAN_mode(tmp_path):
+    # regression: a GLOBAL reject then a LATER scoped ratify overwrites the legacy key last-wins; the global
+    # verdict must still apply to EVERY OTHER scope in the lean (default) path (companion to the structured
+    # fix — the lean scope-guard shared the same bug and dropped the global decision).
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="distillation helps", decision="rejected")           # GLOBAL
+    record_claim_decision(str(tmp_path), statement="distillation helps", decision="ratified", scope="taskA")  # scoped
+    taska = claims_for_memory(str(tmp_path), lessons=[_lesson("distillation helps", "supported", [1],
+                                                              run_id="rA", task_id="taskA")])
+    assert taska[0]["maturity"] == "operator-ratified"          # taskA: the specific scoped verdict wins
+    taskb = claims_for_memory(str(tmp_path), lessons=[_lesson("distillation helps", "supported", [2],
+                                                              run_id="rB", task_id="taskB")])
+    assert taskb[0]["maturity"] == "operator-rejected"          # taskB: the GLOBAL reject still applies
+
+
 def test_global_decision_survives_a_later_scoped_decision_in_structured_mode(tmp_path):
     # mega-review HIGH regression: a portfolio-wide (scope-less) decision must keep applying to OTHER
     # scopes even after a later SCOPED decision on the same statement is recorded. The scoped decision
