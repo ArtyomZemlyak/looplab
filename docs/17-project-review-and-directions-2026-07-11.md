@@ -3872,15 +3872,22 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   (reusing `hybrid_merge`) + why-recalled receipts; the bounded packs at Genesis/run-start/proposal/
   Strategist with token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B** (≥15%
   lower duplicate spend, no trust/exploration regression) that must pass **before any live injection**.
-- **Step 6 — CR3a coverage + Research Atlas UI.** The concept×scope `CoverageFrame` matrix with the
-  unknown/stale/partial state grammar, plus the four coordinated Atlas views (Landscape/Findings/Evidence/
-  Changes) on a snapshot-consistent shell (§21.20.7). **Gate = coverage counts reproduce raw evidence;
-  completeness/staleness disclosed; server-filtered/cursor-paged so the browser never fetches the whole
-  portfolio.**
-- **Step 7 — CR3b/CR3c, both gated.** Optional recursive/community summaries **only** if they clear the
-  §21.20.11 hierarchy gate (≥5 pp grounded-answer gain **or** ≥30% token reduction at equal quality) —
-  otherwise the flat Claim+RunCapsule architecture is final. Then the governance workbench
-  (taxonomy merge/split dry-run, claim lifecycle, reversible publish) as a separate role-gated surface.
+- **Step 6 — CR3a coverage + Research Atlas UI.** **LANDED 2026-07-15 (Atlas DATA slice):**
+  `portfolio_atlas` (`engine/claims.py`) composes the Step 3-5 read-models into one payload — *explored*
+  (concept × #runs), *thin_coverage* (single-run concepts — a lean gap proxy, deliberately NOT a false
+  "never tried" which needs a coverage frame), *contradictions* (`mixed` claims), and the bounded context
+  pack. Pure read; surfaced by `looplab atlas MEMORY_DIR [--json]`. Tests: 6. **TODO to reach full CR3a:**
+  the true concept×scope `CoverageFrame` matrix with the unknown/stale/partial state grammar; the four
+  coordinated Atlas UI views (Landscape/Findings/Evidence/Changes) on a snapshot-consistent shell (§20.7),
+  server-filtered/cursor-paged; the coverage-counts-reproduce-raw-evidence gate. The React screen is the
+  deferred visual layer over this payload.
+- **Step 7 — CR3b/CR3c, both gated. DELIBERATELY NOT BUILT (per the §21.20.11 hierarchy gate).** Optional
+  recursive/community summaries ship **only** if they clear the gate (≥5 pp grounded-answer gain **or** ≥30%
+  token reduction at equal quality). The flat Claim+RunCapsule architecture that Steps 4/5 (`claim_assessments`
+  + `build_context_pack`) already embody is the **current final design** — recursion is not built until it
+  proves out on the benchmark corpus, exactly as the gate requires (building it now would be the speculative
+  feature-creep the design warns against). The governance workbench (taxonomy merge/split dry-run, claim
+  lifecycle, reversible publish) likewise waits for the taxonomy-release substrate (full CR1a).
 
 **Critical path & parallelism.** Step 0 is independent and can land immediately. Step 1 (CR0) is the
 foundation everything else stands on. Steps 2 (D3-wiring) and 3 (index) can proceed in parallel once the

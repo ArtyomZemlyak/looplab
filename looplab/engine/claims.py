@@ -150,6 +150,30 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     return pack
 
 
+def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8) -> dict:
+    """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
+    thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
+    assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
+    Research Atlas UI (or an agent) would render; no LLM, no I/O.
+
+    "Thin" is a lean gap proxy — concepts explored in only ONE run (single-run evidence). A true coverage
+    frame (§20.6, unknown-vs-zero) is the deferred full-CR3a; this deliberately reports thin-coverage, not
+    a false "never tried" (which needs a reference universe)."""
+    from looplab.engine.memory import portfolio_concept_overview
+    overview = portfolio_concept_overview(capsules)
+    claims = claim_assessments(lessons)
+    contested = [c for c in claims if c["epistemic"] == "mixed"]
+    thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
+    return {
+        "n_runs": overview["n_runs"], "n_concepts": overview["n_concepts"],
+        "n_claims": len(claims), "n_contested": len(contested),
+        "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
+        "thin_coverage": thin[:max_items],                   # explored only once — thin evidence (lean gap)
+        "contradictions": contested[:max_items],             # where the portfolio disagrees with itself
+        "context_pack": build_context_pack(claims, concept_overview=overview, max_claims=max_items),
+    }
+
+
 def render_context_pack(pack: dict) -> str:
     """Render a context pack as a compact, bounded text block for a proposing agent (the advisory form).
     Deterministic; leads with contested evidence so the agent sees counter-arguments, not only positives."""

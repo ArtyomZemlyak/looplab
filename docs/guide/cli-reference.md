@@ -20,6 +20,7 @@ looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV 
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
 looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
+looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -370,6 +371,26 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a portfolio-coverage line (composed with `concept_capsules.jsonl` when present) |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
+
+---
+
+## `atlas`
+
+PART IV cross-run Step 6 (§21.20). The **Research Atlas** data view — one payload that composes the concept
+overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into *what's been
+explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
+false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). Pure read
+of `lessons.jsonl` + `concept_capsules.jsonl`; the React screen is a later visual layer over this data.
+
+```bash
+looplab atlas MEMORY_DIR [--max-items 8] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `concept_capsules.jsonl` |
+| `--max-items N` | `8` | Cap per section (explored / contested / thin) |
+| `--json` | off | Emit the full Atlas payload as JSON |
 
 ---
 

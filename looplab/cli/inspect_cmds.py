@@ -525,6 +525,44 @@ def cross_run_concepts_cmd(
         typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}   [{runs}{more}]")
 
 
+@app.command(name="atlas")
+def atlas_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "
+                                                "concept_capsules.jsonl)."),
+    max_items: int = typer.Option(8, help="Cap per section (explored/contested/thin)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full Atlas payload as JSON."),
+):
+    """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
+    it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
+    (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
+    from looplab.engine.claims import portfolio_atlas
+    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir)
+    lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
+    lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
+    caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
+    if not lessons and not caps:
+        typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
+        raise typer.Exit(1)
+    atlas = portfolio_atlas(lessons, caps, max_items=max_items)
+    if as_json:
+        typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Research Atlas: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
+               f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested")
+    if atlas["explored"]:
+        typer.echo("Explored (concept × #runs):")
+        for e in atlas["explored"]:
+            typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}")
+    if atlas["thin_coverage"]:
+        typer.echo("Thin (explored once): " + ", ".join(atlas["thin_coverage"]))
+    if atlas["contradictions"]:
+        typer.echo("Contradictions (portfolio disagrees):")
+        for c in atlas["contradictions"]:
+            typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
+
+
 @app.command(name="claims")
 def claims_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl), or the "
