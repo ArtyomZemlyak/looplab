@@ -551,3 +551,37 @@ def test_cli_run_engine_construction_failure_preserves_existing_snapshots(tmp_pa
     assert task_snap.read_bytes() == task_before
     assert config_snap.read_bytes() == config_before
     assert (run_dir / "events.jsonl").read_bytes() == events_before
+
+
+def test_scoped_error_finish_converges_and_does_not_loop(tmp_path):
+    """R8-A1 (P1, reproduced): a SCOPED error finish (a begun marker whose finish_data has
+    reason='error' plus a run_finished reason=error+finalize_scope) must CONVERGE. Before the fix,
+    _recover_scoped_terminal re-appended a duplicate error run_finished on every resume forever
+    (the scope never gained a complete/abandoned marker), violating invariants #2/#3."""
+    import looplab.engine.finalize as mod
+    from looplab.engine.finalize import incomplete_finalize_scope
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    store = EventStore(run_dir / "events.jsonl")
+    store.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    (run_dir / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    scope = "finalize:deadbeef00000000"
+    begun = store.append("finalize_step", {
+        "scope": scope, "step": "begun",
+        "finish_data": {"reason": "error", "error": "boom"},
+        "finish_report_planned": False})
+    store.append("run_finished", {
+        "reason": "error", "error": "boom", "finalize_scope": scope,
+        "after_seq": begun.seq, "finalization_required": True})
+    eng = _EngineStub(run_dir)
+
+    baseline = sum(e.type == "run_finished" for e in store.read_all())
+    for _ in range(5):                          # each iteration models one resume
+        mod.finalize_run(eng, entry_finished=True, start_time=0.0)
+    events = store.read_all()
+    # No duplicate terminals appended across resumes; the scope is closed and no longer pending.
+    assert sum(e.type == "run_finished" for e in events) == baseline
+    assert incomplete_finalize_scope(events) is None
+    st = fold(events)
+    assert st.finished and not st.finalization_pending()

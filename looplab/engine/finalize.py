@@ -354,6 +354,31 @@ def _recover_scoped_terminal(engine: "Engine", events, state: RunState, scope: s
         return events, state
 
     finish_data, recovery_kind = _terminal_data_for_scope(events, scope)
+    # If the RECOVERY TARGET is itself an error terminal — the begun marker captured an error finish,
+    # i.e. the guarded-abort path staged ``{"reason": "error"}`` — re-materializing it loops forever:
+    # an error finish is never an "effective terminal" (that predicate excludes error), so the scope
+    # never gains a complete/abandoned marker and a DUPLICATE error run_finished (+ report clone) is
+    # appended on every resume (violating invariants #2 one-terminal and #3 gated-side-effects). The
+    # run errored out — that IS its terminal state — so close the scope idempotently instead. (A
+    # NON-error target, e.g. a transient error finish over a durable ``time_budget`` intent, still
+    # re-materializes the original terminal below and converges normally.)
+    if str(finish_data.get("reason") or "").lower() == "error":
+        if (state.finished and state.last_finish_seq >= 0
+                and not _has_finish_step(events, EV_FINALIZATION_FINISHED, state.last_finish_seq)):
+            try:
+                engine.store.append(
+                    EV_FINALIZATION_FINISHED, {"finish_seq": state.last_finish_seq})
+            except Exception:  # noqa: BLE001 - the open scope retries the same close on re-entry
+                pass
+        latest = engine.store.read_all()
+        if not (_scope_has_step(latest, scope, "complete")
+                or _scope_has_step(latest, scope, "abandoned")):
+            try:
+                _mark_finalize_step(engine, scope, "abandoned", outcome="error_terminal")
+            except Exception:  # noqa: BLE001 - retried on re-entry while the scope stays open
+                pass
+        refreshed = engine.store.read_all()
+        return refreshed, fold(refreshed)
     latest = engine.store.read_all()
     report = scoped_finish_report(latest, scope)
     tail_seq = latest[-1].seq if latest else -1
