@@ -14,6 +14,7 @@ is neutral (it takes no stance), exactly as on the lesson read/write paths.
 from __future__ import annotations
 
 import json
+import re
 from typing import Optional
 
 from looplab.engine.memory import _NEGATIVE, normalize_statement
@@ -174,19 +175,49 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
                            aliases=load_concept_aliases(memory_dir))
 
 
-def _fuzzy_merge_claims(claims: list[dict]) -> list[dict]:
-    """CR1b (lean, opt-in): merge claims whose STATEMENTS are near-duplicates (paraphrases) into one, via
-    the shipped hybrid clustering (`cluster_near_duplicates`). Recall-oriented — a SUGGESTION-grade merge,
-    hence opt-in; the structured semantic claim key (subject/intervention/comparator/scope) is the full
-    CR1b. Unions the evidence/runs/scopes, keeps the most-evidenced member's statement as the label, and
-    carries an operator maturity if any member had one. Pure."""
-    if len(claims) <= 1:
+_CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
+
+
+def _stmt_tokens(s: str) -> frozenset:
+    return frozenset(w for w in _CLAIM_WORD.findall((s or "").casefold()) if len(w) > 2)
+
+
+def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[dict]:
+    """CR1b (lean, opt-in): merge claims whose STATEMENTS are genuine PARAPHRASES into one. Identity is a
+    strict token-JACCARD test (>= `threshold`) via union-find — deliberately NOT the hybrid top-k
+    clustering, which blobs a HOMOGENEOUS corpus (every claim shares the task's vocabulary) into one giant
+    cluster (verified: it collapsed 73 distinct rubert claims into 1). Jaccard 0.6 requires most words to
+    match, so distinct techniques stay separate and only near-identical restatements merge. Suggestion-grade
+    -> opt-in; the structured semantic claim key is the full CR1b. Unions evidence/runs/scopes/sources,
+    keeps the most-evidenced statement as the label, carries an operator maturity if any member had one."""
+    n = len(claims)
+    if n <= 1:
         return claims
-    from looplab.search.hybrid_merge import cluster_near_duplicates
-    clusters = cluster_near_duplicates([c["statement"] for c in claims])
+    toks = [_stmt_tokens(c["statement"]) for c in claims]
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i in range(n):
+        if not toks[i]:
+            continue
+        for j in range(i + 1, n):
+            if not toks[j]:
+                continue
+            inter = len(toks[i] & toks[j])
+            if inter and inter / len(toks[i] | toks[j]) >= threshold:
+                parent[_find(i)] = _find(j)
+    groups: dict[int, list[int]] = {}
+    for i in range(n):
+        groups.setdefault(_find(i), []).append(i)
+
     out = []
-    for cl in clusters:
-        members = [claims[i] for i in cl]
+    for idxs in groups.values():
+        members = [claims[i] for i in idxs]
         if len(members) == 1:
             out.append(members[0])
             continue
