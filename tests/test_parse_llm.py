@@ -120,6 +120,16 @@ def test_coerce_infinite_float_to_int_does_not_raise():
     assert _coerce_value("1e400", int) == "1e400"
 
 
+def test_to_int_returns_none_on_non_finite_not_overflow():
+    # to_int does int(float(v)); float() accepts 'inf'/'1e400'/'Infinity' but int() then raises
+    # OverflowError. The documented contract is "None when unparseable", not a crash.
+    from looplab.core.parse import to_int
+    assert to_int("inf") is None and to_int("-inf") is None
+    assert to_int("1e400") is None and to_int("Infinity") is None
+    assert to_int("nan") is None                       # int(float('nan')) -> ValueError -> None
+    assert to_int("3.7") == 3 and to_int("x") is None and to_int(None) is None
+
+
 def test_parse_structured_infinite_int_raises_parse_error_not_overflow():
     from pydantic import BaseModel
 
