@@ -123,6 +123,11 @@ EV_NOVELTY_REJECTED = "novelty_rejected"
 # Audit-only (records the grade + near-node); recorded only when `graded_novelty` is on. Additive,
 # reader-defaulted; folds into RunState.novelty_grades. See looplab/search/graded_novelty.py.
 EV_NOVELTY_GRADED = "novelty_graded"
+# PART IV cross-run Step 2 (§21.20): the proposed idea's concept(s) were tried in a SIMILAR earlier run
+# (loaded from the cross-run ConceptCapsuleStore). Audit-only, recorded only when `cross_run_concepts`
+# is on; SURFACES the prior outcome, never rejects. Additive, reader-defaulted; folds into
+# RunState.cross_run_priors. See looplab/engine/novelty.py + looplab/engine/memory.py.
+EV_CROSS_RUN_PRIOR = "cross_run_prior"
 # R1-c: a calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result, computed live
 # by the engine (an LLM output can't live in the deterministic fold) and frozen here. Generation-scoped
 # and read ONLY as a metric-tie-break in best-selection (never overrides ground truth, §21.7). Additive;

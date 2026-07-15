@@ -488,6 +488,13 @@ class Settings(BaseSettings):
     # before, any script. OPT-IN (default off) because it changes which stored fingerprints a LIVE run
     # matches; a running portfolio must not silently re-key mid-flight. See engine/memory.py.
     fingerprint_universal: bool = False
+    # PART IV cross-run Step 2 (§21.20). Fill graded-novelty's `prior_concepts` from the cross-run
+    # ConceptCapsuleStore: at run end write a per-run concept capsule (the shipped `node_concepts` tags +
+    # best outcome, keyed by task_fingerprint) to `memory_dir`; when a later SIMILAR run proposes an idea
+    # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
+    # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
+    # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
+    cross_run_concepts: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external

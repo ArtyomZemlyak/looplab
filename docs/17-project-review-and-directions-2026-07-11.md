@@ -3834,13 +3834,17 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   Migrate old logs; **gate = incremental projection digest equals a clean full rebuild** at the same
   snapshot (§21.20.11). UI/agent effect: a read-only scope inspector only. Add the **replay test** from
   §21.20.12 #2 here.
-- **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** Replace the raw
-  `prior_concepts: set[str]` with the structured prior-evidence bundle §21.20.5 specifies (concept, scope
-  relation, prior outcomes, representative refs, confidence/freshness, materially-different flag) and wire it
-  into `_graded_novelty_precheck` (`novelty.py`). Level 3 = **surface/reframe**, never cross-scope hard
-  reject; only an exact implementation/data/objective duplicate feeds the existing duplicate policy.
-  **Gate = false hard-reject rate ≈ 0; measured exact-duplicate savings.** Needs the `concept_uid` resolver
-  (§21.20.12 #4), so it lands on top of CR0/CR1a's assignment records.
+- **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** **LANDED 2026-07-15 (lean
+  first slice):** a per-run `ConceptCapsuleStore` (in `engine/memory.py`, mirroring `JsonlCaseLibrary`)
+  persists each run's `node_concepts` tags + best-per-concept outcome to `memory_dir` at finalize, keyed by
+  the universal `task_fingerprint`; `_graded_novelty_precheck` (`novelty.py`) loads similar-run priors into
+  `grade_novelty(prior_concepts=…)` and, on a level-3 hit, records a `cross_run_prior` audit event (folds
+  into `RunState.cross_run_priors`) that SURFACES the prior run + outcome — never rejects. Off-by-default
+  under `cross_run_concepts`; audit-only, off the selection path. Tests: capsule store (7),
+  write+surface+off-switch+replay (8). **Still TODO to reach the full CR2c spec:** upgrade the raw
+  concept-slug set to the structured prior-evidence bundle §21.20.5 specifies (scope relation, freshness,
+  materially-different flag) once the `concept_uid` resolver (§21.20.12 #4) exists; and the exact-duplicate
+  savings gate. Level 3 stays **surface**, never cross-scope hard reject.
 - **Step 3 — CR1a incremental index.** Atoms → `RunCapsule` per run → `PortfolioSummary`/`ConceptDigest`,
   concept assignments over the `concept_uid` resolver, taxonomy releases, and the Atlas metadata journal
   (§21.20.4). **Gate = 50/500-run ingest with 20 concurrent terminal runs producing zero lost/duplicate

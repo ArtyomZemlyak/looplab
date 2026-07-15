@@ -154,6 +154,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         graded_novelty = _opt("graded_novelty")
         capability_expansion = _opt("capability_expansion")
         fingerprint_universal = _opt("fingerprint_universal")
+        cross_run_concepts = _opt("cross_run_concepts")
         phase_handoff_summary = _opt("phase_handoff_summary")
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
@@ -331,6 +332,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._graded_novelty = bool(graded_novelty)
         self._capability_expansion = bool(capability_expansion)
         self._fingerprint_universal = bool(fingerprint_universal)
+        self._cross_run_concepts = bool(cross_run_concepts)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to
@@ -1318,6 +1320,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
     def _store_case(self, final: RunState) -> None:
         return self.lessons.store_case(final)
+
+    def _store_concept_capsule(self, final: RunState) -> None:
+        return self.lessons.store_concept_capsule(final)
 
     @staticmethod
     def _cadence_due(n: int, last: int, every: int) -> bool:

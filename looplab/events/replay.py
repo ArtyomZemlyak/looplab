@@ -23,6 +23,7 @@ from looplab.events.types import (
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_CONCEPT_CONSOLIDATION, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
+    EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
@@ -1242,6 +1243,9 @@ def _on_novelty_rejected(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
 def _on_novelty_graded(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.novelty_grades.append(d)   # D3: a graded-ALLOW (level-4/5) the flat gate would reject (audit)
 
+def _on_cross_run_prior(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    st.cross_run_priors.append(d)   # §21.20 Step 2: concept tried in a SIMILAR earlier run (audit; surface)
+
 def _on_hypothesis_merged(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # P1+: engine-written agentic merge — fold alias hypotheses into a canonical. Collected
     # here, APPLIED deterministically in `_derive_hypotheses` (no LLM in the fold). A malformed
@@ -1735,6 +1739,7 @@ _HANDLERS = {
     EV_FORESIGHT_SELECTED: _on_foresight_selected,
     EV_NOVELTY_REJECTED: _on_novelty_rejected,
     EV_NOVELTY_GRADED: _on_novelty_graded,
+    EV_CROSS_RUN_PRIOR: _on_cross_run_prior,
     EV_NODE_VERIFIED: _on_node_verified,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,

@@ -588,6 +588,10 @@ class RunState(BaseModel):
     # concept overlap the flat gate would reject (level-4 same-direction-new-impl, level-5 re-open of a
     # wrongly-abandoned direction). Audit-only sidecar; never read by best-selection. Additive.
     novelty_grades: list[dict] = Field(default_factory=list)
+    # PART IV cross-run Step 2 (§21.20): concepts the proposed idea shares with a SIMILAR earlier run,
+    # surfaced (never rejected) so the trace/researcher sees "tried in run X -> metric Y". Populated only
+    # under `cross_run_concepts`; audit-only sidecar, never read by best-selection. Additive.
+    cross_run_priors: list[dict] = Field(default_factory=list)
     # Deep-Research stage (Phase 2, audit-only sidecar — NEVER read by best-selection). `research`
     # is the timeline of completed memos (each a ResearchMemo dump); `research_requests` are pending
     # manual `deep_research` control events and `research_served` how many have been fulfilled (the
