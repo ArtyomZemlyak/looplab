@@ -396,3 +396,22 @@ def test_approve_never_defaults_to_a_different_best_or_preapproves(tmp_path):
     assert approved.exit_code == 0, approved.output
     grant = [event for event in es.read_all() if event.type == "approval_granted"][-1]
     assert grant.data == {"node_id": 0, "generation": 0}  # best is #7, pending subject is #0
+
+
+def test_asset_brief_llm_mode_does_not_crash(tmp_path):
+    # `asset-brief <repo> --llm` referenced an undefined `run_dir`, so the agentic mode raised NameError
+    # and was 100% broken. It must at least reach the offline degrade path (no reachable endpoint here).
+    r = runner.invoke(app, ["asset-brief", str(tmp_path), "--llm"])
+    assert not isinstance(r.exception, NameError), r.exception
+    assert r.exit_code == 0, r.output
+
+
+def test_inspect_model_override_targets_llm_model_field():
+    # concept-steward/task-facets/claim-steward used model_copy(update={"model":...}); the Settings field
+    # is `llm_model`, so the override was silently dropped. Guard the coercion the CLI relies on.
+    from looplab.core.config import Settings
+    s = Settings()
+    s.llm_model = "my-override-model"
+    assert s.llm_model == "my-override-model"
+    # the old buggy form wrote a phantom attr and left llm_model at the default
+    assert Settings().model_copy(update={"model": "x"}).llm_model == Settings().llm_model

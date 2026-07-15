@@ -286,8 +286,10 @@ def asset_brief_cmd(
         raise typer.Exit(2)
     client = None
     if llm:
-        from looplab.core.config import Settings
-        settings = _settings_for_run(run_dir, model)
+        # asset-brief sweeps a REPO, not a run dir (no config.snapshot.json), so there is no run_dir here
+        # — pass None to get ambient Settings with the --model override on top. (Previously referenced an
+        # undefined `run_dir`, so `--llm` raised NameError and the whole agentic mode was dead.)
+        settings = _settings_for_run(None, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — degrade to the offline scan
@@ -660,7 +662,8 @@ def concept_steward_cmd(
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
@@ -741,7 +744,8 @@ def task_facets_cmd(
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001
@@ -777,7 +781,8 @@ def claim_steward_cmd(
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
