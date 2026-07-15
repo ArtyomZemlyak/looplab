@@ -2159,7 +2159,8 @@ def _derive_hypotheses(st: RunState) -> None:
     _record_setters: set[int] = set()
     _running: float | None = None
     for _n in sorted(st.nodes.values(), key=lambda x: x.id):
-        if _n.status is NodeStatus.evaluated and _n.feasible and _n.metric is not None:
+        if (_n.status is NodeStatus.evaluated and _n.feasible and _n.metric is not None
+                and not _n.tombstoned):             # §6.3: a deleted node must not set the board's SOTA
             if _running is None or better(_n.metric, _running):
                 _record_setters.add(_n.id)          # first node ESTABLISHES the SOTA, or a later node
                 _running = _n.metric                # BEATS the standing record — either is a real advance
@@ -2167,7 +2168,7 @@ def _derive_hypotheses(st: RunState) -> None:
 
     # 3) compute a verdict per hypothesis from its evidence nodes.
     for h in hyps.values():
-        ev = [st.nodes[i] for i in h.evidence if i in st.nodes]
+        ev = [st.nodes[i] for i in h.evidence if i in st.nodes and not st.nodes[i].tombstoned]
         evaluated = [n for n in ev if n.status is NodeStatus.evaluated and n.feasible
                      and n.metric is not None]
         supported = False

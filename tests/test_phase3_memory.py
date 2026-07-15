@@ -135,6 +135,21 @@ def test_experiments_digest_excludes_tombstoned_nodes():
     assert theme_rollup(st).get("beta", {}).get("count") == 1       # tombstoned 'beta' node excluded
 
 
+def test_sibling_and_lineage_digests_exclude_tombstoned_nodes():
+    # §6.3: the always-on Researcher context (sibling_digest diversity pressure, lineage_lessons inherited
+    # outcomes) must not surface a logically-deleted node — else a deleted dead-end keeps steering proposals.
+    root = _node(0, metric=1.0)
+    live = _node(1, op="improve", parents=[0], metric=0.6)
+    dead = _node(2, op="improve", parents=[0], metric=0.4)
+    dead.tombstoned = True
+    dead.idea.rationale = "DELETED dead-end approach"
+    st = _state([root, live, dead], direction="min")
+    sd, ll = sibling_digest(st, root), lineage_lessons(st, root)
+    assert "#2" not in sd and "DELETED" not in sd, sd     # tombstoned sibling hidden
+    assert "#2" not in ll and "DELETED" not in ll, ll     # tombstoned descendant not an inherited lesson
+    assert "#1" in sd                                       # the live sibling still shows
+
+
 # --------------------------------------------------------------------------- #
 # D2 memory hygiene
 # --------------------------------------------------------------------------- #

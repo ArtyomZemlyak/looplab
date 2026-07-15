@@ -171,10 +171,13 @@ class ConfirmPhaseMixin:
                                   "std": nd.confirmed_std or 0.0,
                                   "n": nd.confirmed_seeds or self.confirm_seeds})
                 continue
-            # The budget break applies ONLY to UNCONFIRMED tail nodes (a fresh per-seed eval costs time);
-            # every already-confirmed leader above is harvested for free regardless of budget.
+            # The budget cutoff applies ONLY to UNCONFIRMED tail nodes (a fresh per-seed eval costs time);
+            # every already-confirmed node is harvested for free above regardless of budget. Use `continue`,
+            # NOT `break`: a `break` would also stop harvesting already-confirmed nodes ORDERED AFTER the
+            # first unconfirmed budget-broken node (e.g. topk = [A✓, B✓, C✗(broke), D✓] would drop D's free
+            # confirmed mean) — the same wrong-champion bug this guard exists to prevent.
             if i >= must_confirm and max_es is not None and spent >= max_es:
-                break                                     # leaders confirmed; a resume extends the tail
+                continue                                  # skip only this unconfirmed node's paid eval; a resume extends it
             # Per-seed resume (#0): reuse seeds already run in a prior (crashed) attempt instead
             # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
             done = state.confirm_seed_results.get(nd.id, {})

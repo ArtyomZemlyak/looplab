@@ -213,6 +213,7 @@ def sibling_digest(state: RunState, parent) -> str:
     pid = parent.id if parent is not None else None
     sibs = [n for n in state.nodes.values()
             if n.status is not NodeStatus.pending
+            and not n.tombstoned                    # §6.3: a deleted sibling must not steer diversity
             and (pid in n.parent_ids if pid is not None else not n.parent_ids)
             and (parent is None or n.id != parent.id)]
     if not sibs:
@@ -251,6 +252,8 @@ def lineage_lessons(state: RunState, parent, k: int = 5) -> str:
     lessons: list[tuple[float, str]] = []
     for nid in desc:
         n = state.nodes[nid]
+        if n.tombstoned:                            # §6.3: a deleted descendant is not an inherited lesson
+            continue
         if n.status is NodeStatus.failed:
             lessons.append((0.5, f"  #{n.id} {n.operator} FAILED ({n.error_reason or 'error'}): "
                                  f"{' '.join((n.idea.rationale or '').split())[:70]}"))
@@ -289,7 +292,9 @@ def ancestral_repair_chain(state: RunState, node, k: int = 4) -> str:
             continue
         seen.add(nid)
         n = state.nodes[nid]
-        if n.operator == "debug" or n.error:
+        # §6.3: a tombstoned ancestor is not a live repair to preserve (defensive — a live node's
+        # ancestors are normally live, since tombstoning removes a whole subtree); keep walking past it.
+        if not n.tombstoned and (n.operator == "debug" or n.error):
             chain.append(n)
         stack.extend(n.parent_ids)
     if not chain:
