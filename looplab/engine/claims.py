@@ -34,6 +34,13 @@ def _node_ids(raw) -> list:
     return out
 
 
+def _qualify_refs(run_id, node_ids) -> list[str]:
+    """Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse: a bare node id is run-local.
+    "?" marks a ref whose run is unknown (e.g. a D8 claim without a run_id)."""
+    r = str(run_id or "?")
+    return [f"{r}:{n}" for n in node_ids]
+
+
 def _epistemic(support, oppose) -> str:
     """The evidence's current verdict on a claim. 'mixed' when both sides exist (a scoped disagreement,
     never newest-wins); 'inconclusive' when only neutral/unknown evidence remains — distinct from a
@@ -56,12 +63,17 @@ CLAIM_DECISIONS = ("ratified", "rejected", "pinned")
 
 
 def record_claim_decision(memory_dir, *, statement: str, decision: str, note: str = "",
-                          by: str = "operator", at: str = "") -> dict:
-    """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL keyed by the same
-    `normalize_statement` identity claims use, so it overlays the machine-proposed assessment. This is the
-    governance write of §22.4 — agents never call it; only a human/control-intent does. Returns the record.
-    Best-effort atomic append; raises on an invalid decision or missing memory dir (a real operator error)."""
+                          by: str = "operator", at: str = "", scope: str = "", metric: str = "") -> dict:
+    """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL, keyed BOTH by the
+    legacy `normalize_statement` (so the lean projection still overlays) AND by a structured `claim_uid`
+    (scope+polarity-precise, so a decision in task A never reaches a same-worded claim in task B — CODEX).
+    `scope` (task id) / `metric` qualify the structured key. This is the §22.4 governance write — agents
+    never call it. Returns the record. Durable locked+fsynced append; raises on an invalid decision or
+    missing memory dir (a real operator error)."""
     from pathlib import Path
+
+    from looplab.engine.claim_key import claim_uid
+    from looplab.engine.concept_registry import _append_governance
     if decision not in CLAIM_DECISIONS:
         raise ValueError(f"decision must be one of {CLAIM_DECISIONS}, got {decision!r}")
     s = str(statement or "").strip()
@@ -69,26 +81,20 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         raise ValueError("empty statement")
     if not memory_dir:
         raise ValueError("no memory_dir")
-    # CODEX AGENT: this key is global prose identity: `normalize_statement` truncates to 160 characters
-    # and carries no task/passport, metric, polarity, or schema version. Rejecting a claim in task A can
-    # therefore reject a same-worded claim in task B (and two long claims with the same prefix collide).
-    # Governance writes need a stable structured claim_uid + explicit scope/revision, not display text.
-    rec = {"statement": s, "key": normalize_statement(s), "decision": decision,
-           "note": str(note or ""), "by": str(by or "operator"), "at": str(at or "")}
+    rec = {"statement": s, "key": normalize_statement(s),
+           "claim_uid": claim_uid(s, scope=scope, metric=metric), "scope": str(scope or ""),
+           "metric": str(metric or ""), "decision": decision, "note": str(note or ""),
+           "by": str(by or "operator"), "at": str(at or "")}
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    # CODEX AGENT: this acknowledged governance append has no interprocess lock, fsync, monotonic sequence,
-    # action id, or optimistic revision. Concurrent UI/CLI writers can interleave/reorder physical lines,
-    # yet `load_claim_decisions` lets the last readable line define policy. Reuse the EventStore-style
-    # locked append/CAS contract and return only after a durable, attributable (`by`/`at`) commit.
-    with open(path, "a", encoding="utf-8") as f:
-        import json as _json
-        f.write(_json.dumps(rec) + "\n")
+    _append_governance(path, rec)      # locked, fsynced append (shared governance write, CODEX)
     return rec
 
 
 def load_claim_decisions(memory_dir) -> dict:
-    """The LATEST operator decision per claim key (last write wins). {} when none / unreadable."""
+    """The LATEST operator decision, indexed by BOTH its legacy statement key AND its structured `claim_uid`
+    (both entries point at the same record), so the lean projection overlays by normalized statement and the
+    structured projection overlays by uid. Last write wins per key. {} when none / unreadable."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -99,9 +105,14 @@ def load_claim_decisions(memory_dir) -> dict:
         return {}
     out: dict = {}
     for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
+        if r.get("decision") not in CLAIM_DECISIONS:
+            continue
         k = str(r.get("key") or normalize_statement(r.get("statement", "")))
-        if k and r.get("decision") in CLAIM_DECISIONS:
-            out[k] = r            # last wins
+        if k:
+            out[k] = r            # last wins (legacy statement key)
+        uid = str(r.get("claim_uid") or "")
+        if uid:
+            out[uid] = r          # structured scope+polarity key
     return out
 
 
@@ -152,10 +163,12 @@ def load_research_claims(memory_dir) -> list[dict]:
     return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
 
 
-def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[dict]:
+def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False,
+                      structured: bool = False) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b)."""
+    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b);
+    `structured` (opt-in) uses the scope+polarity-safe structured claim key (the full CR)."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -168,7 +181,7 @@ def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[
     # research claims (and the Developer sees the R&D stream it claims to exclude). Accept already-scoped
     # research claims/decisions or one shared scope predicate and apply it to every source before joining.
     return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
-                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy)
+                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy, structured=structured)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
@@ -266,13 +279,108 @@ def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[d
     return out
 
 
+def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
+    """The SCOPE+POLARITY-safe structured projection (full CR of the lean fuzzy merge). Identity is the
+    `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
+    sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
+    Governance overlays by the structured `claim_uid` (scope-precise)."""
+    from looplab.engine.claim_key import claim_signature
+    groups: dict[str, dict] = {}
+
+    def _grp(statement, scope):
+        s = str(statement or "").strip()
+        if not s:
+            return None
+        sig = claim_signature(s, scope=str(scope or ""))
+        if sig["polarity"] == 0:                     # no subject content -> not a claim
+            return None
+        g = groups.get(sig["merge_key"])
+        if g is None:
+            g = groups[sig["merge_key"]] = {
+                "uid": sig["uid"], "contra_key": sig["contra_key"], "polarity": sig["polarity"],
+                "scope": sig["scope"], "support": set(), "oppose": set(), "runs": set(),
+                "scopes": set(), "sources": set(), "_ev": {}}
+        g["_ev"][s] = g["_ev"].get(s, 0)             # candidate representative statements (evidence-weighted)
+        return g
+
+    for lz in lessons or []:
+        g = _grp(lz.get("statement"), lz.get("task_id"))
+        if g is None:
+            continue
+        if lz.get("run_id"):
+            g["runs"].add(str(lz["run_id"]))
+        if lz.get("task_id"):
+            g["scopes"].add(str(lz["task_id"]))
+        refs = _qualify_refs(lz.get("run_id"), _node_ids(lz.get("evidence")))
+        outcome = str(lz.get("outcome") or "")
+        if outcome == "supported":
+            g["support"].update(refs)
+        elif outcome in _NEGATIVE:
+            g["oppose"].update(refs)
+        g["_ev"][str(lz.get("statement") or "").strip()] += len(refs)
+
+    for rc in research_claims or []:
+        g = _grp(rc.get("statement"), rc.get("task_id"))
+        if g is None:
+            continue
+        if rc.get("run_id"):
+            g["runs"].add(str(rc["run_id"]))         # D8 rows DO register their run/scope now (CODEX)
+        if rc.get("task_id"):
+            g["scopes"].add(str(rc["task_id"]))
+        refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
+        g["support"].update(refs)
+        g["_ev"][str(rc.get("statement") or "").strip()] += len(refs)
+        for u in (rc.get("urls") or []):
+            if isinstance(u, str) and u:
+                g["sources"].add(u)
+
+    # Contradiction map: a contra_key seen with BOTH polarities means two opposite claims about one subject
+    # in one scope — the portfolio disagrees with itself at the ASSERTION level (unreachable from a single
+    # merged statement). Each such claim is marked contested and carries its opposites' representative text.
+    contra: dict[str, dict[int, list]] = {}
+    for g in groups.values():
+        contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(g)
+
+    _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
+    out = []
+    for g in groups.values():
+        rep = max(g["_ev"], key=lambda s: (g["_ev"][s], s)) if g["_ev"] else ""
+        sup, opp = sorted(g["support"]), sorted(g["oppose"])
+        opposites = [og for pol, gs in contra.get(g["contra_key"], {}).items() if pol != g["polarity"]
+                     for og in gs]
+        contradicts = sorted({max(o["_ev"], key=lambda s: (o["_ev"][s], s)) for o in opposites if o["_ev"]})
+        d = (decisions or {}).get(g["uid"])
+        out.append({
+            "statement": rep,
+            # a polarity contradiction is the strongest contested signal -> mixed even if this side's own
+            # evidence is one-directional (that is exactly what the structured key makes reachable).
+            "epistemic": "mixed" if contradicts else _epistemic(sup, opp),
+            "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
+            "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]), "sources": sorted(g["sources"]),
+            "claim_uid": g["uid"], "polarity": g["polarity"], "contradicts": contradicts,
+        })
+    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"],
+                            0 if c["contradicts"] else 1, c["statement"]))
+    return out
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None, fuzzy: bool = False) -> list[dict]:
+                      decisions: Optional[dict] = None, fuzzy: bool = False,
+                      structured: bool = False) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
     contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
     overlays an operator `maturity` (`operator-ratified`/`operator-rejected`/`operator-pinned`, else
-    `machine-proposed`) — the §22.4 governance overlay. Sorted most-evidenced first. Pure."""
+    `machine-proposed`) — the §22.4 governance overlay. Sorted most-evidenced first. Pure.
+
+    `structured` (opt-in, the full CR of the lean `fuzzy` merge) switches identity to the SCOPE+POLARITY-safe
+    structured claim key (`claim_key.claim_signature`): claims from different tasks never merge, opposite
+    polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection
+    variants collapse by exact structured key (O(n), no transitive over-merge). Mutually exclusive with the
+    lean `fuzzy` path (structured wins)."""
+    if structured:
+        return _structured_assessments(lessons, research_claims, decisions)
     groups: dict[str, dict] = {}
 
     def _group(stmt: str) -> Optional[dict]:

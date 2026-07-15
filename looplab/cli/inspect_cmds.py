@@ -649,6 +649,8 @@ def claim_decide_cmd(
     reject: bool = typer.Option(False, "--reject", help="Operator REJECTS it (dropped from agent context)."),
     pin: bool = typer.Option(False, "--pin", help="Operator PINS it (kept, marked operator-pinned)."),
     note: str = typer.Option("", help="Optional rationale recorded with the decision."),
+    scope: str = typer.Option("", "--scope", help="Task scope for the structured claim key (a decision is "
+                              "scope-precise: it won't reach a same-worded claim in another task)."),
 ):
     """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin a cross-run claim. This is the
     ONLY way to change cross-run MEANING by hand (agents can only read + cite). Append-only, overlaid on
@@ -662,7 +664,7 @@ def claim_decide_cmd(
     import datetime as _dt
     try:
         rec = record_claim_decision(str(memory_dir), statement=statement, decision=picked[0], note=note,
-                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
+                                    scope=scope, at=_dt.datetime.now().isoformat(timespec="seconds"))
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
@@ -769,6 +771,8 @@ def claims_cmd(
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
     fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
+    structured: bool = typer.Option(False, "--structured", help="Use the scope+polarity-safe structured "
+                                    "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
 ):
     """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
@@ -790,7 +794,8 @@ def claims_cmd(
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
     from looplab.engine.claims import claims_for_memory
-    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy)   # +D8 +decisions
+    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy,
+                               structured=structured)   # +D8 +decisions
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent
