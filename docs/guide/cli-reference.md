@@ -368,7 +368,8 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (or the file itself) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
-| `--json` | off | Emit the full assessments as JSON |
+| `--pack` | off | Render the bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a portfolio-coverage line (composed with `concept_capsules.jsonl` when present) |
+| `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
 
 ---
 

@@ -99,3 +99,71 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Step 5 (§21.20.5): a BOUNDED context pack for a proposing agent — evidence AND counter-arguments.
+# --------------------------------------------------------------------------- #
+
+_CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
+
+
+def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] = None,
+                       max_claims: int = 5) -> dict:
+    """Assemble a token-BOUNDED cross-run context pack from claim assessments (+ an optional concept
+    overview) for a proposing agent (§21.20.5, Step 5). The design's hard rule is that positive hits must
+    never crowd out caveats: contested (`mixed`) claims come first, and a **caveat slot is reserved** so at
+    least one mixed/refuted/inconclusive claim is included whenever one exists. Pure/deterministic and
+    'silent' by construction — it just returns structured data; promoting it to advisory prompt-grounding
+    is a separate, gated step (never wired here). No LLM, no I/O."""
+    max_claims = max(1, int(max_claims))
+    by_state: dict[str, list] = {"mixed": [], "supported": [], "refuted": [], "inconclusive": []}
+    for c in claims or []:
+        by_state.get(c["epistemic"], by_state["inconclusive"]).append(c)
+    # contested first (they carry the counter-argument), then supported, then the remaining caveats.
+    ordered = by_state["mixed"] + by_state["supported"] + by_state["refuted"] + by_state["inconclusive"]
+    picked = ordered[:max_claims]
+    # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest picked
+    # (last, since `ordered` is strongest-first) for the strongest available caveat — opposition is never
+    # crowded out by a full slate of positives.
+    if picked and not any(c["epistemic"] in _CAVEAT_STATES for c in picked):
+        caveats = by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"]
+        if caveats:
+            picked = picked[:-1] + [caveats[0]]
+
+    def _slim(c: dict) -> dict:
+        return {"statement": c["statement"], "epistemic": c["epistemic"],
+                "n_support": c["n_support"], "n_oppose": c["n_oppose"],
+                "support": c["support"][:6], "oppose": c["oppose"][:6]}
+
+    pack = {
+        "claims": [_slim(c) for c in picked],
+        "n_claims_total": len(claims or []),
+        "n_contested": len(by_state["mixed"]),
+    }
+    if concept_overview:
+        pack["coverage"] = {
+            "n_runs": concept_overview.get("n_runs", 0),
+            "n_concepts": concept_overview.get("n_concepts", 0),
+            "top_concepts": [e["concept"] for e in (concept_overview.get("concepts") or [])[:max_claims]],
+        }
+    return pack
+
+
+def render_context_pack(pack: dict) -> str:
+    """Render a context pack as a compact, bounded text block for a proposing agent (the advisory form).
+    Deterministic; leads with contested evidence so the agent sees counter-arguments, not only positives."""
+    if not pack.get("claims") and not pack.get("coverage"):
+        return ""
+    _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
+    lines = [f"Cross-run evidence ({pack.get('n_claims_total', 0)} claims, "
+             f"{pack.get('n_contested', 0)} contested) — prior experiments, with counter-evidence:"]
+    for c in pack.get("claims", []):
+        lines.append(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
+                     f"{c['statement'][:120]}")
+    cov = pack.get("coverage")
+    if cov:
+        top = ", ".join(cov.get("top_concepts", [])[:6])
+        lines.append(f"Portfolio coverage: {cov.get('n_runs', 0)} run(s), {cov.get('n_concepts', 0)} "
+                     f"concept(s){'; most-explored: ' + top if top else ''}.")
+    return "\n".join(lines)

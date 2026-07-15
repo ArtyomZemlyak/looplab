@@ -3862,13 +3862,16 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--json]`. Tests: 13. **TODO to reach
   full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence families +
   proof trails (§20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
-- **Step 5 — CR2a/CR2b retrieval + bounded context packs.** The query planner of §21.20.5 (intent →
-  eligibility → capped multi-channel candidates → scope-aware RRF rerank → contradiction bundle →
-  progressive disclosure → receipt), then the bounded context packs at Genesis/run-start/proposal/Strategist
-  with the reserved support/opposition/freshness slots and explicit token envelopes. **Gate = Recall@20 ≥
-  0.95 / nDCG@10 ≥ 0.85, actionable false-transfer ≤ 1%, cross-scope hard-rejects = 0, latency/token
-  budgets;** then a **frozen A/B** showing ≥15% lower duplicate spend with no trust/exploration regression
-  before any live injection.
+- **Step 5 — CR2a/CR2b retrieval + bounded context packs.** **LANDED 2026-07-15 (bounded-pack first
+  slice):** `build_context_pack` / `render_context_pack` (`engine/claims.py`) assemble a token-bounded
+  cross-run pack from the Step-4 claims (+ Step-3 concept overview): contested (`mixed`) claims lead and a
+  **caveat slot is reserved** so positive hits can never crowd out opposition (the §20.5 rule), with a
+  portfolio-coverage line. Pure/deterministic and **silent by construction** — it returns structured data
+  and is surfaced only via `looplab claims --pack`; it is NOT wired into any live prompt. Tests: 9. **TODO
+  to reach full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware-RRF query planner
+  (reusing `hybrid_merge`) + why-recalled receipts; the bounded packs at Genesis/run-start/proposal/
+  Strategist with token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B** (≥15%
+  lower duplicate spend, no trust/exploration regression) that must pass **before any live injection**.
 - **Step 6 — CR3a coverage + Research Atlas UI.** The concept×scope `CoverageFrame` matrix with the
   unknown/stale/partial state grammar, plus the four coordinated Atlas views (Landscape/Findings/Evidence/
   Changes) on a snapshot-consistent shell (§21.20.7). **Gate = coverage counts reproduce raw evidence;

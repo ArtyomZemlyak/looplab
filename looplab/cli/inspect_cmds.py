@@ -531,13 +531,16 @@ def claims_cmd(
                                                 "lessons file itself."),
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
+    pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
 ):
-    """PART IV cross-run Step 4 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
+    """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
     each with support vs oppose node-id evidence and an epistemic state (supported/refuted/mixed/
-    inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. Pure read of
+    inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
+    renders the bounded agent context pack (contested-first, caveat slot reserved). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
-    from looplab.engine.claims import claim_assessments
+    from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     path = p if p.is_file() else p / "lessons.jsonl"
@@ -546,6 +549,16 @@ def claims_cmd(
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
     claims = claim_assessments(lessons)
+    if pack:
+        # compose with the concept overview (Step 3) from the same memory dir when present
+        base = p if p.is_dir() else p.parent
+        caps_path = base / "concept_capsules.jsonl"
+        overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all())
+                    if caps_path.exists() else None)
+        cp = build_context_pack(claims, concept_overview=overview, max_claims=top)
+        typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
+                   else (render_context_pack(cp) or "(empty context pack)"))
+        return
     if contested_only:
         claims = [c for c in claims if c["epistemic"] == "mixed"]
     if as_json:
