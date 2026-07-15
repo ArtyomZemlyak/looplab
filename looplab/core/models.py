@@ -445,6 +445,11 @@ class RunState(BaseModel):
     # affects selection; each entry carries `at_node` so the emission gate is idempotent on resume.
     # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.
     concept_coverage_snapshots: list[dict] = Field(default_factory=list)
+    # PART IV D5 (§21.16, Phase 2c): per-node RAW concept tags (node_id -> [concept_id]) recorded once by
+    # the LLM tagger, so later strategist cadences reuse them and only tag NEW nodes (incremental tagging,
+    # ~O(nodes) not ~O(nodes x cadences) LLM calls). Populated only when `concept_pivot` is on; audit-only,
+    # never affects selection. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
+    node_concepts: dict[int, list[str]] = Field(default_factory=dict)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.
     proposed_spec: Optional[dict] = None  # {eval_spec, adapter_files, goal} from the agent

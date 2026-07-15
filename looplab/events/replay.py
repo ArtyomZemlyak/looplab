@@ -21,7 +21,7 @@ from looplab.events.types import (
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
-    EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
+    EV_NODE_CONCEPTS, EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
     EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
@@ -1089,6 +1089,16 @@ def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCt
     # dedups on resume. NEVER touches selection (mirrors _on_coverage_snapshot).
     st.concept_coverage_snapshots.append(d)
 
+def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV D5 Phase 2c: the LLM tagger's RAW tags for one node, recorded once so later cadences reuse
+    # them. Node-scoped; LAST write wins (a re-tag after graph growth may refine a node's tags). Audit-only
+    # — feeds the concept snapshot / graded-novelty, NEVER selection. Order-tolerant + idempotent.
+    nid = _coerce_node_id(d, "node_id")
+    if nid is None:
+        return
+    concepts = d.get("concepts")
+    st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+
 def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     st.llm_cost = d
 
@@ -1673,6 +1683,7 @@ _HANDLERS = {
     EV_DIVERSITY_ARCHIVE: _on_diversity_archive,
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_CONCEPT_COVERAGE_SNAPSHOT: _on_concept_coverage_snapshot,
+    EV_NODE_CONCEPTS: _on_node_concepts,
     EV_LLM_COST: _on_llm_cost,
     EV_ABLATE: _on_ablate,
     EV_POLICY_DECISION: _on_policy_decision,

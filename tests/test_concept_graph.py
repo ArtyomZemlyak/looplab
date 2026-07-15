@@ -268,6 +268,77 @@ def test_llm_tagger_assigns_and_grows(tmp_path):
     assert "negatives/brand-new-family" in tags[0]
 
 
+def test_incremental_tagging_only_calls_llm_for_new_nodes(tmp_path):
+    """§21.16 Phase 2c EVAL: the headline win — with `known_tags` covering the old nodes, a repeated
+    tagging pass pays ONLY for the new node's LLM call, not the whole history."""
+    st = fold(_store(tmp_path, [("a", "run a", 0.5), ("b", "run b", 0.6), ("c", "run c", 0.7)]).read_all())
+    g = dense_retrieval_skeleton()
+    client = _TagClient(["negatives/external-mining"])
+    # First pass: no known tags -> one LLM call per experiment node (3).
+    tags1 = tag_nodes_llm(st, g, client, grow=True)
+    assert client.calls == 3 and all("negatives/external-mining" in tags1[i] for i in (0, 1, 2))
+    # Second pass: feed back nodes 0,1 as known -> ONLY node 2 is (re)tagged by the LLM.
+    client.calls = 0
+    known = {0: ["negatives/external-mining"], 1: ["negatives/external-mining"]}
+    tags2 = tag_nodes_llm(st, g, client, grow=True, known_tags=known)
+    assert client.calls == 1                         # <-- the incremental win: 1, not 3
+    # reused nodes keep their tags and the concept stays in the graph
+    assert "negatives/external-mining" in tags2[0] and "negatives/external-mining" in tags2[1]
+    assert "negatives/external-mining" in tags2[2]   # the freshly-tagged node
+
+
+def test_incremental_tagging_reuses_grown_ids_without_a_call(tmp_path):
+    """A reused node whose recorded tag is a GROWN `axis/slug` id is re-materialized into the graph with
+    NO LLM call (so a later cadence's coverage still sees it)."""
+    st = fold(_store(tmp_path, [("z", "run z", 0.5)]).read_all())
+    g = dense_retrieval_skeleton()
+    client = _TagClient(["negatives/external-mining"])
+    known = {0: ["negatives/brand-new-grown"]}       # a grown id not in the skeleton
+    tags = tag_nodes_llm(st, g, client, grow=True, known_tags=known)
+    assert client.calls == 0                          # fully reused, no LLM
+    assert "negatives/brand-new-grown" in g           # re-ensured into the graph
+    assert "negatives/brand-new-grown" in tags[0]
+
+
+def test_node_concepts_event_round_trips_and_is_replay_safe(tmp_path):
+    """§21.16 Phase 2c: node_concepts events fold into RunState.node_concepts (last-write-wins,
+    order-tolerant); a log WITHOUT them folds to an empty dict (additive / byte-identical on old logs)."""
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 5, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "theme": "x"}})
+    s.append("node_evaluated", {"node_id": 5, "metric": 0.8})
+    # old-log shape first: no node_concepts -> empty dict
+    assert fold(s.read_all()).node_concepts == {}
+    # now record, then re-record (refinement) — last write wins
+    s.append("node_concepts", {"node_id": 5, "concepts": ["loss/x"], "mode": "llm"})
+    s.append("node_concepts", {"node_id": 5, "concepts": ["loss/x", "regularization/y"], "mode": "llm"})
+    st = fold(s.read_all())
+    assert st.node_concepts == {5: ["loss/x", "regularization/y"]}
+
+
+def test_node_concepts_event_ignores_malformed_payloads(tmp_path):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_concepts", {"concepts": ["a"]})               # no node_id -> ignored
+    s.append("node_concepts", {"node_id": 9, "concepts": "notalist"})   # bad concepts -> []
+    st = fold(s.read_all())
+    assert st.node_concepts == {9: []}
+
+
+def test_build_concept_map_exposes_raw_tags_for_recording():
+    """`build_concept_map` returns `raw_tags` (pre-consolidation) so the engine can record them as
+    node_concepts events; offline fallback exposes them too."""
+    import tempfile, os
+    d = tempfile.mkdtemp()
+    st = fold(_store(Path(d), [("dcl", "decoupled contrastive loss", 0.5)]).read_all())
+    from looplab.search.concept_graph import build_concept_map
+    m = build_concept_map(st, client=None, seed_graph=dense_retrieval_skeleton())
+    assert "raw_tags" in m and isinstance(m["raw_tags"], dict)
+
+
 def test_llm_tagger_degrades_to_heuristic_on_failure(tmp_path):
     # a node whose text DOES match a heuristic alias: on LLM failure it must fall back to that tag
     st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
@@ -321,7 +392,7 @@ def test_build_concept_map_offline_fallback(tmp_path):
                                 ("temperature", "tune the contrastive temperature", 0.82)]).read_all())
     out = build_concept_map(st, "dense retrieval", client=None, seed_graph=dense_retrieval_skeleton())
     assert out["mode"] == "offline-heuristic"
-    assert set(out) == {"graph", "tags", "coverage", "important_uncovered", "mode"}
+    assert set(out) == {"graph", "tags", "raw_tags", "coverage", "important_uncovered", "mode"}
     assert out["important_uncovered"] == []          # no importance derivation without a client
     assert out["coverage"]["experiments"] == 3
 

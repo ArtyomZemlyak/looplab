@@ -22,7 +22,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
 from looplab.core.models import RunState
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT,
-                                  EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
+                                  EV_NODE_CONCEPTS, EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 
@@ -339,24 +339,30 @@ class StrategyCadenceMixin:
             mode = "heuristic"
             if client is not None:
                 parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
-                # COST + SCOPE, by design: this re-tags the whole history each cadence (so per-run tagging is
-                # ~O(nodes × cadences)). That is bounded by `_concept_pivot` being OFF by default (the whole
-                # method early-returns when the flag is off, §295), and the audit snapshot deliberately stays
-                # lightweight: `tools=None` tags from the node's RECORDED text (idea/params/result/log
-                # excerpts already in state), i.e. mode="llm", NOT a live per-node tool-loop — so no live
-                # code/log reads happen here (passing run tools would make it fully agentic but far heavier;
-                # incremental per-node tag caching is the planned optimization, roadmap §21.16).
-                # Span-scope the concept-map LLM generations (agentic tagging + consolidation + importance)
-                # so they file under a `concept_coverage` op, not the ambient/next-node trace (mirrors
-                # `_maybe_consult_strategist`'s `strategist_consult` span). nullcontext on a spanless self.
+                # INCREMENTAL (§21.16, Phase 2c): reuse per-node tags already recorded as `node_concepts`
+                # events and only LLM-tag NEW nodes, so per-run tagging is ~O(nodes) not ~O(nodes × cadences).
+                # Bounded further by `_concept_pivot` being OFF by default (the method early-returns when the
+                # flag is off, §295). The audit snapshot stays lightweight: `tools=None` tags from the node's
+                # RECORDED text (idea/params/result/log excerpts in state), i.e. mode="llm", NOT a live
+                # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
+                # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
+                # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
+                known = {int(k): v for k, v in (getattr(state, "node_concepts", None) or {}).items()}
                 _span = getattr(self, "_op_span", None)
                 with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
                     cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
-                                             seed_graph=seed, parser=parser)
+                                             seed_graph=seed, parser=parser, known_tags=known)
                 # Reuse the coverage build_concept_map already computed (no second O(nodes) rollup).
                 graph, tags = cmap["graph"], cmap["tags"]
                 cov, important = cmap["coverage"], cmap["important_uncovered"]
                 mode = cmap.get("mode", "llm")
+                # Record each NEW/changed node's RAW tags so the next cadence reuses them (idempotent: LAST
+                # write wins in the fold; only emit when the recorded value differs, to avoid log churn).
+                for nid, ft in (cmap.get("raw_tags") or {}).items():
+                    new_ids = sorted(str(c) for c in ft)
+                    if known.get(int(nid)) != new_ids:
+                        self.store.append(EV_NODE_CONCEPTS, {"node_id": int(nid), "concepts": new_ids,
+                                                             "mode": mode})
             if graph is None:                   # deterministic fallback needs a curated skeleton
                 if seed is None:
                     return None

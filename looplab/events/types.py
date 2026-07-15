@@ -89,6 +89,13 @@ EV_COVERAGE_SNAPSHOT = "coverage_snapshot"
 # importance; heuristic+skeleton fallback otherwise) and RECORDED; fold only READS it, so replay preserves
 # the recorded snapshot deterministically. See looplab/search/concept_graph.py.
 EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
+# PART IV D5 (§21.16, Phase 2c): the LLM tagger's RAW concept ids for ONE experiment node, recorded the
+# first time that node is tagged so later strategist cadences REUSE it instead of re-tagging the whole
+# history (turns per-run tagging from ~O(nodes x cadences) LLM calls into ~O(nodes)). Node-scoped and
+# STABLE (a node's raw tags don't change once assigned; consolidation/coverage are re-derived cheaply and
+# purely each cadence). Recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
+# RunState.node_concepts. See looplab/search/concept_graph.py::tag_nodes_llm (known_tags).
+EV_NODE_CONCEPTS = "node_concepts"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"

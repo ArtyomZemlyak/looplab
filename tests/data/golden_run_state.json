@@ -269,6 +269,7 @@
     }
   ],
   "llm_cost": null,
+  "node_concepts": {},
   "nodes": {
     "0": {
       "agent_report": null,

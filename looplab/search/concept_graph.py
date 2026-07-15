@@ -352,7 +352,7 @@ def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, froze
 
 
 def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str = "tool_call",
-                  grow: bool = True, tools=None) -> dict[int, frozenset[str]]:
+                  grow: bool = True, tools=None, known_tags=None) -> dict[int, frozenset[str]]:
     """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
     the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
     GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
@@ -360,7 +360,13 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     mirroring `verify_memo`); otherwise a plain structured call. The alias-based `tag_nodes_heuristic`
     is only the deterministic OFFLINE FALLBACK (used per-node when a call fails, and by tests). Best-
     effort and loop-safe — a failed node degrades to its heuristic tags, never crashing the harness.
-    Impure by design (the LLM step); the analytics it feeds stay pure."""
+    Impure by design (the LLM step); the analytics it feeds stay pure.
+
+    INCREMENTAL (§21.16, Phase 2c): `known_tags` maps node_id -> already-known raw concept ids (from a
+    prior cadence, recorded as `node_concepts` events). Those nodes are NOT re-sent to the LLM — their
+    tags are reused and their concept ids re-`ensure`d into the graph — so a repeated strategist cadence
+    only pays for the NEW nodes' tagging (~O(new) not ~O(all) LLM calls). A node's tags are stable, so
+    reuse is exact; consolidation still runs afterwards over the merged set to normalize synonyms."""
     from pydantic import BaseModel, Field
 
     from looplab.core.parse import parse_structured
@@ -368,7 +374,24 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     class TagOut(BaseModel):
         concept_ids: list[str] = Field(default_factory=list)
 
+    known_tags = known_tags or {}
     heuristic = tag_nodes_heuristic(state, graph)
+
+    def _ensure_ids(ids) -> frozenset[str]:
+        # Re-materialize a reused node's concepts into the graph WITHOUT an LLM call (mirrors the grow
+        # branch below): a known id already in the graph is kept; a grown `axis/slug` id is re-ensured so
+        # the graph rebuilt this cadence carries it. Ids that can't be placed are dropped (best-effort).
+        got: set[str] = set()
+        for raw in ids or ():
+            cid = _normalize_concept_id(raw)
+            if not cid:
+                continue
+            if cid in graph:
+                got.add(cid)
+            elif grow and "/" in cid:
+                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                got.add(cid)
+        return frozenset(got)
     # The prompt is TASK-AGNOSTIC: the domain vocabulary comes ONLY from the graph (KNOWN AXES / KNOWN
     # VOCABULARY), never hardcoded here — so the same tagger works on any task. The multi-touch guidance is
     # phrased with no domain example (a hardcoded dense-retrieval example would mislead the model on a
@@ -393,6 +416,12 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         )
     tags: dict[int, frozenset[str]] = {}
     for n in _experiment_nodes(state):
+        if n.id in known_tags:
+            # REUSE a previously-recorded node's tags — no LLM call. Empty recorded tags fall back to the
+            # node's heuristic tags (a recorded empty means "the tagger found nothing", still valid).
+            reused = _ensure_ids(known_tags[n.id])
+            tags[n.id] = reused if reused else heuristic.get(n.id, frozenset())
+            continue
         desc = _describe_node(n)
         msgs = [{"role": "system", "content": _system()},   # rebuilt from the current (grown) vocabulary
                 {"role": "user", "content": f"EXPERIMENT (node {n.id}):\n{desc}\n\n"
@@ -763,7 +792,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
-                      parser: str = "tool_call") -> dict:
+                      parser: str = "tool_call", known_tags=None) -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -783,16 +812,20 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
         # Deterministic fallback: alias heuristic over whatever seed vocabulary exists (empty -> nothing to
         # localize; a curated seed_graph is required for a useful offline map). No importance derivation.
         tags = tag_nodes_heuristic(state, graph)
-        return {"graph": graph, "tags": tags, "coverage": concept_coverage(state, graph, tags),
+        return {"graph": graph, "tags": tags, "raw_tags": tags,
+                "coverage": concept_coverage(state, graph, tags),
                 "important_uncovered": [], "mode": "offline-heuristic"}
-    tags = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True)
+    # `known_tags` lets a repeated cadence reuse already-recorded node tags and only LLM-tag NEW nodes.
+    raw = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True, known_tags=known_tags)
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
-    graph, tags, renamed = consolidate_concepts(graph, tags, client=client, parser=parser)
+    graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser)
     cov = concept_coverage(state, graph, tags)
     important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
                                           client=client, asset_brief=asset_brief, parser=parser)
-    return {"graph": graph, "tags": tags, "coverage": cov, "important_uncovered": important,
+    # `raw_tags` are the tagger's PRE-consolidation ids (stable per node) — the caller records THESE as
+    # `node_concepts` events so a later cadence reuses them and re-derives consolidation/coverage cheaply.
+    return {"graph": graph, "tags": tags, "raw_tags": raw, "coverage": cov, "important_uncovered": important,
             "consolidated": renamed, "mode": "agentic" if tools is not None else "llm"}
 
 
