@@ -381,6 +381,27 @@ def test_consolidate_reuses_known_renames_authoritatively():
     assert t2[0] == frozenset({"data-aug/mixup"})
 
 
+def test_consolidate_freezes_known_canonicals_no_flap():
+    """B3 defect-#1 regression: a known CANONICAL (a value in known_renames) must NOT be re-merged by the
+    model, or `_final` would rewrite A->B into A->C — the cross-cadence flap B3 exists to stop."""
+    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+
+    class _RemapCanonical:  # the model tries to re-canonicalize the KNOWN canonical data-aug/mixup
+        def complete_tool(self, m, j):
+            return {"merges": [{"raw": "data-aug/mixup", "canonical": "augment/mixup"}]}
+        def complete_text(self, m): return "x"
+    g = ConceptGraph(task_type="t")
+    for cid in ("aug/mixup", "data-aug/mixup", "augment/mixup", "newthing/z"):
+        g.ensure(cid, axes=(cid.split("/", 1)[0],))
+    known = {"aug/mixup": "data-aug/mixup"}   # data-aug/mixup is the recorded CANONICAL
+    # a NEW concept present so `undecided` is non-empty and the LLM step actually runs
+    tags = {0: frozenset({"aug/mixup"}), 1: frozenset({"newthing/z"})}
+    _, t2, rn = consolidate_concepts(g, tags, client=_RemapCanonical(), known_renames=known)
+    assert "data-aug/mixup" not in rn                 # the canonical was NOT re-merged (frozen)
+    assert rn.get("aug/mixup") == "data-aug/mixup"    # the original decision is intact
+    assert t2[0] == frozenset({"data-aug/mixup"})     # node still on the stable canonical (no flap to augment/mixup)
+
+
 def test_consolidate_skips_llm_when_nothing_undecided():
     """B3: when every concept is already covered by known_renames (raw or canonical), the LLM step is
     skipped — the incremental efficiency win + total stability."""

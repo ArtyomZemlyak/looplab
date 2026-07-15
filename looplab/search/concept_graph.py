@@ -868,9 +868,12 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
             for p in out.merges:
                 raw = _normalize_concept_id(p.raw)
                 canon = _normalize_concept_id(p.canonical)
-                # `raw not in known_renames`: a recorded decision is AUTHORITATIVE — never re-decide it.
+                # `raw not in decided`: a recorded decision is AUTHORITATIVE — freeze BOTH known raws AND
+                # known canonicals (`decided` = keys ∪ values). Guarding only the keys would let the model
+                # re-canonicalize a known canonical B->C, which `_final` then rewrites A->B into A->C — the
+                # exact cross-cadence flap B3 exists to stop. New concepts (not in `decided`) still merge.
                 if (raw and canon and raw != canon and raw in idset and "/" in canon
-                        and raw not in known_renames):
+                        and raw not in decided):
                     rename[raw] = canon
         else:
             from looplab.search.hybrid_merge import cluster_near_duplicates
@@ -881,7 +884,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 members = [ids[i] for i in cluster]
                 canon = min(members, key=lambda s: (len(s), s))  # shortest id = canonical
                 for m in members:
-                    if m != canon and m not in known_renames:   # keep recorded decisions fixed
+                    if m != canon and m not in decided:   # freeze known raws AND canonicals (see above)
                         rename[m] = canon
     except Exception:  # noqa: BLE001 — consolidation is best-effort; never break the diagnostic
         return graph, tags, {}
