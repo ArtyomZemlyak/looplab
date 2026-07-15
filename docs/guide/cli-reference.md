@@ -21,6 +21,7 @@ looplab research-targets Axis-structured deep-research targets from coverage (PA
 looplab cross-run-index Run passport + facts index, rebuilt from event logs (PART IV cross-run Step 1/CR0)
 looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
 looplab cross-run-search Relevance-ranked hybrid search over cross-run knowledge (PART IV cross-run CR2a)
+looplab cross-run-digest Recursive axis-cluster summary of explored concepts (PART IV cross-run Step 7)
 looplab concept-merge   Operator merge/purge a cross-run concept slug (PART IV cross-run CR1a)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)

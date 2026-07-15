@@ -138,10 +138,10 @@ def load_research_claims(memory_dir) -> list[dict]:
     return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
 
 
-def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
+def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
-    research claims AND decisions consistently."""
+    research claims AND decisions consistently. `fuzzy` (opt-in) merges paraphrased claims (CR1b)."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -150,7 +150,7 @@ def claims_for_memory(memory_dir, *, lessons=None) -> list[dict]:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
     return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
-                             decisions=load_claim_decisions(memory_dir))
+                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy)
 
 
 def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
@@ -174,8 +174,41 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
                            aliases=load_concept_aliases(memory_dir))
 
 
+def _fuzzy_merge_claims(claims: list[dict]) -> list[dict]:
+    """CR1b (lean, opt-in): merge claims whose STATEMENTS are near-duplicates (paraphrases) into one, via
+    the shipped hybrid clustering (`cluster_near_duplicates`). Recall-oriented — a SUGGESTION-grade merge,
+    hence opt-in; the structured semantic claim key (subject/intervention/comparator/scope) is the full
+    CR1b. Unions the evidence/runs/scopes, keeps the most-evidenced member's statement as the label, and
+    carries an operator maturity if any member had one. Pure."""
+    if len(claims) <= 1:
+        return claims
+    from looplab.search.hybrid_merge import cluster_near_duplicates
+    clusters = cluster_near_duplicates([c["statement"] for c in claims])
+    out = []
+    for cl in clusters:
+        members = [claims[i] for i in cl]
+        if len(members) == 1:
+            out.append(members[0])
+            continue
+        sup = sorted({r for m in members for r in m["support"]})
+        opp = sorted({r for m in members for r in m["oppose"]})
+        rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
+        mat = next((m["maturity"] for m in members if m.get("maturity") != "machine-proposed"),
+                   "machine-proposed")
+        out.append({
+            "statement": rep["statement"], "epistemic": _epistemic(sup, opp), "maturity": mat,
+            "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "runs": sorted({r for m in members for r in m["runs"]}),
+            "scopes": sorted({r for m in members for r in m["scopes"]}),
+            "sources": sorted({s for m in members for s in m.get("sources", [])}),
+            "merged_from": sorted(m["statement"] for m in members),
+        })
+    out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
+    return out
+
+
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
-                      decisions: Optional[dict] = None) -> list[dict]:
+                      decisions: Optional[dict] = None, fuzzy: bool = False) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
     contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
@@ -251,7 +284,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    return out
+    return _fuzzy_merge_claims(out) if fuzzy else out
 
 
 # --------------------------------------------------------------------------- #

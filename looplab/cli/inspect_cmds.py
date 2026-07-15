@@ -618,6 +618,31 @@ def claim_decide_cmd(
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
+@app.command(name="cross-run-digest")
+def cross_run_digest_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full digest as JSON."),
+):
+    """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
+    into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
+    beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
+    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
+    caps_p = Path(memory_dir) / "concept_capsules.jsonl"
+    caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
+    if not caps:
+        typer.echo(f"no concept capsules at {memory_dir}")
+        raise typer.Exit(1)
+    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)))
+    if as_json:
+        typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Cross-run digest: {dg['n_axes']} axis-cluster(s), {dg['n_concepts']} concept(s)")
+    for a in dg["axes"]:
+        typer.echo(f"  {a['n_concepts']:2d} concept(s) / {a['n_runs']:2d} run(s)  {a['axis']}/  "
+                   f"[{', '.join(c.split('/', 1)[-1] for c in a['concepts'][:5])}]")
+
+
 @app.command(name="cross-run-search")
 def cross_run_search_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir."),
@@ -688,6 +713,7 @@ def claims_cmd(
     top: int = typer.Option(20, help="How many most-evidenced claims to show."),
     contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
     pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
+    fuzzy: bool = typer.Option(False, "--fuzzy", help="Merge paraphrased claims (CR1b, suggestion-grade)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
 ):
     """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
@@ -706,7 +732,7 @@ def claims_cmd(
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
     from looplab.engine.claims import claims_for_memory
-    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons)   # + D8 claims + decisions
+    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy)   # +D8 +decisions
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent
