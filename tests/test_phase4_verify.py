@@ -225,6 +225,16 @@ def test_audit_fail_closed_on_missing_and_unreadable(tmp_path):
     assert not is_hard_signal("protected_audit_unavailable")
 
 
+def test_suspicious_output_shape_heuristic_is_advisory_not_hard():
+    # The `looplab harden` constant-prediction rule emits `suspicious_output` on a broad `[x]*NNN`
+    # shape match, which also fires on honest buffer pre-allocation (`weights = [0]*1000`). It must
+    # stay ADVISORY (surface, never gate): hard-gating would silently exclude an honest winner, and a
+    # constant predictor already loses on ground truth, so gating buys nothing.
+    from looplab.events.replay import is_hard_signal
+    assert is_hard_signal("suspicious_output") is False
+    assert is_hard_signal("grader_access") and is_hard_signal("protected_write")   # real cheats stay hard
+
+
 def test_static_scan_flags_protected_deletion():
     """arch-review §4 P1-6: the static scan missed deletion APIs (os.remove) on a protected file."""
     from looplab.trust.reward_hack import detect_reward_hacks

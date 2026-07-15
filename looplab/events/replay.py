@@ -66,7 +66,12 @@ def is_hard_signal(sig: str) -> bool:
     # error should SURFACE to the operator/agent, not gate-exclude an honest node. So it stays
     # advisory alongside critic:*/perfect_metric. `protected_missing`/`protected_unreadable` (a
     # protected file we placed is gone/corrupt) ARE real tamper evidence and remain HARD (P1-6).
-    return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable"))
+    # `suspicious_output` is a broad SHAPE heuristic (the `looplab harden` constant-prediction rule,
+    # pattern `[x]*NNN`) that also matches ordinary buffer pre-allocation (`weights = [0]*1000`); a
+    # constant predictor already loses on ground truth, so hard-gating it only risks silently excluding
+    # an HONEST winner. Advisory (surface, never gate), exactly like perfect_metric.
+    return not sig.startswith(("critic:", "perfect_metric", "protected_audit_unavailable",
+                               "suspicious_output"))
 
 
 def hard_flagged_ids(st: RunState) -> set:
