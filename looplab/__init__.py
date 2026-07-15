@@ -54,6 +54,7 @@ _LAYOUT = {
     "taxonomy_dedup": "search",   # PART IV D4 taxonomy-aware board dedup analysis (offline)
     "crash_repair": "engine",
     "claims": "engine",          # PART IV cross-run Step 4: evidence-grounded claim assessments (read-model)
+    "cross_run_index": "engine", # PART IV cross-run Step 1/CR0: run passport + facts, deterministic rebuild
     "assistant": "serve",
     "assistant_commands": "serve",
     "atomicio": "core",

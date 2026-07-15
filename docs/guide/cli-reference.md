@@ -18,6 +18,7 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
+looplab cross-run-index Run passport + facts index, rebuilt from event logs (PART IV cross-run Step 1/CR0)
 looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
@@ -329,6 +330,25 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
 | `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
+
+---
+
+## `cross-run-index`
+
+PART IV cross-run Step 1 / CR0 (§21.20.3). Builds the portfolio index — each run's **passport** (scope:
+task identity + universal fingerprint + goal terms) and **facts** (attempts = nodes, measurements = terminal
+metrics, best) — by folding every `<run_root>/*/events.jsonl` (the migration over existing runs). A pure,
+deterministic projection of the append-only logs: rebuilding from scratch yields the same index (the CR0
+gate). No new source of truth; no LLM/endpoint.
+
+```bash
+looplab cross-run-index RUN_ROOT [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_ROOT` | *(required)* | Directory holding run subdirs (each with `events.jsonl` + `task.snapshot.json`) |
+| `--json` | off | Emit the full run-facts index as JSON |
 
 ---
 

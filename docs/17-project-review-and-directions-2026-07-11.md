@@ -3828,12 +3828,18 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   distinguishable where legacy collapsed them). (b) TODO: the labelled cross-run fixture from §21.20.10
   (exact repeats, same-app/diff-domain, incompatible metrics, correlated forks, re-eval flips, concept
   aliases/splits, deleted/private runs, a 50-run/5k-node tier). Nothing else can be measured without it.
-- **Step 1 — CR0 contracts + migration + deterministic rebuild.** Define `ScopeProfile`, `RunContext`,
-  `EvaluationSlice`/`ComparisonContract`, `ExecutionAttempt`/`Measurement`, and the Corpus/Visibility
-  snapshot records (§21.20.3) as append-only decision ledgers + a rebuildable SQLite/FTS/vector projection.
-  Migrate old logs; **gate = incremental projection digest equals a clean full rebuild** at the same
-  snapshot (§21.20.11). UI/agent effect: a read-only scope inspector only. Add the **replay test** from
-  §21.20.12 #2 here.
+- **Step 1 — CR0 contracts + migration + deterministic rebuild.** **LANDED 2026-07-15 (lean ledger slice):**
+  `engine/cross_run_index.py` defines the run **passport** (`scope_profile` — identity + universal
+  fingerprint + goal terms) and **facts** (`run_facts` — attempts=nodes / measurements=terminal metrics /
+  best), both PURE deterministic projections of the folded event log + `task.snapshot.json`;
+  `rebuild_index_from_run_root` folds every `*/events.jsonl` (the migration over existing runs), and
+  `tests/test_cross_run_index.py` pins the **CR0 gate** — rebuild-from-scratch is byte-identical and
+  order-independent. Surfaced by `looplab cross-run-index RUN_ROOT [--json]`. Tests: 8. This is the
+  append-only-ledger-first foundation the design sanctions. **TODO to reach full CR0:** the agentic
+  `ScopeProfile` **facets** (interaction/domain/language/dataset-lineage — §20.2) beyond the universal
+  fingerprint; `ComparisonContract`/`EvaluationSlice`; the Corpus/Visibility snapshot records; and the
+  INCREMENTAL projection + `concept_uid` resolver whose "incremental digest == clean rebuild" is the
+  stronger gate (this slice proves the clean-rebuild determinism the incremental path must match).
 - **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** **LANDED 2026-07-15 (lean
   first slice):** a per-run `ConceptCapsuleStore` (in `engine/memory.py`, mirroring `JsonlCaseLibrary`)
   persists each run's `node_concepts` tags + best-per-concept outcome to `memory_dir` at finalize, keyed by

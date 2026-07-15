@@ -525,6 +525,31 @@ def cross_run_concepts_cmd(
         typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}   [{runs}{more}]")
 
 
+@app.command(name="cross-run-index")
+def cross_run_index_cmd(
+    run_root: Path = typer.Argument(..., help="Directory holding run subdirs (each with events.jsonl)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full run-facts index as JSON."),
+):
+    """PART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
+    + FACTS (attempts/measurements) — by folding every `<run_root>/*/events.jsonl` (the migration over
+    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. No LLM/endpoint."""
+    from looplab.engine.cross_run_index import rebuild_index_from_run_root
+    idx = rebuild_index_from_run_root(run_root)
+    if not idx:
+        typer.echo(f"no runs with events.jsonl under {run_root}")
+        raise typer.Exit(1)
+    if as_json:
+        typer.echo(orjson.dumps(idx, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Cross-run index: {len(idx)} run(s)")
+    for f in idx:
+        sc = f["scope"]
+        best = f["best"]
+        bm = f"best={best['metric']:g}" if best and isinstance(best.get("metric"), (int, float)) else "best=—"
+        typer.echo(f"  {f['run_id']:20s} [{sc['task_id']}/{sc['direction']}/{sc['metric'] or '—'}]  "
+                   f"{f['n_attempts']:2d} attempt(s)  {bm}")
+
+
 @app.command(name="atlas")
 def atlas_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "
