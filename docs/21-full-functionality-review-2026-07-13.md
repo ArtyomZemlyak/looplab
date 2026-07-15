@@ -1304,3 +1304,37 @@ resource bounds and revisioned governance have landed.
 The first parallel MkDocs attempt failed only because a newly named `C:\tmp` output directory inherited a
 Windows access denial. Re-running the identical strict build in the already approved temp directory passed;
 this was a validation-harness path permission, not a documentation failure.
+
+## Round 21 — verify the Round-20 doc rebaseline + apply two accuracy fixes (2026-07-15)
+
+Pulled another agent's docs-only rebaseline (`643d6db` + `fe408cf`: doc 17/18/21 + CLI/config guides, backed by
+a 57-run browser walk-through) and adversarially checked it against the code with three independent verifiers.
+The rebaseline is **accurate and appropriately conservative**:
+- **CLI / config / endpoints — all match code.** Every cross-run CLI command (`cross-run-index`/`-concepts`/
+  `-search`/`-digest`, `atlas`, `claims`, `concept-merge`, `claim-decide`), every Settings default, and every
+  HTTP route (`GET /api/cross-run/atlas` & `/claims`, `POST /claim-decide` & `/concept-merge`) verified present
+  with the documented shape; no documented-but-nonexistent or shipped-but-undocumented item.
+- **All five "not shipped" gap claims are factually correct.** Verified with citations: no Atlas/Research-Space
+  React route (the HTTP endpoint exists, the client does not); D8 finalization keeps only statement/node_ids/urls
+  and drops the memo's verification verdict; support counts are attempt refs (lose consolidated `evidence_count`);
+  `concept_uid` is derived-from-label and never called by production reads (raw-slug canonicalization is the
+  default); `ComparisonContract`/`claim_uid`/`evidence_family` are TODO-only.
+- **Internally consistent + correctly scoped.** No un-superseded completion claim survives; the browser evidence
+  is framed as observation (no security/auth property claimed from a UI walk); §33 exists and matches doc 21;
+  the docs pin to `0e45bd3` and do NOT silently claim master's post-`0e45bd3` features (concept split, agentic
+  steward, full CR2a stay marked deferred).
+
+Two accuracy fixes applied:
+- **doc 18 §31.4** — the 57-run browser walk was mislabelled "Global re-review #5"; every other reference
+  (metadata, revision, §28, §33) calls it #7. Corrected to #7.
+- **`engine/claims.py::build_context_pack`** — the docstring said "token-BOUNDED" while its own inline NOTE
+  admits it "bounds by CLAIM COUNT … not a serialized token/byte budget" (the exact overclaim the rebaseline's
+  §33.4 flags as CR-P1). Softened the docstring to "CLAIM-COUNT-bounded" so the code stops overclaiming.
+
+Left as-is (noted, not changed): the Round-18A-before-18B ordering reads chronologically inverted, but 18B/19's
+completion claims are explicitly tagged "superseded by Round 20", so the verdict is unambiguous — a numbering
+nuance, not a contradiction. Full suite (37 targeted claims/context-pack) + mkdocs --strict green.
+
+**Note:** master has advanced 8 commits past `0e45bd3` (agentic concept steward, concept SPLIT, full CR2a
+intent-eligibility, structured claim key, incremental index rebuild) — NOT yet integrated into this branch tip;
+a future rebase would pull them and let the docs mark those "full-CR" slices as landed.

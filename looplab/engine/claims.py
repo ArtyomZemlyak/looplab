@@ -339,8 +339,10 @@ _CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
 
 def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] = None,
                        max_claims: int = 5) -> dict:
-    """Assemble a token-BOUNDED cross-run context pack from claim assessments (+ an optional concept
-    overview) for a proposing agent (§21.20.5, Step 5). The design's hard rule is that positive hits must
+    """Assemble a CLAIM-COUNT-bounded cross-run context pack from claim assessments (+ an optional concept
+    overview) for a proposing agent (§21.20.5, Step 5). ("Claim-count", not token/byte: the pack caps the
+    number of claims + per-claim field lengths; a true serialized-token envelope is the CR2b TODO — see the
+    NOTE below.) The design's hard rule is that positive hits must
     never crowd out caveats: contested (`mixed`) claims come first, and a **caveat slot is reserved** so at
     least one mixed/refuted/inconclusive claim is included whenever one exists. Pure/deterministic and
     'silent' by construction — it just returns structured data; promoting it to advisory prompt-grounding
