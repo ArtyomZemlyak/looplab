@@ -99,12 +99,18 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
         raise ValueError("no memory_dir")
     if dst and src == dst:
         raise ValueError("self-link: from_concept == to_concept")
-    if dst and _would_cycle(src, dst, load_concept_aliases(memory_dir)):
-        raise ValueError(f"alias {src!r} -> {dst!r} would close a cycle")
     rec = {"from": src, "to": dst, "by": str(by or "operator"), "at": str(at or ""), "v": CONCEPT_KEY_VERSION}
     path = Path(memory_dir) / "concept_aliases.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    _append_governance(path, rec)      # locked, fsynced append (see helper)
+
+    def _reject_cycle():
+        # Re-checked UNDER the append lock (re-reading the store), so two concurrent stewards can't each
+        # pass a pre-append snapshot and commit a cycle. `load_concept_aliases` opens the file read-only
+        # (advisory flock doesn't block it) and sees every edge committed before this writer got the lock.
+        if dst and _would_cycle(src, dst, load_concept_aliases(memory_dir)):
+            raise ValueError(f"alias {src!r} -> {dst!r} would close a cycle")
+
+    _append_governance(path, rec, guard=_reject_cycle)      # atomic load+cycle-check+append
     return rec
 
 
@@ -247,10 +253,15 @@ def canonicalize_concepts(concepts, aliases: Optional[dict] = None,
 # now written atomically under an exclusive lock so concurrent UI/CLI writers cannot interleave a line.
 # --------------------------------------------------------------------------- #
 
-def _append_governance(path: Path, rec: dict) -> None:
+def _append_governance(path: Path, rec: dict, *, guard=None) -> None:
     """Append one JSON record under an exclusive advisory lock, then fsync. Falls back to a plain append if
     fcntl is unavailable (non-POSIX) — the lock is best-effort exclusion, not a correctness dependency of
-    the read model (which tolerates torn/duplicate lines via `read_jsonl_lenient`)."""
+    the read model (which tolerates torn/duplicate lines via `read_jsonl_lenient`).
+
+    `guard`, if given, runs UNDER the lock immediately before the append and may raise to ABORT it — so a
+    read-check-append (e.g. the alias cycle rejection) is ATOMIC: a re-read inside the guard sees a
+    concurrent writer's already-committed record, closing the check-then-write race that let two stewards
+    each pass a pre-append snapshot and commit a cycle (a->b and b->a)."""
     line = json.dumps(rec) + "\n"
     with open(path, "a", encoding="utf-8") as f:
         try:
@@ -259,6 +270,8 @@ def _append_governance(path: Path, rec: dict) -> None:
         except Exception:  # noqa: BLE001 — no fcntl (e.g. non-POSIX): best-effort append, lenient reader copes
             fcntl = None   # type: ignore
         try:
+            if guard is not None:
+                guard()             # under the lock; may raise to abort the append (re-reads see committed state)
             f.write(line)
             f.flush()
             import os

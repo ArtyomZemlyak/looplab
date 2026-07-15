@@ -190,3 +190,23 @@ def test_cli_concept_merge_and_purge(tmp_path):
     assert r2.exit_code == 0 and "purged: 'spam'" in r2.stdout
     a = load_concept_aliases(str(tmp_path))
     assert a["hn"] == "hard-neg" and a["spam"] == "\x00purged"
+
+
+def test_append_governance_guard_aborts_append_atomically(tmp_path):
+    # The cycle rejection for record_concept_alias now runs as a `guard` UNDER the append lock, so a
+    # concurrent writer can't slip a cycle-closing edge past a pre-append snapshot. Verify the guard
+    # mechanism: a guard that raises must abort the append (nothing written), not leave a partial record.
+    from looplab.engine.concept_registry import _append_governance
+    p = tmp_path / "gov.jsonl"
+    p.write_text('{"from": "x", "to": "y"}\n', encoding="utf-8")
+    before = p.read_text(encoding="utf-8")
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        _append_governance(p, {"from": "a", "to": "b"}, guard=lambda: (_ for _ in ()).throw(_Boom()))
+    assert p.read_text(encoding="utf-8") == before          # guard raised -> nothing appended
+    # a passing guard appends normally
+    _append_governance(p, {"from": "c", "to": "d"}, guard=lambda: None)
+    assert '"c"' in p.read_text(encoding="utf-8")
