@@ -1007,3 +1007,38 @@ off-by-default (`cross_run_read_tools` / `cross_run_advisory`), read-only, advis
 gains the four `maturity` badge states; §28.5 is **corrected** from the earlier "governance via `CONTROL_EVENTS`"
 assumption to the shipped mechanism (a token-guarded serve `POST` → append-only sidecar `claim_decisions.jsonl`,
 deliberately outside the replay/fold path).
+
+## Round 18 — integrate R1-d verifier CI-tie + CR1a concept UID/alias resolver + D8 persistence (2026-07-15)
+
+Master shipped 9 commits closing the last cross-run engine gaps: **R1-d verifier CI-tie** (§21.19 — a
+statistical, noise-grounded soundness tie-break), a batch of **CODEX audit fixes**, **D8 research claims
+persisted cross-run** (makes `contested` reachable from real machine claims), and **CR1a — the `concept_uid` +
+alias resolver** (`engine/concept_registry.py`: operator merge/purge, non-destructive). Five conflicts, each
+resolved to preserve BOTH sides:
+
+- **replay.py** — UNION of the branch's LLM cost-ledger `_FoldCtx` fields (`llm_usage_seen`/`llm_usage_ids`) and
+  master's R1-d `best_confirmed_significant`. The R1-d fold is additive (`verifier_ci_tie` defaults False on old
+  logs → byte-identical; the golden gained only `verifier_ci_tie:false`), and the confirm-override is gated
+  `(best_confirmed_significant or not verifier_ci_tie)` so a non-significant certificate can't erase best_ci.
+- **strategy.py `_metric_tie_groups`** — the trickiest: master REWROTE it from union-find to SEPARATE groups
+  (CODEX #4: a small exact tie is never blocked behind a large one) AND added the R1-d `ci_tie_set(pool)` group.
+  I reconciled it to keep my earlier **R1-c** fix — the holdout exact-ties group over the FULL eligible holdout
+  pool (`holdout_pool`), not the confirmed subset — while adopting master's separate-groups structure and R1-d
+  group. Verified my R1-c regression test (`test_metric_tie_groups_surfaces_unconfirmed_holdout_tie_past_the_confirmed_pool`)
+  still passes and genuinely exercises the property; no leftover `_find`/union-find reference.
+- **finalize.py** — master added `_store_research_claims` next to the old inline `_store_case`/capsule; the branch
+  had the scoped-marker architecture. Grafted `engine._store_research_claims(final)` into the branch's scoped
+  `case` step (next to `_store_concept_capsule`, gated on `_cross_run_concepts`), same pattern as Round 13.
+- **claims.py `portfolio_atlas`** — combined master's `aliases=` (concept UID resolver) + `research_claims=` (D8)
+  with my Round-17 operator-rejected filter on `contested`.
+- **configuration.md** — kept the branch's enhanced `select_verifier` row + added master's new `verifier_ci_tie` row.
+
+Verification: 170 targeted tests (select_verifier/fitness/concept_registry/claims/replay/options) + the full
+suite green (exit 0), `mkdocs --strict` green. `concept_registry.resolve_slug` is cycle-safe (a `seen` set),
+non-destructive (append-only aliases, raw per-run tags kept), and pure — safe inside the read-models. Focused
+adversarial reviews of the three highest-risk new subsystems (concept registry, D8 persistence + my finalize
+graft, the strategy reconciliation) ran alongside; verified findings applied in the follow-up.
+
+**UI-plans docs (doc 18 PART V refresh #5):** the `concept_uid` resolver shipping closes the **last engine-layer
+gap this document had tracked** — §24.3/§25/§28/§30.1 now record the Atlas as blocked only on the React surface
+(+ the deferred concept *split*), with a faithful cross-run *identity* view finally buildable.

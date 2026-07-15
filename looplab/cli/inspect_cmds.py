@@ -128,7 +128,30 @@ def _run_tools_for(state):
         return None
 
 
-def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
+def _settings_for_run(run_dir=None, model=None):
+    """Load the run's PINNED Settings from `config.snapshot.json` (as resume/UI do) so a diagnostic sends
+    run code/logs to the SAME endpoint the run was pinned to — not a possibly-different ambient config
+    (CODEX #1). Falls back to ambient Settings when the snapshot is absent/unreadable; `model` is the only
+    explicit CLI override applied on top."""
+    from looplab.core.config import Settings
+    settings = None
+    try:
+        snap = (Path(run_dir) / "config.snapshot.json") if run_dir is not None else None
+        if snap is not None and snap.exists():
+            import json
+            data = json.loads(snap.read_text(encoding="utf-8"))
+            data.pop("llm_api_key", None)   # masked in the snapshot; re-read from env/default
+            settings = Settings(**data)
+    except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback
+        settings = None
+    if settings is None:
+        settings = Settings()
+    if model is not None:
+        settings.llm_model = model
+    return settings
+
+
+def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, run_dir=None):
     """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
     per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
     fallback. Returns {graph, tags, important_uncovered, mode, brief}. This is what makes every Phase-1
@@ -143,10 +166,9 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
     # ("Agentic by default … sends node code/logs … pass --offline for the local heuristic"). `asset-brief`
     # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
-        from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        # Use the RUN's pinned endpoint (config.snapshot.json), not ambient Settings, so a diagnostic
+        # sends node code/logs where the run was pinned (CODEX #1); ambient fallback + `model` override.
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic fallback, noted
@@ -202,9 +224,7 @@ def concept_coverage(
     client = None
     if not offline:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => fall back to the offline heuristic, note it
@@ -267,9 +287,7 @@ def asset_brief_cmd(
     client = None
     if llm:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — degrade to the offline scan
@@ -293,7 +311,8 @@ def lock_in(
     from looplab.search.lock_in import lock_in_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         run_dir=run_dir)
     typer.echo(lock_in_report(state, m["graph"], tags=m["tags"], streak_threshold=threshold))
     typer.echo(f"\n  (concept tags built by: {m['mode']})")
 
@@ -313,7 +332,8 @@ def board_dedup(
     from looplab.search.taxonomy_dedup import dedup_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         run_dir=run_dir)
     # dedup works over HYPOTHESIS tags (keyed by hypothesis id), NOT the node tags in m["tags"] (keyed by
     # node id). HT (§21.18) hypothesis-tag precedence:
     #   --offline           -> force the deterministic tag_text heuristic (bypass any recorded cache);
@@ -333,9 +353,7 @@ def board_dedup(
         client = None
         try:
             from looplab.core.config import Settings
-            settings = Settings()
-            if model is not None:
-                settings.llm_model = model
+            settings = _settings_for_run(run_dir, model)
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
             typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
@@ -377,9 +395,11 @@ def novelty_recall_cmd(
     offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
                                                           "paraphrase-vs-variant adjudication — that needs "
                                                           "the LLM)."),
-    max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
-                                                          "of the most-similar candidate pairs with the LLM "
-                                                          "(each pair = one call). Lower it to cap cost/data."),
+    max_pairs: int = typer.Option(60, "--max-pairs", min=0, max=100000,
+                                  help="Call-budget knob: adjudicate at most this many of the most-similar "
+                                       "candidate pairs with the LLM (each pair = one call). Lower it to cap "
+                                       "cost/data. Bounded non-negative: a negative value would slice the "
+                                       "whole internal pool."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
@@ -396,9 +416,7 @@ def novelty_recall_cmd(
     # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
     if not offline:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
             parser = settings.llm_parser
@@ -419,9 +437,7 @@ def lesson_guard_cmd(
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     from looplab.core.config import Settings
-    settings = Settings()
-    if model is not None:
-        settings.llm_model = model
+    settings = _settings_for_run(run_dir, model)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
@@ -551,6 +567,30 @@ def cross_run_index_cmd(
                    f"{f['n_attempts']:2d} attempt(s)  {bm}")
 
 
+@app.command(name="concept-merge")
+def concept_merge_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where concept_aliases.jsonl lives)."),
+    from_concept: str = typer.Argument(..., help="The concept slug to merge away (or purge)."),
+    to_concept: str = typer.Argument("", help="The canonical slug it becomes. Empty = PURGE (tombstone)."),
+):
+    """PART IV cross-run CR1a (§22.4) — the OPERATOR concept governance write: MERGE one concept slug into
+    another (they become one across all cross-run views) or PURGE it (empty target → dropped from views).
+    Non-destructive + reversible: append-only `concept_aliases.jsonl`, applied at READ time; the raw per-run
+    tags are never rewritten. A concept SPLIT (needs bounded re-tagging) is deferred."""
+    from looplab.engine.concept_registry import record_concept_alias
+    import datetime as _dt
+    try:
+        rec = record_concept_alias(str(memory_dir), from_concept=from_concept, to_concept=to_concept,
+                                   at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    if rec["to"]:
+        typer.echo(f"merged: '{rec['from']}' -> '{rec['to']}'")
+    else:
+        typer.echo(f"purged: '{rec['from']}'")
+
+
 @app.command(name="claim-decide")
 def claim_decide_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where claim_decisions.jsonl lives)."),
@@ -589,7 +629,7 @@ def atlas_cmd(
     """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
     it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
     (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
-    from looplab.engine.claims import load_claim_decisions, portfolio_atlas
+    from looplab.engine.claims import atlas_for_memory
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir)
@@ -599,7 +639,7 @@ def atlas_cmd(
     if not lessons and not caps:
         typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
         raise typer.Exit(1)
-    atlas = portfolio_atlas(lessons, caps, max_items=max_items, decisions=load_claim_decisions(base))
+    atlas = atlas_for_memory(base, lessons=lessons, capsules=caps, max_items=max_items)
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
@@ -641,7 +681,8 @@ def claims_cmd(
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
     lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-    claims = claim_assessments(lessons, decisions=load_claim_decisions(p if p.is_dir() else p.parent))
+    from looplab.engine.claims import claims_for_memory
+    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons)   # + D8 claims + decisions
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
         base = p if p.is_dir() else p.parent

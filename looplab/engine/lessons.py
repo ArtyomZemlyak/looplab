@@ -295,3 +295,22 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         # silently lost while `finalization_finished` is committed (CODEX).
         from looplab.engine.memory import ConceptCapsuleStore
         ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
+
+    def store_research_claims(self, final: RunState) -> None:
+        """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
+        cross-run `research_claims.jsonl`, so evidence-backed research findings survive their run and can
+        support/contest lesson verdicts. Best-effort BUILD; the WRITE reaches finalize's retry handshake."""
+        if not self._e.memory_dir:
+            return
+        try:
+            claims = []
+            for memo in (getattr(final, "research", None) or []):
+                for c in (memo.get("claims") if isinstance(memo, dict) else []) or []:
+                    claims.append(c)
+            if not claims:
+                return
+        except Exception:  # noqa: BLE001 — extraction is best-effort, never fails a run
+            return
+        from looplab.engine.claims import record_research_claims
+        record_research_claims(self._e.memory_dir, run_id=final.run_id or final.task_id,
+                               task_id=final.task_id, claims=claims)

@@ -640,19 +640,24 @@ class ConceptCapsuleStore:
         return list(self.capsules)
 
 
-def portfolio_concept_overview(capsules: list[dict]) -> dict:
+def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] = None) -> dict:
     """A cross-run portfolio read-model over concept capsules (§21.20 Step 3 — 'what has been tried across
     the portfolio'). Pure/deterministic, no LLM/IO, drillable to `run_id`. For each concept it lists the
     runs that explored it with THEIR OWN outcome (run_id, metric, direction) — deliberately NOT a single
     cross-run 'best', because raw metrics from different tasks/directions are not comparable without a
-    shared contract (§21.20.1). Also emits a per-run card (concept count + the run's own best_metric)."""
+    shared contract (§21.20.1). Also emits a per-run card (concept count + the run's own best_metric).
+    `aliases` (from `load_concept_aliases`, CR1a) canonicalizes concept slugs at read time: merged aliases
+    collapse to one concept and purged concepts drop — the raw per-run tags are untouched (non-destructive)."""
+    from looplab.engine.concept_registry import resolve_slug
     per_concept: dict[str, dict] = {}
     for c in capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
         direction = str(c.get("direction") or "min")
         for concept in (c.get("concepts") or []):
-            key = str(concept)
+            key = resolve_slug(concept, aliases) if aliases else str(concept)
+            if not key:
+                continue                          # purged concept -> dropped from cross-run views
             e = per_concept.setdefault(key, {"concept": key, "runs": []})
             e["runs"].append({"run_id": rid, "metric": oc.get(concept), "direction": direction})
     concepts = []

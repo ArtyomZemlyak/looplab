@@ -400,6 +400,9 @@ class RunState(BaseModel):
     # best-selection's mean pick breaks a metric-EQUAL tie by the calibrated §12-verifier soundness score
     # (Node.verifier_score) — advisory, never overriding a strictly-better robust_metric (§21.7).
     select_verifier_tiebreak: bool = False
+    # R1-d (§21.19): recorded `verifier_ci_tie` — widen the verifier tie-break to a statistical (CI) tie.
+    # Folded from run_started; absent on old logs -> False -> byte-identical exact-tie selection.
+    verifier_ci_tie: bool = False
     nodes: dict[int, Node] = Field(default_factory=dict)
     # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
     # reset/abort from regrouping old failures into a brand-new browser notification identity.

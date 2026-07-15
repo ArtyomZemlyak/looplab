@@ -112,8 +112,11 @@ def guard_lessons(state: RunState, *, client=None, samples: int = 3, parser: str
                                     client=client, samples=samples, parser=parser)
         og = rep.per_criterion.get("over_generalizes", {}).get("mean")
         ds = rep.per_criterion.get("direction_sound", {}).get("mean")
-        if og is not None:
-            n_scored += 1               # the verifier graded this lesson (vs a total endpoint failure)
+        # A lesson counts as SCORED only when the verdict is COMPLETE — BOTH criteria graded — since
+        # flagging (below) needs both. An og-only partial verdict would let the aggregate claim adjudication
+        # it can't actually act on (CODEX P2); a partial verdict is not a usable score.
+        if og is not None and ds is not None:
+            n_scored += 1               # a COMPLETE verdict (vs endpoint failure / partial coverage)
         flagged = (og is not None and ds is not None
                    and og >= flag_threshold and ds >= flag_threshold)
         hint = ""
