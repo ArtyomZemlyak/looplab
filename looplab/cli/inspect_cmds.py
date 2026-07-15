@@ -545,12 +545,31 @@ def cross_run_concepts_cmd(
 def cross_run_index_cmd(
     run_root: Path = typer.Argument(..., help="Directory holding run subdirs (each with events.jsonl)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full run-facts index as JSON."),
+    incremental: bool = typer.Option(False, "--incremental", help="Reuse a persisted source-digest cache "
+                                     "(<run_root>/.cross_run_index.json); only re-fold CHANGED runs and "
+                                     "report built/cached/skipped receipts."),
 ):
     """PART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
     + FACTS (attempts/measurements) — by folding every `<run_root>/*/events.jsonl` (the migration over
-    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. No LLM/endpoint."""
-    from looplab.engine.cross_run_index import rebuild_index_from_run_root
-    idx = rebuild_index_from_run_root(run_root)
+    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. With `--incremental`
+    an on-disk cache skips unchanged runs and torn runs surface as explicit skip receipts. No LLM/endpoint."""
+    from looplab.engine.cross_run_index import (
+        build_index_incremental, load_index, rebuild_index_from_run_root, save_index,
+    )
+    if incremental:
+        cache = run_root / ".cross_run_index.json"
+        res = build_index_incremental(run_root, prior=load_index(cache))
+        idx = res["index"]
+        if idx:
+            save_index(cache, res)
+        rc = res["receipts"]
+        if not as_json:
+            skipped = f", {len(rc['skipped'])} skipped" if rc["skipped"] else ""
+            typer.echo(f"(incremental: {len(rc['built'])} built, {len(rc['cached'])} cached{skipped})")
+            for s in rc["skipped"]:
+                typer.echo(f"  skip {s['dir']}: {s['reason']}")
+    else:
+        idx = rebuild_index_from_run_root(run_root)
     if not idx:
         typer.echo(f"no runs with events.jsonl under {run_root}")
         raise typer.Exit(1)

@@ -9,7 +9,8 @@ from __future__ import annotations
 import orjson
 
 from looplab.engine.cross_run_index import (
-    build_index, rebuild_index_from_run_root, run_facts, scope_profile,
+    build_index, build_index_incremental, load_index, rebuild_index_from_run_root, run_facts,
+    run_source_digest, save_index, scope_profile,
 )
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -105,6 +106,82 @@ def test_build_index_sorts_regardless_of_input_order(tmp_path):
 def test_empty_run_root_is_empty(tmp_path):
     (tmp_path / "runs").mkdir()
     assert rebuild_index_from_run_root(tmp_path / "runs") == []
+
+
+# --------------------------------------------------------------------------- #
+# Incremental rebuild (full-CR §21.20.13): digest cache + skip receipts + persistence
+# --------------------------------------------------------------------------- #
+
+def test_source_digest_changes_when_the_log_changes(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    d1 = run_source_digest(root / "ra")
+    assert d1.startswith("s_") and run_source_digest(root / "ra") == d1     # stable
+    EventStore(root / "ra" / "events.jsonl").append("node_created", {"node_id": 9, "parent_ids": []})
+    assert run_source_digest(root / "ra") != d1                             # log changed -> digest changed
+    assert run_source_digest(tmp_path / "nope") == ""                       # no log -> ""
+
+
+def test_incremental_reuses_unchanged_and_rebuilds_changed(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal one", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    _make_run_dir(root, "rb", "t2", "goal two", "min", "rmse", [(0, {"a": 1.0}, 0.5)])
+    first = build_index_incremental(root)
+    assert sorted(first["receipts"]["built"]) == ["ra", "rb"] and not first["receipts"]["cached"]
+    # nothing changed -> a second pass with the prior cache reuses BOTH, folds nothing
+    second = build_index_incremental(root, prior=first)
+    assert sorted(second["receipts"]["cached"]) == ["ra", "rb"] and not second["receipts"]["built"]
+    assert _canon(second["index"]) == _canon(first["index"])               # identical index
+    # change ra -> only ra re-folds; rb stays cached
+    EventStore(root / "ra" / "events.jsonl").append("node_created",
+        {"node_id": 1, "parent_ids": [0], "operator": "improve",
+         "idea": {"operator": "improve", "params": {}, "theme": "x"}})
+    EventStore(root / "ra" / "events.jsonl").append("node_evaluated", {"node_id": 1, "metric": 0.9})
+    third = build_index_incremental(root, prior=second)
+    assert third["receipts"]["built"] == ["ra"] and third["receipts"]["cached"] == ["rb"]
+    ra = [f for f in third["index"] if f["run_id"] == "ra"][0]
+    assert ra["n_attempts"] == 2                                            # the new node is reflected
+
+
+def test_incremental_matches_full_rebuild(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "rb", "t2", "goal two", "min", "rmse", [(0, {"a": 1.0}, 0.5)])
+    _make_run_dir(root, "ra", "t1", "goal one", "max", "recall", [(0, {"a": 1.0}, 0.8), (1, {"a": 2.0}, 0.9)])
+    assert _canon(build_index_incremental(root)["index"]) == _canon(rebuild_index_from_run_root(root))
+
+
+def test_torn_run_becomes_a_skip_receipt_not_a_gap(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ok", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    bad = root / "bad"; bad.mkdir()
+    (bad / "events.jsonl").write_bytes(b'{"this is not valid json\n')   # a genuinely corrupt complete line
+    res = build_index_incremental(root)
+    assert [f["run_id"] for f in res["index"]] == ["ok"]                # the good run still indexes
+    assert any(s["dir"] == "bad" for s in res["receipts"]["skipped"])   # the torn run is REPORTED, not silent
+
+
+def test_save_and_load_index_round_trip(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    res = build_index_incremental(root)
+    cache = tmp_path / "idx.json"
+    save_index(cache, res)
+    reloaded = load_index(cache)
+    # the reloaded cache serves as a prior that reuses everything (no re-fold)
+    again = build_index_incremental(root, prior=reloaded)
+    assert again["receipts"]["cached"] == ["ra"] and _canon(again["index"]) == _canon(res["index"])
+    assert load_index(tmp_path / "absent.json") is None
+
+
+def test_cli_cross_run_index_incremental(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal one", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    r1 = CliRunner().invoke(app, ["cross-run-index", str(root), "--incremental"])
+    assert r1.exit_code == 0 and "1 built" in r1.stdout
+    r2 = CliRunner().invoke(app, ["cross-run-index", str(root), "--incremental"])
+    assert r2.exit_code == 0 and "1 cached" in r2.stdout    # the sidecar cache was reused
 
 
 def test_cli_cross_run_index(tmp_path):
