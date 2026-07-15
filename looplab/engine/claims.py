@@ -13,6 +13,7 @@ is neutral (it takes no stance), exactly as on the lesson read/write paths.
 """
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from looplab.engine.memory import _NEGATIVE, normalize_statement
@@ -45,10 +46,63 @@ def _epistemic(support, oppose) -> str:
     return "inconclusive"
 
 
-def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None) -> list[dict]:
+# --------------------------------------------------------------------------- #
+# Operator claim DECISIONS (§22.4) — the ONLY write to cross-run MEANING an actor other than the engine
+# may make. Append-only, keyed by normalized statement, overlaid on the machine-proposed assessment.
+# --------------------------------------------------------------------------- #
+
+CLAIM_DECISIONS = ("ratified", "rejected", "pinned")
+
+
+def record_claim_decision(memory_dir, *, statement: str, decision: str, note: str = "",
+                          by: str = "operator", at: str = "") -> dict:
+    """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL keyed by the same
+    `normalize_statement` identity claims use, so it overlays the machine-proposed assessment. This is the
+    governance write of §22.4 — agents never call it; only a human/control-intent does. Returns the record.
+    Best-effort atomic append; raises on an invalid decision or missing memory dir (a real operator error)."""
+    from pathlib import Path
+    if decision not in CLAIM_DECISIONS:
+        raise ValueError(f"decision must be one of {CLAIM_DECISIONS}, got {decision!r}")
+    s = str(statement or "").strip()
+    if not s:
+        raise ValueError("empty statement")
+    if not memory_dir:
+        raise ValueError("no memory_dir")
+    rec = {"statement": s, "key": normalize_statement(s), "decision": decision,
+           "note": str(note or ""), "by": str(by or "operator"), "at": str(at or "")}
+    path = Path(memory_dir) / "claim_decisions.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        import json as _json
+        f.write(_json.dumps(rec) + "\n")
+    return rec
+
+
+def load_claim_decisions(memory_dir) -> dict:
+    """The LATEST operator decision per claim key (last write wins). {} when none / unreadable."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    if not memory_dir:
+        return {}
+    path = Path(memory_dir) / "claim_decisions.jsonl"
+    if not path.exists():
+        return {}
+    out: dict = {}
+    for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
+        k = str(r.get("key") or normalize_statement(r.get("statement", "")))
+        if k and r.get("decision") in CLAIM_DECISIONS:
+            out[k] = r            # last wins
+    return out
+
+
+def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
+                      decisions: Optional[dict] = None) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
-    contributing `runs`/`scopes`, and an `epistemic` state. Sorted most-evidenced first. Pure."""
+    contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
+    overlays an operator `maturity` (`operator-ratified`/`operator-rejected`/`operator-pinned`, else
+    `machine-proposed`) — the §22.4 governance overlay. Sorted most-evidenced first. Pure."""
     groups: dict[str, dict] = {}
 
     def _group(stmt: str) -> Optional[dict]:
@@ -103,12 +157,15 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             if isinstance(u, str) and u:
                 g["sources"].add(u)
 
+    _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
     out = []
-    for g in groups.values():
+    for key, g in groups.items():
         sup, opp = sorted(g["support"]), sorted(g["oppose"])
+        d = (decisions or {}).get(key)
         out.append({
             "statement": g["statement"],
             "epistemic": _epistemic(sup, opp),
+            "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
             "support": sup, "oppose": opp,
             "n_support": len(sup), "n_oppose": len(opp),
             "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]),
@@ -137,11 +194,18 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # NOTE (CODEX): this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
     # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
     max_claims = max(1, int(max_claims))
+    # Operator governance (§22.4): a claim the operator REJECTED is dropped from the agent's context (the
+    # human overruled it); a RATIFIED claim is surfaced FIRST (the human vouched for it), ahead of even the
+    # contested ones. `machine-proposed` claims keep the default contested-first ordering.
+    live = [c for c in (claims or []) if c.get("maturity") != "operator-rejected"]
+    ratified = [c for c in live if c.get("maturity") == "operator-ratified"]
+    rest = [c for c in live if c.get("maturity") != "operator-ratified"]
     by_state: dict[str, list] = {"mixed": [], "supported": [], "refuted": [], "inconclusive": []}
-    for c in claims or []:
+    for c in rest:
         by_state.get(c["epistemic"], by_state["inconclusive"]).append(c)
-    # contested first (they carry the counter-argument), then supported, then the remaining caveats.
-    ordered = by_state["mixed"] + by_state["supported"] + by_state["refuted"] + by_state["inconclusive"]
+    # ratified first, then contested (counter-argument), then supported, then remaining caveats.
+    ordered = (ratified + by_state["mixed"] + by_state["supported"]
+               + by_state["refuted"] + by_state["inconclusive"])
     picked = ordered[:max_claims]
     # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest picked
     # (last, since `ordered` is strongest-first) for the strongest available caveat — opposition is never
@@ -155,6 +219,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
         # keep runs/scopes too so a reader can resolve the claim's provenance (CODEX).
         return {"statement": c["statement"][:300], "epistemic": c["epistemic"],
+                "maturity": c.get("maturity", "machine-proposed"),
                 "n_support": c["n_support"], "n_oppose": c["n_oppose"],
                 "support": c["support"][:6], "oppose": c["oppose"][:6],
                 "runs": c.get("runs", [])[:6], "scopes": c.get("scopes", [])[:6]}
@@ -173,7 +238,8 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     return pack
 
 
-def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8) -> dict:
+def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
+                    decisions: Optional[dict] = None) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -185,7 +251,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules)
-    claims = claim_assessments(lessons)
+    claims = claim_assessments(lessons, decisions=decisions)
     contested = [c for c in claims if c["epistemic"] == "mixed"]
     thin = [e["concept"] for e in overview["concepts"] if e["n_runs"] == 1]
     # Run count spans BOTH sources — capsules AND the runs cited by lessons — so a lesson-only / legacy

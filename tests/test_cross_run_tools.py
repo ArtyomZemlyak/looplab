@@ -149,3 +149,77 @@ def test_shared_providers_omit_cross_run_tool_when_off(tmp_path):
     from looplab.adapters.tasks import _shared_providers
     provs = _shared_providers(None, _minimal_settings(tmp_path, on=False))
     assert not any(isinstance(p, CrossRunTools) for p in provs)
+
+
+# --------------------------------------------------------------------------- #
+# Scope filter (§22 / live-test finding) — bound to a run, cross-TASK rows don't leak in
+# --------------------------------------------------------------------------- #
+
+def _lz_scoped(statement, task_id, fingerprint, run_id="r1"):
+    return {"statement": statement, "outcome": "supported", "evidence": [1], "run_id": run_id,
+            "task_id": task_id, "role": "", "fingerprint": fingerprint}
+
+
+def test_unbound_is_portfolio_wide(tmp_path):
+    _seed(tmp_path, lessons=[
+        _lz_scoped("about retrieval", "rubert", ["metric:recall", "retrieval", "russian"]),
+        _lz_scoped("about quadratic", "quadratic", ["metric:mse", "quadratic"]),
+    ])
+    out = CrossRunTools(tmp_path).execute("cross_run_claims", {})   # unbound (CLI)
+    assert "about retrieval" in out and "about quadratic" in out   # both — human sees everything
+
+
+def test_bound_scopes_out_foreign_tasks(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, lessons=[
+        _lz_scoped("about retrieval", "rubert", ["metric:recall", "retrieval", "russian"]),
+        _lz_scoped("about quadratic", "quadratic", ["metric:mse", "quadratic"]),
+    ])
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    out = t.execute("cross_run_claims", {})
+    assert "about retrieval" in out          # same task_id OR shared goal term ("retrieval"/"russian")
+    assert "about quadratic" not in out      # the unrelated task no longer leaks (the live-test fix)
+
+
+def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, lessons=[_lz_scoped("legacy lesson", "rubert", ["metric:recall"])])  # no goal terms (ASCII-dropped)
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(task_id="rubert", goal="плотный поиск"))   # Cyrillic goal
+    assert "legacy lesson" in t.execute("cross_run_claims", {})            # exact task_id still passes
+
+
+# --------------------------------------------------------------------------- #
+# Genesis wiring (§22.5) — the run planner gets the cross-run tool when enabled
+# --------------------------------------------------------------------------- #
+
+def _genesis_tools(tmp_path, *, on, monkeypatch):
+    import looplab.engine.genesis as g
+    captured = {}
+
+    def _fake(client, tools, messages, schema, **kw):
+        captured["tools"] = tools
+        raise RuntimeError("stop after assembling tools")
+
+    monkeypatch.setattr(g, "agentic_struct", _fake)
+    g.author_task("classify some text", client=object(), kinds=("dataset",),
+                  memory_dir=str(tmp_path), cross_run_read_tools=on)
+    tools = captured.get("tools")
+    if tools is None:
+        return []
+    provs = getattr(tools, "providers", [tools])
+    flat = []
+    for p in provs:
+        flat += getattr(p, "providers", [p])
+    return flat
+
+
+def test_genesis_gets_cross_run_tool_when_enabled(tmp_path, monkeypatch):
+    flat = _genesis_tools(tmp_path, on=True, monkeypatch=monkeypatch)
+    assert any(isinstance(p, CrossRunTools) for p in flat)
+
+
+def test_genesis_omits_cross_run_tool_when_off(tmp_path, monkeypatch):
+    flat = _genesis_tools(tmp_path, on=False, monkeypatch=monkeypatch)
+    assert not any(isinstance(p, CrossRunTools) for p in flat)

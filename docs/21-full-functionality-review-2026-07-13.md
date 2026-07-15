@@ -942,3 +942,44 @@ three delivery mechanisms; §28.3 anchors Findings to run-qualified citable `"ru
 claim streams; §28.5 anchors the governance workbench to the shipped `CONTROL_EVENTS` operator-write substrate
 (§22.4: agents READ but never EDIT). The "what remains for the UI" story sharpens to *HTTP serving + Atlas React
 surface + operator governance workbench*. Full suite + mkdocs --strict green.
+
+## Round 17 — integrate §22.4 governance WRITE + §22.6 serve API + Genesis/Strategist reads; verify + doc-sync (2026-07-15)
+
+Master shipped the slice that finishes the cross-run consumer model (4 commits): `c41a5f6` (**task-scope the
+read tool** — a live-test leak fix), `b0be675` (**§22.4 operator claim decisions** — the governance WRITE
+path), `9e6e0bb` (**§22.5 Genesis** cross-run read), `cfa1f86` (**§22.6 cross-run serve API** + Strategist
+coverage cue). Integrated by merge; one conflict — `serve/server.py`'s router import list — resolved as a clean
+UNION (the branch's attention/collaboration/reviews routers AND master's new `cross_run` router; the build list
+auto-merged with all of them). `claims.py` and `test_claims.py` auto-merged cleanly, preserving my Round-16
+`portfolio_atlas` n_runs fix + the run-scoped-corroboration regression test alongside master's new governance
+overlay.
+
+What landed, reviewed against the invariants:
+
+- **Governance WRITE (`claims.py`):** `record_claim_decision` → append-only, reversible sidecar
+  `claim_decisions.jsonl` keyed by `normalize_statement` (last-wins), decision ∈ {ratified, rejected, pinned},
+  validated (raises → HTTP 400). `claim_assessments`/`portfolio_atlas` gained a `decisions=` overlay adding a
+  `maturity` field; `build_context_pack` DROPS `operator-rejected` claims and surfaces `operator-ratified`
+  first. This is a sidecar store, NOT a `CONTROL_EVENTS` domain event — cross-run meaning is portfolio-scoped
+  and lives outside the per-run replay/fold path, which is correct (the engine-sole-writer invariant governs
+  the event log, not the memory-dir sidecars).
+- **Serve API (`serve/routers/cross_run.py`):** `GET /api/cross-run/atlas` & `/claims` (reads with decisions
+  overlaid) + `POST /api/cross-run/claim-decide` (the operator write). Verified it is token-guarded like every
+  other write: `server.py`'s default-deny middleware requires the UI token on every `/api/` route outside the
+  tiny zero-model liveness allow-list, so the POST is not reachable unauthenticated — **no auth gap**.
+- **Task-scope leak fix (`cross_run_tools.py`):** now implements `bind_state(self, state, parent=None)` (correct
+  ToolProvider signature) and scopes a BOUND run's queries to its own task (or overlapping goal terms), while an
+  UNBOUND CLI/human query stays portfolio-wide. Also honors operator decisions (drops rejected in
+  `cross_run_claims`). Closes the leak where a live run's agent could read every other task's cross-run data.
+- **Genesis (§22.5) + Strategist coverage cue (§22.6):** additional off-by-default read consumers; advisory,
+  never touch selection, best-effort.
+
+Verification: 98 targeted cross-run/server/strategist tests + the full suite green (exit 0), `mkdocs --strict`
+green. An adversarial mega-review (6-dimension finders + verifiers, focused on the governance write-path
+security + serve auth surface) ran alongside; its verified findings are applied in the follow-up.
+
+**UI-plans docs updated** (doc 18 PART V, refresh #4): the Atlas UI is now **no longer blocked on any backend**
+— read-models + HTTP endpoints + operator write all ship, only the React surface remains (§24.3/§25(4)); §28.3
+gains the four `maturity` badge states; §28.5 is **corrected** from the earlier "governance via `CONTROL_EVENTS`"
+assumption to the shipped mechanism (a token-guarded serve `POST` → append-only sidecar `claim_decisions.jsonl`,
+deliberately outside the replay/fold path).

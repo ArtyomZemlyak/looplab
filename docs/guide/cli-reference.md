@@ -21,6 +21,7 @@ looplab research-targets Axis-structured deep-research targets from coverage (PA
 looplab cross-run-index Run passport + facts index, rebuilt from event logs (PART IV cross-run Step 1/CR0)
 looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
+looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)
 looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
@@ -391,6 +392,32 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a portfolio-coverage line (composed with `concept_capsules.jsonl` when present) |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
+
+Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown,
+a rejected claim is dropped from the agent context pack, and a ratified one is surfaced first.
+
+---
+
+## `claim-decide`
+
+PART V §22.4 — the **operator governance write**: ratify / reject / pin a cross-run claim. This is the ONLY
+way to change cross-run *meaning* by hand — agents can only read + cite (§22). Append-only
+(`claim_decisions.jsonl`), keyed by the normalized statement, overlaid on the machine-proposed assessment
+and honored everywhere the claims are read (CLI, atlas, agent context pack, advisory injection). Reversible
+— re-decide, last write wins.
+
+```bash
+looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `claim_decisions.jsonl` is written) |
+| `STATEMENT` | *(required)* | The claim statement (matched by normalized text) |
+| `--ratify` | — | Operator vouches for it — surfaced FIRST in agent context |
+| `--reject` | — | Operator overrules it — DROPPED from agent context |
+| `--pin` | — | Keep it, marked `operator-pinned` |
+| `--note` | `""` | Optional rationale recorded with the decision |
 
 ---
 

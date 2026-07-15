@@ -4054,14 +4054,21 @@ audited, reversible act.
 
 #### 22.6 Rollout (each off-by-default + audit-first, merged incrementally)
 
-1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (all reasoning roles). **DONE.**
+1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (Researcher/Strategist/
+   deep-research) + **Genesis** (`author_task`, portfolio-wide/unbound for run planning). **DONE.**
 2. Developer role-scoped read variant (into `LLMRepoDeveloper._scout_tools`, `role="developer"`). **DONE.**
-3. Strategist coverage cue + Genesis prior-art (injection, bounded). *(follow-up)*
-4. Operator ratify/pin/purge control events (the governance substrate; UI deferred). *(follow-up)*
+   → READ access now covers EVERY reasoning role: Researcher, Strategist, deep-research, Developer, Genesis.
+3. Strategist coverage cue (bounded portfolio note in its brief under `cross_run_advisory`) + Genesis
+   prior-art (proactive prompt-instruction to consult `cross_run_atlas`, on top of the pull tool). **DONE.**
+4. Operator ratify/reject/pin — `claim_decisions.jsonl` overlay + `looplab claim-decide` **and** a serve
+   API (`GET /api/cross-run/atlas` · `/claims` · `POST /api/cross-run/claim-decide`), honored across the
+   CLI / atlas / agent context pack / advisory injection / strategist cue (rejected dropped, ratified
+   surfaced first). **DONE.** Remaining: the governance UI screen + concept merge/split/purge (need the
+   concept-UID/taxonomy layer, CR1a) and a semantic claim key (CR1b).
 
 Steps 1–2 land the **agentic READ tool for every reasoning role** (Researcher, Strategist, deep-research,
-and the role-scoped Developer), all under the opt-in `cross_run_read_tools` flag — "read for everyone", the
-user's priority. The injected cues (3) and the operator write/ratify path (4) are the remaining slices.
+and the role-scoped Developer); step 4 lands the **operator WRITE/ratify path** (the only actor that may
+change cross-run meaning, §22.4). All under opt-in flags. The injected Strategist/Genesis cues (3) remain.
 
 Every step reuses a shipped seam (the tool-provider contract, the role-routed memory, the control-event
 allow-list) and never lets an agent mutate cross-run truth — the analysis's central guarantee.

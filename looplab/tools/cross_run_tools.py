@@ -34,9 +34,33 @@ class CrossRunTools:
     def __init__(self, memory_dir: str | Path | None, *, role: str = "researcher"):
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
+        self._task_id = ""
+        self._scope_terms: set[str] = set()
 
-    # No bind_state: these queries are portfolio-scoped, not current-run-scoped (a bounded per-task scope
-    # filter is the §21.20.13 CR2a refinement). The provider is stateless and trivially testable.
+    def bind_state(self, state, parent=None) -> None:
+        """Learn the CURRENT run's scope so queries reach SIMILAR tasks, not the whole portfolio (the
+        live-test leak fix): scope = same `task_id` OR a shared goal keyword. When the tool is used
+        UNBOUND (CLI/human), no scope is set and every row passes — the human wants portfolio-wide."""
+        if state is None:
+            return
+        self._task_id = str(getattr(state, "task_id", "") or "")
+        self._scope_terms = _toks(getattr(state, "goal", "") or "")
+
+    def _in_scope(self, row: dict) -> bool:
+        """True when the row belongs to the bound run's scope (same task, or overlapping goal terms), or
+        when the tool is unbound. Goal terms come from the row's `fingerprint` bare tokens (the kind:/dir:/
+        metric: prefixed tokens are excluded). Exact `task_id` always passes — robust even when a legacy
+        (ASCII) fingerprint dropped a non-Latin goal's keywords."""
+        if not self._task_id and not self._scope_terms:
+            return True                                        # unbound -> portfolio-wide
+        if self._task_id and str(row.get("task_id") or "") == self._task_id:
+            return True
+        fp = row.get("fingerprint")
+        if isinstance(fp, list) and self._scope_terms:
+            row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
+            if row_terms & self._scope_terms:
+                return True
+        return False
 
     def specs(self) -> list[dict]:
         if not self.dir:
@@ -70,13 +94,19 @@ class CrossRunTools:
         return read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
 
     def _role_lessons(self) -> list[dict]:
-        """Lessons visible to this role: the role's own + shared/untagged (mirrors the role-routed
-        cross-run lesson priors). An unknown role sees everything."""
-        lessons = self._load("lessons.jsonl")
+        """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
+        role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
+        An unknown role sees every role."""
+        lessons = [lz for lz in self._load("lessons.jsonl") if self._in_scope(lz)]
         if self.role not in ("researcher", "developer"):
             return lessons
-        return [lz for lz in lessons
-                if str(lz.get("role") or "") in ("", self.role)]
+        return [lz for lz in lessons if str(lz.get("role") or "") in ("", self.role)]
+
+    def _scoped_capsules(self) -> list[dict]:
+        from looplab.engine.memory import ConceptCapsuleStore
+        p = self.dir / "concept_capsules.jsonl"
+        caps = ConceptCapsuleStore(p).all() if p.exists() else []
+        return [c for c in caps if self._in_scope(c)]
 
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: execute NEVER raises (a junk arg must read as a tool error, not crash
@@ -90,13 +120,11 @@ class CrossRunTools:
         if not self.dir:
             return "(no cross-run memory configured)"
         from looplab.engine.claims import claim_assessments, portfolio_atlas
-        from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+        from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
             qt = _toks(str(args.get("idea") or ""))
-            caps = (ConceptCapsuleStore(self.dir / "concept_capsules.jsonl").all()
-                    if (self.dir / "concept_capsules.jsonl").exists() else [])
-            ov = portfolio_concept_overview(caps)
+            ov = portfolio_concept_overview(self._scoped_capsules())
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -113,7 +141,9 @@ class CrossRunTools:
             return "TRIED BEFORE (surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
-            claims = claim_assessments(self._role_lessons())
+            from looplab.engine.claims import load_claim_decisions
+            claims = claim_assessments(self._role_lessons(), decisions=load_claim_decisions(self.dir))
+            claims = [c for c in claims if c.get("maturity") != "operator-rejected"]   # honor operator verdicts
             if args.get("contested"):
                 claims = [c for c in claims if c["epistemic"] == "mixed"]
             qt = _toks(str(args.get("query") or ""))
@@ -129,9 +159,9 @@ class CrossRunTools:
                 f"{c['statement']}" for c in claims)
 
         if name == "cross_run_atlas":
-            caps = (ConceptCapsuleStore(self.dir / "concept_capsules.jsonl").all()
-                    if (self.dir / "concept_capsules.jsonl").exists() else [])
-            atlas = portfolio_atlas(self._role_lessons(), caps)
+            from looplab.engine.claims import load_claim_decisions
+            atlas = portfolio_atlas(self._role_lessons(), self._scoped_capsules(),
+                                    decisions=load_claim_decisions(self.dir))
             lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
             if atlas["explored"]:
