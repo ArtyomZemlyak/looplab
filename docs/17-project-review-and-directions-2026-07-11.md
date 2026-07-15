@@ -3612,12 +3612,16 @@ the scientific cross-run surface. Current UI “Project” should be relabelled 
 collision with a future owning Project (ACL/budget/data boundary); a many-to-many **Study** replaces
 single-membership super-task when modelling a research programme.
 
-The Atlas here is the *cross-run* destination (Step 6, gated on CR0/CR1a/CR1b). The complementary
-**near-term per-run visibility layer** — surfacing the *already-shipped, already-served* per-run concept
-tags / coverage+uncovered-region / lock-in / graded-novelty / verifier score that the UI currently ignores,
-which also seeds this Atlas's Landscape view — is specified as **Horizon A** in
-[doc 18 §24.1 (PART V)](18-ui-ux-review-2026-07-11.md). It is a pure read/projection layer (no new store),
-consistent with §21.20.14's reuse rules, and ships independently of the cross-run index.
+The Atlas here is the *cross-run* destination (Step 6, gated on CR0/CR1a/CR1b). The complementary Part-IV UI
+concept is specified in [doc 18 PART V §§23–32](18-ui-ux-review-2026-07-11.md): Horizon A exposes the
+already-served qualitative per-run signals; Horizon A+ adds a sequence-fenced `ConceptFrame` before rendering
+canonical multi-parent topology; §§26–27 deliberately separate Experiment Lineage, legacy Direction lanes,
+the Direction×Concept crosswalk, Concept Landscape/Intersections/Journey and the bounded Focused Map; §§28–31
+define the detailed Atlas interaction, visual/state/accessibility/scale grammar, data contract and validation
+gates. Only the atomic Horizon-A readouts are a pure frontend change: the current folded state lacks labels,
+multi-parent edges, revision/provenance and honest coverage denominators for a full per-run Concept Map.
+All layers remain read/projection consumers — no second store/tagger/claim truth — consistent with §21.20.14,
+and the per-run projection still ships independently of the cross-run index.
 
 ##### 21.20.8 Concurrency, failure, and lifecycle corners
 

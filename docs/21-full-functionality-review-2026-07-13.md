@@ -720,3 +720,40 @@ No code changed this round. The plan is written up as **PART V (§23–§25) of
 Horizon B the cross-run Atlas, gated on the CR contracts), and the reuse/naming corrections — with a
 cross-reference added at doc 17 §21.20.7. Two decisions left open for the owner: cross-run vocabulary scope
 (narrow dense-retrieval skeleton vs broad with alignment) and the Horizon-A entry slice.
+
+---
+
+## Round 12 — Part-IV research-space UI/UX concept review (2026-07-15)
+
+The owner requested a deeper concept review, particularly for theme/direction and concept graph views, with
+new ideas permitted but no implementation. The feature branch was first fast-forwarded from
+`origin/codex/ui-ux-overhaul-20260712` to `94ecb2e`; the incoming Round-11 PART V, doc-17 cross-reference and
+this report were present with no merge conflict.
+
+An independent Part-IV domain inventory, graph-UX design pass and adversarial semantics/accessibility/scale
+pass were reconciled against the current React views and the exact concept/lock-in/novelty/verifier producers
+and folded fields. They found two material corrections to Round 11:
+
+- the current `/state` is sufficient for qualitative tags/signals, but not a canonical per-run concept DAG:
+  it lacks graph labels/definitions, all multi-parent/typed edges, taxonomy revision/digest, assignment
+  provenance/confidence/rationale and complete denominators;
+- `top_concept_frac` is concentration among tagged experiments, not a generic coverage percentage. The compact
+  snapshot omits the tagged count/totals and lock-in threshold/fired decision; `locked_axis/streak` is the
+  historical maximum while `recent_axis/current_streak` is current narrowing.
+
+Doc 18 PART V was therefore expanded from a feature-placement sketch (§23–§25) into the full concept
+(§23–§32). It now separates three coordinated truth models — Experiment Lineage, legacy Direction lanes and
+the multi-label Concept Map — and rejects concept-as-single-group in the existing DAG. New interaction ideas
+include a stable Direction timeline, a Direction×Concept crosswalk (the migration view), matrix/list-first
+Concept Landscape, axis-intersection matrix, temporal Journey and a bounded one/two-hop Focused Concept Map.
+It details the matrix-first cross-run Atlas, proof/compare/Changes/Governance boundaries, state and edge
+semantics, responsive/accessibility/scale contracts, a minimum sequence-fenced per-run `ConceptFrame`,
+degraded-state matrix, acceptance scenarios and dependency-ordered C0/A/A+/B delivery plan.
+
+This round changes documentation only. It does not claim a rendered prototype, browser usability result or UI
+implementation; those are explicit gates in doc 18 §31–§32. The authoritative Atlas section in doc 17
+§21.20.7 now links to the detailed spec and corrects “pure frontend” to apply only to atomic Horizon-A
+readouts. Validation after the final edit: `git diff --check` clean; all relative links in the three modified
+documents resolve; `mkdocs build --strict` succeeds; and the seven focused Part-IV concept/pivot/lock-in/
+graded-novelty/select-verifier/verifier test files pass. No UI/source code changed, so a full application test
+matrix was not represented as necessary evidence for this documentation-only round.
