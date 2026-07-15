@@ -18,11 +18,11 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
-looplab cross-run-index Run passport + facts index, rebuilt from event logs (PART IV cross-run Step 1/CR0)
-looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
-looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
-looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)
-looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
+looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
+looplab cross-run-concepts Valid-capsule concept overview (PART IV cross-run Step 3)
+looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
+looplab claim-decide    Lean operator decision overlay (PART V §22.4)
+looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -336,11 +336,11 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
 
 ## `cross-run-index`
 
-PART IV cross-run Step 1 / CR0 (§21.20.3). Builds the portfolio index — each run's **passport** (scope:
-task identity + universal fingerprint + goal terms) and **facts** (attempts = nodes, measurements = terminal
-metrics, best) — by folding every `<run_root>/*/events.jsonl` (the migration over existing runs). A pure,
-deterministic projection of the append-only logs: rebuilding from scratch yields the same index (the CR0
-gate). No new source of truth; no LLM/endpoint.
+PART IV cross-run Step 1 (§21.20.3). Builds a **lean diagnostic** index: a run passport plus latest folded node
+rows with optional metric and best, from `<run_root>/*/events.jsonl` + task snapshots. Repeated clean rebuilds
+over distinct runs are stable, but this is not the full CR0 corpus-health/per-generation measurement index:
+reset generations collapse, corrupt/missing inputs can yield a partial result without receipts, and equal-key
+duplicates remain input-order-dependent. No LLM/endpoint and no new source of truth.
 
 ```bash
 looplab cross-run-index RUN_ROOT [--json]
@@ -349,15 +349,16 @@ looplab cross-run-index RUN_ROOT [--json]
 | Option | Default | Description |
 |---|---|---|
 | `RUN_ROOT` | *(required)* | Directory holding run subdirs (each with `events.jsonl` + `task.snapshot.json`) |
-| `--json` | off | Emit the full run-facts index as JSON |
+| `--json` | off | Emit the lean index as JSON; it can be partial without health/skip receipts today |
 
 ---
 
 ## `cross-run-concepts`
 
-PART IV cross-run Step 3 (§21.20). A portfolio overview over the per-run **concept capsules** written when
-`cross_run_concepts` is on: which concepts have been explored across the whole portfolio and in which runs,
-each with its OWN outcome. Raw metrics are deliberately **not** compared across tasks (different
+PART IV cross-run Step 3 (§21.20). A portfolio overview over **valid concept capsules present in `MEMORY_DIR`**
+from finalized opt-in runs: which raw concept slugs appear and in which recorded runs, each with its own
+metric-bearing outcome. Missing, malformed, untagged or non-opt-in runs are absent without a completeness
+receipt, and outcome eligibility/trust/split is not fully contracted. Raw metrics are deliberately **not** compared across tasks (different
 task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
 fabricated "best". Pure read of `<memory_dir>/concept_capsules.jsonl` — no LLM/endpoint.
 
@@ -375,14 +376,14 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 
 ## `claims`
 
-PART IV cross-run Step 4 (§21.20). Projects the distilled `lessons.jsonl` into **evidence-grounded claims**:
-each claim groups a statement's support vs oppose node-id evidence and an epistemic state — `supported`,
-`refuted`, `mixed` (the portfolio disagrees with itself), or `inconclusive`. Identity reuses the shipped
-lesson `normalize_statement`, and the shape unifies with the D8 research-claim `{statement, node_ids}` —
-no forked claim type. Pure read; no LLM/endpoint.
+PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` into a **statement-grouped lean claim view** with
+provisional support/oppose references and `supported`/`refuted`/`mixed`/`inconclusive` labels. This is not yet a
+verified independent-evidence assessment: negative-action polarity can invert a factual statement, D8 citation
+is not verifier approval, and refs are attempts rather than evidence families. Identity is normalized statement
+text; no forked claim type. Pure read; no LLM/endpoint.
 
 ```bash
-looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
+looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--json]
 ```
 
 | Option | Default | Description |
@@ -390,21 +391,22 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (or the file itself) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
-| `--pack` | off | Render the bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a portfolio-coverage line (composed with `concept_capsules.jsonl` when present) |
+| `--pack` | off | Render the claim-count-bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a lean portfolio line |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
 
 Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown,
-a rejected claim is dropped from the agent context pack, and a ratified one is surfaced first.
+a rejected claim is dropped from this agent context pack, and a ratified one is surfaced first. The lean Atlas
+contradictions/Strategist path does not yet exclude rejected claims; see [doc 17 §22.7](../17-project-review-and-directions-2026-07-11.md) before enabling advisory.
 
 ---
 
 ## `claim-decide`
 
-PART V §22.4 — the **operator governance write**: ratify / reject / pin a cross-run claim. This is the ONLY
-way to change cross-run *meaning* by hand — agents can only read + cite (§22). Append-only
-(`claim_decisions.jsonl`), keyed by the normalized statement, overlaid on the machine-proposed assessment
-and honored everywhere the claims are read (CLI, atlas, agent context pack, advisory injection). Reversible
-— re-decide, last write wins.
+PART V §22.4 — the **lean operator decision overlay**: ratify / reject / pin a cross-run claim. Agents have no
+matching mutation tool. Records append to `claim_decisions.jsonl`, keyed by normalized statement text, and the
+latest matching record wins. This is not full governance: it has no clear/undo verb, stable claim UID, scope or
+evidence revision, CAS, authenticated actor/history endpoint, or durable concurrent append guarantee. A later
+decision can replace the badge, but that must not be described as audited/reversible undo.
 
 ```bash
 looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."]
@@ -414,20 +416,21 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `claim_decisions.jsonl` is written) |
 | `STATEMENT` | *(required)* | The claim statement (matched by normalized text) |
-| `--ratify` | — | Operator vouches for it — surfaced FIRST in agent context |
-| `--reject` | — | Operator overrules it — DROPPED from agent context |
-| `--pin` | — | Keep it, marked `operator-pinned` |
+| `--ratify` | — | Mark `operator-ratified`; surfaced first in the current context-pack projection |
+| `--reject` | — | Mark `operator-rejected`; dropped from context pack and agentic `cross_run_claims`, but not yet every Atlas/Strategist consumer |
+| `--pin` | — | Mark `operator-pinned`; no additional ordering/retention behavior is currently defined |
 | `--note` | `""` | Optional rationale recorded with the decision |
 
 ---
 
 ## `atlas`
 
-PART IV cross-run Step 6 (§21.20). The **Research Atlas** data view — one payload that composes the concept
+PART IV cross-run Step 6 (§21.20). A **lean Research Atlas summary** — one capped payload that composes the concept
 overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into *what's been
 explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
 false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). Pure read
-of `lessons.jsonl` + `concept_capsules.jsonl`; the React screen is a later visual layer over this data.
+of `lessons.jsonl` + `concept_capsules.jsonl`. It has no saved-scope, comparison, snapshot/health, pagination,
+stable identity or CoverageFrame contract; it is not the full backend in [doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
 
 ```bash
 looplab atlas MEMORY_DIR [--max-items 8] [--json]
@@ -437,7 +440,7 @@ looplab atlas MEMORY_DIR [--max-items 8] [--json]
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `concept_capsules.jsonl` |
 | `--max-items N` | `8` | Cap per section (explored / contested / thin) |
-| `--json` | off | Emit the full Atlas payload as JSON |
+| `--json` | off | Emit the capped lean Atlas-summary payload as JSON |
 
 ---
 

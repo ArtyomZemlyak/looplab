@@ -983,3 +983,99 @@ security + serve auth surface) ran alongside; its verified findings are applied 
 gains the four `maturity` badge states; §28.5 is **corrected** from the earlier "governance via `CONTROL_EVENTS`"
 assumption to the shipped mechanism (a token-guarded serve `POST` → append-only sidecar `claim_decisions.jsonl`,
 deliberately outside the replay/fold path).
+
+## Round 18 — pull 26 commits, global adversarial/UI re-review, and status correction (2026-07-15)
+
+Fast-forwarded `codex/ui-ux-overhaul-20260712` from `85959f7` to `08bf868` (26 commits, 46 files, roughly
+3.5k changed lines). The branch matched `origin/codex/ui-ux-overhaul-20260712` after the pull; there were no
+merge conflicts and no local change was discarded.
+
+Round 17's last paragraph above is retained as historical chronology but is **superseded** by this review.
+The new endpoints complete a useful lean transport slice; they do not complete the backend contract of the
+Research Atlas specified in docs 17/18.
+
+### Verification completed
+
+| Check | Result |
+|---|---|
+| full Python test suite | PASS, exit 0; only existing FastAPI lifespan/deprecation warnings |
+| React/Vitest suite | 306/306 PASS |
+| production Vite build | PASS |
+| bundle-size/reachability budgets | PASS |
+| `mkdocs build --strict` | PASS |
+| paid OpenRouter `minimax/minimax-m3` smoke | PASS: text response `ready`; structured parse returned `operator=user-proposed`, params `x=1.0`, `y=2.0` |
+| `git diff --check 85959f7..08bf868` | PASS |
+| browser walk-through against local API (57 runs) | completed: List, Map, run Report, 131-node Search/timeline and Settings |
+| focused adversarial diagnostics | confirmed one-word cross-scope match, rejected-claim Atlas leak, 160-character claim-key collision and index tie order dependence |
+
+The full and targeted suites being green means the incoming slice is regression-compatible with its current
+tests. It does not invalidate the confirmed edge/contract failures; those scenarios were absent from the suite.
+
+### Corrected implementation verdict
+
+**Shipped:** Unicode fingerprint opt-in, concept capsules and audit receipt, lean run-passport/facts index,
+raw-slug portfolio overview, statement-grouped claims, count-bounded context pack, capped Atlas summary,
+CLI commands, experimental agent read/advisory consumers, `GET /api/cross-run/atlas` / `claims`, and token-
+guarded `POST /api/cross-run/claim-decide` when UI auth is configured.
+
+**Not shipped:** fail-closed cross-run scope and comparison contracts; stable concept/claim/attempt identity;
+eligible measurement and independent evidence-family projection; snapshot/watermark/index health; partial/
+corrupt/restricted states; server filtering and cursor pagination; agent-safe governance projection; token
+envelopes; revisioned durable decisions and audit history; per-run `ConceptFrame`; Research Space/Atlas React
+routes; Part-IV/Part-V Settings controls.
+
+Product label: **lean cross-run summary + claim-decision overlay**, not “backend-complete Research Atlas” and
+not “audited/reversible governance.”
+
+### Confirmed P1 findings
+
+1. **Scope leak:** `CrossRunTools` admits a foreign row after one shared goal word; proactive Researcher and
+   Strategist read all of `memory_dir`; Repo Developer never binds its provider. Require a fail-closed immutable
+   `CrossRunScope` with namespace/project, run exclusion, hard task/metric/direction/dataset/eval compatibility.
+2. **Rejected-claim leak:** context packs drop operator-rejected claims, but Atlas contradictions, the tool and
+   Strategist still surface them. Split human history from the agent-safe active projection.
+3. **Durable prompt injection/secrets:** model-authored statements/concepts/run IDs pass into prompts and traces
+   without redaction/trust envelope, including a Developer loop with write/edit tools. Cap/redact before trace,
+   model and UI; quote as data; retain provenance; test injections, credentials and ANSI/OSC controls.
+4. **Global colliding claim identity:** normalized 160-character statement keys merge scopes/long prefixes and
+   allow decisions on nonexistent/future claims. Add versioned `claim_uid`, evidence revision, existence check
+   and CAS/409 semantics.
+5. **Negative proposition inversion:** a confirmed negative result such as “raising LR regressed the metric” is
+   mapped to opposition because outcome utility and proposition truth are conflated.
+6. **Ineligible concept outcomes:** capsules can publish metric-bearing infeasible, tombstoned or trust-flagged
+   nodes without metric/split/comparison receipts.
+7. **Degraded index masquerades as complete:** valid prefixes of corrupt logs and missing/garbled snapshots are
+   indexed without health metadata; reset generations collapse.
+
+### P2 findings that affect product truth/scale
+
+- decision writes are unlocked/non-fsynced last-write-wins appends with no server actor/time, sequence,
+  idempotency, revision, reset or history API;
+- routes and tools scan whole stores, have no cursor/resource contract, and decision text lacks length limits;
+- malformed rows silently disappear, so unknown/partial/corrupt can look like an honest empty 200;
+- context packs are claim-count/field-capped, not token-bounded;
+- live Researcher/Strategist prompt influence records no derivation receipt (scope/snapshot/query/result digest,
+  consumer/turn/redaction policy), so the influence is not auditable even if the final run replays;
+- support counts measure attempt refs, not independent replications, and lose consolidated `evidence_count`;
+- cited D8 claims become support without consuming their verification verdict;
+- `cross_run_prior` can be recorded against a prospective/replaced/orphaned node;
+- fingerprint/taxonomy identity is unpinned, index tie order is not fully deterministic, Genesis can advertise
+  filesystem tools it lacks, and invalid flag combinations silently no-op.
+- runtime CLI/router/docstrings still overclaim “evidence-grounded,” “token-bounded” and reversible governance;
+  the guides are corrected here, but product help must be aligned before UI exposure.
+
+### Browser/UI conclusions
+
+- List and Report retain good hierarchy and should remain operational/reporting surfaces.
+- Search at 131 nodes is already dense (chips + DAG + inspector + 586-event timeline); concept topology does
+  not belong on that canvas.
+- global Map at 57 runs shrinks to an almost unreadable horizontal strip. This directly validates a separate,
+  matrix-first Atlas and rejects a portfolio-wide concept force/DAG graph.
+- Settings has coherent grouping/help but no Part-IV/Part-V controls.
+- no Atlas or per-run Research Space route, client or navigation affordance exists.
+
+Doc 18 now contains the corrected current-status ledger and a full global re-review in §33: browser evidence,
+canonical snapshot-fenced routes, per-run Research Space, Direction×Concept crosswalk, matrix-first Atlas,
+bounded focused graph, responsive/accessibility/state grammar, governance conflict UX and dependency gates
+G0–G6. Doc 17 §21.20.13 and §22 now reflect actual lean behavior and safety/promotion gates. User-facing config
+and CLI reference wording is corrected in the same round.
