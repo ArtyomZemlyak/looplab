@@ -70,6 +70,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         """M2: content fingerprint of this task so cross-run transfer reaches SIMILAR tasks, not only
         the exact same task_id. Built from kind/direction/metric/goal keywords + the winner's params."""
         from looplab.engine.memory import task_fingerprint
+        # CODEX AGENT: Winner parameter names are outcome-derived, so the alleged task identity changes
+        # when another node wins or a run is extended. Scope fingerprints must come from the immutable
+        # task/comparison contract; result features belong on attempts/effects.
         pnames = list((best.idea.params or {}).keys()) if best is not None and best.idea else []
         return task_fingerprint(getattr(self._e.task, "kind", ""), final.direction,
                                 final.goal or getattr(self._e.task, "goal", ""),
@@ -266,8 +269,15 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             concepts, outcomes = set(), {}
             for nd in final.nodes.values():
                 m = getattr(nd, "robust_metric", None)
+                # CODEX AGENT: These are raw per-run labels and ignore `final.concept_consolidation`.
+                # Exact string matching therefore misses aliases and merges homonyms; persist a canonical
+                # concept UID + taxonomy release while retaining the raw label for audit.
                 for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
                     concepts.add(str(c))
+                    # CODEX AGENT: Assigning the whole node score to every co-tagged concept and selecting
+                    # the best score is not a concept outcome. It is confounded/cherry-picked and currently
+                    # includes infeasible, tombstoned, failed, aborted, or untrusted evidence; store
+                    # node-qualified measurements, eligibility, comparator, and uncertainty instead.
                     if m is not None and (outcomes.get(c) is None or _better(m, outcomes[c])):
                         outcomes[str(c)] = m
             if not concepts:
@@ -280,4 +290,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 concept_outcomes=outcomes)
             ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
         except Exception:  # noqa: BLE001 — cross-run capsule write is best-effort, never fails a run
+            # CODEX AGENT: Swallowing the write failure here makes `finalize_run` believe this step
+            # succeeded, commit `finalization_finished`, and never retry the missing capsule. Return a
+            # success signal or re-raise a typed persistence error to the outer retry handshake.
             return

@@ -494,6 +494,9 @@ class Settings(BaseSettings):
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
     # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
     # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
+    # CODEX AGENT: This is not standalone as documented: reads are behind `graded_novelty`, while writes
+    # need `node_concepts` (normally produced by `concept_pivot`). With only this flag + memory_dir, the
+    # feature can silently persist and surface nothing; validate or explicitly wire its prerequisites.
     cross_run_concepts: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
