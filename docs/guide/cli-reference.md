@@ -18,6 +18,10 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
+looplab cross-run-index Run passport + facts index, rebuilt from event logs (PART IV cross-run Step 1/CR0)
+looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
+looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
+looplab atlas           Research Atlas data: explored / thin / contradictory (PART IV cross-run Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -326,6 +330,87 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
 | `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
+
+---
+
+## `cross-run-index`
+
+PART IV cross-run Step 1 / CR0 (§21.20.3). Builds the portfolio index — each run's **passport** (scope:
+task identity + universal fingerprint + goal terms) and **facts** (attempts = nodes, measurements = terminal
+metrics, best) — by folding every `<run_root>/*/events.jsonl` (the migration over existing runs). A pure,
+deterministic projection of the append-only logs: rebuilding from scratch yields the same index (the CR0
+gate). No new source of truth; no LLM/endpoint.
+
+```bash
+looplab cross-run-index RUN_ROOT [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_ROOT` | *(required)* | Directory holding run subdirs (each with `events.jsonl` + `task.snapshot.json`) |
+| `--json` | off | Emit the full run-facts index as JSON |
+
+---
+
+## `cross-run-concepts`
+
+PART IV cross-run Step 3 (§21.20). A portfolio overview over the per-run **concept capsules** written when
+`cross_run_concepts` is on: which concepts have been explored across the whole portfolio and in which runs,
+each with its OWN outcome. Raw metrics are deliberately **not** compared across tasks (different
+task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
+fabricated "best". Pure read of `<memory_dir>/concept_capsules.jsonl` — no LLM/endpoint.
+
+```bash
+looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` (or the file itself) |
+| `--top N` | `20` | How many most-explored concepts to list |
+| `--json` | off | Emit the full overview (concepts + per-run cards) as JSON |
+
+---
+
+## `claims`
+
+PART IV cross-run Step 4 (§21.20). Projects the distilled `lessons.jsonl` into **evidence-grounded claims**:
+each claim groups a statement's support vs oppose node-id evidence and an epistemic state — `supported`,
+`refuted`, `mixed` (the portfolio disagrees with itself), or `inconclusive`. Identity reuses the shipped
+lesson `normalize_statement`, and the shape unifies with the D8 research-claim `{statement, node_ids}` —
+no forked claim type. Pure read; no LLM/endpoint.
+
+```bash
+looplab claims MEMORY_DIR [--top 20] [--contested] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (or the file itself) |
+| `--top N` | `20` | How many most-evidenced claims to list |
+| `--contested` | off | Show only `mixed` (support **and** oppose) claims |
+| `--pack` | off | Render the bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a portfolio-coverage line (composed with `concept_capsules.jsonl` when present) |
+| `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
+
+---
+
+## `atlas`
+
+PART IV cross-run Step 6 (§21.20). The **Research Atlas** data view — one payload that composes the concept
+overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into *what's been
+explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
+false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). Pure read
+of `lessons.jsonl` + `concept_capsules.jsonl`; the React screen is a later visual layer over this data.
+
+```bash
+looplab atlas MEMORY_DIR [--max-items 8] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `concept_capsules.jsonl` |
+| `--max-items N` | `8` | Cap per section (explored / contested / thin) |
+| `--json` | off | Emit the full Atlas payload as JSON |
 
 ---
 

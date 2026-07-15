@@ -494,3 +494,143 @@ def tensorboard(
         subprocess.run(cmd)
     except KeyboardInterrupt:
         pass
+
+
+@app.command(name="cross-run-concepts")
+def cross_run_concepts_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl), or "
+                                                "the capsules file itself."),
+    top: int = typer.Option(20, help="How many most-explored concepts to show."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
+):
+    """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
+    `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
+    runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    p = Path(memory_dir)
+    path = p if p.is_file() else p / "concept_capsules.jsonl"
+    if not path.exists():
+        typer.echo(f"no concept capsules at {path} (run with cross_run_concepts on to populate)")
+        raise typer.Exit(1)
+    ov = portfolio_concept_overview(ConceptCapsuleStore(path).all())
+    if as_json:
+        typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Cross-run portfolio: {ov['n_runs']} run(s), {ov['n_concepts']} concept(s)")
+    for e in ov["concepts"][: max(0, top)]:
+        def _fmt(r: dict) -> str:
+            m = r.get("metric")
+            return f"{r['run_id']}" + (f"={m:g}" if isinstance(m, (int, float)) and not isinstance(m, bool) else "")
+        runs = ", ".join(_fmt(r) for r in e["runs"][:6])
+        more = "" if len(e["runs"]) <= 6 else f" (+{len(e['runs']) - 6} more)"
+        typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}   [{runs}{more}]")
+
+
+@app.command(name="cross-run-index")
+def cross_run_index_cmd(
+    run_root: Path = typer.Argument(..., help="Directory holding run subdirs (each with events.jsonl)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full run-facts index as JSON."),
+):
+    """PART IV cross-run Step 1 / CR0 (§21.20.3): build the portfolio index — each run's PASSPORT (scope)
+    + FACTS (attempts/measurements) — by folding every `<run_root>/*/events.jsonl` (the migration over
+    existing runs). Pure/deterministic: rebuilding from scratch yields the same index. No LLM/endpoint."""
+    from looplab.engine.cross_run_index import rebuild_index_from_run_root
+    idx = rebuild_index_from_run_root(run_root)
+    if not idx:
+        typer.echo(f"no runs with events.jsonl under {run_root}")
+        raise typer.Exit(1)
+    if as_json:
+        typer.echo(orjson.dumps(idx, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Cross-run index: {len(idx)} run(s)")
+    for f in idx:
+        sc = f["scope"]
+        best = f["best"]
+        bm = f"best={best['metric']:g}" if best and isinstance(best.get("metric"), (int, float)) else "best=—"
+        typer.echo(f"  {f['run_id']:20s} [{sc['task_id']}/{sc['direction']}/{sc['metric'] or '—'}]  "
+                   f"{f['n_attempts']:2d} attempt(s)  {bm}")
+
+
+@app.command(name="atlas")
+def atlas_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl + "
+                                                "concept_capsules.jsonl)."),
+    max_items: int = typer.Option(8, help="Cap per section (explored/contested/thin)."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full Atlas payload as JSON."),
+):
+    """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
+    it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
+    (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
+    from looplab.engine.claims import portfolio_atlas
+    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.events.eventstore import read_jsonl_lenient
+    base = Path(memory_dir)
+    lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
+    lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
+    caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
+    if not lessons and not caps:
+        typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
+        raise typer.Exit(1)
+    atlas = portfolio_atlas(lessons, caps, max_items=max_items)
+    if as_json:
+        typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Research Atlas: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
+               f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested")
+    if atlas["explored"]:
+        typer.echo("Explored (concept × #runs):")
+        for e in atlas["explored"]:
+            typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}")
+    if atlas["thin_coverage"]:
+        typer.echo("Thin (explored once): " + ", ".join(atlas["thin_coverage"]))
+    if atlas["contradictions"]:
+        typer.echo("Contradictions (portfolio disagrees):")
+        for c in atlas["contradictions"]:
+            typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
+
+
+@app.command(name="claims")
+def claims_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl), or the "
+                                                "lessons file itself."),
+    top: int = typer.Option(20, help="How many most-evidenced claims to show."),
+    contested_only: bool = typer.Option(False, "--contested", help="Show only MIXED (support+oppose) claims."),
+    pack: bool = typer.Option(False, "--pack", help="Render the bounded agent context pack (Step 5) instead."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
+):
+    """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
+    each with support vs oppose node-id evidence and an epistemic state (supported/refuted/mixed/
+    inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
+    renders the bounded agent context pack (contested-first, caveat slot reserved). Pure read of
+    `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
+    from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.events.eventstore import read_jsonl_lenient
+    p = Path(memory_dir)
+    path = p if p.is_file() else p / "lessons.jsonl"
+    if not path.exists():
+        typer.echo(f"no lessons at {path}")
+        raise typer.Exit(1)
+    lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+    claims = claim_assessments(lessons)
+    if pack:
+        # compose with the concept overview (Step 3) from the same memory dir when present
+        base = p if p.is_dir() else p.parent
+        caps_path = base / "concept_capsules.jsonl"
+        overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all())
+                    if caps_path.exists() else None)
+        cp = build_context_pack(claims, concept_overview=overview, max_claims=top)
+        typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
+                   else (render_context_pack(cp) or "(empty context pack)"))
+        return
+    if contested_only:
+        claims = [c for c in claims if c["epistemic"] == "mixed"]
+    if as_json:
+        typer.echo(orjson.dumps(claims, option=orjson.OPT_INDENT_2).decode())
+        return
+    _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
+    typer.echo(f"Claims ({len(claims)} shown{' — contested only' if contested_only else ''}): "
+               "✓ supported  ✗ refuted  ⚖ mixed  · inconclusive")
+    for c in claims[: max(0, top)]:
+        typer.echo(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
+                   f"{c['statement'][:100]}")

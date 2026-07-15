@@ -3839,12 +3839,18 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   distinguishable where legacy collapsed them). (b) TODO: the labelled cross-run fixture from §21.20.10
   (exact repeats, same-app/diff-domain, incompatible metrics, correlated forks, re-eval flips, concept
   aliases/splits, deleted/private runs, a 50-run/5k-node tier). Nothing else can be measured without it.
-- **Step 1 — CR0 contracts + migration + deterministic rebuild.** Define `ScopeProfile`, `RunContext`,
-  `EvaluationSlice`/`ComparisonContract`, `ExecutionAttempt`/`Measurement`, and the Corpus/Visibility
-  snapshot records (§21.20.3) as append-only decision ledgers + a rebuildable SQLite/FTS/vector projection.
-  Migrate old logs; **gate = incremental projection digest equals a clean full rebuild** at the same
-  snapshot (§21.20.11). UI/agent effect: a read-only scope inspector only. Add the **replay test** from
-  §21.20.12 #2 here.
+- **Step 1 — CR0 contracts + migration + deterministic rebuild.** **LANDED 2026-07-15 (lean ledger slice):**
+  `engine/cross_run_index.py` defines the run **passport** (`scope_profile` — identity + universal
+  fingerprint + goal terms) and **facts** (`run_facts` — attempts=nodes / measurements=terminal metrics /
+  best), both PURE deterministic projections of the folded event log + `task.snapshot.json`;
+  `rebuild_index_from_run_root` folds every `*/events.jsonl` (the migration over existing runs), and
+  `tests/test_cross_run_index.py` pins the **CR0 gate** — rebuild-from-scratch is byte-identical and
+  order-independent. Surfaced by `looplab cross-run-index RUN_ROOT [--json]`. Tests: 8. This is the
+  append-only-ledger-first foundation the design sanctions. **TODO to reach full CR0:** the agentic
+  `ScopeProfile` **facets** (interaction/domain/language/dataset-lineage — §20.2) beyond the universal
+  fingerprint; `ComparisonContract`/`EvaluationSlice`; the Corpus/Visibility snapshot records; and the
+  INCREMENTAL projection + `concept_uid` resolver whose "incremental digest == clean rebuild" is the
+  stronger gate (this slice proves the clean-rebuild determinism the incremental path must match).
 - **Step 2 — CR2c D3-wiring (pull forward; self-contained, highest ROI).** **LANDED 2026-07-15 (lean
   first slice):** a per-run `ConceptCapsuleStore` (in `engine/memory.py`, mirroring `JsonlCaseLibrary`)
   persists each run's `node_concepts` tags + best-per-concept outcome to `memory_dir` at finalize, keyed by
@@ -3856,32 +3862,49 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   concept-slug set to the structured prior-evidence bundle §21.20.5 specifies (scope relation, freshness,
   materially-different flag) once the `concept_uid` resolver (§21.20.12 #4) exists; and the exact-duplicate
   savings gate. Level 3 stays **surface**, never cross-scope hard reject.
-- **Step 3 — CR1a incremental index.** Atoms → `RunCapsule` per run → `PortfolioSummary`/`ConceptDigest`,
-  concept assignments over the `concept_uid` resolver, taxonomy releases, and the Atlas metadata journal
-  (§21.20.4). **Gate = 50/500-run ingest with 20 concurrent terminal runs producing zero lost/duplicate
-  atoms and an order-independent final digest; re-eval/archive/purge/ACL correctness.** Effect: a fast
-  portfolio inventory.
-- **Step 4 — CR1b durable claims + assessments.** `ClaimDefinition`/`ClaimRevision`,
-  `ClaimEvidenceLink`, `ClaimDecision`, rebuildable `ClaimAssessment` with independence families and proof
-  trails (§21.20.5). Migrate `lessons.jsonl` to machine-proposed claims **without** breaking the legacy path
-  (§21.20.12 #3). **Gate = citation/numeric verifier passes; contradiction/scope/causality gold set.**
-  Effect: a read-only Findings view.
-- **Step 5 — CR2a/CR2b retrieval + bounded context packs.** The query planner of §21.20.5 (intent →
-  eligibility → capped multi-channel candidates → scope-aware RRF rerank → contradiction bundle →
-  progressive disclosure → receipt), then the bounded context packs at Genesis/run-start/proposal/Strategist
-  with the reserved support/opposition/freshness slots and explicit token envelopes. **Gate = Recall@20 ≥
-  0.95 / nDCG@10 ≥ 0.85, actionable false-transfer ≤ 1%, cross-scope hard-rejects = 0, latency/token
-  budgets;** then a **frozen A/B** showing ≥15% lower duplicate spend with no trust/exploration regression
-  before any live injection.
-- **Step 6 — CR3a coverage + Research Atlas UI.** The concept×scope `CoverageFrame` matrix with the
-  unknown/stale/partial state grammar, plus the four coordinated Atlas views (Landscape/Findings/Evidence/
-  Changes) on a snapshot-consistent shell (§21.20.7). **Gate = coverage counts reproduce raw evidence;
-  completeness/staleness disclosed; server-filtered/cursor-paged so the browser never fetches the whole
-  portfolio.**
-- **Step 7 — CR3b/CR3c, both gated.** Optional recursive/community summaries **only** if they clear the
-  §21.20.11 hierarchy gate (≥5 pp grounded-answer gain **or** ≥30% token reduction at equal quality) —
-  otherwise the flat Claim+RunCapsule architecture is final. Then the governance workbench
-  (taxonomy merge/split dry-run, claim lifecycle, reversible publish) as a separate role-gated surface.
+- **Step 3 — CR1a incremental index.** **LANDED 2026-07-15 (lean first slice):** `portfolio_concept_overview`
+  (`engine/memory.py`) aggregates the Step-2 concept capsules into a portfolio view — per-concept: which runs
+  explored it, each with its OWN outcome (raw metrics deliberately NOT compared across tasks) — plus per-run
+  cards; surfaced by the `looplab cross-run-concepts` CLI (`--top`, `--json`). Pure read, no LLM. Tests:
+  read-model + CLI (8). **TODO to reach full CR1a:** `RunCapsule`/`ConceptDigest`/`PortfolioSummary` as
+  incremental materialized read-models over the `concept_uid` resolver, taxonomy releases, and the Atlas
+  metadata journal (§21.20.4); the 50/500-run concurrency + order-independent-digest + re-eval/archive/
+  purge/ACL gates.
+- **Step 4 — CR1b durable claims + assessments.** **LANDED 2026-07-15 (lean first slice):**
+  `claim_assessments` (`engine/claims.py`) is a pure read-model that projects the shipped distilled lessons
+  (+ optional D8 research-memo claims) into evidence-grounded claims — grouping by the lesson
+  `normalize_statement` identity, mapping the lesson verdict vocabulary to **support/oppose** node-id
+  evidence, and computing an epistemic state (`supported`/`refuted`/`mixed`/`inconclusive`). Unifies with
+  the D8 `{statement, node_ids}` shape (no forked claim type); read-only, no migration, legacy lessons
+  path untouched. Surfaced by `looplab claims MEMORY_DIR [--contested] [--json]`. Tests: 13. **TODO to reach
+  full CR1b:** durable `ClaimDefinition`/`ClaimRevision`/`ClaimDecision` records + independence families +
+  proof trails (§20.5); the citation/numeric verifier + contradiction/scope/causality gold-set gates.
+- **Step 5 — CR2a/CR2b retrieval + bounded context packs.** **LANDED 2026-07-15 (bounded-pack first
+  slice):** `build_context_pack` / `render_context_pack` (`engine/claims.py`) assemble a token-bounded
+  cross-run pack from the Step-4 claims (+ Step-3 concept overview): contested (`mixed`) claims lead and a
+  **caveat slot is reserved** so positive hits can never crowd out opposition (the §20.5 rule), with a
+  portfolio-coverage line. Pure/deterministic and **silent by construction** — it returns structured data
+  and is surfaced only via `looplab claims --pack`; it is NOT wired into any live prompt. Tests: 9. **TODO
+  to reach full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware-RRF query planner
+  (reusing `hybrid_merge`) + why-recalled receipts; the bounded packs at Genesis/run-start/proposal/
+  Strategist with token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B** (≥15%
+  lower duplicate spend, no trust/exploration regression) that must pass **before any live injection**.
+- **Step 6 — CR3a coverage + Research Atlas UI.** **LANDED 2026-07-15 (Atlas DATA slice):**
+  `portfolio_atlas` (`engine/claims.py`) composes the Step 3-5 read-models into one payload — *explored*
+  (concept × #runs), *thin_coverage* (single-run concepts — a lean gap proxy, deliberately NOT a false
+  "never tried" which needs a coverage frame), *contradictions* (`mixed` claims), and the bounded context
+  pack. Pure read; surfaced by `looplab atlas MEMORY_DIR [--json]`. Tests: 6. **TODO to reach full CR3a:**
+  the true concept×scope `CoverageFrame` matrix with the unknown/stale/partial state grammar; the four
+  coordinated Atlas UI views (Landscape/Findings/Evidence/Changes) on a snapshot-consistent shell (§20.7),
+  server-filtered/cursor-paged; the coverage-counts-reproduce-raw-evidence gate. The React screen is the
+  deferred visual layer over this payload.
+- **Step 7 — CR3b/CR3c, both gated. DELIBERATELY NOT BUILT (per the §21.20.11 hierarchy gate).** Optional
+  recursive/community summaries ship **only** if they clear the gate (≥5 pp grounded-answer gain **or** ≥30%
+  token reduction at equal quality). The flat Claim+RunCapsule architecture that Steps 4/5 (`claim_assessments`
+  + `build_context_pack`) already embody is the **current final design** — recursion is not built until it
+  proves out on the benchmark corpus, exactly as the gate requires (building it now would be the speculative
+  feature-creep the design warns against). The governance workbench (taxonomy merge/split dry-run, claim
+  lifecycle, reversible publish) likewise waits for the taxonomy-release substrate (full CR1a).
 
 **Critical path & parallelism.** Step 0 is independent and can land immediately. Step 1 (CR0) is the
 foundation everything else stands on. Steps 2 (D3-wiring) and 3 (index) can proceed in parallel once the
