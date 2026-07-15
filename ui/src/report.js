@@ -69,7 +69,11 @@ function rollup(nodes, direction, keyFn) {
     if (isEvaluated(n)) {
       e.evaluated++
       const v = metricOf(n)
-      if (e.best === null || bt(v, e.best)) e.best = v
+      // Only a FEASIBLE result may define `best` — same rule the frontier walk (`improvements`) and the
+      // `improved` count below apply, and the module invariant at the top ("never credit a result the
+      // engine itself rejected"). Otherwise a constraint-violating node's raw metric would inflate this
+      // operator/theme's reported best and, through `directionProfit`, its treemap gain.
+      if (n.feasible !== false && (e.best === null || bt(v, e.best))) e.best = v
       const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
       const pm = parent ? metricOf(parent) : null
       if (n.feasible !== false && pm != null && bt(v, pm)) e.improved++

@@ -1,5 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { SETTINGS_GROUPS, FIELD_BY_KEY } from '../src/settingsSchema.js'
 import {
   ESSENTIAL_SETTING_KEYS,
@@ -48,4 +49,26 @@ test('group and secret restrictions remain available to compact consumers', () =
   assert.equal(groups[0].title, 'LLM')
   assert.ok(!stats.keys.has('llm_api_key'))
   assert.ok(stats.keys.has('llm_model'))
+})
+
+// The agent-governance pills (`field.agents`) advertise which autonomous role may change a setting at
+// runtime — that is exactly the backend `DEFAULT_AGENT_CONTROL` registry (looplab/core/config.py). A
+// mismatch shows the operator a toggle the engine won't honor (or hides a real one). Guard the seam
+// across the language boundary so the pills can't silently drift again (mega-review §UI).
+test('agent-governance pills mirror the backend DEFAULT_AGENT_CONTROL registry', () => {
+  const configPy = readFileSync(new URL('../../looplab/core/config.py', import.meta.url), 'utf8')
+  const block = configPy.match(/DEFAULT_AGENT_CONTROL[^{]*\{([\s\S]*?)\n\}/)
+  assert.ok(block, 'could not locate DEFAULT_AGENT_CONTROL in config.py')
+  const registry = {}
+  for (const m of block[1].matchAll(/"(\w+)":\s*\[([^\]]*)\]/g)) {
+    registry[m[1]] = [...m[2].matchAll(/"(\w+)"/g)].map(x => x[1]).sort()
+  }
+  assert.ok(Object.keys(registry).length >= 10, 'registry parse looks empty — regex drifted')
+  for (const [key, f] of Object.entries(FIELD_BY_KEY)) {
+    if (!f.agents) continue
+    assert.ok(registry[key],
+      `settings field "${key}" shows governance pills ${JSON.stringify(f.agents)} but is not agent-governable in DEFAULT_AGENT_CONTROL`)
+    assert.deepEqual([...f.agents].sort(), registry[key],
+      `governance pills for "${key}" drifted from the backend DEFAULT_AGENT_CONTROL`)
+  }
 })

@@ -1120,8 +1120,18 @@ async function _throw(r, path) {
   let detail = '', payload = null
   try { payload = await r.json(); detail = (payload && (payload.detail ?? payload.error)) ?? '' } catch { /* no body */ }
   const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : null
+  // FastAPI validation errors (422) put `detail` as an ARRAY of {loc, msg, type}. String(array) would
+  // render "[object Object],[object Object]" in the toast — flatten each entry to "field: msg" instead.
+  const arrayDetail = Array.isArray(detail)
+    ? detail.map(d => {
+        if (!d || typeof d !== 'object') return String(d)
+        const field = Array.isArray(d.loc) ? d.loc.filter(x => x !== 'body' && x !== 'query').join('.') : ''
+        return (field ? `${field}: ` : '') + String(d.msg || d.type || JSON.stringify(d))
+      }).filter(Boolean).join('; ')
+    : null
   const message = structured
     ? String(structured.message || structured.detail || structured.error || structured.code || `${path}: ${r.status}`)
+    : arrayDetail ? arrayDetail
     : detail ? String(detail) : `${path}: ${r.status}`
   const err = new Error(message)
   err.status = r.status   // callers branch on the code (e.g. 409 = run live / name taken), not a regex on the message
@@ -1342,7 +1352,11 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
       // Recovery must send the persisted clean display even when it happens to equal `instruction`:
       // the explicit three-field body is the exact durable-turn contract, not a newly composed send.
       body: JSON.stringify(display != null ? { instruction, display, mode } : { instruction, mode }), signal })
-  if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
+  if (!r.ok) { await _throw(r, 'message_stream'); return null }
+  // A 2xx with no readable body (empty stream, or an environment/proxy that doesn't expose one) is NOT
+  // a server error — returning null lets the caller fall back to the non-streaming path instead of
+  // surfacing a misleading "message_stream: 200" toast from _throw's status fallback.
+  if (!r.body) return null
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
   for (;;) {

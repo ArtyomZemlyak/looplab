@@ -63,6 +63,12 @@ const feedbackCopy = Object.freeze({
   'presentation-failed': 'The browser could not display a desktop notification.',
 })
 
+// Severity is shown visually by the coloured dot (aria-hidden). Carry the same meaning in TEXT so it is
+// not conveyed by colour alone (WCAG 1.4.1) and is announced to screen readers (the dot is decorative).
+const SEVERITY_LABEL = Object.freeze({
+  action: 'Needs action', warning: 'Warning', danger: 'Urgent', success: 'Resolved',
+})
+
 function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermission }) {
   const timestamp = itemTime(item.created)
   // Reconstruct the destination from the normalized, generation-fenced fields. Never trust a URL
@@ -71,6 +77,7 @@ function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermissio
   return <li className={`attention-item severity-${item.severity}${unread ? ' unread' : ''}`}>
     <div className="attention-item-heading">
       <span className="attention-severity-dot" aria-hidden="true" />
+      {SEVERITY_LABEL[item.severity] && <span className="sr-only">{SEVERITY_LABEL[item.severity]}: </span>}
       <h4>{item.title}</h4>
       {item.stale && <span className="attention-stale-label">Last verified</span>}
       {unread && <span className="attention-new-label">New</span>}

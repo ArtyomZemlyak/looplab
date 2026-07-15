@@ -319,8 +319,8 @@ def build_router(srv) -> APIRouter:
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
         n = min(max(0, tail), _LOG_TAIL_MAX)
-        def _tail(name: str) -> str:
-            p = nd / name
+        def _tail(name: str, base: Path = nd) -> str:
+            p = base / name
             try:
                 size = p.stat().st_size
                 with open(p, "rb") as f:
@@ -358,9 +358,11 @@ def build_router(srv) -> APIRouter:
             if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
                 stage_names.append("score")
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
+        # run_setup.log lives in the RUN dir (shared setup), not the node dir. Tail-cap it like every
+        # other log here (seek-to-end, byte-bounded) instead of read_text()-ing the whole file into RAM
+        # on every poll — a verbose dependency-install log would otherwise defeat the tail cap.
         return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
-                "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")
-                             if (rd / "run_setup.log").exists() else ""}
+                "run_setup": _tail("run_setup.log", rd)}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/metrics")
     def node_metrics(run_id: str, nid: int):

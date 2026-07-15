@@ -338,7 +338,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
-  const { nodes, edges, groupKeys } = useMemo(() => {
+  const base = useMemo(() => {
     const ns = state?.nodes || {}
     const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode)
     // Group ORDER → a curated tint per group, so adjacent groups stay visually distinct (vs a hash
@@ -419,7 +419,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         focusable: false,
         data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
                 groupTint: inLane ? tintOf(gkey) : null, onOpenActions: onNodeAction ? openActions : null,
-                actionsOpen: menu?.nodeId === n.id } })
+                // actionsOpen is injected by the cheap `nodes` memo below, keyed on menu?.nodeId — so
+                // opening/moving the action menu does NOT rebuild this whole (layout-heavy) memo.
+                actionsOpen: false } })
     })
 
     // (Deep-research memos are no longer drawn in the DAG — they live in the Dock timeline + the
@@ -460,7 +462,17 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter, fx, onNodeAction, openActions, menu?.nodeId])
+      themeFilter, fx, onNodeAction, openActions])
+  const { edges, groupKeys } = base
+  // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
+  // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the
+  // open node, others returned by reference) — so toggling the menu never re-runs the layout memo above.
+  const nodes = useMemo(() => {
+    const openId = menu?.nodeId
+    if (openId == null) return base.nodes
+    return base.nodes.map(n => (n.type === 'exp' && n.data.node?.id === openId)
+      ? { ...n, data: { ...n.data, actionsOpen: true } } : n)
+  }, [base.nodes, menu?.nodeId])
 
   return (
     <LodContext.Provider value={lod}>

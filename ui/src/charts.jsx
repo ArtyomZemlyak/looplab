@@ -264,9 +264,12 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
           <rect x={x} y={s.from == null ? yTo : top} width={bw} height={s.from == null ? base - yTo : hgt} rx="3"
                 fill={s.from == null ? '#4aa3ff' : (improved ? '#2ecc71' : '#ef4444')}
                 stroke="var(--fg)" strokeWidth=".75" opacity={s.from == null ? .72 : .9} />
-          <text x={x + bw / 2} y={Math.max(11, top - 4)} fill="var(--fg-dim)" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+          {/* A shape cue (▲ improved / ▼ regression) redundant with the green/red fill, so the sign of
+              each step is legible without colour perception (WCAG 1.4.1 use-of-colour). */}
+          <text x={x + bw / 2} y={Math.max(11, top - 4)} fill="var(--fg-dim)" fontSize="9.5" textAnchor="middle">
+            {s.from == null ? '' : improved ? '▲ ' : '▼ '}#{s.id}</text>
           <text x={x + bw / 2} y={base + 12} fill={AX} fontSize="9.5" textAnchor="middle">{fmt(s.to)}</text>
-          <title>{`#${s.id} ${s.operator || ''} → ${fmt(s.to)}${s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' (baseline)'}`}</title>
+          <title>{`#${s.id} ${s.operator || ''} → ${fmt(s.to)}${s.delta != null ? ` (Δ ${fmt(s.delta)}, ${improved ? 'improved' : 'regressed'})` : ' (baseline)'}`}</title>
         </g>
       })}
     </svg>}
@@ -415,8 +418,11 @@ export function Scatter({ data, xlab, ylab, width = 720, height = 260, onPick = 
   if (!data || !data.length) return <Empty>no constraint data</Empty>
   const xs = data.map(d => d.x), ys = data.map(d => d.y)
   const pad = 40, w = width, h = height
-  const X = v => pad + (v - Math.min(...xs)) / Math.max(1e-9, Math.max(...xs) - Math.min(...xs)) * (w - 2 * pad)
-  const Y = v => h - pad - (v - Math.min(...ys)) / Math.max(1e-9, Math.max(...ys) - Math.min(...ys)) * (h - 2 * pad)
+  // Hoist the extents out of the scale closures: recomputing Math.min/Math.max(...xs) inside X()/Y()
+  // made scaling O(n²) over the point set (once per point × once per call). Compute the range once.
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys)
+  const X = v => pad + (v - minX) / Math.max(1e-9, maxX - minX) * (w - 2 * pad)
+  const Y = v => h - pad - (v - minY) / Math.max(1e-9, maxY - minY) * (h - 2 * pad)
   const pick = onPick || null
   const statusOf = value => value === true ? 'feasible' : value === false ? 'infeasible' : 'unknown'
   const tableRows = data.map(point => ({ ...point, feasible: statusOf(point.feasible) }))

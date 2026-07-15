@@ -18,6 +18,8 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
+looplab novelty-recall  Novelty-gate RECALL diagnostic: near-duplicate proposal pairs (PART IV E3)
+looplab lesson-guard    Audit distilled lessons: over-generalization + contradictions (PART IV D6/E4)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)

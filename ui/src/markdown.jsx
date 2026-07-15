@@ -8,7 +8,7 @@ import React, { useMemo } from 'react'
 // Only allow SAFE link schemes. LLM/research-authored Markdown could otherwise emit a
 // `javascript:`/`data:`/`vbscript:` href that runs script in the app origin on click (React does NOT
 // neutralize those schemes). Returns the url for http(s)/mailto/relative/anchor links, else null.
-function safeHref(url) {
+export function safeHref(url) {
   const u = String(url || '').trim()
   if (/^[/\\]{2}/.test(u)) return null   // //host, \\host, /\host, \/host -> scheme-relative, reject
   return /^(https?:|mailto:|[/#.?])/i.test(u) ? u : null

@@ -6,6 +6,7 @@ import { getRunAccess } from './runMode.js'
 import { useDialogFocus } from './useDialogFocus.js'
 import { pendingApprovalTarget } from './runIndex.js'
 import { assistantErrorInfo, assistantPreview } from './assistantErrors.js'
+import { reconcilePendingPermissions } from './assistantPermission.js'
 import {
   clearLaunchDraftSession, launchDraftSession, removeLaunchDraft, retainLaunchDraft,
 } from './launchDraftStore.js'
@@ -187,6 +188,11 @@ export default function AssistantBar({ runId, hidden = false }) {
   const [pending, setPending] = useState([])      // live HITL confirm requests
   const [resolvingPerms, setResolvingPerms] = useState(() => new Set())
   const resolvingPermsRef = useRef(new Set())
+  // Ids of permission requests resolved LOCALLY this session. A permissions poll in flight when the user
+  // clicks Approve/Reject can return its pre-resolution snapshot AFTER the card was optimistically removed,
+  // re-adding a resolved card with its buttons re-enabled (a contradictory second decision). We filter
+  // poll-sourced pending against this set; it self-heals as the server drops each resolved id.
+  const resolvedPermsRef = useRef(new Set())
   const [sessions, setSessions] = useState([])    // full-view session list
   const [files, setFiles] = useState([])          // attached text files [{name,size,content,truncated}]
   const [sideW, setSideW] = useState(() => clampAssistantWidth(storageGet('ll.asstW', 440)))
@@ -421,7 +427,7 @@ export default function AssistantBar({ runId, hidden = false }) {
               // A reattached turn may be PARKED on a HITL confirm — surface its card too (the send
               // path polls permissions; without this a reload hides the card until the 900s deny).
               const perms = await assistantPermissions(id)
-              if (mountedRef.current && sidRef.current === id) setPending(perms.pending || [])
+              if (mountedRef.current && sidRef.current === id) setPending(reconcilePendingPermissions(perms.pending, resolvedPermsRef.current))
             } catch { /* transient */ }
           }
         })()
@@ -572,6 +578,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     setResolvingPerms(current => new Set(current).add(reqId))
     try {
       await assistantResolve(reqId, decision)
+      resolvedPermsRef.current.add(reqId)   // a lagging poll must not re-add this now-resolved card
       if (sidRef.current === requestSession) setPending(current => {
         const next = current.filter(req => req.id !== reqId)
         requestAnimationFrame(() => {
@@ -588,7 +595,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       // registry before offering another click; on a true network outage the original card remains.
       try {
         const latest = requestSession ? await assistantPermissions(requestSession) : null
-        if (latest && sidRef.current === requestSession) setPending(latest.pending || [])
+        if (latest && sidRef.current === requestSession) setPending(reconcilePendingPermissions(latest.pending, resolvedPermsRef.current))
       } catch { /* retain the exact pending request for a later retry */ }
     } finally {
       resolvingPermsRef.current.delete(reqId)
@@ -1107,7 +1114,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     let polling = true
     // sid-guarded like every other callback: after a mid-turn session switch, a late poll result
     // must not surface the DEPARTED session's confirm-cards over the one the user switched to.
-    ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(p.pending || []) } catch { /* transient */ } await sleep(800) } })()
+    ;(async () => { while (polling && mountedRef.current && sidRef.current === id) { try { const p = await assistantPermissions(id); if (mountedRef.current && sidRef.current === id) setPending(reconcilePendingPermissions(p.pending, resolvedPermsRef.current)) } catch { /* transient */ } await sleep(800) } })()
     let acc = ''
     let streamedFailure = ''
     // Concurrent PROGRESS poll — the SSE fallback. Behind a buffering proxy (jupyter-server-proxy /
@@ -1396,6 +1403,10 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
 
   const onKey = (e) => {
+    // Ignore keys emitted while an IME is composing (CJK, accent/dead-key input): the Enter/Arrow
+    // keys then belong to the candidate window, not to us. `isComposing` (keyCode 229 on legacy
+    // engines) tells us to stand down so confirming a candidate never submits the message.
+    if (e.isComposing || e.nativeEvent?.isComposing || e.keyCode === 229) return
     if (showSuggestions && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault()
       const delta = e.key === 'ArrowDown' ? 1 : -1

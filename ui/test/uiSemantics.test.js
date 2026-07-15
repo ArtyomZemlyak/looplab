@@ -241,8 +241,12 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
   assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
-  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) setNodeTrace\(d\) \}\)/)
-  assert.match(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\); loadNodeTrace\(alive\) \}[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
+  // persistent failure does not flicker the error/Retry banner every 4s.
+  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) \{ setNodeTrace\(d\); setNodeTraceError\(false\) \} \}\)/)
+  assert.match(dock, /usePoll\(\(alive\) => loadNodeTrace\(alive\)[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\)/,
+    'the trace error flag must clear only on a successful load, not eagerly each poll tick (no banner flicker)')
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,
     'the timeline must not regress to a whole-run trace fold/poll')
 })

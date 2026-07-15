@@ -33,6 +33,7 @@ from looplab.events.types import (
     EV_NODE_BUILDING,
     EV_NODE_FAILED, EV_PAUSE,
     EV_POLICY_DECISION,
+    EV_REPORT_GENERATED,
     EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED,
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
@@ -689,7 +690,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # finish CAS below — abandon the scope on a lost race instead of crashing the finish path.
             try:
                 report = self.store.append(
-                    "report_generated",
+                    EV_REPORT_GENERATED,   # the registry constant, not a literal (invariant #7: a typo'd literal silently no-ops)
                     dict(report.data or {}),
                     expected_last_seq=tail_seq,
                 )

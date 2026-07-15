@@ -18,7 +18,7 @@ export const SETTINGS_GROUPS = [
       { key: 'max_nodes', label: 'Max nodes', type: 'int', agents: ['strategist', 'boss'],
         help: 'Node (experiment) budget — the loop stops after this many.' },
       { key: 'n_seeds', label: 'Seeds', type: 'int', agents: ['strategist'], help: 'Eval seeds per node (variance handling).' },
-      { key: 'max_parallel', label: 'Max parallel', type: 'int', agents: ['strategist', 'boss'],
+      { key: 'max_parallel', label: 'Max parallel', type: 'int', agents: ['strategist'],
         help: '>1 fans out concurrent evals; 1 = deterministic single eval at a time.' },
       { key: 'ablate_every', label: 'Ablate every', type: 'int', agents: ['strategist'],
         help: 'Ablation-driven refinement every N improves (0 = off; greedy only).' },
@@ -57,7 +57,7 @@ export const SETTINGS_GROUPS = [
         help: 'A4: feed recent failed-branch summaries into the proposal prompt so the proposer avoids repeating them.' },
       { key: 'localize_faults', label: 'Fault localization', type: 'bool',
         help: 'C1: rank the repo files most relevant to a failure and surface them in the prompt (repo tasks).' },
-      { key: 'novelty_mode', label: 'Novelty check', type: 'enum', options: ['off', 'algo', 'llm'], agents: ['strategist'],
+      { key: 'novelty_mode', label: 'Novelty check', type: 'enum', options: ['off', 'algo', 'llm'],
         help: 'How a fresh proposal is dedup-checked vs already-tried experiments. off = no explicit gate (the agentic Researcher\'s own read-the-history judgment stands). algo = deterministic param-distance + optional embedding similarity (cheap, no LLM). llm (default) = an LLM reads the real experiments and decides if it\'s a near-duplicate, then re-proposes if so (one extra LLM call per proposal, highest quality).' },
       { key: 'novelty_gate', label: '↳ algo: param gate', type: 'bool',
         help: 'The algorithmic gate (used by novelty_check=algo): nudge near-duplicate proposals off each other by param-space distance. (Legacy: setting this on forces algo mode.)' },
@@ -112,7 +112,7 @@ export const SETTINGS_GROUPS = [
       { key: 'max_eval_seconds', label: 'Max eval time (s)', type: 'float', placeholder: 'unbounded',
         agents: ['strategist', 'boss'],
         help: 'Ceiling on cumulative time spent INSIDE evals (survives resume).' },
-      { key: 'timeout', label: 'Per-eval timeout (s)', type: 'float', agents: ['researcher', 'strategist', 'boss'],
+      { key: 'timeout', label: 'Per-eval timeout (s)', type: 'float', agents: ['researcher', 'strategist'],
         help: 'Kill a single eval after this long. Researcher = the “auto” per-node mode (it sizes heavy/neural-net experiments; this is the fallback).' },
       { key: 'sweep_timeout_mult', label: 'Sweep timeout ×', type: 'float',
         help: 'A sweep node runs a whole grid in one process, so it gets this multiple of the per-eval timeout as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).' },
@@ -171,9 +171,9 @@ export const SETTINGS_GROUPS = [
         help: 'Max tool-call turns ANY agent (Researcher, pilot, crash-triage, run-chat Boss, deep-research, repo-scout) may take before its result is forced. Blank/0 = unlimited — the agent loops until done, never cut off mid-reasoning. Set a positive cap only to bound latency/cost.' },
       { key: 'agent_time_budget_s', label: 'Agent tool-loop time (s)', type: 'float', placeholder: 'unlimited',
         help: 'Wall-clock ceiling across an agent’s tool-loop turns. Blank/0 = no cap. Raise/clear this if a slow reasoning model gets cut off before it emits (replaces the old hardcoded 45s boss limit).' },
-      { key: 'agent_emit_after', label: 'Emit nudge after (turns)', type: 'int', placeholder: '300', agents: ['strategist'],
+      { key: 'agent_emit_after', label: 'Emit nudge after (turns)', type: 'int', placeholder: '300',
         help: 'Convergence safety-net: after this many tool turns the loop NUDGES the agent once to stop investigating and emit its idea. Set generously — a focused researcher may legitimately read many files first. 0 = off.' },
-      { key: 'agent_emit_force', label: '↳ force emit at (turns)', type: 'int', placeholder: '500', agents: ['strategist'],
+      { key: 'agent_emit_force', label: '↳ force emit at (turns)', type: 'int', placeholder: '500',
         help: 'Hard backstop: at this many tool turns the loop FORCES the emit from what the agent gathered, so a model that never commits can’t burn the whole budget. 0 = off. Keep it above the nudge threshold.' },
       { key: 'context_budget_chars', label: 'Context budget (chars)', type: 'int',
         help: 'H4: cap the agentic researcher’s tool-call history by middle-truncating stale output (0 = unbounded).' },
@@ -324,7 +324,10 @@ export const FIELD_BY_KEY = Object.fromEntries(
 export function coerce(field, raw) {
   if (field.type === 'bool') return !!raw
   if (raw === '' || raw == null) return null
-  if (field.type === 'int') { const n = parseInt(raw, 10); return Number.isFinite(n) ? n : null }
+  // Number() (not parseInt): parseInt('2abc') silently accepts trailing junk as 2 and parseInt('2.5')
+  // truncates toward zero. Number() rejects non-numeric input (→ null → engine default) and we round to
+  // the nearest integer so a fractional entry isn't silently floored.
+  if (field.type === 'int') { const n = Number(raw); return Number.isFinite(n) ? Math.round(n) : null }
   if (field.type === 'float') { const n = parseFloat(raw); return Number.isFinite(n) ? n : null }
   if (field.type === 'list') return String(raw).split(',').map(s => s.trim()).filter(Boolean)
   return raw   // text / enum

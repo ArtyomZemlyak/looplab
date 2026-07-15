@@ -640,12 +640,14 @@ class StrategyCadenceMixin:
                 m = metric_of(n)
                 if m is not None:
                     buckets.setdefault(m, []).append(n)
-            # CODEX AGENT: every lower-score tie bucket is enqueued and groups are later sorted by node id,
-            # so an 8-node losing tie can consume the entire cadence cap before the 2-node champion tie.
-            # If the run then finishes, the actual winner stays on id fallback. Produce/prioritize only the
-            # selector-reachable top robust and top holdout buckets (plus the leader CI band).
-            for grp in buckets.values():
-                _add(grp)
+            if not buckets:
+                return
+            # Only the SELECTOR-REACHABLE tie matters: `_select_best` picks the BEST-metric node, so a tie
+            # among non-best (losing) nodes can never be the selection. Enqueue ONLY the best-metric bucket
+            # (direction-aware) — otherwise a large losing tie, sorted ahead by node id, could exhaust the
+            # verify cadence and leave the real champion tie on the id fallback (CODEX).
+            best_m = min(buckets) if state.direction == "min" else max(buckets)
+            _add(buckets[best_m])
 
         _exact_ties(pool, lambda n: n.robust_metric)                 # promotion_key exact ties (mean-pick pool)
         if getattr(self, "_holdout_select", False):
@@ -692,13 +694,12 @@ class StrategyCadenceMixin:
             score = float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
             if score is None:
                 return None
-            # Reject a too-noisy verdict (variance is only measurable across >1 sample): if fewer than half
-            # the samples agree on the modal verdict, the judgment is unstable — abstain so a coin-flip
-            # can't decide the tie (which then falls back to the id tie-break for the whole group).
-            # CODEX AGENT: the prose promises a majority, but agreement==0.5 (e.g. a 1-1 split with two
-            # allowed samples) passes and can choose the champion. Require strict majority (`<= 0.5`
-            # abstains), constrain sample counts to odd values, or use an explicit confidence rule.
-            if samples > 1 and rep.agreement < 0.5:
+            # Reject a too-noisy verdict (variance is only measurable across >1 sample): without a STRICT
+            # majority agreeing on the modal verdict the judgment is unstable — abstain so a coin-flip can't
+            # decide the tie (which then falls back to the id tie-break for the whole group). `<= 0.5`
+            # abstains, so a 1-1 split (agreement==0.5, reachable with an even sample count) does NOT choose
+            # the champion — the prose promised a majority and now the guard enforces it (CODEX).
+            if samples > 1 and rep.agreement <= 0.5:
                 return None
             return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement}
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)

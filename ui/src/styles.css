@@ -1375,6 +1375,9 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   border: none; background: transparent; color: var(--fg); cursor: pointer; border-radius: 7px; }
 .th-opt:hover { background: var(--bg-2); }
 .th-opt.on { background: var(--bg-3); }
+/* Keyboard focus ring for the roving-tabindex menu items — without it an arrow-key user can't see which
+   theme option is focused (the items carry tabIndex=-1 and are focused programmatically). */
+.th-opt:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .th-sw { position: relative; width: 30px; height: 22px; border-radius: 5px; border: 1.5px solid; flex: none; overflow: hidden; }
 .th-sw-ac { position: absolute; left: 4px; bottom: 4px; width: 10px; height: 10px; border-radius: 50%; }
 .th-sw-fg { position: absolute; right: 4px; top: 6px; width: 12px; height: 3px; border-radius: 2px; }

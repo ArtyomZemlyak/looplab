@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import Markdown from './markdown.jsx'
+import Markdown, { safeHref } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 
 // Report-local research memo. This must not live in panels.jsx: importing the report alone should
@@ -29,12 +29,18 @@ export default function MemoCard({ memo, idx, open, onToggle }) {
       </>}
       {(memo.sources || []).length > 0 && <>
         <div className="section-h">Sources consulted</div>
-        <ul className="bul">{memo.sources.map((source, index) => <li key={index}>
-          {source.url
-            ? <a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>
-            : (source.title || '—')}
-          {source.snippet && <span className="muted"> — {String(source.snippet).slice(0, 120)}</span>}
-        </li>)}</ul>
+        <ul className="bul">{memo.sources.map((source, index) => {
+          // A research memo's source URL is LLM/tool-authored, so it must pass the same scheme
+          // allow-list the Markdown renderer uses — a raw <a href> would let a `javascript:` source
+          // run script in the app origin on click. Unsafe/absent url -> plain text (title or url).
+          const href = safeHref(source.url)
+          return <li key={index}>
+            {href
+              ? <a href={href} target="_blank" rel="noreferrer noopener">{source.title || source.url}</a>
+              : (source.title || source.url || '—')}
+            {source.snippet && <span className="muted"> — {String(source.snippet).slice(0, 120)}</span>}
+          </li>
+        })}</ul>
       </>}
       {memo.reasoning && <div className="think-debug" style={{ marginTop: 8 }}>
         <button type="button" className="role-think disclosure-button" aria-expanded={think}

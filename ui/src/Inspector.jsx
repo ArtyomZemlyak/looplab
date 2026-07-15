@@ -777,6 +777,7 @@ function StageLog({ text, live }) {
 function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   const m = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
+  const [allTurns, setAllTurns] = useState(false)
   const roll = st.rollup || {}
   const tk = roll.tokens || {}
   const nTurns = (st.turns || []).length
@@ -800,8 +801,15 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
       {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </button>
     {open && <div className="conv-turns">
-      {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
-        : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+      {/* Cap the mounted turns like the raw span view (SPAN_CAP): a heavily-repaired / tool-looping stage
+          can carry hundreds of turns, and ConvGen eagerly renders each turn's Markdown — mounting them all
+          froze the browser (the exact black-screen the raw view's cap was built to avoid). Show the first
+          SPAN_CAP, then reveal the rest one click away; nothing is lost. */}
+      {(allTurns ? (st.turns || []) : (st.turns || []).slice(0, SPAN_CAP)).map((t, j) =>
+        t.type === 'request' ? <ConvRequest key={j} t={t} />
+          : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+      {!allTurns && (st.turns || []).length > SPAN_CAP && <button className="span-more"
+        onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - SPAN_CAP} more turns</button>}
       {log ? <StageLog text={log} live={live} /> : null}
     </div>}
   </div>
@@ -986,9 +994,12 @@ function MetricCurves({ runId, nodeId, status }) {
     if (nodeId == null) return
     setMetrics({})    // node changed → drop the previous node's curves before the first fetch resolves
   }, [runId, nodeId, done])
+  // A terminal node's metrics are immutable — fetch ONCE (ms=null: immediate, no interval) instead of
+  // polling every 15s forever. A running node still polls at 3s; a status change (via the `done` dep)
+  // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
   usePoll((alive) => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
     .then(d => alive() && setMetrics((d && d.metrics) || {})).catch(() => {}),
-    done ? 15000 : 3000, [runId, nodeId, done], { enabled: nodeId != null })
+    done ? null : 3000, [runId, nodeId, done], { enabled: nodeId != null })
   return <MetricLines series={metrics} />
 }
 

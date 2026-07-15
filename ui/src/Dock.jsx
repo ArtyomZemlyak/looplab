@@ -462,16 +462,17 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const exactBuilding = liveBuilding != null && traceNid === liveBuilding.nodeId
     && traceGeneration != null
     && traceGeneration === liveBuilding.generation
+  // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
+  // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
   const loadNodeTrace = (alive) => get(`/api/runs/${runId}/nodes/${traceNid}/trace`)
-    .then(d => { if (alive()) setNodeTrace(d) })
+    .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
-  usePoll((alive) => { setNodeTraceError(false); loadNodeTrace(alive) }, 4000,
+  usePoll((alive) => loadNodeTrace(alive), 4000,
     [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce],
     { enabled: open && !readOnly && traceNid != null && exactBuilding })
   useEffect(() => {
     if (!open || readOnly || traceNid == null || exactBuilding) return undefined
     let alive = true
-    setNodeTraceError(false)
     loadNodeTrace(() => alive)
     return () => { alive = false }
   }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce])
