@@ -188,3 +188,38 @@ def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
     t = CrossRunTools(tmp_path)
     t.bind_state(SimpleNamespace(task_id="rubert", goal="плотный поиск"))   # Cyrillic goal
     assert "legacy lesson" in t.execute("cross_run_claims", {})            # exact task_id still passes
+
+
+# --------------------------------------------------------------------------- #
+# Genesis wiring (§22.5) — the run planner gets the cross-run tool when enabled
+# --------------------------------------------------------------------------- #
+
+def _genesis_tools(tmp_path, *, on, monkeypatch):
+    import looplab.engine.genesis as g
+    captured = {}
+
+    def _fake(client, tools, messages, schema, **kw):
+        captured["tools"] = tools
+        raise RuntimeError("stop after assembling tools")
+
+    monkeypatch.setattr(g, "agentic_struct", _fake)
+    g.author_task("classify some text", client=object(), kinds=("dataset",),
+                  memory_dir=str(tmp_path), cross_run_read_tools=on)
+    tools = captured.get("tools")
+    if tools is None:
+        return []
+    provs = getattr(tools, "providers", [tools])
+    flat = []
+    for p in provs:
+        flat += getattr(p, "providers", [p])
+    return flat
+
+
+def test_genesis_gets_cross_run_tool_when_enabled(tmp_path, monkeypatch):
+    flat = _genesis_tools(tmp_path, on=True, monkeypatch=monkeypatch)
+    assert any(isinstance(p, CrossRunTools) for p in flat)
+
+
+def test_genesis_omits_cross_run_tool_when_off(tmp_path, monkeypatch):
+    flat = _genesis_tools(tmp_path, on=False, monkeypatch=monkeypatch)
+    assert not any(isinstance(p, CrossRunTools) for p in flat)

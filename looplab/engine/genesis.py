@@ -161,7 +161,8 @@ def _scout_tools(data: Optional[str], repo: Optional[str]):
 def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str] = None,
                 repo: Optional[str] = None, direction: Optional[str] = None,
                 kind: Optional[str] = None, draft: Optional[dict] = None,
-                parser: str = "tool_call") -> GenesisResult:
+                parser: str = "tool_call", memory_dir=None,
+                cross_run_read_tools: bool = False) -> GenesisResult:
     """Ask the model to author an inline task from a plain goal. With `kind=None` it also CHOOSES the
     kind; with `kind` set it is CONSTRAINED to that kind and only fills the rest (the user pinned the
     type, Genesis does the rest within it). `draft` is an existing task dict (e.g. from a config file)
@@ -199,6 +200,18 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     # promise — the same repo-scouting the Web UI's Genesis chat does. With no named path it stays
     # None (pure goal→plan) and `agentic_struct` degrades to the single-shot parse_structured.
     tools = _scout_tools(data, repo)
+    # PART V §22 — give Genesis the read-only CROSS-RUN knowledge (portfolio-wide, unbound): so it can plan
+    # scope/settings informed by what related runs already tried, and DISCLOSE prior art, instead of blind.
+    if memory_dir and cross_run_read_tools:
+        from looplab.agents.agent import CompositeTools
+        from looplab.tools.cross_run_tools import CrossRunTools
+        crt = CrossRunTools(memory_dir, role="researcher")
+        tools = CompositeTools([tools, crt]) if tools is not None else crt
+        sys_prompt += (
+            "\n\nYou also have READ-ONLY CROSS-RUN tools over past runs: cross_run_atlas() (what's been "
+            "explored / where the gaps are / what's contradictory), cross_run_prior_attempts(idea) and "
+            "cross_run_claims(query) — consult them to ground the task's scope in prior art and steer "
+            "toward under-explored or unresolved directions. Advisory: cite, never treat as settled truth.")
     if tools is not None:
         sys_prompt += (
             "\n\nYou have READ-ONLY tools to inspect this machine BEFORE you author the task: "

@@ -4043,9 +4043,11 @@ audited, reversible act.
 
 #### 22.6 Rollout (each off-by-default + audit-first, merged incrementally)
 
-1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (all reasoning roles). **DONE.**
+1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (Researcher/Strategist/
+   deep-research) + **Genesis** (`author_task`, portfolio-wide/unbound for run planning). **DONE.**
 2. Developer role-scoped read variant (into `LLMRepoDeveloper._scout_tools`, `role="developer"`). **DONE.**
-3. Strategist coverage cue + Genesis prior-art (injection, bounded). *(follow-up)*
+   → READ access now covers EVERY reasoning role: Researcher, Strategist, deep-research, Developer, Genesis.
+3. Strategist coverage cue + Genesis prior-art (proactive INJECTION on top of the pull tool, bounded). *(follow-up — every role can already PULL via the tool; this is the extra unprompted nudge.)*
 4. Operator ratify/reject/pin — `claim_decisions.jsonl` overlay + `looplab claim-decide`, honored across
    the CLI / atlas / agent context pack / advisory injection (rejected dropped, ratified surfaced first).
    **DONE (CLI surface; the serve control-event + governance UI + concept merge/split/purge are follow-ups).**
