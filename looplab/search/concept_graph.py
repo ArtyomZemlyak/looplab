@@ -809,7 +809,7 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
 
 
 def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embed=None,
-                         parser: str = "tool_call") -> tuple:
+                         parser: str = "tool_call", known_renames=None) -> tuple:
     """Consolidate a freely-GROWN concept vocabulary so it does not FRAGMENT into synonyms across a run
     (`augmentation` vs `data-augmentation`, `optimizer` vs `optimization`) — the §21.11 follow-up that makes
     the grown graph a STABLE coordinate system on any task. Returns `(graph, tags, rename_map)`.
@@ -818,14 +818,30 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
     concepts/axes to ONE id each; keep genuinely-distinct methods apart — `mixup` ≠ `cutmix`). Deterministic
     FALLBACK (no client): `hybrid_merge.cluster_near_duplicates` over the concept labels (recall-oriented RRF
     clustering) plus an axis-normalization pass; the canonical id per cluster is the shortest existing id.
-    Fail-open: any error returns the graph/tags UNCHANGED (never loses information, never raises)."""
+    Fail-open: any error returns the graph/tags UNCHANGED (never loses information, never raises).
+
+    STABLE / INCREMENTAL (§21.18 B3): `known_renames` (raw->canonical, recorded across cadences) are applied
+    verbatim and are AUTHORITATIVE — a decided merge is NEVER re-decided, so the vocabulary stops flapping
+    (LLM consolidation is nondeterministic). Only concepts not already covered (neither a known raw nor a
+    known canonical) are sent to the model; when there is nothing new to decide, the LLM step is SKIPPED
+    entirely. The returned map is the FULL resolved rename (known + new) for the caller to record."""
+    known_renames = {str(k): str(v) for k, v in (known_renames or {}).items() if k and v}
     concepts = [c for c in graph.concepts() if not c.id.endswith("/*")]
     if len(concepts) < 2:
+        # still honor already-decided renames even on a tiny vocab (keeps a resumed graph consistent)
+        if known_renames:
+            g2, t2 = _apply_consolidation(graph, tags, known_renames)
+            return g2, t2, dict(known_renames)
         return graph, tags, {}
     ids = [c.id for c in concepts]
-    rename: dict = {}
+    rename: dict = dict(known_renames)   # start FIXED on the recorded decisions
+    # Only concepts neither already renamed NOR a known canonical target need a fresh decision.
+    decided = set(known_renames) | set(known_renames.values())
+    undecided = [c for c in concepts if c.id not in decided]
     try:
-        if client is not None:
+        if not undecided:
+            pass                          # nothing new to consolidate -> skip the LLM/heuristic entirely
+        elif client is not None:
             from pydantic import BaseModel, Field
 
             from looplab.core.parse import parse_structured
@@ -852,7 +868,9 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
             for p in out.merges:
                 raw = _normalize_concept_id(p.raw)
                 canon = _normalize_concept_id(p.canonical)
-                if raw and canon and raw != canon and raw in idset and "/" in canon:
+                # `raw not in known_renames`: a recorded decision is AUTHORITATIVE — never re-decide it.
+                if (raw and canon and raw != canon and raw in idset and "/" in canon
+                        and raw not in known_renames):
                     rename[raw] = canon
         else:
             from looplab.search.hybrid_merge import cluster_near_duplicates
@@ -863,7 +881,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
                 members = [ids[i] for i in cluster]
                 canon = min(members, key=lambda s: (len(s), s))  # shortest id = canonical
                 for m in members:
-                    if m != canon:
+                    if m != canon and m not in known_renames:   # keep recorded decisions fixed
                         rename[m] = canon
     except Exception:  # noqa: BLE001 — consolidation is best-effort; never break the diagnostic
         return graph, tags, {}
@@ -888,7 +906,7 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
-                      parser: str = "tool_call", known_tags=None) -> dict:
+                      parser: str = "tool_call", known_tags=None, known_renames=None) -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -915,7 +933,8 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
     raw = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True, known_tags=known_tags)
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
-    graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser)
+    graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser,
+                                                known_renames=known_renames)
     cov = concept_coverage(state, graph, tags)
     important = derive_reference_concepts(task_goal or getattr(state, "goal", "") or "", cov,
                                           client=client, asset_brief=asset_brief, parser=parser)

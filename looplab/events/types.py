@@ -102,6 +102,12 @@ EV_NODE_CONCEPTS = "node_concepts"
 # statement-slug id); recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
 # RunState.hypothesis_concepts. See looplab/search/concept_graph.py::tag_text_llm.
 EV_HYPOTHESIS_CONCEPTS = "hypothesis_concepts"
+# PART IV D5 (§21.18 B3): the concept-vocabulary consolidation rename map (raw_id -> canonical_id) decided
+# by the LLM, recorded so LATER cadences REUSE the decisions instead of re-deciding them (LLM-nondeterministic
+# -> flapping coverage + B1 churn). Fixing known renames makes the vocabulary a STABLE coordinate system and
+# only new concepts are consolidated. Recorded only when `concept_pivot` is on; additive, reader-defaulted;
+# folds (accumulated) into RunState.concept_consolidation. See looplab/search/concept_graph.py.
+EV_CONCEPT_CONSOLIDATION = "concept_consolidation"
 EV_LLM_COST = "llm_cost"
 EV_ABLATE = "ablate"
 EV_POLICY_DECISION = "policy_decision"

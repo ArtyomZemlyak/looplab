@@ -2997,9 +2997,25 @@ required tag behaviour:
   against a loss-only vocab recovers `encoder/adapter-tuning` when re-tagged against the grown vocab.
   Chose vocab-version invalidation over the prefilter→confirm design (simpler, reuses the re-tag machinery,
   correct). **B1 follow-up:** the same for hypotheses + lessons (nodes are the primary coverage signal).
-- **B3 (MEDIUM):** record the consolidation rename map as an event so coverage is stable across cadences
-  (no LLM re-decision flapping). Live test: two cadences → identical canonical mapping.
+- **B3 (DONE):** record the consolidation rename map as a `concept_consolidation` event
+  (RunState.concept_consolidation, accumulated). `consolidate_concepts(known_renames=…)` treats recorded
+  decisions as AUTHORITATIVE (never re-decided) and skips the LLM when nothing is undecided, so the
+  vocabulary stops flapping (fixes the coverage jitter + the B1 churn corner). Threaded through
+  `build_concept_map`; the strategy snapshot records only NEW decisions. Off-by-default.
 - **B2 / B4 / axis events (LOW):** explicit concept-delete policy; concept split; axis restructuring.
+
+**CROSS-RUN (CR) — the concept machinery is currently PER-RUN (user-flagged 2026-07-15; design parked
+pending the user's decision).** node_concepts / hypothesis_concepts / concept_consolidation / coverage all
+live in one run's RunState and rebuild from scratch each run; only DISTILLED LESSONS (D6/E4) cross runs
+today (LoopLab's existing `memory.py`/`lessons_*`). `graded_novelty.prior_concepts` (D3 level-3
+"tried_across_runs") is a STUB — the param exists but no caller populates it, so level-3 never fires.
+Backlog (not started):
+- **CR1:** persist the concept vocabulary + consolidation map + per-concept outcomes across runs (seed a new
+  run's graph so the agent doesn't re-learn the coordinate system; global-stable consolidation). B3's rename
+  map is the natural substrate.
+- **CR2:** populate `prior_concepts` from cross-run memory so D3 level-3 finally fires (surface "tried in
+  run X, outcome Y").
+- **CR3:** cross-run coverage — "was concept Z ever touched in ANY run".
 
 The through-line: the **LLM decides semantics** (which concept, when to split/merge), **deterministic code
 maintains the record** (events, fold, redistribution, prefilter), each step keeps a heuristic fallback, and

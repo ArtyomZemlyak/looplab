@@ -21,9 +21,9 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        validate_strategy)
 from looplab.core.models import RunState
 from looplab.events.replay import fold
-from looplab.events.types import (EV_CONCEPT_COVERAGE_SNAPSHOT, EV_COVERAGE_SNAPSHOT,
-                                  EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS, EV_NODE_VERIFIED,
-                                  EV_STRATEGY_DECISION)
+from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
+                                  EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
+                                  EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
 
 # HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
 # run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
@@ -367,10 +367,20 @@ class StrategyCadenceMixin:
                 stale = set(stale_tagged_nodes(list(all_known), at_vocab,
                                                growth=_RETAG_GROWTH, cap=_RETAG_CAP))
                 known = {nid: v for nid, v in all_known.items() if nid not in stale}
+                known_renames = {str(k): str(v)
+                                 for k, v in (getattr(state, "concept_consolidation", None) or {}).items()}
                 _span = getattr(self, "_op_span", None)
                 with (_span("concept_coverage") if callable(_span) else contextlib.nullcontext()):
                     cmap = build_concept_map(state, task_goal=state.goal or "", client=client, tools=None,
-                                             seed_graph=seed, parser=parser, known_tags=known)
+                                             seed_graph=seed, parser=parser, known_tags=known,
+                                             known_renames=known_renames)
+                # B3 (§21.18): record only the NEW consolidation decisions so later cadences keep them FIXED
+                # (stable vocabulary, no flapping). Accumulated in the fold; emit-only-if-new -> no churn.
+                new_renames = {k: v for k, v in (cmap.get("consolidated") or {}).items()
+                               if known_renames.get(k) != v}
+                if new_renames:
+                    self.store.append(EV_CONCEPT_CONSOLIDATION,
+                                      {"rename": new_renames, "mode": cmap.get("mode", "llm")})
                 # Reuse the coverage build_concept_map already computed (no second O(nodes) rollup).
                 graph, tags = cmap["graph"], cmap["tags"]
                 cov, important = cmap["coverage"], cmap["important_uncovered"]

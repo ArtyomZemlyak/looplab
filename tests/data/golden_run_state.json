@@ -86,6 +86,7 @@
   "budget_overrides": {},
   "building": null,
   "champion": null,
+  "concept_consolidation": {},
   "concept_coverage_snapshots": [],
   "config_hash": "1f0bc827ac74",
   "confirm_request_generations": [],

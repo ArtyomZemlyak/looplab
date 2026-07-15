@@ -344,6 +344,58 @@ def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
     assert fold(s.read_all()).node_concepts == {3: ["negatives/y"]}
 
 
+def test_concept_consolidation_event_accumulates_and_is_replay_safe(tmp_path):
+    """B3 (§21.18): concept_consolidation events ACCUMULATE into RunState.concept_consolidation (order-
+    tolerant, idempotent, malformed-safe); a log without them folds to {} (additive)."""
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    assert fold(s.read_all()).concept_consolidation == {}
+    s.append("concept_consolidation", {"rename": {"aug/x": "data-aug/x"}})
+    s.append("concept_consolidation", {"rename": {"opt/y": "optimization/y"}})   # accumulates
+    s.append("concept_consolidation", {"rename": "notadict"})                    # malformed -> ignored
+    st = fold(s.read_all())
+    assert st.concept_consolidation == {"aug/x": "data-aug/x", "opt/y": "optimization/y"}
+
+
+def test_consolidate_reuses_known_renames_authoritatively():
+    """B3: a recorded rename is FIXED — never re-decided — even if the model would merge it elsewhere, so the
+    vocabulary is stable across cadences."""
+    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+
+    class _MergeAll:  # a client that would (wrongly) merge everything into 'z/z'
+        def complete_tool(self, m, j):
+            return {"merges": [{"raw": "aug/mixup", "canonical": "z/z"},
+                               {"raw": "newaxis/newconcept", "canonical": "aug/mixup"}]}
+        def complete_text(self, m): return "x"
+    g = ConceptGraph(task_type="t")
+    for cid in ("aug/mixup", "z/z", "newaxis/newconcept"):
+        g.ensure(cid, axes=(cid.split("/", 1)[0],))
+    tags = {0: frozenset({"aug/mixup"}), 1: frozenset({"newaxis/newconcept"})}
+    # KNOWN says aug/mixup stays canonical (maps to itself is dropped as identity); feed a real fixed decision
+    known = {"aug/mixup": "data-aug/mixup"}
+    g.ensure("data-aug/mixup", axes=("data-aug",))
+    _, t2, rn = consolidate_concepts(g, tags, client=_MergeAll(), known_renames=known)
+    # the recorded aug/mixup -> data-aug/mixup is KEPT (NOT overridden to z/z); the new concept CAN be decided
+    assert rn["aug/mixup"] == "data-aug/mixup"
+    assert t2[0] == frozenset({"data-aug/mixup"})
+
+
+def test_consolidate_skips_llm_when_nothing_undecided():
+    """B3: when every concept is already covered by known_renames (raw or canonical), the LLM step is
+    skipped — the incremental efficiency win + total stability."""
+    from looplab.search.concept_graph import ConceptGraph, consolidate_concepts
+
+    class _Boom:  # must NOT be called
+        def complete_tool(self, m, j): raise AssertionError("LLM called though nothing was undecided")
+        def complete_text(self, m): raise AssertionError("no")
+    g = ConceptGraph(task_type="t")
+    g.ensure("aug/mixup", axes=("aug",)); g.ensure("data-aug/mixup", axes=("data-aug",))
+    known = {"aug/mixup": "data-aug/mixup"}   # aug/mixup is raw, data-aug/mixup is canonical -> all covered
+    _, _, rn = consolidate_concepts(g, {0: frozenset({"aug/mixup"})}, client=_Boom(), known_renames=known)
+    assert rn == {"aug/mixup": "data-aug/mixup"}
+
+
 def test_hypothesis_concepts_event_round_trips_and_is_replay_safe(tmp_path):
     """HT (§21.18): hypothesis_concepts folds into RunState.hypothesis_concepts (str-keyed, last-write-wins,
     malformed-safe); a log without them folds to {} (additive / byte-identical on old logs)."""
