@@ -126,3 +126,26 @@ def test_repo_developer_scouts_omit_cross_run_when_off(tmp_path):
     d._cross_run_memory_dir = str(tmp_path)
     d._editables = []
     assert d._scout_tools() == []                          # off -> byte-identical to before
+
+
+# --------------------------------------------------------------------------- #
+# Integration (§22): the real Researcher/Strategist provider assembly wires the tool under the flag
+# --------------------------------------------------------------------------- #
+
+def _minimal_settings(tmp_path, *, on):
+    from looplab.core.config import Settings
+    return Settings(memory_dir=str(tmp_path), knowledge_dir=None, skills_dir=None,
+                    researcher_tools=False, cross_run_tools=False, all_runs_tools=False,
+                    literature_search=False, cross_run_read_tools=on)
+
+
+def test_shared_providers_include_cross_run_tool_when_enabled(tmp_path):
+    from looplab.adapters.tasks import _shared_providers
+    provs = _shared_providers(None, _minimal_settings(tmp_path, on=True))
+    assert any(isinstance(p, CrossRunTools) and p.role == "researcher" for p in provs)
+
+
+def test_shared_providers_omit_cross_run_tool_when_off(tmp_path):
+    from looplab.adapters.tasks import _shared_providers
+    provs = _shared_providers(None, _minimal_settings(tmp_path, on=False))
+    assert not any(isinstance(p, CrossRunTools) for p in provs)
