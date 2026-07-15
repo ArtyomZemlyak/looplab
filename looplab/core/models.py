@@ -372,6 +372,9 @@ class RunState(BaseModel):
     # best-selection's mean pick breaks a metric-EQUAL tie by the calibrated §12-verifier soundness score
     # (Node.verifier_score) — advisory, never overriding a strictly-better robust_metric (§21.7).
     select_verifier_tiebreak: bool = False
+    # R1-d (§21.19): recorded `verifier_ci_tie` — widen the verifier tie-break to a statistical (CI) tie.
+    # Folded from run_started; absent on old logs -> False -> byte-identical exact-tie selection.
+    verifier_ci_tie: bool = False
     nodes: dict[int, Node] = Field(default_factory=dict)
     # The node currently BEING BUILT (a `node_building` marker), shown in the UI the instant work starts
     # on it — before the dev session finishes with node_created. Transient: {node_id, operator,

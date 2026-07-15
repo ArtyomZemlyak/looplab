@@ -208,6 +208,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         holdout_select = _opt("holdout_select")
         holdout_top_k = _opt("holdout_top_k")
         select_verifier = _opt("select_verifier")
+        verifier_ci_tie = _opt("verifier_ci_tie")
         select_verifier_samples = _opt("select_verifier_samples")
         debug_depth = _opt("debug_depth")
         operator_bandit = _opt("operator_bandit")
@@ -447,6 +448,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._holdout_select = bool(holdout_select)
         self._holdout_top_k = max(1, int(holdout_top_k))
         self._select_verifier = bool(select_verifier)
+        self._verifier_ci_tie = bool(verifier_ci_tie)
         self._select_verifier_samples = max(1, int(select_verifier_samples))
         # The FRACTION defines the split every search metric is scored against, so it must be pinned
         # in the event log (like trust_gate / holdout_select) — on resume the recorded value is
@@ -844,6 +846,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # R1-c: calibrated-verifier metric-tie-break, recorded at start so replay
                             # applies the same rule. Absent in old logs -> False -> byte-identical pick.
                             "select_verifier": self._select_verifier,
+                            # R1-d: statistical (CI) verifier tie-break. Absent in old logs -> False ->
+                            # byte-identical exact-tie pick.
+                            "verifier_ci_tie": self._verifier_ci_tie,
                         },
                     )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -931,6 +936,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # setup hasn't recorded run_started yet, keep the live value rather than zero it from an empty fold.
         if _entry.run_id:
             self._select_verifier = _entry.select_verifier_tiebreak
+            self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick
@@ -1469,11 +1475,15 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     state, idea, repropose=lambda p=parent: self.researcher.propose(state, p))
                 idea.operator = "improve"
                 # PART IV D7 (§21.8): under action-space LOCK-IN with the capability_expansion lever on, this
-                # improve proposal was already steered by the "build a new capability" directive
-                # (proposal_cues, SAME gate) — stamp it as its OWN `expand` operator so operator_yields
-                # MEASURES whether expanding paid off (scored, SearchFitness-competing as its own lineage),
-                # not silently as another `improve`. Off (flag default) -> stays `improve`, byte-identical.
-                if getattr(self, "_capability_expansion", False):
+                # improve proposal was already steered by the "build a new capability" directive — stamp it
+                # as its OWN `expand` operator so operator_yields MEASURES whether expanding paid off (scored,
+                # SearchFitness-competing as its own lineage), not silently as another `improve`. The relabel
+                # must fire on the EXACT SAME condition as the directive (proposal_cues `_stamp_novelty_hint`):
+                # flag on + `capability_expansion_due` + the EXPLORE stance. Without the stance gate, a
+                # balanced/exploit improve (which got NO expand directive) would be mislabeled `expand` and
+                # contaminate the expand yield (CODEX P1). Off (flag default) -> stays `improve`, byte-identical.
+                if (getattr(self, "_capability_expansion", False)
+                        and getattr(self, "_novelty_stance", None) == "explore"):
                     from looplab.engine.proposal_cues import _LOCK_IN_STREAK
                     from looplab.search.lock_in import capability_expansion_due
                     if capability_expansion_due(state, streak_threshold=_LOCK_IN_STREAK)[0]:

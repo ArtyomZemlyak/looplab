@@ -127,7 +127,30 @@ def _run_tools_for(state):
         return None
 
 
-def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
+def _settings_for_run(run_dir=None, model=None):
+    """Load the run's PINNED Settings from `config.snapshot.json` (as resume/UI do) so a diagnostic sends
+    run code/logs to the SAME endpoint the run was pinned to — not a possibly-different ambient config
+    (CODEX #1). Falls back to ambient Settings when the snapshot is absent/unreadable; `model` is the only
+    explicit CLI override applied on top."""
+    from looplab.core.config import Settings
+    settings = None
+    try:
+        snap = (Path(run_dir) / "config.snapshot.json") if run_dir is not None else None
+        if snap is not None and snap.exists():
+            import json
+            data = json.loads(snap.read_text(encoding="utf-8"))
+            data.pop("llm_api_key", None)   # masked in the snapshot; re-read from env/default
+            settings = Settings(**data)
+    except Exception:  # noqa: BLE001 — any snapshot issue -> ambient fallback
+        settings = None
+    if settings is None:
+        settings = Settings()
+    if model is not None:
+        settings.llm_model = model
+    return settings
+
+
+def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, run_dir=None):
     """Shared PART IV D5 build — AGENTIC by default (the LLM agent grows the graph, tags, derives the
     per-task importance; `build_concept_map`), the deterministic alias heuristic only as the `--offline`
     fallback. Returns {graph, tags, important_uncovered, mode, brief}. This is what makes every Phase-1
@@ -142,10 +165,9 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None):
     # ("Agentic by default … sends node code/logs … pass --offline for the local heuristic"). `asset-brief`
     # keeps the inverse (--llm opt-in) because ITS agentic path is a much heavier full tool-loop.
     if not offline:
-        from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        # Use the RUN's pinned endpoint (config.snapshot.json), not ambient Settings, so a diagnostic
+        # sends node code/logs where the run was pinned (CODEX #1); ambient fallback + `model` override.
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic fallback, noted
@@ -201,9 +223,7 @@ def concept_coverage(
     client = None
     if not offline:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => fall back to the offline heuristic, note it
@@ -266,9 +286,7 @@ def asset_brief_cmd(
     client = None
     if llm:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — degrade to the offline scan
@@ -292,7 +310,8 @@ def lock_in(
     from looplab.search.lock_in import lock_in_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         run_dir=run_dir)
     typer.echo(lock_in_report(state, m["graph"], tags=m["tags"], streak_threshold=threshold))
     typer.echo(f"\n  (concept tags built by: {m['mode']})")
 
@@ -312,7 +331,8 @@ def board_dedup(
     from looplab.search.taxonomy_dedup import dedup_report
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model)
+    m = _concept_map_for(state, task_type or state.task_id or "", offline=offline, model=model,
+                         run_dir=run_dir)
     # dedup works over HYPOTHESIS tags (keyed by hypothesis id), NOT the node tags in m["tags"] (keyed by
     # node id). HT (§21.18) hypothesis-tag precedence:
     #   --offline           -> force the deterministic tag_text heuristic (bypass any recorded cache);
@@ -332,9 +352,7 @@ def board_dedup(
         client = None
         try:
             from looplab.core.config import Settings
-            settings = Settings()
-            if model is not None:
-                settings.llm_model = model
+            settings = _settings_for_run(run_dir, model)
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
             typer.echo(f"(no LLM endpoint: {e}; using the heuristic hypothesis tagger)")
@@ -376,9 +394,11 @@ def novelty_recall_cmd(
     offline: bool = typer.Option(False, "--offline", help="Only cluster candidate near-dup pairs (no "
                                                           "paraphrase-vs-variant adjudication — that needs "
                                                           "the LLM)."),
-    max_pairs: int = typer.Option(60, "--max-pairs", help="Call-budget knob: adjudicate at most this many "
-                                                          "of the most-similar candidate pairs with the LLM "
-                                                          "(each pair = one call). Lower it to cap cost/data."),
+    max_pairs: int = typer.Option(60, "--max-pairs", min=0, max=100000,
+                                  help="Call-budget knob: adjudicate at most this many of the most-similar "
+                                       "candidate pairs with the LLM (each pair = one call). Lower it to cap "
+                                       "cost/data. Bounded non-negative: a negative value would slice the "
+                                       "whole internal pool."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
     """PART IV E3 (§21.12): the novelty-gate RECALL diagnostic. Surfaces near-duplicate proposal pairs that
@@ -395,9 +415,7 @@ def novelty_recall_cmd(
     # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
     if not offline:
         from looplab.core.config import Settings
-        settings = Settings()
-        if model is not None:
-            settings.llm_model = model
+        settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
             parser = settings.llm_parser
@@ -418,9 +436,7 @@ def lesson_guard_cmd(
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     from looplab.core.config import Settings
-    settings = Settings()
-    if model is not None:
-        settings.llm_model = model
+    settings = _settings_for_run(run_dir, model)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — this diagnostic is LLM-only
