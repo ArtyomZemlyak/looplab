@@ -402,16 +402,24 @@ class StrategyCadenceMixin:
                 try:
                     from looplab.search.concept_graph import tag_text_llm
                     known_h = getattr(state, "hypothesis_concepts", None) or {}
+                    h_at_vocab = getattr(state, "hypothesis_concepts_at_vocab", None) or {}
+                    v_now = len(graph.concepts())
+                    # B1-ext (§21.18): re-tag the most-STALE hypotheses (tagged against a much smaller vocab)
+                    # in addition to UNtagged ones — same at_vocab staleness rule as nodes, bounded per cadence.
+                    stale_h = set(stale_tagged_nodes(list(known_h), h_at_vocab,
+                                                     growth=_RETAG_GROWTH, cap=_RETAG_CAP))
                     tagged_this_cadence = 0
                     for h in (state.hypotheses or {}).values():
-                        if h.id in known_h or not getattr(h, "statement", ""):
+                        if not getattr(h, "statement", ""):
+                            continue
+                        if h.id in known_h and h.id not in stale_h:   # already tagged & fresh -> skip
                             continue
                         if tagged_this_cadence >= _HYP_TAG_CAP:
                             break
                         htags = sorted(tag_text_llm(h.statement, graph, client, parser=parser,
                                                     allow_plural=True))
                         self.store.append(EV_HYPOTHESIS_CONCEPTS, {"hyp_id": str(h.id), "concepts": htags,
-                                                                   "mode": mode})
+                                                                   "mode": mode, "at_vocab": v_now})
                         tagged_this_cadence += 1
                 except Exception:  # noqa: BLE001 — hypothesis tagging is best-effort audit enrichment
                     pass

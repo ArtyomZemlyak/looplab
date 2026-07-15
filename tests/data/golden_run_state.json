@@ -146,6 +146,7 @@
   "hypotheses_deleted": [],
   "hypotheses_merged": [],
   "hypothesis_concepts": {},
+  "hypothesis_concepts_at_vocab": {},
   "hypothesis_ranking": null,
   "inject_requests": [],
   "injects_done": 0,
