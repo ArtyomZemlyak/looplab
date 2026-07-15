@@ -907,15 +907,34 @@ security hardening — the `max_parallel`/`n_seeds`/`max_nodes` upper-bound vali
 onto master's canonical file, and audited the other two `--theirs` files (claims.py, lessons.py) to confirm
 they lost only intentionally-superseded content. Full suite green after the restore.
 
-**Mega-review** (6-dimension parallel finders + adversarial verifiers over the new code) confirmed the read-model
-key contracts all match empirically (`portfolio_concept_overview` → `concept/n_runs/runs[{run_id,metric,direction}]`,
-etc.), `CrossRunTools.execute` never raises, the role-scoped CLAIM split is real (not a no-op), and no engine
-invariant is violated. Low-severity observations recorded for follow-up: (a) `delete_run` removes the run dir
-but not the portfolio-shared `memory_dir`, so a deleted run's aggregate lessons/metrics still surface via
-CrossRunTools — the §22.6-step-4 operator purge control-event is the intended (deferred) remedy; (b)
-`_role_lessons` fails OPEN for an unknown role string (documented as "anything else sees all"; not reachable
-today since every call site passes a hardcoded `researcher`/`developer`); (c) the concept-coverage atlas is
-portfolio-wide by design (only the claim stream is role-split). None are regressions from this merge.
+**Mega-review** (6-dimension parallel finders + adversarial verifiers over the new code; 21 agents,
+15 raw → **5 CONFIRMED, 0 uncertain**, the other 10 refuted as by-design / documented-TODO / not-reachable).
+It confirmed the read-model key contracts all match empirically (`portfolio_concept_overview` →
+`concept/n_runs/runs[{run_id,metric,direction}]`, etc.), `CrossRunTools.execute` never raises, the role-scoped
+CLAIM split is real (not a no-op), and no engine invariant is violated. **All 5 confirmed findings adapted in
+this branch** (they harden master's own new code without changing its design):
+
+- **[medium] test-coverage — the HARD direction gate was untested.** `_cross_run_prior` drops a prior unless
+  its `direction` matches the run's, but the only opposite-direction test failed the Jaccard floor *before*
+  the gate ran, so removing the gate left the suite green. Added
+  `test_cross_run_direction_gate_suppresses_opposite_direction_prior`: a prior with the same goal/metric/kind
+  but opposite direction clears the sim floor (Jaccard 0.667 > 0.3) yet is dropped by the gate; the
+  same-direction twin surfaces — isolating the gate.
+- **[low] claims.py — `portfolio_atlas` reported two different `n_runs`.** Top-level `n_runs` (capsule ∪
+  lesson-cited runs) disagreed with the embedded `context_pack.coverage.n_runs` (capsule-only), re-exposing the
+  "zero runs for lesson-only memory" artifact the union set out to fix. Fixed by passing the unioned count into
+  the context pack's coverage; pinned by `test_atlas_n_runs_counts_lesson_runs_and_stays_internally_consistent`.
+- **[low] test-coverage — the `_valid_capsule` poison quarantine was untested.** Added
+  `test_poisoned_capsule_row_is_quarantined_not_fatal` (a string `concepts` / int fingerprint / empty run_id
+  row is dropped while the valid row still loads and isn't poisoned into character-concepts).
+- **[low] doc-sync — `configuration.md` said the Developer-scoped read tool was "a follow-up"** though the same
+  change wires `CrossRunTools(role="developer")` (and §22.6 marks it DONE). Corrected the settings-table row.
+
+Refuted (recorded, not changed): `delete_run` doesn't purge the portfolio-shared `memory_dir` (the §22.6-step-4
+operator purge control-event is the intended deferred remedy); `_role_lessons` fails OPEN for an unknown role
+(documented "anything else sees all"; not reachable — every call site passes a hardcoded `researcher`/`developer`);
+the concept-coverage atlas is portfolio-wide by design (only the claim stream is role-split); the `_toks` len>2
+short-token filter is the shipped codebase-wide tokenizer convention. None are regressions from this merge.
 
 **UI-plans docs updated** (doc 18 PART V, per request): §25 gains items (3b)/(3c) — the read-models now have
 live consumers (the advisory prompt path AND the agentic `CrossRunTools`), realizing doc 17 §22's first two of

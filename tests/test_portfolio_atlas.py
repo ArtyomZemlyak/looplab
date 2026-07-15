@@ -55,6 +55,18 @@ def test_thin_coverage_is_single_run_concepts_not_false_never_tried():
     assert "hard-neg" not in atlas["thin_coverage"]       # explored twice -> not thin
 
 
+def test_atlas_n_runs_counts_lesson_runs_and_stays_internally_consistent():
+    # A lesson-only / legacy memory (no opt-in concept capsules) must NOT report zero runs: n_runs unions
+    # the runs cited by lessons. And the top-level count must AGREE with the embedded context_pack coverage
+    # (one payload never reports two different n_runs).
+    atlas = portfolio_atlas(
+        [_lesson("hard-neg helps", "supported", [1], run_id="rA"),
+         _lesson("mnr helps", "supported", [2], run_id="rB")],
+        [])                                                        # no capsules at all
+    assert atlas["n_runs"] == 2 and atlas["n_concepts"] == 0       # both lesson runs counted, not zero
+    assert atlas["context_pack"]["coverage"]["n_runs"] == 2        # embedded coverage agrees with the top
+
+
 def test_atlas_empty_is_well_formed():
     atlas = portfolio_atlas([], [])
     assert atlas["n_runs"] == 0 and atlas["explored"] == [] and atlas["contradictions"] == []

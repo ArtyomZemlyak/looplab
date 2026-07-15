@@ -194,13 +194,19 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     run_ids = {c.get("run_id") for c in capsules if c.get("run_id")}
     for cl in claims:
         run_ids.update(cl.get("runs") or [])
+    n_runs = len(run_ids)
+    # Keep the embedded context-pack coverage n_runs CONSISTENT with the top-level count (both the union of
+    # capsule + lesson-cited runs), so one atlas payload never reports two different run counts — otherwise a
+    # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
+    # union set out to fix (CODEX).
+    pack_overview = {**overview, "n_runs": n_runs}
     return {
-        "n_runs": len(run_ids), "n_concepts": overview["n_concepts"],
+        "n_runs": n_runs, "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
         "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
         "thin_coverage": thin[:max_items],                   # explored only once — thin evidence (lean gap)
         "contradictions": contested[:max_items],             # where the portfolio disagrees with itself
-        "context_pack": build_context_pack(claims, concept_overview=overview, max_claims=max_items),
+        "context_pack": build_context_pack(claims, concept_overview=pack_overview, max_claims=max_items),
     }
 
 

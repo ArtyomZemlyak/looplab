@@ -178,6 +178,50 @@ def test_dissimilar_prior_does_not_surface(tmp_path):
     assert fold(s.read_all()).cross_run_priors == []
 
 
+def test_cross_run_direction_gate_suppresses_opposite_direction_prior(tmp_path):
+    # The HARD direction gate (novelty._cross_run_prior) in ISOLATION: a prior with the SAME goal/metric/
+    # kind but the OPPOSITE optimization direction differs only in the `dir:` fingerprint token, so it still
+    # clears the fuzzy Jaccard floor — yet a min/rmse outcome is NOT comparable to this max/recall run, so
+    # the gate must drop it. Same run + concept; ONLY the prior's direction differs, and that alone flips
+    # surface on/off (test_dissimilar_prior_does_not_surface can't pin this — it fails the sim floor first).
+    def _n_surfaced(prior_direction):
+        d = tmp_path / prior_direction; d.mkdir()
+        mem = d / "mem"; mem.mkdir()
+        fp = task_fingerprint("dataset", prior_direction, "dense retrieval", "recall", universal=True)
+        ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(build_concept_capsule(
+            run_id="prior-dir", fingerprint=fp, direction=prior_direction, concepts=[_CONCEPT],
+            best_metric=0.9, concept_outcomes={_CONCEPT: 0.9}))
+        s = _run_with_cached_concept(d, _CONCEPT)                  # run direction = "max"
+        eng = _GateEngine(s, mem)
+        eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+        idea = Idea(operator="improve", params={"rank": 8.0}, rationale="hard-neg scheme")
+        eng._graded_novelty_precheck(fold(s.read_all()), idea)
+        return len(fold(s.read_all()).cross_run_priors)
+
+    assert _n_surfaced("max") == 1                                 # same direction -> surfaces (control)
+    assert _n_surfaced("min") == 0                                 # opposite direction -> HARD gate drops it
+
+
+def test_poisoned_capsule_row_is_quarantined_not_fatal(tmp_path):
+    # ConceptCapsuleStore._valid_capsule (memory.py) drops schema-poisoned rows instead of letting one bad
+    # row disable the feature: a STRING `concepts` would otherwise iterate into CHARACTER concepts, and a
+    # non-string/empty run_id or non-list fingerprint can poison retrieval. The VALID row must still load.
+    import orjson
+    path = tmp_path / "concept_capsules.jsonl"
+    good = build_concept_capsule(run_id="good", fingerprint=task_fingerprint("dataset", "max", "g", "m"),
+                                 direction="max", concepts=["data/hard-neg"], concept_outcomes={})
+    rows = [
+        {"run_id": "", "fingerprint": [], "concepts": [], "concept_outcomes": {}},   # empty run_id -> drop
+        {"run_id": "poison", "fingerprint": 7, "concepts": ["ok"], "concept_outcomes": {}},  # int fp -> drop
+        {"run_id": "poison2", "fingerprint": [], "concepts": "hardneg", "concept_outcomes": {}},  # str concepts -> drop
+        good,
+    ]
+    path.write_bytes(b"\n".join(orjson.dumps(r) for r in rows) + b"\n")
+    caps = ConceptCapsuleStore(path).all()
+    assert [c["run_id"] for c in caps] == ["good"]                 # only the valid row survives
+    assert caps[0]["concepts"] == ["data/hard-neg"]               # not poisoned into character concepts
+
+
 # --------------------------------------------------------------------------- #
 # Replay-safety of the audit event
 # --------------------------------------------------------------------------- #
