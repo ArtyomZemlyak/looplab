@@ -691,6 +691,19 @@ def test_budget_extend_rejects_nonfinite():
     assert st.budget_overrides["max_seconds"] == 30.0
 
 
+def test_policy_decision_tolerates_non_dict_scores():
+    # A non-dict `scores` (list/str/number from a corrupt or hand-edited log) must not brick the fold
+    # with an AttributeError (the whole run would become unopenable). It folds to empty policy_scores.
+    from looplab.core.models import Event
+    base = Event(type="run_started", data={"run_id": "r", "task_id": "t"})
+    for bad in ([1, 2, 3], "oops", 5, None):
+        st = fold([base, Event(type="policy_decision", data={"scores": bad, "chosen": 0})])
+        assert st.policy_scores == {}, bad
+    # a well-formed dict still parses (int-coerced keys)
+    st = fold([base, Event(type="policy_decision", data={"scores": {"3": 0.5}, "chosen": 3})])
+    assert st.policy_scores == {3: 0.5} and st.policy_chosen == 3
+
+
 # A "reused" stage marker (a re-eval that SKIPPED a stage the inline-repair reuse kept) must NOT clobber
 # the REAL completion record from the attempt that actually ran the stage — else the node reads as if it
 # trained in 0s. Keep the informative record; order-tolerant (a real record still supersedes a reused).

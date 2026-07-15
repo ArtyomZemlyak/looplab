@@ -1287,7 +1287,11 @@ def _on_ablate(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 
 def _on_policy_decision(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     _scores = {}
-    for k, v in (d.get("scores") or {}).items():
+    _raw = d.get("scores")
+    # A non-dict `scores` (a list/str/number from a corrupt or hand-edited log) has no `.items()`
+    # and would raise an uncaught AttributeError that bricks the ENTIRE fold — the same corrupt-log
+    # class the per-key try/except below already guards. Skip a non-dict container the same way.
+    for k, v in (_raw.items() if isinstance(_raw, dict) else ()):
         try:
             _scores[int(k)] = v                 # a non-integer key (corrupt log) is skipped
         except (TypeError, ValueError):
