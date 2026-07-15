@@ -96,10 +96,20 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
     return rec
 
 
+def _global_key(legacy_key: str) -> str:
+    """A DISTINCT index (in the same decisions dict) for the last SCOPE-LESS decision on a statement, so
+    a later scoped decision that overwrites the plain legacy key can't hide the portfolio-wide verdict
+    from the structured fallback. The control-char prefix can't collide with a normalize_statement key
+    or a claim_uid. The dict is only ever read via `.get(key)`, never iterated, so extra keys are safe."""
+    return "\x00global\x00" + legacy_key
+
+
 def load_claim_decisions(memory_dir) -> dict:
-    """The LATEST operator decision, indexed by BOTH its legacy statement key AND its structured `claim_uid`
-    (both entries point at the same record), so the lean projection overlays by normalized statement and the
-    structured projection overlays by uid. Last write wins per key. {} when none / unreadable."""
+    """The LATEST operator decision, indexed by its legacy statement key, its structured `claim_uid`, AND
+    (for scope-less decisions) a distinct global key — so the lean projection overlays by normalized
+    statement, the structured projection overlays by uid, and the structured fallback can still find a
+    GLOBAL verdict after a later scoped decision overwrote the legacy key. Last write wins per key.
+    {} when none / unreadable."""
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -114,7 +124,14 @@ def load_claim_decisions(memory_dir) -> dict:
             continue
         k = str(r.get("key") or normalize_statement(r.get("statement", "")))
         if k:
-            out[k] = r            # last wins (legacy statement key)
+            out[k] = r            # last wins (legacy statement key) — the LEAN path (caller passes scoped
+            #                       lessons, so scope isolation comes from the input, not this lookup)
+            # ALSO index the last GLOBAL (scope-less) decision under a DISTINCT key. The structured
+            # fallback needs the portfolio-wide verdict, but a LATER scoped ratify/reject/pin on the same
+            # statement overwrites out[k] last-wins — so without this, a global decision silently stopped
+            # applying to every OTHER scope once any scoped decision on that statement was recorded.
+            if not str(r.get("scope") or ""):
+                out[_global_key(k)] = r
         uid = str(r.get("claim_uid") or "")
         if uid:
             out[uid] = r          # structured scope+polarity key
@@ -367,13 +384,13 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         contradicts = sorted({max(o["_ev"], key=lambda s: (o["_ev"][s], s)) for o in opposites if o["_ev"]})
         d = (decisions or {}).get(g["uid"])
         if d is None:
-            # A SCOPE-LESS operator decision (the default `claim-decide` with no --scope, keyed only by the
-            # legacy normalize_statement) applies to EVERY scope of that statement. A SCOPED decision keeps
-            # its own scope and is NOT applied here via the legacy key, so it never leaks across tasks
-            # (mega-review finding: the default operator path was silently ignored in structured mode).
-            leg = (decisions or {}).get(normalize_statement(rep))
-            if leg and not str(leg.get("scope") or ""):
-                d = leg
+            # A SCOPE-LESS operator decision (the default `claim-decide` with no --scope) applies to EVERY
+            # scope of that statement. Read it from the DISTINCT global index — not the plain legacy key —
+            # so a LATER scoped decision on the same statement (which overwrites the legacy key last-wins)
+            # can't hide the portfolio-wide verdict here (mega-review finding: global-then-scoped silently
+            # dropped the global decision for every other scope). A scoped decision only ever reaches its
+            # own scope, via its uid above.
+            d = (decisions or {}).get(_global_key(normalize_statement(rep)))
         out.append({
             "statement": rep,
             # a polarity contradiction is the strongest contested signal -> mixed even if this side's own

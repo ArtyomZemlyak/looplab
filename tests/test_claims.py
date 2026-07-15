@@ -403,6 +403,22 @@ def test_scoped_decision_does_not_leak_in_LEAN_mode(tmp_path):
     assert taska[0]["maturity"] == "operator-rejected"
 
 
+def test_global_decision_survives_a_later_scoped_decision_in_structured_mode(tmp_path):
+    # mega-review HIGH regression: a portfolio-wide (scope-less) decision must keep applying to OTHER
+    # scopes even after a later SCOPED decision on the same statement is recorded. The scoped decision
+    # overwrites the legacy statement key last-wins, so the structured fallback reads the global verdict
+    # from its distinct global index, not the (now-scoped) legacy key.
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="dropout helps", decision="rejected")            # global
+    record_claim_decision(str(tmp_path), statement="dropout helps", decision="ratified", scope="taskA")
+    outB = claims_for_memory(str(tmp_path), structured=True,
+                             lessons=[_lesson("dropout helps", "supported", [0], run_id="rB", task_id="taskB")])
+    assert outB[0]["maturity"] == "operator-rejected", outB          # taskB keeps the GLOBAL rejection
+    outA = claims_for_memory(str(tmp_path), structured=True,
+                             lessons=[_lesson("dropout helps", "supported", [1], run_id="rA", task_id="taskA")])
+    assert outA[0]["maturity"] == "operator-ratified", outA          # taskA keeps its own scoped ratify
+
+
 def test_scopeless_decision_applies_in_lean_mode(tmp_path):
     from looplab.engine.claims import claims_for_memory, record_claim_decision
     record_claim_decision(str(tmp_path), statement="warmup helps", decision="ratified")   # no scope
