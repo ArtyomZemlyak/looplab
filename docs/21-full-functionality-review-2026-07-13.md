@@ -644,15 +644,20 @@ the default (`select_verifier` off) path; the epoch-stamped `best_confirmed` gua
 concept fold handlers are audit-only and never touch selection. Fixes applied (all low-severity — a
 correctness edge + doc/comment drift, matching this branch's "stale docs/comments = a bug" rule):
 
-- **`search/graded_novelty.py`** (correctness): level-2 "same concept-set" used subset containment
-  (`idea ∩ tags == idea`, true whenever `idea ⊆ tags`) where the comment specifies a *full-profile*
-  match. An idea that DROPS a concept was mis-graded level-2 "already tried" instead of level-4
-  "same-direction / new implementation". Changed to set equality (the safe direction — no selection
-  impact, since the live precheck acts only on levels 4/5).
-- **`tools/asset_brief.py`** (offline fallback parser): a raw count `> 100` can no longer head the "best
-  result" line ahead of a genuine `[0,1]` metric; the checkpoint value regex now captures sci-notation
-  (`mse=1.2e-5` no longer truncates to `1`) and negative metrics (`spearman=-0.3`); `@`-scores keep the
-  MAX, not the first (`a@0.85_b@0.90` → `0.90`). The underscore-glued anchor case is preserved.
+- **`search/graded_novelty.py`** (comment only, after a self-review reversal): the level-2
+  "same concept-set" filter uses `overlap(nd) == set(idea_concepts)` — the idea's COMPLETE concept set
+  is subsumed by a tried node (`idea ⊆ node tags`), so it introduces nothing new. A first pass changed
+  this to strict set-equality, but a `/code-review` adversarial pass showed that regresses live
+  behaviour: with close params it moves the "idea drops a concept" case out of level 2 (which the live
+  `_graded_novelty_precheck` safely DEFERS to the flat gate) into the level-4 ALLOW short-circuit — a
+  wrong-allow. Reverted to master's containment (the safe direction) and instead clarified the comment
+  to explain WHY it is containment, not equality.
+- **`tools/asset_brief.py`** (offline fallback parser): the checkpoint value regex now captures
+  sci-notation (`mse=1.2e-5` no longer truncates to `1`) and `@`-scores keep the MAX, not the first
+  (`a@0.85_b@0.90` → `0.90`); the underscore-glued anchor case is preserved. (Two further tweaks tried
+  in the first pass — a `>100` headline guard and a negative-sign `-?` — were reverted after the
+  `/code-review` pass: the guard dropped legitimate `psnr` (a higher-is-better dB metric that exceeds
+  100), and the sign let an anti-correlation head the "best result" line.)
 - **Docs/comments**: `core/fitness.py` `selection_key`/`eligible` docstrings (holdout_topk now ranks by
   `promotion_key`); `search/concept_graph.py` touch-fraction denominator ("TAGGED experiments");
   `configuration.md` `select_verifier` holdout scope (verification fires on mean-metric ties, holdout

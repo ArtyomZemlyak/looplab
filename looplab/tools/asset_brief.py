@@ -90,11 +90,12 @@ def _named_metric_re(extra: tuple[str, ...] = ()) -> "re.Pattern":
     # filename)". Underscore-as-separator is the whole point of surfacing a checkpoint's score.
     return re.compile(
         rf"(?<![a-z0-9])((?:val[_\-]?|test[_\-]?|dev[_\-]?)?(?:{fam})(?:@\d+)?)\s*[=:_\-]\s*"
-        # value: an optional sign, a fraction/integer, and an optional sci-notation exponent. The exponent
-        # branch keeps `mse=1.2e-5` from truncating to `1`; the leading `-?` keeps a negative metric
-        # (e.g. a correlation `spearman=-0.3`) from being dropped. The separator above is consumed FIRST,
-        # so a bare dash there stays a separator and only a sign directly on the number is taken as negative.
-        r"(-?(?:0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})(?:[eE][+\-]?\d+)?)(?![a-z0-9])", re.I)
+        # value: a fraction/integer with an optional sci-notation exponent. The exponent branch keeps
+        # `mse=1.2e-5` from truncating to `1` (the old pattern stopped at the `e`). Deliberately NO leading
+        # sign: a bare `-` before the digits is the name<->value separator, and admitting a negative here
+        # would let an anti-correlation (`spearman=-0.3`) head the "best result" line — so negatives stay
+        # unparsed (a conservative miss), consistent with the delimited-table path which also has no sign.
+        r"((?:0?\.\d+|[01]\.\d+|\d{1,3}\.\d+|\d{1,3})(?:[eE][+\-]?\d+)?)(?![a-z0-9])", re.I)
 
 
 # --------------------------------------------------------------------------- #
@@ -448,12 +449,10 @@ def _best_known(brief: AssetBrief) -> Optional[dict]:
                 if any(s in low for s in _LOWER_IS_BETTER):
                     continue                     # lower-is-better: a max is meaningless, skip the headline
                 # normalize a percentage (1 < v <= 100) to a fraction for comparison only — score-family
-                # metrics are in [0,1], so a value above 1 is a percent spelling of the same quantity. A
-                # value ABOVE 100, though, is not a percent but a raw count (steps/hits/examples counted by
-                # a same-named field); it is not a comparable [0,1] score, so it must never head the
-                # "best result" line ahead of a genuine fractional metric.
-                if val > 100.0:
-                    continue
+                # metrics are in [0,1], so a value above 1 is a percent spelling of the same quantity.
+                # (No `> 100` guard: `psnr` is a legitimate higher-is-better family member whose dB scale
+                # routinely exceeds 100 for near-lossless reconstructions — dropping it would erase the
+                # headline it is exactly meant to surface.)
                 cmp = val / 100.0 if 1.0 < val <= 100.0 else val
                 if cmp > best_cmp:
                     best_cmp = cmp
