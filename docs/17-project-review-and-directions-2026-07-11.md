@@ -3845,11 +3845,14 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   concept-slug set to the structured prior-evidence bundle §21.20.5 specifies (scope relation, freshness,
   materially-different flag) once the `concept_uid` resolver (§21.20.12 #4) exists; and the exact-duplicate
   savings gate. Level 3 stays **surface**, never cross-scope hard reject.
-- **Step 3 — CR1a incremental index.** Atoms → `RunCapsule` per run → `PortfolioSummary`/`ConceptDigest`,
-  concept assignments over the `concept_uid` resolver, taxonomy releases, and the Atlas metadata journal
-  (§21.20.4). **Gate = 50/500-run ingest with 20 concurrent terminal runs producing zero lost/duplicate
-  atoms and an order-independent final digest; re-eval/archive/purge/ACL correctness.** Effect: a fast
-  portfolio inventory.
+- **Step 3 — CR1a incremental index.** **LANDED 2026-07-15 (lean first slice):** `portfolio_concept_overview`
+  (`engine/memory.py`) aggregates the Step-2 concept capsules into a portfolio view — per-concept: which runs
+  explored it, each with its OWN outcome (raw metrics deliberately NOT compared across tasks) — plus per-run
+  cards; surfaced by the `looplab cross-run-concepts` CLI (`--top`, `--json`). Pure read, no LLM. Tests:
+  read-model + CLI (8). **TODO to reach full CR1a:** `RunCapsule`/`ConceptDigest`/`PortfolioSummary` as
+  incremental materialized read-models over the `concept_uid` resolver, taxonomy releases, and the Atlas
+  metadata journal (§21.20.4); the 50/500-run concurrency + order-independent-digest + re-eval/archive/
+  purge/ACL gates.
 - **Step 4 — CR1b durable claims + assessments.** `ClaimDefinition`/`ClaimRevision`,
   `ClaimEvidenceLink`, `ClaimDecision`, rebuildable `ClaimAssessment` with independence families and proof
   trails (§21.20.5). Migrate `lessons.jsonl` to machine-proposed claims **without** breaking the legacy path

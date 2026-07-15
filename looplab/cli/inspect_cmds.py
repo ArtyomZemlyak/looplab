@@ -493,3 +493,33 @@ def tensorboard(
         subprocess.run(cmd)
     except KeyboardInterrupt:
         pass
+
+
+@app.command(name="cross-run-concepts")
+def cross_run_concepts_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl), or "
+                                                "the capsules file itself."),
+    top: int = typer.Option(20, help="How many most-explored concepts to show."),
+    as_json: bool = typer.Option(False, "--json", help="Emit the full overview as JSON."),
+):
+    """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
+    `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
+    runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    p = Path(memory_dir)
+    path = p if p.is_file() else p / "concept_capsules.jsonl"
+    if not path.exists():
+        typer.echo(f"no concept capsules at {path} (run with cross_run_concepts on to populate)")
+        raise typer.Exit(1)
+    ov = portfolio_concept_overview(ConceptCapsuleStore(path).all())
+    if as_json:
+        typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
+        return
+    typer.echo(f"Cross-run portfolio: {ov['n_runs']} run(s), {ov['n_concepts']} concept(s)")
+    for e in ov["concepts"][: max(0, top)]:
+        def _fmt(r: dict) -> str:
+            m = r.get("metric")
+            return f"{r['run_id']}" + (f"={m:g}" if isinstance(m, (int, float)) and not isinstance(m, bool) else "")
+        runs = ", ".join(_fmt(r) for r in e["runs"][:6])
+        more = "" if len(e["runs"]) <= 6 else f" (+{len(e['runs']) - 6} more)"
+        typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}   [{runs}{more}]")

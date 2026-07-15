@@ -18,6 +18,7 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
+looplab cross-run-concepts Portfolio overview of concepts tried across runs (PART IV cross-run Step 3)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
 looplab bench           Capability self-benchmark across tasks
@@ -326,6 +327,26 @@ looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
 | `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
+
+---
+
+## `cross-run-concepts`
+
+PART IV cross-run Step 3 (§21.20). A portfolio overview over the per-run **concept capsules** written when
+`cross_run_concepts` is on: which concepts have been explored across the whole portfolio and in which runs,
+each with its OWN outcome. Raw metrics are deliberately **not** compared across tasks (different
+task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
+fabricated "best". Pure read of `<memory_dir>/concept_capsules.jsonl` — no LLM/endpoint.
+
+```bash
+looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` (or the file itself) |
+| `--top N` | `20` | How many most-explored concepts to list |
+| `--json` | off | Emit the full overview (concepts + per-run cards) as JSON |
 
 ---
 

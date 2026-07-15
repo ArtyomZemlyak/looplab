@@ -611,6 +611,37 @@ class ConceptCapsuleStore:
         return list(self.capsules)
 
 
+def portfolio_concept_overview(capsules: list[dict]) -> dict:
+    """A cross-run portfolio read-model over concept capsules (§21.20 Step 3 — 'what has been tried across
+    the portfolio'). Pure/deterministic, no LLM/IO, drillable to `run_id`. For each concept it lists the
+    runs that explored it with THEIR OWN outcome (run_id, metric, direction) — deliberately NOT a single
+    cross-run 'best', because raw metrics from different tasks/directions are not comparable without a
+    shared contract (§21.20.1). Also emits a per-run card (concept count + the run's own best_metric)."""
+    per_concept: dict[str, dict] = {}
+    for c in capsules:
+        rid = str(c.get("run_id") or "")
+        oc = c.get("concept_outcomes") or {}
+        direction = str(c.get("direction") or "min")
+        for concept in (c.get("concepts") or []):
+            key = str(concept)
+            e = per_concept.setdefault(key, {"concept": key, "runs": []})
+            e["runs"].append({"run_id": rid, "metric": oc.get(concept), "direction": direction})
+    concepts = []
+    for e in per_concept.values():
+        e["runs"].sort(key=lambda r: r["run_id"])
+        e["n_runs"] = len({r["run_id"] for r in e["runs"]})
+        concepts.append(e)
+    concepts.sort(key=lambda e: (-e["n_runs"], e["concept"]))   # most-explored first, then name
+    cards = [{"run_id": str(c.get("run_id") or ""),
+              "n_concepts": len({str(x) for x in (c.get("concepts") or [])}),
+              "best_metric": c.get("best_metric"),
+              "direction": str(c.get("direction") or "min"),
+              "concepts": sorted({str(x) for x in (c.get("concepts") or [])})}
+             for c in capsules]
+    cards.sort(key=lambda k: k["run_id"])
+    return {"n_runs": len(capsules), "n_concepts": len(concepts), "concepts": concepts, "runs": cards}
+
+
 class CaseLibrary:
     """Episodic case store over a `VectorStore`. Optionally *harmonic* (Memora): pass an `abstract`
     callable (see `tools.memora.make_abstractor`) to index each case by a short abstraction + cue
