@@ -133,20 +133,29 @@ class SearchFitness:
             return nm == lm                       # no leader noise estimate -> exact-tie only (conservative)
         return abs(nm - lm) <= self._ci_z * lse
 
+    def ci_tie_set(self, nodes):
+        """The statistical tie-set `best_ci` decides among: the metric-LEADER (`selection_key`) plus every
+        node within the leader's confirm-noise CI (`_statistically_tied`; exact-metric equality when the
+        noise is unknown). SHARED by the selector (`best_ci`) AND the producer (`_metric_tie_groups`), so
+        both use the SAME tie predicate — else a CI-tied candidate would be COMPARED by best_ci yet never
+        SCORED by the producer (it would sit at the neutral midpoint and best_ci would fall back to the
+        leader, making R1-d a no-op)."""
+        if not nodes:
+            return []
+        leader = self.best(nodes, self.selection_key)   # metric-first leader (soundness-blind)
+        return [n for n in nodes if self._statistically_tied(n, leader)]
+
     def best_ci(self, nodes):
         """R1-d (§21.19) mean-pick with a STATISTICAL (CI-band) verifier tie-break, when `ci_tie` is on.
         Two-stage: (1) the metric-leader by `selection_key` (metric-first, id tie-break); (2) among nodes
-        statistically INDISTINGUISHABLE from it (within the leader's CI), pick by soundness THEN the metric
-        THEN id — `(±verifier_score, robust_metric, id)` — so an unscored / equal-soundness tie-set falls
-        back to the METRIC LEADER (not an arbitrary id), while a sounder within-noise node still wins. A
-        significantly-worse node is excluded from the tie-set, so this can NEVER promote a node over a
-        genuinely-better metric (§21.7). Identical to the plain exact-tie pick when ci_tie is off."""
+        statistically INDISTINGUISHABLE from it (`ci_tie_set`), pick by soundness THEN the metric THEN id —
+        `(±verifier_score, robust_metric, id)` — so an unscored / equal-soundness tie-set falls back to the
+        METRIC LEADER (not an arbitrary id), while a sounder within-noise node still wins. A significantly-
+        worse node is excluded from the tie-set, so this can NEVER promote a node over a genuinely-better
+        metric (§21.7). Identical to the plain exact-tie pick when ci_tie is off."""
         if not self._ci_tie:
             return self.best(nodes, self.promotion_key)
-        leader = self.best(nodes, self.selection_key)   # metric-first leader (soundness-blind)
-        tied = [n for n in nodes if self._statistically_tied(n, leader)]
-        # soundness first (direction-oriented via _vc), then the metric (direction-oriented under the run's
-        # chooser), then id — so a no-signal tie-set resolves to the exact metric leader, as promised.
+        tied = self.ci_tie_set(nodes)
         return self.best(tied, key=lambda n: (self._vc(n), n.robust_metric, n.id))
 
     def holdout_key(self, node):

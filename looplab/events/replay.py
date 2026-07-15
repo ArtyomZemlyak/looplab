@@ -98,11 +98,15 @@ class _FoldCtx:
     """The fold's cross-arm state: `best_confirmed` (EV_BEST_CONFIRMED -> _select_best) is the
     only value that flows BETWEEN arms without living on `st` — threaded explicitly so every
     handler stays a pure function of its arguments."""
-    __slots__ = ("best_confirmed", "charged_terminal_generations", "charged_confirm_seeds",
-                 "charged_ablation_ids", "pending_finish_report", "event_index")
+    __slots__ = ("best_confirmed", "best_confirmed_significant", "charged_terminal_generations",
+                 "charged_confirm_seeds", "charged_ablation_ids", "pending_finish_report", "event_index")
 
     def __init__(self):
         self.best_confirmed: int | None = None
+        # R1-d: whether the confirm certificate found a SIGNIFICANT winner. Only consulted when a
+        # best_confirmed is set; defaults True so legacy events / the ci_tie-off path keep the unconditional
+        # override (byte-identical). A non-significant confirm under `verifier_ci_tie` must NOT erase best_ci.
+        self.best_confirmed_significant: bool = True
         # First terminal COST wins per (node,lifecycle), independently from whether that lifecycle is
         # still current. A reset may discard its metric/state, but cannot refund compute already spent.
         self.charged_terminal_generations: set[tuple[int, int]] = set()
@@ -1327,7 +1331,12 @@ def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if not _generation_map_matches(st, d):
         return
     nid = _coerce_node_id(d)
-    ctx.best_confirmed = nid if "node_id" in d else ctx.best_confirmed
+    if "node_id" in d:
+        ctx.best_confirmed = nid
+        # R1-d: record whether this certificate is a SIGNIFICANT winner (default True: legacy events with no
+        # `significant` field keep the unconditional override). A non-significant certificate is a STATISTICAL
+        # tie the verifier CI-tie may resolve instead — see _select_best.
+        ctx.best_confirmed_significant = bool(d.get("significant", True))
     st.confirmed_done = True   # the confirmation phase ran to completion
 
 def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1780,7 +1789,7 @@ def fold(events: Iterable[Event]) -> RunState:
             h(st, e, e.data, ctx)
 
     flagged = _apply_trust_gate(st)
-    _select_best(st, flagged, ctx.best_confirmed)
+    _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)
 
     _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
     return st
@@ -1806,7 +1815,8 @@ def _apply_trust_gate(st: RunState) -> set:
     return flagged
 
 
-def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None:
+def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
+                 best_confirmed_significant: bool = True) -> None:
     """Best-selection post-pass: derive `best_node_id` (mean-based pick -> variance-gated confirm
     override -> holdout-gated promotion) plus the audit-only generalization gap. Pure and
     deterministic over the folded state — the tail of `fold`, extracted verbatim."""
@@ -1839,14 +1849,15 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None) -> None
     # past the feasibility gate (#5): a constraint-violating node must not become best even if
     # the confirm phase ran on it (the mean-based pick above already excluded infeasibles).
     # The confirm certificate is the confirm phase's OWN authoritative winner (robust_selection over the
-    # multi-seed means + a significance test), so it overrides the mean pick — including its verifier
-    # tie-break. Scope boundary (by design): among confirmed nodes that tie on confirmed_mean the winner
-    # is the confirm phase's choice, not the verifier's; the verifier tie-break applies to the mean pick
-    # and the holdout pick (both rankings HERE), not to which node the confirm phase certified.
-    # CODEX AGENT: [P1] Normal confirmation always emits best_confirmed, so this unconditional override
-    # erases the best_ci result above and makes R1-d ineffective at final selection. The confirmation
-    # certificate must compose with the same CI/verifier semantics instead of replacing them.
+    # multi-seed means + a significance test), so it overrides the mean pick. R1-d COMPOSITION (CODEX #7):
+    # the certificate overrides only when it found a SIGNIFICANT winner — OR when verifier_ci_tie is off
+    # (then it overrides unconditionally, byte-identical to before). When the confirm found NO significant
+    # winner (a statistical tie) AND ci_tie is on, the `best_ci` soundness pick above STANDS, because that
+    # tie is EXACTLY what the CI-tie exists to resolve — an unconditional override would erase it and make
+    # R1-d a no-op. Scope boundary (unchanged): among nodes the confirm DID significantly separate, the
+    # winner is the confirm phase's, not the verifier's.
     if (best_confirmed is not None and best_confirmed in st.nodes
+            and (best_confirmed_significant or not st.verifier_ci_tie)
             and st.nodes[best_confirmed].status is NodeStatus.evaluated
             and not st.nodes[best_confirmed].tombstoned
             and st.nodes[best_confirmed].robust_metric is not None

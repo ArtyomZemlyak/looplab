@@ -203,6 +203,55 @@ def test_metric_tie_groups_surfaces_confirmed_ties(tmp_path):
     groups = Engine._metric_tie_groups(None, st)
     assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # only the confirmed tie
 
+def test_metric_tie_groups_scores_the_ci_band_when_verifier_ci_tie(tmp_path):
+    """CODEX #6 regression: the producer must create verifier work for CI-tied (near-equal) nodes — the
+    exact set best_ci compares — else R1-d is a no-op (CI candidates sit unscored at the neutral midpoint)."""
+    s = _run(tmp_path, select_verifier=True)
+    _add(s, 0, 0.90)
+    _add(s, 1, 0.905)                            # DIFFERENT robust metrics -> NO exact tie
+    st = fold(s.read_all())
+    for nid, m in ((0, 0.90), (1, 0.905)):       # make them confirmed + CI-tied (SE=0.05/√3=0.029)
+        st.nodes[nid].confirmed_mean = m
+        st.nodes[nid].confirmed_std = 0.05
+        st.nodes[nid].confirmed_seeds = 3
+
+    class _S:
+        _verifier_ci_tie = True
+    groups = Engine._metric_tie_groups(_S(), st)
+    assert any({0, 1} <= {n.id for n in g} for g in groups)   # the CI-band is produced -> both get scored
+    assert Engine._metric_tie_groups(None, st) == []          # off -> distinct metrics, no group
+
+
+def _cnode(nid, mean, *, std, seeds, score):
+    from looplab.core.models import Idea, Node, NodeStatus
+    n = Node(id=nid, operator="draft", idea=Idea(operator="draft"), metric=mean,
+             status=NodeStatus.evaluated, feasible=True, confirmed_mean=mean)
+    n.confirmed_std, n.confirmed_seeds, n.verifier_score = std, seeds, score
+    return n
+
+
+def test_non_significant_confirm_does_not_erase_best_ci(tmp_path):
+    """CODEX #7 regression: a confirm certificate that found NO significant winner is a statistical tie the
+    CI-tie exists to resolve — the override must NOT erase best_ci. A SIGNIFICANT certificate still wins."""
+    from looplab.core.models import RunState
+    from looplab.events.replay import _select_best
+    st = RunState(direction="max")
+    st.select_verifier_tiebreak = True
+    st.verifier_ci_tie = True
+    st.nodes[0] = _cnode(0, 0.905, std=0.05, seeds=3, score=0.2)   # raw leader, LOW soundness
+    st.nodes[1] = _cnode(1, 0.90, std=0.05, seeds=3, score=0.95)   # CI-tied, HIGH soundness
+    # confirm chose 0 but NOT significant -> the CI-tie soundness pick (id 1) must stand
+    _select_best(st, set(), best_confirmed=0, best_confirmed_significant=False)
+    assert st.best_node_id == 1
+    # a SIGNIFICANT confirm of 0 DOES override (the confirm separated them) -> id 0
+    _select_best(st, set(), best_confirmed=0, best_confirmed_significant=True)
+    assert st.best_node_id == 0
+    # ci_tie OFF -> unconditional override, byte-identical to before (even non-significant) -> id 0
+    st.verifier_ci_tie = False
+    _select_best(st, set(), best_confirmed=0, best_confirmed_significant=False)
+    assert st.best_node_id == 0
+
+
 def test_metric_tie_groups_includes_holdout_ties_when_holdout_select(tmp_path):
     """R1-c holdout completeness (§21.18): nodes tied on holdout_metric but NOT on robust_metric form a
     tie-COMPONENT when holdout_select is on, so their holdout_key verifier slot finally gets produced. With
