@@ -136,6 +136,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw
   logs/prompts/traces, artifacts, and owner settings are never available to the recipient.
+- **Comment threads** — event-sourced operator discussion pinned to a run or a specific node, with an
+  edit history and a resolve/reopen state. The view is served as authenticated current + history
+  projections (`GET /api/runs/{run_id}/comments`, `…/comments/{id}/history`); the operator writes the
+  `comment_created` / `comment_edited` / `comment_resolution_changed` control intents and the projection
+  (`events/comment_projection.py`) derives the threaded state — the engine stays the sole writer of
+  domain events (distinct from the legacy single `annotation` event).
 - **Trust panel** — surfaces the safety monitors (reward-hack, code-leakage, critic flags); set
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a flagged node ineligible
   to win, not just logged.
