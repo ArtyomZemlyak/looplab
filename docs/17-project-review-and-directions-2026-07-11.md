@@ -3870,3 +3870,56 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
 foundation everything else stands on. Steps 2 (D3-wiring) and 3 (index) can proceed in parallel once the
 `concept_uid` resolver from CR0 exists; Step 2 is the first *user-visible research* win and should not wait
 for the full index/claims/UI mass. Steps 4–7 are the long, individually-gated tail.
+
+##### 21.20.14 Synergy with shipped Part IV — the reuse map (no duplication)
+
+CR is **not a new parallel stack**; it is a read/projection layer that reuses or extends the seams Part IV
+already shipped. Every proposed record was checked against the code. The rule is: **CR invents an identity/
+scope/versioning layer, and reuses the existing detectors, retrievers, embedders, digests and event log
+underneath — it never forks a second copy of a thing that exists.** Verified mapping:
+
+| CR §21.20 record / mechanism | Shipped Part IV seam (verified) | Verdict |
+|---|---|---|
+| `ExecutionAttempt` / `Measurement` | `events.jsonl` `node_created`/`node_evaluated` + `confirmed_mean/std/seeds`; the engine is the sole event writer | **EXTEND as a projection** — read events, never a second write path (engine invariant #1) |
+| CR "evidence digest" / supersede-on-re-eval | `lessons_reconcile.py` per-node **OUTCOME signature** + change-gate hash + reconcile-on-move; `events/digest.py` | **EXTEND** the proven signature with claim-relevant fields; reuse the change-gate |
+| re-eval / generation identity | **M1** `node_reset`→new generation + tag-invalidation (already shipped) | **REUSE** — M1 already defines "reopened run = new attempt identity"; align, don't redefine |
+| `ScopeProfile` facets | `task_fingerprint` (`memory.py`) seed + `idea.theme` slug (`roles.py`) | **EXTEND** fingerprint → structured facets; the universal-tokenizer fix (Step 0) lands here first |
+| `concept_uid`/`ConceptRevision`/`TaxonomyRelease`/`ConceptAssignment` | per-run concept graph (`concept_graph.py`: `node_concepts`/`hypothesis_concepts`/`concept_consolidation`, axis-DAG, `tag_nodes_llm`/`tag_text_llm`); **B3** rename map | **EXTEND** — per-run graph IS the local tagger + evidence; add only a slug→uid resolver. **Do NOT build a second tagger** |
+| `ConceptDigest` / `CoverageFrame` | `concept_coverage` + `coverage.py` per-run read-model; `theme_rollup` (legacy free-text) | **EXTEND** per-run coverage to a cross-run frame; the concept graph already supersedes free-text themes — wire it, don't add a third rollup |
+| `ClaimDefinition`/`ClaimEvidenceLink`/`ClaimAssessment` | **D8 `_ClaimOut` `{statement, node_ids, urls}` + its evidence-verifier** (`deep_research.py`); `lessons.jsonl` | **UNIFY** with the D8 claim shape (biggest dedup — generalize it, never fork). Lessons **migrate into** claims as a projection; **no dual-write** |
+| `TrustAssessment` | `trust/` gates (leakage, reward-hack, CV, redaction, confirmation) | **REUSE** the existing detectors; CR records their verdicts, it does not re-detect |
+| `EffectEstimate` / expected-information-gain | `foresight.py` (predict-before-execute) + `SearchFitness` significance/`best_ci` | **REUSE** foresight as the predictor and fitness for within-contract comparability; advisory only |
+| Retrieval planner (candidate gen + RRF fusion) | **`hybrid_merge`** (grep+BM25+vector **RRF**) + `vectorstore` (embed/cosine) + `memora` (harmonic) | **REUSE** hybrid_merge as the fuser + vectorstore as the vector channel; CR adds only the scope/eligibility/receipt wrapper. **Do NOT reimplement RRF/embeddings** |
+| `SolutionExemplar` / Pareto registry | `JsonlCaseLibrary`/`CaseLibrary` + `retain_if_improved` + harmonic index | **EXTEND** cases → exemplar-with-provenance; keep retain-on-improvement |
+| `RunCapsule` / `PortfolioSummary` | `events/digest.py` (`sibling_digest`/`experiments_digest`) + `serve/scope_report.py` | **EXTEND** the existing digests + scope-report into incremental capsules |
+| ingest source (folded runs, cached) | `SiblingRunTools`/`MachineRunsTools`/`RunStateCache` (fingerprinted fold cache + traversal guards) | **REUSE** the cache + guards as the ingest reader |
+| structured `prior_concepts` bundle (CR2c) | `grade_novelty(prior_concepts=…)` **stub** (`graded_novelty.py`) | **FILL** the existing parameter — the wire is already there, just unpopulated |
+| `DerivationReceipt` / context-receipt event | new event type + strategist `source` provenance field | **NEW but small** — one allow-listed event type; reuse events/`fold`/registry discipline |
+| `ComparisonContract` (cross-task) | fitness comparability is same-task only | **NEW (justified)** — cross-task comparability genuinely doesn't exist; reuse robust/confirm semantics inside a contract |
+| `VisibilityPolicy` / ACL | minimal today | **NEW (justified)**, off-by-default; a single-user local portfolio treats visibility as `ANY` |
+| Research Atlas UI | Run List / Map / Cross-run Sweep / Memory tabs; `projects`/super-tasks | **EXTEND** into one snapshot-consistent surface; relabel Project→Collection, super-task→Study (no new science, just naming) |
+
+**Correction to reuse a claim in §21.20.0:** "W3C-PROV export" overstates the current state — there is no
+formal PROV exporter today; provenance is **node-id-backed** (D8 claims cite `node_ids`; the Strategist
+records a `source`). CR's `EvidenceRef` builds on that node-id evidence-ref pattern; a formal PROV serializer
+is optional and later.
+
+**Six hard anti-duplication rules (bake into every CR PR):**
+
+1. **Engine stays the sole domain-event writer** (invariant #1). CR is read/projection; the only event it
+   introduces is the allow-listed context receipt.
+2. **One claim type** — generalize D8 `_ClaimOut`; never a second parallel `Claim`.
+3. **One retrieval fuser** (`hybrid_merge`), **one embedder** (`vectorstore`), **one harmonic index**
+   (`memora`), **one trust layer** (`trust/`). CR wraps them; it does not re-implement them.
+4. **One concept tagger** — the per-run agentic graph. CR adds cross-run identity/versioning, not a new
+   tagging pass.
+5. **Lessons and cases are migrated into claims/exemplars as projections** — never dual-written with
+   divergent conflict rules while the legacy path is live.
+6. **The `task_fingerprint` charset fix lands once** (in `memory.py`, versioned) and `ScopeProfile` builds
+   on top — the allowlist is not re-introduced anywhere in CR text keys.
+
+**Completeness check — shipped things CR must honour (not forget):** M1 rerun/generation identity; B3
+consolidation rename-map as the alias substrate; trust gates as `TrustAssessment` inputs; `confirmed_*` +
+`best_ci` significance as the within-contract uncertainty; foresight as the info-gain predictor; the
+`BACKGROUND_APPENDABLE` typed-append discipline for the receipt event; and the pure-`fold`/replay invariants
+(the portfolio index is never read inside `fold`).
