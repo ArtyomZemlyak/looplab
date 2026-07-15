@@ -3872,9 +3872,12 @@ and is promoted to live influence only after its gate passes on a **frozen-portf
   slice):** `build_context_pack` / `render_context_pack` (`engine/claims.py`) assemble a token-bounded
   cross-run pack from the Step-4 claims (+ Step-3 concept overview): contested (`mixed`) claims lead and a
   **caveat slot is reserved** so positive hits can never crowd out opposition (the §20.5 rule), with a
-  portfolio-coverage line. Pure/deterministic and **silent by construction** — it returns structured data
-  and is surfaced only via `looplab claims --pack`; it is NOT wired into any live prompt. Tests: 9. **TODO
-  to reach full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware-RRF query planner
+  portfolio-coverage line. Pure/deterministic. **Advisory wiring also LANDED (CR2b first slice):** under the
+  separate `cross_run_advisory` flag, `_set_complexity_hint` folds the rendered pack into the Researcher's
+  proposal prompt exactly like the E4 prior note — advisory only, never touches selection (§21.7), "" when
+  the store is empty or the flag is off (prompt byte-identical). This is the gated flip of Step 2 from
+  audit-only to a live prompt cue; measure via a frozen A/B before defaulting on. Tests: 9 (pack) + 7
+  (advisory wiring). **TODO to reach full CR2a/CR2b:** the intent→eligibility→capped-multi-channel→scope-aware-RRF query planner
   (reusing `hybrid_merge`) + why-recalled receipts; the bounded packs at Genesis/run-start/proposal/
   Strategist with token envelopes; the Recall@20/nDCG/false-transfer gates and the **frozen A/B** (≥15%
   lower duplicate spend, no trust/exploration regression) that must pass **before any live injection**.

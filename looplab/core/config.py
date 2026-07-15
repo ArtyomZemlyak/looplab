@@ -498,6 +498,13 @@ class Settings(BaseSettings):
     # need `node_concepts` (normally produced by `concept_pivot`). With only this flag + memory_dir, the
     # feature can silently persist and surface nothing; validate or explicitly wire its prerequisites.
     cross_run_concepts: bool = False
+    # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
+    # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
+    # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
+    # prompt-grounding, never touches node selection (§21.7). Reads `memory_dir` (lessons.jsonl +
+    # concept_capsules.jsonl); "" when empty. OPT-IN (default off) — the gated flip of Step 2 from audit-only
+    # to a live prompt cue; measure the effect via a frozen A/B before defaulting on. See engine/proposal_cues.py.
+    cross_run_advisory: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"
     # Developer backend (ADR-7): "default" (templated/LLM from the task) or an external

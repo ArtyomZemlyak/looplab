@@ -108,6 +108,7 @@ ATTR_BY_FIELD = {
     "capability_expansion": "_capability_expansion",
     "fingerprint_universal": "_fingerprint_universal",
     "cross_run_concepts": "_cross_run_concepts",
+    "cross_run_advisory": "_cross_run_advisory",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }
