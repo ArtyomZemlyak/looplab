@@ -21,6 +21,21 @@ def test_flags_fit_before_split():
     assert r["leak"] and any(f["signal"] == "fit_before_split" for f in r["flags"])
 
 
+def test_fit_before_split_still_flagged_with_kfold_import():
+    # A bare `KFold`/`StratifiedKFold` import must NOT be mistaken for the split point (which would set
+    # split_at=0 and silently disable the fit_before_split detector for the whole file). The real split
+    # is the `.split(` call / the `KFold(` instantiation.
+    code = (
+        "from sklearn.model_selection import KFold\n"      # import — NOT a split point
+        "scaler = StandardScaler()\n"
+        "Xs = scaler.fit_transform(X)\n"                   # fit on full data BEFORE any split -> leak
+        "for tr, te in KFold(5).split(X):\n"
+        "    pass\n"
+    )
+    r = code_leakage_scan(code)
+    assert r["leak"] and any(f["signal"] == "fit_before_split" for f in r["flags"]), r
+
+
 def test_clean_pipeline_no_flags():
     code = (
         "X_train, X_test, y_train, y_test = train_test_split(X, y)\n"
