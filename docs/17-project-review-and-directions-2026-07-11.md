@@ -3955,3 +3955,98 @@ consolidation rename-map as the alias substrate; trust gates as `TrustAssessment
 `best_ci` significance as the within-contract uncertainty; foresight as the info-gain predictor; the
 `BACKGROUND_APPENDABLE` typed-append discipline for the receipt event; and the pure-`fold`/replay invariants
 (the portfolio index is never read inside `fold`).
+
+## PART V — CROSS-RUN CONSUMERS: THE ROLE-ACCESS MODEL (2026-07-15)
+
+### 22. Who consumes cross-run knowledge, how, and who may change it
+
+The §21.20 cross-run read-models (concept overview, claim assessments, context pack, Research Atlas,
+run passport/facts) are only worth building if the loop's ROLES can actually use them. LoopLab has several
+LLM personas plus deterministic actors and the human operator; this section is the access analysis + review.
+
+#### 22.1 The actors
+
+- **Genesis** (`engine/genesis.py`) — bootstraps a run: proposes task scope + settings before any node.
+- **Researcher** (`agents/roles.py::LLMResearcher`) — proposes the next experiment each node.
+- **Strategist** (`agents/strategist.py`) — the meta-controller: explore/exploit stance + cadence.
+- **Developer** (`agents/roles.py::LLMDeveloper`) — writes/repairs the solution code.
+- **Deep-research** (`agents/deep_research.py`, D8) — periodic portfolio review; emits D8 `Claim`s.
+- **Evaluator / trust gates** (`trust/`) — score the current node; no cross-run need (they judge THIS result).
+- **Engine** (`engine/`) — the deterministic loop; the sole writer of run events + cross-run capsules/facts.
+- **Operator / UI** (`serve/`, CLIs) — the human; inspects everything and is the only ratifier.
+
+#### 22.2 Three delivery mechanisms (they are NOT interchangeable)
+
+1. **Agentic READ tool** (pull on demand) — a read-only `CrossRunTools` provider in the tool-loop, so a
+   role can ASK ("was this tried? what's contested? where are the gaps?") when it decides it needs to.
+   Assembled in `adapters/tasks.py::_shared_providers` (Researcher/Strategist/pilot) + `deep_research`.
+2. **Proactive prompt INJECTION** (bounded, pushed every turn) — the §21.20.5 context pack folded into a
+   role's prompt (Researcher = the `cross_run_advisory` slice; Strategist = a coverage cue; Genesis =
+   prior-art). Bounded + off-by-default + audit-only-first, exactly like the E4 prior note.
+3. **API / CLI** (human) — `looplab cross-run-concepts / claims / atlas / cross-run-index` and a serve
+   endpoint for the Research Atlas UI.
+
+Read (tool) belongs to EVERY reasoning role; injection is reserved for the few moments where unprompted
+grounding pays for its tokens; the human gets the rich interactive surface.
+
+#### 22.3 The read/write access matrix
+
+| Actor | Read (tool) | Read (injected) | Write FACTS | Propose claims | Edit / ratify |
+|---|---|---|---|---|---|
+| Genesis | ✓ | ✓ prior-art / gaps | — | — | — |
+| Researcher | ✓ | ✓ context pack (`cross_run_advisory`) | — | via lessons (finalize) | — |
+| Strategist | ✓ | ✓ coverage / info-gain cue | — | — | — |
+| Developer | ✓ (repair-scoped) | (optional, dev-scoped) | — | via dev lessons | — |
+| Deep-research | ✓ | — | — | ✓ D8 `Claim`s (machine-proposed) | — |
+| Evaluator / trust | — | — | — | — | — |
+| Engine (finalize) | — | — | ✓ capsules + run facts | ✓ lessons→claims (projection) | — |
+| Operator (human) | ✓ (UI/CLI) | — | — | — | ✓ ratify / merge-split / pin / tombstone-purge |
+
+#### 22.4 Why agents READ but never EDIT (the load-bearing conclusion)
+
+The hard invariant from §21.20.1 is **evidence before synthesis** and **no poisoning**: a single run's
+opinion must never rewrite portfolio truth. Therefore:
+
+- **Agents propose, they do not commit.** A Researcher/Strategist/Developer READS claims and priors and
+  may CITE them, but cannot mark a claim "verified", merge two concepts, or delete a run's evidence. The
+  only thing an agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim,
+  written by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation
+  of the shared claim/concept store.
+- **The engine writes FACTS, not verdicts.** Capsules + run facts are deterministic projections of the
+  event log (immutable atoms); the engine never editorializes them.
+- **The operator is the sole EDITOR.** Ratifying a claim (machine-proposed → verified/rejected), merging or
+  splitting a concept, pinning a scope alias, and tombstoning/purging a run are operator actions — they flow
+  through the allow-listed control-event channel (`serve/protocol.py::CONTROL_EVENTS`), audited and
+  reversible, exactly like the other human control intents. This is the lean seam for the CR3c governance
+  workbench; the workbench UI is deferred, the control events are the substrate.
+
+This keeps the whole subsystem replay-safe and un-poisonable: reads are advisory everywhere, the only
+automated writes are immutable facts, and every *judgement* that changes cross-run meaning is a human,
+audited, reversible act.
+
+#### 22.5 Delivery-per-role, concretely
+
+- **Researcher** — READ tool (find_prior_attempts / claims / atlas) + the `cross_run_advisory` injected
+  pack (shipped). Highest-value consumer: it stops re-inventing what a sibling run settled.
+- **Strategist** — READ tool + a bounded COVERAGE cue (explored / thin / contested by eligible scope) so
+  its explore/exploit dial is grounded in portfolio coverage, not just the current run's narrowing signal.
+  Kept on the three-layer separation (current run / prior exact scope / prior adjacent scope) so a
+  well-explored neighbour never hides a gap in THIS task.
+- **Genesis** — READ (a portfolio atlas summary + proven-setup constraints) folded into the run-planning
+  prompt, replacing the uncited prose currently fed from `_prior_learnings_index` with cited, scoped
+  evidence (the §21.20.0 "legacy unsafe influence" note).
+- **Developer** — READ tool, but ROLE-SCOPED to repair/implementation-relevant evidence (codebase /
+  framework / crash-fix claims), mirroring how cross-run LESSONS are already role-routed
+  (`LESSON_ROLE_DEVELOPER`). It does not see the R&D claim stream (separation of concerns).
+- **Deep-research** — READ the atlas (unknowns + contradictions) to target unresolved questions and avoid
+  duplicating a prior memo; it already EMITS D8 claims that feed the claim assessments.
+
+#### 22.6 Rollout (each off-by-default + audit-first, merged incrementally)
+
+1. `CrossRunTools` read provider + wire into `_shared_providers` + `deep_research` (all reasoning roles).
+2. Developer role-scoped read variant.
+3. Strategist coverage cue + Genesis prior-art (injection, bounded).
+4. Operator ratify/pin/purge control events (the governance substrate; UI deferred).
+
+Every step reuses a shipped seam (the tool-provider contract, the role-routed memory, the control-event
+allow-list) and never lets an agent mutate cross-run truth — the analysis's central guarantee.

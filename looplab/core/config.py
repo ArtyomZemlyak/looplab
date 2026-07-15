@@ -753,6 +753,13 @@ class Settings(BaseSettings):
     # `cross_run_tools` (same-task only); the agent decides when a foreign run is relevant. Advisory;
     # never changes best-selection. Needs the run's own dir wired through (no-op for unit-built roles).
     all_runs_tools: bool = True
+    # PART V §22 — read-only CROSS-RUN KNOWLEDGE tool for the reasoning roles (Researcher, Strategist,
+    # deep-research, and a Developer-scoped variant). Adds `cross_run_prior_attempts` / `cross_run_claims`
+    # / `cross_run_atlas` over the §21.20 read-models (concept overview + claim assessments + atlas), read
+    # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). ADVISORY ONLY — an agent may cite what it
+    # finds but never mutates cross-run truth (facts are engine-written, verdicts operator-ratified, §22.4).
+    # OPT-IN (default off) because the cross-run stores only exist once the Part-IV features have run.
+    cross_run_read_tools: bool = False
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))

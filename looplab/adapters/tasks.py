@@ -444,6 +444,9 @@ def _shared_providers(task: TaskAdapter, settings, run_dir=None, *, core_only: b
     if getattr(settings, "memory_dir", None):              # agentic pull of lessons + meta-notes (else injection-only)
         from looplab.tools.memory_tools import MemoryTools
         providers.append(MemoryTools(settings.memory_dir))
+    if getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
+        from looplab.tools.cross_run_tools import CrossRunTools   # PART V §22 — read-only cross-run knowledge
+        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
     # Skills: hand-written (skills_dir) + M4 auto-distilled (<memory_dir>/skills) in ONE SkillTools
     # over BOTH dirs — two separate providers would each register list_skills/use_skill and the second
     # shadows the first (the hand-written library becomes unreachable). Hand-written wins a name clash.
