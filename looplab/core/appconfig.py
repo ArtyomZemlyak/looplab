@@ -265,9 +265,18 @@ def render_template(kind: str = "dataset") -> str:
         ("llm_model", "qwen3:8b", "model id (only used when backend: llm)"),
         ("llm_base_url", "http://localhost:11434/v1", "any OpenAI-compatible endpoint"),
         ("developer_backend", "default", "default | opencode | aider | goose | continue"),
-        ("knowledge_dir", "null", "dir of markdown notes the agent may search"),
-        ("memory_dir", "null", "cross-run case memory dir (learn across runs)"),
+        # memory_dir/knowledge_dir are ON by default with real path defaults (~/.looplab/{memory,knowledge}).
+        # They are rendered COMMENTED (see _COMMENTED_KNOBS below): an ACTIVE `null` line here would OVERRIDE
+        # those defaults and silently disable cross-run memory + the knowledge base in every scaffolded config.
+        ("knowledge_dir", "~/.looplab/knowledge",
+         "markdown notes the agent may search — ON by default; set a dir, or null to disable"),
+        ("memory_dir", "~/.looplab/memory",
+         "cross-run case memory (learn across runs) — ON by default; set a dir, or null to disable"),
     ]
+    # Discoverable but non-overriding: these knobs default ON to a real path, so we show them COMMENTED —
+    # documenting the knob without emitting an active value that would replace the default (esp. a `null`
+    # that silently turns the feature off). Uncomment + edit to point elsewhere, or set `null` to disable.
+    _COMMENTED_KNOBS = {"knowledge_dir", "memory_dir"}
     shown = {k for k, _, _ in common} | {"llm_api_key"}
     lines: list[str] = [
         "# LoopLab run config. Run it with:  looplab run looplab.yaml",
@@ -286,7 +295,7 @@ def render_template(kind: str = "dataset") -> str:
         "  # ── Common knobs ──────────────────────────────────────────────────────────────────────",
     ]
     for key, val, comment in common:
-        decl = f"  {key}: {val}"
+        decl = f"  {'# ' if key in _COMMENTED_KNOBS else ''}{key}: {val}"
         # Always leave ≥2 spaces before the comment — a `#` glued to the value is NOT a YAML comment,
         # it becomes part of the value (e.g. a base_url ending in `/v1# ...`).
         lines.append(decl + " " * max(2, 40 - len(decl)) + f"# {comment}")

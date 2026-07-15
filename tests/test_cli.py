@@ -106,6 +106,13 @@ def test_init_writes_parseable_documented_template(tmp_path):
     # The whole template must be valid YAML, incl. the comment alignment (a `#` glued to a value
     # would corrupt e.g. llm_base_url).
     assert doc["settings"]["llm_base_url"].endswith("/v1")
+    # memory_dir/knowledge_dir are ON by default (real path defaults). The scaffold must NOT emit them
+    # as ACTIVE `null` lines — that would override the defaults and silently disable cross-run memory +
+    # the knowledge base in every generated config. Loading the scaffolded settings must keep them set.
+    from looplab.core.config import Settings
+    s = Settings(**doc["settings"])
+    assert s.memory_dir, "scaffolded config disabled cross-run memory (memory_dir came out falsy)"
+    assert s.knowledge_dir, "scaffolded config disabled the knowledge base (knowledge_dir came out falsy)"
 
 
 def test_run_unified_yaml_applies_task_and_settings(tmp_path):
