@@ -713,7 +713,9 @@ def cross_run_search_cmd(
         typer.echo(orjson.dumps(r, option=orjson.OPT_INDENT_2).decode())
         return
     rc = r["receipt"]
-    typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']} "
+    trunc = f", {rc['truncated']} dropped" if rc.get("truncated") else ""
+    typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']}{trunc} "
+               f"[intent={rc.get('intent', '?')}, {rc.get('n_caveats', 0)} caveat(s) reserved] "
                f"(channels: {', '.join(rc['channels'])})")
     for h in r["results"]:
         if h["kind"] == "claim":

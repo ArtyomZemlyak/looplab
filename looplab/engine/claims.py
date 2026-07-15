@@ -13,6 +13,7 @@ is neutral (it takes no stance), exactly as on the lesson read/write paths.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Optional
@@ -528,16 +529,65 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     return pack
 
 
-def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None) -> dict:
-    """CR2a retrieval planner (lean, §21.20.5): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
-    (with their epistemic state / operator maturity) + concepts (with #runs) — over the shipped
-    `HybridRetriever` (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), ranked by relevance to
-    `query`, returning a BOUNDED, RECEIPTED result. Advisory. The fuller CR2a (intent-classified
-    eligibility, capped per-channel candidates, contradiction quotas) builds on this ranked hybrid recall;
-    operator-rejected claims are already excluded (they never enter the corpus)."""
+# Deterministic query-INTENT cues (CR2a eligibility). Kept ML-context-safe: ambiguous technique words
+# ("negative", "loss") are NOT cues, so "hard negatives for retrieval" reads as neutral EXPLORE, not FAILED.
+_INTENT_CUES = {
+    "failed":    frozenset("fail failed failing avoid avoided pitfall pitfalls mistake mistakes wrong "
+                           "broke broken regress regression hurt hurts degrade degrades harmful useless "
+                           "ineffective".split()),
+    "contested": frozenset("contested contradict contradiction conflict conflicting disagree disagreement "
+                           "controversial controversy debate unclear uncertain".split()),
+    "worked":    frozenset("best proven effective recommend recommended success successful reliable robust "
+                           "winning champion".split()),
+}
+_CAVEAT = frozenset(("mixed", "refuted"))     # claims that carry counter-evidence — the contradiction pool
+
+
+def _classify_intent(query: str) -> str:
+    """Map a free-text query to a retrieval INTENT (failed / contested / worked / explore) by cue overlap.
+    Deterministic, no LLM. `explore` (neutral) when no cue fires — the safe default that reorders nothing."""
+    toks = set(_CLAIM_WORD.findall(str(query or "").casefold()))
+    scored = [(sum(1 for w in cues if w in toks), name) for name, cues in _INTENT_CUES.items()]
+    best_n, best = max(scored, key=lambda t: (t[0], t[1]))
+    return best if best_n else "explore"
+
+
+def _eligible(kind: str, meta: dict, intent: str) -> bool:
+    """Whether a doc is on-INTENT (a soft priority signal, never a hard exclusion — counter-evidence is
+    still returned). Concepts are always eligible; a claim's eligibility depends on its epistemic/maturity."""
+    if kind != "claim" or intent == "explore":
+        return True
+    ep, mat = meta.get("epistemic"), meta.get("maturity")
+    if intent == "failed":
+        return ep in _CAVEAT
+    if intent == "contested":
+        return ep == "mixed"
+    if intent == "worked":
+        return ep == "supported" or mat == "operator-ratified"
+    return True
+
+
+def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
+                       scope_task: str = "", contradiction_quota: float = 0.34,
+                       max_corpus: int = 2000, structured: bool = False) -> dict:
+    """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
+    (epistemic state / operator maturity) + concepts (#runs) — over the shipped `HybridRetriever`
+    (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), then shape the ranked recall with:
+
+    - INTENT classification (`failed`/`contested`/`worked`/`explore`) → an eligibility priority so an
+      on-intent claim floats up (soft; never hides counter-evidence);
+    - a CONTRADICTION QUOTA reserving ~`contradiction_quota` of the k slots for caveat (mixed/refuted)
+      claims when they exist, so a positive-heavy recall never buries the counter-evidence (mirrors the
+      context pack's caveat slot). `failed`/`contested` intents raise the quota;
+    - a bounded corpus (`max_corpus`, truncation REPORTED not silent) + a why-recalled RECEIPT (intent,
+      quota, corpus digest, degraded-channel note, per-hit rank).
+
+    Every source is SCOPED before indexing: pass scoped `lessons`/`capsules`, and `scope_task` filters the
+    D8 research claims to that task so a task-bound agent cannot retrieve another task's claims (CODEX).
+    Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import load_concept_aliases
+    from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits)
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
@@ -547,13 +597,17 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
-    # CODEX AGENT: caller-supplied `lessons`/`capsules` look like a scoped corpus, but
-    # `claims_for_memory` still reloads every D8 claim/decision from `memory_dir`; when capsules are omitted
-    # they are also loaded portfolio-wide. `CrossRunTools` passes only task-scoped lessons, so a bound agent
-    # can retrieve another task's D8 claims and concepts. Scope every source before constructing the index.
-    claims = [c for c in claims_for_memory(memory_dir, lessons=lessons)
+    # Scope EVERY source (CODEX): the D8 research claims are filtered to `scope_task` so a bound agent never
+    # retrieves another task's claims; decisions are a global governance overlay (they only ever REMOVE via
+    # rejection). When no scope is given, behaviour is portfolio-wide (back-compat).
+    research = load_research_claims(memory_dir)
+    if scope_task:
+        research = [r for r in research if str(r.get("task_id") or "") == scope_task]
+    claims = [c for c in claim_assessments(lessons, research_claims=research,
+                                           decisions=load_claim_decisions(memory_dir), structured=structured)
               if c.get("maturity") != "operator-rejected"]
-    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir))
+    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir),
+                                          splits=load_concept_splits(memory_dir))
     docs: list[tuple[str, str, dict]] = []
     for c in claims:
         docs.append(("claim", c["statement"], {"epistemic": c["epistemic"], "n_support": c["n_support"],
@@ -561,23 +615,63 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     for e in overview["concepts"]:
         docs.append(("concept", e["concept"],
                      {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
-    # CODEX AGENT: this is an invocation summary, not a "why-recalled" or replay receipt: it has no corpus
-    # revision/digest, stable evidence ids, per-hit channel ranks/contributions, embedder identity, or alias
-    # and governance versions. It cannot reconstruct or explain a result after append-only stores change.
-    # Also validate `k`: k=0/-1 is recorded here but normalized to one hit below, while huge values are free.
-    receipt = {"query": str(query or ""), "k": int(k), "n_corpus": len(docs),
-               "channels": ["lexical", "bm25", "vector"]}
+
+    n_total = len(docs)
+    truncated = max(0, n_total - max(1, int(max_corpus)))
+    if truncated:
+        docs = docs[:max(1, int(max_corpus))]     # bounded; truncation is REPORTED below, never silent
+    intent = _classify_intent(query)
+    kk = max(1, int(k))                            # normalize k (0/-1 -> 1) before it reaches the receipt
+    # A why-recalled receipt: corpus revision (content digest), the degraded vector-channel semantics, the
+    # classified intent + quota, and (below) the per-hit rank — enough to explain/reproduce a result.
+    corpus_digest = hashlib.sha1("\x1f".join(f"{d[0]}:{d[1]}" for d in docs).encode("utf-8")).hexdigest()[:16]
+    receipt = {"query": str(query or ""), "k": kk, "n_corpus": n_total,
+               "channels": ["lexical", "bm25", "vector"], "intent": intent,
+               "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
+               "corpus_digest": corpus_digest, "truncated": truncated,
+               "contradiction_quota": round(float(contradiction_quota), 3)}
     if not docs or not str(query or "").strip():
-        return {"results": [], "receipt": {**receipt, "n_hits": 0}}
+        return {"results": [], "receipt": {**receipt, "n_hits": 0, "n_caveats": 0}}
+
     from looplab.search.hybrid_merge import HybridRetriever
-    # CODEX AGENT: no embedder is passed, so the advertised semantic/vector channel is the 64-bucket
-    # `hash_embed` bag-of-words (including collision hits), not semantic retrieval. This also rebuilds BM25
-    # and every document vector over the unbounded portfolio on every tool call. Inject/version a configured
-    # index, expose degraded channel semantics in the receipt, and enforce corpus/query/result budgets.
-    hits = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=max(1, int(k)))
-    results = [{"kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4), **docs[i][2]}
-               for i, s in hits]
-    return {"results": results, "receipt": {**receipt, "n_hits": len(results)}}
+    # Retrieve a POOL larger than k so the intent priority + contradiction quota have room to reorder/swap
+    # without extra queries; the vector channel is the `hash_embed` bag-of-words (a lexical proxy — declared
+    # in the receipt, not passed off as semantic retrieval).
+    pool_n = min(len(docs), max(kk * 4, kk + 12))
+    pool = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=pool_n)
+    ranked = [{"idx": i, "kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4),
+               "rel_rank": r, **docs[i][2]} for r, (i, s) in enumerate(pool)]
+    # INTENT eligibility: a STABLE re-sort that floats on-intent docs up while preserving relevance order
+    # within each tier (explore => every doc eligible => order unchanged; test-safe).
+    ranked.sort(key=lambda h: (0 if _eligible(h["kind"], h, intent) else 1, h["rel_rank"]))
+    picked = ranked[:kk]
+
+    # CONTRADICTION QUOTA: guarantee ~quota of the k slots are caveat (mixed/refuted) claims when the pool
+    # has them — swapping the LEAST-relevant non-caveat picks (from the bottom) for the most-relevant unpicked
+    # caveats, so the top relevance hit is never displaced and opposition is never crowded out.
+    q = 0.5 if intent in ("failed", "contested") else float(contradiction_quota)
+    target = min(int(kk * max(0.0, q) + 0.999), kk)         # ceil(k*q), capped at k
+    have = [h for h in picked if h["kind"] == "claim" and h.get("epistemic") in _CAVEAT]
+    if target > len(have):
+        picked_ids = {h["idx"] for h in picked}
+        extra = [h for h in ranked if h["idx"] not in picked_ids
+                 and h["kind"] == "claim" and h.get("epistemic") in _CAVEAT]
+        need = target - len(have)
+        for cav in extra[:need]:
+            # evict the last (least-relevant) non-caveat pick; if none remain, stop (never drop a caveat)
+            victim = next((h for h in reversed(picked) if not (h["kind"] == "claim"
+                          and h.get("epistemic") in _CAVEAT)), None)
+            if victim is None:
+                break
+            picked[picked.index(victim)] = cav
+        picked.sort(key=lambda h: (0 if _eligible(h["kind"], h, intent) else 1, h["rel_rank"]))
+
+    n_caveats = sum(1 for h in picked if h["kind"] == "claim" and h.get("epistemic") in _CAVEAT)
+    results = [{k2: v for k2, v in h.items() if k2 != "idx"} for h in picked]
+    # Report the EFFECTIVE quota actually applied (raised for failed/contested) + the reserved caveat target,
+    # so the receipt explains why a contested claim was (or wasn't) surfaced — not just the configured base.
+    return {"results": results, "receipt": {**receipt, "n_hits": len(results), "n_caveats": n_caveats,
+                                            "effective_quota": round(q, 3), "caveat_target": target}}
 
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,

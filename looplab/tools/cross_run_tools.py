@@ -198,11 +198,12 @@ class CrossRunTools:
 
         if name == "cross_run_search":
             from looplab.engine.claims import cross_run_retrieve
-            # CODEX AGENT: this scopes only lessons. Omitting `capsules=self._scoped_capsules()` loads every
-            # task's concepts, and the callee separately reloads all D8 claims; the returned retrieval receipt
-            # is then discarded. A task-bound tool must pass one fully scoped snapshot and retain its receipt
-            # in the run/event trail so the advice can be audited and replayed.
-            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons())
+            # Pass ONE fully-scoped snapshot: scoped lessons + scoped capsules + `scope_task` so the callee
+            # filters the D8 claims to this task too — a task-bound tool cannot retrieve another task's
+            # knowledge (CODEX). The intent + contradiction-quota shaping + why-recalled receipt come from
+            # the full CR2a path; the receipt is surfaced to the agent as the retrieval rationale.
+            r = cross_run_retrieve(self.dir, str(args.get("query") or ""), lessons=self._role_lessons(),
+                                   capsules=self._scoped_capsules(), scope_task=self._task_id)
             hits = r["results"][:8]
             if not hits:
                 return "(no cross-run knowledge matched)"
