@@ -154,7 +154,7 @@ box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips o
 const TY=1360;
 box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
-box("mC",672,TY,320,72,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl"]);
+box("mC",672,TY,320,72,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl · concept capsules/graph","agentic steward: LLM proposes merge/split/purge (opt-in)"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);

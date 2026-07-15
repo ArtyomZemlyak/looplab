@@ -116,6 +116,13 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 engine._store_research_claims(fold(engine.store.read_all()))   # + D8 claims cross-run
         except Exception:  # noqa: BLE001 - retry on a later finalization re-entry
             complete = False
+        # §22.4 AGENTIC taxonomy steward — portfolio-scoped, DECOUPLED from the run's terminal state, so a
+        # curation hiccup (or an LLM call) never blocks/retries finalization (it does NOT touch `complete`).
+        # Gated on `cross_run_curation` + an available LLM client; off => byte-identical finalize.
+        try:
+            engine._store_concept_curation(fold(engine.store.read_all()))
+        except Exception:  # noqa: BLE001 — agentic curation must never affect the run's finalization
+            pass
         try:
             engine._write_reflection_note(                         # E4 cross-run meta-review prior
                 fold(engine.store.read_all()))

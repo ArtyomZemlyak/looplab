@@ -108,6 +108,72 @@ def test_steward_end_to_end_apply(tmp_path):
     assert ov["n_concepts"] == 1
 
 
+# --------------------------------------------------------------------------- #
+# Engine wiring — store_concept_curation at finalize (gated, decoupled, best-effort)
+# --------------------------------------------------------------------------- #
+
+def _fake_engine_with_client(memory_dir, client, *, on=True, auto=False):
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        memory_dir=str(memory_dir),
+        _cross_run_curation=on, _cross_run_curation_auto=auto,
+        researcher=SimpleNamespace(client=client, inner=None, fallback=None), developer=None)
+
+
+def _seed_two_mergeable(mem):
+    s = ConceptCapsuleStore(mem / "concept_capsules.jsonl")
+    s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                concepts=["data/hn"], concept_outcomes={}))
+    s.add(build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
+                                concepts=["data/hard-negative-mining"], concept_outcomes={}))
+
+
+def test_finalize_curation_off_is_noop(tmp_path):
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+    mem = tmp_path / "mem"; mem.mkdir()
+    _seed_two_mergeable(mem)
+    eng = _fake_engine_with_client(mem, _Client({"merges": [], "splits": [], "purges": []}), on=False)
+    LessonMemory(eng).store_concept_curation(RunState(run_id="r", task_id="t"))
+    assert not (mem / "concept_curation_log.jsonl").exists()   # flag off -> nothing happens
+
+
+def test_finalize_curation_logs_but_does_not_apply_by_default(tmp_path):
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+    mem = tmp_path / "mem"; mem.mkdir()
+    _seed_two_mergeable(mem)
+    client = _Client({"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+                      "splits": [], "purges": []})
+    LessonMemory(_fake_engine_with_client(mem, client, on=True, auto=False)).store_concept_curation(
+        RunState(run_id="r", task_id="t"))
+    assert (mem / "concept_curation_log.jsonl").exists()       # proposal LOGGED for operator
+    assert not (mem / "concept_aliases.jsonl").exists()        # but NOT applied (default = ratify path)
+
+
+def test_finalize_curation_auto_applies(tmp_path):
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+    mem = tmp_path / "mem"; mem.mkdir()
+    _seed_two_mergeable(mem)
+    client = _Client({"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+                      "splits": [], "purges": []})
+    LessonMemory(_fake_engine_with_client(mem, client, on=True, auto=True)).store_concept_curation(
+        RunState(run_id="r", task_id="t"))
+    assert load_concept_aliases(str(mem))["data/hn"] == "data/hard-negative-mining"   # auto-applied
+
+
+def test_finalize_curation_toy_backend_is_noop(tmp_path):
+    from looplab.engine.lessons import LessonMemory
+    from looplab.core.models import RunState
+    mem = tmp_path / "mem"; mem.mkdir()
+    _seed_two_mergeable(mem)
+    # no client (toy backend) -> reflect_client None -> steward degrades to empty, nothing logged
+    eng = _fake_engine_with_client(mem, None, on=True)
+    LessonMemory(eng).store_concept_curation(RunState(run_id="r", task_id="t"))
+    assert not (mem / "concept_curation_log.jsonl").exists()
+
+
 def test_cli_concept_steward(tmp_path, monkeypatch):
     from typer.testing import CliRunner
     from looplab.cli import app

@@ -113,4 +113,35 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, str(e))
         return {"ok": True, "split": rec}
 
+    @router.get("/api/cross-run/curation-log")
+    def curation_log(limit: int = 20):
+        """The AGENTIC taxonomy steward's recent proposals (from `concept_curation_log.jsonl`) — what the
+        LLM suggested merging/splitting/purging, for operator review. Read-only."""
+        import json
+        from looplab.events.eventstore import read_jsonl_lenient
+        p = Path(_memory_dir()) / "concept_curation_log.jsonl"
+        rows = read_jsonl_lenient(p, loads=json.loads, dicts_only=True) if p.exists() else []
+        return {"entries": rows[-max(1, int(limit)):][::-1], "n": len(rows)}
+
+    @router.post("/api/cross-run/concept-steward")
+    def concept_steward(apply: bool = False):
+        """Run the AGENTIC concept steward NOW (operator-triggered): the LLM reviews the portfolio concept
+        graph and proposes a curation. `apply=true` records it through the reversible governance writes.
+        The LLM only proposes; writes go through the same append-only path as manual merge/split."""
+        from looplab.engine.concept_steward import steward_concepts
+        client = None
+        try:
+            eng = getattr(srv, "engine", None) or getattr(srv, "_engine", None)
+            client = eng._reflect_client() if eng is not None else None
+        except Exception:  # noqa: BLE001 — fall back to building one from settings
+            client = None
+        if client is None:
+            try:
+                from looplab.core.llm import make_llm_client
+                client = make_llm_client(srv.llm_settings())
+            except Exception as e:  # noqa: BLE001
+                raise HTTPException(400, f"no LLM client available: {e}")
+        out = steward_concepts(_memory_dir(), client, apply=apply, by="ui")
+        return {"ok": True, **out}
+
     return router

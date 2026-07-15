@@ -73,6 +73,34 @@ def test_concept_merge_and_split_routes(tmp_path):
     assert s.status_code == 200 and s.json()["split"]["rules"][0]["to"] == "data/hard-neg"
 
 
+def test_concept_steward_endpoints(tmp_path, monkeypatch):
+    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+    md = Path(os.environ["LOOPLAB_MEMORY_DIR"]); md.mkdir(parents=True, exist_ok=True)
+    s = ConceptCapsuleStore(md / "concept_capsules.jsonl")
+    s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                concepts=["data/hn"], concept_outcomes={}))
+    s.add(build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
+                                concepts=["data/hard-negative-mining"], concept_outcomes={}))
+
+    class _C:
+        def complete_tool(self, m, j):
+            return {"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+                    "splits": [], "purges": []}
+
+        def complete_text(self, m):
+            return "{}"
+
+    import looplab.core.llm as _llm
+    monkeypatch.setattr(_llm, "make_llm_client", lambda *a, **k: _C())
+    client = TestClient(make_app(tmp_path))
+    # operator-triggered agentic run, applying the proposal
+    r = client.post("/api/cross-run/concept-steward", params={"apply": True})
+    assert r.status_code == 200 and r.json()["proposals"]["merges"][0]["to_concept"] == "data/hard-negative-mining"
+    # the merge landed through the reversible governance write
+    from looplab.engine.concept_registry import load_concept_aliases
+    assert load_concept_aliases(str(md))["data/hn"] == "data/hard-negative-mining"
+
+
 def test_contested_filter(tmp_path):
     md = Path(os.environ["LOOPLAB_MEMORY_DIR"]); md.mkdir(parents=True, exist_ok=True)
     (md / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(x) for x in [

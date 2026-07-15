@@ -296,6 +296,34 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         from looplab.engine.memory import ConceptCapsuleStore
         ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
 
+    def store_concept_curation(self, final: RunState) -> None:
+        """PART IV §22.4 — the AGENTIC taxonomy steward at finalize: when `cross_run_curation` is on and an
+        LLM client is available (`reflect_client`), let the LLM review the freshly-updated portfolio concept
+        graph and PROPOSE a curation (merge/split/purge). Proposals are LOGGED to `concept_curation_log.jsonl`
+        for operator ratification; when `cross_run_curation_auto` is on they are ALSO applied through the SAME
+        reversible governance writes (record_concept_alias/split). Portfolio-scoped and fully decoupled from
+        the run's terminal state — best-effort, never raises, never blocks a run. Idempotency note: on a
+        finalize re-entry this may re-run (one extra bounded LLM call); the append-only aliases make a
+        re-applied merge a harmless last-write-wins duplicate."""
+        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
+            return
+        try:
+            client = self.reflect_client()
+            if client is None:
+                return                          # toy backend / no LLM -> steward degrades to empty anyway
+            from looplab.engine.concept_steward import curation_is_empty, steward_concepts
+            auto = bool(getattr(self._e, "_cross_run_curation_auto", False))
+            out = steward_concepts(self._e.memory_dir, client, apply=auto, by="steward")
+            if curation_is_empty(out["proposals"]):
+                return
+            import json
+            rec = {"run_id": final.run_id or final.task_id, "auto": auto,
+                   "proposals": out["proposals"], "receipt": out.get("receipt")}
+            with open(Path(self._e.memory_dir) / "concept_curation_log.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+        except Exception:  # noqa: BLE001 — agentic curation must never fail a run
+            return
+
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
         cross-run `research_claims.jsonl`, so evidence-backed research findings survive their run and can
