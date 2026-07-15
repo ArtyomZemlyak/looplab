@@ -348,6 +348,29 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         except Exception:  # noqa: BLE001 — agentic curation must never fail a run
             return
 
+    def store_task_facets(self, final: RunState) -> None:
+        """PART IV §21.20.2 — AGENTIC task faceting at finalize: classify THIS run's task into facets once
+        (skip if already recorded — facets are per-task, not per-run), so the portfolio accumulates a facet
+        overlay that lets cross-run scoping recognize semantically-similar tasks. Gated on `cross_run_curation`
+        + an LLM client; best-effort, decoupled, never blocks a run."""
+        if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
+            return
+        try:
+            tid = str(getattr(final, "task_id", "") or "")
+            if not tid:
+                return
+            from looplab.engine.task_facets import load_task_facets, steward_task_facets
+            if tid in load_task_facets(self._e.memory_dir):
+                return                          # already faceted this task -> idempotent, no LLM call
+            client = self.reflect_client()
+            if client is None:
+                return
+            kind = str(getattr(getattr(self._e, "task", None), "kind", "") or "")
+            steward_task_facets(self._e.memory_dir, client, task_id=tid,
+                                goal=str(getattr(final, "goal", "") or ""), kind=kind, apply=True)
+        except Exception:  # noqa: BLE001 — agentic faceting must never fail a run
+            return
+
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
         cross-run `research_claims.jsonl`, so evidence-backed research findings survive their run and can

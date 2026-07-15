@@ -722,6 +722,43 @@ def claim_decide_cmd(
     typer.echo(f"recorded: {rec['decision']} — {rec['statement'][:80]}")
 
 
+@app.command(name="task-facets")
+def task_facets_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where task_facets.jsonl lives)."),
+    goal: str = typer.Argument(..., help="The task goal to classify."),
+    task_id: str = typer.Option("", "--task-id", help="Task id to record facets under (needed for --apply)."),
+    kind: str = typer.Option("", "--kind", help="Task kind (dataset/repo/...) — a hint for the classifier."),
+    apply: bool = typer.Option(False, "--apply", help="RECORD the facets for --task-id."),
+    model: Optional[str] = typer.Option(None, help="Override model id."),
+):
+    """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM classifies a task's goal into facets
+    (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
+    tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
+    fingerprint); used as an extra cross-task scope-match signal. `--apply` records for `--task-id`."""
+    from looplab.core.config import Settings
+    from looplab.engine.task_facets import steward_task_facets
+    import datetime as _dt
+    settings = Settings()
+    if model:
+        settings = settings.model_copy(update={"model": model})
+    try:
+        client = _make_llm_client(settings)
+    except Exception as e:  # noqa: BLE001
+        typer.echo(f"task-facets needs a reachable LLM endpoint: {e}")
+        raise typer.Exit(1)
+    out = steward_task_facets(str(memory_dir), client, task_id=task_id, goal=goal, kind=kind, apply=apply,
+                              at=_dt.datetime.now().isoformat(timespec="seconds"))
+    if not out["facets"]:
+        typer.echo("task-facets: none classified")
+        return
+    for ax, v in out["facets"].items():
+        typer.echo(f"  {ax:12} {v}")
+    if apply and out["recorded"]:
+        typer.echo(f"recorded for task '{task_id}'")
+    elif apply and not task_id:
+        typer.echo("(pass --task-id to record)")
+
+
 @app.command(name="claim-steward")
 def claim_steward_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl)."),

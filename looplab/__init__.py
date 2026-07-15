@@ -59,6 +59,7 @@ _LAYOUT = {
     "concept_registry": "engine",# PART IV cross-run CR1a: concept UID + alias resolver (merge/purge/split)
     "concept_steward": "engine", # PART IV cross-run §21.20.13/§22.4: agentic taxonomy curator (LLM proposes)
     "cross_run_index": "engine", # PART IV cross-run Step 1/CR0: run passport + facts, deterministic rebuild
+    "task_facets": "engine",     # PART IV cross-run §21.20.2: agentic task faceting overlay (off the index)
     "cross_run_tools": "tools",  # PART V §22: read-only cross-run knowledge tool for the agent tool-loop
     "assistant": "serve",
     "assistant_commands": "serve",

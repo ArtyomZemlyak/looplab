@@ -122,6 +122,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         try:
             engine._store_concept_curation(fold(engine.store.read_all()))
             engine._store_claim_curation(fold(engine.store.read_all()))   # agentic claim ratify/reject/pin
+            engine._store_task_facets(fold(engine.store.read_all()))       # agentic task faceting (once/task)
         except Exception:  # noqa: BLE001 — agentic curation must never affect the run's finalization
             pass
         try:

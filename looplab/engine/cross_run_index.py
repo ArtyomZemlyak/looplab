@@ -34,14 +34,18 @@ SCOPE_SCHEMA_VERSION = 1
 
 
 def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric: str = "",
-                  universal: bool = True) -> dict:
+                  universal: bool = True, facets: Optional[dict] = None) -> dict:
     """The task PASSPORT (§21.20.3): an IMMUTABLE task identity + fingerprint + salient goal terms.
     Deliberately derives ONLY from the immutable task (kind/direction/metric/goal) — NOT the winner's
     params, which are outcome-derived and would make identity shift when a new node wins or a run extends
     (CODEX). Result features belong on `run_facts` attempts, not the passport. `fp_mode`/`v` version the
-    tokenizer+schema so records built under different modes are never silently joined."""
+    tokenizer+schema so records built under different modes are never silently joined.
+
+    `facets` (from the AGENTIC `task_facets`, §21.20.2) is an OPTIONAL advisory overlay — a "facets" key is
+    added ONLY when passed. The FINGERPRINT never depends on it, and the deterministic index path
+    (`build_index`/`rebuild_index_from_run_root`) never passes it, so CR0 rebuild stays byte-identical."""
     from looplab.engine.memory import _goal_tokens, task_fingerprint
-    return {
+    out = {
         "v": SCOPE_SCHEMA_VERSION,
         "fp_mode": "universal" if universal else "legacy",
         "task_id": str(task_id or ""),
@@ -51,6 +55,9 @@ def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric:
         "fingerprint": task_fingerprint(kind, direction, goal, metric, universal=universal),
         "goal_terms": sorted(set(_goal_tokens(goal, universal=universal))),
     }
+    if facets:
+        out["facets"] = {k: str(v) for k, v in facets.items() if v}   # advisory overlay only
+    return out
 
 
 def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: bool = True) -> dict:

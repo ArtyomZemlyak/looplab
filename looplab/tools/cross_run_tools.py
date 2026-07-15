@@ -36,6 +36,8 @@ class CrossRunTools:
         self.role = str(role or "researcher")
         self._task_id = ""
         self._scope_terms: set[str] = set()
+        self._task_facets: dict = {}
+        self._my_facets: dict = {}
 
     def bind_state(self, state, parent=None) -> None:
         """Learn the CURRENT run's scope so queries reach SIMILAR tasks, not the whole portfolio (the
@@ -45,6 +47,15 @@ class CrossRunTools:
             return
         self._task_id = str(getattr(state, "task_id", "") or "")
         self._scope_terms = _toks(getattr(state, "goal", "") or "")
+        # AGENTIC faceting overlay (§21.20.2): if the portfolio has facets, learn the bound task's facets so
+        # a candidate row from a DIFFERENT task_id that shares ≥2 facet axes (e.g. two retrieval tasks with
+        # different ids) is recognized as in-scope — a semantic match the lexical goal-term OR would miss.
+        try:
+            from looplab.engine.task_facets import load_task_facets
+            self._task_facets = load_task_facets(self.dir)
+            self._my_facets = self._task_facets.get(self._task_id, {})
+        except Exception:  # noqa: BLE001 — faceting is an optional overlay; scope still works without it
+            self._task_facets, self._my_facets = {}, {}
 
     def _in_scope(self, row: dict) -> bool:
         """True when the row belongs to the bound run's scope (same task, or overlapping goal terms), or
@@ -55,6 +66,15 @@ class CrossRunTools:
             return True                                        # unbound -> portfolio-wide
         if self._task_id and str(row.get("task_id") or "") == self._task_id:
             return True
+        # Facet overlap (agentic §21.20.2): a row from a different task that shares ≥2 facet axes with the
+        # bound task is in-scope — recognizes semantically-similar tasks the lexical goal-term OR misses.
+        my_facets = getattr(self, "_my_facets", None)
+        if my_facets:
+            other = getattr(self, "_task_facets", {}).get(str(row.get("task_id") or ""))
+            if other:
+                from looplab.engine.task_facets import facet_overlap
+                if facet_overlap(my_facets, other) >= 2:
+                    return True
         fp = row.get("fingerprint")
         if isinstance(fp, list) and self._scope_terms:
             row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}

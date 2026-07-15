@@ -25,6 +25,7 @@ looplab cross-run-digest Recursive axis-cluster summary of explored concepts (PA
 looplab concept-merge   Operator merge/purge a cross-run concept slug (PART IV cross-run CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
 looplab concept-steward AGENTIC taxonomy curator: LLM proposes merge/split/purge (--apply records) (PART IV §22.4)
+looplab task-facets     AGENTIC task faceting: LLM classifies a goal into domain/language/... facets (PART IV §21.20.2)
 looplab claims          Lessons → evidence-grounded claims (support/oppose) (PART IV cross-run Step 4)
 looplab claim-decide    Operator ratify/reject/pin a cross-run claim (PART V §22.4 governance)
 looplab claim-steward   AGENTIC claim curator: LLM proposes ratify/reject/pin (--apply records) (PART IV §22.4)
