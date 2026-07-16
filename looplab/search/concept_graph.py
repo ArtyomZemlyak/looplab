@@ -898,6 +898,114 @@ def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
     return {"lens": lens, "roots": sorted(children.get(None, [])), "nodes": nodes}
 
 
+def concept_touch_counts(node_concepts) -> dict:
+    """Per-concept touch count from `node_concepts` (how many nodes carry each id) — the orientation
+    signal a symmetric (co_occurs) lens needs (higher touch = the hub/parent). Pure/deterministic."""
+    from collections import Counter as _C
+    c: _C = _C()
+    for ids in (node_concepts or {}).values():
+        for cid in (ids or []):
+            k = _normalize_concept_id(cid)
+            if k:
+                c[k] += 1
+    return dict(c)
+
+
+def default_lenses() -> list[dict]:
+    """The shipped lens pack — each a pure PROJECTION spec (no data of its own). `is_a` nests by concept
+    path; the rest nest by a stored typed-edge relation. Order = display order; `is_a` is the default."""
+    return [
+        {"name": "is_a", "label": "Family · is-a", "rels": ["is_a"], "kind": "path"},
+        {"name": "uses", "label": "Usage · uses", "rels": ["uses"], "kind": "edge"},
+        {"name": "part_of", "label": "Composition · part-of", "rels": ["part_of"], "kind": "edge"},
+        {"name": "co_occurs", "label": "Empirical · co-occurs", "rels": ["co_occurs"], "kind": "edge"},
+    ]
+
+
+_SYMMETRIC_RELS = frozenset({"co_occurs", "related_to"})
+
+
+def _lens_rels(lens) -> Optional[set]:
+    if isinstance(lens, str):
+        return None if lens == "is_a" else {lens}
+    rels = lens.get("rels") if isinstance(lens, dict) else None
+    return set(rels) if rels else None
+
+
+def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
+    """Project a hierarchy from the TYPED concept-edge set under a non-`is_a` lens — the multi-lens
+    payoff of the edge substrate. `edges` is `RunState.concept_edges` ({key: {src, rel, dst, confidence}}).
+    A DIRECTED rel (uses / part_of) reads (src, rel, dst) as "src's parent is dst"; a SYMMETRIC rel
+    (co_occurs / related_to) is oriented by `touch` (parent = the higher-touch endpoint; ties → the
+    smaller id), so the most-used concept becomes the hub. Each concept gets ONE primary parent (highest
+    confidence, then id); the rest are kept as `cross_parents`. A greedy, DETERMINISTIC spanning
+    arborescence with cycle-avoidance (a candidate parent that would close a cycle is skipped) — pure +
+    replay-safe. Returns {"lens", "roots", "nodes": {id: {parent, depth, children, tagged,
+    cross_parents}}}."""
+    from collections import deque as _deque
+    tagged = {c for c in (_normalize_concept_id(x) for x in (concept_ids or ())) if c}
+    lens_name = lens if isinstance(lens, str) else str((lens or {}).get("name") or "custom")
+    rels = _lens_rels(lens)
+    touch = touch or {}
+    cand: dict[str, list] = {}                     # child -> [(confidence, parent)]
+    all_ids: set[str] = set(tagged)
+    for e in (edges or {}).values():
+        if not isinstance(e, dict):
+            continue
+        rel = e.get("rel")
+        if rels is not None and rel not in rels:
+            continue
+        src, dst = _normalize_concept_id(e.get("src")), _normalize_concept_id(e.get("dst"))
+        if not src or not dst or src == dst:
+            continue
+        conf = float(e.get("confidence") or 0.0)
+        all_ids.add(src)
+        all_ids.add(dst)
+        if rel in _SYMMETRIC_RELS:
+            ts, td = touch.get(src, 0), touch.get(dst, 0)
+            parent = (src if ts > td else dst if td > ts else min(src, dst))   # higher touch; tie→min id
+            child = dst if parent == src else src
+        else:
+            parent, child = dst, src                # src <rel> dst  =>  dst is the parent
+        cand.setdefault(child, []).append((conf, parent))
+    parent_of: dict[str, str] = {}
+
+    def _would_cycle(child, parent):
+        x, seen = parent, set()
+        while x is not None and x not in seen:
+            if x == child:
+                return True
+            seen.add(x)
+            x = parent_of.get(x)
+        return False
+    for cid in sorted(all_ids):                    # deterministic assignment order
+        for _conf, p in sorted(cand.get(cid, []), key=lambda t: (-t[0], t[1])):
+            if p in all_ids and not _would_cycle(cid, p):
+                parent_of[cid] = p
+                break
+    children: dict[Optional[str], list] = {}
+    for cid in all_ids:
+        children.setdefault(parent_of.get(cid), []).append(cid)
+    roots = sorted(children.get(None, []))
+    depth: dict[str, int] = {}
+    dq = _deque((r, 0) for r in roots)
+    while dq:
+        cid, d = dq.popleft()
+        if cid in depth:
+            continue
+        depth[cid] = d
+        for ch in sorted(children.get(cid, [])):
+            dq.append((ch, d + 1))
+    nodes = {}
+    for cid in all_ids:
+        prim = parent_of.get(cid)
+        cross = sorted({p for _, p in cand.get(cid, []) if p != prim and p in all_ids})
+        nodes[cid] = {"parent": prim, "depth": depth.get(cid, 0),
+                      "children": sorted(children.get(cid, [])),
+                      "tagged": cid in tagged, "cross_parents": cross}
+    return {"lens": lens_name, "roots": roots, "nodes": nodes}
+
+
 def uncovered_regions(state: RunState, graph: ConceptGraph,
                       tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
     """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
