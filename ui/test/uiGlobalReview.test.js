@@ -98,8 +98,10 @@ test('stale async resources are cancelled and run ids are encoded at every trans
     source('Inspector.jsx'), source('panels.jsx'),
   ])
   assert.match(shared, /const controller = new AbortController\(\)/)
-  assert.match(shared, /e\?\.name !== 'AbortError'/)
-  assert.match(shared, /return \(\) => \{ active = false; controller\.abort\(\) \}/)
+  assert.match(shared, /setTimeout\([\s\S]*SHARED_REQUEST_TIMEOUT_MS[\s\S]*controller\.abort/)
+  assert.match(shared, /requestRef\.current\?\.id !== id/)
+  assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
+  assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
   assert.match(shared, /shared\/\$\{encodeURIComponent\(sid\)\}/)
   assert.match(hooks, /fetchEventStream\(runApiPath\(runId, '\/events'\), \{/)
   assert.match(hooks, /const controller = new AbortController\(\)/)

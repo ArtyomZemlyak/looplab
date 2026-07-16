@@ -1444,16 +1444,25 @@ async function send(path, method, body) {
   return r.json()
 }
 
-export const authStatus = () => get('/api/auth/status')
-export async function verifyOwnerToken(token) {
+export const authStatus = (options = {}) => get('/api/auth/status', options)
+export async function verifyOwnerToken(token, { signal } = {}) {
   const r = await fetch(apiUrl('/api/auth/verify'), {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-LoopLab-Token': String(token || '') },
     body: '{}',
+    signal,
   })
   if (!r.ok) await _throw(r, '/api/auth/verify')
+  const data = await r.json()
+  // A deadline may abort while a non-standard fetch implementation is still resolving. Never
+  // persist a credential from that late response; the mounted auth gate has already rejected it.
+  if (signal?.aborted) {
+    const error = new Error('Owner token verification was aborted')
+    error.name = 'AbortError'
+    throw error
+  }
   setOwnerToken(token)
-  return r.json()
+  return data
 }
 export const clearOwnerToken = () => setOwnerToken('')
 export const reviewManifest = () => get('/api/review')

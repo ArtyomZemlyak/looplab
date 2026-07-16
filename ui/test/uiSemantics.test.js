@@ -136,7 +136,8 @@ test('route changes update title and move focus to a named main landmark', async
   assert.match(app, /document\.title = `\$\{label\} · LoopLab`/)
   assert.match(app, /document\.querySelector\('\[data-route-main\]'\)\?\.focus\(\)/)
   assert.match(auth, /data-route-main tabIndex=\{-1\}/)
-  assert.match(auth, /gateRef\.current\?\.focus\(\{ preventScroll: true \}\)/)
+  assert.match(auth, /resource\.error[\s\S]*?errorRef\.current\?\.focus\(\{ preventScroll: true \}\)[\s\S]*?resource\.status === 'locked'[\s\S]*?inputRef\.current\?\.focus/)
+  assert.match(auth, /resource\.status !== 'ready'[\s\S]*?headingRef\.current\?\.focus/)
   for (const [name, text] of [['RunList', list], ['RunView', runView], ['Settings', settings], ['SharedAssistant', shared]]) {
     assert.match(text, /data-route-main[^>]*tabIndex=\{-1\}/, `${name} needs a focusable main landmark`)
   }
