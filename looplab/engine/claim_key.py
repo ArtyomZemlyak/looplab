@@ -26,7 +26,7 @@ import hashlib
 import re
 import unicodedata
 
-CLAIM_KEY_VERSION = 2
+CLAIM_KEY_VERSION = 3
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 # The "n't" contraction (a negation modifier the tokenizer splits off). The apostrophe is REQUIRED — a
@@ -100,11 +100,19 @@ def _content(stems, *, allow_symbol: bool = False) -> tuple[str, ...]:
 
 
 def _analyze(statement: str) -> tuple:
-    """Return ``(subject, roles, polarity)`` with conservative role-aware identity.
+    """Return ``(subject, roles, polarity, relation_sign, negated)`` with conservative role-aware identity.
 
     For an effect assertion, ``roles`` is ``(lhs, rhs)``. Keeping the sides separate means
     "A improves B" cannot merge with, or contradict, "B improves A" without a real semantic parser.
-    With no recognized effect verb, all ordered content stays in one role. Polarity is negation parity.
+    With no recognized effect verb, all ordered content stays in one role.
+
+    TWO independent sign axes (mega-review §21.20.5): the RELATION direction (helps=+1 / hurts=-1, from the
+    effect verb) and sentential NEGATION (parity of `not`/`no`/`n't`). They must stay SEPARATE in identity —
+    "X does NOT improve Y" (a null/refuted-positive: relation +1, negated) is a DIFFERENT claim from "X
+    reduces Y" (a supported negative-effect: relation -1, asserted), even though both net to polarity -1. The
+    old single parity bit collapsed them, pooling a "doesn't help" observation into a "hurts" claim
+    ("Hurts is a supported negative-effect claim, not a refuted positive"). `polarity` (net stance) is kept
+    for the contradiction pairing; `relation_sign`/`negated` enter the merge_key so null != harm never merge.
     """
     low = unicodedata.normalize("NFKC", str(statement or "")).casefold()
     words = _WORD.findall(low)
@@ -115,17 +123,22 @@ def _analyze(statement: str) -> tuple:
     relation_at = next((i for i, s in enumerate(stems) if s in (_POS_EFFECT | _NEG_EFFECT)), None)
     if relation_at is None:
         roles = (_content(eligible),)
+        relation_sign = 0
     else:
         # Assertion roles are identity, not a bag of entities. Sorting A/B together made
         # "A improves B" collide with "B improves A" and let governance for one relation control the other.
         roles = (_content(stems[:relation_at], allow_symbol=True),
                  _content(stems[relation_at + 1:], allow_symbol=True))
+        relation_sign = 1 if stems[relation_at] in _POS_EFFECT else -1
     subject = tuple(s for role in roles for s in role)
     if not subject:
-        return (), roles, 0
-    # Count sign-flippers over every token, including short modifiers such as "no".
-    flips = sum(1 for s in stems if s in _NEGATE or s in _NEG_EFFECT) + len(_NT.findall(low))
-    return subject, roles, (-1 if flips % 2 else 1)
+        return (), roles, 0, 0, 0
+    # SENTENTIAL negation only (not the relation verb): "no"/"not"/"never"/... + the "n't" contraction.
+    negated = (sum(1 for s in stems if s in _NEGATE) + len(_NT.findall(low))) % 2
+    # Net stance = relation direction (positive base when there is no effect verb) flipped by negation.
+    base = relation_sign if relation_sign else 1
+    polarity = -base if negated else base
+    return subject, roles, polarity, relation_sign, negated
 
 
 def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dict:
@@ -139,17 +152,21 @@ def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dic
       - contra_key: polarity-agnostic — two claims sharing it with OPPOSITE polarity contradict
       - uid:       a stable opaque governance key over merge_key
     Pure/deterministic."""
-    subj, roles, pol = _analyze(statement)
+    subj, roles, pol, relation_sign, negated = _analyze(statement)
     sc, mt = str(scope or ""), str(metric or "")
     role_payload = "\x1e".join("\x1f".join(f"{len(s)}:{s}" for s in role) for role in roles)
     subj_h = hashlib.sha256(role_payload.encode("utf-8")).hexdigest()[:32]
     # Length-prefix qualifiers: delimiter-bearing task/metric IDs must not alias another partitioning of
     # the same bytes (scope="a|b", metric="c" versus scope="a", metric="b|c").
     contra_key = f"{CLAIM_KEY_VERSION}|{len(sc)}:{sc}|{len(mt)}:{mt}|{subj_h}"
-    merge_key = f"{contra_key}|{pol:+d}"
+    # merge_key carries the RELATION direction and the NEGATION parity SEPARATELY (not the collapsed net
+    # polarity), so a null-effect claim (relation +1, negated) never merges with a harm claim (relation -1,
+    # asserted). contra_key stays polarity-agnostic; the net `polarity` field drives contradiction pairing.
+    merge_key = f"{contra_key}|{relation_sign:+d}|{negated:d}"
     uid = "clm_" + hashlib.sha256(merge_key.encode("utf-8")).hexdigest()[:32]
     return {"version": CLAIM_KEY_VERSION, "subject": subj, "roles": roles,
-            "polarity": pol, "scope": sc, "metric": mt,
+            "polarity": pol, "relation_sign": relation_sign, "negated": bool(negated),
+            "scope": sc, "metric": mt,
             "merge_key": merge_key, "contra_key": contra_key, "uid": uid}
 
 
