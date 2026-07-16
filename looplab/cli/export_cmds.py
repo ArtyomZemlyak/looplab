@@ -45,12 +45,20 @@ def smoke(model: Optional[str] = typer.Option(None, help="Override model id.")):
         from looplab.core.parse import parse_structured
         idea = parse_structured(
             client,
-            [{"role": "user", "content": "Propose params x=1.0, y=2.0 to try."}],
+            [{"role": "user", "content": (
+                "Return one experiment with operator try_params and numeric params "
+                "x=1.0, y=2.0. Preserve both parameter names and values exactly."
+            )}],
             Idea, settings.llm_parser,
         )
+        expected = {"x": 1.0, "y": 2.0}
+        if not isinstance(idea.params, dict) or any(idea.params.get(key) != value
+                                                     for key, value in expected.items()):
+            raise ValueError("structured response did not preserve x=1.0 and y=2.0")
         typer.echo(f"structured OK: operator={idea.operator} params={idea.params}")
     except Exception as e:  # noqa: BLE001
-        typer.echo(f"structured FAILED (will rely on fallback at runtime): {e}")
+        typer.echo(f"structured FAILED: {e}")
+        raise typer.Exit(1)
 
 
 @app.command()
