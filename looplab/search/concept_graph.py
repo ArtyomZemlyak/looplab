@@ -351,14 +351,13 @@ def _experiment_nodes(state: RunState) -> list:
 
 
 def _node_text(node) -> str:
-    """The searchable surface text for a node: theme + AUTHORED concepts + rationale + hypothesis +
-    operator + param names. Lowercased. This is what the heuristic tagger and the LLM tagger both describe
-    an experiment by — the authored `idea.concepts` ids are included so a node's own concept vocabulary is
-    matchable even when the free text never spells it out."""
+    """The searchable surface text for a node: theme + rationale + hypothesis + operator + param names.
+    Lowercased. This is what the heuristic tagger and the LLM tagger both describe an experiment by."""
     idea = getattr(node, "idea", None)
+    # CODEX AGENT: Idea.concepts is the proposer's claim. Feeding it to the classifier would let the
+    # producer manufacture the supposedly independent evidence used by graded-novelty admission.
     parts = [
         getattr(idea, "theme", "") or "",
-        " ".join(str(c) for c in (getattr(idea, "concepts", None) or [])),
         getattr(idea, "rationale", "") or "",
         getattr(idea, "hypothesis", "") or "",
         getattr(node, "operator", "") or "",
@@ -666,8 +665,8 @@ def _describe_node(node) -> str:
     bits = [f"operator={getattr(node, 'operator', '')}"]
     if getattr(idea, "theme", None):
         bits.append(f"theme={idea.theme}")
-    if getattr(idea, "concepts", None):                       # the Researcher's authored concept ids
-        bits.append("concepts=" + ", ".join(str(c) for c in idea.concepts))
+    # CODEX AGENT: do not show proposer-authored concept claims to the independent node classifier;
+    # it must infer memberships from the experiment description rather than rubber-stamp its input label.
     if getattr(idea, "hypothesis", None):
         bits.append(f"hypothesis={idea.hypothesis}")
     rat = " ".join((getattr(idea, "rationale", "") or "").split())

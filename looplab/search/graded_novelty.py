@@ -37,13 +37,10 @@ from looplab.search.concept_graph import (ConceptGraph, _experiment_nodes, tag_n
 # --------------------------------------------------------------------------- #
 
 def _idea_text(idea: Idea) -> str:
-    # Include the AUTHORED concept ids: the Researcher now emits `idea.concepts` (a set of axis/slug ids),
-    # and those ids ARE the vocabulary the tagger matches against — omitting them let an idea whose free
-    # text never echoed its own concept ("loss/contrastive" not spelled out in the rationale) tag empty,
-    # grade level-0 novel/allow, and quietly soften the L4/L5 branch-vs-leaf detection this feature exists for.
+    # CODEX AGENT: concepts are authored by the proposal being admitted. They remain display metadata,
+    # not classifier input; otherwise a proposal can self-assign a shared/failed concept and earn L4/L5.
     parts = [getattr(idea, "theme", "") or "", getattr(idea, "rationale", "") or "",
              getattr(idea, "hypothesis", "") or "", getattr(idea, "operator", "") or "",
-             " ".join(str(c) for c in (getattr(idea, "concepts", None) or [])),
              " ".join(str(k) for k in (getattr(idea, "params", None) or {}))]
     return " ".join(parts).lower()
 
