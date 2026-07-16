@@ -686,6 +686,68 @@ def test_report_refresh_never_starts_provider_without_durable_claim(
     assert providers == []
 
 
+def test_report_refresh_success_requires_durable_terminal_before_success(
+        tmp_path, monkeypatch):
+    """A paid result with an unconfirmed terminal is ambiguous, then same-key replay reconciles."""
+    import looplab.events.eventstore as eventstore_module
+
+    _build_run(tmp_path, "demo", writer=None)
+    calls = []
+    syncs = 0
+
+    def fail_terminal_sync(_fd):
+        nonlocal syncs
+        syncs += 1
+        if syncs == 2:  # durable START succeeds; the success terminal cannot be confirmed
+            raise OSError("terminal fsync unavailable")
+
+    monkeypatch.setattr(eventstore_module, "strict_fsync", fail_terminal_sync)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
+        calls.append(state.run_id) or {"headline": "paid terminal", "at_node": len(state.nodes)}))
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    uncertain = _refresh_report(
+        client, generation=generation, key="terminal-durability").json()
+
+    assert uncertain["code"] == "report_refresh_uncertain"
+    assert uncertain["ambiguous"] is True
+    assert "same request identity" in uncertain["error"]
+    reconciled = _refresh_report(
+        TestClient(make_app(tmp_path)), generation=generation,
+        key="terminal-durability").json()
+    assert reconciled["ok"] is True
+    assert reconciled["content"]["headline"] == "paid terminal"
+    assert calls == ["demo"]
+
+
+def test_report_refresh_failure_terminal_uses_strict_durability(tmp_path, monkeypatch):
+    """A fresh-key retry is offered only after the sanitized failure receipt is fsync-confirmed."""
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    observed = []
+    real_append = EventStore.append
+
+    def watched_append(self, event_type, data, **kwargs):
+        if event_type == "report_refresh_failed":
+            observed.append(dict(kwargs))
+        return real_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr(EventStore, "append", watched_append)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr(
+        "looplab.serve.report.generate_report",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("provider failed")),
+    )
+    result = _refresh_report(
+        TestClient(make_app(tmp_path)), key="durable-failure-terminal").json()
+
+    assert result["ok"] is False
+    assert observed == [{"require_lock": True, "require_durable": True}]
+
+
 def test_report_refresh_terminal_replay_does_not_require_current_llm_settings(
         tmp_path, monkeypatch):
     """A durable receipt remains recoverable even if settings become unreadable afterward."""

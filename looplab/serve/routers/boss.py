@@ -319,7 +319,7 @@ def _record_report_refresh_failure(srv, run_dir, generation: str, identity: str,
             store.append(
                 EV_REPORT_REFRESH_FAILED,
                 {"refresh_id": identity, "generation": generation, "error_kind": safe_kind},
-                require_lock=True,
+                require_lock=True, require_durable=True,
             )
         return True
     except Exception:  # noqa: BLE001 - an unresolved claim remains fail-closed after storage failure
@@ -346,11 +346,24 @@ def _run_report_refresh_worker(srv, settings, run_dir, generation: str,
             content = generate_report(
                 state, client, parser=settings.llm_parser,
                 trigger="manual", raise_on_failure=True)
-            event = EventStore(run_dir / "events.jsonl").append(
-                EV_REPORT_GENERATED, {
-                    "content": content, "at_node": content.get("at_node"), "trigger": "manual",
-                    "refresh_id": identity, "generation": generation,
-                }, require_lock=True)
+            try:
+                event = EventStore(run_dir / "events.jsonl").append(
+                    EV_REPORT_GENERATED, {
+                        "content": content, "at_node": content.get("at_node"), "trigger": "manual",
+                        "refresh_id": identity, "generation": generation,
+                    }, require_lock=True, require_durable=True)
+            except Exception:  # noqa: BLE001 - paid work completed; only same-key reconcile is safe
+                return {
+                    "ok": False,
+                    "code": "report_refresh_uncertain",
+                    "error_kind": "uncertain",
+                    "error": (
+                        "The paid report completed, but its durable success receipt is unconfirmed. "
+                        "Resume with the same request identity; do not start a new request."
+                    ),
+                    "generation": generation,
+                    "ambiguous": True,
+                }
     except HTTPException as exc:
         failure = _background_http_failure(exc)
         if failure.get("code") in _DOMAIN_HTTP_FAILURES:
