@@ -2,12 +2,14 @@
 bodies are verbatim moves from `serve/server.py::make_app` (BACKLOG §4)."""
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.serve.engine_proc import (
     _engine_alive, _engine_liveness, _fresh_resume_launch_pending, _fresh_run_launch_pending,
     _run_lifecycle_lock)
-from looplab.serve.projects import ProjectError
+from looplab.serve.projects import ProjectError, ProjectStoreLockError
 
 
 def build_router(srv) -> APIRouter:
@@ -16,13 +18,22 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ projects (ClearML-style)
     def _project_call(fn):
-        """Run one ProjectStore mutation, translating its ProjectError into the same 400 every
-        projects/supertasks route raised inline (HTTPException(400, str(e)) — identical status and
-        {"detail": ...} body, just written once)."""
+        """Map invalid mutations to 400 and an unavailable required durability lock to 503."""
         try:
             return fn()
+        except ProjectStoreLockError as e:
+            raise HTTPException(503, str(e)) from e
         except ProjectError as e:
-            raise HTTPException(400, str(e))
+            raise HTTPException(400, str(e)) from e
+
+    @contextmanager
+    def _project_transaction():
+        """Acquire required metadata serialization before a compound destructive operation starts."""
+        try:
+            with projects.transaction():
+                yield
+        except ProjectStoreLockError as e:
+            raise HTTPException(503, str(e)) from e
 
     @router.get("/api/projects")
     def list_projects():
@@ -93,7 +104,7 @@ def build_router(srv) -> APIRouter:
         """Set/clear a run's UI display label. Non-destructive: the run dir id is unchanged."""
         _run_dir(run_id)   # 404 guard
         body = await request.json()
-        projects.set_label(run_id, body.get("label"))
+        _project_call(lambda: projects.set_label(run_id, body.get("label")))
         return {"ok": True}
 
     @router.delete("/api/runs/{run_id}")
@@ -113,7 +124,9 @@ def build_router(srv) -> APIRouter:
             # The command sequencer excludes command workers/current spawn leases. The lifecycle
             # fence additionally excludes the durable-resume reconciler and reset's pre-lock launch
             # window introduced by older/CLI-compatible control paths.
-            with _run_lifecycle_lock(rd):
+            # CODEX AGENT: Acquire the required metadata lock before deleting bytes. Returning 503
+            # after rmtree would falsely report failure for a run that was already irreversibly gone.
+            with _run_lifecycle_lock(rd), _project_transaction():
                 liveness = _engine_liveness(rd)
                 if liveness is None:
                     raise HTTPException(409, {
@@ -171,7 +184,7 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(
                         500, f"run dir could not be fully removed (e.g. {leftover!r} — a file "
                              "may be open or the storage is read-only); retry once nothing holds it")
-                projects.forget(run_id)
+                projects.forget_locked(run_id)
                 srv.summary_cache.pop(run_id, None)
         return {"ok": True}
 

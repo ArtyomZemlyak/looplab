@@ -63,6 +63,19 @@ def test_lesson_records_flatten(tmp_path):
     assert recs[0]["claim_stance"] == "support"
 
 
+def test_lesson_records_ignore_poison_watermark_and_malformed_lesson_rows():
+    state = RunState()
+    state.lessons_distilled = [{
+        "at_node": "9" * 10_000,
+        "pairs": [[63, 10]],
+        "lessons": ["bad-row", {"statement": "usable", "outcome": "noted"}],
+    }]
+    assert _lesson_records(state) == [{
+        "statement": "usable", "outcome": "noted", "claim_stance": "",
+        "at_node": 0, "node_ids": [63],
+    }]
+
+
 def test_flags_the_overgeneralizing_mislesson(tmp_path):
     st = _run(tmp_path, [
         {"statement": "do not use false negative filtering", "outcome": "node 63 failed", "evidence": [63]},

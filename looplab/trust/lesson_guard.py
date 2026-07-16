@@ -24,7 +24,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.trust.verifier import (VerdictReport, lesson_overgeneralization_criteria, verify)
 
 
@@ -48,9 +48,13 @@ def _lesson_records(state: RunState) -> list[dict]:
     ids of the (child, parent) `pairs` the distillation spent (the failed/won experiments it came from)."""
     out: list[dict] = []
     for ev in (state.lessons_distilled or []):
-        at_node = int(ev.get("at_node", 0) or 0)
+        if not isinstance(ev, dict):
+            continue
+        at_node = safe_lesson_node_count(ev.get("at_node")) or 0
         pair_children = [p[0] for p in (ev.get("pairs") or []) if isinstance(p, (list, tuple)) and p]
         for lz in (ev.get("lessons") or []):
+            if not isinstance(lz, dict):
+                continue
             stmt = str(lz.get("statement", "") or "").strip()
             if not stmt:
                 continue

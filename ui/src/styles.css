@@ -711,7 +711,7 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 /* Deep-research drawer (panels.jsx ResearchPanel): memos with actionable directions. */
 .rsch-memo { padding: 10px 0; border-bottom: 1px solid var(--line); }
 .rsch-memo:last-child { border-bottom: 0; }
-.rsch-h { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.rsch-h { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
 .rsch-h .rsch-ic { opacity: .7; }
 .rsch-h b { font-weight: 600; }
 .rsch-dirs { list-style: none; padding: 0; margin: 4px 0; }
@@ -719,6 +719,19 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 .rsch-dirs li > span { flex: 1; }
 .rsch-reasoning { margin-top: 6px; }
 .rsch-reasoning summary { cursor: pointer; color: var(--fg-dim); font-size: 12px; }
+
+/* ResearchPanel renders bounded but untrusted provider prose. Long URLs/identifiers must stay
+   inside the narrow drawer instead of forcing the overlay wider than the viewport. */
+.rsch-memo,
+.rsch-h,
+.rsch-h > *,
+.rsch-dirs li,
+.rsch-dirs li > span,
+.rsch-memo .bul li,
+.rsch-reasoning {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 
 .cardgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px,1fr)); gap: 10px; }
 

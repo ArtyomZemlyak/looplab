@@ -36,6 +36,45 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
     return out
 
 
+MAX_LESSON_NODE_COUNT = (1 << 31) - 1
+
+
+def safe_lesson_node_count(value) -> int | None:
+    """Total parser for a durable advisory node-count watermark.
+
+    Current writers emit integers. Lossless numeric legacy scalars remain accepted, while malformed or
+    enormous values cannot crash resume or suppress lesson/reflection cadence forever.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        result = value
+    elif isinstance(value, float):
+        if not math.isfinite(value) or not value.is_integer():
+            return None
+        result = int(value)
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text or len(text) > 10 or not text.isascii() or not text.isdecimal():
+            return None
+        result = int(text)
+    else:
+        return None
+    return result if 0 <= result <= MAX_LESSON_NODE_COUNT else None
+
+
+def latest_lesson_node_count(records, *, key: str = "at_node") -> int:
+    """Largest valid watermark in heterogeneous durable rows; invalid rows contribute nothing."""
+    latest = 0
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        parsed = safe_lesson_node_count(record.get(key))
+        if parsed is not None:
+            latest = max(latest, parsed)
+    return latest
+
+
 class NodeStatus(str, Enum):
     pending = "pending"      # node_created seen, not yet evaluated (resume re-entry point)
     evaluated = "evaluated"  # has a metric

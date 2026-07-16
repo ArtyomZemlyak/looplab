@@ -28,7 +28,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
-from looplab.core.models import RunState
+from looplab.core.models import RunState, latest_lesson_node_count
 from looplab.engine.lessons_distill import LessonDistillMixin
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
@@ -127,7 +127,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if state.pending_nodes():
             return state
         n = len(state.nodes)
-        last = max((int(d.get("at_node") or 0) for d in state.lessons_distilled), default=0)
+        last = latest_lesson_node_count(state.lessons_distilled)
         if not self._e._cadence_due(n, last, self._e.lessons_every):
             return state
         fp = self._e._task_fingerprint(state, state.best())
@@ -171,7 +171,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         if self._e.lessons_refresh_every <= 0 or not (self._e._reflection_priors and self._e.memory_dir):
             return state
         n = len(state.nodes)
-        last = max((int(d.get("at_node") or 0) for d in state.lessons_refreshed), default=0)
+        last = latest_lesson_node_count(state.lessons_refreshed)
         if not self._e._cadence_due(n, last, self._e.lessons_refresh_every):
             return state
         stamp = self._e._lessons_store_stamp()

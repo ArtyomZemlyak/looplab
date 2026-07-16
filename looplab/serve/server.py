@@ -79,6 +79,7 @@ def _ui_dist() -> Path:
 _IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable"
 _REVALIDATE_ASSET_CACHE = "no-cache"
 _CONTENT_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^/]+$")
+_API_REQUEST_BODY_MAX = 2_000_000
 
 
 def _is_live_sse_path(path: str) -> bool:
@@ -108,6 +109,82 @@ class _SSESafeGZipMiddleware:
             await self.app(scope, receive, send)
             return
         await self.compressed(scope, receive, send)
+
+
+class _APIRequestBodyLimitMiddleware:
+    """Bound every API request body, including chunked requests without Content-Length.
+
+    The UI has no binary upload endpoint; its largest legitimate payloads are authoring text and
+    structured launch/chat requests. Buffering at most two megabytes before dispatch gives every
+    router the same hard memory envelope and prevents a handler that calls ``request.json()`` or
+    ``request.body()`` from allocating an attacker-controlled body first. Static assets and HTML do
+    not pass through this path.
+    """
+
+    def __init__(self, app, *, max_bytes: int = _API_REQUEST_BODY_MAX):
+        self.app = app
+        self.max_bytes = max(1, int(max_bytes))
+
+    async def _reject(self, send, status: int, detail: str) -> None:
+        body = json.dumps({"detail": detail}, separators=(",", ":")).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": status,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") != "http" or not str(scope.get("path") or "").startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        headers = {bytes(k).lower(): bytes(v) for k, v in scope.get("headers", [])}
+        raw_length = headers.get(b"content-length")
+        if raw_length is not None:
+            try:
+                declared = int(raw_length)
+            except (TypeError, ValueError):
+                await self._reject(send, 400, "invalid Content-Length")
+                return
+            if declared < 0:
+                await self._reject(send, 400, "invalid Content-Length")
+                return
+            if declared > self.max_bytes:
+                await self._reject(send, 413, "API request body is too large")
+                return
+
+        buffered = bytearray()
+        while True:
+            message = await receive()
+            if message.get("type") == "http.disconnect":
+                # Preserve the disconnect for the downstream request object; no response is fabricated.
+                async def disconnected():
+                    return {"type": "http.disconnect"}
+                await self.app(scope, disconnected, send)
+                return
+            if message.get("type") != "http.request":
+                continue
+            buffered.extend(message.get("body") or b"")
+            if len(buffered) > self.max_bytes:
+                await self._reject(send, 413, "API request body is too large")
+                return
+            if not message.get("more_body", False):
+                break
+
+        replayed = False
+
+        async def replay_receive():
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": bytes(buffered), "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
 
 
 def _vite_manifest_assets(directory: Path) -> set[str]:
@@ -262,6 +339,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                ["http://localhost:5173", "http://127.0.0.1:5173"])
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
+    app.add_middleware(_APIRequestBodyLimitMiddleware, max_bytes=_API_REQUEST_BODY_MAX)
     # Enforce the same compressed-transfer contract the manifest bundle gate measures while keeping live
     # EventSource and assistant token streams unbuffered across every supported Starlette version.
     app.add_middleware(_SSESafeGZipMiddleware, minimum_size=500, compresslevel=6)
@@ -459,6 +537,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # Explicit app-state handle for lifecycle integrations/tests; routers still close over the same
     # AppState instance, so replacing a dependency such as srv.commands is immediately observed.
     app.state.looplab = srv
+
+    @app.on_event("startup")
+    def _recover_restart_command_workers():
+        # A process can die after publishing an accepted restart record but before its worker appends
+        # the folded restart intent. Once appended, install_resume_reconcile_hooks is independently
+        # sufficient; this hook closes the earlier reserve->append window without any browser poll.
+        srv.commands.recover_pending_restarts()
 
     @app.get("/api/auth/status")
     def auth_status(request: Request):

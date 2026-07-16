@@ -309,7 +309,15 @@ export function toMarkdown(state, best) {
   L.push('')
   L.push(`**${rep?.headline || v.headline}**`)
   if (rep?.verdict) { L.push(''); L.push(rep.verdict) }
-  if (v.caveats.length) { L.push(''); L.push('Caveats: ' + v.caveats.map(c => c.text).join('; ') + '.') }
+  if (rep?.caveats?.length) {
+    L.push('')
+    L.push('**Agent-authored caveats (narrative only; not deterministic trust checks):**')
+    rep.caveats.forEach(caveat => L.push(`- ${caveat}`))
+  }
+  if (v.caveats.length) {
+    L.push('')
+    L.push('Deterministic trust caveats: ' + v.caveats.map(c => c.text).join('; ') + '.')
+  }
   L.push('')
   L.push(`- **Run:** ${state.run_id}`)
   L.push(`- **Direction:** ${state.direction}`)

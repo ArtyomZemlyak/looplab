@@ -502,8 +502,8 @@ def test_persisted_index_offset_drift_returns_none_not_wrong_span(run):
     get_index(sp)
     span_index._CACHE.clear()
     ip = rd / "spans.index.jsonl"
-    lines = [l for l in ip.read_bytes().split(b"\n") if l]
-    recs = [json.loads(l) for l in lines[1:]]                   # skip header
+    lines = [line for line in ip.read_bytes().split(b"\n") if line]
+    recs = [json.loads(line) for line in lines[1:]]                   # skip header
     by_id = {r["span_id"]: r for r in recs}
     victim, other = by_id["g0_1"], by_id["g1_0"]               # both middle spans (last stays intact)
     victim["_o"], victim["_l"] = other["_o"], other["_l"]      # point g0_1's row at g1_0's bytes

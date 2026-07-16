@@ -40,6 +40,7 @@ from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, fin
 # `"train\n"` — a control char the "filesystem-safe slug" contract promises to reject (it would land
 # in a log filename and trace/span attributes). `\Z` anchors the true end of string.
 _STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+MAX_STAGE_COUNT = 16
 
 
 def safe_stage_name(name: str) -> bool:
@@ -337,6 +338,8 @@ def validate_stages(stages, *, reserved: tuple = ()) -> tuple[Optional[list], Op
     ("score",); operator-declared stages reserve nothing (the operator owns scoring)."""
     if not isinstance(stages, list) or not stages:
         return None, "`stages` must be a non-empty array of {name, command:[argv...]} objects."
+    if len(stages) > MAX_STAGE_COUNT:
+        return None, f"`stages` may contain at most {MAX_STAGE_COUNT} entries."
     seen, clean = set(), []
     for i, s in enumerate(stages):
         if not isinstance(s, dict):

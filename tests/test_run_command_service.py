@@ -168,6 +168,9 @@ def _wait_for_intent(rd, command_id, timeout=1.0):
 def test_every_control_event_has_one_explicit_engine_policy():
     assert set(CONTROL_SPECS) == set(CONTROL_EVENTS)
     assert CONTROL_SPECS["run_abort"].engine_policy is EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP
+    assert CONTROL_SPECS["restart"].engine_policy is EnginePolicy.RESTART_AFTER_EXIT
+    assert CONTROL_SPECS["restart"].postcondition == "restart_served"
+    assert CONTROL_DATA_FIELDS["restart"] == frozenset()
     assert CONTROL_SPECS["set_strategy"].engine_policy is EnginePolicy.ENSURE_RUNNING
     assert {name for name, spec in CONTROL_SPECS.items()
             if spec.engine_policy is EnginePolicy.NO_SPAWN} == {
@@ -574,7 +577,7 @@ def test_attached_finalize_cannot_succeed_against_later_external_abort(tmp_path)
     assert _types(rd).count("run_abort") == 2
 
 
-@pytest.mark.parametrize("event_type", ["pause", "resume"])
+@pytest.mark.parametrize("event_type", ["pause", "restart", "resume"])
 def test_stop_and_resume_reject_during_pending_finalize(tmp_path, event_type):
     _seed(tmp_path, finalizing=True)
     client, _srv = _client(tmp_path, _Driver(alive=True))
@@ -599,7 +602,7 @@ def test_finish_seq_only_pending_is_visible_and_rejects_new_commands(tmp_path):
     assert state["finalization_incomplete"] is True and state["phase"] == PHASE_FINALIZING
     assert listed["finalization_incomplete"] is True and listed["phase"] == PHASE_FINALIZING
 
-    for event_type in ("pause", "resume"):
+    for event_type in ("pause", "restart", "resume"):
         record = _post(client, event_type, key=f"finish-seq-{event_type}").json()
         assert record["status"] == "rejected"
         assert record["error"]["code"] == "finalize_in_progress"
@@ -615,6 +618,47 @@ def test_pause_waits_for_folded_pause_and_no_engine(tmp_path):
     assert done["status"] == "succeeded"
     assert fold(EventStore(rd / "events.jsonl").read_all()).paused is True
     assert driver.calls == []
+
+
+def test_restart_waits_for_old_owner_then_requires_exact_replacement_serve(tmp_path):
+    rd = _seed(tmp_path)
+    driver = _Driver(alive=True)
+    client, _srv = _client(tmp_path, driver, timeout=0.30, observation=1.0)
+
+    command = _post(client, "restart", key="one-durable-restart").json()
+    intent = _wait_for_intent(rd, command["id"])
+    folded = fold(EventStore(rd / "events.jsonl").read_all())
+    assert intent.type == "restart" and folded.paused and folded.resume_pending()
+
+    # The command must not Popen while the owner that folded the pause still holds engine.lock.
+    time.sleep(0.05)
+    assert driver.calls == []
+
+    def replacement_serves_restart():
+        store = EventStore(rd / "events.jsonl")
+        store.append("resume", {})
+        store.append("resume_served", {})
+        driver.alive = True
+
+    driver.on_spawn = replacement_serves_restart
+    driver.alive = False
+    done = _terminal(client, command, timeout=1.5)
+    assert done["status"] == "succeeded"
+    assert len(driver.calls) == 1 and driver.calls[0][0][0] == "resume"
+
+    events = EventStore(rd / "events.jsonl").read_all()
+    launch = next(event for event in events
+                  if event.type == "resume_requested" and event.data.get("launch_claim"))
+    served = next(event for event in events if event.type == "resume_served")
+    assert intent.seq < launch.seq < served.seq
+    assert launch.data["request_seq"] == intent.seq
+    assert not fold(events).paused and not fold(events).resume_pending()
+
+    # Lost response/browser retry is record lookup, not a second pause or replacement process.
+    duplicate = _post(client, "restart", key="one-durable-restart")
+    assert duplicate.status_code == 200 and duplicate.json()["id"] == command["id"]
+    assert duplicate.json()["status"] == "succeeded"
+    assert _types(rd).count("restart") == 1 and len(driver.calls) == 1
 
 
 def test_spawn_exception_and_no_progress_startup_are_structured_failures(tmp_path):
@@ -866,6 +910,32 @@ def test_approval_append_cas_rejects_an_intervening_event(tmp_path, monkeypatch)
     assert not any(event.type == "approval_granted" for event in store.read_all())
 
 
+def test_restart_append_cas_cannot_cross_a_concurrent_finalize(tmp_path, monkeypatch):
+    rd = _seed(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    client, srv = _client(tmp_path, _Driver(alive=False))
+    srv.commands._start_worker = lambda *_args, **_kwargs: None
+    admitted = _post(client, "restart", key="restart-finalize-race").json()
+    assert admitted["status"] == "accepted"
+
+    decide = srv.commands._decision
+
+    def finalize_after_restart_admission(run_dir, event_type):
+        result = decide(run_dir, event_type)
+        if event_type == "restart":
+            store.append("run_abort", {"reason": "operator-finalize-won"})
+        return result
+
+    monkeypatch.setattr(srv.commands, "_decision", finalize_after_restart_admission)
+    path = srv.commands._path(rd, admitted["id"])
+    srv.commands._execute(rd, path, srv.commands._load(path), claimed=False)
+
+    final = srv.commands._load(path)
+    assert final["status"] == "rejected"
+    assert final["error"]["code"] == "restart_state_changed"
+    assert "restart" not in _types(rd) and _types(rd).count("run_abort") == 1
+
+
 @pytest.mark.parametrize("unavailable", ["tombstoned", "aborted"])
 def test_normalizer_rejects_unavailable_inject_parent_and_source(tmp_path, unavailable):
     parent_rd = _seed(tmp_path, "parent")
@@ -941,6 +1011,7 @@ def test_command_http_is_no_store_for_success_validation_and_early_auth(monkeypa
     ("set_strategy", {"strategy": {"policy": "asha", "secret": "leak"}}),
     ("set_strategy", {"strategy": {"policy": "asha", "policy_params": {"c": 2}}}),
     ("resume", {"secret": "must not be persisted"}),
+    ("restart", {"secret": "must not be persisted"}),
     ("pause", {"ignored": True}),
     ("fork", {"from_node_id": 0, "junk": True}),
     ("force_confirm", {"node_id": 999}),

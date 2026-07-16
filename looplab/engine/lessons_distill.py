@@ -21,7 +21,7 @@ from typing import Optional
 import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
-from looplab.core.models import NodeStatus, RunState
+from looplab.core.models import NodeStatus, RunState, safe_lesson_node_count
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
 from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
@@ -49,7 +49,8 @@ class LessonDistillMixin:
         # ignores) carries `at_nodes`; the highest prior value is the coverage watermark.
         _reflection_notes = [e.data for e in self._e.store.read_all()
                              if e.type == EV_REFLECTION_NOTE]
-        _reflected_at = [int(d.get("at_nodes", 0) or 0) for d in _reflection_notes]
+        _reflected_at = [parsed for d in _reflection_notes
+                         if (parsed := safe_lesson_node_count(d.get("at_nodes"))) is not None]
         if _reflected_at and len(final.nodes) <= max(_reflected_at):
             return
         # Crash-idempotency (#3): finalization is RETRIED after a crash. If this EXACT finish already

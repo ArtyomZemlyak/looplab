@@ -1,8 +1,8 @@
 """ClearML-style project organization for the live UI (a SEPARATE, UI-only concern — never
 imported by the engine or `replay.fold`). Projects are a nestable folder tree that groups runs;
 membership is metadata in `<run-root>/projects.json`, so runs stay physically where they are
-(moving a run dir would break its append-only `events.jsonl` + resume). Single writer = the UI
-server, so a plain read-modify-atomic-write is enough; no cross-process lock like the event log.
+(moving a run dir would break its append-only `events.jsonl` + resume). Multiple UI processes may
+share a run root, so every read-modify-write is serialized by a stable required interprocess lock.
 
 Shape of projects.json:
     {"projects": [{"id","name","parent_id"}, ...],
@@ -25,6 +25,7 @@ import json
 import os
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from looplab.core.atomicio import atomic_write_text
@@ -33,6 +34,10 @@ from looplab.core.models import Project
 
 class ProjectError(ValueError):
     """Invalid project operation (unknown id, cycle, …) — the server maps this to HTTP 400."""
+
+
+class ProjectStoreLockError(RuntimeError):
+    """A project mutation could not obtain its required cross-process serialization guarantee."""
 
 
 def _new_id() -> str:
@@ -46,16 +51,34 @@ def _new_st_id() -> str:
 class ProjectStore:
     """Read/modify/atomic-write CRUD over `<run-root>/projects.json`. Each mutating method loads
     the current file, applies the change, persists, and returns the relevant result — so the
-    on-disk file is always the source of truth and concurrent server workers never diverge."""
+    on-disk file is always the source of truth and concurrent server processes do not lose updates."""
 
     def __init__(self, path: str | os.PathLike):
         self.path = Path(path)
-        # Each mutating op is load→mutate→atomic-save; a lock makes that read-modify-write atomic
-        # WITHIN the process. FastAPI runs sync handlers (e.g. delete_project) in a threadpool while
-        # async handlers run on the event loop, so without this a threadpool write can interleave
-        # with an event-loop write and clobber it (lost update). os.replace already makes reads
-        # see a whole file, so read-only paths don't need the lock.
+        # The local lock serializes FastAPI's threadpool and event-loop handlers. The stable sibling
+        # lock extends the SAME load→mutate→atomic-save transaction across UI processes/workers.
+        # Read-only paths need neither: os.replace always exposes one complete file.
         self._lock = threading.Lock()
+        self._lock_path = Path(str(self.path) + ".lock")
+
+    @contextmanager
+    def _transaction(self):
+        """Hold both locks before the mutator re-reads current state; fail closed if unsupported."""
+        from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
+
+        try:
+            with self._lock, _interprocess_lock(self._lock_path, required=True):
+                yield
+        except EventStoreLockError as exc:
+            raise ProjectStoreLockError(
+                f"project metadata lock is unavailable for {self.path}: {exc.cause}"
+            ) from exc
+
+    @contextmanager
+    def transaction(self):
+        """Public compound mutation fence for operations that also change another run-root resource."""
+        with self._transaction():
+            yield
 
     # ------------------------------------------------------------------ load / save
     @staticmethod
@@ -112,7 +135,7 @@ class ProjectStore:
 
     # ------------------------------------------------------------------ CRUD
     def create(self, name: str, parent_id: str | None = None) -> Project:
-        with self._lock:
+        with self._transaction():
             data = self.load()
             if parent_id is not None:
                 self._require(data, parent_id)
@@ -123,7 +146,7 @@ class ProjectStore:
             return proj
 
     def rename(self, pid: str, name: str) -> Project:
-        with self._lock:
+        with self._transaction():
             data = self.load()
             p = self._require(data, pid)
             p["name"] = (name or "").strip() or p["name"]
@@ -131,7 +154,7 @@ class ProjectStore:
             return Project(**p)
 
     def reparent(self, pid: str, parent_id: str | None) -> Project:
-        with self._lock:
+        with self._transaction():
             data = self.load()
             p = self._require(data, pid)
             if parent_id is not None:
@@ -147,7 +170,7 @@ class ProjectStore:
     def delete(self, pid: str) -> None:
         """Delete a project; reparent its direct child projects and reassign its runs to the
         deleted project's parent (so nothing is orphaned — matches ClearML's behavior)."""
-        with self._lock:
+        with self._transaction():
             data = self.load()
             p = self._require(data, pid)
             parent = p.get("parent_id")
@@ -165,7 +188,7 @@ class ProjectStore:
 
     def assign(self, run_id: str, project_id: str | None) -> None:
         """Put a run in a project (or unassign when project_id is None)."""
-        with self._lock:
+        with self._transaction():
             data = self.load()
             if project_id is None:
                 data["assignments"].pop(run_id, None)
@@ -190,7 +213,7 @@ class ProjectStore:
         return st
 
     def create_supertask(self, name: str, task_id: str | None = None) -> dict:
-        with self._lock:
+        with self._transaction():
             data = self.load()
             st = {"id": _new_st_id(), "name": (name or "untitled").strip() or "untitled",
                   "task_id": (task_id or None)}
@@ -199,7 +222,7 @@ class ProjectStore:
             return st
 
     def rename_supertask(self, sid: str, name: str) -> dict:
-        with self._lock:
+        with self._transaction():
             data = self.load()
             st = self._require_st(data, sid)
             st["name"] = (name or "").strip() or st["name"]
@@ -208,7 +231,7 @@ class ProjectStore:
 
     def delete_supertask(self, sid: str) -> None:
         """Delete a super-task and unassign its runs (flat axis — nothing to reparent)."""
-        with self._lock:
+        with self._transaction():
             data = self.load()
             self._require_st(data, sid)
             data["supertasks"] = [s for s in data["supertasks"] if s["id"] != sid]
@@ -218,7 +241,7 @@ class ProjectStore:
 
     def assign_supertask(self, run_id: str, supertask_id: str | None) -> None:
         """Put a run in a super-task (or clear it when supertask_id is None)."""
-        with self._lock:
+        with self._transaction():
             data = self.load()
             if supertask_id is None:
                 data["supertask_assignments"].pop(run_id, None)
@@ -234,7 +257,7 @@ class ProjectStore:
     def set_label(self, run_id: str, label: str | None) -> None:
         """Give a run a display name (or clear it with None/empty). UI-only overlay — the run's
         directory id is never touched, so its event log and resume stay valid."""
-        with self._lock:
+        with self._transaction():
             data = self.load()
             label = (label or "").strip()
             if label:
@@ -245,9 +268,13 @@ class ProjectStore:
 
     def forget(self, run_id: str) -> None:
         """Drop all UI metadata for a run (used when its directory is deleted)."""
-        with self._lock:
-            data = self.load()
-            data["assignments"].pop(run_id, None)
-            data["labels"].pop(run_id, None)
-            data["supertask_assignments"].pop(run_id, None)
-            self._save(data)
+        with self._transaction():
+            self.forget_locked(run_id)
+
+    def forget_locked(self, run_id: str) -> None:
+        """Drop run metadata while the caller already owns :meth:`transaction`."""
+        data = self.load()
+        data["assignments"].pop(run_id, None)
+        data["labels"].pop(run_id, None)
+        data["supertask_assignments"].pop(run_id, None)
+        self._save(data)

@@ -238,6 +238,16 @@ def test_stage_timeout_must_be_finite_positive():
     assert err is None and clean[0]["timeout"] == 30.0
 
 
+def test_stage_count_is_bounded_before_execution_or_log_projection():
+    from looplab.runtime.command_eval import MAX_STAGE_COUNT, validate_stages
+    stages = [
+        {"name": f"stage_{i}", "command": ["python", "x.py"]}
+        for i in range(MAX_STAGE_COUNT + 1)
+    ]
+    clean, err = validate_stages(stages)
+    assert clean is None and f"at most {MAX_STAGE_COUNT}" in err
+
+
 def test_finite_timeout_bounds_pathological_values():
     from looplab.runtime.sandbox import finite_timeout, MAX_TIMEOUT_S
     assert finite_timeout(float("nan"), 600.0) == 600.0            # fail-open -> the default

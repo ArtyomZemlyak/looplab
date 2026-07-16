@@ -3,10 +3,28 @@ layer for the UI). Pure metadata over projects.json — no engine/event-log invo
 from __future__ import annotations
 
 import json
+import multiprocessing
 
 import pytest
 
-from looplab.serve.projects import ProjectError, ProjectStore
+from looplab.serve.projects import ProjectError, ProjectStore, ProjectStoreLockError
+
+
+def _hold_project_write(path: str, ready, release) -> None:
+    project_store = ProjectStore(path)
+    with project_store._transaction():
+        data = project_store.load()
+        data["labels"]["held"] = "first"
+        ready.set()
+        if not release.wait(15):
+            raise TimeoutError("parent did not release project transaction")
+        project_store._save(data)
+
+
+def _write_project_label(path: str, started, done) -> None:
+    started.set()
+    ProjectStore(path).set_label("writer", "second")
+    done.set()
 
 
 def store(tmp_path):
@@ -92,6 +110,108 @@ def test_concurrent_creates_no_lost_update(tmp_path):
     for t in threads:
         t.join()
     assert len(s.load()["projects"]) == n      # all survive -> no lost update
+
+
+def test_cross_process_transaction_waits_then_rereads_without_lost_update(tmp_path):
+    path = str(tmp_path / "projects.json")
+    ctx = multiprocessing.get_context("spawn")
+    ready, release = ctx.Event(), ctx.Event()
+    started, done = ctx.Event(), ctx.Event()
+    holder = ctx.Process(target=_hold_project_write, args=(path, ready, release))
+    writer = ctx.Process(target=_write_project_label, args=(path, started, done))
+    holder.start()
+    try:
+        assert ready.wait(10), "holder never acquired the project transaction"
+        writer.start()
+        assert started.wait(10), "writer process never started its mutation"
+        assert not done.wait(0.5), "writer crossed the interprocess lock while it was held"
+    finally:
+        release.set()
+    holder.join(15)
+    writer.join(15)
+    assert holder.exitcode == writer.exitcode == 0
+    assert ProjectStore(path).load()["labels"] == {"held": "first", "writer": "second"}
+
+
+def test_project_mutation_fails_closed_when_required_lock_is_unavailable(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+
+    from looplab.events import eventstore
+    from looplab.events.eventstore import EventStoreLockError
+
+    project_store = store(tmp_path)
+    project_store.set_label("existing", "keep")
+    before = project_store.path.read_bytes()
+
+    @contextmanager
+    def unavailable(path, *, required=False):
+        assert required is True
+        raise EventStoreLockError(path, OSError("locking unsupported"))
+        yield  # pragma: no cover - contextmanager syntax only
+
+    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    with pytest.raises(ProjectStoreLockError, match="project metadata lock is unavailable"):
+        project_store.set_label("new", "must-not-land")
+    assert project_store.path.read_bytes() == before
+
+
+def test_project_lock_failure_maps_to_http_503(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+
+    from looplab.events import eventstore
+    from looplab.events.eventstore import EventStoreLockError
+    from looplab.serve.server import make_app
+
+    @contextmanager
+    def unavailable(path, *, required=False):
+        assert required is True
+        raise EventStoreLockError(path, OSError("locking unsupported"))
+        yield  # pragma: no cover - contextmanager syntax only
+
+    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    response = TestClient(make_app(tmp_path)).post("/api/projects", json={"name": "blocked"})
+    assert response.status_code == 503
+    assert "project metadata lock is unavailable" in response.json()["detail"]
+    assert not (tmp_path / "projects.json").exists()
+
+
+def test_delete_run_acquires_project_lock_before_removing_run_bytes(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from contextlib import contextmanager
+
+    from fastapi.testclient import TestClient
+
+    from looplab.events import eventstore
+    from looplab.events.eventstore import EventStoreLockError
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    (run_dir / "events.jsonl").write_text(
+        '{"seq":0,"type":"run_started","data":{}}\n', encoding="utf-8")
+    project_store = ProjectStore(tmp_path / "projects.json")
+    project_store.set_label("demo", "keep")
+    before = project_store.path.read_bytes()
+    original_lock = eventstore._interprocess_lock
+
+    @contextmanager
+    def unavailable(path, *, required=False):
+        if not required:
+            with original_lock(path, required=required):
+                yield
+            return
+        raise EventStoreLockError(path, OSError("locking unsupported"))
+        yield  # pragma: no cover - contextmanager syntax only
+
+    monkeypatch.setattr(eventstore, "_interprocess_lock", unavailable)
+    response = TestClient(make_app(tmp_path)).delete("/api/runs/demo")
+    assert response.status_code == 503
+    assert "project metadata lock is unavailable" in response.json()["detail"]
+    assert (run_dir / "events.jsonl").is_file(), "lock failure must precede irreversible deletion"
+    assert project_store.path.read_bytes() == before
 
 
 def test_delete_top_level_unassigns_runs(tmp_path):

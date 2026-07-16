@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, operatorMeta,
-  commandFeedback, getRunCommand, COMMAND_SUCCEEDED, COMMAND_FAILED, runApiPath, runNodeApiPath,
+  commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
@@ -413,13 +413,14 @@ export function DataQualityPanel({ state, onClose }) {
 export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [cfg, setCfg] = useState(null)
   const [form, setForm] = useState(null)
+  const [loadError, setLoadError] = useState('')
+  const [loadNonce, setLoadNonce] = useState(0)
   const [saved, setSaved] = useState(null)   // last-persisted form (to detect unsaved edits)
   const [agentControl, setAgentControl] = useState({})   // per-run governance matrix (agent_control)
   const [savedAC, setSavedAC] = useState({})
   const [configMeta, setConfigMeta] = useState({ pinnedFields: new Set(), mismatchFields: [] })
   const [sec, setSec] = useState('')
   const [busy, setBusy] = useState(false)
-  const [restartPending, setRestartPending] = useState(null) // {stage:'pause'|'resume', record}
   const [raw, setRaw] = useState(false)
   const loadGenerationRef = useRef(0)
   const mutationRef = useRef(null)
@@ -428,7 +429,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     const controller = new AbortController()
     // A reused panel must never display or reconcile the previous run while the next config loads.
     mutationRef.current = null
-    setBusy(false); setRestartPending(null); setCfg(null); setForm(null); setSaved(null)
+    setBusy(false); setCfg(null); setForm(null); setSaved(null); setLoadError('')
     setAgentControl({}); setSavedAC({})
     setConfigMeta({ pinnedFields: new Set(), mismatchFields: [] })
     get(runApiPath(runId, '/config'), { signal: controller.signal }).then(c => {
@@ -438,62 +439,30 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
       const f = toForm(parsed.config); setForm(f); setSaved(f)
       const ac = parsed.config.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
     }).catch(error => {
-      if (error?.name !== 'AbortError' && generation === loadGenerationRef.current) setCfg(null)
+      if (error?.name !== 'AbortError' && generation === loadGenerationRef.current) {
+        setCfg(null)
+        setLoadError('Run settings could not be loaded. Check the connection and retry.')
+      }
     })
     return () => controller.abort()
-  }, [runId])
+  }, [runId, loadNonce])
 
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
   const engineLive = live?.engine_running === true
-  const controlBusy = busy || restartPending != null
-  const pauseLabels = { success: 'Run paused', noop: 'Run was already paused',
-    executing: 'Pause requested — waiting for the current experiment to stop', failure: 'Pause failed' }
+  const controlBusy = busy
   const resumeLabels = { success: 'Resumed with the saved settings', noop: 'Run was already running',
     executing: 'Resume requested — waiting for the engine to load the saved settings', failure: 'Resume failed' }
+  const restartLabels = { success: 'Restarted with the saved settings', noop: 'Restart was already satisfied',
+    executing: 'Restart requested — the current experiment will stop before a replacement engine loads the saved settings',
+    failure: 'Restart failed' }
   const acceptResume = async (expectedGeneration = loadGenerationRef.current, requestedRunId = runId) => {
     const record = await CONTROL.resume(requestedRunId)
     if (expectedGeneration !== loadGenerationRef.current) return null
     const feedback = commandFeedback(record, resumeLabels)
     onToast(feedback.message)
-    setRestartPending(feedback.kind === 'pending' ? { stage: 'resume', record } : null)
     return feedback
   }
-  useEffect(() => {
-    const pending = restartPending
-    if (!pending?.record?.id || !['accepted', 'executing'].includes(pending.record.status)) return
-    const generation = loadGenerationRef.current
-    let active = true, timer = null
-    const poll = async () => {
-      try {
-        const record = await getRunCommand(runId, pending.record.id)
-        if (!active) return
-        if (COMMAND_SUCCEEDED.has(record.status) || COMMAND_FAILED.has(record.status)) {
-          const feedback = commandFeedback(record, pending.stage === 'pause' ? pauseLabels : resumeLabels)
-          if (feedback.kind === 'error' || pending.stage === 'resume') {
-            onToast(feedback.message); setRestartPending(null); return
-          }
-          onToast('Pause completed — resuming with the saved settings…')
-          try { await acceptResume(generation, runId) }
-          catch (error) {
-            if (!active || generation !== loadGenerationRef.current) return
-            onToast(`Resume failed: ${error.message || error}`); setRestartPending(null)
-          }
-          return
-        }
-      } catch (error) {
-        if ([401, 403, 404].includes(error?.status) || error?.code === 'COMMAND_PROTOCOL_ERROR') {
-          onToast(`Restart status unavailable: ${error.message || error}`)
-          setRestartPending(null)
-          return
-        }
-        // Transport/5xx is ambiguous: preserve the same command and retry its authoritative GET.
-      }
-      if (active) timer = setTimeout(poll, 1500)
-    }
-    timer = setTimeout(poll, 1000)
-    return () => { active = false; clearTimeout(timer) }
-  }, [runId, restartPending?.record?.id])
   const dirty = useMemo(() => {
     if (!form || !saved) return new Set()
     const cur = fromForm(form), base = fromForm(saved), s = new Set()
@@ -551,7 +520,6 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     } finally { finishMutation(mutation) }
   }
   const onResume = async () => {           // stalled/finished: just spawn the engine (re-reads the snapshot)
-    if (restartPending) return
     const mutation = beginMutation()
     if (!mutation) return
     try {
@@ -561,20 +529,17 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     }
     finally { finishMutation(mutation) }
   }
-  const onPauseResume = async () => {      // command service owns both postconditions and engine policy
-    if (restartPending) return
+  const onPauseResume = async () => {
     const mutation = beginMutation()
     if (!mutation) return
     const submittedRunId = runId
     try {
-      onToast('pausing — the current experiment finishes first…')
-      const record = await CONTROL.pause(submittedRunId)
+      // # CODEX AGENT: This is one durable command/postcondition. Never restore a client-side
+      // pause-then-resume saga here: unmounting between commands would strand the accepted intent.
+      const record = await CONTROL.restart(submittedRunId)
       if (mutation.generation !== loadGenerationRef.current) return
-      const stopped = commandFeedback(record, pauseLabels)
-      onToast(stopped.message)
-      if (stopped.kind === 'error') return
-      if (stopped.kind === 'pending') { setRestartPending({ stage: 'pause', record }); return }
-      await acceptResume(mutation.generation, submittedRunId)
+      const feedback = commandFeedback(record, restartLabels)
+      onToast(feedback.message)
     } catch (e) {
       if (mutation.generation === loadGenerationRef.current) onToast('Pause/resume failed: ' + e.message)
     }
@@ -610,7 +575,12 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
           placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
         <button className="btn sm primary" disabled={!sec || controlBusy} onClick={extendBudget}>apply</button>
       </div>
-      {!form ? <div className="muted">…</div> : <>
+      {!form ? (loadError
+        ? <div className="report-inline-state error" role="alert">
+            <OpIcon name="alert" size={14} /><span>{loadError}</span>
+            <button className="btn sm" onClick={() => setLoadNonce(value => value + 1)}>Retry</button>
+          </div>
+        : <div className="muted" role="status">Loading run settings…</div>) : <>
         <div className="notice" style={{ marginBottom: 10 }}>
           {engineLive
             ? <>This run is <b>live</b>. Saving updates its <code>config.snapshot.json</code>, but the running engine keeps its current settings until it restarts — use <b>Pause &amp; resume</b> to stop it (the current experiment finishes first) and continue with the new settings.</>
@@ -624,11 +594,6 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             {' '}A legacy snapshot disagrees for {configMeta.mismatchFields.join(', ')}; the effective
             launch values are shown and will be repaired when another editable setting is saved.
           </>}
-        </div>}
-        {restartPending && <div className="notice" role="status" style={{ marginBottom: 10 }}>
-          {restartPending.stage === 'pause'
-            ? 'Pause requested. Waiting for the current experiment to stop before resuming with the saved settings…'
-            : 'Resume requested. Waiting for the engine to load the saved settings…'}
         </div>}
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />

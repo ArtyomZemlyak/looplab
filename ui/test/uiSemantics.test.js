@@ -56,7 +56,11 @@ test('run view modes are truthful toggles and merge has one explicit confirmatio
     'only the confirmation submit path may call the merge API')
   assert.match(runView, /const submitMergeTarget = async[\s\S]*?await CONTROL\.merge\(/)
   assert.match(runView, /drag drop only preselects A \+ B[\s\S]*?openMergeChooser\(arg\.from, arg\.to/)
-  assert.match(runView, /node click only preselects the destination[\s\S]*?setMergeTarget\(String\(id\)\)/)
+  assert.match(runView, /node click only preselects the destination[\s\S]*?selectMergeTarget\(mergeIntent[\s\S]*?setMergeIntent\(next\)/)
+  assert.match(runView, /captureMergeIntent\(\{[\s\S]*?runGeneration: generation[\s\S]*?nodes: live\?\.nodes/,
+    'opening the chooser must snapshot the displayed run and source attempt')
+  assert.match(runView, /mergeIntentMatches\(intent,[\s\S]*?true\)[\s\S]*?CONTROL\.merge\([\s\S]*?expectedGeneration: command\.expectedGeneration/,
+    'confirmation must validate and submit the captured run/attempt fence')
   assert.match(dag, /Overlap is only a pair-selection gesture[\s\S]*?onNodeAction\('merge', \{ from, to: hit \}\)/)
   assert.match(runView, /mergeSubmittingRef\.current = true[\s\S]*?await CONTROL\.merge[\s\S]*?mergeSubmittingRef\.current = false/,
     'a synchronous lock must cover the entire request, including events before React re-renders')
@@ -182,10 +186,14 @@ test('displayed run generation participates in state dedupe and is published onl
   assert.match(hooks, /useLayoutEffect\(\(\) => \{ observeRunGeneration\(runId, generation\) \}/)
 })
 
-test('Config restart tracks both accepted/executing and terminates authoritative read failures', async () => {
+test('Config restart is one server-owned durable command and config load failure is retryable', async () => {
   const panels = await source('panels.jsx')
-  assert.match(panels, /!\['accepted', 'executing'\]\.includes\(pending\.record\.status\)/)
-  assert.match(panels, /\[401, 403, 404\]\.includes\(error\?\.status\)[\s\S]*?setRestartPending\(null\)/)
+  const restart = panels.slice(panels.indexOf('const onPauseResume = async'), panels.indexOf('const extendBudget'))
+  assert.match(restart, /await CONTROL\.restart\(submittedRunId\)/)
+  assert.doesNotMatch(restart, /CONTROL\.pause|CONTROL\.resume|getRunCommand|setTimeout/)
+  assert.doesNotMatch(panels, /restartPending|setRestartPending/)
+  assert.match(panels, /setLoadError\('Run settings could not be loaded\.[\s\S]*?\[runId, loadNonce\]/)
+  assert.match(panels, /loadError[\s\S]*?role="alert"[\s\S]*?setLoadNonce\(value => value \+ 1\)/)
 })
 
 test('both command surfaces fail before POST when durable intent persistence fails', async () => {

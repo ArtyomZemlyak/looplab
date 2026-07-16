@@ -706,8 +706,8 @@ class MachineRunsTools:
                     "predate tracing, or ran with tracing off.)")
         try:
             convo = build_conversation(st, load_spans(spans_path), nid)
-        except Exception as e:  # noqa: BLE001 — a torn/hand-edited spans.jsonl (e.g. a null `attributes`
-            return f"(could not read trace: {e})"  # → AttributeError) must soft-fail, never crash the loop
+        except Exception as e:  # noqa: BLE001 — an unexpected hand-edited/I/O failure must soft-fail
+            return f"(could not read trace: {e})"  # and never terminate the agent tool loop
         return _render_conversation(convo, run_id, nid, stage, self.max_chars)
 
 

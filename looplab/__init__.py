@@ -39,6 +39,7 @@ _LAYOUT = {
     "ablation": "engine",
     "agent": "agents",
     "agents_md": "tools",
+    "advisory_payloads": "core",  # bounded/redacted memo + report projections at durable/read boundaries
     "appconfig": "core",
     "appstate": "serve",
     "attention": "serve",

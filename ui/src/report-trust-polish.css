@@ -22,6 +22,48 @@
 .report-view .tbl td { padding-block: 7px; vertical-align: top; }
 .report-view .champion-card { box-shadow: var(--shadow-card); }
 
+/* Agent/provider prose may contain an unbroken identifier or URL. Keep every narrative flex/grid
+   child shrinkable and wrap the text instead of widening the report at phone widths. */
+.report-view,
+.report-view .verdict-banner,
+.report-view .verdict-headline,
+.report-view .verdict-text,
+.report-view .agent-report-caveats,
+.report-view .agent-report-caveats li,
+.report-view .memo-card,
+.report-view .memo-body,
+.report-view .memo-body .v,
+.report-view .memo-body li,
+.report-view .think-body {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.report-view .memo-head,
+.report-view .verdict-row,
+.agent-report-caveats-title {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.report-view .memo-head > *,
+.report-view .verdict-row > *,
+.agent-report-caveats-title > * { min-width: 0; }
+
+.agent-report-caveats {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--fg-mut);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--fg-mut) 5%, var(--bg-1));
+}
+.agent-report-caveats-title { display: flex; align-items: center; gap: 6px; }
+.agent-report-caveats-title .muted { font-size: 11px; }
+.agent-report-caveats .bul { margin-block: 6px 0; }
+.memo-verification-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.memo-verification-list .bad { color: var(--trust-alarm-ink); }
+.memo-verification-list .ok { color: var(--trust-ok-ink); }
+
 .verdict-banner.neutral {
   border-left-color: var(--fg-dim);
   background: color-mix(in srgb, var(--fg-dim) 6%, var(--bg-1));

@@ -42,7 +42,7 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -54,7 +54,7 @@ EXPECTED_RUN_GENERATION_FIELD = "expected_generation"
 
 # Control events the UI is allowed to append (intent). The engine writes the domain effect.
 CONTROL_EVENTS = {
-    EV_RUN_ABORT, EV_PAUSE, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
+    EV_RUN_ABORT, EV_PAUSE, EV_RESTART, EV_RESUME, EV_NODE_ABORT, EV_NODE_RESET, EV_BUDGET_EXTEND, EV_HINT,
     EV_FORCE_CONFIRM, EV_FORCE_ABLATE, EV_FORK, EV_ANNOTATION, EV_PROMOTE,
     EV_APPROVAL_GRANTED, EV_SPEC_APPROVED, EV_INJECT_NODE, EV_RUN_REOPENED,
     EV_SET_STRATEGY,   # A7: operator pins/overrides the Strategist's choice (HITL parity)

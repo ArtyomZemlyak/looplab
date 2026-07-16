@@ -121,16 +121,16 @@ def test_select_pairs_skips_unevaluated_and_unknown_parents():
 
 def test_param_credit_statement_single_change():
     w = _node(1, metric=1.0, params={"x": 3.0, "y": -1.0})
-    l = _node(0, metric=5.0, params={"x": 1.0, "y": -1.0})
-    stmt = param_credit_statement(w, l, 4.0)
+    loser = _node(0, metric=5.0, params={"x": 1.0, "y": -1.0})
+    stmt = param_credit_statement(w, loser, 4.0)
     assert "x" in stmt and "improved" in stmt and "4" in stmt
     assert "y" not in stmt.split("improved")[0].replace("y'", "")  # unchanged param not credited
 
 
 def test_param_credit_statement_regression_and_no_credit():
     w = _node(1, metric=6.0, params={"x": 9.0})
-    l = _node(0, metric=5.0, params={"x": 1.0}, op="draft")
-    assert "regressed" in param_credit_statement(w, l, -1.0)
+    loser = _node(0, metric=5.0, params={"x": 1.0}, op="draft")
+    assert "regressed" in param_credit_statement(w, loser, -1.0)
     assert param_credit_statement(w, w, 0.0) is None             # no diff -> no lesson
     wide_w = _node(2, params={"a": 1, "b": 2, "c": 3, "d": 4})
     wide_l = _node(3, params={"a": 9, "b": 9, "c": 9, "d": 9})
@@ -283,7 +283,7 @@ def _store_rows(mem: Path) -> list[dict]:
     p = mem / "lessons.jsonl"
     if not p.exists():
         return []
-    return [orjson.loads(l) for l in p.read_text().splitlines() if l.strip()]
+    return [orjson.loads(line) for line in p.read_text().splitlines() if line.strip()]
 
 
 def test_run_end_writes_comparative_rows_and_records_spent_pairs(tmp_path):
@@ -444,6 +444,54 @@ def test_refresh_off_and_reflection_off_are_noops(tmp_path):
     assert eng3._maybe_distill_lessons(st_pending) is st_pending   # pending evals: hold off
 
 
+def test_malformed_lesson_watermarks_cannot_poison_resume_cadence(tmp_path):
+    nodes = [_node(0, metric=1.0, op="draft"), _node(1, metric=2.0, op="draft")]
+    poison = [
+        {"at_node": "not-an-int"},
+        {"at_node": "9" * 10_000},
+        {"at_node": float("inf")},
+        {"at_node": -1},
+    ]
+
+    distill = _engine(
+        tmp_path, name="distill-poison", reflection_priors=True,
+        memory_dir=str(tmp_path / "mem"), comparative_lessons=True, lessons_every=1,
+    )
+    distill_state = _state(nodes)
+    distill_state.lessons_distilled = poison
+    distill._maybe_distill_lessons(distill_state)
+    distilled = [e for e in distill.store.read_all() if e.type == "lessons_distilled"]
+    assert len(distilled) == 1 and distilled[0].data["at_node"] == len(nodes)
+
+    refresh = _engine(
+        tmp_path, name="refresh-poison", reflection_priors=True,
+        memory_dir=str(tmp_path / "mem"), lessons_refresh_every=1,
+    )
+    refresh_state = _state(nodes)
+    refresh_state.lessons_refreshed = poison
+    refresh._maybe_refresh_lessons(refresh_state)
+    refreshed = [e for e in refresh.store.read_all() if e.type == "lessons_refreshed"]
+    assert len(refreshed) == 1 and refreshed[0].data["at_node"] == len(nodes)
+
+
+def test_legacy_numeric_lesson_watermark_remains_a_replay_gate(tmp_path):
+    from looplab.core.models import latest_lesson_node_count, safe_lesson_node_count
+
+    assert safe_lesson_node_count(" 12 ") == 12
+    assert safe_lesson_node_count(12.0) == 12
+    assert safe_lesson_node_count(True) is None
+    assert latest_lesson_node_count([{"at_node": "11"}, {"at_node": 12.0}]) == 12
+
+    eng = _engine(
+        tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"),
+        comparative_lessons=True, lessons_every=1,
+    )
+    state = _state([_node(0, metric=1.0, op="draft"), _node(1, metric=2.0, op="draft")])
+    state.lessons_distilled = [{"at_node": "2"}]
+    assert eng._maybe_distill_lessons(state) is state
+    assert not list(eng.store.read_all())
+
+
 # --------------------------------------------------------------------------- #
 # The synergy end-to-end: run A's credit-assigned lessons reach run B's proposals
 # --------------------------------------------------------------------------- #
@@ -510,7 +558,7 @@ def test_lesson_memory_internal_calls_route_through_engine_delegators(tmp_path, 
     # hit the patched engine attributes.
     eng.lessons.write_reflection_note(st)
     assert seen["reflect"] == 1, "lessons.write_reflection_note must call engine._reflect_lessons"
-    assert any("seam guard sentinel" in l for l in seen["append"]), \
+    assert any("seam guard sentinel" in lesson for lesson in seen["append"]), \
         "lessons.write_reflection_note must persist via engine._append_lessons"
 
 

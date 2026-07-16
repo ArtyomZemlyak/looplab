@@ -484,19 +484,21 @@ test('CONTROL wrappers use only the command service, never legacy control/resume
   }, async () => {
     await CONTROL.finalize('demo')
     await CONTROL.resume('demo')
+    await CONTROL.restart('demo')
     await CONTROL.fork('demo', 7, 3)
-    await CONTROL.merge('demo', [7, 8], { 7: 3, 8: 1 })
+    await CONTROL.merge('demo', [7, 8], { 7: 3, 8: 1 }, { expectedGeneration: GEN_A })
   })
-  assert.equal(calls.length, 4)
+  assert.equal(calls.length, 5)
   assert.ok(calls.every(call => call.url === '/proxy/app/api/runs/demo/commands'))
   assert.ok(calls.every(call => !call.url.includes('/control') && !call.url.endsWith('/resume')))
   assert.deepEqual(calls.map(call => JSON.parse(call.options.body).type),
-    ['run_abort', 'resume', 'fork', 'inject_node'])
-  assert.deepEqual(JSON.parse(calls[2].options.body).data, { from_node_id: 7, generation: 3 })
-  assert.deepEqual(JSON.parse(calls[3].options.body).data, {
+    ['run_abort', 'resume', 'restart', 'fork', 'inject_node'])
+  assert.deepEqual(JSON.parse(calls[3].options.body).data, { from_node_id: 7, generation: 3 })
+  assert.deepEqual(JSON.parse(calls[4].options.body).data, {
     idea: { operator: 'merge', rationale: 'merge #7 + #8' },
     parent_ids: [7, 8], parent_generations: { 7: 3, 8: 1 },
   })
+  assert.equal(JSON.parse(calls[4].options.body).expected_generation, GEN_A)
 })
 
 test('idempotency fallback is UUID v4 shaped', () => {

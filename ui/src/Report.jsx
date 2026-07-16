@@ -29,6 +29,16 @@ function VerdictBanner({ v, rep, onOpenPanel }) {
       </div>
       <div className="verdict-headline">{rep?.headline || v.headline}</div>
       {narrative && <div className="verdict-text"><Markdown text={narrative} /></div>}
+      {/* # CODEX AGENT: Agent-authored caveats are advisory narrative; they never recolor or
+          upgrade the deterministic trust classification carried by `v`. */}
+      {rep?.caveats?.length > 0 && <div className="agent-report-caveats" role="note"
+        aria-label="Agent-authored caveats">
+        <div className="agent-report-caveats-title"><OpIcon name="alert" size={12} />
+          <strong>Agent-authored caveats</strong>
+          <span className="muted">narrative only · not deterministic trust checks</span>
+        </div>
+        <ul className="bul">{rep.caveats.map((caveat, index) => <li key={index}>{caveat}</li>)}</ul>
+      </div>}
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => <button key={i} className={'caveat-chip ' + c.severity}
           disabled={!onOpenPanel} title={onOpenPanel ? `see ${c.panel} →` : 'Unavailable in historical mode'}
@@ -63,7 +73,8 @@ function List({ items }) {
 }
 
 export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode, readOnly = false,
-  historySeq = null, expectedGeneration = null, readOnlyReason = 'history', evidenceAvailable = true }) {
+  historySeq = null, expectedGeneration = null, observedSeq = null,
+  readOnlyReason = 'history', evidenceAvailable = true }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
@@ -77,7 +88,10 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   const [openMemo, setOpenMemo] = useState(memos.length ? memos[memos.length - 1].sourceIndex : null)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
-  const lastAt = useRef(rep?.at_node)
+  const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
+  const refreshRequestRef = useRef({ token: 0, receiptSeq: null, timer: null, busy: false })
+  const observedSeqRef = useRef(observedSeq)
+  observedSeqRef.current = observedSeq
   useEffect(() => {
     if (!best) { setBestCodeResource({ status: 'idle', data: null, error: null }); return }
     if (readOnlyReason === 'review' && !evidenceAvailable) {
@@ -95,46 +109,106 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   }, [runId, best?.id, readOnly, historySeq, expectedGeneration, readOnlyReason,
     evidenceAvailable, bestCodeNonce])
   const bestCode = bestCodeResource.data
-  // Refresh completes when a newer report (different at_node / trigger) folds in via SSE.
+
+  const finishRefresh = (token, { error = '', canRetry = true } = {}) => {
+    const request = refreshRequestRef.current
+    if (request.token !== token) return
+    if (request.timer) clearTimeout(request.timer)
+    request.timer = null
+    request.receiptSeq = null
+    request.busy = false
+    setRefreshing(false)
+    setRefreshError(error)
+    setRefreshRetryAllowed(canRetry)
+  }
+  // # CODEX AGENT: The endpoint receipt names the exact report event; content fields such as at_node
+  // and trigger may legitimately repeat, so they are not completion identities.
   useEffect(() => {
-    if (refreshing && (rep?.at_node !== lastAt.current || rep?.trigger === 'manual')) {
-      setRefreshing(false)
-      setRefreshError('')
+    const request = refreshRequestRef.current
+    if (refreshing && Number.isSafeInteger(request.receiptSeq)
+        && Number.isSafeInteger(observedSeq) && observedSeq >= request.receiptSeq) {
+      finishRefresh(request.token)
     }
-    lastAt.current = rep?.at_node
-  }, [rep?.at_node, rep?.trigger])
+  }, [observedSeq, refreshing])
+  useEffect(() => {
+    const request = refreshRequestRef.current
+    request.token += 1
+    if (request.timer) clearTimeout(request.timer)
+    request.timer = null
+    request.receiptSeq = null
+    request.busy = false
+    setRefreshing(false)
+    setRefreshError('')
+    setRefreshRetryAllowed(true)
+    return () => {
+      request.token += 1
+      if (request.timer) clearTimeout(request.timer)
+      request.timer = null
+      request.receiptSeq = null
+      request.busy = false
+    }
+  }, [runId])
 
   const dl = (name, text, type) => {
     const blob = new Blob([text], { type }); const u = URL.createObjectURL(blob)
     const el = document.createElement('a'); el.href = u; el.download = name; el.click(); URL.revokeObjectURL(u)
   }
   const refresh = async () => {
+    const request = refreshRequestRef.current
+    if (request.busy) return
+    request.token += 1
+    const token = request.token
+    request.busy = true
+    request.receiptSeq = null
+    if (request.timer) clearTimeout(request.timer)
+    request.timer = null
     setRefreshing(true)
     setRefreshError('')
+    setRefreshRetryAllowed(true)
     try {
       const r = await CONTROL.refreshReport(runId)
+      if (refreshRequestRef.current.token !== token) return
       if (r && r.ok === false) {
         const message = 'No report model is reachable. Check the provider settings and retry.'
-        setRefreshing(false); setRefreshError(message); onToast?.(message)
+        finishRefresh(token, { error: message }); onToast?.(message)
+        return
       }
-    } catch {
+      if (!Number.isSafeInteger(r?.seq) || r.seq < 0) {
+        const message = 'Report generation returned no durable event receipt. Check the server and retry.'
+        finishRefresh(token, { error: message }); onToast?.(message)
+        return
+      }
+      request.receiptSeq = r.seq
+      if (Number.isSafeInteger(observedSeqRef.current) && observedSeqRef.current >= r.seq) {
+        finishRefresh(token)
+        return
+      }
+      request.timer = setTimeout(() => {
+        const message = 'The report was generated, but this view did not observe its event. Reload the run before generating again.'
+        finishRefresh(token, { error: message, canRetry: false })
+        onToast?.(message)
+      }, 30000)
+    } catch (error) {
+      if (refreshRequestRef.current.token !== token) return
       const message = 'Report refresh failed. Check the provider settings or connection, then retry.'
-      setRefreshing(false); setRefreshError(message); onToast?.(message)
+      finishRefresh(token, { error: message }); onToast?.(message)
     }
-    setTimeout(() => setRefreshing(false), 30000)   // safety net if no SSE update arrives
   }
   const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
   const modelCard = () => JSON.stringify({
     task: state.task_id, goal: state.goal, direction: state.direction, run_id: state.run_id,
     champion: best ? { node_id: best.id, operator: best.operator, metric: best.confirmed_mean ?? best.metric,
       confirmed: best.confirmed_mean != null, params: best.idea?.params || {}, lineage: best.parent_ids || [] } : null,
-    verdict: rep?.headline || v.headline, counts: { nodes: Object.keys(state.nodes).length, evaluated: a.nEval },
+    verdict: rep?.headline || v.headline,
+    agent_report_caveats: rep?.caveats || [],
+    deterministic_trust: { status: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
+    counts: { nodes: Object.keys(state.nodes).length, evaluated: a.nEval },
   }, null, 2)
 
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
       <div className="toolbar report-toolbar">
-        {!readOnly && <button className="btn sm primary" disabled={refreshing} onClick={refresh}
+        {!readOnly && <button className="btn sm primary" disabled={refreshing || !refreshRetryAllowed} onClick={refresh}
           title="Agent rewrites the report from all results so far"><OpIcon name="replay" size={12} /> {refreshing ? 'Refreshing…' : 'Refresh report'}</button>}
         {readOnly && <span className="history-inline">{readOnlyReason === 'review'
           ? 'Read-only review · report refresh disabled'
@@ -150,7 +224,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       </div>
       {refreshError && <div className="report-inline-state error" role="alert">
         <OpIcon name="alert" size={14} /><span>{refreshError}</span>
-        {!readOnly && <button className="btn sm" onClick={refresh}>Retry</button>}
+        {!readOnly && refreshRetryAllowed && <button className="btn sm" onClick={refresh}>Retry</button>}
       </div>}
 
       <h1 className="report-title">{state.goal || state.task_id}</h1>

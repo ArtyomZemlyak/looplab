@@ -166,6 +166,11 @@ EV_RESUME_SERVED = "resume_served"
 #     serve/server.py and the control section of `replay.fold`). ---
 EV_RUN_ABORT = "run_abort"
 EV_PAUSE = "pause"
+# Server-owned pause-and-resume handoff. Unlike a client-side ``pause`` then ``resume`` saga, this
+# ONE durable intent both freezes the current owner and leaves an unfulfilled resume watermark. The
+# command worker (or startup reconciler after a crash/restart) launches a replacement only after the
+# old singleton owner exits; ``resume_served`` is the exact completion boundary.
+EV_RESTART = "restart"
 EV_RESUME = "resume"
 EV_NODE_ABORT = "node_abort"
 EV_NODE_RESET = "node_reset"      # re-run an EXISTING node in place from a stage (propose|implement|

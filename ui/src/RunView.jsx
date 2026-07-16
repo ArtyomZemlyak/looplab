@@ -20,6 +20,9 @@ import {
   approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady,
 } from './runIndex.js'
 import { initialDagOverviewDecision } from './dagViewport.js'
+import {
+  captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
+} from './mergeIntent.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -407,8 +410,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }
   // U3 · canvas as a control surface: right-click actions + drag-to-merge + a "merge with…" arm mode.
-  const [mergeFrom, setMergeFrom] = useState(null)   // arm: next node click merges with this one
-  const [mergeTarget, setMergeTarget] = useState('')
+  const [mergeIntent, setMergeIntent] = useState(null)
+  const mergeFrom = mergeIntent?.sourceId ?? null
+  const mergeTarget = mergeIntent?.targetId == null ? '' : String(mergeIntent.targetId)
   const [mergeSubmitting, setMergeSubmitting] = useState(false)
   const mergeSubmittingRef = useRef(false)   // synchronous guard: two submit events can precede a render
   const mergeReturnFocusRef = useRef(null)
@@ -418,8 +422,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     const source = mergeFrom
     const captured = mergeReturnFocusRef.current
     mergeReturnFocusRef.current = null
-    setMergeFrom(null)
-    setMergeTarget('')
+    setMergeIntent(null)
     if (!restoreFocus || source == null) return
     requestAnimationFrame(() => {
       const fallback = document.querySelector(`[data-node-action-id="${source}"]`)
@@ -436,9 +439,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       showToast('Choose two different experiments to merge')
       return
     }
+    // # CODEX AGENT: Confirmation owns this exact run generation and both attempt identities; a
+    // later render may invalidate the chooser but must never silently rebind the operator's intent.
+    const intent = captureMergeIntent({
+      runId, runGeneration: generation, nodes: live?.nodes, sourceId, targetId,
+    })
+    if (!intent) {
+      showToast('The run or experiment attempts changed while opening merge. Refresh and choose again.')
+      return
+    }
     mergeReturnFocusRef.current = returnFocus || null
-    setMergeFrom(sourceId)
-    setMergeTarget(targetId == null ? '' : String(targetId))
+    setMergeIntent(intent)
     showToast(targetId == null
       ? `Choose a destination for #${sourceId}, then confirm the merge`
       : `Review merge #${sourceId} + #${targetId}, then confirm`)
@@ -450,8 +461,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
   useEffect(() => {
     if (!historyActive) return
-    setMergeFrom(null)
-    setMergeTarget('')
+    setMergeIntent(null)
     mergeReturnFocusRef.current = null
     setComparePair(null)
     setOpenHub(null)
@@ -472,6 +482,13 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     }
   }, [historyActive, history.status, history.resolvedSeq])
   const live2 = hist || live
+  useEffect(() => {
+    if (!mergeIntent || mergeSubmittingRef.current || mergeIntentMatches(mergeIntent, {
+      runId, runGeneration: generation, nodes: live?.nodes,
+    })) return
+    showToast('Merge cancelled because the run or one of its experiment attempts changed.')
+    closeMergeChooser(true)
+  }, [mergeIntent, runId, generation, live?.nodes])
   const allowedInspectTabs = useMemo(() => {
     if (reviewMode) return reviewInspectorTabs(reviewEvidence)
     if (historyActive) return READ_ONLY_INSPECT_TABS
@@ -608,7 +625,15 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       closeMergeChooser(false); return
     }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
-      setMergeTarget(String(id))
+      const next = selectMergeTarget(mergeIntent, {
+        runId, runGeneration: generation, nodes: live?.nodes,
+      }, Number(id))
+      if (!next) {
+        showToast('Merge cancelled because the run or one of its experiment attempts changed.')
+        closeMergeChooser(true)
+        return
+      }
+      setMergeIntent(next)
       showToast(`Review merge #${mergeFrom} + #${id}, then confirm`)
       requestAnimationFrame(() => mergeConfirmRef.current?.focus?.({ preventScroll: true }))
       return
@@ -698,16 +723,23 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const submitMergeTarget = async (event) => {
     event.preventDefault()
     if (mergeTarget === '') return
-    const source = mergeFrom
-    const target = Number(mergeTarget)
-    if (source == null || !Number.isSafeInteger(target) || target === source) return
+    const intent = mergeIntent
+    const command = mergeIntentCommand(intent)
+    if (!command || !mergeIntentMatches(intent, {
+      runId, runGeneration: generation, nodes: live?.nodes,
+    }, true)) {
+      showToast('Merge cancelled because the run or one of its experiment attempts changed.')
+      closeMergeChooser(true)
+      return
+    }
+    const [source, target] = command.ids
     if (mergeSubmittingRef.current) { showToast('A merge is already being submitted'); return }
     mergeSubmittingRef.current = true
     setMergeSubmitting(true)
     try {
-      const ids = [source, target]
-      const generations = Object.fromEntries(ids.map(id => [id, live2?.nodes?.[id]?.attempt]))
-      const feedback = checkedCommand(await CONTROL.merge(runId, ids, generations), {
+      const feedback = checkedCommand(await CONTROL.merge(
+        command.runId, command.ids, command.parentGenerations,
+        { expectedGeneration: command.expectedGeneration }), {
         success: `Merge #${source} + #${target} applied — the engine is processing it`, noop: 'That merge was already satisfied',
         executing: `Merge #${source} + #${target} requested — waiting for the engine`, failure: 'Merge failed',
       })
@@ -1051,7 +1083,21 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
         <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
         <select ref={mergeSelectRef} id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
-          onChange={event => setMergeTarget(event.target.value)} autoFocus>
+          onChange={event => {
+            if (!event.target.value) {
+              setMergeIntent(current => current
+                ? { ...current, targetId: null, targetAttempt: null } : current)
+              return
+            }
+            const next = selectMergeTarget(mergeIntent, {
+              runId, runGeneration: generation, nodes: live?.nodes,
+            }, Number(event.target.value))
+            if (next) setMergeIntent(next)
+            else {
+              showToast('Merge cancelled because the run or one of its experiment attempts changed.')
+              closeMergeChooser(true)
+            }
+          }} autoFocus>
           <option value="">Choose an experiment…</option>
           {mergeCandidates.map(node => <option key={node.id} value={node.id}>
             #{node.id} · {node.operator || 'experiment'} · {node.status}
@@ -1070,6 +1116,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             <LazyBoundary label="run report" resetKey={`${runId}:${history.resolvedSeq ?? 'live'}`}>
               <ReportView state={state} runId={runId} onToast={showToast}
                 readOnly={readOnlyMode} historySeq={history.resolvedSeq}
+                observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={routeState.generation}
                 readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
                 onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}

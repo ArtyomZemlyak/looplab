@@ -509,6 +509,7 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                             cancel_event: Optional[threading.Event] = None,
                             wait_on_alive: bool = False,
                             spawn_engine: Optional[Callable[..., Optional[int]]] = None,
+                            liveness: Optional[Callable[[Path], Optional[bool]]] = None,
                             on_spawn: Optional[Callable[[Optional[int]], None]] = None) -> bool:
     """Atomically claim one pending resume in the event log, then launch its detached CLI.
 
@@ -523,6 +524,7 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
     import time as _time
 
     now = _time.time() if now is None else now
+    liveness_probe = liveness or _spawn_liveness
     should_wait = False
     waiter_args = list(cli_args)
     with _run_lifecycle_lock(rd):
@@ -544,14 +546,14 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 # A claimant can acquire engine.lock between the caller's liveness probe and this
                 # fold. Preserve a post-exit waiter on that live flip; otherwise a tail-exiting owner
                 # can strand the accepted intent indefinitely.
-                liveness = _spawn_liveness(rd)
-                if wait_on_alive and liveness is True:
+                ownership = liveness_probe(rd)
+                if wait_on_alive and ownership is True:
                     should_wait = True
                     break
                 return False
-            liveness = _spawn_liveness(rd)
-            if liveness is not False:
-                if liveness is None:
+            ownership = liveness_probe(rd)
+            if ownership is not False:
+                if ownership is None:
                     return False
                 should_wait = True
                 break
@@ -567,9 +569,9 @@ def _claim_and_spawn_resume(rd: Path, cli_args: list[str], *, env: Optional[dict
                 continue
             except (EventLogCorruptionError, OSError):
                 return False
-            liveness = _spawn_liveness(rd)
-            if liveness is not False:
-                if liveness is None:
+            ownership = liveness_probe(rd)
+            if ownership is not False:
+                if ownership is None:
                     # Keep the just-written launch claim as durable quarantine.  A later healthy
                     # probe can reconcile it; uncertainty is never permission to Popen.
                     return False

@@ -573,6 +573,28 @@ def test_fold_resume_intent_seq_gated(tmp_path):
     assert not fold(s.read_all()).resume_pending()             # one serve satisfies both
 
 
+def test_restart_is_one_durable_operator_pause_and_resume_request(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "min"})
+    s.append("resume_served", {})  # historical owner acknowledgement cannot satisfy a new restart
+    restart = s.append("restart", {})
+
+    stopped = fold(s.read_all())
+    assert stopped.paused is True and stopped.pause_node_id is None
+    assert stopped.pause_event_seq == restart.seq
+    assert stopped.resume_pending() is True
+    assert stopped.last_resume_request_seq == restart.seq
+    assert stopped.last_resume_request_mode == "resume"
+
+    # Only the replacement CLI lifts the operator pause. The served marker then fulfills this exact
+    # durable handoff, so replay after any process/browser restart reaches the same settled state.
+    s.append("resume", {})
+    assert not fold(s.read_all()).paused and fold(s.read_all()).resume_pending()
+    served = s.append("resume_served", {})
+    resumed = fold(s.read_all())
+    assert served.seq > restart.seq and not resumed.paused and not resumed.resume_pending()
+
+
 def test_append_expected_last_seq_cas(tmp_path):
     # P1-12 explicit-seq optimistic concurrency: an append with expected_last_seq lands only if the
     # log tail is still exactly that seq — else it raises and writes NOTHING.

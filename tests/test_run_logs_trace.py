@@ -144,16 +144,19 @@ def test_read_run_trace_without_spans_is_graceful(tmp_path):
     assert "no spans.jsonl" in rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
 
 
-def test_read_run_trace_soft_fails_on_malformed_spans(tmp_path):
-    """A JSON-valid but malformed spans.jsonl (a null `attributes` → AttributeError inside
-    build_conversation) must soft-fail to a string, never crash the tool loop."""
+def test_read_run_trace_quarantines_malformed_span_shape(tmp_path):
+    """A JSON-valid row with recoverable malformed attributes becomes an empty safe observation.
+
+    The reader must neither crash nor mislabel the whole trace file as unreadable merely because one
+    complete line has an old/custom shape.
+    """
     root = _make_run(tmp_path)
     (root / "demo" / "spans.jsonl").write_text(
         json.dumps({"span_id": "s1", "trace_id": "tr", "parent_id": None, "attributes": None}) + "\n",
         encoding="utf-8")
     rts = MachineRunsTools(root)
     out = rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
-    assert isinstance(out, str) and "could not read trace" in out
+    assert isinstance(out, str) and "no trace stages recorded" in out
 
 
 # --------------------------------------------------- read-file allowlist covers logs + jsonl data

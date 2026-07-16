@@ -46,9 +46,10 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
-from looplab.serve.engine_proc import _engine_alive, _engine_liveness, _spawn_engine
+from looplab.serve.engine_proc import (
+    _claim_and_spawn_resume, _engine_alive, _engine_liveness, _spawn_engine)
 from looplab.serve.protocol import COLLABORATION_EVENTS, CONTROL_EVENTS
 from looplab.trust.redact import redact_secrets
 
@@ -57,6 +58,7 @@ class EnginePolicy(str, Enum):
     NO_SPAWN = "no_spawn"
     ENSURE_RUNNING = "ensure_running"
     ENSURE_DRIVER_PRESERVE_STOP = "ensure_driver_preserve_stop"
+    RESTART_AFTER_EXIT = "restart_after_exit"
 
 
 @dataclass(frozen=True)
@@ -76,6 +78,7 @@ def _spec(event_type: str, policy: EnginePolicy, postcondition: str) -> ControlS
 CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_RUN_ABORT: _spec(EV_RUN_ABORT, EnginePolicy.ENSURE_DRIVER_PRESERVE_STOP, "finished_and_stopped"),
     EV_PAUSE: _spec(EV_PAUSE, EnginePolicy.NO_SPAWN, "paused_and_stopped"),
+    EV_RESTART: _spec(EV_RESTART, EnginePolicy.RESTART_AFTER_EXIT, "restart_served"),
     EV_RESUME: _spec(EV_RESUME, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_RUN_REOPENED: _spec(EV_RUN_REOPENED, EnginePolicy.ENSURE_RUNNING, "engine_ack"),
     EV_NODE_ABORT: _spec(EV_NODE_ABORT, EnginePolicy.NO_SPAWN, "folded_intent"),
@@ -106,6 +109,7 @@ assert set(CONTROL_SPECS) == set(CONTROL_EVENTS), "every control event needs an 
 CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_RUN_ABORT: frozenset({"reason"}),
     EV_PAUSE: frozenset(),
+    EV_RESTART: frozenset(),
     EV_RESUME: frozenset(),
     EV_RUN_REOPENED: frozenset(),
     EV_NODE_ABORT: frozenset({"node_id", "generation", "reason"}),
@@ -406,6 +410,9 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
 
     if event_type == EV_RUN_ABORT:
         data = _normalize_finalize_data(data)
+    if event_type == EV_RESTART and not task_file_for(rd):
+        raise HTTPException(
+            400, "restart requires task.snapshot.json or a usable legacy ui_meta.json task file")
 
     state = None
 
@@ -2352,6 +2359,15 @@ class RunCommandService:
             if state.finished or (state.paused and not alive):
                 return "noop", None
             return "append", None
+        if event_type == EV_RESTART:
+            if pending_finalize:
+                return "reject", _error(
+                    "finalize_in_progress", "cannot restart while finalization is pending",
+                    "wait for finalization to finish, then submit a new restart command",
+                    retryable=True)
+            # Always append a fresh restart boundary. Even a currently paused/dead run needs an exact
+            # request sequence that the replacement owner's later resume_served can satisfy.
+            return "append", None
         if event_type in {EV_RESUME, EV_RUN_REOPENED}:
             if pending_finalize:
                 return "reject", _error(
@@ -2719,6 +2735,47 @@ class RunCommandService:
             record = self._load(path) or record
         return self._public(record)
 
+    def recover_pending_restarts(self) -> None:
+        """Restart nonterminal restart-command workers after a UI-server process loss.
+
+        A restart record can be durable a few instructions before its folded intent. Scanning only
+        this compound lifecycle command closes that reserve->append crash window; once the intent is
+        present, the independent resume reconciler is the second recovery path. Cross-process worker
+        claims keep multiple uvicorn startup hooks idempotent.
+        """
+        try:
+            candidates = list(self.srv.root.iterdir()) if self.srv.root.exists() else []
+        except OSError:
+            return
+        for candidate in candidates:
+            try:
+                rd = self.validate_paths(candidate)
+                directory = rd / ".commands"
+                paths = list(directory.glob("cmd_*.json")) if directory.exists() else []
+            except (HTTPException, OSError):
+                continue
+            for path in paths:
+                try:
+                    if path.is_symlink() or not _COMMAND_ID_RE.fullmatch(path.stem):
+                        continue
+                    with self.sequence(rd):
+                        record = self._read_existing(path)
+                        if (record is None or record.get("event_type") != EV_RESTART
+                                or record.get("status") in TERMINAL_STATUSES):
+                            continue
+                        generation_match, current_generation = self._record_generation_match(
+                            rd, record)
+                        if generation_match is not True:
+                            self._terminal(
+                                path, record, "failed",
+                                error=self._record_generation_error(
+                                    record, generation_match, current_generation))
+                            continue
+                    self._start_worker(rd, path, record)
+                except (HTTPException, OSError):
+                    # One malformed/unavailable run must not prevent recovery of every other run.
+                    continue
+
     def _claim_execution(self, rd: Path, command_id: str) -> bool:
         lock = self._exec_path(rd, command_id)
         lock.parent.mkdir(parents=True, exist_ok=True)
@@ -2892,6 +2949,26 @@ class RunCommandService:
         # only for ordinary paused/finished continuation.  Never append run_reopened here.
         return self.spawn_engine(["resume", str(rd), "--task-file", str(task_file)], run_dir=rd)
 
+    def _claim_restart_spawn(self, rd: Path) -> bool:
+        """Claim and spawn the replacement owner for a folded restart, never the old owner.
+
+        The caller invokes this only after observing the singleton as definitively free. The shared
+        lifecycle helper rechecks that fact under the reset/delete fence, appends a durable launch
+        claim, then performs Popen. If this command worker disappears before any of those steps, the
+        restart event remains a normal pending resume for the server-startup reconciler.
+        """
+        task_file = task_file_for(rd)
+        if not task_file:
+            raise RuntimeError("run has no task.snapshot.json or usable ui_meta.json")
+        return _claim_and_spawn_resume(
+            rd,
+            ["resume", str(rd), "--task-file", str(task_file)],
+            cancel_event=getattr(self.srv, "resume_cancel", None),
+            wait_on_alive=False,
+            spawn_engine=self.spawn_engine,
+            liveness=self._engine_state,
+        )
+
     def _postcondition(
             self, rd: Path, record: dict,
             observation: Optional[CommandObservation] = None) -> bool:
@@ -2913,6 +2990,14 @@ class RunCommandService:
         if kind == "paused_and_stopped":
             state = observation.state()
             return bool(state.paused and self._engine_state(rd) is False)
+        if kind == "restart_served":
+            state = observation.state()
+            event_seq = record.get("event_seq")
+            # ``resume_served`` is written only after the replacement CLI owns engine.lock. Requiring
+            # it to be later than THIS marked restart prevents an old owner/startup from satisfying a
+            # new command; requiring the pause to be lifted proves the full pause->resume transition.
+            return bool(isinstance(event_seq, int) and not isinstance(event_seq, bool)
+                        and state.last_resume_served_seq > event_seq and not state.paused)
         if kind == "finished_and_stopped":
             state = observation.state()
             if (not state.finished or self._engine_state(rd) is not False
@@ -3063,6 +3148,19 @@ class RunCommandService:
                             "the approval state changed before the intent could be recorded",
                             "refresh the run and submit a new approval command", retryable=False))
                         return
+                elif event_type == EV_RESTART:
+                    # Restart is a compound lifecycle boundary. A finalize/reset/other control that
+                    # wins after admission must not be silently crossed by a later pause+resume
+                    # watermark, so bind the append to the exact state snapshot just re-admitted.
+                    try:
+                        intent = store.append(
+                            event_type, event_data, expected_last_seq=decision_baseline)
+                    except EventStoreConcurrencyError:
+                        self._terminal(path, record, "rejected", error=_error(
+                            "restart_state_changed",
+                            "the run changed before the restart intent could be recorded",
+                            "refresh the run and submit a new restart command", retryable=False))
+                        return
                 elif event_type not in COLLABORATION_EVENTS:
                     intent = store.append(event_type, event_data)
                 record["baseline_seq"] = decision_baseline
@@ -3095,7 +3193,20 @@ class RunCommandService:
                     error=self._engine_unknown_error(
                         f"start a driver for {event_type}", retryable=True))
                 return
-            if spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
+            if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and liveness is False:
+                try:
+                    launched = self._claim_restart_spawn(rd)
+                except Exception as exc:  # noqa: BLE001 - durable intent remains startup-recoverable
+                    self._terminal(path, record, "failed", error=_error(
+                        "spawn_failed", f"could not start the replacement run engine: {exc}",
+                        "fix the cause; startup recovery or this command's retry can serve the same intent",
+                        retryable=True))
+                    return
+                if launched:
+                    record["replacement_launch_claimed"] = True
+                    record["updated_at"] = time.time()
+                    self._save(path, record)
+            elif spec.engine_policy is not EnginePolicy.NO_SPAWN and liveness is False:
                 spawned_now = False
                 if self._recent_spawn_claim(rd):
                     record["waiting_for_spawn"] = True
@@ -3231,7 +3342,35 @@ class RunCommandService:
                 # A pre-existing engine can die before acknowledging this intent. Re-ensure exactly
                 # one driver under the same per-run sequencer; the spawn-inflight lease closes the
                 # Popen→engine.lock window for other command workers/processes.
-                if spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
+                if spec.engine_policy is EnginePolicy.RESTART_AFTER_EXIT and not alive:
+                    with self.sequence(rd):
+                        retry_observation = self._observe(rd)
+                        if self._postcondition(rd, record, retry_observation):
+                            self._succeeded(rd, path, record)
+                            return
+                        retry_liveness = self._engine_state(rd)
+                        if retry_liveness is None:
+                            self._terminal(
+                                path, record, "failed",
+                                error=self._engine_unknown_error(
+                                    "start the replacement run driver", retryable=True))
+                            return
+                        if retry_liveness is False:
+                            try:
+                                launched = self._claim_restart_spawn(rd)
+                            except Exception as exc:  # noqa: BLE001
+                                self._terminal(path, record, "failed", error=_error(
+                                    "spawn_failed",
+                                    f"could not start the replacement run engine: {exc}",
+                                    ("fix the cause; startup recovery or this command's retry can "
+                                     "serve the same intent"),
+                                    retryable=True))
+                                return
+                            if launched:
+                                record["replacement_launch_claimed"] = True
+                                record["updated_at"] = time.time()
+                                self._save(path, record)
+                elif spec.engine_policy is not EnginePolicy.NO_SPAWN and not alive:
                     with self.sequence(rd):
                         retry_observation = self._observe(rd)
                         if self._postcondition(rd, record, retry_observation):

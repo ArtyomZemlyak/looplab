@@ -709,6 +709,64 @@ def test_server_startup_recovers_pending_resume_without_runs_poll(tmp_path, monk
     assert len(spawns) == 1 and "resume" in spawns[0][0][0]
 
 
+def test_server_startup_recovers_restart_after_command_worker_loss(tmp_path, monkeypatch):
+    """The restart event itself is enough recovery truth; no browser or command thread must survive."""
+    from looplab.events.eventstore import EventStore
+    from looplab.events.replay import fold
+    from looplab.serve import engine_proc as ep
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
+    restart = store.append("restart", {"_command_id": "cmd_" + "a" * 32})
+    state = fold(store.read_all())
+    assert state.paused and state.resume_pending()
+    assert state.last_resume_request_seq == restart.seq
+
+    spawns = []
+    monkeypatch.setattr(ep, "_RESUME_RECONCILE_GRACE_S", 0.0)
+    monkeypatch.setattr(ep, "_engine_alive", lambda _rd: False)
+    monkeypatch.setattr(ep, "_spawn_engine", lambda *args, **kwargs: spawns.append((args, kwargs)))
+
+    with TestClient(make_app(tmp_path)) as client:
+        assert client.get("/api/health").status_code == 200
+    assert len(spawns) == 1
+    assert spawns[0][0][0][0] == "resume"
+    claimed = fold(store.read_all())
+    assert claimed.resume_pending() and claimed.last_resume_launch_seq > restart.seq
+
+
+def test_server_startup_recovers_restart_record_lost_before_intent_append(tmp_path, monkeypatch):
+    """Recovery also closes the durable-record -> folded-intent worker crash window."""
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.run_commands import RunCommandService
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    (rd / "task.snapshot.json").write_text("{}", encoding="utf-8")
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "run", "task_id": "t", "direction": "min"})
+
+    first_app = make_app(tmp_path)
+    first = first_app.state.looplab.commands
+    first._start_worker = lambda *_args, **_kwargs: None
+    record = first.submit(
+        rd, "restart-worker-lost", "restart", {},
+        expected_generation=first.run_generation(rd))
+    assert record["status"] == "accepted"
+    assert not any(event.type == "restart" for event in EventStore(rd / "events.jsonl").read_all())
+
+    recovered = []
+    monkeypatch.setattr(
+        RunCommandService, "_start_worker",
+        lambda self, run_dir, path, row: recovered.append((run_dir, path, row["id"])))
+    with TestClient(make_app(tmp_path)) as client:
+        assert client.get("/api/health").status_code == 200
+    assert recovered == [(rd, rd / ".commands" / f"{record['id']}.json", record["id"])]
+
+
 def test_server_startup_does_not_create_waiter_for_unknown_liveness(tmp_path, monkeypatch):
     """Unknown/reparse runs stay quarantined without one 20 Hz polling thread per directory."""
     from looplab.serve import engine_proc as ep
@@ -2298,7 +2356,8 @@ def test_node_logs_surfaces_declared_stage_logs_only(tmp_path):
     s.append("node_building", {"node_id": 0, "operator": "draft", "parent_ids": []})
     nd = rd / "nodes" / "node_0"
     nd.mkdir(parents=True)
-    (nd / "looplab_stages.json").write_text('{"stages": [{"name": "train"}]}')
+    (nd / "looplab_stages.json").write_text(
+        '{"stages": [{"name": "train", "command": ["python", "train.py"]}]}')
     (nd / "train.log").write_text("Epoch 0 loss=1.0\nEpoch 1 loss=0.5\n")
     (nd / "score.log").write_text("recall@100: 0.8\n")     # score is the reserved operator stage
     (nd / "debug.log").write_text("noise the training code wrote to its cwd\n")
@@ -2322,3 +2381,35 @@ def test_node_logs_single_command_uses_eval_log(tmp_path):
     client = TestClient(make_app(tmp_path))
     body = client.get("/api/runs/demo/nodes/0/logs").json()
     assert body["eval"].strip() == "metric: 0.42" and body["stages"] == {}
+
+
+def test_node_logs_rejects_manifest_traversal_and_bounds_aggregate_tail(tmp_path, monkeypatch):
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    nd = rd / "nodes" / "node_0"
+    nd.mkdir(parents=True)
+    # Previously this unvalidated name read rd/outside.log through node_0/../../outside.log.
+    (rd / "outside.log").write_text("PRIVATE-SIBLING-LOG", encoding="utf-8")
+    (nd / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "../../outside", "command": ["python", "x.py"]},
+    ]}), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    body = client.get("/api/runs/demo/nodes/0/logs?tail=100").json()
+    assert "PRIVATE-SIBLING-LOG" not in json.dumps(body) and body["stages"] == {}
+
+    # Valid bands remain visible, but all returned log tails share one response-size envelope.
+    import looplab.serve.routers.runs as runs_router
+    monkeypatch.setattr(runs_router, "_LOG_TAIL_MAX", 40)
+    (nd / "looplab_stages.json").write_text(json.dumps({"stages": [
+        {"name": "prep", "command": ["python", "prep.py"]},
+        {"name": "train", "command": ["python", "train.py"]},
+    ]}), encoding="utf-8")
+    for name in ("prep.log", "train.log", "score.log", "eval.log", "setup.log"):
+        (nd / name).write_text("x" * 100, encoding="utf-8")
+    (rd / "run_setup.log").write_text("x" * 100, encoding="utf-8")
+    bounded = client.get("/api/runs/demo/nodes/0/logs?tail=100").json()
+    total = sum(len(value.encode()) for value in (
+        bounded["eval"], bounded["setup"], bounded["run_setup"], *bounded["stages"].values()))
+    assert total <= 40

@@ -15,6 +15,7 @@ when this was one file.
 from __future__ import annotations
 
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
@@ -33,11 +34,41 @@ from looplab.tools.vectorstore import make_embedder as _make_embedder
 from looplab.adapters.tasks import _make_abstractor as _make_lesson_abstractor
 _TASK_KINDS = tuple(kinds())
 
+
+def _make_cli_streams_total() -> None:
+    """Prevent help/error rendering from crashing on a legacy text encoding.
+
+    Typer's Rich help writes directly to ``sys.stdout``/``sys.stderr``.  On Windows those streams can
+    still be strict cp1252 even though our command descriptions legitimately contain arrows and other
+    Unicode notation.  Keep the host's chosen encoding (so a legacy console does not receive forced
+    UTF-8 bytes), but make unrepresentable glyphs degrade to a replacement instead of turning
+    ``looplab --help`` into a traceback.  Redirected/captured streams without ``reconfigure`` are left
+    untouched.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if not callable(reconfigure):
+            continue
+        try:
+            reconfigure(errors="replace")
+        except (AttributeError, OSError, ValueError):
+            # Embedders may expose a closed, detached or immutable stream.  CLI execution must remain
+            # usable there; Click/Rich will apply whatever policy that host supplied.
+            continue
+
+
+class _TotalOutputTyper(typer.Typer):
+    """Typer entry point that configures output only when the CLI is actually invoked."""
+
+    def __call__(self, *args, **kwargs):
+        _make_cli_streams_total()
+        return super().__call__(*args, **kwargs)
+
 # rich_markup_mode="markdown" (not the Typer default "rich"): in "rich" mode square brackets are
 # parsed as console style tags, so help text like `pip install 'looplab[ui]'` silently renders as
 # `pip install 'looplab'` — the [ui]/[dev]/[otel] extra names vanish. Markdown mode keeps the pretty
 # help panels but treats brackets literally, so install hints stay correct.
-app = typer.Typer(
+app = _TotalOutputTyper(
     add_completion=False,
     rich_markup_mode="markdown",
     help="LoopLab — autonomous ML/DS research engine. Give it a goal; it invents -> implements -> "
@@ -333,7 +364,7 @@ def _print_result(state) -> None:
 # against the `app` above. This block MUST stay at the bottom — the groups import the shared
 # builders back from this (still-initializing) package, which is safe only because everything they
 # need is already defined by this point.
-from looplab.cli import export_cmds, inspect_cmds, run_cmds, ui_cmds  # noqa: E402
+from looplab.cli import export_cmds, inspect_cmds, run_cmds, ui_cmds  # noqa: E402,F401
 
 # Back-compat re-exports: when `looplab/cli.py` was one flat module, every command was an attribute
 # of `looplab.cli` (tests call `cli.stop(...)`/`cli.finalize(...)` directly; tools import `app`).

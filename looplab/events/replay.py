@@ -29,7 +29,7 @@ from looplab.events.types import (
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
     EV_POLICY_DECISION, EV_PROMOTE, EV_PROXY_SCORED, EV_REPORT_GENERATED,
-    EV_RESEARCH_COMPLETED, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
+    EV_RESEARCH_COMPLETED, EV_RESTART, EV_RESUME, EV_RESUME_REQUESTED, EV_RESUME_SERVED,
     EV_REWARD_HACK_SUSPECTED, EV_RUN_ABORT,
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
@@ -1758,6 +1758,21 @@ def _on_pause(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if previous != (st.paused, st.pause_node_id, st.pause_generation):
         st.pause_event_seq = e.seq
 
+
+def _on_restart(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Fold one durable, server-owned pause -> replacement-owner handoff.
+
+    The old engine observes the operator pause and releases its singleton lock. At the same time the
+    event itself is the resume request watermark, so losing the browser, command worker, or whole UI
+    server cannot strand the run: the normal startup reconciler can claim and launch it. A replacement
+    CLI clears the pause with ``resume`` and appends ``resume_served`` only after acquiring the lock.
+    """
+    _on_pause(st, e, {}, ctx)
+    if e.seq > st.last_resume_request_seq:
+        st.last_resume_request_seq = e.seq
+        st.last_resume_request_ts = float(getattr(e, "ts", 0.0) or 0.0)
+        st.last_resume_request_mode = "resume"
+
 def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     nid = _coerce_node_id(d)
     n = st.nodes.get(nid) if nid is not None else None
@@ -1980,6 +1995,7 @@ _HANDLERS = {
     EV_NODE_TOMBSTONED: _on_node_tombstoned,
     EV_RESUME_REQUESTED: _on_resume_requested,
     EV_RESUME_SERVED: _on_resume_served,
+    EV_RESTART: _on_restart,
     EV_NODE_RESET: _on_node_reset,
     EV_STAGE_FINISHED: _on_stage_finished,
     EV_CONFIRM_EVAL: _on_confirm_eval,

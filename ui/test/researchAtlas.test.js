@@ -56,6 +56,23 @@ test('Atlas projection reconciles concurrent totals without trusting malformed t
   assert.equal(boundedAtlasText({ unsafe: 'shape' }), '')
 })
 
+test('Atlas derives evidence balance from sanitized totals instead of payload labels', () => {
+  const contradictory = [
+    { ...claim(0), epistemic: 'refuted', n_support: 2, support: [], n_oppose: 0, oppose: [] },
+    { ...claim(1), epistemic: 'supported', n_support: 0, support: [], n_oppose: 3, oppose: [] },
+    { ...claim(2), epistemic: 'inconclusive', n_support: 1, support: [], n_oppose: 1, oppose: [] },
+    { ...claim(3), epistemic: 'mixed', n_support: -4, support: [], n_oppose: 'bad', oppose: [] },
+  ]
+  const view = buildResearchAtlasView({}, { claims: contradictory }, {})
+
+  assert.deepEqual(view.claims.map(row => [row.nSupport, row.nOppose, row.epistemic]), [
+    [2, 0, 'supported'],
+    [0, 3, 'refuted'],
+    [1, 1, 'mixed'],
+    [0, 0, 'inconclusive'],
+  ])
+})
+
 test('Atlas projection applies hard caps before React receives portfolio collections', () => {
   const concepts = Array.from({ length: ATLAS_RENDER_LIMITS.concepts + 3 }, (_, index) => ({
     concept: `concept-${index}`,
@@ -194,7 +211,10 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run memory yet/, /Degraded view; some sources have not loaded\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
-  assert.match(atlas, /role="region" tabIndex=\{0\} aria-label="Bounded explored concepts"/)
+  assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
+  assert.doesNotMatch(atlas, /<ul[^>]*role="region"/)
+  assert.match(atlas, /aria-label="Bounded mixed-evidence claim records"/)
+  assert.doesNotMatch(atlas, /aria-label="[^"]*[Cc]ontradictory claims"/)
   assert.match(atlas, /Some portfolio records were ignored\./)
   assert.match(atlas, /Partial refresh; preserving last-loaded data for failed sources\./)
   assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)

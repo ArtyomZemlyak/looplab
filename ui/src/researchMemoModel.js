@@ -136,7 +136,11 @@ export function normalizeResearchMemos(value) {
   for (let index = total - 1; index >= start && budget.remaining > 0; index--) {
     const raw = item(value, index)
     if (!record(raw)) continue
-    newestFirst.push({ ...normalizeResearchMemoFrom(raw, budget), sourceIndex: index })
+    const allowance = Math.min(MEMO_CHARS, budget.remaining)
+    const memoBudget = makeBudget(allowance)
+    const memo = normalizeResearchMemoFrom(raw, memoBudget)
+    budget.remaining -= allowance - memoBudget.remaining
+    newestFirst.push({ ...memo, sourceIndex: index })
   }
   const memos = newestFirst.reverse()
   return { memos, total, omitted: Math.max(0, total - memos.length) }

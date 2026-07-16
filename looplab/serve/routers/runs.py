@@ -319,18 +319,6 @@ def build_router(srv) -> APIRouter:
         nd = _node_dir(rd, nid)
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
-        n = min(max(0, tail), _LOG_TAIL_MAX)
-        def _tail(name: str, base: Path = nd) -> str:
-            p = base / name
-            try:
-                size = p.stat().st_size
-                with open(p, "rb") as f:
-                    if size > n:
-                        f.seek(size - n)
-                    b = f.read()
-            except OSError:
-                return ""
-            return b.decode("utf-8", "replace")
         # Per-stage logs — a multi-stage eval tees each stage to `<name>.log`. Bound the set to the
         # node's DECLARED stages, in pipeline order. NOT a bare `*.log` glob: that would surface any
         # stray log the training code writes to its cwd (a framework's own debug.log) as a phantom
@@ -352,12 +340,38 @@ def build_router(srv) -> APIRouter:
             # `score` stage after them. Re-read EVERY poll, never memoized — the manifest is written
             # mid-node by the STAGES phase, so it can appear between polls and differs per node.
             try:
+                from looplab.runtime.command_eval import materialized_stages
                 man = json.loads((nd / "looplab_stages.json").read_text("utf-8"))
-                stage_names = [str(s["name"]) for s in (man.get("stages") or []) if s.get("name")]
+                clean = materialized_stages(man)
+                stage_names = [str(s["name"]) for s in clean] if clean else []
             except (OSError, ValueError, TypeError):
                 pass
             if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
                 stage_names.append("score")
+        # `tail` is a per-log convenience limit, but the HTTP response itself also needs one hard
+        # envelope. Divide the existing byte cap across declared stages plus eval/setup/run setup, so
+        # a valid many-stage pipeline cannot multiply a 5 MB query into an 80+ MB response.
+        requested_n = min(max(0, tail), _LOG_TAIL_MAX)
+        file_slots = max(1, len(stage_names) + 3)
+        n = min(requested_n, _LOG_TAIL_MAX // file_slots)
+
+        def _tail(name: str, base: Path = nd) -> str:
+            try:
+                root = base.resolve()
+                p = (root / name).resolve()
+                # Names are direct children, not paths. This second boundary also rejects a log
+                # symlink that points outside the run/node directory.
+                if p.parent != root:
+                    return ""
+                size = p.stat().st_size
+                with open(p, "rb") as f:
+                    if size > n:
+                        f.seek(size - n)
+                    b = f.read(n)
+            except (OSError, ValueError):
+                return ""
+            return b.decode("utf-8", "replace")
+
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
         # run_setup.log lives in the RUN dir (shared setup), not the node dir. Tail-cap it like every
         # other log here (seek-to-end, byte-bounded) instead of read_text()-ing the whole file into RAM

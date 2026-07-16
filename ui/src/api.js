@@ -1024,6 +1024,9 @@ export const CONTROL = {
   stop: (rid) => runCommand(rid, 'pause', {}),
   finalize: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
   resume: (rid) => runCommand(rid, 'resume', {}),
+  // One durable server-owned pause -> replacement-owner handoff. The browser does not orchestrate
+  // two commands, so navigation or reload cannot strand a run between them.
+  restart: (rid) => runCommand(rid, 'restart', {}),
   // back-compat aliases (older callers / NL control): pause≡stop, abort≡finalize, reopen≡resume.
   pause: (rid) => runCommand(rid, 'pause', {}),
   abort: (rid) => runCommand(rid, 'run_abort', { reason: 'finalized' }),
@@ -1074,10 +1077,10 @@ export const CONTROL = {
   reopen: (rid) => runCommand(rid, 'run_reopened', {}),
   // U3: merge two nodes — inject a multi-parent `merge` node; the engine recombines the parents'
   // solutions via its real merge/ensemble operator (not a blank manual node).
-  merge: (rid, ids, parentGenerations = undefined) => runCommand(rid, 'inject_node', {
+  merge: (rid, ids, parentGenerations = undefined, options = {}) => runCommand(rid, 'inject_node', {
       idea: { operator: 'merge', rationale: `merge ${ids.map(i => '#' + i).join(' + ')}` },
       parent_ids: ids, parent_generations: parentGenerations,
-    }),
+    }, options),
   // A7: pin/override the Strategist's choice live (HITL parity). `strategy` = a Strategy dict
   // {policy?, policy_params?, developer?, operators?, fidelity?, rationale?}.
   setStrategy: (rid, strategy) => runCommand(rid, 'set_strategy', { strategy }),

@@ -102,8 +102,6 @@ const normalizeClaim = value => {
   const row = record(value)
   const statement = boundedAtlasText(row.statement, 500)
   if (!statement) return null
-  const epistemic = ['supported', 'refuted', 'mixed', 'inconclusive'].includes(row.epistemic)
-    ? row.epistemic : 'inconclusive'
   const maturity = ['machine-proposed', 'operator-ratified', 'operator-rejected', 'operator-pinned']
     .includes(row.maturity) ? row.maturity : 'machine-proposed'
   // Every portfolio string is model-authored/untrusted and every collection is capped here. Components
@@ -111,13 +109,18 @@ const normalizeClaim = value => {
   const support = textList(row.support, ATLAS_RENDER_LIMITS.evidence)
   const oppose = textList(row.oppose, ATLAS_RENDER_LIMITS.evidence)
   const unverified = textList(row.unverified, ATLAS_RENDER_LIMITS.evidence)
+  const nSupport = Math.max(count(row.n_support), support.length)
+  const nOppose = Math.max(count(row.n_oppose), oppose.length)
+  const epistemic = nSupport > 0
+    ? (nOppose > 0 ? 'mixed' : 'supported')
+    : (nOppose > 0 ? 'refuted' : 'inconclusive')
   return {
     uid: boundedAtlasText(row.claim_uid, 180),
     statement,
     epistemic,
     maturity,
-    nSupport: Math.max(count(row.n_support), support.length),
-    nOppose: Math.max(count(row.n_oppose), oppose.length),
+    nSupport,
+    nOppose,
     nUnverified: Math.max(count(row.n_unverified), unverified.length),
     support,
     oppose,
