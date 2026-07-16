@@ -11,10 +11,12 @@ import json
 import math
 import os
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
+from itertools import islice
 from typing import Optional
 
 from looplab.core.models import RunState
+from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 
 
 _MAX_SPAN_ID_CHARS = 256
@@ -23,6 +25,214 @@ _MAX_TRACE_TOKENS = (1 << 63) - 1
 _MAX_TRACE_SECONDS = 1e15
 _MAX_TRACE_FLOAT = sys.float_info.max
 _MAX_PARENT_HOPS = 1024
+
+# Public projection contract.  ``spans.jsonl`` is files-as-truth, but it is not a trusted API
+# payload: custom exporters and hand-edited/corrupt runs can put arbitrary objects, credentials and
+# multi-megabyte strings in it.  Every browser-facing/indexed shape passes through this versioned,
+# bounded allowlist.  Bump together with span_index._SCHEMA when the record shape changes.
+TRACE_PROJECTION_SCHEMA = 2
+TRACE_VIEW_SPAN_CAP = 1024
+TRACE_NODE_SPAN_CAP = 512
+TRACE_DETAIL_SPAN_CAP = 256
+TRACE_CONVERSATION_SPAN_CAP = 512
+
+_SPAN_TEXT_BUDGET = 8192
+_META_TEXT_CAP = 256
+_EVENTS_CAP = 16
+_EVENT_FIELDS_CAP = 8
+_STRUCT_ITEMS_CAP = 32
+_STRUCT_DEPTH_CAP = 3
+_TOOL_CALLS_CAP = 16
+_CONVERSATION_STAGE_CAP = 64
+_CONVERSATION_TURN_CAP = 256
+
+_SPAN_FIELDS = {
+    "name", "kind", "trace_id", "span_id", "parent_id", "run_id", "status",
+    "start", "end", "duration_s", "attributes", "events", "_projection",
+}
+_ATTRIBUTE_FIELDS = {
+    # topology / conversation reconstruction
+    "node_id", "phase", "phase_span", "input_from", "input_carry", "input_partial",
+    # generation / tool observation
+    "model", "op", "model_parameters", "tool", "tool_calls", "input", "output",
+    "thinking", "usage", "cost", "level",
+    # engine/evaluation operation diagnostics used by the Inspector
+    "stage", "exit_code", "timed_out", "reused", "sandboxed", "seed", "blocks",
+    "attempt", "reason", "package", "trigger", "operator", "parent_id", "proxy_score",
+    "proxy_skipped", "eval_seconds", "metric", "ok", "repair_attempts", "violations",
+    "drift", "error_reason", "feasible", "robust_metric", "materialized",
+    "handoff_from", "handoff_to",
+}
+_ATTR_TEXT_FIELDS = {
+    "phase", "model", "op", "tool", "level", "stage", "reason", "package", "trigger",
+    "operator", "error_reason", "materialized", "handoff_from", "handoff_to",
+}
+_ATTR_BOOL_FIELDS = {
+    "input_partial", "timed_out", "reused", "sandboxed", "proxy_skipped", "ok", "drift",
+    "feasible",
+}
+_ATTR_INT_FIELDS = {
+    "input_carry", "exit_code", "seed", "blocks", "attempt", "repair_attempts", "violations",
+}
+_ATTR_FLOAT_FIELDS = {"proxy_score", "eval_seconds", "metric", "robust_metric"}
+_EVENT_FIELDS = {"error", "type", "message", "n", "count", "status", "stage", "step", "reason"}
+
+
+def _projection_counter(value) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= (1 << 31) - 1 else 0
+
+
+class _ProjectionBudget:
+    """Shared per-span text budget plus honest, idempotent omission accounting."""
+
+    def __init__(self, previous=None):
+        previous = previous if isinstance(previous, dict) else {}
+        self.remaining = _SPAN_TEXT_BUDGET
+        self.counts = {key: _projection_counter(previous.get(key)) for key in (
+            "omitted_fields", "omitted_attributes", "omitted_events", "omitted_messages",
+            "omitted_tool_calls", "omitted_items", "omitted_chars",
+        )}
+        self.previous_truncated = previous.get("truncated") is True
+
+    def omit(self, key: str, n: int = 1) -> None:
+        self.counts[key] = min((1 << 31) - 1, self.counts.get(key, 0) + max(0, int(n)))
+
+    def text(self, value, *, cap: int = _META_TEXT_CAP, single_line: bool = False) -> str:
+        allowed = min(max(0, int(cap)), self.remaining)
+        raw = redact_persisted_text(
+            value, max_chars=max(allowed, 0), entropy=True, single_line=single_line)
+        # ``redact_persisted_text`` deliberately does not expose the secret's original length.  Count
+        # only known input truncation; the marker still makes the truncation visible to the reader.
+        try:
+            original_len = len(str(value)) if value is not None else 0
+        except Exception:  # noqa: BLE001 - opaque diagnostics are projected as unavailable text
+            original_len = 0
+        if original_len > allowed:
+            self.omit("omitted_chars", original_len - allowed)
+        self.remaining = max(0, self.remaining - len(raw))
+        return raw
+
+    def metadata(self) -> dict:
+        counts = {key: value for key, value in self.counts.items() if value}
+        truncated = self.previous_truncated or bool(counts) or self.remaining <= 0
+        return {"schema": TRACE_PROJECTION_SCHEMA, "truncated": truncated, **counts}
+
+
+def _safe_structured(value, budget: _ProjectionBudget, *, depth: int = 0):
+    """Small JSON-compatible structured value with secret-key masking and shared text accounting."""
+    if value is None or isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return budget.text(value, cap=2000)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value if -(1 << 63) <= value <= (1 << 63) - 1 else budget.text(value, cap=64)
+    if isinstance(value, float):
+        return value if math.isfinite(value) else budget.text(value, cap=32, single_line=True)
+    if depth >= _STRUCT_DEPTH_CAP:
+        budget.omit("omitted_items")
+        return "<depth-limited>"
+    if isinstance(value, dict):
+        out = {}
+        items = list(islice(value.items(), _STRUCT_ITEMS_CAP + 1))
+        if len(items) > _STRUCT_ITEMS_CAP:
+            budget.omit("omitted_items", max(1, len(value) - _STRUCT_ITEMS_CAP))
+        for raw_key, child in items[:_STRUCT_ITEMS_CAP]:
+            key = budget.text(raw_key, cap=80, single_line=True)
+            if not key:
+                budget.omit("omitted_items")
+                continue
+            if is_secret_key_name(raw_key):
+                out[key] = "***"
+            else:
+                out[key] = _safe_structured(child, budget, depth=depth + 1)
+            if budget.remaining <= 0:
+                break
+        return out
+    if isinstance(value, (list, tuple)):
+        items = list(islice(value, _STRUCT_ITEMS_CAP + 1))
+        if len(items) > _STRUCT_ITEMS_CAP:
+            try:
+                omitted = len(value) - _STRUCT_ITEMS_CAP
+            except Exception:  # noqa: BLE001
+                omitted = 1
+            budget.omit("omitted_items", max(1, omitted))
+        return [_safe_structured(item, budget, depth=depth + 1)
+                for item in items[:_STRUCT_ITEMS_CAP] if budget.remaining > 0]
+    return budget.text(value, cap=256)
+
+
+def _project_messages(value, budget: _ProjectionBudget) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        if value is not None:
+            budget.omit("omitted_messages")
+        return []
+    total = len(value)
+    kept = list(value[:_MSGS_CAP])
+    if total > _MSGS_CAP:
+        head = _MSGS_CAP // 2
+        kept = list(value[:head]) + list(value[-(_MSGS_CAP - head):])
+        budget.omit("omitted_messages", total - _MSGS_CAP)
+    out = []
+    for raw in kept:
+        if not isinstance(raw, dict):
+            budget.omit("omitted_messages")
+            continue
+        out.append({
+            "role": budget.text(raw.get("role", "user"), cap=32, single_line=True) or "user",
+            "content": budget.text(raw.get("content", ""), cap=_IO_CAP),
+        })
+        if budget.remaining <= 0:
+            budget.omit("omitted_messages", max(0, len(kept) - len(out)))
+            break
+    return out
+
+
+def _project_tool_calls(value, budget: _ProjectionBudget) -> list[dict]:
+    if not isinstance(value, (list, tuple)):
+        if value is not None:
+            budget.omit("omitted_tool_calls")
+        return []
+    calls = list(value[:_TOOL_CALLS_CAP])
+    if len(value) > _TOOL_CALLS_CAP:
+        budget.omit("omitted_tool_calls", len(value) - _TOOL_CALLS_CAP)
+    out = []
+    for raw in calls:
+        if not isinstance(raw, dict):
+            budget.omit("omitted_tool_calls")
+            continue
+        out.append({
+            "name": budget.text(raw.get("name", ""), cap=128, single_line=True),
+            "arguments": budget.text(raw.get("arguments", ""), cap=1000),
+        })
+    return out
+
+
+def _project_events(value, budget: _ProjectionBudget) -> list[dict]:
+    if not isinstance(value, list):
+        if value is not None:
+            budget.omit("omitted_events")
+        return []
+    selected = value[:_EVENTS_CAP]
+    if len(value) > _EVENTS_CAP:
+        budget.omit("omitted_events", len(value) - _EVENTS_CAP)
+    out = []
+    for raw in selected:
+        if not isinstance(raw, dict):
+            budget.omit("omitted_events")
+            continue
+        event = {"name": budget.text(raw.get("name", "event"), cap=80, single_line=True) or "event"}
+        allowed = [(key, child) for key, child in raw.items() if key != "name" and key in _EVENT_FIELDS]
+        budget.omit("omitted_fields", sum(1 for key in raw if key != "name" and key not in _EVENT_FIELDS))
+        if len(allowed) > _EVENT_FIELDS_CAP:
+            budget.omit("omitted_fields", len(allowed) - _EVENT_FIELDS_CAP)
+        for key, child in allowed[:_EVENT_FIELDS_CAP]:
+            if key in {"n", "count"}:
+                event[key] = _safe_token_count(child)
+            else:
+                event[key] = budget.text(child, cap=500 if key in {"error", "message", "reason"} else 160,
+                                         single_line=key not in {"error", "message", "reason"})
+        out.append(event)
+    return out
 
 
 def _normalized_id(value) -> Optional[str]:
@@ -35,7 +245,15 @@ def _normalized_id(value) -> Optional[str]:
     if value is None:
         return None
     if isinstance(value, str):
-        return value if value and len(value) <= _MAX_SPAN_ID_CHARS else None
+        if not value or len(value) > _MAX_SPAN_ID_CHARS:
+            return None
+        # IDs are echoed in routes, trees and persisted indexes.  A custom exporter must not be able
+        # to smuggle a credential/control payload through the identity plane, which intentionally does
+        # not otherwise redact values (redacting an ID would silently change topology).  Quarantine the
+        # observation instead; ordinary hex/UUID and legacy compact IDs remain byte-identical.
+        safe = redact_persisted_text(
+            value, max_chars=_MAX_SPAN_ID_CHARS, entropy=True, single_line=True)
+        return value if safe == value else None
     if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_TRACE_TOKENS:
         return str(value)
     return None
@@ -79,11 +297,13 @@ def _safe_token_count(value) -> int:
 
 
 def _normalize_span(value) -> Optional[dict]:
-    """Validate the light structural contract of one durable span.
+    """Project one durable span through the strict browser/index security contract.
 
     A complete, valid-JSON line with a bad schema is a quarantined observation, not an end-of-log marker.
-    Invalid required ids drop the one line; recoverable fields degrade to safe defaults. The returned
-    dictionaries are shallow copies, so readers never mutate the durable/raw objects they were handed.
+    Invalid required ids drop the one line; recoverable fields degrade to safe defaults.  Unknown keys,
+    raw exception payloads and unbounded structured values stay in ``spans.jsonl`` but never cross into
+    an index or response.  Omission metadata is carried on the span and remains idempotent if a persisted
+    index record is normalized again after restart.
     """
     if not isinstance(value, dict):
         return None
@@ -92,45 +312,106 @@ def _normalize_span(value) -> Optional[dict]:
     if span_id is None or trace_id is None:
         return None
 
-    span = dict(value)
-    span["span_id"] = span_id
-    span["trace_id"] = trace_id
-    span["parent_id"] = _normalized_id(span.get("parent_id"))
-    span["start"] = _finite_number(
-        span.get("start", 0.0), maximum=_MAX_TRACE_SECONDS)
-    if "end" in span:
-        span["end"] = _finite_number(span.get("end"), maximum=_MAX_TRACE_SECONDS)
-    if "duration_s" in span:
+    budget = _ProjectionBudget(value.get("_projection"))
+    budget.omit("omitted_fields", sum(1 for key in value if key not in _SPAN_FIELDS))
+    parent_id = _normalized_id(value.get("parent_id"))
+    if value.get("parent_id") is not None and parent_id is None:
+        budget.omit("omitted_fields")
+    span = {
+        "name": budget.text(value.get("name", "span"), cap=160, single_line=True) or "span",
+        "kind": budget.text(value.get("kind", "operation"), cap=32, single_line=True) or "operation",
+        "trace_id": trace_id,
+        "span_id": span_id,
+        "parent_id": parent_id,
+        "run_id": budget.text(value.get("run_id", ""), cap=256, single_line=True),
+        "status": budget.text(value.get("status", ""), cap=32, single_line=True),
+        "start": _finite_number(value.get("start", 0.0), maximum=_MAX_TRACE_SECONDS),
+    }
+    if "end" in value:
+        span["end"] = _finite_number(value.get("end"), maximum=_MAX_TRACE_SECONDS)
+    if "duration_s" in value:
         span["duration_s"] = _finite_number(
-            span.get("duration_s"), nonnegative=True, maximum=_MAX_TRACE_SECONDS)
+            value.get("duration_s"), nonnegative=True, maximum=_MAX_TRACE_SECONDS)
 
-    raw_attributes = span.get("attributes")
-    attributes = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
-    node_id = attributes.get("node_id")
-    if not ((isinstance(node_id, int) and not isinstance(node_id, bool)
-             and 0 <= node_id <= _MAX_TRACE_TOKENS)
-            or (isinstance(node_id, str) and node_id
-                and len(node_id) <= _MAX_NODE_ID_CHARS)):
-        attributes.pop("node_id", None)
+    raw_attributes = value.get("attributes")
+    raw_attributes = raw_attributes if isinstance(raw_attributes, dict) else {}
+    budget.omit("omitted_attributes", sum(1 for key in raw_attributes if key not in _ATTRIBUTE_FIELDS))
+    attributes = {}
+    node_id = raw_attributes.get("node_id")
+    if isinstance(node_id, int) and not isinstance(node_id, bool) and 0 <= node_id <= _MAX_TRACE_TOKENS:
+        attributes["node_id"] = node_id
+    elif isinstance(node_id, str) and node_id and len(node_id) <= _MAX_NODE_ID_CHARS:
+        attributes["node_id"] = budget.text(node_id, cap=_MAX_NODE_ID_CHARS, single_line=True)
+    elif "node_id" in raw_attributes:
+        budget.omit("omitted_attributes")
     for key in ("phase_span", "input_from"):
-        if key in attributes:
-            normalized = _normalized_id(attributes.get(key))
+        if key in raw_attributes:
+            normalized = _normalized_id(raw_attributes.get(key))
             if normalized is None:
-                attributes.pop(key, None)
+                budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
-    usage = attributes.get("usage")
+    for key in _ATTR_TEXT_FIELDS:
+        if key in raw_attributes:
+            attributes[key] = budget.text(
+                raw_attributes.get(key), cap=512 if key in {"reason", "error_reason", "materialized"} else 160,
+                single_line=key not in {"reason", "error_reason"})
+    for key in _ATTR_BOOL_FIELDS:
+        if key in raw_attributes:
+            if isinstance(raw_attributes.get(key), bool):
+                attributes[key] = raw_attributes[key]
+            else:
+                budget.omit("omitted_attributes")
+    for key in _ATTR_INT_FIELDS:
+        if key in raw_attributes:
+            item = raw_attributes.get(key)
+            if isinstance(item, int) and not isinstance(item, bool) and -(1 << 63) <= item <= (1 << 63) - 1:
+                attributes[key] = item
+            else:
+                budget.omit("omitted_attributes")
+    for key in _ATTR_FLOAT_FIELDS:
+        if key in raw_attributes:
+            attributes[key] = _finite_number(raw_attributes.get(key))
+    if "parent_id" in raw_attributes:
+        parent_node = raw_attributes.get("parent_id")
+        if isinstance(parent_node, int) and not isinstance(parent_node, bool) and 0 <= parent_node <= _MAX_TRACE_TOKENS:
+            attributes["parent_id"] = parent_node
+        else:
+            budget.omit("omitted_attributes")
+
+    usage = raw_attributes.get("usage")
     usage = dict(usage) if isinstance(usage, dict) else {}
-    for key in ("prompt", "completion", "total"):
+    safe_usage = {}
+    for key in ("prompt", "completion", "total", "context"):
         if key in usage:
-            usage[key] = _safe_token_count(usage[key])
-    if "usage" in attributes or usage:
-        attributes["usage"] = usage
-    if "cost" in attributes:
-        attributes["cost"] = _finite_number(attributes.get("cost"), nonnegative=True)
-    if "tool_calls" in attributes and not isinstance(attributes.get("tool_calls"), list):
-        attributes["tool_calls"] = []
+            safe_usage[key] = _safe_token_count(usage[key])
+    if "usage" in raw_attributes:
+        attributes["usage"] = safe_usage
+        if not isinstance(raw_attributes.get("usage"), dict):
+            budget.omit("omitted_attributes")
+        elif len(usage) > len(safe_usage):
+            budget.omit("omitted_items", len(usage) - len(safe_usage))
+    if "cost" in raw_attributes:
+        attributes["cost"] = _finite_number(raw_attributes.get("cost"), nonnegative=True)
+    if "model_parameters" in raw_attributes:
+        attributes["model_parameters"] = _safe_structured(raw_attributes.get("model_parameters"), budget)
+    if "tool_calls" in raw_attributes:
+        attributes["tool_calls"] = _project_tool_calls(raw_attributes.get("tool_calls"), budget)
+    if "input" in raw_attributes:
+        attributes["input"] = (_project_messages(raw_attributes.get("input"), budget)
+                               if span["kind"] == "generation"
+                               else _safe_structured(raw_attributes.get("input"), budget))
+    for key in ("output", "thinking"):
+        if key in raw_attributes:
+            item = raw_attributes.get(key)
+            attributes[key] = (budget.text(item, cap=_IO_CAP)
+                               if isinstance(item, str) or item is None
+                               else _safe_structured(item, budget))
+    if span["kind"] == "generation" and budget.counts.get("omitted_messages"):
+        attributes["input_partial"] = True
     span["attributes"] = attributes
+    span["events"] = _project_events(value.get("events"), budget)
+    span["_projection"] = budget.metadata()
     return span
 
 
@@ -141,6 +422,70 @@ def _normalize_spans(spans) -> list[dict]:
         if normalized is not None:
             out.append(normalized)
     return out
+
+
+def _bounded_tail(values, cap: int) -> tuple[list, int]:
+    """Return at most cap newest values plus the exact number observed, without a full copy."""
+    cap = max(0, int(cap))
+    if isinstance(values, (list, tuple)):
+        return list(values[-cap:]) if cap else [], len(values)
+    tail = deque(maxlen=cap)
+    total = 0
+    for value in values or ():
+        total += 1
+        if cap:
+            tail.append(value)
+    return list(tail), total
+
+
+def _bounded_node_trace_tail(values, node_id, cap: int) -> tuple[list, int]:
+    """Cap a node conversation only after selecting the traces attributed to that node.
+
+    The no-index path receives the entire run, whereas the indexed path already receives only the
+    target node's traces.  Taking the whole-run tail first lets sufficiently busy, unrelated nodes
+    evict an older target node completely and also makes the two paths report different totals.
+    ``build_conversation`` is public but its normal inputs are concrete snapshots (``load_spans`` or
+    ``SpanIndex.full_spans_for_node``); retain a bounded one-pass degradation for exotic iterables.
+    """
+    if not isinstance(values, (list, tuple)):
+        return _bounded_tail(values, cap)
+
+    target = str(node_id)
+    matching_trace_ids: set[str] = set()
+    for raw in values:
+        if not isinstance(raw, dict):
+            continue
+        trace_id = _normalized_id(raw.get("trace_id"))
+        raw_node_id = _node_id_of(raw)
+        if trace_id is not None and raw_node_id is not None and str(raw_node_id) == target:
+            matching_trace_ids.add(trace_id)
+
+    # CODEX AGENT: Filtering precedes the global cap.  This must stay equivalent to the index's
+    # ``node_tids -> rows -> tail`` path or an unrelated busy node can erase the requested story.
+    matching = (
+        raw for raw in values
+        if isinstance(raw, dict) and _normalized_id(raw.get("trace_id")) in matching_trace_ids
+    )
+    return _bounded_tail(matching, cap)
+
+
+def _response_projection(*, total_spans: int, visible_spans: int, light: bool = False,
+                         truncated_spans: int = 0, **extra) -> dict:
+    total = max(visible_spans, _projection_counter(total_spans))
+    omitted = max(0, total - visible_spans)
+    clean_extra = {key: _projection_counter(value) for key, value in extra.items()}
+    truncated = omitted > 0 or truncated_spans > 0 or any(
+        value > 0 for key, value in clean_extra.items() if key.startswith("omitted_"))
+    return {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "light": bool(light),
+        "truncated": truncated,
+        "total_spans": total,
+        "visible_spans": visible_spans,
+        "omitted_spans": omitted,
+        "truncated_spans": max(0, truncated_spans),
+        **clean_extra,
+    }
 
 
 def load_spans(path: str | os.PathLike) -> list[dict]:
@@ -217,37 +562,40 @@ _MSGS_CAP = 10          # max messages kept in a generation's `input` (head + ta
 
 
 def _cap_str(v, n: int = _IO_CAP):
-    if isinstance(v, str) and len(v) > n:
-        return v[:n] + f"\n…[+{len(v) - n} chars truncated — full text in spans.jsonl]"
-    return v
+    if not isinstance(v, str):
+        return v
+    return redact_persisted_text(v, max_chars=max(0, int(n)), entropy=True)
 
 
 def _cap_msgs(msgs: list) -> list:
     if not isinstance(msgs, list):
         return msgs
-    capped = [({**m, "content": _cap_str(m.get("content", ""))} if isinstance(m, dict) else m) for m in msgs]
-    if len(capped) <= _MSGS_CAP:
-        return capped
-    head, tail = _MSGS_CAP // 2, _MSGS_CAP - _MSGS_CAP // 2
-    return capped[:head] + [{"role": "system", "content": f"…[{len(capped) - _MSGS_CAP} earlier messages omitted]"}] + capped[-tail:]
+    return _project_messages(msgs, _ProjectionBudget())
 
 
 def _cap_span_io(s: dict) -> dict:
-    """Return the span with its heavy I/O attributes truncated (generation/tool only)."""
+    """Return one already-normalized span with bounded/redacted I/O and updated omission truth."""
     a = s.get("attributes")
     if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
         return s
+    budget = _ProjectionBudget(s.get("_projection"))
     a = dict(a)
-    if isinstance(a.get("output"), str):
-        a["output"] = _cap_str(a["output"])
-    if isinstance(a.get("thinking"), str):
-        a["thinking"] = _cap_str(a["thinking"])
+    for key in ("output", "thinking"):
+        if key in a:
+            a[key] = (budget.text(a.get(key), cap=_IO_CAP)
+                      if isinstance(a.get(key), str) or a.get(key) is None
+                      else _safe_structured(a.get(key), budget))
     if "input" in a:
-        a["input"] = _cap_msgs(a["input"])
-    return {**s, "attributes": a}
+        a["input"] = (_project_messages(a.get("input"), budget)
+                      if s.get("kind") == "generation"
+                      else _safe_structured(a.get("input"), budget))
+    if s.get("kind") == "generation" and budget.counts.get("omitted_messages"):
+        a["input_partial"] = True
+    return {**s, "attributes": a, "_projection": budget.metadata()}
 
 
-_STRIP_IO_KEYS = ("input", "output", "thinking", "input_carry", "input_from")
+_STRIP_IO_KEYS = ("input", "output", "thinking", "input_carry", "input_from",
+                  "model_parameters", "tool_calls")
 
 
 def _strip_span_io(s: dict) -> dict:
@@ -257,7 +605,7 @@ def _strip_span_io(s: dict) -> dict:
     (`input_carry`/`input_from`): with no `input` they carry no meaning, and leaving them would let a
     stray `hydrate_inputs` on a light span reconstruct to `[]` (its `input` is gone)."""
     a = s.get("attributes")
-    if not isinstance(a, dict) or not any(k in a for k in ("input", "output", "thinking")):
+    if not isinstance(a, dict) or not any(k in a for k in _STRIP_IO_KEYS):
         return s
     return {**s, "attributes": {k: v for k, v in a.items() if k not in _STRIP_IO_KEYS}}
 
@@ -387,12 +735,14 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
 
 
 def hydrate_inputs(spans: list[dict]) -> list[dict]:
-    """Reconstruct the FULL verbatim `input` of every delta-encoded generation in `spans` from its
+    """Reconstruct the complete retained `input` of every delta-encoded generation in `spans` from its
     `input_from` chain (see `tracing.generation`): full = reconstruct(input_from)[:input_carry] + delta.
     Returns spans with `input` expanded and the `input_carry`/`input_from` bookkeeping dropped, so a
-    reader (the single-observation view, the per-op trace tree) sees exactly the prompt the LLM received,
-    with nothing lost. A generation with no `input_carry` (old full logs, or a fresh base) passes through
-    unchanged. Reconstruct within the passed set (a whole trace) — the chain never leaves its trace.
+    reader (the single-observation view, the per-op trace tree) sees the complete diagnostic projection
+    retained by tracing. Capture-time redaction and projection caps still apply, so this must not be
+    described as the verbatim provider prompt. A generation with no `input_carry` (old full logs, or a
+    fresh base) passes through unchanged. Reconstruct within the passed set (a whole trace) — the chain
+    never leaves its trace.
     If an ANCESTOR span is absent (a torn/offset-skipped line — `span_index._read_full` drops one) the
     chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
     stamped `input_partial=True` so a reader never presents a short input as the verbatim prompt."""
@@ -473,16 +823,20 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
     return out
 
 
-def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
+def build_conversation(state: RunState, spans: list[dict], node_id, *, total_spans=None) -> dict:
     """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
     with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
     files-as-truth; caps every string for the browser, but never re-sends the growing history."""
-    spans = _normalize_spans(spans)
+    selected, _observed_total = _bounded_node_trace_tail(
+        spans, node_id, TRACE_CONVERSATION_SPAN_CAP)
+    spans = _normalize_spans(selected)
     by_id = {s["span_id"]: s for s in spans}
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
     stages: list[dict] = []
+    matching_span_count = 0
+    matching_spans: list[dict] = []
     for tid, ss in by_trace.items():
         ss_sorted = sorted(ss, key=lambda x: x.get("start", 0.0))
         # The REAL root may be absent LIVE: an operation span is written only on CLOSE, and
@@ -496,6 +850,8 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
         nid = _node_id_of(first) if first else None
         if nid is None or str(nid) != str(node_id):
             continue
+        matching_span_count += len(ss)
+        matching_spans.extend(ss)
         # Split EVERY trace into its sub-loop bands (propose / stages / plan / implement / repair /
         # inline_repair / …) so the conversation reads as ordered role blocks. Wrapper roots
         # (`create_node` = "Author node", `seed_workspace` around an inline repair) are structure the
@@ -562,17 +918,49 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
                                "start": _first_turn_start(g),
                                "rollup": _rollup(grp), "turns": turns})
     stages.sort(key=lambda x: x.get("start", 0.0))
-    return {"run_id": state.run_id, "task_id": state.task_id, "node_id": str(node_id), "stages": stages}
+    total_stages = len(stages)
+    total_turns = sum(len(stage.get("turns") or []) for stage in stages)
+    # CODEX AGENT: Bound the rendered thread globally, not merely each text field.  A crafted trace
+    # with thousands of tiny stages/turns otherwise remains a multi-megabyte response and DOM tree.
+    visible: list[dict] = []
+    remaining = _CONVERSATION_TURN_CAP
+    for stage in reversed(stages[-_CONVERSATION_STAGE_CAP:]):
+        turns = stage.get("turns") or []
+        keep = turns[-remaining:] if remaining else []
+        omitted_here = max(0, len(turns) - len(keep))
+        if keep or not turns:
+            visible.append({**stage, "turns": keep,
+                            "projection": {"truncated": omitted_here > 0,
+                                           "omitted_turns": omitted_here}})
+        remaining = max(0, remaining - len(keep))
+    stages = list(reversed(visible))
+    visible_turns = sum(len(stage.get("turns") or []) for stage in stages)
+    # `_observed_total` is the exact number of observations in traces attributed to this node for both
+    # the whole-run fallback and the node-scoped index path; it is measured before the response cap.
+    reported_total = max(matching_span_count, _observed_total, _projection_counter(total_spans))
+    projection = _response_projection(
+        total_spans=reported_total, visible_spans=len(matching_spans),
+        truncated_spans=sum(1 for span in matching_spans
+                            if (span.get("_projection") or {}).get("truncated")),
+        total_stages=total_stages, visible_stages=len(stages),
+        omitted_stages=max(0, total_stages - len(stages)),
+        total_turns=total_turns, visible_turns=visible_turns,
+        omitted_turns=max(0, total_turns - visible_turns))
+    return {"schema": TRACE_PROJECTION_SCHEMA, "run_id": state.run_id, "task_id": state.task_id,
+            "node_id": str(node_id), "stages": stages, "projection": projection}
 
 
-def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False) -> dict:
+def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False,
+                     total_spans=None, span_cap: int = TRACE_VIEW_SPAN_CAP) -> dict:
     """Group spans into per-node trees + a run summary, correlated by node_id (carried on each
     trace's root span). Spans with no node_id land under `unscoped` (e.g. onboarding). Each span
     carries `kind` (operation/generation/tool) so the UI renders the Langfuse-style observation
     tree; `rollups` gives per-node token/cost/observation totals aggregated from generations.
     Heavy generation I/O is truncated (see `_cap_span_io`) so the payload stays browser-safe; with
     `light=True` it's dropped entirely (run-level timeline doesn't need prompts/outputs)."""
-    spans = [(_strip_span_io if light else _cap_span_io)(s) for s in _normalize_spans(spans)]
+    selected, observed_total = _bounded_tail(spans, span_cap)
+    spans = [(_strip_span_io if light else _cap_span_io)(s) for s in _normalize_spans(selected)]
+    reported_total = max(observed_total, _projection_counter(total_spans), len(spans))
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
@@ -602,14 +990,24 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False)
 
     errors = [s for s in spans if s.get("status") == "ERROR"]
     run_roll = _rollup(spans)
+    truncated_spans = sum(
+        1 for span in spans if (span.get("_projection") or {}).get("truncated") is True)
+    projection = _response_projection(
+        total_spans=reported_total, visible_spans=len(spans), light=light,
+        truncated_spans=truncated_spans)
     return {
+        "schema": TRACE_PROJECTION_SCHEMA,
         "run_id": state.run_id,
         "task_id": state.task_id,
         "nodes": {k: v for k, v in nodes.items()},
         "rollups": {k: _rollup(v) for k, v in node_spans.items()},
         "unscoped": unscoped,
+        "projection": projection,
         "summary": {
-            "spans": len(spans),
+            "spans": reported_total,
+            "visible_spans": len(spans),
+            "omitted_spans": projection["omitted_spans"],
+            "rollup_partial": projection["omitted_spans"] > 0,
             "errors": len(errors),
             "generations": run_roll["generations"],
             "tools": run_roll["tools"],

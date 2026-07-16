@@ -399,11 +399,14 @@ def build_router(srv) -> APIRouter:
             # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
             # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
             tv = srv.node_trace_view(rd, nid)
-            return {"nodes": tv.get("nodes", {}).get(str(nid), []),
+            return {"schema": tv.get("schema"),
+                    "nodes": tv.get("nodes", {}).get(str(nid), []),
                     "rollup": tv.get("rollups", {}).get(str(nid), {}),
-                    "summary": tv.get("summary", {})}
+                    "summary": tv.get("summary", {}),
+                    "projection": tv.get("projection", {})}
         except Exception:  # noqa: BLE001
-            return {"nodes": [], "rollup": {}, "summary": {}}
+            return {"nodes": [], "rollup": {}, "summary": {},
+                    "projection": {"truncated": True, "unavailable": True}}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
     def node_trace(run_id: str, nid: int):
@@ -414,45 +417,64 @@ def build_router(srv) -> APIRouter:
 
     @router.get("/api/runs/{run_id}/spans/{sid}")
     def span_io(run_id: str, sid: str):
-        """Full (uncapped) input/output/reasoning for ONE observation — fetched on demand when the
-        user expands a generation/tool in the trace tree. The tree endpoints stay light (no I/O) so a
-        long run's trace is browser-safe; the complete text lives here and in spans.jsonl. No info lost."""
+        """Bounded, redacted I/O projection for one observation; raw diagnostics stay in spans.jsonl."""
         rd = _run_dir(run_id)
         try:
             # Seek straight to the span's byte offset via the index instead of scanning the whole
             # (up to 1 GB) spans.jsonl for one span. Falls back to a scan if the index lacks it (a
             # span past the indexed tail, a foreign/torn file) so nothing is ever unreachable.
             from looplab.events.span_index import get_index
+            from looplab.events.traceview import (
+                TRACE_DETAIL_SPAN_CAP, TRACE_PROJECTION_SCHEMA, _cap_span_io, _cap_str,
+                _normalize_span)
             idx = get_index(rd / "spans.jsonl")
             s = idx.full_span(sid) if idx is not None else None
             if s is None:
                 for cand in iter_jsonl(rd / "spans.jsonl"):
-                    if cand.get("span_id") == sid:
-                        s = cand
+                    if isinstance(cand, dict) and cand.get("span_id") == sid:
+                        s = _normalize_span(cand)
                         break
             if s is not None:
                 a = s.get("attributes") or {}
-                # Delta-encoded generation: reconstruct its FULL verbatim input from the trace's chain
+                trace_spans = []
+                trace_total = idx.trace_span_count(s.get("trace_id")) if idx is not None else 1
+                # Delta-encoded generation: reconstruct its input from a bounded trace window, then
+                # project it through the per-message/per-span caps below.
                 # (tracing stores only the per-turn delta to keep spans.jsonl ~6x smaller) — so the
                 # expanded observation shows exactly the prompt the LLM received. No-op for tools/old logs.
                 if s.get("kind") == "generation" and "input_carry" in a:
                     from looplab.events.traceview import hydrate_inputs
                     tid = s.get("trace_id")
-                    trace_spans = (idx.full_spans_for_trace(tid) if idx is not None
-                                   else [c for c in iter_jsonl(rd / "spans.jsonl") if c.get("trace_id") == tid])
+                    trace_spans = (idx.full_spans_for_trace(
+                        tid, TRACE_DETAIL_SPAN_CAP, anchor_sid=sid) if idx is not None else [s])
                     # `s` may be a just-appended span past the indexed tail (found via the scan fallback
                     # above but absent from the index snapshot) — include it so its own delta joins the
                     # chain and reconstruction resolves, instead of returning the raw delta until top-up.
                     if not any(c.get("span_id") == sid for c in trace_spans):
                         trace_spans = trace_spans + [s]
                     s = next((h for h in hydrate_inputs(trace_spans) if h.get("span_id") == sid), s)
-                    a = s.get("attributes") or {}
-                return {"span_id": sid, "name": s.get("name"), "kind": s.get("kind"),
-                        "attributes": a, "events": s.get("events") or [],
-                        "duration_s": s.get("duration_s"), "status": s.get("status")}
+                s = _cap_span_io(s)
+                projection = dict(s.get("_projection") or {})
+                visible = len(trace_spans) if trace_spans else 1
+                projection.update({
+                    "trace_total_spans": trace_total,
+                    "trace_visible_spans": visible,
+                    "omitted_trace_spans": max(0, trace_total - visible),
+                    "truncated": projection.get("truncated") is True or trace_total > visible,
+                })
+                return {"schema": TRACE_PROJECTION_SCHEMA, "span_id": s.get("span_id"),
+                        "name": s.get("name"), "kind": s.get("kind"),
+                        "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
+                        "duration_s": s.get("duration_s"), "status": s.get("status"),
+                        "projection": projection}
         except Exception:  # noqa: BLE001
             pass
-        return {"span_id": sid, "attributes": {}, "events": []}
+        try:
+            safe_sid = _cap_str(sid, 256)
+        except Exception:  # noqa: BLE001
+            safe_sid = ""
+        return {"span_id": safe_sid, "attributes": {}, "events": [],
+                "projection": {"truncated": False, "unavailable": True}}
 
     @router.get("/api/runs/{run_id}/trace/tail")
     def trace_tail(run_id: str, limit: int = 30):
@@ -469,8 +491,11 @@ def build_router(srv) -> APIRouter:
         # empty feed exactly during the heavy generations a user most wants to watch. Still bounded so a
         # multi-MB spans.jsonl is never re-parsed in full every poll.
         recent: list[dict] = []
+        from looplab.events.traceview import (
+            TRACE_PROJECTION_SCHEMA, _cap_str, _finite_number, _normalize_span)
         _CHUNK = 262144
         _MAX_TAIL = 8 * 1024 * 1024
+        source_truncated = False
         try:
             import os
             p = rd / "spans.jsonl"
@@ -487,33 +512,51 @@ def build_router(srv) -> APIRouter:
                         break
             lines = blob.splitlines()
             if start > 0 and lines:
+                source_truncated = True
                 lines = lines[1:]                    # drop the partial first line (didn't reach BOF)
             for line in lines:
                 try:
                     s = json.loads(line)
                 except (ValueError, TypeError):
                     continue
-                if s.get("kind") not in ("generation", "tool"):
+                s = _normalize_span(s)
+                if s is None or s.get("kind") not in ("generation", "tool"):
                     continue
-                a = s.get("attributes") or {}
-                it = {"span_id": s.get("span_id"), "kind": s.get("kind"), "node_id": a.get("node_id"),
-                      "start": s.get("start"), "duration_s": s.get("duration_s"),
-                      "status": s.get("status")}
+                a = s.get("attributes") if isinstance(s.get("attributes"), dict) else {}
+                node_id = a.get("node_id")
+                if not ((isinstance(node_id, int) and not isinstance(node_id, bool)
+                         and 0 <= node_id <= (1 << 63) - 1)
+                        or (isinstance(node_id, str) and 0 < len(node_id) <= 128)):
+                    node_id = None
+                elif isinstance(node_id, str):
+                    node_id = _cap_str(node_id, 128)
+                it = {"span_id": s.get("span_id"), "kind": s.get("kind"),
+                      "node_id": node_id,
+                      "start": _finite_number(s.get("start"), maximum=1e15),
+                      "duration_s": _finite_number(s.get("duration_s"), nonnegative=True, maximum=1e15),
+                      "status": _cap_str(str(s.get("status") or ""), 32)}
                 if s.get("kind") == "generation":
-                    it["model"] = a.get("model")
+                    it["model"] = _cap_str(str(a.get("model") or ""), 160)
                     txt = a.get("thinking") or a.get("output") or ""
-                    it["text"] = txt[:500] if isinstance(txt, str) else ""
+                    it["text"] = _cap_str(txt, 500) if isinstance(txt, str) else ""
                 else:
-                    it["tool"] = a.get("tool")
+                    it["tool"] = _cap_str(str(a.get("tool") or ""), 128)
                     inp = a.get("input")
                     if isinstance(inp, dict):
-                        it["arg"] = str(inp.get("path") or inp.get("pattern") or inp.get("query")
-                                        or inp.get("command") or inp.get("root") or "")[:160]
-                    it["output"] = str(a.get("output") or "")[:200]
+                        arg = inp.get("path") or inp.get("pattern") or inp.get("query") \
+                            or inp.get("command") or inp.get("root") or ""
+                        it["arg"] = _cap_str(str(arg), 160)
+                    it["output"] = _cap_str(str(a.get("output") or ""), 200)
                 recent.append(it)
         except OSError:
             pass
-        return {"tail": recent[-limit:]}
+        shown = recent[-limit:]
+        omitted = max(0, len(recent) - len(shown))
+        return {"schema": TRACE_PROJECTION_SCHEMA, "tail": shown,
+                "projection": {"schema": TRACE_PROJECTION_SCHEMA,
+                               "truncated": source_truncated or omitted > 0,
+                               "source_truncated": source_truncated,
+                               "visible_spans": len(shown), "omitted_spans": omitted}}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/conversation")
     def node_conversation(run_id: str, nid: int):
@@ -524,15 +567,19 @@ def build_router(srv) -> APIRouter:
         raw span tree / spans.jsonl)."""
         rd = _run_dir(run_id)
         try:
-            from looplab.events.traceview import build_conversation, load_spans
+            from looplab.events.traceview import (
+                TRACE_CONVERSATION_SPAN_CAP, build_conversation, load_spans)
             from looplab.events.span_index import get_index
             # Read only THIS node's traces' spans (by byte offset via the index), not the whole
             # spans.jsonl — a node's conversation on a 1 GB run no longer scans the entire file.
             idx = get_index(rd / "spans.jsonl")
-            spans = idx.full_spans_for_node(nid) if idx is not None else load_spans(rd / "spans.jsonl")
-            return build_conversation(srv.trace_scalars(rd), spans, nid)
+            total = idx.node_span_count(nid) if idx is not None else None
+            spans = (idx.full_spans_for_node(nid, TRACE_CONVERSATION_SPAN_CAP)
+                     if idx is not None else load_spans(rd / "spans.jsonl"))
+            return build_conversation(srv.trace_scalars(rd), spans, nid, total_spans=total)
         except Exception:  # noqa: BLE001
-            return {"run_id": run_id, "node_id": str(nid), "stages": []}
+            return {"run_id": run_id, "node_id": str(nid), "stages": [],
+                    "projection": {"truncated": True, "unavailable": True}}
 
     @router.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
@@ -615,7 +662,9 @@ def build_router(srv) -> APIRouter:
             return srv.trace_view(rd)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
             return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
-                    "summary": {"spans": 0, "errors": 0, "total_eval_seconds": 0}}
+                    "summary": {"spans": 0, "visible_spans": 0, "omitted_spans": 0,
+                                "errors": 0, "total_eval_seconds": 0},
+                    "projection": {"truncated": True, "unavailable": True}}
 
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str):
@@ -625,19 +674,38 @@ def build_router(srv) -> APIRouter:
         inside, so eventstore stamps it), and the UI shows only THAT trace here, not the node's whole
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
-        from looplab.events.traceview import load_spans, _tree, _cap_span_io, hydrate_inputs
+        from looplab.events.traceview import (
+            TRACE_DETAIL_SPAN_CAP, TRACE_PROJECTION_SCHEMA, _bounded_tail, _cap_span_io,
+            _normalized_id, _projection_counter, _response_projection, _tree, hydrate_inputs,
+            load_spans)
         try:
             # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
             from looplab.events.span_index import get_index
             idx = get_index(rd / "spans.jsonl")
-            raw = (idx.full_spans_for_trace(trace_id) if idx is not None
-                   else [s for s in load_spans(rd / "spans.jsonl") if s.get("trace_id") == trace_id])
+            safe_tid = _normalized_id(trace_id)
+            if safe_tid is None:
+                raise ValueError("invalid trace id")
+            total = idx.trace_span_count(safe_tid) if idx is not None else None
+            if idx is not None:
+                raw = idx.full_spans_for_trace(safe_tid, TRACE_DETAIL_SPAN_CAP)
+            else:
+                raw, total = _bounded_tail(
+                    (s for s in load_spans(rd / "spans.jsonl")
+                     if s.get("trace_id") == safe_tid), TRACE_DETAIL_SPAN_CAP)
             # Reconstruct delta-encoded generation inputs to the full verbatim prompt before capping,
             # so this per-op tree shows the real input (no-op on old logs / non-delta spans).
             spans = [_cap_span_io(s) for s in hydrate_inputs(raw)]
-            return {"spans": _tree(spans), "count": len(spans)}
+            total = max(len(spans), _projection_counter(total) if total is not None else len(raw))
+            projection = _response_projection(
+                total_spans=total, visible_spans=len(spans),
+                truncated_spans=sum(1 for span in spans
+                                    if (span.get("_projection") or {}).get("truncated") is True))
+            return {"schema": TRACE_PROJECTION_SCHEMA, "spans": _tree(spans, _normalized=True),
+                    "count": total, "visible_count": len(spans),
+                    "omitted_count": projection["omitted_spans"], "projection": projection}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
-            return {"spans": [], "count": 0}
+            return {"spans": [], "count": 0, "visible_count": 0, "omitted_count": 0,
+                    "projection": {"truncated": True, "unavailable": True}}
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):

@@ -106,7 +106,7 @@ def test_conversation_projection_unchanged_by_delta(tmp_path):
     assert any("You are a developer" in (m.get("content") or "") for m in requests[0]["messages"])
 
 
-def test_span_io_endpoint_reconstructs_full_input(tmp_path):
+def test_span_io_endpoint_reconstructs_bounded_input_with_omission_truth(tmp_path):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient
     from looplab.serve.server import make_app
@@ -120,8 +120,13 @@ def test_span_io_endpoint_reconstructs_full_input(tmp_path):
     last = sorted(gens, key=lambda x: x.get("start", 0.0))[-1]
     client = TestClient(make_app(tmp_path))
     body = client.get(f"/api/runs/demo/spans/{last['span_id']}").json()
-    # the expanded observation shows the FULL prompt the LLM received, reconstructed from the chain
-    assert body["attributes"]["input"] == sent[-1]
+    # The chain is reconstructed before projection, then the browser receives only a bounded head/tail
+    # preview with explicit truth that messages were omitted. Raw exact diagnostics remain in JSONL.
+    shown = body["attributes"]["input"]
+    assert len(shown) <= 10
+    assert shown[0] == sent[-1][0] and shown[-1] == sent[-1][-1]
+    assert body["attributes"]["input_partial"] is True
+    assert body["projection"]["omitted_messages"] == len(sent[-1]) - len(shown)
     assert "input_carry" not in body["attributes"]
 
 
@@ -317,7 +322,10 @@ def test_old_full_input_logs_still_work(tmp_path):
                       "attributes": {"node_id": 0, "input": [dict(m) for m in full], "output": "o"},
                       "events": [], "status": "OK", "start": float(k + 1), "duration_s": 1.0})
     (rd / "spans.jsonl").write_text("".join(json.dumps(s) + "\n" for s in spans), encoding="utf-8")
-    assert hydrate_inputs(spans) == spans                 # no input_carry → unchanged
+    hydrated = hydrate_inputs(spans)
+    assert [item["attributes"]["input"] for item in hydrated[1:]] == [
+        item["attributes"]["input"] for item in spans[1:]]
+    assert all(item["_projection"]["schema"] >= 2 for item in hydrated)
     st = RunState(run_id="demo", task_id="t", goal="g", direction="min")
     convo = build_conversation(st, load_spans(rd / "spans.jsonl"), 0)
     reqs = [t for t in convo["stages"][0]["turns"] if t["type"] == "request"]

@@ -13,6 +13,7 @@ import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import CommentsThread from './CommentsThread.jsx'
+import { traceDetailState, tracePartial, unavailableTraceDetail } from './traceProjection.js'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -403,25 +404,13 @@ const STAGE = {
 }
 const stageMeta = (name) => STAGE[name] || { icon: 'dot', role: name, desc: '', tone: 'var(--accent)' }
 
-function llmEvents(s) { return (s.events || []).filter(e => e.name === 'llm_call') }
-
 // Compact info helpers so each trace row carries the data that DIFFERENTIATES it (langfuse/Phoenix
 // convention: model · input→output tokens · a content preview), instead of a bare op name repeated.
 const ktok = (n) => (n == null ? '' : (n >= 1000 ? +(n / 1000).toFixed(n >= 9950 ? 0 : 1) + 'k' : String(n)))
 const shortModel = (m) => (m || '').split('/').pop()
-function callTok(c) { const t = c.tokens || {}; return { in: t.prompt, out: t.completion, total: t.total || ((t.prompt || 0) + (t.completion || 0)) } }
-// First meaningful line of the completion (what the call PRODUCED) — falls back to the last user
-// message (what it was ASKED) so even an empty/streaming completion still reads as something.
-function callPreview(c) {
-  const firstLine = (s) => (s || '').trim().split('\n').map(l => l.trim()).find(Boolean) || ''
-  const compl = firstLine(c.completion)
-  if (compl) return compl
-  const lastUser = [...(c.prompt || [])].reverse().find(m => m.role === 'user')
-  return firstLine(lastUser && lastUser.content)
-}
 // Roll the whole subtree of a span up to "how many model calls and how many tokens it cost" — shown on
 // the stage/span header so you see the expensive steps without expanding anything. Counts first-class
-// GENERATION spans (kind), and legacy `llm_call` events (older runs) so both render.
+// GENERATION spans. Projection schema 2 deliberately drops legacy event-embedded I/O.
 function spanRollup(s) {
   // tok = SUM of every call's total (billed — a tool loop re-sends the growing context each turn, O(n²)).
   // ctx = the PEAK single prompt = the real context-window size. out = generated tokens. The UI shows
@@ -429,7 +418,6 @@ function spanRollup(s) {
   let calls = 0, tok = 0, ctx = 0, out = 0
   const walk = (x) => {
     if (x.kind === 'generation') { calls++; const u = (x.attributes || {}).usage || {}; const p = u.prompt || 0; tok += (u.total != null ? u.total : p + (u.completion || 0)); ctx = Math.max(ctx, p); out += u.completion || 0 }
-    ;(x.events || []).forEach(e => { if (e.name === 'llm_call') { calls++; const t = callTok(e); tok += t.total || 0; ctx = Math.max(ctx, t.in || 0); out += t.out || 0 } })
     ;(x.children || []).forEach(walk)
   }
   walk(s)
@@ -445,7 +433,7 @@ function genToCall(s) {
     op: a.op, model: a.model, prompt: a.input || [],
     completion: typeof a.output === 'string' ? a.output : (a.output != null ? JSON.stringify(a.output, null, 2) : ''),
     thinking: a.thinking, tool_calls: a.tool_calls, model_parameters: a.model_parameters, cost: a.cost,
-    tokens: { prompt: u.prompt, completion: u.completion, total: u.total },
+    tokens: u,
   }
 }
 const asText = (v) => v == null ? '' : (typeof v === 'string' ? v : JSON.stringify(v, null, 2))
@@ -497,7 +485,7 @@ function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
   })
   const shown = all ? rows : rows.slice(0, SPAN_CAP)
   return <>
-    {shown.map(({ c, d, i }) => <SpanRow key={i} s={c} depth={d} t0={t0} total={total} runId={runId} parentOp={parentOp} />)}
+    {shown.map(({ c, d, i }) => <SpanRow key={`${runId}:${c.span_id || i}`} s={c} depth={d} t0={t0} total={total} runId={runId} parentOp={parentOp} />)}
     {!all && rows.length > SPAN_CAP && <button className="span-more" style={{ marginLeft: depth * 14 + 4 }}
       onClick={() => setAll(true)}>… show {rows.length - SPAN_CAP} more observations</button>}
   </>
@@ -507,10 +495,10 @@ function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
 // span's OFFSET from the trace start (t0) and sized by its duration, so sequence reads at a glance.
 // Renders three observation kinds distinctly — GENERATION (an LLM call: op·model·in→out·preview, its
 // prompt/output on expand), TOOL (name·arg, its input/output on expand), and OPERATION (a phase of
-// work) — so the tree shows exactly what called what and what each produced. Nothing is truncated.
+// work) — so the tree shows exactly what called what and what each bounded projection produced.
 function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const [open, setOpen] = useState(false)
-  const [io, setIo] = useState(null)   // lazily-fetched FULL i/o for a generation/tool (Langfuse-style)
+  const [io, setIo] = useState(null)
   const kind = s.kind || 'operation'
   const err = s.status === 'ERROR'
   const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
@@ -518,20 +506,20 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name).tone
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
   const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total} runId={runId} parentOp={s.name} />
-  // On first expand of a generation/tool, pull the full (uncapped) input/output on demand — the tree
-  // is served light so a long run stays fast, and NO information is lost (full text fetched here).
+  // On first expand, pull the bounded/redacted detail projection; its omission receipt is rendered.
   useEffect(() => {
     if (open && io === null && runId && s.span_id && (kind === 'generation' || kind === 'tool')) {
       let on = true
-      spanDetail(runId, s.span_id).then(d => on && setIo((d && d.attributes) || {})).catch(() => on && setIo({}))
+      spanDetail(runId, s.span_id).then(d => on && setIo(traceDetailState(d)))
+        .catch(() => on && setIo(unavailableTraceDetail()))
       return () => { on = false }
     }
   }, [open])
 
   if (kind === 'generation') {
     // Row header from the LIGHT span (op·model·tokens); the prompt/output come from the fetched `io`.
-    const a = { ...(s.attributes || {}), ...(io || {}) }
-    const c = genToCall({ ...s, attributes: a }), t = callTok(c)
+    const a = { ...(s.attributes || {}), ...(io?.attributes || {}) }
+    const c = genToCall({ ...s, attributes: a }), t = c.tokens
     return <>
       <button type="button" aria-expanded={open} className={'span-row gen disclosure-button' + (err ? ' err' : '')}
         style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
@@ -544,16 +532,18 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         })()}
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
-        {(t.in != null || t.out != null) && <span className="badge" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
+        {(t.prompt != null || t.completion != null) && <span className="badge" title={`${t.prompt || 0} prompt → ${t.completion || 0} completion tokens`}>{ktok(t.prompt)}→{ktok(t.completion)}</span>}
         {err && <span className="badge reason">ERROR</span>}
       </button>
       {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
-        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <GenBody c={c} />}</div>}
+        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : io.status === 'unavailable'
+          ? <div className="notice compact">Trace detail unavailable.</div>
+          : <>{io.partial && <div className="notice compact">Trace detail truncated.</div>}<GenBody c={c} /></>}</div>}
       {kids}
     </>
   }
   if (kind === 'tool') {
-    const a = { ...(s.attributes || {}), ...(io || {}) }
+    const a = { ...(s.attributes || {}), ...(io?.attributes || {}) }
     const inp = asText(a.input), outp = asText(a.output), name = (s.attributes || {}).tool || a.tool || 'tool'
     return <>
       <button type="button" aria-expanded={open} className={'span-row tool disclosure-button' + (err ? ' err' : '')}
@@ -565,7 +555,9 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         {err && <span className="badge reason">ERROR</span>}
       </button>
       {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
-        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : <>
+        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : io.status === 'unavailable'
+          ? <div className="notice compact">Trace detail unavailable.</div> : <>
+          {io.partial && <div className="notice compact">Trace detail truncated.</div>}
           {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
           {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
           {!inp && !outp && <div className="muted" style={{ fontSize: 12 }}>(no input/output recorded)</div>}</>}
@@ -573,12 +565,11 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
       {kids}
     </>
   }
-  // OPERATION span (a phase of work): its attributes, non-llm events, + legacy llm_call events (old runs).
+  // OPERATION span (a phase of work): bounded attributes and events.
   const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
-  const events = (s.events || []).filter(e => e.name !== 'llm_call')
-  const calls = llmEvents(s)
+  const events = s.events || []
   const m = stageMeta(s.name)
-  const detail = attrs.length || events.length || calls.length
+  const detail = attrs.length || events.length
   const OperationHeader = detail ? 'button' : 'div'
   return <>
     <OperationHeader type={detail ? 'button' : undefined} aria-expanded={detail ? open : undefined}
@@ -589,8 +580,6 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
       <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
       {bar}
       <span className="t">{fmt(s.duration_s, 3)}s</span>
-      {calls.length > 0 && (() => { const tok = calls.reduce((a, c) => a + (callTok(c).total || 0), 0)
-        return <span className="badge" title="model calls in this step — expand to read prompt & completion">{calls.length}×LLM{tok ? ` · ${ktok(tok)}` : ''}</span> })()}
       {err && <span className="badge reason">ERROR</span>}
     </OperationHeader>
     {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
@@ -600,53 +589,9 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         <span className="ty">{e.name}</span>{e.error ? <span className="flag"> {e.error}</span> :
           <span className="muted"> {Object.entries(e).filter(([k]) => k !== 'name').map(([k, v]) => `${k}=${v}`).join(' ')}</span>}
       </div>)}
-      {calls.map((c, i) => <LlmCall key={i} call={{ ...c, span: s.name }} idx={i} />)}
     </div>}
     {kids}
   </>
-}
-
-// One LLM call as a COMPACT, information-dense row (the langfuse "generation" line): op · model ·
-// in→out tokens · #prompt-msgs · 🧠 · a one-line content preview — so repeated calls in a loop read
-// as distinct steps, not "chat / chat / chat". Click to expand the full prompt / completion / reasoning.
-export function LlmCall({ call, idx }) {
-  const [open, setOpen] = useState(idx === 0)   // first call expanded by default
-  const [think, setThink] = useState(false)     // raw reasoning is debug-only — collapsed by default
-  const t = callTok(call)
-  const msgs = (call.prompt || []).length
-  const preview = callPreview(call)
-  return <div className={'llm-row' + (open ? ' open' : '')}>
-    <button type="button" className="llm-line disclosure-button" aria-expanded={open}
-      onClick={() => setOpen(o => !o)} title={preview || 'expand for prompt & completion'}>
-      <span className="span-tw">{open ? '▾' : '▸'}</span>
-      {typeof idx === 'number' && <span className="llm-i">{idx + 1}</span>}
-      <span className="llm-op">{call.op || 'llm'}</span>
-      {call.model && <span className="llm-model" title={call.model}>{shortModel(call.model)}</span>}
-      {(t.in != null || t.out != null) && <span className="llm-tok" title={`${t.in || 0} prompt → ${t.out || 0} completion tokens`}>{ktok(t.in)}→{ktok(t.out)}</span>}
-      {msgs > 2 && <span className="llm-msgs" title={`${msgs} messages in the prompt (context size)`}>{msgs}m</span>}
-      {call.thinking && <span className="llm-think" title="model reasoning captured"><OpIcon name="bulb" /></span>}
-      {preview && <span className="llm-prev">{preview}</span>}
-    </button>
-    {open && <div className="llm-io">
-      {(call.prompt || []).map((m, i) => <div key={i} className="msg">
-        <div className={'msg-role role-' + (m.role || 'user')}>{m.role}</div>
-        <pre className="code">{m.content}</pre>
-      </div>)}
-      <div className="msg">
-        <div className="msg-role role-completion">completion</div>
-        <pre className="code">{call.completion || '(empty)'}</pre>
-      </div>
-      {/* Raw <think> chain-of-thought: a debug aid only, kept collapsed so the clean answer above
-          stays the primary view. The conclusion is what matters; this is how it got there. */}
-      {call.thinking && <div className="msg think-debug">
-        <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
-          onClick={() => setThink(v => !v)}>
-          {think ? '▾' : '▸'} reasoning (debug)
-        </button>
-        {think && <Markdown className="think-body" text={call.thinking} />}
-      </div>}
-    </div>}
-  </div>
 }
 
 // A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
@@ -658,7 +603,7 @@ function StageBlock({ s, t0, total, runId }) {
     <div className="stage-h" title={m.desc}>
       <span className="stage-ic"><OpIcon name={m.icon} /></span>
       <b>{m.role}</b>
-      {roll.calls > 0 && <span className="stage-roll" title={`${roll.calls} model call(s) · context peaked at ~${roll.ctx} tokens, generated ~${roll.out} · ${roll.tok} billed (context re-sent each turn)`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
+      {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
       <span className="spacer" style={{ flex: 1 }} />
       <span className="t">{fmt(s.duration_s, 3)}s</span>
     </div>
@@ -676,7 +621,7 @@ export function NodeTrace({ spans, runId }) {
   const roots = spans || []
   if (!roots.length) return <div className="muted" style={{ fontSize: 12 }}>No LLM/execution spans captured for this node yet.</div>
   const { t0, total } = traceBounds(roots)
-  return <div className="trace">{roots.map((s, i) => <StageBlock key={i} s={s} t0={t0} total={total} runId={runId} />)}</div>
+  return <div className="trace">{roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}</div>
 }
 
 // The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
@@ -843,7 +788,9 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
-  if (!stages.length) return <div className="muted">No conversation captured for this node yet.</div>
+  const partial = tracePartial(conv.projection)
+  if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'}>{partial
+    ? 'Trace projection is partial.' : 'No conversation captured for this node yet.'}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
   // (propose/implement/…) has no subprocess log.
@@ -852,7 +799,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  return <div className="conv">
+  return <div className="conv">{partial && <div className="notice compact">Trace projection is partial.</div>}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -880,6 +827,7 @@ function Trace({ n, runId, live, working }) {
   const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy' | error message
   const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
+  const partial = tracePartial(n.trace?.projection)
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
   // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
@@ -929,8 +877,7 @@ function Trace({ n, runId, live, working }) {
     <div className="conv-toggle">
       <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
         title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}
-        title="The raw span tree with each generation's full re-sent message list">raw spans</button>
+      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>raw spans</button>
       {view === 'conversation' && <button className="seg" aria-pressed={allOpen} style={{ fontSize: 10 }} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
       <span style={{ flex: 1 }} />{clearBtn}{nav}
@@ -956,6 +903,7 @@ function Trace({ n, runId, live, working }) {
   const rtok = roll.tokens || {}
   return <div className="trace" ref={bodyRef}>
     {head}
+    {partial && <div className="notice compact">Trace projection is partial.</div>}
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
       Expand any observation to read its input &amp; output.
@@ -968,7 +916,7 @@ function Trace({ n, runId, live, working }) {
         {roll.cost ? ` · $${roll.cost}` : ''}
       </span> : null}
     </div>
-    {spans.map((s, i) => <React.Fragment key={i}>
+    {spans.map((s, i) => <React.Fragment key={`${n.attempt ?? ''}:${s.span_id || i}`}>
       <StageBlock s={s} t0={t0} total={total} runId={runId} />
       {agent && i === authorIdx && <AgentReport r={agent} />}
     </React.Fragment>)}

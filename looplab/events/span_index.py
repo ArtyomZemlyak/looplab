@@ -19,9 +19,9 @@ byte `(offset, length)` of each span's line in `spans.jsonl`. So:
 Built INCREMENTALLY (parse only bytes appended since last read — mirrors
 `eventstore._parse_jsonl_region`), cached in-process, and PERSISTED atomically to `spans.index.jsonl`
 so a cold/restarted server reads 16 MB, not 1 GB. It is STRICTLY an accelerator: any validation
-failure (identity/size mismatch, corruption, offset drift, missing file) falls back to a full rebuild
-from `spans.jsonl`, so the result is always byte-identical to reading `spans.jsonl` directly — worst
-case is "as slow as before", never wrong. `spans.jsonl` remains the sole source of truth.
+failure (identity/size mismatch, corruption, offset drift, missing file) falls back to a full rebuild.
+Records are the versioned, bounded/redacted trace projection rather than raw durable dictionaries;
+`spans.jsonl` remains the sole source of truth and the only place full diagnostics live.
 """
 from __future__ import annotations
 
@@ -38,7 +38,7 @@ from looplab.events.traceview import _normalize_span, _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 4
+_SCHEMA = 5
 _INDEX_NAME = "spans.index.jsonl"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
 # span bytes have grown by this factor since the last write. Bounds a live run's total index-write
@@ -168,16 +168,22 @@ class SpanIndex:
             self.covers = consumed
 
     # -- reads (snapshot the in-memory maps under `_rlock`, then do disk I/O outside it) ---------
-    def light_spans(self) -> list[dict]:
+    def light_spans(self, limit: Optional[int] = None) -> list[dict]:
         """A SNAPSHOT of the light span list (for `build_trace_view(light=True)`). A copy, not a live
         reference: build_trace_view iterates it while a concurrent `_topup` may append to `self.light`,
         and a plain-reference iteration would silently pick up half-appended tail spans. The dicts
         inside are shared (never mutated after creation), so the copy is shallow and cheap (~ms)."""
         with self._rlock:
-            return list(self.light)
+            cap = None if limit is None else max(0, int(limit))
+            values = self.light if cap is None else (self.light[-cap:] if cap else ())
+            return list(values)
+
+    def span_count(self) -> int:
+        with self._rlock:
+            return len(self.light)
 
     def _read_full(self, rows: list[int]) -> list[dict]:
-        """Read the FULL (uncapped) span lines for the given rows by seeking to their byte offsets —
+        """Read and safely project selected full span lines by seeking to their byte offsets —
         so a per-node/-trace/-span detail view touches only those bytes, not the whole file. `rows`
         is a snapshot taken under `_rlock` by the caller; `self.meta` is append-only, so reading
         `meta[r]` here (outside the lock) is safe — a concurrent append never moves an existing row."""
@@ -219,22 +225,41 @@ class SpanIndex:
         got = self._read_full([row])
         return got[0] if got else None
 
-    def full_spans_for_trace(self, tid: str) -> list[dict]:
+    def full_spans_for_trace(self, tid: str, limit: Optional[int] = None,
+                             *, anchor_sid: Optional[str] = None) -> list[dict]:
         with self._rlock:
             rows = list(self.by_tid.get(tid, ()))
+            if anchor_sid is not None:
+                anchor = self.by_sid.get(anchor_sid)
+                rows = [row for row in rows if anchor is not None and row <= anchor]
+            if limit is not None:
+                cap = max(0, int(limit))
+                rows = rows[-cap:] if cap else []
         return self._read_full(rows)
 
-    def light_spans_for_node(self, node_id) -> list[dict]:
+    def trace_span_count(self, tid: str) -> int:
+        with self._rlock:
+            return len(self.by_tid.get(tid, ()))
+
+    def light_spans_for_node(self, node_id, limit: Optional[int] = None) -> list[dict]:
         """The LIGHT spans of the traces attributed to this node — IN-MEMORY, no disk read (unlike
         `full_spans_for_node`, which seeks each span's full I/O). Lets the node-detail timeline build
         O(node) instead of O(whole run): `build_trace_view(light=True)` over just these yields the SAME
         `nodes[nid]`/`rollup` as over ALL spans, because a span's effective node (its own node_id, else
         its trace root's) is N iff it lives in one of N's traces — exactly what `node_tids` collects."""
         with self._rlock:
-            return [self.light[r] for tid in self.node_tids.get(str(node_id), ())
-                    for r in self.by_tid.get(tid, ())]
+            rows = sorted(r for tid in self.node_tids.get(str(node_id), ())
+                          for r in self.by_tid.get(tid, ()))
+            if limit is not None:
+                cap = max(0, int(limit))
+                rows = rows[-cap:] if cap else []
+            return [self.light[row] for row in rows]
 
-    def full_spans_for_node(self, node_id) -> list[dict]:
+    def node_span_count(self, node_id) -> int:
+        with self._rlock:
+            return sum(len(self.by_tid.get(tid, ())) for tid in self.node_tids.get(str(node_id), ()))
+
+    def full_spans_for_node(self, node_id, limit: Optional[int] = None) -> list[dict]:
         """Every FULL span in the traces attributed to this node (a node's create_node + evaluate +
         repair traces). Matches `build_conversation`'s grouping: it reads spans by TRACE and shows a
         trace whose root carries this node_id — so we collect all traces that carry the node_id on any
@@ -242,7 +267,11 @@ class SpanIndex:
         trace root's node_id, so an extra trace is dropped there, and a node-idless child of a matching
         trace is still included because we read by trace)."""
         with self._rlock:                              # snapshot rows — never iterate the live set/lists
-            rows = [r for tid in self.node_tids.get(str(node_id), ()) for r in self.by_tid.get(tid, ())]
+            rows = sorted(r for tid in self.node_tids.get(str(node_id), ())
+                          for r in self.by_tid.get(tid, ()))
+            if limit is not None:
+                cap = max(0, int(limit))
+                rows = rows[-cap:] if cap else []
         return self._read_full(rows)
 
     # -- persistence ---------------------------------------------------------------------------

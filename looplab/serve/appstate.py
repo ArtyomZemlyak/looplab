@@ -237,7 +237,7 @@ class AppState:
         (spans.jsonl, events.jsonl) file identity so an unchanged run is served instantly on refetch.
         Degrades to a full `load_spans` read if the index is unavailable (missing/foreign spans file)."""
         from looplab.events.span_index import get_index
-        from looplab.events.traceview import build_trace_view, load_spans
+        from looplab.events.traceview import TRACE_VIEW_SPAN_CAP, build_trace_view, load_spans
         sp = rd / "spans.jsonl"
 
         def _sig(p: Path):
@@ -262,13 +262,15 @@ class AppState:
         if hit is not None and hit[0] == sig:
             return hit[1]
         idx = get_index(sp)
-        spans = idx.light_spans() if idx is not None else load_spans(sp)
-        view = build_trace_view(self.trace_scalars(rd), spans, light=True)
+        total = idx.span_count() if idx is not None else None
+        spans = idx.light_spans(TRACE_VIEW_SPAN_CAP) if idx is not None else load_spans(sp)
+        view = build_trace_view(
+            self.trace_scalars(rd), spans, light=True, total_spans=total,
+            span_cap=TRACE_VIEW_SPAN_CAP)
         with self._trace_view_lock:      # only the dict ops — the slow build above ran lock-free
             self._trace_view_cache[key] = (sig, view)
-            # Keep this SMALL: a 1 GB run's light view is ~200 MB, so cap by count at a few recently-
-            # viewed runs (node-detail clicks on one run all share its single entry). An evicted view
-            # just rebuilds from the still-cached span index (~1 s), never a re-parse of spans.jsonl.
+            # CODEX AGENT: the cached response itself is span-capped by TRACE_VIEW_SPAN_CAP.  Count-only
+            # eviction previously retained up to four ~200 MB views and let one request exhaust memory.
             while len(self._trace_view_cache) > 4:
                 self._trace_view_cache.pop(next(iter(self._trace_view_cache)))
         return view
@@ -290,11 +292,13 @@ class AppState:
         run-level `summary` narrows to the node (unused by the node-detail UI). Degrades to the whole-run
         `trace_view` when the index is unavailable (missing/foreign spans), so the node tree still renders."""
         from looplab.events.span_index import get_index
-        from looplab.events.traceview import build_trace_view
+        from looplab.events.traceview import TRACE_NODE_SPAN_CAP, build_trace_view
         idx = get_index(rd / "spans.jsonl")
         if idx is None:
             return self.trace_view(rd)
-        return build_trace_view(self.trace_scalars(rd), idx.light_spans_for_node(nid), light=True)
+        return build_trace_view(
+            self.trace_scalars(rd), idx.light_spans_for_node(nid, TRACE_NODE_SPAN_CAP), light=True,
+            total_spans=idx.node_span_count(nid), span_cap=TRACE_NODE_SPAN_CAP)
 
     def phase(self, st, *, finalize_incomplete: bool = False) -> str:
         # A pending run_abort is not an ordinary pause: the engine must preserve it, write

@@ -1,7 +1,7 @@
 """The light span index (`events.span_index`): the accelerator behind the trace views on large runs.
 
-It must be an INVISIBLE optimization — every read served through it is byte-identical to reading the
-whole `spans.jsonl` the old way (`load_spans` + `build_trace_view`/`build_conversation`), while
+It must be an INVISIBLE optimization — every read served through it matches the same versioned
+projection built directly from `spans.jsonl` (`load_spans` + views), while
 touching only the light structure (timeline) or one node/span's byte range (detail). These tests pin
 that equivalence plus the cache/persistence/invalidation contract (append-only top-up, cold reload
 from the persisted index, rebuild on replace/shrink/corruption, graceful degrade)."""
@@ -23,6 +23,7 @@ from looplab.events.traceview import (
     _MAX_PARENT_HOPS,
     _cap_span_io,
     _iter_parent_spans,
+    _normalize_span,
     _tree,
     build_conversation,
     build_trace_view,
@@ -108,7 +109,9 @@ def test_full_span_roundtrip_by_offset(run):
     idx = get_index(sp)
     for target in ("g0_1", "tl1_2", "root0"):
         ref = next(s for s in spans if s["span_id"] == target)
-        assert _canon(idx.full_span(target)) == _canon(ref)      # complete span incl. heavy I/O
+        # The byte-offset lookup is exact, but the returned record crosses the same versioned security
+        # projection as every HTTP view; raw durable dictionaries never become browser payloads.
+        assert _canon(idx.full_span(target)) == _canon(_normalize_span(ref))
     assert idx.full_span("nope") is None
 
 
@@ -461,9 +464,11 @@ def test_endpoints_serve_through_the_index(tmp_path):
     assert "input" not in json.dumps(tv) and "S" * 100 not in json.dumps(tv)   # heavy I/O stripped
     assert (rd / "spans.index.jsonl").exists()
 
-    # /spans/{sid}: full (uncapped) I/O for one observation, fetched by byte offset.
+    # /spans/{sid}: bounded/redacted I/O projection for one observation, fetched by byte offset.
     span = client.get("/api/runs/demo/spans/g0_1").json()
-    assert span["attributes"]["output"] == "O" * 4000 and span["attributes"]["thinking"] == "T" * 4000
+    assert len(span["attributes"]["output"]) <= 2000
+    assert len(span["attributes"]["thinking"]) <= 2000
+    assert span["projection"]["truncated"] is True
 
     # /conversation: the node's linear thread (reads only that node's byte ranges).
     convo = client.get("/api/runs/demo/nodes/0/conversation").json()
