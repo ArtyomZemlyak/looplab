@@ -34,6 +34,16 @@ test('owner diagnostic state round-trips canonically inside the fragment', () =>
   assert.equal(hashWithRunRouteState(hash, parsed.state), hash)
 })
 
+test('owner Concepts view survives copy, reload, and history route round-trips', () => {
+  const current = { ...emptyRunRouteState(), generation: GEN, view: 'concepts' }
+  const hash = hashWithRunRouteState('#/run/demo', current)
+  assert.equal(hash, `#/run/demo?gen=${GEN}&view=concepts`)
+  const parsed = parseRunRouteState(hash)
+  assert.deepEqual(parsed.issues, [])
+  assert.deepEqual(parsed.state, current)
+  assert.equal(hashWithRunRouteState(hash, parsed.state), hash)
+})
+
 test('route parsing separates encoded run ids from diagnostic parameters', () => {
   const hash = '#/run/a%20b%2F%25%3F%23?node=2'
   assert.deepEqual(splitRouteHash(hash), { path: '/run/a%20b%2F%25%3F%23', query: 'node=2' })
@@ -61,7 +71,7 @@ test('historical sequence requires an exact generation fence', () => {
 })
 
 test('node, panel, view, and filters also fail closed without a generation fence', () => {
-  for (const query of ['node=4', 'panel=trust', 'view=report', 'focus=quality', 'q=timeout', 'kinds=eval']) {
+  for (const query of ['node=4', 'panel=trust', 'view=report', 'view=concepts', 'focus=quality', 'q=timeout', 'kinds=eval']) {
     const parsed = parseRunRouteState(`#/run/demo?${query}`)
     assert.deepEqual(parsed.state, emptyRunRouteState(), query)
     assert.match(parsed.issues.join(' '), /generation fence/, query)
@@ -78,6 +88,16 @@ test('review links preserve safe context but strip history and raw timeline filt
   assert.match(parsed.issues.join(' '), /unavailable in review links/)
   assert.equal(hashWithRunRouteState(hash, parsed.state, { reviewMode: true }),
     `#/rv_token?gen=${GEN}&view=report&node=4&tab=code&panel=compare&focus=quality`)
+})
+
+test('review links fail closed on the owner-only Concepts view', () => {
+  const hash = `#/rv_token?gen=${GEN}&view=concepts`
+  const parsed = parseRunRouteState(hash, { reviewMode: true })
+  assert.equal(parsed.state.view, 'dag')
+  assert.equal(parsed.state.generation, GEN)
+  assert.match(parsed.issues.join(' '), /Concept view is unavailable in review links/)
+  assert.equal(hashWithRunRouteState(hash, parsed.state,
+    { reviewMode: true, forceGeneration: true }), `#/rv_token?gen=${GEN}`)
 })
 
 test('tab depends on a node and defaults are omitted', () => {
@@ -143,8 +163,9 @@ test('a semantic no-op preserves an explicit generation-only fence', () => {
 test('programmatic sanitizer applies review and allow-list boundaries', () => {
   const state = sanitizeRunRouteState({
     generation: GEN, nodeId: 0, inspectTab: 'Trace', panel: 'events', sequence: 3,
-    timelineFilter: 'needle', timelineKinds: ['eval', 'evil'],
+    timelineFilter: 'needle', timelineKinds: ['eval', 'evil'], view: 'concepts',
   }, { reviewMode: true })
+  assert.equal(state.view, 'dag')
   assert.equal(state.nodeId, 0)
   assert.equal(state.inspectTab, 'Trace')
   assert.equal(state.panel, 'events')

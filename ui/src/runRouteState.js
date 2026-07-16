@@ -103,7 +103,7 @@ function normalizeKinds(value, issues) {
 export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   const state = emptyRunRouteState()
   if (GENERATION_RE.test(String(input.generation || ''))) state.generation = String(input.generation)
-  if (input.view === 'report' || input.view === 'concepts') state.view = input.view
+  if (input.view === 'report' || (!reviewMode && input.view === 'concepts')) state.view = input.view
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
   const nodeGeneration = state.nodeId != null && Number.isSafeInteger(input.nodeGeneration)
     && input.nodeGeneration >= 0 ? input.nodeGeneration : null
@@ -170,6 +170,10 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
   const view = single(params, 'view', issues)
   if (view != null && view !== '') {
     if (view === 'report') state.view = 'report'
+    else if (view === 'concepts') {
+      if (reviewMode) issues.push('Concept view is unavailable in review links.')
+      else state.view = 'concepts'
+    }
     else if (view !== 'dag') issues.push('Unknown workspace view was ignored.')
   }
   state.nodeId = integer(single(params, 'node', issues), 'node id', issues)
@@ -241,7 +245,7 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
   if (state.generation && (forceGeneration || runRouteStateHasTarget(state, { reviewMode }))) {
     params.set('gen', state.generation)
   }
-  if (state.view === 'report') params.set('view', 'report')
+  if (state.view === 'report' || state.view === 'concepts') params.set('view', state.view)
   if (state.nodeId != null) {
     params.set('node', String(state.nodeId))
     if (state.nodeGeneration != null) params.set('attempt', String(state.nodeGeneration))
