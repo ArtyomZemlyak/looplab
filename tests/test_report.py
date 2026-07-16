@@ -10,9 +10,9 @@ from pathlib import Path
 import anyio
 import pytest
 
-from looplab.core.models import Event
+from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
 from looplab.events.replay import fold
-from looplab.serve.report import generate_report, make_report_writer
+from looplab.serve.report import _report_context, generate_report, make_report_writer
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
@@ -29,6 +29,17 @@ def test_generate_report_degrades_offline():
     for k in ("verdict", "champion_summary", "what_worked", "learnings", "what_didnt",
               "next_directions", "caveats"):
         assert k in content
+
+
+def test_report_champion_uses_concept_axis_when_legacy_theme_is_absent():
+    st = RunState(goal="g", direction="min")
+    st.nodes[0] = Node(id=0, operator="draft", status=NodeStatus.evaluated, metric=0.5,
+                       idea=Idea(operator="draft", concepts=["loss/contrastive"]))
+    st.best_node_id = 0
+
+    # CODEX AGENT: the deterministic report context must not describe new concept-authored champions
+    # as themeless merely because the deprecated Idea.theme field is absent.
+    assert "Champion: #0 metric=0.5 (draft, loss)" in _report_context(st)
 
 
 def test_report_generated_folds_latest_wins():

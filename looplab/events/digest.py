@@ -178,8 +178,8 @@ def _node_line(n) -> str:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
         outcome = f"metric={fmt_num(node_metric(n))}"
-    # Derived theme (legacy idea.theme, else the first concept's coarse axis) so the working-set line is
-    # not blank on concept-authored runs — the same vocabulary theme_rollup/coverage advertise.
+    # CODEX AGENT: derive the legacy theme or first authored concept's coarse axis so this working-set
+    # line uses the same vocabulary as theme_rollup/coverage and is not blank on concept-authored runs.
     theme_label = node_theme(n)
     theme = f" {{{theme_label}}}" if theme_label else ""
     swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""

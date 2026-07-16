@@ -68,8 +68,7 @@ def live_llm_reachable() -> bool:
     base = (s.llm_base_url or "").rstrip("/")
     if not base:
         return False
-    env = _llm_env()
-    proxies = {}                                        # honor the NO_PROXY we just computed
+    proxies = {}                                        # probe the configured endpoint directly
     opener = urllib.request.build_opener(urllib.request.ProxyHandler(proxies))
     try:
         opener.open(urllib.request.Request(base + "/models", method="GET"), timeout=4)
@@ -235,12 +234,16 @@ def run(sc: Scenario) -> None:
 def load(sc: Scenario) -> tuple[dict, list]:
     """Fold the run to a plain-dict state + raw events, so `check` reads it like the UI would."""
     from looplab.events.eventstore import EventStore
+    from looplab.events.digest import node_theme
     from looplab.events.replay import fold
-    events = [json.loads(l) for l in (sc.run_dir / "events.jsonl").read_text().splitlines() if l.strip()]
+    events = [json.loads(line) for line in (sc.run_dir / "events.jsonl").read_text().splitlines()
+              if line.strip()]
     st = fold(EventStore(str(sc.run_dir / "events.jsonl")).read_all())
     state = {"best_node_id": st.best_node_id, "trust_gate": st.trust_gate,
              "nodes": {nid: {"metric": n.metric, "operator": n.operator,
-                             "theme": (n.idea.theme if n.idea else None),
+                             # CODEX AGENT: live gates observe the same compatibility grouping as
+                             # runtime tools; concept-authored nodes must not look permanently themeless.
+                             "theme": node_theme(n),
                              "hypothesis": (n.idea.hypothesis if n.idea else None),
                              "code": (n.code or "")} for nid, n in st.nodes.items()},
              "hypotheses": getattr(st, "hypotheses", {})}

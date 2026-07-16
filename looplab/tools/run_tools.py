@@ -136,7 +136,7 @@ class RunTools:
             outcome = f"FAILED({n.error_reason or 'error'})"
         else:
             outcome = f"metric={digest.fmt_num(digest.node_metric(n))}"
-        # Derived theme (legacy idea.theme, else the first concept's coarse axis) — the SAME vocabulary
+        # CODEX AGENT: derived theme (legacy idea.theme, else the first concept's coarse axis) — the SAME vocabulary
         # list_themes/list_experiments advertise, so a concept-authored run isn't shown blank here.
         node_theme = digest.node_theme(n)
         theme = f" {{{node_theme}}}" if node_theme else ""
@@ -151,7 +151,7 @@ class RunTools:
         else:
             nodes = digest.top_nodes(st, len(st.nodes), worst=(sort == "worst"))
         if theme:
-            # Filter on the DERIVED theme (digest.node_theme) — the same vocabulary list_themes advertises;
+            # CODEX AGENT: filter on the DERIVED theme (digest.node_theme) — the vocabulary list_themes advertises;
             # a raw idea.theme filter matched nothing on concept-authored runs (themes come from concepts).
             nodes = [n for n in nodes if digest.node_theme(n) == theme]
         nodes = nodes[:limit]

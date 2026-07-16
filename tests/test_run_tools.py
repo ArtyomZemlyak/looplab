@@ -8,7 +8,8 @@ import math
 from looplab.events import digest
 from looplab.agents.agent import ToolUsingResearcher
 from looplab.core.config import Settings
-from looplab.core.models import Idea, Node, NodeStatus, RunState, Trial
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, Node, NodeStatus,
+                                 RunState, Trial)
 from looplab.agents.roles import LLMResearcher
 from looplab.tools.run_tools import DataTools, RunTools
 from looplab.adapters.tasks import make_roles
@@ -170,14 +171,25 @@ def test_list_experiments_theme_filter_matches_derived_concept_axis():
                 idea=Idea(operator="improve", params={}, concepts=["loss/triplet"]),
                 metric=0.7, status=NodeStatus.evaluated),
         2: Node(id=2, operator="draft",
-                idea=Idea(operator="draft", params={}, concepts=["data/synth"]),
+                idea=Idea(operator="draft", params={}, theme="legacy-theme",
+                          concepts=["data/synth"]),
                 metric=0.5, status=NodeStatus.evaluated),
     }
-    rt = RunTools(); rt.bind_state(st)
-    assert "loss" in rt.execute("list_themes", {})            # derived axis advertised
+    # CODEX AGENT: classifier output is an independent sidecar. Compatibility theme surfaces keep
+    # following the authored Idea, with the legacy theme taking precedence over authored concepts.
+    st.node_concepts[0] = ["classifier/override"]
+    st.node_concept_provenance[0] = NODE_CONCEPT_PROVENANCE_CLASSIFIER
+    rt = RunTools()
+    rt.bind_state(st)
+    themes = rt.execute("list_themes", {})
+    assert "loss" in themes and "legacy-theme" in themes    # exactly the filter vocabulary
     listed = rt.execute("list_experiments", {"theme": "loss"})
     assert "#0" in listed and "#1" in listed and "#2" not in listed   # filter uses the derived axis
     assert "no matching" not in listed.lower()
+    assert "{loss}" in digest.experiments_digest(st)       # the always-on digest uses it too
+    legacy = rt.execute("list_experiments", {"theme": "legacy-theme"})
+    assert "#2" in legacy and "{legacy-theme}" in legacy
+    assert "no matching" in rt.execute("list_experiments", {"theme": "classifier"})
 
 
 def test_run_tools_unbound_is_safe():
@@ -263,7 +275,7 @@ def test_csv_ragged_rows_count_truncated_as_missing():
     dt = DataTools(_RaggedTask())
     dt.bind_state(_st())
     prof = dt.execute("data_profile", {})
-    dline = [l for l in prof.splitlines() if l.strip().startswith("d:")][0]
+    dline = [line for line in prof.splitlines() if line.strip().startswith("d:")][0]
     assert "missing=0.75" in dline                   # d present in only 1 of 4 rows, not 0.00
 
 
