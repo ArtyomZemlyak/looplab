@@ -67,11 +67,34 @@ class JobRegistry:
             j = self._jobs.get(job_id)
             return dict(j) if j else None
 
-    def has_identity(self, identity: str) -> bool:
-        """Whether this process can still rejoin the exact in-flight/done logical job."""
+    def _completed_result(self, job_id: str, *, consume: bool):
+        """Atomically observe a terminal result and optionally retire its private receipt.
+
+        A non-idempotent job that completes during ``run_as_job``'s inline wait never publishes its
+        ``job_id`` to a caller, so retaining that unreachable receipt only burns shared capacity.
+        Idempotent jobs are not consumed by default; only callers with an independent durable replay
+        ledger may opt in after their compute path has published its terminal receipt.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.get("status") != JOB_DONE:
+                return False, None
+            result = job.get("result")
+            if consume:
+                self._remove_locked(job_id)
+            return True, result
+
+    def rejoin(self, identity: str) -> dict | None:
+        """Return an existing process receipt without reserving or evicting replacement work."""
         with self._lock:
             job_id = self._idempotent_jobs.get(identity)
-            return bool(job_id and job_id in self._jobs)
+            if not job_id or job_id not in self._jobs:
+                return None
+            return {"status": JOB_RUNNING, "job_id": job_id}
+
+    def has_identity(self, identity: str) -> bool:
+        """Whether this process can still rejoin the exact in-flight/done logical job."""
+        return self.rejoin(identity) is not None
 
     @property
     def inline_wait(self) -> float:
@@ -139,9 +162,30 @@ class JobRegistry:
                 "error": "background job failed",
             }, ts=time.time())
 
+    async def run_reserved(self, job_id: str, compute, *, inline_wait: float | None = None,
+                           with_progress: bool = False, consume: bool = False):
+        """Start/wait for an exact receipt; never create replacement work if it disappeared."""
+        self.start_reserved(job_id, compute, with_progress=with_progress)
+        deadline = time.monotonic() + (self._inline_wait if inline_wait is None else inline_wait)
+        while time.monotonic() < deadline:
+            done, result = self._completed_result(job_id, consume=consume)
+            if done:
+                return result
+            await anyio.sleep(0.2)
+        if self.get(job_id) is None:
+            return {
+                "ok": False,
+                "code": "job_unknown",
+                "ambiguous": True,
+                "error": "background job receipt is unavailable",
+            }
+        return {"status": JOB_RUNNING, "job_id": job_id}
+
     async def run_as_job(self, compute, *, inline_wait: float | None = None,
                          with_progress: bool = False,
-                         idempotency_key: str | None = None):
+                         idempotency_key: str | None = None,
+                         consume_inline_result: bool = False,
+                         reserved_job_id: str | None = None):
         """Run `compute` (a 0-arg callable returning the final response dict) in a worker thread; return
         its result inline when it finishes within the inline wait, else {status:'running', job_id}. The
         thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
@@ -150,20 +194,27 @@ class JobRegistry:
         `with_progress=True` hands `compute` ONE argument instead — a `set_progress(payload)` callable
         that annotates the running job's `progress` field (thread-safe; genesis streams its live scout
         steps through it, and its poll endpoint surfaces them). `inline_wait` overrides the registry-wide
-        default for this one call (genesis keeps its own LOOPLAB_GENESIS_INLINE_WAIT knob)."""
+        default for this one call (genesis keeps its own LOOPLAB_GENESIS_INLINE_WAIT knob).
+
+        ``consume_inline_result`` is for an idempotent caller whose compute path publishes an
+        independent durable replay receipt before returning. When such work finishes inline, its
+        process-local receipt is private and can be retired just like a non-idempotent inline job;
+        generic idempotent callers keep the historical in-memory rejoin behavior by default.
+
+        ``reserved_job_id`` is the rejoin-only path for a caller that already bound a durable claim
+        to an exact process receipt. It never falls back to allocating replacement work.
+        """
+        if reserved_job_id is not None:
+            return await self.run_reserved(
+                reserved_job_id, compute, inline_wait=inline_wait,
+                with_progress=with_progress, consume=consume_inline_result)
         receipt = self.reserve(idempotency_key)
         if receipt.get("status") != JOB_RUNNING:
             return receipt
-        job_id = receipt["job_id"]
-        self.start_reserved(job_id, compute, with_progress=with_progress)
-
-        deadline = time.monotonic() + (self._inline_wait if inline_wait is None else inline_wait)
-        while time.monotonic() < deadline:
-            j = self.get(job_id)
-            if j and j.get("status") == JOB_DONE:
-                return j["result"]
-            await anyio.sleep(0.2)
-        return {"status": JOB_RUNNING, "job_id": job_id}
+        return await self.run_reserved(
+            receipt["job_id"], compute, inline_wait=inline_wait,
+            with_progress=with_progress,
+            consume=idempotency_key is None or consume_inline_result)
 
 
 def build_router(srv) -> APIRouter:
@@ -172,7 +223,8 @@ def build_router(srv) -> APIRouter:
     @router.get("/api/jobs/{job_id}")
     def get_job(job_id: str):
         """Poll a generic background job (see _run_as_job): `running` until done, then the result dict
-        with status='done'; `unknown` if it expired/was evicted (the UI should re-issue the action)."""
+        with status='done'; `unknown` if its volatile process receipt expired or was evicted. The
+        caller must use its endpoint-specific durable identity to reconcile unknown outcomes."""
         j = srv.jobs.get(job_id)
         if not j:
             return {"status": JOB_UNKNOWN}

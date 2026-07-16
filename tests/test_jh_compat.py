@@ -11,7 +11,12 @@ import os
 
 import pytest
 
-from looplab.core.atomicio import atomic_write_text, atomic_write_bytes, best_effort_fsync
+from looplab.core.atomicio import (
+    atomic_write_bytes,
+    atomic_write_text,
+    best_effort_fsync,
+    strict_fsync,
+)
 
 
 def test_best_effort_fsync_swallows_unsupported(monkeypatch):
@@ -27,6 +32,18 @@ def test_best_effort_fsync_swallows_unsupported(monkeypatch):
     p = os.path.join(d, "x.json")
     atomic_write_text(p, '{"ok": true}')
     assert open(p, encoding="utf-8").read() == '{"ok": true}'
+
+
+def test_strict_fsync_fails_closed_when_sync_is_unsupported(tmp_path, monkeypatch):
+    """A paid-work claim must never degrade to best effort before the provider starts."""
+    target = tmp_path / "claim"
+    with target.open("wb") as handle:
+        handle.write(b"claim")
+        handle.flush()
+        monkeypatch.setattr(
+            os, "fsync", lambda _fd: (_ for _ in ()).throw(OSError("unsupported")))
+        with pytest.raises(OSError, match="durable fsync failed"):
+            strict_fsync(handle.fileno())
 
 
 def test_fsync_timeout_env_parse_tolerates_garbage(monkeypatch):

@@ -132,3 +132,82 @@ def test_completed_receipt_outlives_the_ten_minute_client_deadline(monkeypatch):
     admitted = registry.reserve("new-work")
     assert admitted["status"] == "running"
     assert sum(registry.get(f"done-{index}") is not None for index in range(64)) == 63
+
+
+def test_rejoin_only_receipt_never_recreates_evicted_paid_work(monkeypatch):
+    import looplab.serve.jobs as jobs_module
+
+    now = [1_000.0]
+    monkeypatch.setattr(jobs_module.time, "time", lambda: now[0])
+    registry = JobRegistry()
+    first = _run(
+        registry, lambda: {"ok": True}, inline_wait=1,
+        idempotency_key="durable-paid-claim")
+    assert first == {"ok": True}
+    receipt = registry.rejoin("durable-paid-claim")
+    assert receipt is not None
+
+    for index in range(63):
+        registry.put(f"pressure-{index}", status="running", result=None, ts=now[0])
+    now[0] += 661
+    assert registry.reserve("new-work")["status"] == "running"
+    assert registry.get(receipt["job_id"]) is None
+
+    calls = []
+
+    async def rejoin_evicted():
+        return await registry.run_as_job(
+            lambda: calls.append("duplicate"), inline_wait=0,
+            reserved_job_id=receipt["job_id"])
+
+    result = anyio.run(rejoin_evicted)
+    assert result["code"] == "job_unknown"
+    assert result["ambiguous"] is True
+    assert calls == []
+    assert registry.rejoin("durable-paid-claim") is None
+
+
+def test_inline_non_idempotent_jobs_release_capacity_but_idempotent_result_rejoins():
+    registry = JobRegistry()
+
+    async def run_many():
+        return [
+            await registry.run_as_job(
+                lambda index=index: {"ok": True, "index": index}, inline_wait=1)
+            for index in range(70)
+        ]
+
+    results = anyio.run(run_many)
+
+    assert results == [{"ok": True, "index": index} for index in range(70)]
+    assert registry._jobs == {}  # no caller ever received these private job ids
+
+    async def run_durable_reports():
+        return [
+            await registry.run_as_job(
+                lambda index=index: {"ok": True, "seq": index},
+                inline_wait=1,
+                idempotency_key=f"durable-report-{index}",
+                consume_inline_result=True,
+            )
+            for index in range(70)
+        ]
+
+    durable_results = anyio.run(run_durable_reports)
+
+    assert durable_results == [{"ok": True, "seq": index} for index in range(70)]
+    assert registry._jobs == {}  # replay is owned by the caller's durable ledger
+
+    calls = []
+    first = _run(
+        registry, lambda: calls.append("paid") or {"ok": True, "value": "kept"},
+        inline_wait=1, idempotency_key="durable-report",
+    )
+    replay = _run(
+        registry, lambda: calls.append("duplicate") or {"ok": True},
+        inline_wait=1, idempotency_key="durable-report",
+    )
+
+    assert first == replay == {"ok": True, "value": "kept"}
+    assert calls == ["paid"]
+    assert registry.has_identity("durable-report") is True

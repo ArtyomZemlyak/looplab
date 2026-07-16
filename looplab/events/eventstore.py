@@ -15,7 +15,7 @@ from typing import Any, Iterator, Optional
 
 import orjson
 
-from looplab.core.atomicio import best_effort_fsync
+from looplab.core.atomicio import best_effort_fsync, strict_fsync
 from looplab.core.models import Event
 from looplab.core.tracing import current_ids
 
@@ -418,7 +418,8 @@ class EventStore:
 
     def append(self, type: str, data: dict[str, Any], *,
                trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
-               expected_last_seq: "int | None" = None, require_lock: bool = False) -> Event:
+               expected_last_seq: "int | None" = None, require_lock: bool = False,
+               require_durable: bool = False) -> Event:
         """Durably append one event and return it (the envelope with its assigned seq).
 
         Under a best-effort cross-process lock (the UI server and the engine write the SAME
@@ -437,6 +438,9 @@ class EventStore:
 
         ``require_lock`` is deliberately opt-in so existing engine behavior is unchanged.  Versioned
         collaboration enables it and fails visibly if the cross-process lock cannot be acquired.
+
+        ``require_durable`` fails unless fsync succeeds within the configured deadline. Paid
+        external work uses it before starting; ordinary logging remains FUSE-friendly best effort.
         """
         # Stamp the event with the active span's (trace_id, span_id) so the UI can join events to the
         # trace — UNLESS the caller passes an EXPLICIT pair (even None): a telemetry event emitted AFTER
@@ -467,8 +471,10 @@ class EventStore:
             with open(self.path, "ab") as f:    # advance _seq only AFTER a durable write succeeds
                 f.write(line + b"\n")
                 f.flush()
-                best_effort_fsync(f.fileno())   # FUSE/S3 fsync may raise/throttle — must not abort the
-                #                                 engine mid-run (read tolerates a torn final line)
+                if require_durable:
+                    strict_fsync(f.fileno())
+                else:
+                    best_effort_fsync(f.fileno())  # read tolerates a torn final line
             self._seq = seq
             # Keep cache bytes + file identity synchronized with our own successful write. Without
             # this top-up, a store that appended but had not yet read the new record could retain

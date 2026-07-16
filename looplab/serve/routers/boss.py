@@ -937,7 +937,8 @@ def build_router(srv) -> APIRouter:
                         "message": "Another report refresh already owns this run generation.",
                         "remediation": "Wait for its report event or reload before trying again.",
                     })
-                if not srv.jobs.has_identity(job_identity):
+                reservation = srv.jobs.rejoin(job_identity)
+                if reservation is None:
                     return {
                         "ok": False,
                         "code": "report_refresh_uncertain",
@@ -964,7 +965,7 @@ def build_router(srv) -> APIRouter:
                     store.append(
                         EV_REPORT_REFRESH_STARTED,
                         {"refresh_id": job_identity, "generation": generation},
-                        require_lock=True,
+                        require_lock=True, require_durable=True,
                     )
                     # Start before releasing the sequencer: no accepted durable claim can remain an
                     # in-memory workerless reservation if the HTTP task is cancelled at its first await.
@@ -976,7 +977,7 @@ def build_router(srv) -> APIRouter:
         # in the worker and the same identity rejoins it after any ambiguous transport response.
         result = await srv.jobs.run_as_job(
             compute, inline_wait=min(0.5, srv.jobs.inline_wait),
-            idempotency_key=job_identity)
+            consume_inline_result=True, reserved_job_id=reservation["job_id"])
         if result.get("code") == "job_failed":
             if not _record_report_refresh_failure(
                     srv, rd, generation, job_identity, "internal"):

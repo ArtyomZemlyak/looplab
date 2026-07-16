@@ -368,6 +368,25 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
     assert st["report"]["headline"] == "live"
 
 
+def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monkeypatch):
+    """An inline paid result is replayable from its event receipt, not an unreachable job id."""
+    _build_run(tmp_path, "demo", writer=None)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
+        "headline": "durable", "at_node": len(state.nodes),
+    })
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    for index in range(65):
+        result = _refresh_report(
+            client, generation=generation, key=f"fast-refresh-{index}").json()
+        assert result["ok"] is True
+
+    assert app.state.looplab.jobs._jobs == {}
+
+
 def test_report_refresh_ignores_non_sha_ledger_identity(tmp_path, monkeypatch):
     """A malformed diagnostic row cannot permanently block every real refresh identity."""
     from looplab.events.eventstore import EventStore
@@ -465,16 +484,16 @@ def test_report_refresh_retry_starts_workerless_durable_reservation(tmp_path, mo
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "recovered", "at_node": len(state.nodes)}))
     registry = app.state.looplab.jobs
-    original = registry.run_as_job
+    original = registry.run_reserved
 
     async def handler_vanished(*_args, **_kwargs):
         raise RuntimeError("request task vanished before worker start")
 
-    monkeypatch.setattr(registry, "run_as_job", handler_vanished)
+    monkeypatch.setattr(registry, "run_reserved", handler_vanished)
     with pytest.raises(RuntimeError, match="vanished"):
         _refresh_report(client, generation=generation, key="workerless-reservation")
 
-    monkeypatch.setattr(registry, "run_as_job", original)
+    monkeypatch.setattr(registry, "run_reserved", original)
     recovered = _refresh_report(
         client, generation=generation, key="workerless-reservation").json()
 
@@ -553,7 +572,7 @@ def test_report_refresh_job_start_failure_records_restart_safe_terminal(
             "error": "background job failed",
         }
 
-    monkeypatch.setattr(app.state.looplab.jobs, "run_as_job", failed_spawn)
+    monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", failed_spawn)
     first = _refresh_report(
         client, generation=generation, key="failed-worker-start").json()
 
@@ -605,6 +624,28 @@ def test_report_refresh_terminal_append_failure_stays_uncertain(
         restarted, generation=generation, key="must-not-rebill")
     assert other.status_code == 409
     assert other.json()["detail"]["code"] == "report_refresh_in_progress"
+
+
+def test_report_refresh_never_starts_provider_without_durable_claim(
+        tmp_path, monkeypatch):
+    """An unconfirmed paid claim fails closed before provider construction or billing."""
+    _build_run(tmp_path, "demo", writer=None)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    providers = []
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda _settings: providers.append("started") or object(),
+    )
+    monkeypatch.setattr(
+        "looplab.events.eventstore.strict_fsync",
+        lambda _fd: (_ for _ in ()).throw(OSError("durable fsync failed")),
+    )
+
+    with pytest.raises(OSError, match="durable fsync failed"):
+        _refresh_report(client, generation=generation, key="unconfirmed-claim")
+    assert providers == []
 
 
 def test_report_refresh_terminal_replay_does_not_require_current_llm_settings(
@@ -1304,14 +1345,14 @@ def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_pa
         created.append(True)
         raise AssertionError("a stale generation must be rejected before client construction")
 
-    async def replace_before_worker(compute, **_kwargs):
+    async def replace_before_worker(_job_id, compute, **_kwargs):
         (rd / "events.jsonl").rename(rd / "events.jsonl.replaced")
         EventStore(rd / "events.jsonl").append("run_started", {
             "run_id": "replacement", "task_id": "new", "goal": "new", "direction": "min"})
         return compute()
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", forbidden_client)
-    monkeypatch.setattr(app.state.looplab.jobs, "run_as_job", replace_before_worker)
+    monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", replace_before_worker)
     client = TestClient(app)
     response = _refresh_report(client)
 

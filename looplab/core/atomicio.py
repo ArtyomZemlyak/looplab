@@ -29,6 +29,40 @@ _FSYNC_TIMEOUT = _fsync_timeout()
 _FSYNC_DISABLED = False   # flips permanently once fsync is seen to BLOCK — a stalled FUSE mount
 
 
+def strict_fsync(fileno: int) -> None:
+    """Confirm a sync or fail within the configured deadline.
+
+    Paid-work claims cannot use the normal best-effort durability contract: starting a provider
+    call after an unconfirmed claim could make a retry bill twice. Duplicate the descriptor so a
+    timed-out sync thread can finish safely after the caller closes its own file handle.
+    """
+    duplicate = os.dup(fileno)
+    done = threading.Event()
+    failure: list[BaseException] = []
+
+    def _sync() -> None:
+        try:
+            os.fsync(duplicate)
+        except BaseException as exc:  # noqa: BLE001 - propagate the exact durability failure
+            failure.append(exc)
+        finally:
+            try:
+                os.close(duplicate)
+            finally:
+                done.set()
+
+    worker = threading.Thread(target=_sync, daemon=True)
+    try:
+        worker.start()
+    except BaseException:
+        os.close(duplicate)
+        raise
+    if not done.wait(_FSYNC_TIMEOUT):
+        raise TimeoutError("durable fsync timed out")
+    if failure:
+        raise OSError("durable fsync failed") from failure[0]
+
+
 def best_effort_fsync(fileno: int) -> None:
     """fsync that DEGRADES where it isn't supported OR where it BLOCKS. On an object-store FUSE mount
     (geesefs/s3fs/goofys — common on JupyterHub data volumes) fsync can raise OSError (EINVAL/ENOTSUP/
