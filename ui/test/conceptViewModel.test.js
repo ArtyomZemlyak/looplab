@@ -17,8 +17,20 @@ test('experimentsByConcept inverts, canonicalizes, dedups, keeps many-to-many', 
 })
 
 test('experimentsByConcept is null-safe', () => {
-  assert.deepEqual(experimentsByConcept(), {})
-  assert.deepEqual(experimentsByConcept({ 0: null }), {})
+  // returns a null-prototype map (safe to key by agent-authored ids), so compare by keys not deepEqual
+  assert.deepEqual(Object.keys(experimentsByConcept()), [])
+  assert.deepEqual(Object.keys(experimentsByConcept({ 0: null })), [])
+})
+
+test('experimentsByConcept survives prototype-key concept ids', () => {
+  // "__proto__"/"constructor" as tags must not read Object.prototype or crash the accumulator.
+  const out = experimentsByConcept({ 0: ['__proto__'], 1: ['constructor'], 2: ['loss/a'] })
+  assert.deepEqual(out['__proto__'], [0])
+  assert.deepEqual(out['constructor'], [1])
+  assert.deepEqual(out['loss/a'], [2])
+  // canonicalId must not let a rename map's inherited key hijack a raw id
+  const r = experimentsByConcept({ 0: ['constructor'] }, {})
+  assert.deepEqual(r['constructor'], [0])            // NOT Object's constructor fn
 })
 
 test('deltaTone signs', () => {
