@@ -60,7 +60,8 @@ export function improvements(nodes, direction) {
 function rollup(nodes, direction, keyFn) {
   const dir = direction || 'min'
   const bt = better(dir)
-  const out = {}
+  // Agent-authored direction names are data, not prototype-bearing object properties.
+  const out = Object.create(null)
   Object.values(nodes).forEach(n => {
     const key = keyFn(n)
     if (key == null) return
@@ -86,19 +87,26 @@ function rollup(nodes, direction, keyFn) {
 export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
 export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.idea?.theme || null)
 
-// Per-direction (theme) profit for the Directions overview: how many experiments each theme ran and
-// how much its best beat the run baseline (signed, direction-aware). Drives the treemap (area = count,
-// color = gain). Pure — reuses the same frontier baseline the Report leads with.
+// Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
+// this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
+// is evidence shown inside a control, never an implicit ranking that makes controls jump underhand.
 export function directionProfit(state) {
   const nodes = state.nodes || {}
   const dir = state.direction || 'min'
   const baseline = (improvements(nodes, dir)[0] || {}).to ?? null   // first feasible frontier value
-  return themeEffectiveness(nodes, dir).map(t => {
+  const byDirection = new Map(themeEffectiveness(nodes, dir).map(row => [row.key, row]))
+  const directions = [...new Set(Object.values(nodes).sort((a, b) => a.id - b.id)
+    .map(node => node.idea?.theme).filter(Boolean))]
+  return directions.map(direction => {
+    const t = byDirection.get(direction)
     let gain = null
     if (baseline != null && t.best != null) gain = dir === 'min' ? baseline - t.best : t.best - baseline
-    return { theme: t.key, count: t.count, evaluated: t.evaluated, improved: t.improved, best: t.best, gain, baseline }
-  }).sort((a, b) => (b.gain ?? -Infinity) - (a.gain ?? -Infinity) || b.count - a.count)
+    return { ...t, direction, gain, baseline }
+  })
 }
+
+export const optimizationLabel = direction => direction === 'max' ? 'maximize'
+  : direction === 'min' ? 'minimize' : 'unknown'
 
 // For a MERGE node (≥2 parents): what each parent contributed — its theme + the "trick" it carried
 // (that parent's own param-diff vs its parent). Powers the node card's "⊕ combines" line + the
@@ -373,7 +381,7 @@ export function toMarkdown(state, _best, context = {}) {
   }
   L.push('')
   L.push(`- **Run:** ${state.run_id}`)
-  L.push(`- **Direction:** ${state.direction}`)
+  L.push(`- **Optimization orientation:** ${optimizationLabel(state.direction)}`)
   L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
   L.push(`- **Nodes:** ${nodeCount} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
   if (champion) L.push(`- **Best:** node #${champion.id} · metric ${fmt(champion.confirmed_mean ?? champion.metric)}${champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : ''} · params ${JSON.stringify(champion.idea?.params)}`)
@@ -418,7 +426,7 @@ export function toMarkdown(state, _best, context = {}) {
   if (a.regressions.length) { L.push(`\n**Regressions:** ${a.regressions.length} node(s) ran but did not beat their parent.`) }
   if (a.infeasible.length) { L.push(`\n**Infeasible:** ${a.infeasible.length} node(s) violated a constraint and were excluded.`) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
-  if (deadThemes.length) L.push(`\n**Themes that didn't pay off:** ${deadThemes.map(t => t.key).join(', ')}.`)
+  if (deadThemes.length) L.push(`\n**Directions that didn't pay off:** ${deadThemes.map(t => t.key).join(', ')}.`)
   if (!fr.length && !a.regressions.length && !a.infeasible.length && !deadThemes.length) L.push('\n_Nothing notably failed._')
   L.push('')
   L.push('## Operator effectiveness')

@@ -1404,8 +1404,8 @@ pre.code.event-json { max-height: 220px; }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
 
 .directions-overview { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }
-.do-head { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
-.do-head .muted { font-weight: 400; }
+.do-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
+.do-head .muted { flex: 1 1 280px; min-width: 0; font-weight: 400; }
 /* round-6: compact theme chips replace the screen-eating treemap */
 .do-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 62px; min-width: 0; overflow: auto; }
 .do-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 999px;

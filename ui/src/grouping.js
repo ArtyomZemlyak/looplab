@@ -4,7 +4,7 @@
 import { fmt } from './util.js'
 
 export const GROUP_MODES = [
-  ['theme', 'theme'], ['operator', 'operator'], ['metric', 'metric'], ['niche', 'niche'], ['none', 'none'],
+  ['theme', 'direction'], ['operator', 'operator'], ['metric', 'metric'], ['niche', 'niche'], ['none', 'none'],
 ]
 
 // Per-mode context (e.g. metric tercile thresholds) computed once over the node set.
