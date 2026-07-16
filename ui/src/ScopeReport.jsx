@@ -6,6 +6,8 @@ const list = value => Array.isArray(value) ? value : []
 const text = value => typeof value === 'string' ? value : ''
 const count = value => Number.isInteger(value) && value >= 0 ? value : null
 const status = value => text(value).slice(0, 64).replaceAll('_', ' ')
+const valid = value => typeof value?.exists === 'boolean'
+  && (!value.exists || (value.content && typeof value.content === 'object' && !Array.isArray(value.content)))
 
 function Section({ title, items }) {
   items = list(items).filter(x => typeof x === 'string')
@@ -36,20 +38,25 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
 
   useEffect(() => {
     setData(null); setErr(null)
-    getScopeReport(scope.type, scope.id).then(setData).catch(e => setErr(e.message))
+    getScopeReport(scope.type, scope.id)
+      .then(value => valid(value) ? setData(value) : setErr('Invalid report response.'))
+      .catch(() => setErr('Report unavailable.'))
   }, [scope.type, scope.id])
 
   const generate = async () => {
     setBusy(true); setErr(null)
-    try { setData({ ...(await genScopeReport(scope.type, scope.id)), exists: true }) }
-    catch (e) { setErr(/400/.test(e.message) ? 'No runs in this scope yet.' : 'Generation failed: ' + e.message) }
+    try {
+      const value = { ...await genScopeReport(scope.type, scope.id), exists: true }
+      if (!valid(value)) throw 0
+      setData(value)
+    }
+    catch (e) { setErr(e?.status === 400 ? 'No runs in this scope yet.' : 'Generation failed.') }
     finally { setBusy(false) }
   }
 
   const c = data?.content
   const groups = list(c?.comparison_groups)
   const observations = list(c?.metric_observations)
-  const authority = data?.authoritative === true
   const evidenceRuns = count(c?.coverage?.prompt_runs) ?? count(c?.coverage?.model_runs)
   const sourceRuns = count(c?.coverage?.source_runs)
   const label = text(data?.label) || text(data?.scope?.label) || text(scope.label) || `${scope.type} ${scope.id}`
@@ -60,12 +67,12 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
 
   return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
     <div ref={dialogRef} className="panel sr-panel" role="dialog" aria-modal="true"
-      aria-label={`Cross-run report for ${label}`} tabIndex={-1}>
+      aria-label={`Report for ${label}`} tabIndex={-1}>
       <div className="panel-h">
         <span className="ttl">Cross-run report · {label}</span>
         <span className="right" />
         {data?.exists && <button className="btn sm" disabled={busy} onClick={generate}>{busy ? '… generating' : '↻ Regenerate'}</button>}
-        <button className="btn sm ghost" onClick={onClose} aria-label="Close cross-run report">✕</button>
+        <button className="btn sm ghost" onClick={onClose} aria-label="Close report">✕</button>
       </div>
       <div className="panel-b">
         {err && <div className="notice resource-error" role="alert">{err}</div>}
@@ -73,7 +80,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
 
         {data && !data.exists && <div className="sr-empty">
           <div className="muted">
-            No report yet — <b>{runCount}</b> runs in scope. Generation uses bounded evidence.
+            No report — <b>{runCount}</b> runs. Evidence is bounded.
           </div>
           <button className="btn primary" disabled={busy || !runCount} onClick={generate}>
             {busy ? '… generating' : '✦ Generate report'}</button>
@@ -83,16 +90,16 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
           <div className="sr-meta">
             {evidenceRuns != null && sourceRuns != null
               ? <span>· evidence {evidenceRuns}/{sourceRuns} runs{c.coverage.incomplete === true ? ' (incomplete)' : ''}</span>
-              : <span>· stored scope has {Array.isArray(data.run_ids) ? data.run_ids.length : '?'} runs</span>}
+              : <span>· snapshot: {Array.isArray(data.run_ids) ? data.run_ids.length : '?'} runs</span>}
             {data.stale && <span className="sr-stale"> · stale snapshot — regenerate</span>}
           </div>
           {headline && <div className="sr-headline">{headline}</div>}
           {verdict && <div className="sr-verdict">{verdict}</div>}
           {groups.length > 0 && <div className="sr-sec">
-            <div className="sr-h">Comparable metric cohorts</div>
+            <div className="sr-h">Comparable cohorts</div>
             {groups.map((group, i) => {
               const rows = list(group?.measurements)
-              const trusted = authority && group?.contract_authority === 'declared' && rows.every(row => row?.authority === 'declared')
+              const trusted = data?.authoritative === true && group?.contract_authority === 'declared' && rows.every(row => row?.authority === 'declared')
               const winner = trusted && !data.stale && group?.indeterminate === null && rows.length > 1 && text(group?.winner?.run_id)
               const reason = !trusted ? 'unverified' : data.stale ? 'stale' : status(group?.indeterminate) || 'unavailable'
               return <div className="sr-group" key={text(group?.contract_id) || i}>

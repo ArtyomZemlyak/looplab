@@ -14,6 +14,10 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    // The build target is Vite's 2026 Baseline set. Browsers outside that set may ignore the
+    // modulepreload hint but still load native dynamic imports, so shipping Vite's runtime preload
+    // polyfill adds transfer/startup work without changing application correctness.
+    modulePreload: { polyfill: false },
     // The post-build budget gate resolves route closures from Vite's graph instead of guessing from
     // hashed filenames. Keep the normal 500 kB warning as a visible early signal; the stricter raw /
     // gzip and reachability budgets live in scripts/check-bundle.mjs and fail CI.

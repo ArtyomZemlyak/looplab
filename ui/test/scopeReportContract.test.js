@@ -13,4 +13,7 @@ test('ScopeReport keeps stale and indeterminate comparison authority visible', (
   assert.match(source, /incomplete_runs[\s\S]*run incomplete/)
   assert.match(source, /note={status\(item\?\.comparison_status\)/)
   assert.match(source, /contract_authority[\s\S]*unverified/)
+  assert.match(source, /typeof value\?\.exists === 'boolean'[\s\S]*!Array\.isArray\(value\.content\)/)
+  assert.match(source, /e\?\.status === 400/)
+  assert.doesNotMatch(source, /\/400\/\.test\(e\.message\)|'Generation failed: ' \+ e\.message/)
 })
