@@ -40,7 +40,6 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "agents_md": "tools",
-    "advisory_payloads": "core",  # bounded/redacted memo + report projections at durable/read boundaries
     "appconfig": "core",
     "appstate": "serve",
     "attention": "serve",
