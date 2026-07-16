@@ -276,6 +276,19 @@ class NoveltyGateMixin:
         # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
         # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
         # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
+        # REVIEW(2026-07-16): this filter is fail-closed only when it empties the map ENTIRELY (the
+        # case the 6b3eac4 tests cover). The mixed case is fail-OPEN: classifier events are emitted
+        # only at the strategist cadence (every `strategist_every` nodes), so every node created SINCE
+        # the last cadence is filtered out here yet grade_novelty/failed_directions treat absence as
+        # "touches no concepts" (tags.get(nid, frozenset())). Consequences on an all-default run:
+        # (1) a reworded near-repeat of the NEWEST node cannot grade level 2 (that node is invisible
+        # to same_concept_nodes), grades 4/5 via an older node, and the param-delta backstop below
+        # compares only against grade.near_node — the OLDER node — so it short-circuits past the flat
+        # gate pre-6b3eac4 authored tags would have caught; (2) a direction whose newest un-classified
+        # node just WON still grades level-5 wrongly_abandoned (failed_directions can't see the win).
+        # The filter should treat not-yet-classified nodes as UNKNOWN (defer/exclude from grading),
+        # not as concept-free evidence — e.g. fall back to authored tags for nodes with no classifier
+        # receipt, marked as untrusted for the bypass decision only.
         node_concepts = {
             nid: concepts
             for nid, concepts in all_node_concepts.items()
