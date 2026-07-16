@@ -201,6 +201,17 @@ def build_router(srv) -> APIRouter:
         graph, tags = graph_from_node_concepts(nc)
         cids = sorted({c for ids in nc.values() for c in ids})
         edges = getattr(st, "concept_edges", None) or {}
+        # REVIEW(2026-07-16): the docstring's "ids are canonical and align with the concept_edges"
+        # only holds for tags — `edges` is passed RAW. The fold never rewrites edge keys, so edges
+        # emitted by a cadence BEFORE a consolidation rename keep the old ids forever, and
+        # project_lens adds every edge endpoint to the tree unconditionally (all_ids.add(src/dst)):
+        # after a rename, an edge-lens tree shows BOTH the retired raw id (as an untagged ghost node,
+        # with its stale edges) AND the canonical id the tags/metrics/touch use — the two halves of
+        # the response disagree on the vocabulary. Edge endpoints need the same
+        # `rename.get(x, x)` collapse as `nc` above (dropping self-edges the collapse creates)
+        # before projection. Also worth noting: `?lens=uses` on a run with NO edges silently returns
+        # the is_a tree — `edges_present: false` lets the UI detect it, but the top-level "lens"
+        # field then contradicts the query param the client sent.
         touch = concept_touch_counts(nc)
         tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
                 else project_lens(cids, edges, lens, touch=touch))
