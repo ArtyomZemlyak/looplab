@@ -27,12 +27,34 @@ test('chipsAtPath drills into a concept', () => {
   assert.equal(byId['loss/contrastive'], 2)        // nodes 0,1
   assert.equal(byId['loss/mnr'], 1)                // node 2
   assert.equal(byId['loss/contrastive/dcl'], undefined)   // that's two levels down, not shown here
-  // node 4 (tagged exactly "loss") produces no child chip under loss
+})
+
+test('chipsAtPath surfaces level-exact tags as a trailing "here" chip', () => {
+  const chips = chipsAtPath(NC, {}, 'loss')
+  // node 4 (tagged exactly "loss") has no next-level child -> it must not vanish; it becomes the
+  // trailing atLevel chip so the user sees where the remainder of the parent count went.
+  const here = chips.find(c => c.atLevel)
+  assert.ok(here, 'expected an atLevel chip after drilling into loss')
+  assert.equal(here.id, 'loss')
+  assert.equal(here.label, 'loss')
+  assert.equal(here.count, 1)                       // node 4 only
+  assert.equal(chips[chips.length - 1], here)       // rendered last (child chips first)
+  // top level has no exact-at-root tags -> no atLevel chip there
+  assert.equal(chipsAtPath(NC, {}, '').some(c => c.atLevel), false)
 })
 
 test('chipsAtPath canonicalizes via rename', () => {
   const chips = chipsAtPath({ 0: ['raw'] }, { raw: 'loss/x' }, '')
   assert.equal(chips[0].id, 'loss')
+})
+
+test('chipsAtPath survives prototype-key tags', () => {
+  // LLM-authored ids can collide with Object.prototype keys — must not read the chain or crash.
+  const chips = chipsAtPath({ 0: ['__proto__/x'], 1: ['constructor'], 2: ['loss/a'] }, {}, '')
+  const byId = Object.fromEntries(chips.map(c => [c.id, c.count]))
+  assert.equal(byId['__proto__'], 1)
+  assert.equal(byId['constructor'], 1)
+  assert.equal(byId['loss'], 1)
 })
 
 test('breadcrumb segments', () => {

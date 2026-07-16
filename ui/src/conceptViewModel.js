@@ -2,6 +2,7 @@
 // The projection (tree) + per-concept metrics come from GET /api/runs/:id/concepts, single-sourced in
 // Python (project_hierarchy / project_lens / concept_metrics). These helpers place experiments under
 // concepts and drive the configurable, ClearML-style metric table.
+import { canonicalId, conceptMap } from './conceptId.js'
 
 // The configurable table columns, in stable order. `delta` marks a signed baseline-relative column
 // (colored up/down). The UI picks a subset (add/remove); this list is the source of truth.
@@ -20,25 +21,22 @@ export const DEFAULT_COLUMNS = ['touched', 'best', 'delta_best']
 // rename map. Many-to-many: a node appears under EVERY concept it carries (never divided); the tree
 // nesting (from the endpoint) supplies ancestry, so a node is listed at its EXACT tagged ids only.
 export function experimentsByConcept(nodeConcepts = {}, rename = {}) {
-  const acc = {}
+  // conceptId strings are LLM-authored, so both the rename lookup and the accumulator go through the
+  // shared prototype-safe helpers (canonicalId + a null-prototype map) — a tag like "__proto__" or
+  // "constructor" can never read/skip through Object.prototype and crash the view. See conceptId.js.
+  const acc = new Map()                               // conceptId -> Set(nodeId)
   for (const [nid, ids] of Object.entries(nodeConcepts || {})) {
     const id = Number(nid)
     for (const raw of (ids || [])) {
-      // REVIEW(2026-07-16): concept ids are LLM-authored free strings, and both lookups here go
-      // through the object prototype chain: `rename[raw]` on raw="constructor" returns
-      // Object's constructor function (truthy) and silently becomes the concept key, and
-      // `acc[c] ||= new Set()` on c="__proto__" reads Object.prototype (truthy), skips the
-      // assignment, then calls `.add()` on it -> TypeError, crashing the whole Concept view over
-      // one weird tag. Plain-object-as-map with agent-supplied keys needs either `Map` for `acc`
-      // or Object.create(null) + hasOwnProperty guards for both maps (JSON.parse data is safe as
-      // own-props, but `acc` is BUILT here via `||=` assignment which does hit the setter).
-      const c = rename[raw] || raw
+      const c = canonicalId(raw, rename)
       if (!c) continue
-      ;(acc[c] ||= new Set()).add(id)
+      let set = acc.get(c)
+      if (!set) acc.set(c, (set = new Set()))
+      set.add(id)
     }
   }
-  const out = {}
-  for (const [c, set] of Object.entries(acc)) out[c] = [...set].sort((a, b) => a - b)
+  const out = conceptMap()                            // null-proto: safe to key by an agent-authored id
+  for (const [c, set] of acc) out[c] = [...set].sort((a, b) => a - b)
   return out
 }
 
