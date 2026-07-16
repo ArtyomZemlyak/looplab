@@ -1,12 +1,13 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, fmtInt, CONTROL, runNodeApiPath } from './util.js'
+import { reportRefreshIntent, isTransientCommandReadError, get, fmt, fmtInt, CONTROL,
+  runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
 import MemoCard from './MemoCard.jsx'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import { reportStepIdentity } from './trustSemantics.js'
-import { DataTable } from './accessibility.jsx'
+import { DataTable, downloadBlob } from './accessibility.jsx'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import { normalizeRunReport } from './reportModel.js'
 import './report-trust-polish.css'
@@ -14,6 +15,47 @@ import './report-trust-polish.css'
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
 const TRUST_LABEL = { unverified: 'not fully verified', caveats: 'with caveats', suspect: 'flags found' }
 const OUTCOME_LABEL = { improved: '▲ improved', flat: '— flat', regressed: '▼ regressed', none: 'no result' }
+
+export const reportRefreshFailure = (failure, thrown = false) => {
+  const code = failure?.code
+  if (code === 'run_generation_changed' || code === 'run_generation_unavailable') {
+    return ['The run changed during report generation. Reload it.', false]
+  }
+  if ([401, 403, 404].includes(Number(failure?.status))) {
+    return ['Report refresh is unavailable in this run or session. Reload.', false, true]
+  }
+  if (code === 'job_unknown') {
+    return ['Report receipt expired. Retry checks the same paid request.', true, true]
+  }
+  if (code === 'job_capacity') {
+    return ['The report service is busy. Retry shortly.', true]
+  }
+  if (code === 'report_refresh_in_progress') {
+    return ['Another report refresh is running. Wait, then reload.', false]
+  }
+  if (code === 'report_refresh_uncertain') {
+    return ['The report outcome is uncertain; do not submit new paid work. Reload to reconcile.', false, true]
+  }
+  if (code === 'REPORT_REFRESH_PROTOCOL_ERROR' || code === 'job_protocol_error') {
+    return ['The report receipt is invalid. Reload to reconcile.', false, true]
+  }
+  const status = Number(failure?.status)
+  const transientThrow = thrown && (failure?.submissionMayHaveSucceeded === true
+    || isTransientCommandReadError(failure))
+  if (failure?.ambiguous === true || transientThrow) {
+    return ['Report-job connection lost. Retry resumes the same paid job.', true, true]
+  }
+  if (thrown && status >= 400 && status < 500) {
+    return ['The report request was rejected. Reload before retrying.', false]
+  }
+  const kind = failure?.error_kind
+  if (kind === 'credentials') return ['Check report-provider credentials in Settings.', true]
+  if (kind === 'rate_limit') return ['The report provider is busy. Retry shortly.', true]
+  if (kind === 'accounting_pending') {
+    return ['Durable cost accounting is pending. Retry after storage recovers.', true]
+  }
+  return ['Report generation failed. Check provider settings and retry.', true]
+}
 
 // Conclusion-first banner: the agent headline (if any) else the deterministic verdict, trust-colored,
 // with inline caveat chips that deep-link to the explaining panel.
@@ -29,8 +71,8 @@ function VerdictBanner({ v, rep, onOpenPanel }) {
       </div>
       <div className="verdict-headline">{rep?.headline || v.headline}</div>
       {narrative && <div className="verdict-text"><Markdown text={narrative} /></div>}
-      {/* # CODEX AGENT: Agent-authored caveats are advisory narrative; they never recolor or
-          upgrade the deterministic trust classification carried by `v`. */}
+      {/* Agent-authored caveats are advisory narrative; they never recolor or upgrade the
+          deterministic trust classification carried by `v`. */}
       {rep?.caveats?.length > 0 && <div className="agent-report-caveats" role="note"
         aria-label="Agent-authored caveats">
         <div className="agent-report-caveats-title"><OpIcon name="alert" size={12} />
@@ -89,7 +131,11 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
-  const refreshRequestRef = useRef({ token: 0, receiptSeq: null, timer: null, busy: false })
+  const refreshGenerationReady = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
+  const refreshRequestRef = useRef({
+    token: 0, receiptSeq: null, timer: null, busy: false,
+    idempotencyKey: null, generation: null, controller: null,
+  })
   const observedSeqRef = useRef(observedSeq)
   observedSeqRef.current = observedSeq
   useEffect(() => {
@@ -110,33 +156,58 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     evidenceAvailable, bestCodeNonce])
   const bestCode = bestCodeResource.data
 
-  const finishRefresh = (token, { error = '', canRetry = true } = {}) => {
+  const finishRefresh = (token, {
+    error = '', canRetry = true, preserveIntent = false,
+  } = {}) => {
     const request = refreshRequestRef.current
     if (request.token !== token) return
     if (request.timer) clearTimeout(request.timer)
+    let finalError = error
+    let finalCanRetry = canRetry
+    let finalPreserveIntent = preserveIntent
+    if (!finalPreserveIntent && request.idempotencyKey && request.generation) {
+      try {
+        reportRefreshIntent(runId, request.generation, request.idempotencyKey)
+      } catch {
+        finalError = 'The completed report identity could not be cleared. Reload.'
+        finalCanRetry = false
+        finalPreserveIntent = true
+      }
+    }
     request.timer = null
+    request.controller?.abort()
+    request.controller = null
     request.receiptSeq = null
     request.busy = false
+    if (!finalPreserveIntent) {
+      request.idempotencyKey = null
+      request.generation = null
+    }
     setRefreshing(false)
-    setRefreshError(error)
-    setRefreshRetryAllowed(canRetry)
+    setRefreshError(finalError)
+    setRefreshRetryAllowed(finalCanRetry)
   }
-  // # CODEX AGENT: The endpoint receipt names the exact report event; content fields such as at_node
-  // and trigger may legitimately repeat, so they are not completion identities.
+  // The endpoint receipt names the exact report event; content fields such as at_node and trigger
+  // may legitimately repeat, so they are not completion identities.
   useEffect(() => {
     const request = refreshRequestRef.current
     if (refreshing && Number.isSafeInteger(request.receiptSeq)
+        && request.generation === expectedGeneration
         && Number.isSafeInteger(observedSeq) && observedSeq >= request.receiptSeq) {
       finishRefresh(request.token)
     }
-  }, [observedSeq, refreshing])
+  }, [observedSeq, refreshing, expectedGeneration])
   useEffect(() => {
     const request = refreshRequestRef.current
     request.token += 1
     if (request.timer) clearTimeout(request.timer)
     request.timer = null
+    request.controller?.abort()
+    request.controller = null
     request.receiptSeq = null
     request.busy = false
+    request.idempotencyKey = null
+    request.generation = null
     setRefreshing(false)
     setRefreshError('')
     setRefreshRetryAllowed(true)
@@ -144,38 +215,70 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       request.token += 1
       if (request.timer) clearTimeout(request.timer)
       request.timer = null
+      request.controller?.abort()
+      request.controller = null
       request.receiptSeq = null
       request.busy = false
+      request.idempotencyKey = null
+      request.generation = null
     }
-  }, [runId])
+  }, [runId, expectedGeneration])
 
-  const dl = (name, text, type) => {
-    const blob = new Blob([text], { type }); const u = URL.createObjectURL(blob)
-    const el = document.createElement('a'); el.href = u; el.download = name; el.click(); URL.revokeObjectURL(u)
-  }
+  const dl = (name, text, type) => downloadBlob(name, [text], type)
   const refresh = async () => {
     const request = refreshRequestRef.current
     if (request.busy) return
+    // Bind paid work to the generation visible at click time. Until the result is authoritative,
+    // remounts and retries retain this identity and rejoin the same server job.
+    let intent
+    try {
+      intent = reportRefreshIntent(runId, expectedGeneration)
+    } catch {
+      const message = 'Report refresh needs working session storage.'
+      setRefreshError(message)
+      setRefreshRetryAllowed(false)
+      onToast?.(message)
+      return
+    }
+    if (!intent) {
+      const message = 'Reload the run before generating its report; its generation is not verified.'
+      setRefreshError(message)
+      setRefreshRetryAllowed(false)
+      onToast?.(message)
+      return
+    }
     request.token += 1
     const token = request.token
     request.busy = true
     request.receiptSeq = null
+    request.generation = intent.generation
+    request.idempotencyKey = intent.idempotencyKey
+    request.controller = typeof AbortController === 'undefined' ? null : new AbortController()
     if (request.timer) clearTimeout(request.timer)
     request.timer = null
     setRefreshing(true)
     setRefreshError('')
     setRefreshRetryAllowed(true)
     try {
-      const r = await CONTROL.refreshReport(runId)
+      const r = await CONTROL.refreshReport(runId, {
+        expectedGeneration: intent.generation,
+        idempotencyKey: intent.idempotencyKey,
+        signal: request.controller?.signal,
+      })
       if (refreshRequestRef.current.token !== token) return
       if (r && r.ok === false) {
-        const message = 'No report model is reachable. Check the provider settings and retry.'
-        finishRefresh(token, { error: message }); onToast?.(message)
+        const [message, canRetry, preserveIntent] = reportRefreshFailure(r)
+        finishRefresh(token, {
+          error: message, canRetry, preserveIntent,
+        })
+        onToast?.(message)
         return
       }
       if (!Number.isSafeInteger(r?.seq) || r.seq < 0) {
-        const message = 'Report generation returned no durable event receipt. Check the server and retry.'
-        finishRefresh(token, { error: message }); onToast?.(message)
+        const message = 'No durable report receipt was returned. Reload and reconcile it.'
+        finishRefresh(token, {
+          error: message, canRetry: false, preserveIntent: true,
+        }); onToast?.(message)
         return
       }
       request.receiptSeq = r.seq
@@ -190,8 +293,11 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       }, 30000)
     } catch (error) {
       if (refreshRequestRef.current.token !== token) return
-      const message = 'Report refresh failed. Check the provider settings or connection, then retry.'
-      finishRefresh(token, { error: message }); onToast?.(message)
+      const [message, canRetry, preserveIntent] = reportRefreshFailure(error, true)
+      finishRefresh(token, {
+        error: message, canRetry, preserveIntent,
+      })
+      onToast?.(message)
     }
   }
   const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
@@ -208,7 +314,8 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   return (
     <div className="report-view" aria-busy={refreshing || undefined}>
       <div className="toolbar report-toolbar">
-        {!readOnly && <button className="btn sm primary" disabled={refreshing || !refreshRetryAllowed} onClick={refresh}
+        {!readOnly && <button className="btn sm primary"
+          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady} onClick={refresh}
           title="Agent rewrites the report from all results so far"><OpIcon name="replay" size={12} /> {refreshing ? 'Refreshing…' : 'Refresh report'}</button>}
         {readOnly && <span className="history-inline">{readOnlyReason === 'review'
           ? 'Read-only review · report refresh disabled'
@@ -224,7 +331,8 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       </div>
       {refreshError && <div className="report-inline-state error" role="alert">
         <OpIcon name="alert" size={14} /><span>{refreshError}</span>
-        {!readOnly && refreshRetryAllowed && <button className="btn sm" onClick={refresh}>Retry</button>}
+        {!readOnly && refreshRetryAllowed && refreshGenerationReady
+          && <button className="btn sm" onClick={refresh}>Retry</button>}
       </div>}
 
       <h1 className="report-title">{state.goal || state.task_id}</h1>

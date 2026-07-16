@@ -726,7 +726,10 @@ def build_router(srv) -> APIRouter:
                 q.put((SSE_DONE, {k: res.get(k) for k in
                                   ("reply", "steps", "applied", "proposals", "todos", "refs", "tokens", "mode")}))
             except Exception as e:  # noqa: BLE001
-                q.put((SSE_ERROR, str(e)))
+                # Worker failures may carry provider URLs, routed model/account metadata or
+                # credential fragments.  SSE is part of the public API contract too: keep its
+                # historical string payload, but emit only the allow-listed assistant message.
+                q.put((SSE_ERROR, _safe_assistant_failure(e)["reply"]))
             finally:
                 # Tear down ONLY OUR turn's registry entries (owner-guarded): a newer turn may have
                 # replaced them, and popping unconditionally would orphan it.

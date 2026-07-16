@@ -97,8 +97,11 @@ def build_router(srv) -> APIRouter:
             rt = RunTools()
             rt.bind_state(st, None)
             return rt.execute("read_experiment", {"node_id": node_id})
-        except Exception as e:  # noqa: BLE001 - deep access is best-effort
-            return f"(drill failed: {e})"
+        except Exception:  # noqa: BLE001 - deep access is best-effort
+            # This string becomes model input and may be echoed into the persisted/public report.
+            # Run/tool exceptions can contain paths or provider metadata, so keep the diagnostic
+            # deliberately generic. Detailed failures belong in server-side observability.
+            return "(drill unavailable)"
 
     def _scope_sig(run_ids: list) -> list:
         """Cheap fingerprint of the run set (ids + each log's size/mtime) to detect staleness — a new

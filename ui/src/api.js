@@ -735,7 +735,12 @@ export function commandFeedback(record, labels = {}) {
     message: `${labels.failure || 'Command failed'}: unexpected command status ${status || 'missing'}` }
 }
 
-const commandSleep = (ms) => new Promise(resolve => setTimeout(resolve, ms))
+const commandSleep = (ms, signal) => new Promise((resolve, reject) => {
+  const abort = () => { clearTimeout(timer); reject(signal.reason) }
+  const timer = setTimeout(() => { signal?.removeEventListener('abort', abort); resolve() }, ms)
+  signal?.addEventListener('abort', abort, { once: true })
+  if (signal?.aborted) abort()
+})
 
 function commandProtocolError(path, message, record = null) {
   const error = new Error(`${path}: ${message}`)
@@ -814,9 +819,11 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
   consume = response => response) {
   const timeout = Math.max(0, Number(timeoutMs) || 0)
   const controller = typeof AbortController === 'undefined' ? null : new AbortController()
+  const signal = options.signal && controller
+    ? AbortSignal.any([options.signal, controller.signal]) : options.signal || controller?.signal
   let timedOut = false, timer = null
   const work = Promise.resolve().then(async () => {
-    const response = await fetch(apiUrl(path), controller ? { ...options, signal: controller.signal } : options)
+    const response = await fetch(apiUrl(path), signal ? { ...options, signal } : options)
     return consume(response)
   })
   if (!timeout) return work
@@ -1016,6 +1023,40 @@ export async function runCommand(runId, type, data = {}, {
   }
 }
 
+const reportStorageError = cause => Object.assign(
+  new Error('Report refresh storage is unavailable.'),
+  { code: 'REPORT_REFRESH_STORAGE_UNAVAILABLE', cause },
+)
+
+// Keep one logical refresh identity across component unmounts and ambiguous responses. A retry POST
+// can then rejoin the server's first job. Supplying `completedKey` clears only that exact intent;
+// paid work fails closed when tab storage is unavailable.
+export function reportRefreshIntent(runId, generation, completedKey = '', storage = undefined) {
+  const backing = transportStorage(storage)
+  if (!validRunGeneration(generation)) return null
+  if (!backing) throw reportStorageError()
+  const key = 'll.report-refresh.' + encodeURIComponent(String(runId || ''))
+  const prefix = generation + ':'
+  try {
+    if (completedKey) {
+      if (backing.getItem(key) === prefix + completedKey) {
+        // Tombstone before best-effort removal. If removeItem fails, the next acquisition cannot
+        // mistake a completed paid identity for an active one.
+        backing.setItem(key, '')
+        if (backing.getItem(key) !== '') throw new Error('storage write failed')
+        try { backing.removeItem(key) } catch { /* the tombstone is already authoritative */ }
+      }
+      return true
+    }
+    const saved = backing.getItem(key)
+    const candidate = saved?.startsWith(prefix) ? saved.slice(prefix.length) : ''
+    const idempotencyKey = safeIdentityText(candidate) ? candidate : createIdempotencyKey()
+    backing.setItem(key, prefix + idempotencyKey)
+    if (backing.getItem(key) !== prefix + idempotencyKey) throw new Error('storage write failed')
+    return { generation, idempotencyKey }
+  } catch (cause) { throw reportStorageError(cause) }
+}
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
@@ -1093,16 +1134,53 @@ export const CONTROL = {
   // Workstream A: force a high-quality regeneration of the agent-authored run report now. Dedicated
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
-  // Contract preserved: resolves to {ok, seq, content} (or {ok:false} offline), never a job_id.
-  refreshReport: async (rid) => jobAwait(await post(runApiPath(rid, '/report_refresh'), {})),
+  // Contract preserved: resolves to {ok, seq, generation, content} (or {ok:false} offline), never a
+  // job_id. The same key rejoins ambiguous retries to one paid server job.
+  refreshReport: async (rid, { expectedGeneration, idempotencyKey, signal,
+    requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS } = {}) => {
+    if (!validRunGeneration(expectedGeneration)) {
+      throw runGenerationError(
+        'invalid_run_generation',
+        'A verified run generation is required before refreshing the report.',
+        'Reload the run before generating its report.',
+      )
+    }
+    if (!safeIdentityText(idempotencyKey)) {
+      throw new Error('A valid report refresh idempotency key is required.')
+    }
+    const path = runApiPath(rid, '/report_refresh')
+    assertNotReviewMutation(path)
+    assertRunMutationAllowed(path)
+    const response = await commandFetch(path, {
+      method: 'POST',
+      headers: _authHeaders({
+        'Content-Type': 'application/json', 'Idempotency-Key': String(idempotencyKey),
+      }),
+      body: JSON.stringify({ expected_generation: expectedGeneration }),
+      signal,
+    }, requestTimeoutMs, async reply => {
+      if (!reply.ok) await _throw(reply, path)
+      return commandResponseJson(reply, path, { submission: true })
+    })
+    const result = await jobAwait(response, { maxTransientErrors: 3, signal })
+    if (result?.ambiguous !== true
+        && (!validRunGeneration(result?.generation) || result.generation !== expectedGeneration)) {
+      const error = new Error('Invalid report generation receipt.')
+      error.code = 'REPORT_REFRESH_PROTOCOL_ERROR'
+      error.ambiguous = true
+      error.submissionMayHaveSucceeded = true
+      throw error
+    }
+    return result
+  },
   // Generic authoritative command by {type, data}; slash commands and action routers share this path.
   raw: (rid, type, data = {}) => runCommand(rid, type, data),
 }
 
 // Apply one assistant/boss action through the same authoritative lifecycle. Report regeneration keeps
 // its dedicated background-job endpoint; all event commands delegate engine policy to the server.
-export async function appendAction(runId, action) {
-  if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId)
+export async function appendAction(runId, action, options = {}) {
+  if (action.type === '__refresh_report__') return CONTROL.refreshReport(runId, options)
   return CONTROL.raw(runId, action.type, action.data || {})
 }
 
@@ -1467,18 +1545,55 @@ export const getScopeReport = (type, id) => get(_scopeUrl(type, id))
 // Generic background-job poll: the server hands back {status:'running', job_id}
 // for slow work so it can't 504 behind a proxy. Returns the final result dict; tolerates transient
 // poll errors. `resp` that's already a result (fast inline path) is returned unchanged.
-const _job = (jobId) => get(`/api/jobs/${encodeURIComponent(jobId)}`)
-export async function jobAwait(resp, { intervalMs = 1500, timeoutMs = 600000 } = {}) {
+const _job = (jobId, { requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS, signal } = {}) => {
+  const path = `/api/jobs/${encodeURIComponent(jobId)}`
+  const requestPath = reviewReadPath(path)
+  return commandFetch(requestPath, {
+    headers: _authHeaders({}), cache: 'no-store', signal,
+  }, requestTimeoutMs, async response => {
+    if (!response.ok) await _throw(response, path)
+    return commandResponseJson(response, path)
+  })
+}
+export async function jobAwait(resp, {
+  intervalMs = 1500, timeoutMs = 600000, signal,
+  maxTransientErrors = Number.POSITIVE_INFINITY,
+  requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+} = {}) {
   if (!resp || resp.status !== 'running' || !resp.job_id) return resp
   const deadline = Date.now() + timeoutMs
+  let transientErrors = 0
   while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, intervalMs))
+    if (signal?.aborted) throw signal.reason || new DOMException('Aborted', 'AbortError')
     let j
-    try { j = await _job(resp.job_id) } catch { continue }   // transient — keep polling
+    try {
+      const remainingMs = Math.max(1, deadline - Date.now())
+      j = await _job(resp.job_id, {
+        requestTimeoutMs: Math.min(requestTimeoutMs, remainingMs), signal,
+      })
+      transientErrors = 0
+    } catch (error) {
+      error.submissionMayHaveSucceeded = true
+      if (!isTransientCommandReadError(error)) throw error
+      if (++transientErrors >= maxTransientErrors) {
+        return { ok: false, code: 'job_contact_lost', ambiguous: true,
+          error: 'job contact lost' }
+      }
+      await commandSleep(intervalMs, signal)
+      continue
+    }
+    if (!j || typeof j !== 'object' || Array.isArray(j)
+        || !['running', 'done', 'unknown'].includes(j.status)) {
+      return { ok: false, code: 'job_protocol_error', ambiguous: true,
+        error: 'invalid job status' }
+    }
     if (j.status === 'done') return j
-    if (j.status === 'unknown') return { ok: false, error: 'the job expired — try again' }
+    if (j.status === 'unknown') return { ok: false, code: 'job_unknown', ambiguous: true,
+      error: 'job receipt expired' }
+    await commandSleep(intervalMs, signal)
   }
-  return { ok: false, error: 'timed out' }
+  return { ok: false, code: 'job_timeout', ambiguous: true,
+    error: 'job timed out' }
 }
 // Cross-run synthesis can read many runs + drive an agent, so it runs as a background job; await it to
 // completion and surface a hard failure as a throw (the panel's catch shows it), preserving the old

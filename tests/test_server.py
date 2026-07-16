@@ -2071,6 +2071,28 @@ def test_ui_token_injection_payload_is_absent_from_hardened_html(tmp_path, monke
         response.headers.get("Content-Security-Policy") or "")
 
 
+def test_paid_job_and_report_refresh_responses_are_never_cacheable(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    owner = {"X-LoopLab-Token": "owner-secret"}
+
+    responses = [
+        client.get("/api/jobs/missing"),
+        client.get("/api/jobs/missing", headers=owner),
+        client.post(
+            "/api/runs/missing/report_refresh", headers=owner,
+            json={"expected_generation": "a" * 64}),
+    ]
+
+    assert [response.status_code for response in responses] == [401, 200, 400]
+    for response in responses:
+        assert response.headers["cache-control"] == "no-store"
+        vary = {item.strip().lower() for item in response.headers["vary"].split(",")}
+        assert {"x-looplab-token", "authorization"} <= vary
+    assert "idempotency-key" in responses[-1].headers["vary"].lower()
+
+
 def test_g1_no_token_index_unchanged(tmp_path, monkeypatch):
     """Default local path (no token): the index is served raw — no Sec-Fetch gating, no extra
     security headers — exactly as before."""

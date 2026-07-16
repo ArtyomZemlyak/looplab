@@ -18,6 +18,7 @@ from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
 from looplab.events.eventstore import read_jsonl_lenient
+from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
 
 
@@ -176,7 +177,9 @@ def build_router(srv) -> APIRouter:
         smoke`): pings the model with a one-word prompt. Never raises — returns reachability so
         the UI can warn before a run launches against a dead endpoint."""
         s = srv.llm_settings()
-        info = {"model": s.llm_model, "base_url": s.llm_base_url}
+        # The configured URL may contain user-info or sensitive query parameters.  The health card
+        # only needs the model identity, so never reflect the URL even to the owner API.
+        info = {"model": s.llm_model}
         try:
             # Bound the probe well under any proxy gateway timeout: a reachable-but-hanging endpoint
             # (queued model, heartbeat-only body) must NOT make the health check itself 504 — the very
@@ -186,7 +189,7 @@ def build_router(srv) -> APIRouter:
             txt = client.complete_text([{"role": "user", "content": "Reply with one word: ready"}])
             return {"ok": True, "text": (txt or "").strip()[:80], **info}
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "error": str(e), **info}
+            return {"ok": False, **safe_provider_failure(e), **info}
 
     # ------------------------------------------------------------------ GPU monitor
     @router.get("/api/gpu")

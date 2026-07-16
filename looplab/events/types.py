@@ -213,6 +213,8 @@ EV_LESSONS_RECONCILED = "lessons_reconciled"    # a node re-eval changed an outc
 #                                                 citing it were retired + re-derived from the corrected state
 EV_COMMAND_ACK = "command_ack"                  # engine folded a server command intent (causal ack)
 EV_FINALIZE_STEP = "finalize_step"              # one logical finalize's replay-safe step gate
+EV_REPORT_REFRESH_STARTED = "report_refresh_started"  # durable paid-work/idempotency claim
+EV_REPORT_REFRESH_FAILED = "report_refresh_failed"    # sanitized terminal receipt; no report written
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 EV_SETUP_FINISHED = "setup_finished"
@@ -257,7 +259,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_SETUP_STARTED, EV_SETUP_STEP, EV_DRIFT_UNAVAILABLE, EV_INJECT_FAILED, EV_BUDGET,
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
-    EV_COMMAND_ACK, EV_FINALIZE_STEP,
+    EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
 })

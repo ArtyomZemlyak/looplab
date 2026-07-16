@@ -50,6 +50,10 @@ from looplab.serve.tui_format import (  # noqa: F401 — re-exported for the imp
 _COMMAND_DONE = {"succeeded", "noop"}
 _COMMAND_FAILED = {"failed", "rejected", "timed_out"}
 _COMMAND_PENDING = {"accepted", "executing"}
+_REPORT_PENDING_CODES = {
+    "job_contact_lost", "job_authorization_lost", "job_unknown", "job_timeout", "job_protocol_error",
+    "report_refresh_uncertain", "report_refresh_protocol_error",
+}
 
 
 def _url_id(value: Any) -> str:
@@ -62,6 +66,15 @@ def _command_error(record: dict) -> str:
     if isinstance(err, dict):
         return str(err.get("message") or err.get("detail") or err.get("code") or "command failed")
     return str(err or "command failed")
+
+
+def _report_success(result: object, generation: str) -> bool:
+    """A paid report succeeds only with its exact durable event and generation receipts."""
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    seq = result.get("seq")
+    return (type(seq) is int and seq >= 0
+            and result.get("generation") == generation)
 
 
 def _staged_command(event_type: str, data: dict, idempotency_key: str,
@@ -583,9 +596,34 @@ class Tui:
             staged_index = None
             try:
                 if action.get("type") == "__refresh_report__":
-                    result = self.api.refresh_report(run_id)
-                    if not isinstance(result, dict) or result.get("ok") is not True:
+                    expected_generation = self.api.run_generation(run_id)
+                    key = str(uuid.uuid4())
+                    turn["status"] = "pending"
+                    turn["report_refresh"] = {
+                        "expected_generation": expected_generation,
+                        "idempotency_key": key,
+                    }
+                    history.append(turn)
+                    staged_index = len(history) - 1
+                    if self._persist(run_id, turn) is False:
                         turn["status"] = "failed"
+                        turn["error"] = (
+                            "could not durably stage report identity; no paid work was submitted")
+                        self.console.print(_command_failure_line(label, turn["error"]))
+                        return
+                    result = self.api.refresh_report(
+                        run_id, expected_generation=expected_generation,
+                        idempotency_key=key)
+                    if isinstance(result, dict) and result.get("ok") is True \
+                            and not _report_success(result, expected_generation):
+                        result = {
+                            "ok": False, "code": "report_refresh_protocol_error",
+                            "error": "report refresh returned no valid durable event receipt",
+                        }
+                    if not isinstance(result, dict) or result.get("ok") is not True:
+                        code = str(result.get("code") or "") if isinstance(result, dict) else ""
+                        turn["status"] = "pending" if code in _REPORT_PENDING_CODES else "failed"
+                        turn["report_code"] = code
                         error = (result or {}).get("error") if isinstance(result, dict) else None
                         turn["error"] = error or "report refresh returned no confirmed success"
                         self.console.print(_command_failure_line(label, turn['error']))
@@ -740,6 +778,62 @@ class Tui:
         for action_index, turn in enumerate(history):
             if turn.get("role") != "action" or turn.get("status") != "pending":
                 continue
+            action = turn.get("action") if isinstance(turn.get("action"), dict) else {}
+            if action.get("type") == "__refresh_report__":
+                label = action.get("label") or "refresh report"
+                intent = (turn.get("report_refresh")
+                          if isinstance(turn.get("report_refresh"), dict) else {})
+                try:
+                    generation = normalize_run_generation(intent.get("expected_generation"))
+                    key = str(intent.get("idempotency_key") or "")
+                    if not key or len(key) > 512:
+                        raise ValueError("invalid report identity")
+                except (ApiError, ValueError):
+                    turn["status"] = "failed"
+                    turn["error"] = (
+                        "pending report refresh has no durable identity; no new paid work was submitted")
+                    self._persist_command_status(run_id, turn, action_index=action_index)
+                    self.console.print(_command_failure_line(label, turn["error"]))
+                    continue
+                try:
+                    result = self.api.refresh_report(
+                        run_id, expected_generation=generation, idempotency_key=key)
+                except ApiError as exc:
+                    if command_error_transient(exc) or exc.status in (401, 403):
+                        unresolved = True
+                        self.console.print(
+                            f"  [yellow]…[/yellow] {_esc(label)} — same-report status unavailable")
+                        continue
+                    turn["status"] = "failed"
+                    turn["error"] = str(exc)
+                    self._persist_command_status(run_id, turn, action_index=action_index)
+                    self.console.print(_command_failure_line(label, turn["error"]))
+                    continue
+                if isinstance(result, dict) and result.get("ok") is True \
+                        and not _report_success(result, generation):
+                    result = {
+                        "ok": False, "code": "report_refresh_protocol_error",
+                        "error": "report refresh returned no valid durable event receipt",
+                    }
+                code = str(result.get("code") or "") if isinstance(result, dict) else ""
+                if isinstance(result, dict) and result.get("ok") is True:
+                    turn["status"] = "done"
+                    turn.pop("error", None)
+                    turn.pop("report_code", None)
+                    self._persist_command_status(run_id, turn, action_index=action_index)
+                    self.console.print(f"  [green]✓[/green] [cyan]{_esc(label)}[/cyan]")
+                elif code in _REPORT_PENDING_CODES:
+                    unresolved = True
+                    turn["report_code"] = code
+                    turn["error"] = str(result.get("error") or "report outcome remains uncertain")
+                else:
+                    turn["status"] = "failed"
+                    turn["report_code"] = code
+                    turn["error"] = str(
+                        result.get("error") or "report refresh returned no confirmed success")
+                    self._persist_command_status(run_id, turn, action_index=action_index)
+                    self.console.print(_command_failure_line(label, turn["error"]))
+                continue
             command = turn.get("command") or {}
             command_id = command.get("id")
             label = (turn.get("action") or {}).get("label") or command.get("event_type") or "action"
@@ -828,6 +922,8 @@ class Tui:
             update["action_index"] = action_index
         if turn.get("error"):
             update["error"] = turn["error"]
+        if turn.get("report_code"):
+            update["report_code"] = turn["report_code"]
         self._persist(run_id, update)
 
     def _append_and_show(self, run_id: str, history: list, turn: dict) -> None:
@@ -875,6 +971,8 @@ class Tui:
                         target["error"] = row["error"]
                     else:
                         target.pop("error", None)
+                    if row.get("report_code"):
+                        target["report_code"] = row["report_code"]
                     current_id = (target.get("command") or {}).get("id")
                     if current_id:
                         by_command[str(current_id)] = target

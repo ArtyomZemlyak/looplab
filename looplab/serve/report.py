@@ -120,10 +120,14 @@ def _report_tools(state: RunState):
         return None
 
 
-def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "") -> dict:
-    """Synthesize one conclusion-first report dict from the run state. Best-effort: a transport/parse
-    failure (or no usable model) returns a minimal report rather than raising — the caller records it
-    as a `report_generated` event regardless, so the UI always has the deterministic analysis."""
+def generate_report(state: RunState, client, *, parser: str = "tool_call", trigger: str = "",
+                    raise_on_failure: bool = False) -> dict:
+    """Synthesize one conclusion-first report dict from the run state.
+
+    Engine-owned cadence/finalization calls keep the best-effort default and receive deterministic
+    fallback content. A manual paid refresh passes ``raise_on_failure=True`` so provider failure can
+    be recorded as a distinct durable terminal without replacing the last known-good report.
+    """
     from looplab.core.parse import parse_structured
     from looplab.agents.agent import agentic_struct
     try:
@@ -141,8 +145,12 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
                              fallback=lambda m: parse_structured(client, m, _ReportOut, parser))
         content = out.model_dump(mode="json")
     except Exception as e:  # noqa: BLE001 — report is best-effort; never crash the run
+        if raise_on_failure:
+            raise
+        from looplab.serve.assistant import safe_provider_failure
+        failure = safe_provider_failure(e)
         content = _ReportOut(headline="(report unavailable)",
-                             verdict=f"(report generation failed: {e})").model_dump(mode="json")
+                             verdict=f"(report generation failed: {failure['message']})").model_dump(mode="json")
     content["at_node"] = len(state.nodes)
     content["trigger"] = trigger
     return sanitize_report_payload(content)

@@ -178,7 +178,7 @@ class _APIRequestBodyLimitMiddleware:
             if message.get("type") != "http.request":
                 continue
             chunk = message.get("body") or b""
-            # # CODEX AGENT: Reject before copying an attacker-sized ASGI chunk. Extending first
+            # Reject before copying an attacker-sized ASGI chunk. Extending first
             # defeats the advertised memory envelope even though the eventual response is 413.
             if len(chunk) > self.max_bytes - len(buffered):
                 await self._reject(send, 413, "API request body is too large")
@@ -521,11 +521,15 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                            and parts[4] == "status")
         is_log_page = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "log-page")
+        is_report_refresh = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
+                             and parts[4] == "report_refresh")
+        is_job = len(parts) == 4 and parts[1] == "api" and parts[2] == "jobs"
         is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                            and parts[4] == "comments"))
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
-        if is_command or is_start_status or is_log_page or is_comments or is_attention:
+        if (is_command or is_start_status or is_log_page or is_report_refresh
+                or is_job or is_comments or is_attention):
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
             vary.update({"X-LoopLab-Token", "Authorization"})
@@ -533,7 +537,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 vary.add(REVIEW_HEADER)
             elif is_attention:
                 vary.update({"X-LoopLab-Token", REVIEW_HEADER})
-            else:
+            elif not is_job:
                 vary.add("Idempotency-Key")
             response.headers["Vary"] = ", ".join(sorted(vary, key=str.lower))
         return response

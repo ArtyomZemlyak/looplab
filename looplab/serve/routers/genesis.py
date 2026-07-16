@@ -14,7 +14,7 @@ import anyio
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
-from looplab.serve.assistant import safe_assistant_failure
+from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 from looplab.serve.schemas import _GenesisSpec
 from looplab.serve.serve_prompts import RESEARCH_BRIEF_SYSTEM, genesis_system
@@ -62,12 +62,13 @@ def build_router(srv) -> APIRouter:
             # retries) and stall EVERY other client — including the live SSE streams — until it returns.
             text = await anyio.to_thread.run_sync(lambda: client.complete_text(msgs))
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
-            return {"ok": False, "error": str(e), "model": s.llm_model, "base_url": s.llm_base_url}
+            return {"ok": False, **safe_provider_failure(e), "model": s.llm_model}
         saved = None
         if body.get("save"):
             kd = srv.settings.load_ui_settings().get("knowledge_dir") or Settings().knowledge_dir
             if kd:
-                d = Path(kd); d.mkdir(parents=True, exist_ok=True)
+                d = Path(kd)
+                d.mkdir(parents=True, exist_ok=True)
                 slug = "".join(c if c.isalnum() else "-" for c in topic.lower())[:48].strip("-") or "topic"
                 fp = d / f"research-{slug}.md"
                 fp.write_text(f"# Research brief: {topic}\n\n{text}\n", encoding="utf-8")
@@ -171,8 +172,8 @@ def build_router(srv) -> APIRouter:
         try:
             client = srv.make_llm_client(gset)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail with a usable message
-            failure = safe_assistant_failure(e)
-            return {"ok": False, "error": failure["error"], "error_kind": failure["error_kind"],
+            failure = safe_provider_failure(e)
+            return {"ok": False, **failure,
                     "spec": _soft, "reply": "The model provider is unavailable. Check Settings and retry; you can still use the manual form."}
         base_msgs = [{"role": "system", "content": sys_prompt}, {"role": "user", "content": user}]
 
@@ -261,8 +262,8 @@ def build_router(srv) -> APIRouter:
                     spec = parse_structured(client, base_msgs, _GenesisSpec,
                                             defaults.get("llm_parser", "tool_call"))
             except Exception as e:  # noqa: BLE001 - planning failed -> soft fail with a usable message
-                return {"ok": False, "error": str(e), "spec": _soft,
-                        "reply": f"Couldn't plan this ({e}). You can still use the manual form."}
+                return {"ok": False, **safe_provider_failure(e), "spec": _soft,
+                        "reply": "Couldn't generate a plan with the model provider. You can still use the manual form."}
             return {"ok": True, "spec": _normalize_genesis(spec, draft),
                     "reply": spec.reply or "Here's a plan — tweak the card and launch."}
 
@@ -285,7 +286,8 @@ def build_router(srv) -> APIRouter:
             try:
                 return _compute_plan(_on_step)
             except Exception as e:  # noqa: BLE001 - surface as a job error, never a wedged job
-                return {"ok": False, "error": f"planning failed: {e}"}
+                return {"ok": False, **safe_provider_failure(e), "spec": _soft,
+                        "reply": "Couldn't generate a plan with the model provider. You can still use the manual form."}
 
         # Adaptive fast-path — the shared srv.jobs.run_as_job spawn+inline-wait (same funnel as the
         # assistant/boss/report routes): a quick model finishes inside the inline wait and the spec is

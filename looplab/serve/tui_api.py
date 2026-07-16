@@ -110,7 +110,9 @@ class Api:
                 pass
             raise ApiError(detail or f"{path}: HTTP {e.code}", status=e.code) from e
         except (urllib.error.URLError, OSError, socket.timeout, http.client.HTTPException) as e:
-            raise ApiError(f"could not reach {self.base}{path}: {e}") from e
+            # The configured base may carry user-info/query credentials and transport exceptions can
+            # repeat the full URL. Keep the durable/TUI error stable and path-scoped only.
+            raise ApiError(f"{path}: server transport unavailable") from e
         try:
             return json.loads(raw) if raw else None
         except ValueError as e:
@@ -216,10 +218,82 @@ class Api:
                 f"{_path_segment(command_id)}")
         return self._command_record(self.get(path), path, expected_id=str(command_id))
 
-    def refresh_report(self, run_id: str) -> dict:
-        """Regenerate a report through its dedicated background-job endpoint (not run commands)."""
-        resp = self.post(f"/api/runs/{_path_segment(run_id)}/report_refresh", {}, timeout=60)
-        return self._await_job(resp, lambda j: f"/api/jobs/{j}", interval=1.5, deadline_s=600)
+    def refresh_report(self, run_id: str, *, expected_generation: Optional[str] = None,
+                       idempotency_key: Optional[str] = None,
+                       submit_retries: int = 1) -> dict:
+        """Regenerate a generation-fenced report through its dedicated background-job endpoint."""
+        generation = normalize_run_generation(
+            expected_generation if expected_generation is not None
+            else self.run_generation(run_id))
+        key = str(idempotency_key or uuid.uuid4())
+        path = f"/api/runs/{_path_segment(run_id)}/report_refresh"
+
+        def submit() -> dict:
+            response = None
+            for attempt in range(max(0, int(submit_retries)) + 1):
+                try:
+                    response = self._request(
+                        "POST", path,
+                        body={EXPECTED_RUN_GENERATION_FIELD: generation}, timeout=60,
+                        headers={"Idempotency-Key": key})
+                    break
+                except ApiError as exc:
+                    if not command_error_transient(exc) or attempt >= max(0, int(submit_retries)):
+                        raise
+                    time.sleep(0.15)
+            try:
+                return self._await_job(
+                    response, lambda job_id: f"/api/jobs/{job_id}",
+                    interval=1.5, deadline_s=600)
+            except ApiError as exc:
+                if exc.status in {401, 403} and isinstance(response, dict):
+                    return {
+                        "ok": False, "code": "job_authorization_lost", "ambiguous": True,
+                        "job_id": response.get("job_id"),
+                        "error": "authorization was lost while observing the existing report job",
+                    }
+                raise
+
+        result = submit()
+        # A process receipt can disappear after the durable report event landed. Re-submit once with
+        # the SAME key so the event-log ledger returns that terminal rather than billing new work.
+        if isinstance(result, dict) and result.get("code") in {
+                "job_contact_lost", "job_unknown", "job_protocol_error"}:
+            result = submit()
+        if not isinstance(result, dict):
+            raise ApiError("report refresh returned an invalid response", status=200)
+        receipt_generation = result.get(RUN_GENERATION_FIELD)
+        local_ambiguity = result.get("code") in {
+            "job_contact_lost", "job_authorization_lost", "job_unknown", "job_timeout",
+            "job_protocol_error",
+        }
+        if receipt_generation is not None:
+            try:
+                receipt_matches = normalize_run_generation(receipt_generation) == generation
+            except ApiError:
+                receipt_matches = False
+            if not receipt_matches:
+                return {
+                    "ok": False, "code": "report_refresh_protocol_error", "ambiguous": True,
+                    "error": "report refresh returned an invalid generation receipt",
+                    "idempotency_key": key, RUN_GENERATION_FIELD: generation,
+                }
+        elif not local_ambiguity:
+            return {
+                "ok": False, "code": "report_refresh_protocol_error", "ambiguous": True,
+                "error": "report refresh returned no durable generation receipt",
+                "idempotency_key": key, RUN_GENERATION_FIELD: generation,
+            }
+        if result.get("ok") is True:
+            seq = result.get("seq")
+            if type(seq) is not int or seq < 0:
+                return {
+                    "ok": False, "code": "report_refresh_protocol_error", "ambiguous": True,
+                    "error": "report refresh returned no durable event receipt",
+                    "idempotency_key": key, RUN_GENERATION_FIELD: generation,
+                }
+        return {**result, "idempotency_key": key,
+                RUN_GENERATION_FIELD: receipt_generation or generation}
 
     def ping(self) -> bool:
         """Is a LoopLab server answering here? (a cheap, short-timeout GET on the runs list)."""
@@ -246,16 +320,29 @@ class Api:
                 # A 5xx (status set) is treated as transient — keep polling. A transport failure
                 # (status None: connection refused/timeout) usually means the server died; bail fast
                 # after a few in a row instead of spinning out the whole 5-10 min deadline.
+                if not command_error_transient(e):
+                    raise
                 if e.status is None:
                     misses += 1
                     if misses >= 5:
-                        return {"ok": False, "error": "lost contact with the server"}
+                        return {"ok": False, "code": "job_contact_lost", "ambiguous": True,
+                                "job_id": resp["job_id"],
+                                "error": "lost contact with the existing background job"}
                 continue
+            if (not isinstance(j, dict)
+                    or j.get("status") not in {JOB_RUNNING, JOB_DONE, JOB_UNKNOWN}):
+                return {"ok": False, "code": "job_protocol_error", "ambiguous": True,
+                        "job_id": resp["job_id"],
+                        "error": "the background job returned an invalid status receipt"}
             if isinstance(j, dict) and j.get("status") == JOB_DONE:
                 return j
             if isinstance(j, dict) and j.get("status") == JOB_UNKNOWN:
-                return {"ok": False, "error": "the job expired — try again"}
-        return {"ok": False, "error": "timed out waiting for the boss"}
+                return {"ok": False, "code": "job_unknown", "ambiguous": True,
+                        "job_id": resp["job_id"],
+                        "error": "the background job receipt expired"}
+        return {"ok": False, "code": "job_timeout", "ambiguous": True,
+                "job_id": resp["job_id"],
+                "error": "timed out waiting for the existing background job"}
 
     def genesis(self, messages: list, instruction: str, draft: Optional[dict]) -> dict:
         resp = self.post("/api/genesis", {"messages": messages, "instruction": instruction, "draft": draft},

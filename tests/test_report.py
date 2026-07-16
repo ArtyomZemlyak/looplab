@@ -65,6 +65,32 @@ def test_replay_canonicalizes_malformed_and_oversized_advisory_sidecars():
     assert "\x00" not in state.report["headline"]
 
 
+def test_durable_advisory_budget_prioritizes_verification_and_caveats():
+    from looplab.core.advisory_payloads import (
+        sanitize_report_payload,
+        sanitize_research_memo_payload,
+    )
+
+    huge_rows = ["x" * 10_000] * 32
+    memo = sanitize_research_memo_payload({
+        "summary": "summary",
+        "reasoning": "r" * 100_000,
+        "findings": huge_rows,
+        "recommended_directions": huge_rows,
+        "verification": {"method": "llm", "verdicts": [{
+            "statement": "critical claim", "verdict": "unsupported", "note": "not evidenced",
+        }]},
+    })
+    assert memo["verification"]["verdicts"][0]["verdict"] == "unsupported"
+
+    report = sanitize_report_payload({
+        "what_worked": huge_rows,
+        "learnings": huge_rows,
+        "caveats": ["critical advisory caveat"],
+    })
+    assert report["caveats"] == ["critical advisory caveat"]
+
+
 def test_make_report_writer_offline_is_none():
     from looplab.core.config import Settings
     assert make_report_writer(Settings(), client=None) is None
@@ -315,6 +341,15 @@ def test_engine_no_writer_no_report(tmp_path):
     assert st.report is None  # off without a writer -> deterministic-only, no event
 
 
+def _refresh_report(client, run_id="demo", *, generation=None, key="test-report-refresh"):
+    generation = (generation if generation is not None
+                  else client.get(f"/api/runs/{run_id}/state").json()["generation"])
+    return client.post(
+        f"/api/runs/{run_id}/report_refresh",
+        headers={"Idempotency-Key": key},
+        json={"expected_generation": generation})
+
+
 def test_report_refresh_endpoint(tmp_path, monkeypatch):
     _build_run(tmp_path, "demo", writer=None)
     client = TestClient(make_app(tmp_path))
@@ -324,11 +359,337 @@ def test_report_refresh_endpoint(tmp_path, monkeypatch):
                         lambda st, c, **kw: {"headline": "live", "at_node": len(st.nodes),
                                              "trigger": kw.get("trigger", "")})
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
-    r = client.post("/api/runs/demo/report_refresh").json()
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    r = _refresh_report(client, generation=generation).json()
     assert r["ok"] is True and r["content"]["headline"] == "live"
+    assert r["generation"] == generation
     # it folded into state.report
     st = client.get("/api/runs/demo/state").json()["state"]
     assert st["report"]["headline"] == "live"
+
+
+def test_report_refresh_ignores_non_sha_ledger_identity(tmp_path, monkeypatch):
+    """A malformed diagnostic row cannot permanently block every real refresh identity."""
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    EventStore(tmp_path / "demo" / "events.jsonl").append("report_refresh_started", {
+        "refresh_id": "z" * 64, "generation": generation,
+    })
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: {
+        "headline": "not blocked", "at_node": len(state.nodes),
+    })
+
+    result = _refresh_report(client, generation=generation, key="valid-key").json()
+
+    assert result["ok"] is True and result["content"]["headline"] == "not blocked"
+
+
+def test_report_refresh_rejects_generation_replaced_after_click(tmp_path, monkeypatch):
+    """A delayed click formed on generation A may never bill or append into replacement B."""
+    from looplab.events.eventstore import EventStore
+
+    rd = _seed_finished_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    generation_a = client.get("/api/runs/demo/state").json()["generation"]
+    (rd / "events.jsonl").rename(rd / "events.jsonl.generation-a")
+    EventStore(rd / "events.jsonl").append("run_started", {
+        "run_id": "demo", "task_id": "replacement", "goal": "generation B",
+        "direction": "min",
+    })
+    created = []
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda _settings: created.append(True) or object())
+
+    response = _refresh_report(client, generation=generation_a, key="delayed-a")
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "run_generation_changed"
+    assert response.json()["detail"]["expected_generation"] == generation_a
+    assert created == []
+
+
+def test_report_refresh_idempotency_rejoins_one_paid_job(tmp_path, monkeypatch):
+    """A lost POST response can be retried with the same key without a second model call."""
+    import threading
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    _build_run(tmp_path, "demo", writer=None)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def blocked_report(state, client, **kwargs):
+        calls.append((state.run_id, kwargs.get("trigger")))
+        entered.set()
+        assert release.wait(5), "test did not release report generation"
+        return {"headline": "one paid call", "at_node": len(state.nodes), "trigger": "manual"}
+
+    import looplab.serve.report as report_mod
+    monkeypatch.setattr(report_mod, "generate_report", blocked_report)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    first = _refresh_report(client, generation=generation, key="same-logical-refresh").json()
+    assert first["status"] == "running" and entered.wait(3)
+    retry = _refresh_report(client, generation=generation, key="same-logical-refresh").json()
+    assert retry == first
+    assert calls == [("demo", "manual")]
+
+    release.set()
+    result = None
+    for _ in range(100):
+        result = client.get(f"/api/jobs/{first['job_id']}").json()
+        if result.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert result and result["ok"] is True
+    assert result["generation"] == generation
+    assert calls == [("demo", "manual")]
+
+
+def test_report_refresh_retry_starts_workerless_durable_reservation(tmp_path, monkeypatch):
+    _build_run(tmp_path, "demo", writer=None)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    calls = []
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
+        calls.append(state.run_id) or {"headline": "recovered", "at_node": len(state.nodes)}))
+    registry = app.state.looplab.jobs
+    original = registry.run_as_job
+
+    async def handler_vanished(*_args, **_kwargs):
+        raise RuntimeError("request task vanished before worker start")
+
+    monkeypatch.setattr(registry, "run_as_job", handler_vanished)
+    with pytest.raises(RuntimeError, match="vanished"):
+        _refresh_report(client, generation=generation, key="workerless-reservation")
+
+    monkeypatch.setattr(registry, "run_as_job", original)
+    recovered = _refresh_report(
+        client, generation=generation, key="workerless-reservation").json()
+
+    assert recovered["ok"] is True and recovered["content"]["headline"] == "recovered"
+    assert calls == ["demo"]
+
+
+def test_report_refresh_restart_is_fail_closed_then_recovers_terminal_receipt(
+        tmp_path, monkeypatch):
+    """A fresh server may observe or recover paid work, but can never rebill an orphaned claim."""
+    import threading
+    import time
+
+    _build_run(tmp_path, "demo", writer=None)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def blocked_report(state, client, **kwargs):
+        calls.append(state.run_id)
+        entered.set()
+        assert release.wait(5), "test did not release report generation"
+        return {"headline": "restart-safe", "at_node": len(state.nodes), "trigger": "manual"}
+
+    import looplab.serve.report as report_mod
+    monkeypatch.setattr(report_mod, "generate_report", blocked_report)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    first_client = TestClient(make_app(tmp_path))
+    generation = first_client.get("/api/runs/demo/state").json()["generation"]
+
+    first = _refresh_report(
+        first_client, generation=generation, key="restart-safe-key").json()
+    assert first["status"] == "running" and entered.wait(3)
+
+    restarted = TestClient(make_app(tmp_path))
+    uncertain = _refresh_report(
+        restarted, generation=generation, key="restart-safe-key").json()
+    assert uncertain["ok"] is False
+    assert uncertain["code"] == "report_refresh_uncertain"
+    conflict = _refresh_report(
+        restarted, generation=generation, key="another-tab-key")
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["code"] == "report_refresh_in_progress"
+    assert calls == ["demo"]
+
+    release.set()
+    terminal = None
+    for _ in range(100):
+        terminal = first_client.get(f"/api/jobs/{first['job_id']}").json()
+        if terminal.get("status") == "done":
+            break
+        time.sleep(0.05)
+    assert terminal and terminal["ok"] is True
+
+    recovered = _refresh_report(
+        restarted, generation=generation, key="restart-safe-key").json()
+    assert recovered["ok"] is True
+    assert recovered["seq"] == terminal["seq"]
+    assert calls == ["demo"]
+
+
+def test_report_refresh_job_start_failure_records_restart_safe_terminal(
+        tmp_path, monkeypatch):
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    async def failed_spawn(*_args, **_kwargs):
+        return {
+            "ok": False,
+            "code": "job_failed",
+            "error_kind": "internal",
+            "error": "background job failed",
+        }
+
+    monkeypatch.setattr(app.state.looplab.jobs, "run_as_job", failed_spawn)
+    first = _refresh_report(
+        client, generation=generation, key="failed-worker-start").json()
+
+    assert first["code"] == "job_failed"
+    failed = [
+        event for event in EventStore(tmp_path / "demo" / "events.jsonl").read_all()
+        if event.type == "report_refresh_failed"
+    ]
+    assert len(failed) == 1 and failed[0].data["error_kind"] == "internal"
+
+    restarted = TestClient(make_app(tmp_path))
+    replayed = _refresh_report(
+        restarted, generation=generation, key="failed-worker-start").json()
+    assert replayed["code"] == "report_refresh_failed"
+    assert replayed["error_kind"] == "internal"
+
+
+def test_report_refresh_terminal_append_failure_stays_uncertain(
+        tmp_path, monkeypatch):
+    """A failed provider call is not retryable under a fresh key until its terminal is durable."""
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    real_append = EventStore.append
+
+    def fail_failure_receipt(self, event_type, data, **kwargs):
+        if event_type == "report_refresh_failed":
+            raise OSError("terminal storage unavailable")
+        return real_append(self, event_type, data, **kwargs)
+
+    monkeypatch.setattr(EventStore, "append", fail_failure_receipt)
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda _settings: (_ for _ in ()).throw(RuntimeError("provider failed")),
+    )
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    result = _refresh_report(
+        client, generation=generation, key="uncertain-terminal").json()
+
+    assert result["code"] == "report_refresh_uncertain"
+    assert result["generation"] == generation
+    restarted = TestClient(make_app(tmp_path))
+    same = _refresh_report(
+        restarted, generation=generation, key="uncertain-terminal").json()
+    assert same["code"] == "report_refresh_uncertain"
+    other = _refresh_report(
+        restarted, generation=generation, key="must-not-rebill")
+    assert other.status_code == 409
+    assert other.json()["detail"]["code"] == "report_refresh_in_progress"
+
+
+def test_report_refresh_terminal_replay_does_not_require_current_llm_settings(
+        tmp_path, monkeypatch):
+    """A durable receipt remains recoverable even if settings become unreadable afterward."""
+    _build_run(tmp_path, "demo", writer=None)
+    import looplab.serve.report as report_mod
+    monkeypatch.setattr(report_mod, "generate_report", lambda st, _client, **_kwargs: {
+        "headline": "durable replay", "at_node": len(st.nodes), "trigger": "manual",
+    })
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+    first = _refresh_report(client, generation=generation, key="replay-without-settings").json()
+    assert first["ok"] is True
+
+    monkeypatch.setattr(
+        "looplab.serve.settings_store.SettingsStore.load_ui_settings",
+        lambda _store: (_ for _ in ()).throw(OSError("settings unreadable")),
+    )
+    replayed = _refresh_report(
+        client, generation=generation, key="replay-without-settings").json()
+
+    assert replayed == first
+
+
+def test_report_refresh_background_http_rejection_records_terminal(
+        tmp_path, monkeypatch):
+    from fastapi import HTTPException
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    def reject_activity(*_args, **_kwargs):
+        raise HTTPException(503, {
+            "code": "sequence_unavailable",
+            "message": "https://user:secret@provider.invalid?token=hidden",
+        })
+
+    monkeypatch.setattr(app.state.looplab.commands, "run_activity", reject_activity)
+    first = _refresh_report(
+        client, generation=generation, key="rejected-worker").json()
+
+    assert first["code"] == "background_request_rejected"
+    assert "secret" not in str(first) and "token=hidden" not in str(first)
+    failed = [
+        event for event in EventStore(tmp_path / "demo" / "events.jsonl").read_all()
+        if event.type == "report_refresh_failed"
+    ]
+    assert len(failed) == 1
+
+    replayed = _refresh_report(
+        TestClient(make_app(tmp_path)), generation=generation, key="rejected-worker").json()
+    assert replayed["code"] == "report_refresh_failed"
+
+
+def test_manual_report_failure_preserves_last_good_report(tmp_path, monkeypatch):
+    """Manual provider failure is a failed receipt, never a new unavailable report event."""
+    from looplab.events.eventstore import EventStore
+
+    _build_run(tmp_path, "demo", writer=None)
+    rd = tmp_path / "demo"
+    EventStore(rd / "events.jsonl").append("report_generated", {
+        "content": {"headline": "last known good", "at_node": 0, "trigger": "finish"},
+    })
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("https://user:secret@provider.invalid/v1?token=hidden")
+
+    monkeypatch.setattr("looplab.agents.agent.agentic_struct", explode)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+
+    response = _refresh_report(client, key="failed-manual-report")
+
+    assert response.status_code == 200 and response.json()["ok"] is False
+    assert "secret" not in str(response.json()) and "token=hidden" not in str(response.json())
+    state = client.get("/api/runs/demo/state").json()["state"]
+    assert state["report"]["headline"] == "last known good"
+    reports = [event for event in EventStore(rd / "events.jsonl").read_all()
+               if event.type == "report_generated"]
+    assert len(reports) == 1
 
 
 def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
@@ -338,7 +699,7 @@ def test_report_refresh_soft_fails_offline(tmp_path, monkeypatch):
     def _boom(_s):
         raise RuntimeError("no model")
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom)
-    r = client.post("/api/runs/demo/report_refresh")
+    r = _refresh_report(client)
     assert r.status_code == 200 and r.json()["ok"] is False  # soft-fail, no crash
 
 
@@ -356,7 +717,7 @@ def test_report_refresh_async_job_path(tmp_path, monkeypatch):
                                              "trigger": kw.get("trigger", "")})
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda s: object())
     client = TestClient(make_app(tmp_path))                     # reads the inline wait at construction
-    r = client.post("/api/runs/demo/report_refresh").json()
+    r = _refresh_report(client).json()
     assert r["status"] == "running" and r["job_id"]            # handed back a job, didn't block
     job = None
     for _ in range(100):                                        # poll the background regen to completion
@@ -411,7 +772,7 @@ def test_report_refresh_lease_blocks_reset_through_durable_append(tmp_path, monk
     monkeypatch.setattr(control_router, "_spawn_engine", lambda *_a, **_k: 9101)
     client = TestClient(make_app(tmp_path))
 
-    queued = client.post("/api/runs/demo/report_refresh").json()
+    queued = _refresh_report(client).json()
     assert queued["status"] == "running" and entered.wait(3)
     assert list((rd / ".commands").glob(".activity_*.json"))
     assert client.post("/api/runs/demo/reset").status_code == 409
@@ -951,10 +1312,11 @@ def test_report_worker_rejects_replaced_generation_before_client_creation(tmp_pa
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", forbidden_client)
     monkeypatch.setattr(app.state.looplab.jobs, "run_as_job", replace_before_worker)
-    response = TestClient(app).post("/api/runs/demo/report_refresh")
+    client = TestClient(app)
+    response = _refresh_report(client)
 
     assert response.status_code == 200 and response.json()["ok"] is False
-    assert "run_generation_changed" in response.json()["error"]
+    assert response.json()["code"] == "run_generation_changed"
     assert created == []
     new_types = [event.type for event in EventStore(rd / "events.jsonl").read_all()]
     assert "llm_usage" not in new_types and "report_generated" not in new_types
@@ -1529,6 +1891,29 @@ def test_scope_report_module_deterministic_ranks_and_degrades():
         assert k in c
     empty = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, [], None)
     assert "No runs" in empty["headline"]               # empty scope degrades, never raises
+
+
+def test_scope_report_tool_failure_cannot_be_echoed_into_persisted_content(monkeypatch):
+    from looplab.serve import scope_report
+
+    leak = "https://user:secret@provider.example/v1?token=hidden"
+
+    def echo_tool_error(_client, tools, _messages, _emit_spec, **_kwargs):
+        return {
+            "headline": "safe",
+            "verdict": tools.execute(
+                "inspect_experiment", {"run_id": "a", "node_id": leak}),
+        }
+
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", echo_tool_error)
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "a", "direction": "min", "best_metric": 0.05}], object(),
+        drill=lambda _run_id, _node_id: "unreachable",
+    )
+
+    assert content["verdict"] == "(tool request invalid)"
+    assert "provider.example" not in str(content) and "token=hidden" not in str(content)
 
 
 def test_scope_report_ranks_each_run_by_its_own_direction():

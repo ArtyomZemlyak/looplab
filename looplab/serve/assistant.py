@@ -26,16 +26,15 @@ from typing import Callable, Optional
 from looplab.core.atomicio import atomic_write_text, best_effort_fsync
 from looplab.events.eventstore import iter_jsonl
 
+# Permission modes mirror Claude Code. `plan` is the safe read-only default; mutating modes are
+# enforced by the write/shell/git providers. Re-export the shared source of truth so session and
+# provider mode sets cannot drift.
+from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa: F401
+
 # The LoopLab source tree (…/looplab/looplab/assistant.py -> repo root two levels up). The assistant
 # may read (and, in later phases, edit) the code that runs it — this is what "fix LoopLab itself"
 # needs — so the repo root is always an allowed root alongside the run-root and the user's home.
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-# Permission modes, mirroring Claude Code. `plan` is read-only (the safe default); the mutating modes
-# are honored by the write/shell/git providers in P1. Re-exported from the single source of truth
-# (tools/perm_modes.py — the decision table the providers enforce) so the mode SET can never drift
-# between the session layer and the enforcing providers.
-from looplab.tools.perm_modes import DEFAULT_MODE, MODES, normalize_mode  # noqa: F401
 
 
 def safe_assistant_failure(exc: Exception) -> dict:
@@ -60,7 +59,38 @@ def safe_assistant_failure(exc: Exception) -> dict:
     else:
         kind = "provider_error"
         message = "The model provider returned an error. Retry or review the provider settings."
-    return {"error": kind, "error_kind": kind, "reply": f"(assistant error: {message})"}
+    return {
+        "error": kind,
+        "error_kind": kind,
+        "message": message,
+        "reply": f"(assistant error: {message})",
+    }
+
+
+def safe_provider_failure(exc: Exception) -> dict:
+    """Return the public soft-failure envelope for an owner-facing provider route.
+
+    Keep ``error`` as a human-readable string for existing UI callers while adding the stable
+    ``error_kind`` discriminator.  Both values come from the same allow-listed classifier as
+    assistant transcripts; the provider exception itself is never copied into the response.
+    """
+    # A few owner routes wrap both provider creation and a generation-fenced activity lease in the
+    # same soft-failure boundary. Preserve the one allow-listed lifecycle conflict without reflecting
+    # arbitrary HTTPException detail (which can contain paths or user input) as a provider error.
+    detail = getattr(exc, "detail", None)
+    if (isinstance(detail, dict)
+            and detail.get("code") == "run_generation_changed"):
+        return {
+            "error": "run_generation_changed",
+            "error_kind": "run_state_conflict",
+            "message": "The run was reset or replaced before this work started.",
+        }
+    failure = safe_assistant_failure(exc)
+    return {
+        "error": failure["message"],
+        "error_kind": failure["error_kind"],
+        "message": failure["message"],
+    }
 
 
 def sanitize_assistant_message(message: dict) -> dict:
@@ -164,7 +194,11 @@ class SessionStore:
 
     def messages(self, sid: str) -> list[dict]:
         try:
-            return list(iter_jsonl(self._msgs_path(sid)))
+            # Canonicalize legacy assistant failures at the storage boundary. This keeps old raw
+            # provider URLs/account metadata out of owner/shared reads, future model prompts, and
+            # forked transcripts while leaving user-authored messages untouched.
+            return [sanitize_assistant_message(message)
+                    for message in iter_jsonl(self._msgs_path(sid))]
         except OSError:
             return []
 

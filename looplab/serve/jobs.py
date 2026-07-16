@@ -16,6 +16,12 @@ from fastapi import APIRouter
 from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 
 
+_MAX_JOBS = 64
+# Browser and TUI poll contracts wait up to ten minutes. Never evict a completed receipt while a
+# conforming client can still be waiting for it; bounded capacity fails closed instead.
+_COMPLETED_RETENTION_SECONDS = 660.0
+
+
 # ---- generic background-job registry (generalizes the genesis pattern) -----------------------
 # Slow, unbounded work (an agent synthesizing across many runs, a heavy report regen) must not run
 # inline: behind a UI proxy (JupyterHub's jupyter-server-proxy) a request that outlasts the gateway
@@ -25,22 +31,117 @@ from looplab.serve.protocol import JOB_DONE, JOB_RUNNING, JOB_UNKNOWN
 class JobRegistry:
     def __init__(self):
         self._jobs: dict = {}
+        self._idempotent_jobs: dict[str, str] = {}
+        self._job_identities: dict[str, str] = {}
         self._lock = threading.Lock()
         self._inline_wait = float(os.environ.get("LOOPLAB_JOB_INLINE_WAIT", "8.0"))
+
+    def _remove_locked(self, job_id: str) -> None:
+        self._jobs.pop(job_id, None)
+        identity = self._job_identities.pop(job_id, None)
+        if identity is not None and self._idempotent_jobs.get(identity) == job_id:
+            self._idempotent_jobs.pop(identity, None)
+
+    def _make_room_locked(self, now: float) -> bool:
+        """Evict only old completed receipts; running work and fresh results are never displaced."""
+        if len(self._jobs) < _MAX_JOBS:
+            return True
+        completed = sorted(
+            (job_id for job_id, job in self._jobs.items()
+             if job.get("status") == JOB_DONE
+             and now - float(job.get("ts", now)) >= _COMPLETED_RETENTION_SECONDS),
+            key=lambda job_id: self._jobs[job_id].get("ts", 0),
+        )
+        for job_id in completed:
+            self._remove_locked(job_id)
+            if len(self._jobs) < _MAX_JOBS:
+                return True
+        return False
 
     def put(self, job_id: str, **fields) -> None:
         with self._lock:
             self._jobs.setdefault(job_id, {}).update(fields)
-            if len(self._jobs) > 64:     # bound memory: keep the most-recent 64
-                for k in sorted(self._jobs, key=lambda j: self._jobs[j].get("ts", 0))[:-64]:
-                    self._jobs.pop(k, None)
 
     def get(self, job_id: str):
         with self._lock:
             j = self._jobs.get(job_id)
             return dict(j) if j else None
 
-    async def run_as_job(self, compute, *, inline_wait: float | None = None, with_progress: bool = False):
+    def has_identity(self, identity: str) -> bool:
+        """Whether this process can still rejoin the exact in-flight/done logical job."""
+        with self._lock:
+            job_id = self._idempotent_jobs.get(identity)
+            return bool(job_id and job_id in self._jobs)
+
+    @property
+    def inline_wait(self) -> float:
+        return self._inline_wait
+
+    def reserve(self, idempotency_key: str | None = None) -> dict:
+        """Atomically reserve/rejoin a bounded job identity without starting its worker."""
+        with self._lock:
+            job_id = (self._idempotent_jobs.get(idempotency_key)
+                      if idempotency_key is not None else None)
+            if job_id is not None and job_id in self._jobs:
+                return {"status": JOB_RUNNING, "job_id": job_id}
+            if idempotency_key is not None:
+                self._idempotent_jobs.pop(idempotency_key, None)
+            now = time.time()
+            if not self._make_room_locked(now):
+                return {
+                    "ok": False,
+                    "code": "job_capacity",
+                    "error_kind": "capacity",
+                    "error": "background job capacity is temporarily full; retry later",
+                }
+            job_id = secrets.token_hex(8)
+            self._jobs[job_id] = {
+                "status": JOB_RUNNING, "result": None, "ts": now, "worker_started": False}
+            if idempotency_key is not None:
+                self._idempotent_jobs[idempotency_key] = job_id
+                self._job_identities[job_id] = idempotency_key
+            return {"status": JOB_RUNNING, "job_id": job_id}
+
+    def discard_reservation(self, job_id: str) -> None:
+        """Release only a workerless reservation whose durable caller-side claim failed."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and not job.get("worker_started"):
+                self._remove_locked(job_id)
+
+    def start_reserved(self, job_id: str, compute, *, with_progress: bool = False) -> None:
+        """Start an existing reservation once; safe for same-identity concurrent callers."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job.get("worker_started") or job.get("status") == JOB_DONE:
+                return
+            job["worker_started"] = True
+
+        def _worker():
+            try:
+                res = compute(lambda p: self.put(job_id, progress=p)) if with_progress else compute()
+            except Exception:  # noqa: BLE001 - raw provider/internal errors must never cross /api/jobs
+                res = {
+                    "ok": False,
+                    "code": "job_failed",
+                    "error_kind": "internal",
+                    "error": "background job failed",
+                }
+            self.put(job_id, status=JOB_DONE, result=res, ts=time.time())
+
+        try:
+            threading.Thread(target=_worker, daemon=True).start()
+        except Exception:  # noqa: BLE001 - a failed spawn must not leave a permanent running claim
+            self.put(job_id, status=JOB_DONE, result={
+                "ok": False,
+                "code": "job_failed",
+                "error_kind": "internal",
+                "error": "background job failed",
+            }, ts=time.time())
+
+    async def run_as_job(self, compute, *, inline_wait: float | None = None,
+                         with_progress: bool = False,
+                         idempotency_key: str | None = None):
         """Run `compute` (a 0-arg callable returning the final response dict) in a worker thread; return
         its result inline when it finishes within the inline wait, else {status:'running', job_id}. The
         thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
@@ -50,16 +151,11 @@ class JobRegistry:
         that annotates the running job's `progress` field (thread-safe; genesis streams its live scout
         steps through it, and its poll endpoint surfaces them). `inline_wait` overrides the registry-wide
         default for this one call (genesis keeps its own LOOPLAB_GENESIS_INLINE_WAIT knob)."""
-        job_id = secrets.token_hex(8)
-        self.put(job_id, status=JOB_RUNNING, result=None, ts=time.time())
-
-        def _worker():
-            try:
-                res = compute(lambda p: self.put(job_id, progress=p)) if with_progress else compute()
-            except Exception as e:  # noqa: BLE001 - surface a usable error, never crash the worker
-                res = {"ok": False, "error": str(e)}
-            self.put(job_id, status=JOB_DONE, result=res, ts=time.time())
-        threading.Thread(target=_worker, daemon=True).start()
+        receipt = self.reserve(idempotency_key)
+        if receipt.get("status") != JOB_RUNNING:
+            return receipt
+        job_id = receipt["job_id"]
+        self.start_reserved(job_id, compute, with_progress=with_progress)
 
         deadline = time.monotonic() + (self._inline_wait if inline_wait is None else inline_wait)
         while time.monotonic() < deadline:

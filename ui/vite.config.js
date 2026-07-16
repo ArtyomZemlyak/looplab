@@ -21,17 +21,39 @@ export default defineConfig({
     chunkSizeWarningLimit: 500,
     rollupOptions: {
       output: {
-        // Keep the only deliberate vendor split tied to the graph interaction boundary. React and
-        // every other dependency remain under Rolldown's graph-driven sharing; broad vendor buckets
-        // would make lightweight routes download code they never execute. Capturing dependencies
-        // recursively would pull React into this graph-only chunk and make every route load it.
+        // Keep the only vendor split tied to the graph interaction boundary. Small application
+        // groups consolidate modules used together across the same owner workspaces, avoiding many
+        // tiny gzip streams without crossing the route/panel boundaries enforced by the bundle
+        // checker. Never capture dependencies recursively: that would pull React/core into a group.
         strictExecutionOrder: true,
         codeSplitting: {
-          groups: [{
-            name: 'vendor-flow',
-            test: /[/\\]node_modules[/\\]@xyflow[/\\]/,
-            includeDependenciesRecursively: false,
-          }],
+          groups: [
+            {
+              name: 'vendor-flow',
+              test: /[/\\]node_modules[/\\]@xyflow[/\\]/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'analysis-support',
+              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics)\.js$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'code-support',
+              test: /[/\\]src[/\\](CodeViewer\.jsx|lineDiff\.js)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'graph-support',
+              test: /[/\\]src[/\\](dagViewport|grouping)\.js$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'ui-primitives',
+              test: /[/\\]src[/\\](EnergyToggle|PanelShell|icons|runMapModel|useDialogFocus)\.(js|jsx)$/,
+              includeDependenciesRecursively: false,
+            },
+          ],
         },
       },
     },

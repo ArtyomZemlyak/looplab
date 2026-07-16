@@ -57,6 +57,26 @@ def test_session_store_crud_and_fork(tmp_path):
     assert {s["id"] for s in st.list()} == {m["id"], child["id"]}
 
 
+def test_session_store_canonicalizes_legacy_provider_failures_before_prompt_or_fork(tmp_path):
+    st = SessionStore(tmp_path)
+    source = st.create(title="legacy")
+    leak = (
+        "Couldn't reach the model (request to "
+        "https://api.provider.example/v1/messages model=private-model acct=acct-42)"
+    )
+    st.append(source["id"], {"role": "assistant", "content": leak})
+
+    loaded = st.messages(source["id"])
+    child = st.fork(source["id"])
+    forked = st.messages(child["id"])
+
+    for transcript in (loaded, forked):
+        rendered = json.dumps(transcript)
+        assert transcript[0]["error_kind"] == "unavailable"
+        for fragment in ("provider.example", "private-model", "acct-42", "v1/messages"):
+            assert fragment not in rendered
+
+
 def test_session_store_rejects_traversal(tmp_path):
     st = SessionStore(tmp_path)
     for bad in ("../evil", "a/b", ".."):

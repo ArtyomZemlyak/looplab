@@ -126,11 +126,15 @@ test('dynamic API paths preserve fragment syntax and a literal encoded slash as 
   globalThis.sessionStorage = { getItem: () => '' }
   globalThis.fetch = async url => {
     calls.push(String(url))
-    return { ok: true, json: async () => ({ ok: true }) }
+    return { ok: true, json: async () => ({ ok: true, generation: 'a'.repeat(64), seq: 1 }) }
   }
   try {
-    await CONTROL.refreshReport('trial#1')
-    await CONTROL.refreshReport('literal%2Fname')
+    await CONTROL.refreshReport('trial#1', {
+      expectedGeneration: 'a'.repeat(64), idempotencyKey: 'report-trial-1',
+    })
+    await CONTROL.refreshReport('literal%2Fname', {
+      expectedGeneration: 'a'.repeat(64), idempotencyKey: 'report-literal-name',
+    })
     await patchProject('project#1', { name: 'renamed' })
     await deleteProject('literal%2Fproject')
     await renameSupertask('task#1', 'renamed')

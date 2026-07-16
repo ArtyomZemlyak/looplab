@@ -271,7 +271,7 @@ def test_await_job_unknown_is_expired(monkeypatch):
     monkeypatch.setattr(api, "get", lambda path, timeout=None: {"status": "unknown"})
     out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
                          interval=0.001, deadline_s=5)
-    assert out["ok"] is False and "expired" in out["error"]
+    assert out["ok"] is False and out["code"] == "job_unknown" and out["ambiguous"] is True
 
 
 def test_await_job_bails_when_server_lost(monkeypatch):
@@ -285,7 +285,7 @@ def test_await_job_bails_when_server_lost(monkeypatch):
     monkeypatch.setattr(api, "get", dead)
     out = api._await_job({"status": "running", "job_id": "abc"}, lambda j: f"/api/jobs/{j}",
                          interval=0.001, deadline_s=60)        # huge deadline; must NOT spin it out
-    assert out["ok"] is False and "lost contact" in out["error"]
+    assert out["ok"] is False and out["code"] == "job_contact_lost" and out["ambiguous"] is True
 
 
 def test_await_job_tolerates_5xx_then_done(monkeypatch):
@@ -309,7 +309,51 @@ def test_await_job_tolerates_5xx_then_done(monkeypatch):
     assert out["ok"] is True and out["reply"] == "ok"
 
 
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_await_job_surfaces_authoritative_poll_failure(monkeypatch, status):
+    api = tui.Api("http://x")
+    calls = []
+
+    def rejected(path, timeout=None):
+        calls.append(path)
+        raise tui.ApiError("denied", status=status)
+
+    monkeypatch.setattr(api, "get", rejected)
+    with pytest.raises(tui.ApiError) as caught:
+        api._await_job(
+            {"status": "running", "job_id": "abc"}, lambda job_id: f"/api/jobs/{job_id}",
+            interval=0.001, deadline_s=60)
+    assert caught.value.status == status and calls == ["/api/jobs/abc"]
+
+
+def test_await_job_quarantines_malformed_receipt(monkeypatch):
+    api = tui.Api("http://x")
+    monkeypatch.setattr(api, "get", lambda *_args, **_kwargs: {"status": "mystery"})
+    out = api._await_job(
+        {"status": "running", "job_id": "abc"}, lambda job_id: f"/api/jobs/{job_id}",
+        interval=0.001, deadline_s=60)
+    assert out["code"] == "job_protocol_error" and out["ambiguous"] is True
+
+
 # ----------------------------------------------------------------------------- authoritative run commands
+
+def test_transport_failure_never_reflects_configured_base_or_raw_exception(monkeypatch):
+    import urllib.error
+
+    api = tui.Api("https://ui-user:ui-secret@looplab.example?token=hidden")
+
+    def failed(*_args, **_kwargs):
+        raise urllib.error.URLError(
+            "request to https://provider.example/v1?account=private")
+
+    monkeypatch.setattr("urllib.request.urlopen", failed)
+    with pytest.raises(tui.ApiError) as caught:
+        api.get("/api/runs")
+    rendered = str(caught.value)
+    assert rendered == "/api/runs: server transport unavailable"
+    for fragment in ("ui-secret", "token=hidden", "provider.example", "private"):
+        assert fragment not in rendered
+
 
 def test_run_generation_reads_exact_lowercase_state_token(monkeypatch):
     api = tui.Api("http://x")
@@ -321,6 +365,126 @@ def test_run_generation_reads_exact_lowercase_state_token(monkeypatch):
 
     assert api.run_generation("run/with space?") == GENERATION
     assert calls == [("GET", "/api/runs/run%2Fwith%20space%3F/state")]
+
+
+def test_report_refresh_posts_generation_and_idempotency_receipt(monkeypatch):
+    api = tui.Api("http://x")
+    calls = []
+
+    def request(method, path, body=None, timeout=None, headers=None):
+        calls.append((method, path, body, headers or {}))
+        if method == "GET":
+            return {"state": {}, "generation": GENERATION}
+        return {"ok": True, "seq": 4, "generation": GENERATION}
+
+    monkeypatch.setattr(api, "_request", request)
+    result = api.refresh_report("run/with space?", idempotency_key="one-report")
+
+    assert result["ok"] is True
+    assert calls == [
+        ("GET", "/api/runs/run%2Fwith%20space%3F/state", None, {}),
+        ("POST", "/api/runs/run%2Fwith%20space%3F/report_refresh",
+         {"expected_generation": GENERATION}, {"Idempotency-Key": "one-report"}),
+    ]
+
+
+def test_report_refresh_rejects_mismatched_success_receipt(monkeypatch):
+    api = tui.Api("http://x")
+    monkeypatch.setattr(api, "_request", lambda *_args, **_kwargs: {
+        "ok": True, "seq": 4, "generation": "b" * 64})
+
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="one-report")
+    assert result["code"] == "report_refresh_protocol_error"
+    assert result["ambiguous"] is True
+
+
+def test_report_refresh_rejects_mismatched_failure_receipt(monkeypatch):
+    api = tui.Api("http://x")
+    monkeypatch.setattr(api, "_request", lambda *_args, **_kwargs: {
+        "ok": False, "code": "report_refresh_failed", "error_kind": "internal",
+        "generation": "b" * 64,
+    })
+
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="one-report")
+    assert result["code"] == "report_refresh_protocol_error"
+    assert result["ambiguous"] is True
+
+
+@pytest.mark.parametrize("seq", [None, True, -1, 1.5, "4"])
+def test_report_refresh_quarantines_success_without_safe_event_receipt(monkeypatch, seq):
+    api = tui.Api("http://x")
+    monkeypatch.setattr(api, "_request", lambda *_args, **_kwargs: {
+        "ok": True, "seq": seq, "generation": GENERATION})
+
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="one-report")
+
+    assert result["ok"] is False
+    assert result["code"] == "report_refresh_protocol_error"
+    assert result["idempotency_key"] == "one-report"
+
+
+def test_report_refresh_retries_lost_post_with_same_identity(monkeypatch):
+    api = tui.Api("http://x")
+    keys = []
+
+    def request(method, path, body=None, timeout=None, headers=None):
+        keys.append((method, (headers or {}).get("Idempotency-Key")))
+        if len(keys) == 1:
+            raise tui.ApiError("transport unavailable", status=None)
+        return {"ok": True, "seq": 4, "generation": GENERATION}
+
+    monkeypatch.setattr(api, "_request", request)
+    monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _seconds: None)
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="same-report")
+
+    assert result["ok"] is True and result["idempotency_key"] == "same-report"
+    assert keys == [("POST", "same-report"), ("POST", "same-report")]
+
+
+def test_report_refresh_reconciles_unknown_job_with_same_identity(monkeypatch):
+    api = tui.Api("http://x")
+    posts = []
+
+    def request(method, path, body=None, timeout=None, headers=None):
+        if method == "POST":
+            posts.append((path, (headers or {}).get("Idempotency-Key")))
+            if len(posts) == 1:
+                return {"status": "running", "job_id": "old-receipt"}
+            return {"ok": True, "seq": 8, "generation": GENERATION}
+        return {"status": "unknown"}
+
+    monkeypatch.setattr(api, "_request", request)
+    monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _seconds: None)
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="same-report")
+
+    assert result["ok"] is True and result["seq"] == 8
+    assert posts == [
+        ("/api/runs/demo/report_refresh", "same-report"),
+        ("/api/runs/demo/report_refresh", "same-report"),
+    ]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_report_refresh_poll_auth_loss_preserves_same_paid_identity(monkeypatch, status):
+    api = tui.Api("http://x")
+
+    def request(method, _path, **_kwargs):
+        if method == "POST":
+            return {"status": "running", "job_id": "paid-job"}
+        raise tui.ApiError("authorization lost", status=status)
+
+    monkeypatch.setattr(api, "_request", request)
+    monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _seconds: None)
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="same-report")
+
+    assert result["code"] == "job_authorization_lost" and result["ambiguous"] is True
+    assert result["idempotency_key"] == "same-report"
 
 
 @pytest.mark.parametrize("generation", [None, "A" * 64, "a" * 63, 123])
@@ -1171,9 +1335,15 @@ def test_report_refresh_keeps_dedicated_endpoint():
         def __init__(self):
             self.refreshed = []
 
-        def refresh_report(self, run_id):
-            self.refreshed.append(run_id)
+        def run_generation(self, _run_id):
+            return GENERATION
+
+        def post(self, *_args, **_kwargs):
             return {"ok": True}
+
+        def refresh_report(self, run_id, **_kwargs):
+            self.refreshed.append(run_id)
+            return {"ok": True, "seq": 4, "generation": GENERATION}
 
         def run_command(self, *_a, **_k):
             raise AssertionError("report refresh is not a run command")
@@ -1188,7 +1358,13 @@ def test_report_refresh_keeps_dedicated_endpoint():
 
 def test_report_refresh_requires_explicit_success_and_stops_plan():
     class FakeApi:
-        def refresh_report(self, run_id):
+        def run_generation(self, _run_id):
+            return GENERATION
+
+        def post(self, *_args, **_kwargs):
+            return {"ok": True}
+
+        def refresh_report(self, run_id, **_kwargs):
             return {}
 
         def run_command(self, *_a, **_k):
@@ -1202,6 +1378,55 @@ def test_report_refresh_requires_explicit_success_and_stops_plan():
     ])
     assert len(history) == 1 and history[0]["status"] == "failed"
     assert "no confirmed success" in history[0]["error"]
+
+
+def test_report_refresh_stages_identity_and_reuses_it_after_tui_restart(monkeypatch):
+    import copy
+    import uuid
+
+    key = "6cb2c398-91fb-4b0e-85f2-49791aa440e1"
+
+    class FakeApi:
+        def __init__(self):
+            self.rows = []
+            self.refreshes = []
+
+        def run_generation(self, _run_id):
+            return GENERATION
+
+        def post(self, _path, body=None, **_kwargs):
+            self.rows.append(copy.deepcopy(body))
+            return {"ok": True}
+
+        def get(self, _path, **_kwargs):
+            return copy.deepcopy(self.rows)
+
+        def refresh_report(self, run_id, **kwargs):
+            self.refreshes.append((run_id, kwargs["expected_generation"], kwargs["idempotency_key"]))
+            if len(self.refreshes) == 1:
+                raise SystemExit("client died after paid work was accepted")
+            return {"ok": True, "seq": 9, "generation": GENERATION}
+
+    api = FakeApi()
+    first = _command_tui(api)
+    first._persist = lambda run_id, row: bool(api.post(f"/{run_id}/chat-log", row))
+    monkeypatch.setattr(tui.uuid, "uuid4", lambda: uuid.UUID(key))
+
+    with pytest.raises(SystemExit, match="client died"):
+        first._apply_plan(
+            "demo", [], [{"type": "__refresh_report__", "data": {}, "label": "refresh"}])
+
+    assert api.rows[0]["status"] == "pending"
+    assert api.rows[0]["report_refresh"] == {
+        "expected_generation": GENERATION, "idempotency_key": key,
+    }
+
+    restarted = _command_tui(api)
+    restarted._persist = lambda run_id, row: bool(api.post(f"/{run_id}/chat-log", row))
+    history = restarted._load_chat("demo")
+    assert restarted._reconcile_pending("demo", history) is True
+    assert history[0]["status"] == "done"
+    assert api.refreshes == [("demo", GENERATION, key), ("demo", GENERATION, key)]
 
 
 def test_live_prompt_falls_back_when_select_unusable(monkeypatch):

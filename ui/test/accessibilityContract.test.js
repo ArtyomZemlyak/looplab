@@ -32,7 +32,7 @@ test('accessibility helpers satisfy their semantic and interaction contracts', a
   })
 
   try {
-    const { ChartFrame, DataTable, followClientRoute, nextRovingIndex, tableCsv } =
+    const { ChartFrame, DataTable, downloadBlob, followClientRoute, nextRovingIndex, tableCsv } =
       await vite.ssrLoadModule('/src/accessibility.jsx')
     const { ParallelCoords, Scatter, Trajectory } = await vite.ssrLoadModule('/src/charts.jsx')
 
@@ -126,6 +126,42 @@ test('accessibility helpers satisfy their semantic and interaction contracts', a
         tableCsv(columns, rows),
         '"\'=dangerous label"\r\n"\'=HYPERLINK(""https://invalid.example"")"\r\n"\'  @SUM(1,2)"\r\n"-12.5"',
       )
+    })
+
+    await t.test('blob downloads attach before click and defer URL revocation', async () => {
+      const dom = new JSDOM('<!doctype html><body></body>')
+      const previous = {
+        document: globalThis.document,
+        create: globalThis.URL.createObjectURL,
+        revoke: globalThis.URL.revokeObjectURL,
+      }
+      const clicks = []
+      let revoked = false
+      globalThis.document = dom.window.document
+      globalThis.URL.createObjectURL = () => 'blob:download-test'
+      globalThis.URL.revokeObjectURL = href => {
+        assert.equal(href, 'blob:download-test')
+        revoked = true
+      }
+      dom.window.HTMLAnchorElement.prototype.click = function click() {
+        clicks.push({ attached: this.isConnected, download: this.download })
+      }
+      try {
+        assert.equal(downloadBlob('report.md', ['safe report'], 'text/markdown'), true)
+        assert.deepEqual(clicks, [{ attached: true, download: 'report.md' }])
+        assert.equal(dom.window.document.querySelector('a'), null)
+        assert.equal(revoked, false)
+        await new Promise(resolve => setTimeout(resolve, 0))
+        assert.equal(revoked, true)
+      } finally {
+        if (previous.document === undefined) delete globalThis.document
+        else globalThis.document = previous.document
+        if (previous.create === undefined) delete globalThis.URL.createObjectURL
+        else globalThis.URL.createObjectURL = previous.create
+        if (previous.revoke === undefined) delete globalThis.URL.revokeObjectURL
+        else globalThis.URL.revokeObjectURL = previous.revoke
+        dom.window.close()
+      }
     })
 
     await t.test('client routing preserves every native modified-link gesture', () => {

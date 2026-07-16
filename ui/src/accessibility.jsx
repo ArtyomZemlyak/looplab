@@ -27,13 +27,12 @@ export function tableCsv(columns, rows) {
   return [header, ...body].join('\r\n')
 }
 
-export function downloadTableCsv(filename, columns, rows) {
+export function downloadBlob(filename, parts, type) {
   if (typeof document === 'undefined' || typeof URL === 'undefined') return false
-  const blob = new Blob([`\ufeff${tableCsv(columns, rows)}`], { type: 'text/csv;charset=utf-8' })
-  const href = URL.createObjectURL(blob)
+  const href = URL.createObjectURL(new Blob(parts, { type }))
   const anchor = document.createElement('a')
   anchor.href = href
-  anchor.download = filename || 'data.csv'
+  anchor.download = filename
   // Firefox does not fire a download for a synthetic click on a DETACHED anchor, and revoking the
   // blob URL on the same tick can abort the download before the stream starts. Attach, click, then
   // detach and revoke on the next tick.
@@ -43,6 +42,11 @@ export function downloadTableCsv(filename, columns, rows) {
   document.body.removeChild(anchor)
   setTimeout(() => URL.revokeObjectURL(href), 0)
   return true
+}
+
+export function downloadTableCsv(filename, columns, rows) {
+  return downloadBlob(filename || 'data.csv', [`\ufeff${tableCsv(columns, rows)}`],
+    'text/csv;charset=utf-8')
 }
 
 function TableElement({ caption, columns, rows, rowKey, empty, card }) {

@@ -102,6 +102,28 @@ def test_owner_secret_is_never_embedded_in_owner_or_review_html(tmp_path, monkey
     assert client.get("/assets/app.js").headers["Cache-Control"] == "no-cache"
 
 
+def test_review_state_collapses_legacy_report_provider_exception(tmp_path, monkeypatch):
+    rd = _seed_run(tmp_path)
+    leak = (
+        "(report generation failed: request to "
+        "https://provider.example/v1/chat?user_id=acct-42 model=private-route)"
+    )
+    EventStore(rd / "events.jsonl").append(
+        "report_generated", {"content": {"headline": "legacy", "verdict": leak}})
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    client = TestClient(make_app(tmp_path))
+    token = _create(client)["token"]
+
+    response = client.get(
+        "/api/review/state", headers={"X-LoopLab-Review": token})
+
+    assert response.status_code == 200
+    verdict = response.json()["state"]["report"]["verdict"]
+    assert verdict == "(report generation failed: The model provider returned an error.)"
+    for fragment in ("provider.example", "v1/chat", "user_id", "acct-42", "private-route"):
+        assert fragment not in response.text
+
+
 def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeypatch):
     _seed_run(tmp_path, "demo")
     _seed_run(tmp_path, "other")

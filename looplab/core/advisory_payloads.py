@@ -165,6 +165,14 @@ def sanitize_research_memo_payload(payload) -> dict:
 
 
 _REPORT_LIST_FIELDS = ("caveats", "what_worked", "learnings", "what_didnt", "next_directions")
+_LEGACY_REPORT_FAILURE = "(report generation failed:"
+
+
+def _report_verdict(value):
+    """Collapse the exact legacy raw-exception envelope before ordinary text redaction."""
+    if isinstance(value, str) and value.lstrip().lower().startswith(_LEGACY_REPORT_FAILURE):
+        return "(report generation failed: The model provider returned an error.)"
+    return value
 
 
 def sanitize_report_payload(payload) -> dict:
@@ -176,7 +184,7 @@ def sanitize_report_payload(payload) -> dict:
         # Legacy report events used a single `summary` field. Preserve it bounded so older logs and
         # finalization receipts remain readable while modern structured fields stay canonical.
         "summary": _text(src.get("summary", ""), 4_000, budget),
-        "verdict": _text(src.get("verdict", ""), 4_000, budget),
+        "verdict": _text(_report_verdict(src.get("verdict", "")), 4_000, budget),
         "champion_summary": _text(src.get("champion_summary", ""), 4_000, budget),
     }
     # Caveats are trust-significant narrative. Give them the shared budget before positive/ordinary

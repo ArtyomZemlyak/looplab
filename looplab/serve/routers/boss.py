@@ -6,19 +6,22 @@ historical `looplab.server._Action` import path keeps working for tests and call
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import os
+import sys
 import threading
+import unicodedata
 from typing import Optional
 
 import anyio
 import orjson
 try:
-    from fastapi import APIRouter, HTTPException, Request
+    from fastapi import APIRouter, HTTPException, Request, Response
     from fastapi.responses import JSONResponse
 except ModuleNotFoundError as e:  # allow importing pure action models/mappers without the [ui] extra
     if e.name != "fastapi":
         raise
-    APIRouter = HTTPException = Request = JSONResponse = None  # type: ignore[assignment,misc]
+    APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
 from looplab.core.atomicio import best_effort_fsync
 from looplab.engine.costs import (
@@ -28,10 +31,29 @@ from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT,
     EV_INJECT_NODE, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_REPORT_GENERATED, EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
+    EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED, EV_REPORT_REFRESH_STARTED,
+    EV_RESUME, EV_RUN_ABORT, EV_SET_STRATEGY,
     EV_SPEC_APPROVED)
+from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.llm_context import _boss_context, _client_tokens, _node_context
+from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.serve_prompts import CHAT_SYSTEM, COMMAND_SYSTEM, COMPACT_SYSTEM
+
+
+class _RunCostAccountingPending(RuntimeError):
+    """A prior paid call cannot yet be durably attributed to this run."""
+
+
+def _safe_boss_failure(exc: Exception) -> dict:
+    """Keep the one server-owned accounting failure distinct from provider outages."""
+    if isinstance(exc, _RunCostAccountingPending):
+        message = (
+            "A prior paid model call is still waiting for durable cost accounting. "
+            "Retry after storage recovers."
+        )
+        return {"error": message, "error_kind": "accounting_pending", "message": message}
+    return safe_provider_failure(exc)
+
 
 # Workstream C → agentic boss: the chat action-router LLM emits a _Plan — a short conversational reply
 # plus an ORDERED list of _Action steps. Each _Action maps to a control {type, data} the UI applies
@@ -163,7 +185,7 @@ def _metered_run_client(srv, settings, run_dir, generation):
     # unavailable, fail this new call before client construction while the old generation lease stays
     # live; the caller's normal offline/degraded response path handles the exception.
     if not _flush_pending_run_costs(srv, run_dir):
-        raise RuntimeError("a prior paid call is still waiting for durable run-cost accounting")
+        raise _RunCostAccountingPending
 
     activity_ctx = srv.commands.run_activity(run_dir, "ui_llm", generation=generation)
     activity_ctx.__enter__()
@@ -183,6 +205,197 @@ def _metered_run_client(srv, settings, run_dir, generation):
     finally:
         if not retained:
             activity_ctx.__exit__(None, None, None)
+
+
+_DOMAIN_HTTP_FAILURES = {
+    "run_generation_changed": {
+        "message": "The run was reset or replaced before this work started.",
+        "remediation": "Reload the current run generation before trying again.",
+    },
+    "run_generation_unavailable": {
+        "message": "The run has no durable generation identity yet.",
+        "remediation": "Wait for run_started, reload the run, and try again.",
+    },
+}
+
+
+def _sanitized_domain_http_exception(exc: HTTPException) -> Optional[HTTPException]:
+    """Preserve allow-listed lifecycle status without reflecting arbitrary exception detail."""
+    detail = exc.detail
+    code = str(detail.get("code") or "") if isinstance(detail, dict) else ""
+    copy = _DOMAIN_HTTP_FAILURES.get(code)
+    if copy is None:
+        return None
+    return HTTPException(int(exc.status_code), {"code": code, **copy})
+
+
+def _background_http_failure(exc: HTTPException) -> dict:
+    sanitized = _sanitized_domain_http_exception(exc)
+    if sanitized is not None:
+        detail = sanitized.detail
+        return {
+            "ok": False,
+            "code": detail["code"],
+            "error_kind": "run_state_conflict",
+            "error": detail["message"],
+        }
+    return {
+        "ok": False,
+        "code": "background_request_rejected",
+        "error_kind": "request_error",
+        "error": "The background request was rejected.",
+    }
+
+
+def _report_refresh_ledger(events, generation: str) -> tuple[dict[str, object], set[str]]:
+    """Return terminal receipts and unresolved paid-work claims for one run generation."""
+    starts: set[str] = set()
+    terminals: dict[str, object] = {}
+    for event in events:
+        data = event.data if isinstance(event.data, dict) else {}
+        identity = data.get("refresh_id")
+        if (not isinstance(identity, str) or len(identity) != 64
+                or any(char not in "0123456789abcdef" for char in identity)
+                or data.get("generation") != generation):
+            continue
+        if event.type == EV_REPORT_REFRESH_STARTED:
+            starts.add(identity)
+        elif event.type in {EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED}:
+            terminals.setdefault(identity, event)  # first durable terminal is authoritative
+    return terminals, starts - set(terminals)
+
+
+def _normalize_report_generation(value: object) -> str:
+    if (not isinstance(value, str) or len(value) != 64
+            or any(char not in "0123456789abcdefABCDEF" for char in value)):
+        raise HTTPException(400, {
+            "code": "invalid_run_generation",
+            "message": "expected_generation must be an exact 64-character hexadecimal string.",
+            "remediation": "Refresh GET /state and submit its generation with this report request.",
+        })
+    return value.lower()
+
+
+_REPORT_REFRESH_ERROR_KINDS = frozenset({
+    "credentials", "rate_limit", "unavailable", "provider_error", "capacity", "internal",
+    "accounting_pending",
+})
+
+
+def _report_refresh_terminal(event, generation: str) -> dict:
+    if event.type == EV_REPORT_GENERATED and isinstance(event.data.get("content"), dict):
+        return {
+            "ok": True,
+            "seq": event.seq,
+            "generation": generation,
+            "content": event.data["content"],
+        }
+    raw_kind = str(event.data.get("error_kind") or "")
+    kind = raw_kind if raw_kind in _REPORT_REFRESH_ERROR_KINDS else "provider_error"
+    return {
+        "ok": False,
+        "code": "report_refresh_failed",
+        "error_kind": kind,
+        "error": "Report generation failed. Retry with a new request identity.",
+        "generation": generation,
+    }
+
+
+def _record_report_refresh_failure(srv, run_dir, generation: str, identity: str,
+                                   error_kind: str) -> bool:
+    """Persist a sanitized terminal before telling the caller that a fresh key is safe."""
+    safe_kind = error_kind if error_kind in _REPORT_REFRESH_ERROR_KINDS else "provider_error"
+    try:
+        with srv.commands.sequence(run_dir):
+            canonical = srv.commands.validate_paths(run_dir)
+            if srv.commands.run_generation(canonical) != generation:
+                return False
+            store = EventStore(canonical / "events.jsonl")
+            terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
+            if identity in terminals:
+                return True
+            if identity not in unresolved:
+                return False
+            store.append(
+                EV_REPORT_REFRESH_FAILED,
+                {"refresh_id": identity, "generation": generation, "error_kind": safe_kind},
+                require_lock=True,
+            )
+        return True
+    except Exception:  # noqa: BLE001 - an unresolved claim remains fail-closed after storage failure
+        return False
+
+
+def _report_run_identity(run_dir) -> str:
+    """Stable direct-child identity with desktop filesystem case/Unicode semantics."""
+    identity = run_dir.name
+    if os.name == "nt":
+        return os.path.normcase(identity)
+    if sys.platform == "darwin":
+        return unicodedata.normalize("NFD", identity).casefold()
+    return identity
+
+
+def _run_report_refresh_worker(srv, settings, run_dir, generation: str,
+                               identity: str) -> dict:
+    """Execute one already-claimed report workflow and publish exactly one terminal outcome."""
+    try:
+        from looplab.serve.report import generate_report
+        with _metered_run_client(srv, settings, run_dir, generation) as client:
+            state = srv.state(run_dir)
+            content = generate_report(
+                state, client, parser=settings.llm_parser,
+                trigger="manual", raise_on_failure=True)
+            event = EventStore(run_dir / "events.jsonl").append(
+                EV_REPORT_GENERATED, {
+                    "content": content, "at_node": content.get("at_node"), "trigger": "manual",
+                    "refresh_id": identity, "generation": generation,
+                }, require_lock=True)
+    except HTTPException as exc:
+        failure = _background_http_failure(exc)
+        if failure.get("code") in _DOMAIN_HTTP_FAILURES:
+            return {**failure, "generation": generation}
+        if _record_report_refresh_failure(
+                srv, run_dir, generation, identity,
+                str(failure.get("error_kind") or "")):
+            return {**failure, "generation": generation}
+        return {
+            "ok": False, "code": "report_refresh_uncertain", "error_kind": "uncertain",
+            "error": "The rejected report request has no durable terminal receipt.",
+            "generation": generation, "ambiguous": True,
+        }
+    except Exception as exc:  # noqa: BLE001 - public failure is allow-listed below
+        failure = _safe_boss_failure(exc)
+        if _record_report_refresh_failure(
+                srv, run_dir, generation, identity,
+                str(failure.get("error_kind") or "")):
+            return {"ok": False, **failure, "generation": generation}
+        return {
+            "ok": False, "code": "report_refresh_uncertain", "error_kind": "uncertain",
+            "error": "The paid report attempt has no durable terminal receipt.",
+            "generation": generation, "ambiguous": True,
+        }
+    return {"ok": True, "seq": event.seq, "generation": generation, "content": content}
+
+
+def _sanitize_chat_turn(turn: object) -> dict:
+    """Canonicalize legacy paid-report action errors before storage or owner projection."""
+    out = dict(turn) if isinstance(turn, dict) else {}
+    action = out.get("action")
+    stable_codes = {
+        "report_refresh_uncertain", "report_refresh_in_progress", "report_refresh_failed",
+        "job_unknown", "job_contact_lost", "job_timeout", "job_protocol_error", "job_capacity",
+        "run_generation_changed", "run_generation_unavailable",
+    }
+    if (out.get("role") == "action" and isinstance(action, dict)
+            and action.get("type") == "__refresh_report__" and out.get("error")
+            and not isinstance(out.get("report_refresh"), dict)
+            and out.get("report_code") not in stable_codes
+            and out.get("error_kind") not in _REPORT_REFRESH_ERROR_KINDS):
+        failure = safe_provider_failure(RuntimeError(str(out["error"])))
+        out["error"] = failure["message"]
+        out["error_kind"] = failure["error_kind"]
+    return out
 
 
 class _Action(BaseModel):
@@ -394,7 +607,7 @@ def build_router(srv) -> APIRouter:
     def chat_log(run_id: str):
         """The saved chat turns for this run, in order ({role:'user'|'assistant'|'action', …})."""
         rd = _run_dir(run_id)
-        return list(iter_jsonl(rd / "chat.jsonl"))
+        return [_sanitize_chat_turn(turn) for turn in iter_jsonl(rd / "chat.jsonl")]
 
     @router.post("/api/runs/{run_id}/chat-log")
     async def chat_log_append(run_id: str, request: Request):
@@ -409,6 +622,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "chat turn must be valid JSON") from exc
         if not isinstance(turn, dict):
             raise HTTPException(400, "chat turn must be a JSON object")
+        turn = _sanitize_chat_turn(turn)
         path = rd / "chat.jsonl"
         with srv.commands.run_activity(rd, "chat_append", generation=generation):
             with open(path, "ab") as f:
@@ -439,8 +653,13 @@ def build_router(srv) -> APIRouter:
                     [{"role": "system", "content": sys_prompt},
                      {"role": "user", "content": convo}]))
                 tokens = _client_tokens(client)
+        except HTTPException as exc:
+            sanitized = _sanitized_domain_http_exception(exc)
+            if sanitized is not None:
+                raise sanitized from exc
+            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail (chat stays uncompacted)
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
         return {"ok": True, "summary": (summary or "").strip(), "tokens": tokens}
 
     @router.post("/api/runs/{run_id}/chat")
@@ -465,8 +684,13 @@ def build_router(srv) -> APIRouter:
                     lambda: client.complete_text([{"role": "system", "content": sys_prompt}, *msgs]))
                 model = getattr(client, "model", None)
                 tokens = _client_tokens(client)
+        except HTTPException as exc:
+            sanitized = _sanitized_domain_http_exception(exc)
+            if sanitized is not None:
+                raise sanitized from exc
+            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
         except Exception as e:  # noqa: BLE001 - offline / no model -> soft fail
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
         # Return the LLM I/O so the chat row can expand into a langfuse-style trace. We include the
         # user's latest message + the system prompt (which carries the run/node context) so the trace
         # honestly shows the actual input, but omit the REST of the echoed conversation — the client
@@ -513,8 +737,13 @@ def build_router(srv) -> APIRouter:
                         {"role": "user", "content": prompt}]))
                     return {"ok": True, "parsed": False, "idea": {
                         "operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
+        except HTTPException as exc:
+            sanitized = _sanitized_domain_http_exception(exc)
+            if sanitized is not None:
+                raise sanitized from exc
+            return JSONResponse({"ok": False, **_safe_boss_failure(exc)}, status_code=200)
         except Exception as e:  # noqa: BLE001 - offline / no model
-            return JSONResponse({"ok": False, "error": str(e)}, status_code=200)
+            return JSONResponse({"ok": False, **_safe_boss_failure(e)}, status_code=200)
 
     @router.post("/api/runs/{run_id}/command")
     async def command(run_id: str, request: Request):
@@ -600,8 +829,10 @@ def build_router(srv) -> APIRouter:
             try:
                 context = _metered_run_client(srv, s, rd, generation)
                 client = context.__enter__()
+            except HTTPException as exc:
+                return _background_http_failure(exc)
             except Exception as e:  # noqa: BLE001 - offline / no model
-                return {"ok": False, "error": str(e)}
+                return {"ok": False, **_safe_boss_failure(e)}
             try:
                 plan = None
                 try:
@@ -636,43 +867,128 @@ def build_router(srv) -> APIRouter:
                     return {"ok": True, "reply": text, "trace": {
                         "model": getattr(client, "model", None), "system": advise_sys,
                         "user": user_msg, "completion": text, "tokens": _client_tokens(client)}}
+                except HTTPException as exc:
+                    return _background_http_failure(exc)
                 except Exception as e:  # noqa: BLE001 - offline/model soft fail
-                    return {"ok": False, "error": str(e)}
+                    return {"ok": False, **_safe_boss_failure(e)}
             finally:
                 context.__exit__(None, None, None)
 
         return await srv.jobs.run_as_job(_compute)
 
     @router.post("/api/runs/{run_id}/report_refresh")
-    async def report_refresh(run_id: str):
+    async def report_refresh(run_id: str, request: Request, response: Response):
         """Force a high-quality regeneration of the agent-authored run report NOW. Appends a
         `report_generated` event directly, so it works whether or not the engine loop is alive —
-        appends are lock-guarded, same as control events. Soft-fails offline: the deterministic
-        report keeps rendering and no event is written. Runs as a BACKGROUND JOB (like scope-report
-        generate): a slow/large model's full regeneration can outlast a UI proxy's gateway timeout,
+        appends are lock-guarded, same as control events. Provider failure preserves the last report
+        and writes a sanitized `report_refresh_failed` terminal receipt. Runs as a BACKGROUND JOB
+        (like scope-report generation): a slow model can outlast a UI proxy's gateway timeout,
         so it hands back {status:'running', job_id} the UI awaits via jobAwait instead of 504ing — a
         fast model still returns {ok, seq, content} inline within the wait."""
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "report refresh body must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "report refresh body must be a JSON object")
+        expected = _normalize_report_generation(body.get(EXPECTED_RUN_GENERATION_FIELD))
+        raw_idempotency_key = request.headers.get("Idempotency-Key", "")
+        if not raw_idempotency_key or len(raw_idempotency_key) > 512:
+            raise HTTPException(
+                400, "Idempotency-Key is required and must be at most 512 characters")
+
         rd = _run_dir(run_id)
-        generation = srv.commands.run_generation(rd)
-        st = srv.state(rd)
-        s = _llm_settings(rd)
-
-        def _compute() -> dict:
-            # Runs in a worker thread (see _run_as_job): the synthesis is blocking + network-bound, so
-            # inline it would freeze the event loop / SSE tails AND risk a proxy 504 on a slow model.
-            # Append the event from the thread too — appends are lock-guarded, same as a control event.
-            try:
-                from looplab.serve.report import generate_report
-                with _metered_run_client(srv, s, rd, generation) as client:
-                    content = generate_report(st, client, parser=s.llm_parser, trigger="manual")
-                    ev = EventStore(rd / "events.jsonl").append(
-                        EV_REPORT_GENERATED, {
-                            "content": content, "at_node": content.get("at_node"), "trigger": "manual",
-                        })
-            except Exception as e:  # noqa: BLE001 — offline / no model -> soft fail, no event
-                return {"ok": False, "error": str(e)}
-            return {"ok": True, "seq": ev.seq, "content": content}
-
-        return await srv.jobs.run_as_job(_compute)
+        settings = None
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            generation = srv.commands.run_generation(rd)
+            if not generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_unavailable",
+                    "message": "The run has no durable generation identity.",
+                    "remediation": "Wait for run_started, refresh the run, and try again.",
+                })
+            if generation != expected:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected,
+                    "current_generation": generation,
+                    "message": "The run was reset or replaced before report refresh arrived.",
+                    "remediation": "Reload the replacement run before generating its report.",
+                })
+            # The event log is the restart-safe idempotency ledger. `started` lands
+            # before provider construction; success/failure is a terminal receipt. An orphaned start
+            # is intentionally uncertain and can never be replayed into a second paid call.
+            canonical_identity = _report_run_identity(rd)
+            job_identity = hashlib.sha256(
+                ("report_refresh\0" + canonical_identity + "\0" + generation + "\0"
+                 + raw_idempotency_key).encode("utf-8")).hexdigest()
+            store = EventStore(rd / "events.jsonl")
+            terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
+            terminal = terminals.get(job_identity)
+            if terminal is not None:
+                return _report_refresh_terminal(terminal, generation)
+            if unresolved:
+                if job_identity not in unresolved:
+                    raise HTTPException(409, {
+                        "code": "report_refresh_in_progress",
+                        "message": "Another report refresh already owns this run generation.",
+                        "remediation": "Wait for its report event or reload before trying again.",
+                    })
+                if not srv.jobs.has_identity(job_identity):
+                    return {
+                        "ok": False,
+                        "code": "report_refresh_uncertain",
+                        "error_kind": "uncertain",
+                        "error": "The earlier paid report attempt has no live process receipt.",
+                        "generation": generation,
+                        "ambiguous": True,
+                    }
+                # The current implementation starts before releasing this sequencer. The lazy
+                # fallback also repairs a workerless reservation created by an older process without
+                # reading mutable settings when the existing worker is already live.
+                compute = lambda: _run_report_refresh_worker(  # noqa: E731
+                    srv, _llm_settings(rd), rd, generation, job_identity)
+            else:
+                # Configuration is needed only for brand-new paid work. Durable terminal replay,
+                # restart uncertainty, and live same-key rejoin must survive later config damage.
+                settings = _llm_settings(rd)
+                reservation = srv.jobs.reserve(job_identity)
+                if reservation.get("status") != "running":
+                    return {**reservation, "generation": generation}
+                compute = lambda: _run_report_refresh_worker(  # noqa: E731 - bound claim closure
+                    srv, settings, rd, generation, job_identity)
+                try:
+                    store.append(
+                        EV_REPORT_REFRESH_STARTED,
+                        {"refresh_id": job_identity, "generation": generation},
+                        require_lock=True,
+                    )
+                    # Start before releasing the sequencer: no accepted durable claim can remain an
+                    # in-memory workerless reservation if the HTTP task is cancelled at its first await.
+                    srv.jobs.start_reserved(reservation["job_id"], compute)
+                except Exception:
+                    srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
+                    raise
+        # Return a durable job receipt well inside the browser's request deadline; paid work continues
+        # in the worker and the same identity rejoins it after any ambiguous transport response.
+        result = await srv.jobs.run_as_job(
+            compute, inline_wait=min(0.5, srv.jobs.inline_wait),
+            idempotency_key=job_identity)
+        if result.get("code") == "job_failed":
+            if not _record_report_refresh_failure(
+                    srv, rd, generation, job_identity, "internal"):
+                return {
+                    "ok": False,
+                    "code": "report_refresh_uncertain",
+                    "error_kind": "uncertain",
+                    "error": "The report worker ended, but its terminal receipt could not be stored.",
+                    "generation": generation,
+                    "ambiguous": True,
+                }
+            result = {**result, "generation": generation}
+        return result
 
     return router

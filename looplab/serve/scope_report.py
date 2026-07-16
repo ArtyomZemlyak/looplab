@@ -146,8 +146,8 @@ class _CrossRunTools:
                     return "(deep experiment access unavailable here)"
                 return self._drill(str(args.get("run_id")), int(args.get("node_id")))
             return f"(unknown tool: {name})"
-        except Exception as e:  # noqa: BLE001 - a junk tool call must never crash generation
-            return f"(tool error: {e})"
+        except Exception:  # noqa: BLE001 - model/tool payloads must never enter persisted reports
+            return "(tool request invalid)"
 
     def bind_state(self, *a, **k) -> None:  # drive_tool_loop may call this; cross-run tools are stateless
         pass
