@@ -64,3 +64,24 @@ def test_empty_edges():
     assert project_lens(["a"], {}, "uses") == {
         "lens": "uses", "roots": ["a"], "nodes": {"a": {"parent": None, "depth": 0, "children": [],
                                                         "tagged": True, "cross_parents": []}}}
+
+
+def test_nodes_dict_is_id_sorted_not_hash_ordered():
+    # Regression: the `nodes` dict was built by iterating the raw `all_ids` SET, so its key order
+    # followed randomized string hashing (PYTHONHASHSEED) — json.dumps of the projection (returned by
+    # the /concepts endpoint) was not byte-stable across processes despite the "DETERMINISTIC" docstring.
+    t = [("zeta", "uses", "hub", 1.0), ("alpha", "uses", "hub", 1.0), ("mid", "uses", "alpha", 1.0)]
+    h = project_lens(["zeta", "alpha", "hub", "mid"], _edges(t), "uses")
+    assert list(h["nodes"]) == sorted(h["nodes"])
+
+
+def test_string_is_a_lens_filters_to_is_a_not_all_rels():
+    # Regression: `_lens_rels("is_a")` returned None (== NO filter), so a string is_a lens mixed EVERY
+    # relation into one tree, disagreeing with the equivalent dict form {"rels": ["is_a"]}. Both spellings
+    # must project only the is_a edges.
+    e = _edges([("a", "is_a", "root", 1.0), ("a", "uses", "b", 1.0), ("b", "co_occurs", "c", 1.0)])
+    as_string = project_lens(["a", "b", "c", "root"], e, "is_a")
+    as_dict = project_lens(["a", "b", "c", "root"], e, {"name": "is_a", "rels": ["is_a"]})
+    assert as_string["nodes"] == as_dict["nodes"]        # the two spellings agree
+    assert as_string["nodes"]["a"]["parent"] == "root"   # followed the is_a edge
+    assert as_string["nodes"]["b"]["parent"] is None      # the `uses` edge was NOT mixed in

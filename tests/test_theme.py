@@ -58,3 +58,35 @@ def test_theme_rollup():
     assert set(roll) == {"loss-fn", "architecture"}
     assert roll["loss-fn"] == {"count": 2, "best_metric": 0.3}   # min direction -> 0.3 beats 1.0
     assert roll["architecture"]["count"] == 1
+
+
+def _node_concepts(nid, concepts, theme=None, operator="improve"):
+    idea = Idea(operator=operator, params={"x": float(nid)}, rationale="r",
+                theme=theme, concepts=concepts)
+    return Event(seq=nid + 1, type="node_created",
+                 data={"node_id": nid, "parent_ids": [], "operator": operator,
+                       "idea": idea.model_dump(mode="json"), "code": ""})
+
+
+def test_node_theme_falls_back_to_concept_axis_after_phase0():
+    # Regression: Phase 0 (bd816a5) moved authoring from `idea.theme` to `idea.concepts`, but the theme
+    # READERS were not migrated — every new-run node was untitled so theme_rollup/coverage zeroed out.
+    # node_theme must fall back to the first concept's coarse AXIS, and legacy `theme` still wins.
+    from looplab.events.digest import node_theme, theme_rollup
+    from looplab.search.coverage import _node_theme
+
+    st = fold([_run("max"),
+               _node_concepts(0, ["loss/contrastive", "arch/moe"]), _eval(0, 0.9),
+               _node_concepts(1, ["loss/triplet"]), _eval(1, 0.7),
+               _node_concepts(2, ["reg/r-drop"], theme="legacy-theme"), _eval(2, 0.5),
+               _node_concepts(3, [])])                    # neither theme nor concepts -> skipped
+    assert node_theme(st.nodes[0]) == "loss"              # first concept's axis
+    assert node_theme(st.nodes[2]) == "legacy-theme"      # explicit theme still takes precedence
+    assert node_theme(st.nodes[3]) is None
+    roll = theme_rollup(st)
+    assert roll["loss"]["count"] == 2                     # nodes 0 and 1 both bucket to axis "loss"
+    assert roll["loss"]["best_metric"] == 0.9             # max direction
+    assert set(roll) == {"loss", "legacy-theme"}
+    # coverage's reader delegates to the SAME derivation — one vocabulary across surfaces.
+    for n in st.nodes.values():
+        assert _node_theme(n) == node_theme(n)
