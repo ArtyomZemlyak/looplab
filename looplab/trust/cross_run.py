@@ -121,9 +121,11 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                     if len(safe_key) > remaining[0]:
                         break
                     remaining[0] -= len(safe_key)
-                    if is_secret_key_name(safe_key):
+                    if is_secret_key_name(key):
                         # CODEX AGENT: redact by the original structured key before stringifying the
                         # child.  A nested ``api_key`` must never rely on its value looking secret-like.
+                        # (Classifying the truncated/entropy-masked ``safe_key`` here would let a secret
+                        # name that the 160-char cap or entropy mask rewrote slip past and leak its value.)
                         out[safe_key] = "***"
                         remaining[0] = max(0, remaining[0] - 3)
                     else:

@@ -48,6 +48,23 @@ def test_recursive_projection_masks_nested_keys_strings_and_malformed_objects():
     assert "\n" not in clipped and len(clipped) <= 80
 
 
+def test_secret_key_masking_uses_the_original_key_not_the_bounded_display_key():
+    # Regression: the secret-key gate must classify the ORIGINAL structured key, never the
+    # truncated/entropy-masked display key. A secret name that the 160-char cap or the entropy mask
+    # rewrites would otherwise fail is_secret_key_name and leak its child value in the clear.
+    high_entropy_secret_key = "token_a1b2c3d4e5f6g7h8i9j0k1l2"   # >=24 chars -> entropy-masked display key
+    oversized_secret_key = (
+        "config.services.external.providers.vault.rotation.primary.region."
+        + "x" * 120 + ".openai_api_key")                        # >160 chars -> truncated display key
+    projected = sanitize_cross_run_projection({
+        high_entropy_secret_key: "hunter2pass!",
+        oversized_secret_key: "sk-REALSECRETVALUE1234",
+    })
+    rendered = json.dumps(projected)
+    assert "hunter2pass!" not in rendered and "sk-REALSECRETVALUE1234" not in rendered
+    assert set(projected.values()) == {"***"}
+
+
 @pytest.mark.parametrize("payload", [
     {"decision": "ratified", "ｄｅｃｉｓｉｏｎ": "rejected"},
     {"ｄｅｃｉｓｉｏｎ": "rejected", "decision": "ratified"},
