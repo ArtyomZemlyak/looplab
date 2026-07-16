@@ -37,10 +37,12 @@ function ResourceNotice({ state, label, retry }) {
 }
 
 const mutationMessage = error => error?.status === 409
-  ? 'Conflict; draft kept.'
+  ? 'Conflict; current input or selection kept.'
   : error?.status === 503
-    ? 'Unavailable; draft kept.'
-    : 'Save failed; draft kept.'
+    ? 'Unavailable; current input or selection kept.'
+    : 'Save failed; current input or selection kept.'
+
+// Prompt-local input and menu selection survive a failed mutation until the operator retries.
 
 function useMutation() {
   const lock = useRef(false)
@@ -56,6 +58,67 @@ function useMutation() {
 }
 
 const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
+
+const listMutationMessage = (kind, error) => {
+  if (kind === 'delete-run') return error?.status === 409
+    ? 'This run is still live. Pause or stop it before deleting.'
+    : 'Run deletion was not confirmed. Check the refreshed list before retrying.'
+  if (kind === 'delete-project') return error?.status === 409
+    ? 'This project changed elsewhere and was not deleted. Refresh before retrying.'
+    : 'Project deletion was not confirmed. Check the refreshed list before retrying.'
+  return error?.status === 409
+    ? 'This assignment changed elsewhere and the move was not applied. Refresh before retrying.'
+    : 'The move was not confirmed. Check the refreshed list before retrying.'
+}
+
+const LIST_WRITE_TIMEOUT_MS = 12_000
+const LIST_RECONCILE_TIMEOUT_MS = 8_000
+
+// Resolve exactly once even when unabortable transport settles after the local deadline. Attaching
+// both handlers up front also prevents a late rejection from becoming an unhandled promise.
+const settleWithin = (work, timeout) => new Promise(resolve => {
+  let settled = false
+  const finish = result => {
+    if (settled) return
+    settled = true; clearTimeout(timer); resolve(result)
+  }
+  const timer = setTimeout(() => finish({ timeout: true }), timeout)
+  Promise.resolve().then(work).then(
+    () => finish({ ok: true }),
+    error => finish({ error }),
+  )
+})
+
+// Destructive list actions and drag/drop share one lock. A failed transport can have an ambiguous
+// outcome, so this guard never replays a write; callers reconcile with a read before the operator can
+// explicitly try again.
+export function useListMutation({ actionTimeout = LIST_WRITE_TIMEOUT_MS, reconcileTimeout = LIST_RECONCILE_TIMEOUT_MS } = {}) {
+  const lock = useRef(false)
+  const version = useRef(0)
+  const [state, setState] = useState(null)
+  useEffect(() => () => { version.current += 1 }, [])
+  const run = async (kind, label, action, reconcile) => {
+    if (lock.current) return false
+    const token = ++version.current
+    const update = value => { if (version.current === token) setState(value) }
+    lock.current = true; update({ busy: true, label })
+    try {
+      const outcome = await settleWithin(action, actionTimeout)
+      if (outcome.ok) { update(null); return true }
+      let message = listMutationMessage(kind, outcome.error)
+      if (reconcile) {
+        update({ busy: true, label: 'Checking the current list before retry…' })
+        const check = await settleWithin(reconcile, reconcileTimeout)
+        if (check.timeout) message += ' The follow-up list check timed out.'
+        else if (!check.ok) message += ' The follow-up list check failed.'
+      }
+      update({ busy: false, error: message }); return false
+    }
+    finally { lock.current = false }
+  }
+  const clear = () => { version.current += 1; setState(null) }
+  return [state, run, clear]
+}
 
 // Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
 // inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
@@ -101,7 +164,7 @@ export function TreeNode({ p, depth, ctx }) {
         <button className="ic" disabled={projectBusy} aria-label={`Add sub-project inside ${p.name}`}
           onClick={event => addProject(p.id, event.currentTarget)}>＋</button>
         <button className="ic" disabled={projectBusy} aria-label={`Rename project ${p.name}`} onClick={event => startProjectRename(p.id, event.currentTarget)}><OpIcon name="pencil" size={12} /></button>
-        <button className="ic" disabled={projectBusy} aria-label={`Delete project ${p.name}`} onClick={() => removeProject(p.id)}>✕</button>
+        <button className="ic" disabled={projectBusy} aria-label={`Delete project ${p.name}`} onClick={event => removeProject(p.id, event.currentTarget)}>✕</button>
       </span>
     </div>
     {renaming === p.id && projectBusy && <div className="muted" role="status">Saving project name…</div>}
@@ -141,13 +204,18 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
 }
 
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
-function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename, onDelete, onClose }) {
+function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename, onDelete, onClose, onBusyChange }) {
   const menuRef = useRef(null)
   const [busy, error, mutate] = useMutation()
   useEffect(() => { menuRef.current?.querySelector('[role="menuitem"]')?.focus() }, [])
+  useEffect(() => {
+    onBusyChange?.(busy)
+    return () => onBusyChange?.(false)
+  }, [busy, onBusyChange])
   const close = (restore = false) => { if (!busy) onClose(restore) }
   const act = async action => { if (await mutate(action)) onClose(true) }
   const onKeyDown = event => {
+    if (busy && event.key === 'Tab') { event.preventDefault(); return }
     const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
     if (event.key === 'Escape') { event.preventDefault(); close(true); return }
     const current = Math.max(0, items.indexOf(document.activeElement))
@@ -182,7 +250,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
       {busy && <div className="muted" role="status">Saving…</div>}
       {error && <div className="flag" role="alert">{error}</div>}
       <div className="mi-sep" />
-      <button type="button" role="menuitem" tabIndex={-1} className="mi danger" onClick={() => { close(false); onDelete(r) }}>✕ Delete run…</button>
+      <button type="button" role="menuitem" tabIndex={-1} className="mi danger" onClick={() => onDelete(r)}>✕ Delete run…</button>
     </div>
   </>
 }
@@ -239,6 +307,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
   const [projectBusy, projectError, saveProjectRename, clearProjectError] = useMutation()
+  const [listMutation, mutateList, clearListMutation] = useListMutation()
+  const [menuBusy, setMenuBusy] = useState(false)
   const projectRenameReturnRef = useRef(null)
   const runsMainRef = useRef(null)
   const projectsAllRef = useRef(null)
@@ -265,6 +335,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const projectsToggleRef = useRef(null)
   const projectsCloseRef = useRef(null)
   const projectsDialogRef = useRef(null)
+  const listBusy = !!listMutation?.busy
+  const navigationBusy = listBusy || projectBusy || menuBusy
   const closeRunMenu = (restore = false) => {
     setRunMenu(null)
     if (restore) focusSoon(runMenuTriggerRef.current)
@@ -284,7 +356,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
   const closeRunRename = () => { setRunRename(null); restoreRunModalFocus() }
   const closeSuperTasks = () => { setStModal(false); restoreRunModalFocus() }
-  useDialogFocus(projectsDialogRef, projectBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
+  // Keep the compact drawer active while any list or menu mutation is pending.
+  useDialogFocus(projectsDialogRef, navigationBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
   // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
@@ -384,36 +457,42 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
       && projectRenameReturnRef.current.focus({ preventScroll: true }))
     return true
   }
-  const removeProject = async (id) => {
+  const removeProject = async (id, returnFocus) => {
     if (!confirm(`Delete project "${projName[id]}"? Sub-projects and runs move up to its parent.`)) return
-    await deleteProject(id); if (sel === id) setSel(ALL); await refresh()
-    requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
+    const removed = await mutateList('delete-project', `Deleting project “${projName[id]}”…`,
+      async () => { await deleteProject(id); await refresh() }, refresh)
+    if (removed && sel === id) setSel(ALL)
+    if (removed) requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
+    else focusSoon(returnFocus)
   }
   const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }
-  const onDrop = async (project_id) => { if (dragRun) { await moveRun(dragRun, project_id); setDragRun(null) } }
+  const onDrop = async (project_id) => {
+    const runId = dragRun
+    if (!runId || listBusy) return
+    setDragRun(null)
+    const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
+    await mutateList('move-run', `Moving run to “${target}”…`,
+      async () => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }, refresh)
+  }
   const submitRunRename = async (label) => {
     await renameRun(runRename.run_id, label); await loadRuns()
   }
   const removeRun = async (r) => {
+    const menuFocus = document.activeElement
     const returnFocus = runMenuTriggerRef.current
     const card = returnFocus?.closest('.run-card')
     const fallbackFocus = card?.nextElementSibling?.querySelector('.run-card-main')
       || card?.previousElementSibling?.querySelector('.run-card-main')
-    setRunMenu(null)
     if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) {
-      focusSoon(returnFocus); return
+      focusSoon(menuFocus); return
     }
-    try { await deleteRun(r.run_id); await refresh() }
-    catch (e) {
-      // The request client attaches status; keep every fallback bounded instead of reflecting backend text.
-      alert(e.status === 409
-        ? 'This run is still live — pause or stop it before deleting.'
-        : 'Delete failed.')
-    }
-    finally { requestAnimationFrame(() => {
+    setRunMenu(null)
+    await mutateList('delete-run', `Deleting run “${r.label || r.run_id}”…`,
+      async () => { await deleteRun(r.run_id); await refresh() }, refresh)
+    requestAnimationFrame(() => {
       const target = returnFocus?.isConnected ? returnFocus : fallbackFocus?.isConnected ? fallbackFocus : runsMainRef.current
       target?.focus({ preventScroll: true })
-    }) }
+    })
   }
   // super-task CRUD (the buckets themselves; per-run assignment is assignToSuper above).
   const createSuper = async (name) => { await createSupertask(name); await loadSupers() }
@@ -430,17 +509,24 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const treeCtx = { byParent, expanded, sel, setSel: chooseProject, onDrop, toggle, renaming,
                     finishProjectRename, startProjectRename, projectBusy, projectError,
                     count, addProject, removeProject }
+  const mutationNotice = listMutation?.busy
+    ? <div className="notice" role="status">{listMutation.label}</div>
+    : listMutation?.error
+      ? <div className="notice resource-error" role="alert">{listMutation.error}{' '}
+          <button type="button" className="btn sm" onClick={clearListMutation}>Dismiss</button>
+        </div>
+      : null
 
   return (
-    <main ref={runsMainRef} className="app" data-route-main tabIndex={-1}>
+    <main ref={runsMainRef} className="app" data-route-main tabIndex={-1} aria-busy={navigationBusy}>
       <h1 className="sr-only">Runs</h1>
       <div className="topbar home-head"><span className="brand"><span className="dot">◉</span> LoopLab</span>
         <span className="muted home-subtitle">autonomous R&D — live runs</span>
-        <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" onClick={() => setProjectsOpen(true)}
+        <button ref={projectsToggleRef} className="btn sm ghost projects-toggle" disabled={navigationBusy} onClick={() => setProjectsOpen(true)}
                 aria-expanded={projectsOpen} aria-controls="projects-drawer">
           <OpIcon name="folder" className="t-ic" /> Projects
         </button>
-        <button className="btn sm primary new-run-cta"
+        <button className="btn sm primary new-run-cta" disabled={navigationBusy}
                 onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>
           ＋ New run
         </button>
@@ -455,16 +541,17 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         <div className="home-actions">
           <ThemeSwitcher />
           <EnergyToggle />
-          <button type="button" className="btn sm ghost" title="Read the experimental bounded portfolio preview"
+          <button type="button" className="btn sm ghost" disabled={navigationBusy} title="Read the experimental bounded portfolio preview"
                   aria-label="Open Research Atlas preview" onClick={() => onResearchAtlas?.()}>
             <OpIcon name="compass" className="t-ic" /> Atlas preview
           </button>
-          <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
+          <button className="btn sm ghost" disabled={navigationBusy} title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
         </div>
       </div>
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
-        {projectsOpen && <button className="project-backdrop" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
+        {projectsOpen && <button className="project-backdrop" disabled={projectBusy} aria-disabled={navigationBusy || undefined}
+                                 onClick={() => { if (!navigationBusy) setProjectsOpen(false) }}
                                  aria-label="Close projects" />}
         <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
                role={compactNav && projectsOpen && !projModal ? 'dialog' : undefined}
@@ -472,36 +559,39 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                tabIndex={compactNav ? -1 : undefined}
                aria-hidden={compactNav && (!projectsOpen || !!projModal) ? 'true' : undefined}
                inert={compactNav && (!projectsOpen || !!projModal) ? '' : undefined}>
-          <div className="psidebar-h">
-            <b>Projects</b>
-            <button ref={projectsCloseRef} className="btn sm ghost projects-close" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
-                    aria-label="Close projects">×</button>
-            <button className="btn sm" disabled={projectBusy} onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
+          {compactNav && projectsOpen && mutationNotice}
+          <div inert={listBusy ? '' : undefined}>
+            <div className="psidebar-h">
+              <b>Projects</b>
+              <button ref={projectsCloseRef} className="btn sm ghost projects-close" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
+                      aria-label="Close projects">×</button>
+              <button className="btn sm" disabled={projectBusy} onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
+            </div>
+            <button ref={projectsAllRef} type="button" className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')}
+                 disabled={projectBusy} onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
+              <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
+            </button>
+            <button type="button" className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')}
+                 disabled={projectBusy} onClick={() => chooseProject(UNASSIGNED)} aria-pressed={sel === UNASSIGNED}
+                 onDragOver={e => { if (!projectBusy) e.preventDefault() }} onDrop={() => { if (!projectBusy) onDrop(UNASSIGNED) }}>
+              <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
+            </button>
+            <nav className="ptree" aria-label="Project folders">
+              {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
+              {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
+            </nav>
           </div>
-          <button ref={projectsAllRef} type="button" className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')}
-               disabled={projectBusy} onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
-            <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
-          </button>
-          <button type="button" className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')}
-               disabled={projectBusy} onClick={() => chooseProject(UNASSIGNED)} aria-pressed={sel === UNASSIGNED}
-               onDragOver={e => { if (!projectBusy) e.preventDefault() }} onDrop={() => { if (!projectBusy) onDrop(UNASSIGNED) }}>
-            <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
-          </button>
-          <nav className="ptree" aria-label="Project folders">
-            {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
-            {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
-          </nav>
         </aside>
 
         <div className={'runlist' + (view === 'map' ? ' map-list-shell' : '')}>
           <div className="crumbs">
-            <button type="button" className="crumb" onClick={() => chooseProject(ALL)}>All runs</button>
+            <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(ALL)}>All runs</button>
             {breadcrumb.map(p => <React.Fragment key={p.id}><span className="sep">/</span>
-              <button type="button" className="crumb" onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
+              <button type="button" className="crumb" disabled={navigationBusy} onClick={() => chooseProject(p.id)}>{p.name}</button></React.Fragment>)}
             {sel === UNASSIGNED && <><span className="sep">/</span><span className="crumb">Unassigned</span></>}
             <span style={{ flex: 1 }} />
             {scope && <div className="view-toggle crumb-report">
-              <button className={'vt report' + (showReport ? ' on' : '')} title={`cross-run report for ${scope.label}`}
+              <button className={'vt report' + (showReport ? ' on' : '')} disabled={navigationBusy} title={`cross-run report for ${scope.label}`}
                 onClick={() => setShowReport(true)}><OpIcon name="doc" size={12} /> Report<span className="vt-scope"> · {scope.label}</span></button>
             </div>}
           </div>
@@ -528,7 +618,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               <option value={UNASSIGNED}>— no super-task —</option>
               {superdata.supertasks.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
-            <button className="btn sm ghost" aria-label="Create or manage super-tasks"
+            <button className="btn sm ghost" disabled={navigationBusy} aria-label="Create or manage super-tasks"
               title="create / manage super-tasks" onClick={event => openSuperTasks(event.currentTarget)}><OpIcon name="target" className="t-ic" /> ＋</button>
             <span style={{ flex: 1 }} />
             <span className="muted runbar-count">{visible.length}/{runsOf(sel).length}</span>
@@ -552,20 +642,21 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
+          {(!compactNav || !projectsOpen) && mutationNotice}
           {runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
             {sel === ALL
-              ? <button className="btn sm primary" onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
+              ? <button className="btn sm primary" disabled={navigationBusy} onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
           {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
           {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && visible.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
-              <MapView onOpen={onOpen} runs={visible} projects={proj.projects}
+              <MapView onOpen={id => { if (!navigationBusy) onOpen(id) }} runs={visible} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
                 scopeLabel={scope?.label || (sel === ALL ? 'All runs' : sel === UNASSIGNED ? 'Unassigned' : (projName[sel] || sel))} />
             </LazyBoundary>
           </div>}
           {view === 'list' && runs && visible.map(r => (
-            <div className="run-card" key={r.run_id} draggable
+            <div className="run-card" key={r.run_id} draggable={!navigationBusy}
                  onDragStart={() => setDragRun(r.run_id)} onDragEnd={() => setDragRun(null)}>
               {(() => {
                 // A zombie (not finished, but no engine holds the lock) reads as "search" from phase
@@ -580,7 +671,11 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               })()}
               <a className="run-card-main" href={`#/run/${encodeURIComponent(r.run_id)}`}
                    draggable={false}
-                   onClick={event => followClientRoute(event, () => onOpen(r.run_id))}
+                   aria-disabled={navigationBusy || undefined}
+                   onClick={event => {
+                     if (navigationBusy) { event.preventDefault(); return }
+                     followClientRoute(event, () => onOpen(r.run_id))
+                   }}
                    aria-label={`Open run ${r.label || r.run_id}`}>
                 <div><b>{r.label || r.run_id}</b> <span className="muted">· {r.label ? r.run_id + ' · ' : ''}{r.task_id}</span>
                   {r.project_id && projName[r.project_id] && <span className="pill" style={{ marginLeft: 6 }}><OpIcon name="folder" className="t-ic" /> {projName[r.project_id]}</span>}
@@ -595,7 +690,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                   {fmtAgo(r.mtime)}</div>}
               </div>
               <div className="run-actions">
-                <button className="ic dots" aria-label={`Actions for run ${r.label || r.run_id}`}
+                <button className="ic dots" disabled={navigationBusy} aria-label={`Actions for run ${r.label || r.run_id}`}
                         aria-haspopup="menu" aria-expanded={runMenu === r.run_id}
                         onClick={e => {
                           e.stopPropagation()
@@ -604,7 +699,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                         }}>⋮</button>
                 {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
                   onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
-                  onRename={openRunRename} onDelete={removeRun} onClose={closeRunMenu} />}
+                  onRename={openRunRename} onDelete={removeRun} onClose={closeRunMenu} onBusyChange={setMenuBusy} />}
               </div>
             </div>
           ))}
