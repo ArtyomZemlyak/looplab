@@ -7,6 +7,7 @@ byte-identical; best-effort.
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from looplab.agents.strategist import StrategyContext, _strategist_brief
 from looplab.core.models import RunState
@@ -32,12 +33,50 @@ class _Host(StrategyCadenceMixin):
 
 def test_engine_populates_note_from_memory(tmp_path):
     (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(x) for x in [
-        {"statement": "hard-neg helps", "outcome": "supported", "evidence": [1], "run_id": "r1", "task_id": "t"},
-        {"statement": "mnr helps", "outcome": "supported", "evidence": [2], "run_id": "rA", "task_id": "t"},
-        {"statement": "mnr helps", "outcome": "tested", "evidence": [3], "run_id": "rB", "task_id": "t"},
+        {"statement": "hard-neg helps", "outcome": "supported", "evidence": [1], "run_id": "r1",
+         "task_id": "t", "direction": "max"},
+        {"statement": "mnr helps", "outcome": "supported", "evidence": [2], "run_id": "rA",
+         "task_id": "t", "direction": "max"},
+        {"statement": "mnr helps", "outcome": "tested", "evidence": [3], "run_id": "rB",
+         "task_id": "t", "direction": "max"},
     ]) + b"\n")
-    note = _Host(tmp_path, on=True)._cross_run_note_for_ctx()
+    note = _Host(tmp_path, on=True)._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max"))
     assert "returned run(s)" in note and "mixed-evidence" in note
+
+
+@pytest.mark.parametrize("persisted_direction", [None, "", "MAX", "sideways", 1])
+def test_strategist_note_rejects_missing_or_garbled_persisted_direction(
+        tmp_path, persisted_direction):
+    row = {
+        "statement": "untrusted polarity", "outcome": "supported", "evidence": [1],
+        "run_id": "r1", "task_id": "t",
+    }
+    if persisted_direction is not None:
+        row["direction"] = persisted_direction
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
+    host = _Host(tmp_path, on=True)
+
+    assert host._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max")) == ""
+    assert host._cross_run_note_receipt == {}
+
+
+@pytest.mark.parametrize("current_direction", [None, "", "MAX", "sideways", 1])
+def test_strategist_note_rejects_invalid_current_direction(tmp_path, current_direction):
+    from types import SimpleNamespace
+
+    row = {
+        "statement": "valid persisted evidence", "outcome": "supported", "evidence": [1],
+        "run_id": "r1", "task_id": "t", "direction": "max",
+    }
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(row) + b"\n")
+    host = _Host(tmp_path, on=True)
+    state = SimpleNamespace(
+        run_id="current", task_id="t", direction=current_direction)
+
+    assert host._cross_run_note_for_ctx(state) == ""
+    assert host._cross_run_note_receipt == {}
 
 
 def test_exact_task_strategist_note_rejects_opposite_direction(tmp_path):

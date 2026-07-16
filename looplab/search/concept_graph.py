@@ -923,16 +923,15 @@ _SYMMETRIC_RELS = frozenset({"co_occurs", "related_to"})
 
 
 def _lens_rels(lens) -> Optional[set]:
-    # REVIEW(2026-07-16): returning None for the STRING "is_a" makes project_lens apply NO rel filter
-    # at all — `project_lens(ids, edges, "is_a")` silently builds a tree from EVERY stored relation
-    # (is_a + uses + co_occurs mixed, co_occurs edges even flipping to touch-orientation), which is
-    # never a meaningful hierarchy. The dict form from default_lenses() ({"rels": ["is_a"]}) filters
-    # correctly, so the two spellings of the same lens disagree. If the intent is "is_a is the
-    # path-kind lens, use project_hierarchy for it", project_lens should either map the string to
-    # {"is_a"} (edge-asserted is_a edges DO exist since Phase 2c) or reject it loudly — not degrade
-    # into an unfiltered mixed-rel projection.
+    # The STRING "is_a" must filter to the is_a relation, NOT return None: a None here means "no rel
+    # filter", so `project_lens(ids, edges, "is_a")` would build a tree from EVERY stored relation
+    # (is_a + uses + co_occurs mixed, co_occurs even flipped to touch-orientation) — never a meaningful
+    # hierarchy, and disagreeing with the equivalent dict form ({"rels": ["is_a"]}) that default_lenses()
+    # emits. Phase 2c asserts real is_a edges, so map the string to {"is_a"} for a consistent filter.
+    # (The concepts endpoint routes is_a to project_hierarchy, so this is the defensive path for any
+    # direct project_lens("is_a") caller.)
     if isinstance(lens, str):
-        return None if lens == "is_a" else {lens}
+        return {lens}
     rels = lens.get("rels") if isinstance(lens, dict) else None
     return set(rels) if rels else None
 
@@ -1002,12 +1001,13 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
         for ch in sorted(children.get(cid, [])):
             dq.append((ch, d + 1))
     nodes = {}
-    # REVIEW(2026-07-16): same defect as project_hierarchy above — iterating the raw `all_ids` SET makes
-    # the `nodes` dict's key order string-hash-dependent (randomized per process), so serialized output
-    # is not byte-stable despite the "DETERMINISTIC" docstring; iterate `sorted(all_ids)`. Also: a
-    # derive_lens spec may carry a `root` field, but project_lens never reads it — a minted
-    # "focus on <root>" lens silently projects the WHOLE graph (see the REVIEW note on derive_lens).
-    for cid in all_ids:
+    # Iterate SORTED ids (not the raw set): a raw-set iteration makes the `nodes` dict's key order
+    # string-hash-dependent (randomized per process via PYTHONHASHSEED), so json.dumps of this
+    # projection is not byte-stable across processes despite the "DETERMINISTIC" docstring — the concepts
+    # endpoint returns this tree, so byte-instability breaks its HTTP etag/caching and diff-based tests.
+    # (Matches the sibling project_hierarchy fix.) A `root`-focused lens is not yet consumed here; see the
+    # note in derive_lens — the emitted root is validated but wiring the subtree filter is pending.
+    for cid in sorted(all_ids):
         prim = parent_of.get(cid)
         cross = sorted({p for _, p in cand.get(cid, []) if p != prim and p in all_ids})
         nodes[cid] = {"parent": prim, "depth": depth.get(cid, 0),
@@ -1060,16 +1060,14 @@ def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_cal
         name = _normalize_concept_id(out.name) or "-".join(rels)[:24] or "lens"
         spec = {"name": name, "label": (out.label or name).strip()[:60], "rels": rels,
                 "kind": "path" if rels == ["is_a"] else "edge", "provenance": "agent"}
+        # Validate the root the SAME way rels are validated (against the graph). The prompt tells the
+        # model to pick the root "from the vocabulary"; a hallucinated root that is not an actual concept
+        # is dropped (keep the lens, drop the focus) rather than carried verbatim. NOTE: consuming
+        # `spec["root"]` in the projectors (filter to the subtree) is still pending feature work — until
+        # then a root-bearing spec projects the whole graph — but the emitted value is now guaranteed to
+        # be a real in-graph concept so that wiring can trust it.
         root = _normalize_concept_id(out.root)
-        # REVIEW(2026-07-16): asymmetric validation — hallucinated RELS are filtered against `avail`
-        # (and the whole mint degrades to None), but a hallucinated ROOT is carried verbatim: the
-        # prompt tells the model to pick the root "from the vocabulary", yet `vocab` (already computed
-        # above) is never consulted here. A root not in the graph should be dropped (keep the lens,
-        # drop the focus) the same way bad rels are. Worse, NOTHING consumes `spec["root"]` today —
-        # project_lens/project_hierarchy ignore the key entirely — so "focus on X" requests mint a
-        # spec that promises focus in its label but projects the whole graph. Either wire root
-        # filtering into project_lens in the same change, or don't emit the field yet.
-        if root:
+        if root and root in set(vocab):
             spec["root"] = root
         return spec
     except Exception:  # noqa: BLE001 — minting a lens is best-effort; fall back to a default lens

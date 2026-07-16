@@ -20,7 +20,7 @@ import unicodedata
 from pathlib import Path
 
 from looplab.tools._base import fn_spec
-from looplab.trust.cross_run import cross_run_text
+from looplab.trust.cross_run import cross_run_text, same_live_direction
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
@@ -79,8 +79,9 @@ class CrossRunTools:
         """
         if not self._bound:
             return True                                        # unbound -> portfolio-wide
-        row_direction = str(row.get("direction") or "")
-        if self._direction and row_direction in ("min", "max") and row_direction != self._direction:
+        # CODEX AGENT: a bound provider is agent-facing. Exact task identity cannot override missing or
+        # malformed polarity provenance; only an explicitly unbound human/CLI audit stays portfolio-wide.
+        if not same_live_direction(self._direction, row.get("direction")):
             return False
         if self._task_id and str(row.get("task_id") or "") == self._task_id:
             return True

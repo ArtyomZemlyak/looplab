@@ -7,6 +7,7 @@ advisory-only guarantee (the provider exposes NO mutation tool).
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from looplab.tools.cross_run_tools import CrossRunTools
 
@@ -21,9 +22,9 @@ def _seed(d, *, lessons=None, capsules=None):
             store.add(c)
 
 
-def _lesson(statement, outcome, evidence, *, run_id="r1", role=""):
+def _lesson(statement, outcome, evidence, *, run_id="r1", role="", direction="max"):
     return {"statement": statement, "outcome": outcome, "evidence": evidence,
-            "run_id": run_id, "task_id": "t", "role": role}
+            "run_id": run_id, "task_id": "t", "role": role, "direction": direction}
 
 
 def _cap(run_id, concepts, outcomes):
@@ -226,7 +227,7 @@ def test_shared_providers_omit_cross_run_tool_when_off(tmp_path):
 
 def _lz_scoped(statement, task_id, fingerprint, run_id="r1"):
     return {"statement": statement, "outcome": "supported", "evidence": [1], "run_id": run_id,
-            "task_id": task_id, "role": "", "fingerprint": fingerprint}
+            "task_id": task_id, "role": "", "fingerprint": fingerprint, "direction": "max"}
 
 
 def test_unbound_is_portfolio_wide(tmp_path):
@@ -245,7 +246,8 @@ def test_bound_scopes_out_foreign_tasks(tmp_path):
         _lz_scoped("about quadratic", "quadratic", ["metric:mse", "quadratic"]),
     ])
     t = CrossRunTools(tmp_path)
-    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    t.bind_state(SimpleNamespace(
+        task_id="rubert", goal="dense retrieval on russian reviews", direction="max"))
     out = t.execute("cross_run_claims", {})
     assert "about retrieval" in out          # same task_id OR shared goal term ("retrieval"/"russian")
     assert "about quadratic" not in out      # the unrelated task no longer leaks (the live-test fix)
@@ -257,7 +259,8 @@ def test_one_generic_goal_word_is_not_enough_to_cross_task_boundary(tmp_path):
         _lz_scoped("private foreign result", "foreign", ["retrieval", "medical", "images"]),
     ])
     t = CrossRunTools(tmp_path)
-    t.bind_state(SimpleNamespace(task_id="current", goal="retrieval of russian legal passages"))
+    t.bind_state(SimpleNamespace(
+        task_id="current", goal="retrieval of russian legal passages", direction="max"))
     assert "private foreign result" not in t.execute("cross_run_claims", {})
 
 
@@ -285,19 +288,54 @@ def test_bound_scope_rejects_opposite_direction_when_recorded(tmp_path):
     assert "opposite objective" not in t.execute("cross_run_claims", {})
 
 
+@pytest.mark.parametrize("persisted_direction", [None, "", "MAX", "sideways", 1])
+def test_bound_scope_rejects_missing_or_garbled_persisted_direction(
+        tmp_path, persisted_direction):
+    from types import SimpleNamespace
+
+    row = _lz_scoped("untrusted polarity", "same-task", ["retrieval", "russian"])
+    if persisted_direction is None:
+        row.pop("direction")
+    else:
+        row["direction"] = persisted_direction
+    _seed(tmp_path, lessons=[row])
+    tools = CrossRunTools(tmp_path)
+    tools.bind_state(SimpleNamespace(
+        task_id="same-task", goal="retrieval russian", direction="max"))
+
+    assert "untrusted polarity" not in tools.execute("cross_run_claims", {})
+
+
+@pytest.mark.parametrize("current_direction", [None, "", "MAX", "sideways", 1])
+def test_bound_scope_rejects_invalid_current_direction(tmp_path, current_direction):
+    from types import SimpleNamespace
+
+    _seed(tmp_path, lessons=[
+        _lz_scoped("valid persisted evidence", "same-task", ["retrieval", "russian"]),
+    ])
+    tools = CrossRunTools(tmp_path)
+    tools.bind_state(SimpleNamespace(
+        task_id="same-task", goal="retrieval russian", direction=current_direction))
+
+    assert "valid persisted evidence" not in tools.execute("cross_run_claims", {})
+
+
 def test_d8_claims_are_task_scoped_and_never_routed_to_developer(tmp_path):
     from types import SimpleNamespace
     from looplab.engine.claims import record_research_claims
     for task, statement in (("mine", "my verified memo"), ("foreign", "foreign verified memo")):
         record_research_claims(tmp_path, run_id=f"r-{task}", task_id=task,
+                               direction="max",
                                claims=[{"statement": statement, "node_ids": [1],
                                         "verification": {"verdict": "supported", "method": "llm"}}])
     researcher = CrossRunTools(tmp_path, role="researcher")
-    researcher.bind_state(SimpleNamespace(task_id="mine", goal="unique current goal"))
+    researcher.bind_state(SimpleNamespace(
+        task_id="mine", goal="unique current goal", direction="max"))
     out = researcher.execute("cross_run_claims", {})
     assert "my verified memo" in out and "foreign verified memo" not in out
     developer = CrossRunTools(tmp_path, role="developer")
-    developer.bind_state(SimpleNamespace(task_id="mine", goal="unique current goal"))
+    developer.bind_state(SimpleNamespace(
+        task_id="mine", goal="unique current goal", direction="max"))
     assert "verified memo" not in developer.execute("cross_run_claims", {})
 
 
@@ -327,8 +365,9 @@ def test_bound_keeps_same_task_even_without_goal_overlap(tmp_path):
     from types import SimpleNamespace
     _seed(tmp_path, lessons=[_lz_scoped("legacy lesson", "rubert", ["metric:recall"])])  # no goal terms (ASCII-dropped)
     t = CrossRunTools(tmp_path)
-    t.bind_state(SimpleNamespace(task_id="rubert", goal="плотный поиск"))   # Cyrillic goal
-    assert "legacy lesson" in t.execute("cross_run_claims", {})            # exact task_id still passes
+    t.bind_state(SimpleNamespace(
+        task_id="rubert", goal="плотный поиск", direction="max"))  # Cyrillic goal
+    assert "legacy lesson" in t.execute("cross_run_claims", {})  # exact task + direction still passes
 
 
 def _cap_scoped(run_id, task_id, concepts, fingerprint):
@@ -346,7 +385,8 @@ def test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas(tmp_
         _cap_scoped("r2", "quadratic", ["quantization"], ["metric:mse", "quadratic"]),
     ])
     t = CrossRunTools(tmp_path)
-    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    t.bind_state(SimpleNamespace(
+        task_id="rubert", goal="dense retrieval on russian reviews", direction="max"))
     prior = t.execute("cross_run_prior_attempts", {"idea": "hard-neg or quantization"})
     assert "hard-neg" in prior and "quantization" not in prior          # foreign-task capsule scoped out
     atlas = t.execute("cross_run_atlas", {})
@@ -386,9 +426,11 @@ def test_cross_run_claims_scopes_D8_research_to_bound_task(tmp_path):
     from looplab.engine.claims import record_research_claims
     _seed(tmp_path, lessons=[_lz_scoped("local finding retrieval", "rubert", ["retrieval", "russian"])])
     record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask",
+                           direction="max",
                            claims=[{"statement": "foreign secret research", "node_ids": [9]}])
     t = CrossRunTools(tmp_path)
-    t.bind_state(SimpleNamespace(task_id="rubert", goal="dense retrieval on russian reviews"))
+    t.bind_state(SimpleNamespace(
+        task_id="rubert", goal="dense retrieval on russian reviews", direction="max"))
     out = t.execute("cross_run_claims", {})
     assert "foreign secret research" not in out          # other task's D8 research is scoped out
 

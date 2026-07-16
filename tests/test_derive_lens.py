@@ -61,5 +61,15 @@ def test_root_is_carried_when_valid():
     assert spec["root"] == "llm"                       # normalized
 
 
+def test_hallucinated_root_not_in_vocab_is_dropped():
+    # Regression: a root is validated against the concept vocabulary the same way rels are validated
+    # against `avail`. A model-invented root that is not an actual concept must be dropped (keep the
+    # lens, drop the focus), not carried verbatim — the prompt asks for a root "from the vocabulary".
+    spec = derive_lens("focus on the void", _EDGES,
+                       _LensClient({"rels": ["uses"], "root": "not-a-real-concept"}))
+    assert spec is not None and "root" not in spec     # lens kept, hallucinated focus dropped
+    assert spec["rels"] == ["uses"]
+
+
 def test_failure_degrades_to_none():
     assert derive_lens("x", _EDGES, _BoomClient()) is None

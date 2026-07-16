@@ -29,7 +29,8 @@ from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_
                                   EV_NODE_CONCEPTS, EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
-from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
+from looplab.trust.cross_run import (cross_run_text, same_live_direction,
+                                     sanitize_cross_run_projection, valid_live_direction)
 
 # HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
 # run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
@@ -108,6 +109,12 @@ class StrategyCadenceMixin:
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
             self._cross_run_note_receipt = {}
             return ""
+        current_direction = getattr(state, "direction", None) if state is not None else None
+        # CODEX AGENT: the Strategist consumes this as live decision context. No state or an invalid
+        # current objective must yield no guidance rather than a portfolio-wide legacy projection.
+        if not valid_live_direction(current_direction):
+            self._cross_run_note_receipt = {}
+            return ""
         try:
             import hashlib
             import json
@@ -123,18 +130,12 @@ class StrategyCadenceMixin:
             research = load_research_claims(base)
             task_id = str(getattr(state, "task_id", "") or "") if state is not None else ""
             run_id = str(getattr(state, "run_id", "") or "") if state is not None else ""
-            if state is not None:
-                def _visible(row):
-                    row_direction = str(row.get("direction") or "")
-                    current_direction = str(getattr(state, "direction", "") or "")
-                    direction_compatible = (row_direction not in ("min", "max")
-                                            or current_direction not in ("min", "max")
-                                            or row_direction == current_direction)
-                    return (direction_compatible
-                            and bool(task_id) and str(row.get("task_id") or "") == task_id
-                            and (not run_id or str(row.get("run_id") or "") != run_id))
-                lessons, caps, research = ([row for row in rows if _visible(row)]
-                                           for rows in (lessons, caps, research))
+            def _visible(row):
+                return (same_live_direction(current_direction, row.get("direction"))
+                        and bool(task_id) and str(row.get("task_id") or "") == task_id
+                        and (not run_id or str(row.get("run_id") or "") != run_id))
+            lessons, caps, research = ([row for row in rows if _visible(row)]
+                                       for rows in (lessons, caps, research))
             if not lessons and not caps and not research:
                 self._cross_run_note_receipt = {}
                 return ""

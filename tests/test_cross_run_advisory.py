@@ -8,6 +8,7 @@ exactly like the E4 prior note. These tests pin the off-switch (byte-identical p
 from __future__ import annotations
 
 import orjson
+import pytest
 
 from looplab.core.config import Settings
 from looplab.core.models import RunState
@@ -32,10 +33,10 @@ def _seed(memory_dir, *, lessons=None, capsules=None):
             store.add(c)
 
 
-def _lesson(statement, outcome, evidence, run_id="r1", direction=""):
+def _lesson(statement, outcome, evidence, run_id="r1", direction="max"):
     row = {"statement": statement, "outcome": outcome, "evidence": evidence,
            "run_id": run_id, "task_id": "t"}
-    if direction:
+    if direction is not None:
         row["direction"] = direction
     return row
 
@@ -61,7 +62,8 @@ def test_on_renders_pack_with_evidence_and_counter_evidence(tmp_path):
         _lesson("mnr helps", "tested", [2], run_id="rB"),        # contested -> mixed
         _lesson("hard-neg helps", "supported", [3]),
     ])
-    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(RunState())
+    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
     assert txt.startswith("\n")                                  # folds into the hint like the E4 prior
     assert "Cross-run evidence" in txt and "counter-evidence" in txt
     assert "mnr helps" in txt and "⚖" in txt                     # the contested claim is surfaced
@@ -71,15 +73,26 @@ def test_on_includes_coverage_line_from_capsules(tmp_path):
     _seed(tmp_path,
           lessons=[_lesson("x helps", "supported", [1])],
           capsules=[build_concept_capsule(run_id="r1", fingerprint=["kind:dataset"], direction="max",
-                                          concepts=["hard-neg", "distillation"], concept_outcomes={})])
-    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(RunState(direction="max"))
+                                          concepts=["hard-neg", "distillation"], concept_outcomes={},
+                                          task_id="t")])
+    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
     assert "Bounded live concept observations (not coverage)" in txt and "hard-neg" in txt
+
+
+def test_advisory_rejects_valid_direction_without_scope_identity(tmp_path):
+    _seed(tmp_path, lessons=[_lesson("portfolio evidence", "supported", [1])])
+    host = _Host(tmp_path, on=True)
+
+    assert host._cross_run_advisory_text(
+        RunState(run_id="current", direction="max")) == ""
+    assert host._cross_run_advisory_receipt == {}
 
 
 def test_d8_only_memory_is_visible_and_exact_task_scoped(tmp_path):
     from looplab.engine.claims import record_research_claims
 
-    record_research_claims(str(tmp_path), run_id="rD8", task_id="task-a", claims=[{
+    record_research_claims(str(tmp_path), run_id="rD8", task_id="task-a", direction="max", claims=[{
         "statement": "doc2query expands recall", "node_ids": [7],
         "verification": {"verdict": "supported", "method": "llm"},
     }])
@@ -89,6 +102,50 @@ def test_d8_only_memory_is_visible_and_exact_task_scoped(tmp_path):
         RunState(run_id="current", task_id="task-b", direction="max"))
     assert "doc2query expands recall" in same
     assert "doc2query expands recall" not in other
+
+
+@pytest.mark.parametrize("persisted_direction", [None, "", "MAX", "sideways", 1])
+def test_exact_task_advisory_rejects_missing_or_garbled_lesson_direction(
+        tmp_path, persisted_direction):
+    _seed(tmp_path, lessons=[
+        _lesson("untrusted polarity", "supported", [1], direction=persisted_direction),
+    ])
+
+    host = _Host(tmp_path, on=True)
+    text = host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
+
+    assert text == ""
+    assert host._cross_run_advisory_receipt == {}
+
+
+def test_exact_task_advisory_rejects_research_without_direction(tmp_path):
+    from looplab.engine.claims import record_research_claims
+
+    record_research_claims(str(tmp_path), run_id="legacy", task_id="task-a", claims=[{
+        "statement": "legacy research without polarity", "node_ids": [7],
+        "verification": {"verdict": "supported", "method": "llm"},
+    }])
+
+    host = _Host(tmp_path, on=True)
+    text = host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="task-a", direction="max"))
+
+    assert text == ""
+    assert host._cross_run_advisory_receipt == {}
+
+
+@pytest.mark.parametrize("current_direction", [None, "", "MAX", "sideways", 1])
+def test_advisory_rejects_invalid_current_direction(tmp_path, current_direction):
+    from types import SimpleNamespace
+
+    _seed(tmp_path, lessons=[_lesson("valid persisted evidence", "supported", [1])])
+    state = SimpleNamespace(
+        run_id="current", task_id="t", direction=current_direction)
+    host = _Host(tmp_path, on=True)
+
+    assert host._cross_run_advisory_text(state) == ""
+    assert host._cross_run_advisory_receipt == {}
 
 
 def test_d8_exact_task_advisory_rejects_opposite_direction(tmp_path):

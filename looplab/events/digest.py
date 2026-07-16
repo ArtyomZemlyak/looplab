@@ -64,28 +64,39 @@ def param_distance(a: dict, b: dict) -> float:
     return math.sqrt(sum((a[k] - b[k]) ** 2 for k in keys)) / math.sqrt(len(keys))
 
 
+def node_theme(node) -> Optional[str]:
+    """A node's single THEME label — the one grouping vocabulary shared by `theme_rollup`,
+    `coverage.py::_node_theme` and the /runs API.
+
+    Legacy `idea.theme` when present; else the coarse AXIS of the node's first authored concept. Phase 0
+    (bd816a5) migrated AUTHORING from a single `theme` slug to the `concepts` set but did not move the
+    readers, so on new runs every node is untitled and every theme surface zeroed (the digest's theme
+    chips, the coverage breadth scalars the Strategist narrowing detector reads, the explore-hint's
+    "concentrates on '<theme>'"). Falling back to the concept axis (e.g. "loss/contrastive" -> "loss")
+    keeps the OLD coarse-theme granularity so those signals stay live until the theme readers are torn
+    out entirely. Deterministic (first concept = the Researcher's authoring order, replay-stable).
+    Returns None only when the node carries neither a theme nor any concept."""
+    idea = getattr(node, "idea", None)
+    theme = getattr(idea, "theme", None)
+    if theme:
+        return theme
+    for concept in (getattr(idea, "concepts", None) or []):
+        axis = str(concept).strip().split("/", 1)[0].strip()
+        if axis:
+            return axis
+    return None
+
+
 def theme_rollup(state: RunState) -> dict:
-    """Per-theme rollup: {theme: {count, best_metric}}. A node's theme is its `idea.theme`
-    (Researcher-assigned); nodes without one are skipped. `best_metric` is the better value per the
-    run's direction. Audit-only — never read by replay.fold."""
-    # REVIEW(2026-07-16): Phase 0 (bd816a5) stopped AUTHORING `idea.theme` (Researcher now emits
-    # `concepts`) but this reader was not migrated — the migration order is inverted (writer off
-    # before readers moved). On every NEW run all nodes are untitled, so this returns {} and,
-    # transitively: (1) the digest's "Themes:" chips vanish from the Researcher's state brief;
-    # (2) coverage_signal (search/coverage.py) reports themes=0 / theme_entropy=0 /
-    # dominant_theme_frac=0 forever, so the RuleStrategist's narrowing detector
-    # (agents/strategist.py:164 `>= 0.75 / >= 0.6`) can never fire and the LLM Strategist is shown
-    # zeroed breadth numbers; (3) the explore-hint's "concentrates on '<theme>'" detail
-    # (engine/proposal_cues.py:~205) is always empty. Until the theme readers are torn out, this
-    # rollup should FALL BACK to concepts (e.g. treat each `axis/slug` id — or its axis — as a
-    # theme when idea.theme is empty), and coverage.py::_node_theme must mirror the same fallback
-    # to keep the "one theme vocabulary across every surface" promise it documents.
+    """Per-theme rollup: {theme: {count, best_metric}}. A node's theme is `node_theme` (legacy
+    `idea.theme`, else its first concept's axis — see that helper); nodes with neither are skipped.
+    `best_metric` is the better value per the run's direction. Audit-only — never read by replay.fold."""
     better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
     out: dict[str, dict] = {}
     for n in state.nodes.values():
         if n.tombstoned:                        # §6.3: a logically-deleted node must not skew theme counts/bests
             continue
-        theme = getattr(n.idea, "theme", None)
+        theme = node_theme(n)
         if not theme:
             continue
         m = n.robust_metric
