@@ -48,6 +48,14 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     const epoch = ++requestEpoch.current
     const controller = new AbortController()
     readAbort.current = controller
+    // REVIEW(2026-07-16): busy is hard-reset to false here, but a paid generation POST for THIS scope
+    // may still be in flight — generate() never aborts on scope switch (only the GET is aborted) and
+    // it fences re-entry via generatingScopes. So leaving and returning to a generating scope renders
+    // an idle "Generate" button whose click silently no-ops at the `generatingScopes.has(key)` guard,
+    // with no busy indicator and no way to see the run finish (its epoch was invalidated, so even the
+    // result is dropped). Seed busy from the fence — `busy: generatingScopes.current.has(key)` — and
+    // let the generation's finally refresh the view for the current key, so an in-flight paid call is
+    // never invisible.
     setView({ key, data: null, busy: false, err: null })
     getScopeReport(scope.type, scope.id, { signal: controller.signal })
       .then(value => {
