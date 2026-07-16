@@ -14,17 +14,20 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 core, events and stdlib (the search/agent/tool deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import logging
 import unicodedata
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import Idea, NodeStatus, RunState
+from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, NodeStatus, RunState
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
 _IDEA_IDENTITY_MAX_SOURCE_CHARS = 16_384
 _IDEA_IDENTITY_MAX_NORMALIZED_CHARS = 32_768
 _IDEA_IDENTITY_MAX_TOKENS = 2_048
+_IDEA_IDENTITY_CACHE_MAX = 1_024
+_LOG = logging.getLogger(__name__)
 
 
 def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
@@ -97,6 +100,40 @@ class NoveltyGateMixin:
             v = self._embedder(text)
             self._idea_vecs[key] = v
         return v
+
+    def _cached_prior_idea_identity(self, text: str) -> tuple[tuple[str, ...], bool]:
+        """Memoize immutable prior-node identities with a bounded, collision-free content key."""
+        raw = str(text or "")
+        # The canonicalizer never reads beyond its source cap. Length + cap+1 exact characters therefore
+        # distinguish every complete input and every materially different truncated result without retaining
+        # an unbounded model-supplied rationale in the cache key.
+        key = (len(raw), raw[:_IDEA_IDENTITY_MAX_SOURCE_CHARS + 1])
+        cache = getattr(self, "_idea_identity_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._idea_identity_cache = cache
+        if key not in cache:
+            if len(cache) >= _IDEA_IDENTITY_CACHE_MAX:
+                cache.clear()
+            cache[key] = _canonical_idea_identity(raw)
+        return cache[key]
+
+    def _warn_incomplete_prior_identity(self, state: RunState, node) -> None:
+        """Expose a fail-closed oversized-prior cliff once per run/node lifecycle."""
+        seen = getattr(self, "_idea_identity_warnings", None)
+        if not isinstance(seen, set):
+            seen = set()
+            self._idea_identity_warnings = seen
+        key = (state.run_id, node.id, getattr(node, "attempt", 0))
+        if key in seen:
+            return
+        if len(seen) >= _IDEA_IDENTITY_CACHE_MAX:
+            seen.clear()
+        seen.add(key)
+        _LOG.warning(
+            "graded novelty bypass deferred: prior node %s has an incomplete bounded idea identity",
+            node.id,
+        )
 
     def _semantic_duplicate(self, state: RunState, idea: Idea):
         """T5: nearest existing node by idea-TEXT embedding similarity, or None. Only meaningful
@@ -223,18 +260,27 @@ class NoveltyGateMixin:
         selection change. No-op (returns None) with the flag off, an empty run, or no vocabulary — so the
         default path is byte-identical.
 
-        AGENTIC-FIRST (§21.4 F2): when the LLM node tags are cached as `node_concepts` (Feature 1), the
-        grade uses THOSE (reconstructed deterministically — no re-tag) instead of alias-matching a curated
-        skeleton, and the proposed idea is tagged by the LLM against the same vocabulary (`tag_idea_llm`), so
-        idea and node tags are consistent. Degrades to the skeleton + deterministic heuristic when the cache
-        is empty (concept_pivot off) or no reflect client — the flag still works standalone."""
+        AGENTIC-FIRST (§21.4 F2): when independently classified node tags are cached as `node_concepts`,
+        the grade uses only entries carrying an exact classifier provenance receipt (reconstructed
+        deterministically — no re-tag). Researcher-authored memberships and unknown provenance never enter
+        this bypass. It degrades to the skeleton + deterministic heuristic when the trusted cache is empty."""
         if not getattr(self, "_graded_novelty", False) or not state.nodes:
             return None
         from looplab.search.concept_graph import graph_from_node_concepts, skeleton_for
         from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
-        node_concepts = getattr(state, "node_concepts", None) or {}
+        all_node_concepts = getattr(state, "node_concepts", None) or {}
+        concept_provenance = getattr(state, "node_concept_provenance", None) or {}
+        # CODEX AGENT: an Idea's concepts are authored by the same proposer whose admission is being
+        # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
+        # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
+        # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
+        node_concepts = {
+            nid: concepts
+            for nid, concepts in all_node_concepts.items()
+            if concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+        }
         # Everything below is guarded: a reconstruction / tagger / grader hiccup must NEVER block proposing.
         try:
             if node_concepts:                     # AGENTIC: reuse the cached LLM node tags (no re-tag)
@@ -289,24 +335,15 @@ class NoveltyGateMixin:
         identity, complete = candidate_identity
         if not complete or not identity:
             return None
-        # REVIEW(2026-07-16): two follow-ups on this scan. (1) EFFICIENCY: prior identities are
-        # recomputed from scratch on EVERY level-4/5 proposal — `_canonical_idea_identity` walks up to
-        # 16K chars through per-char unicodedata calls, × all idea-carrying nodes, and node ideas are
-        # immutable once created; memoize by `hash(self._idea_text(nd.idea))` exactly like `_idea_vec`
-        # already does two methods up (same staleness-safe text-keyed pattern), turning the quadratic
-        # rescan into one pass per new node. (2) SILENT CLIFF: a SINGLE prior whose rationale+hypothesis
-        # exceeds _IDEA_IDENTITY_MAX_SOURCE_CHARS makes this return None on every future proposal —
-        # the level-4/5 short-circuit permanently and invisibly disables itself for the rest of the run
-        # (rationale is model-supplied and unbounded; only the parse-fallback truncates to 500). Fail-
-        # closed is the right direction, but permanent-off deserves a one-time audit event or log line
-        # so a run where this tripped is distinguishable from one where grades simply deferred.
         for nd in state.nodes.values():
             if getattr(nd, "idea", None) is None:
                 continue
-            prior_canonical = _canonical_idea_identity(self._idea_text(nd.idea))
+            prior_canonical = self._cached_prior_idea_identity(self._idea_text(nd.idea))
             prior_identity, prior_complete = prior_canonical
-            if (not prior_complete
-                    or _same_canonical_idea_identity(candidate_identity, prior_canonical)):
+            if not prior_complete:
+                self._warn_incomplete_prior_identity(state, nd)
+                return None                     # ambiguous prior -> visible, fail-closed flat-gate defer
+            if _same_canonical_idea_identity(candidate_identity, prior_canonical):
                 return None                      # duplicate/ambiguous identity -> defer to the flat gate
         near = state.nodes.get(grade.near_node)
         if near is None or getattr(near, "idea", None) is None:

@@ -107,8 +107,48 @@ def test_f2_grades_from_the_cached_llm_tags_and_agentic_idea_tag(tmp_path):
     idea = Idea(operator="improve", params={"rank": 8.0}, rationale="a different adapter bottleneck size")
     out = eng._graded_novelty_precheck(fold(s.read_all()), idea)
     assert out is idea                                     # level-4 ALLOW short-circuit
-    g = fold(s.read_all()).novelty_grades[-1]
+    replayed = fold(s.read_all())
+    assert replayed.node_concept_provenance == {0: "classifier"}
+    g = replayed.novelty_grades[-1]
     assert g["level"] == 4 and "encoderarch/adapter-tuning" in g["shared_concepts"]
+
+
+def test_researcher_authored_concepts_cannot_certify_agentic_bypass(tmp_path):
+    """The proposer cannot self-author the classifier evidence that lets its next proposal bypass dedup."""
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "unknown-task", "goal": "g",
+                             "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {"rank": 4.0},
+                                       "rationale": "baseline bottleneck",
+                                       "concepts": ["encoderarch/adapter-tuning"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.7})
+    state = fold(s.read_all())
+    assert state.node_concept_provenance == {0: "researcher-authored"}
+
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a materially different adapter bottleneck")
+
+    assert eng._graded_novelty_precheck(state, candidate) is None
+    assert fold(s.read_all()).novelty_grades == []
+
+
+def test_unknown_concept_provenance_fails_closed(tmp_path):
+    """A legacy/direct state snapshot with memberships but no producer receipt is not classifier evidence."""
+    s = _run(tmp_path, task_id="totally-unknown-task")
+    s.append("node_concepts", {"node_id": 0, "concepts": ["encoderarch/adapter-tuning"]})
+    replayed = fold(s.read_all())
+    assert replayed.node_concept_provenance == {0: "classifier"}  # old event shape remains trusted
+    state_without_receipt = replayed.model_copy(update={"node_concept_provenance": {}})
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a materially different adapter bottleneck")
+
+    assert eng._graded_novelty_precheck(state_without_receipt, candidate) is None
+    assert fold(s.read_all()).novelty_grades == []
 
 
 def test_f2_no_cache_no_client_is_the_heuristic_fallback(tmp_path):
@@ -178,6 +218,45 @@ def test_oversize_identity_defers_instead_of_trusting_a_truncated_comparison(tmp
     assert identity and complete is False
     assert eng._graded_novelty_precheck(fold(store.read_all()), oversized) is None
     assert fold(store.read_all()).novelty_grades == []
+
+
+def test_prior_identity_scan_memoizes_immutable_node_text(tmp_path, monkeypatch):
+    import looplab.engine.novelty as novelty_module
+
+    store = _run(tmp_path)
+    state = fold(store.read_all())
+    eng = _GateEngine(store, graded=True)
+    original = novelty_module._canonical_idea_identity
+    calls = 0
+
+    def counted(text):
+        nonlocal calls
+        calls += 1
+        return original(text)
+
+    monkeypatch.setattr(novelty_module, "_canonical_idea_identity", counted)
+    assert eng._graded_novelty_precheck(state, _LEVEL4) is _LEVEL4
+    assert eng._graded_novelty_precheck(state, _LEVEL4) is _LEVEL4
+    # Candidate identity is intentionally recomputed; each of the two immutable priors is scanned once.
+    assert calls == 4
+
+
+def test_oversize_prior_is_fail_closed_but_warned_once(tmp_path, caplog):
+    store = _run(tmp_path)
+    store.append("node_created", {"node_id": 2, "parent_ids": [], "operator": "explore",
+                                   "idea": {"operator": "explore", "params": {"huge": 1.0},
+                                            "rationale": "x" * 17_000}})
+    store.append("node_evaluated", {"node_id": 2, "metric": 0.1})
+    state = fold(store.read_all())
+    eng = _GateEngine(store, graded=True)
+
+    with caplog.at_level("WARNING", logger="looplab.engine.novelty"):
+        assert eng._graded_novelty_precheck(state, _LEVEL4) is None
+        assert eng._graded_novelty_precheck(state, _LEVEL4) is None
+
+    warnings = [r for r in caplog.records if "incomplete bounded idea identity" in r.message]
+    assert len(warnings) == 1
+    assert "node 2" in warnings[0].message
 
 
 def test_prose_only_structural_variant_still_runs_the_flat_gate(tmp_path):

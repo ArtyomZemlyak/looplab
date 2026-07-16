@@ -38,6 +38,12 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
 
 MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 
+# Stable replay-derived trust labels for ``RunState.node_concept_provenance``.  Keep these strings
+# boring and explicit: the novelty admission path compares them exactly and treats every future /
+# malformed / missing value as untrusted until that producer is reviewed.
+NODE_CONCEPT_PROVENANCE_AUTHORED = "researcher-authored"
+NODE_CONCEPT_PROVENANCE_CLASSIFIER = "classifier"
+
 
 def safe_lesson_node_count(value) -> int | None:
     """Total parser for a durable advisory node-count watermark.
@@ -105,9 +111,10 @@ class Idea(BaseModel):
     # PART IV concepts: the SET of research concepts this experiment touches, as `axis/slug` ids
     # (e.g. "loss/contrastive", "architecture/moe", "regularization/r-drop"). The Researcher AUTHORS
     # these (many-to-many — a node usually touches several; propose a new id when none fits). This is
-    # the grouping substrate that replaces the flat `theme` slug. Audit-only for search/selection.
-    # Folded into RunState.node_concepts at node_created (replay.fold) so concept read-models see them
-    # from the first node — no tagging cadence required; a later cadence may consolidate/enrich them.
+    # the grouping substrate that replaces the flat `theme` slug. These are PROPOSER claims, not
+    # independent classifier evidence. Folded into RunState.node_concepts at node_created so concept
+    # read-models see them from the first node; RunState.node_concept_provenance keeps that trust boundary
+    # explicit and a later classifier event may consolidate/enrich them.
     # Flows through the event log automatically (idea.model_dump → node_created → Idea(**d["idea"])).
     concepts: list[str] = Field(default_factory=list)
     # Intra-node sweep: instead of a single point in `params`, the Researcher may attach a discrete
@@ -570,11 +577,16 @@ class RunState(BaseModel):
     # affects selection; each entry carries `at_node` so the emission gate is idempotent on resume.
     # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.
     concept_coverage_snapshots: list[dict] = Field(default_factory=list)
-    # PART IV D5 (§21.16, Phase 2c): per-node RAW concept tags (node_id -> [concept_id]) recorded once by
-    # the LLM tagger, so later strategist cadences reuse them and only tag NEW nodes (incremental tagging,
-    # ~O(nodes) not ~O(nodes x cadences) LLM calls). Populated only when `concept_pivot` is on; audit-only,
-    # never affects selection. Additive/reader-defaulted: empty on old logs -> byte-identical fold.
+    # PART IV D5 (§21.16, Phase 2c): per-node concept memberships (node_id -> [concept_id]). A membership
+    # may originate on the Researcher-authored Idea or from the independent `node_concepts` classifier
+    # event; the last writer wins for read-model compatibility. Consumers that can affect admission MUST
+    # consult node_concept_provenance rather than assuming every membership came from the classifier.
     node_concepts: dict[int, list[str]] = Field(default_factory=dict)
+    # CODEX AGENT: proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
+    # replay-derived sidecar records the producer of the CURRENT last-write-wins membership. Missing and
+    # unknown values are deliberately untrusted; legacy generation-zero `node_concepts` events replay as
+    # `classifier`, while old `node_created` Idea.concepts replay as `researcher-authored` without migration.
+    node_concept_provenance: dict[int, str] = Field(default_factory=dict)
     # PART IV D5 (§21.18 B1): the concept-graph vocabulary SIZE when each node was last tagged. A node
     # tagged against a much smaller vocabulary than the current one is STALE (a concept minted by a later
     # node may now apply to it), so the cadence re-tags the most-stale nodes against the grown vocabulary

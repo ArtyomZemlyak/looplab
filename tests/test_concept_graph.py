@@ -316,6 +316,7 @@ def test_node_concepts_event_round_trips_and_is_replay_safe(tmp_path):
     s.append("node_concepts", {"node_id": 5, "concepts": ["loss/x", "regularization/y"], "mode": "llm"})
     st = fold(s.read_all())
     assert st.node_concepts == {5: ["loss/x", "regularization/y"]}
+    assert st.node_concept_provenance == {5: "classifier"}
 
 
 def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
@@ -330,6 +331,7 @@ def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
     s.append("node_evaluated", {"node_id": 3, "metric": 0.8})
     s.append("node_concepts", {"node_id": 3, "concepts": ["loss/x"], "mode": "llm"})
     assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
+    assert fold(s.read_all()).node_concept_provenance == {3: "classifier"}
     # an EVAL re-score keeps the tags (idea+code unchanged)
     s.append("node_reset", {"node_id": 3, "from_stage": "eval"})
     assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
@@ -338,10 +340,39 @@ def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
     assert fold(s.read_all()).node_concepts == {3: ["loss/x"]}
     # a PROPOSE re-propose invalidates them (the idea itself is re-generated)
     s.append("node_reset", {"node_id": 3, "from_stage": "propose"})
-    assert fold(s.read_all()).node_concepts == {}
+    reset_state = fold(s.read_all())
+    assert reset_state.node_concepts == {}
+    assert reset_state.node_concept_provenance == {}
     # ...and a fresh re-tag after the rerun repopulates
-    s.append("node_concepts", {"node_id": 3, "concepts": ["negatives/y"], "mode": "llm"})
+    s.append("node_concepts", {"node_id": 3, "concepts": ["negatives/y"], "mode": "llm",
+                                "generation": 3})
     assert fold(s.read_all()).node_concepts == {3: ["negatives/y"]}
+
+
+def test_late_classifier_event_cannot_cross_a_propose_generation(tmp_path):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {},
+                                       "rationale": "old", "concepts": ["author/old"]}})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/old"], "generation": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": "propose"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {},
+                                       "rationale": "new", "concepts": ["author/new"]},
+                              "generation": 1})
+    # Both an explicitly old result and an indistinguishable legacy result are unsafe after reset.
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/late"], "generation": 0})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/unstamped"]})
+    st = fold(s.read_all())
+    assert st.node_concepts == {0: ["author/new"]}
+    assert st.node_concept_provenance == {0: "researcher-authored"}
+
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/current"], "generation": 1})
+    current = fold(s.read_all())
+    assert current.node_concepts == {0: ["classifier/current"]}
+    assert current.node_concept_provenance == {0: "classifier"}
 
 
 def test_concept_consolidation_event_accumulates_and_is_replay_safe(tmp_path):
@@ -411,7 +442,8 @@ def test_consolidate_skips_llm_when_nothing_undecided():
         def complete_tool(self, m, j): raise AssertionError("LLM called though nothing was undecided")
         def complete_text(self, m): raise AssertionError("no")
     g = ConceptGraph(task_type="t")
-    g.ensure("aug/mixup", axes=("aug",)); g.ensure("data-aug/mixup", axes=("data-aug",))
+    g.ensure("aug/mixup", axes=("aug",))
+    g.ensure("data-aug/mixup", axes=("data-aug",))
     known = {"aug/mixup": "data-aug/mixup"}   # aug/mixup is raw, data-aug/mixup is canonical -> all covered
     _, _, rn = consolidate_concepts(g, {0: frozenset({"aug/mixup"})}, client=_Boom(), known_renames=known)
     assert rn == {"aug/mixup": "data-aug/mixup"}
@@ -498,6 +530,9 @@ def test_node_concepts_at_vocab_folds_and_syncs_with_rerun(tmp_path):
     s.append("node_concepts", {"node_id": 2, "concepts": ["loss/x"], "at_vocab": 12})
     st = fold(s.read_all())
     assert st.node_concepts_at_vocab == {2: 12} and st.node_concepts == {2: ["loss/x"]}
+    # A later legacy classifier result without a vocabulary receipt replaces, rather than inherits, it.
+    s.append("node_concepts", {"node_id": 2, "concepts": ["loss/y"]})
+    assert fold(s.read_all()).node_concepts_at_vocab == {}
     # a pre-B1 event (no at_vocab) doesn't set the map
     s.append("node_concepts", {"node_id": 5, "concepts": ["reg/y"]})
     assert 5 not in fold(s.read_all()).node_concepts_at_vocab
@@ -512,15 +547,16 @@ def test_node_concepts_event_ignores_malformed_payloads(tmp_path):
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
     s.append("node_concepts", {"concepts": ["a"]})               # no node_id -> ignored
-    s.append("node_concepts", {"node_id": 9, "concepts": "notalist"})   # bad concepts -> []
+    s.append("node_concepts", {"node_id": 9, "concepts": "notalist"})   # unknown node -> ignored
     st = fold(s.read_all())
-    assert st.node_concepts == {9: []}
+    assert st.node_concepts == {}
+    assert st.node_concept_provenance == {}
 
 
 def test_build_concept_map_exposes_raw_tags_for_recording():
     """`build_concept_map` returns `raw_tags` (pre-consolidation) so the engine can record them as
     node_concepts events; offline fallback exposes them too."""
-    import tempfile, os
+    import tempfile
     d = tempfile.mkdtemp()
     st = fold(_store(Path(d), [("dcl", "decoupled contrastive loss", 0.5)]).read_all())
     from looplab.search.concept_graph import build_concept_map

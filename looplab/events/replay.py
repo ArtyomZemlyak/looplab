@@ -9,8 +9,9 @@ from typing import Iterable
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
-                     hypothesis_id, normalize_extra_metrics, run_setup_key)
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
+                     NODE_CONCEPT_PROVENANCE_CLASSIFIER, Event, Hypothesis, Idea, Node, NodeStatus,
+                     RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
@@ -303,14 +304,28 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         raise
     except Exception:
         return   # (was `continue` in the loop arm: skip just this event)
+    current_provenance = st.node_concept_provenance.get(n.id)
+    classifier_subject_unchanged = bool(
+        current is not None
+        and current_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+        and current.operator == n.operator
+        and current.idea.model_dump(exclude={"concepts"}) == n.idea.model_dump(exclude={"concepts"})
+    )
     st.nodes[n.id] = n
-    # Researcher-AUTHORED concepts populate the per-node concept set deterministically at creation —
-    # no LLM, no tagging cadence — so concept read-models see them from the first node. A later
-    # tagging cadence (a `node_concepts` event) may override with a consolidated/enriched set
-    # (last-write-wins in the fold). Guarded on non-empty so a `node_reset` re-emit that carries no
-    # concepts never clobbers a cadence-set value. Rides on the Idea in the event log → replay-safe.
-    if n.idea.concepts:
+    # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
+    # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
+    # independent classifier evidence. A later `node_concepts` event overrides both, last-write-wins.
+    # An implement/eval reset may re-emit node_created for the same idea. Do not let its embedded
+    # proposer claims downgrade an existing classifier receipt. If a malformed re-emission changes the
+    # classifier's actual subject without a propose reset, discard that stale receipt fail-closed.
+    if current_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER and not classifier_subject_unchanged:
+        st.node_concepts.pop(n.id, None)
+        st.node_concept_provenance.pop(n.id, None)
+        st.node_concepts_at_vocab.pop(n.id, None)
+    if n.idea.concepts and not classifier_subject_unchanged:
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
+        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
+        st.node_concepts_at_vocab.pop(n.id, None)
     if current is None:
         # A holdout score is a disclosed final-exam signal. If a genuinely NEW candidate lands
         # afterwards (an inject/fork/policy action won the finish CAS race), the search has become
@@ -906,6 +921,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             # `implement` too. No-op on old logs / untagged nodes.
             if stage == "propose":
                 st.node_concepts.pop(n.id, None)
+                st.node_concept_provenance.pop(n.id, None)
                 st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
         else:
             # eval-type reset: pending-with-code, the eval loop re-scores it. `from_stage` names
@@ -1270,18 +1286,35 @@ def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCt
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 Phase 2c: the LLM tagger's RAW tags for one node, recorded once so later cadences reuse
-    # them. Node-scoped; LAST write wins (a re-tag after graph growth may refine a node's tags). Audit-only
-    # — feeds the concept snapshot / graded-novelty, NEVER selection. Order-tolerant + idempotent.
+    # them. Node/lifecycle-scoped; LAST valid write wins (a re-tag after graph growth may refine a node's
+    # tags). It feeds read models and the opt-in graded-novelty admission precheck, so provenance and
+    # generation matching below are a trust boundary rather than audit-only decoration.
     nid = _coerce_node_id(d, "node_id")
     if nid is None:
         return
+    node = st.nodes.get(nid)
+    generation = _event_generation(d)
+    # Modern cadence events are lifecycle-stamped. Legacy unstamped events can only describe the
+    # original generation: after a reset they are indistinguishable from a late pre-reset classifier
+    # result, so accepting them would attach evidence for the old Idea to a new one. Unknown nodes and
+    # explicit stale/invalid generations are ignored rather than creating orphan classifier evidence.
+    if node is None:
+        return
+    if generation is _MISSING:
+        if node.attempt != 0:
+            return
+    elif generation is None or generation != node.attempt:
+        return
     concepts = d.get("concepts")
     st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    st.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_CLASSIFIER
     # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
-    # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> 0 (treated as oldest).
+    # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> no receipt (oldest).
     av = d.get("at_vocab")
     if isinstance(av, int) and av >= 0:
         st.node_concepts_at_vocab[nid] = av
+    else:
+        st.node_concepts_at_vocab.pop(nid, None)
 
 def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for one hypothesis, recorded once so taxonomy

@@ -21,7 +21,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        validate_strategy)
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
-from looplab.core.models import RunState
+from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER, RunState
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
@@ -457,7 +457,15 @@ class StrategyCadenceMixin:
                 # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
                 # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they
                 # file under a `concept_coverage` op, not the ambient/next-node trace. nullcontext if spanless.
-                all_known = {int(k): v for k, v in (getattr(state, "node_concepts", None) or {}).items()}
+                provenance = getattr(state, "node_concept_provenance", None) or {}
+                # CODEX AGENT: Researcher-authored Idea.concepts are visible read-model claims, not an
+                # independent tagging result. Reusing them as known_tags would prevent the classifier from
+                # ever examining that node and would later let the claim masquerade as classifier evidence.
+                all_known = {
+                    int(k): v
+                    for k, v in (getattr(state, "node_concepts", None) or {}).items()
+                    if provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                }
                 at_vocab = {int(k): int(v)
                             for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}
                 # B1 (§21.18): re-tag the most-stale nodes — those tagged against a much smaller vocabulary
@@ -491,10 +499,14 @@ class StrategyCadenceMixin:
                 # its at_vocab, so it isn't flagged stale (and re-tagged) every cadence — no churn.
                 for nid, ft in (cmap.get("raw_tags") or {}).items():
                     nid = int(nid)
+                    node = state.nodes.get(nid)
+                    if node is None:
+                        continue
                     new_ids = sorted(str(c) for c in ft)
                     if nid not in known or known.get(nid) != new_ids:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
-                                                             "mode": mode, "at_vocab": v_now})
+                                                             "mode": mode, "at_vocab": v_now,
+                                                             "generation": node.attempt})
                 # PART IV concept-edge substrate: record the typed graph so hierarchy becomes a swappable
                 # projection. is_a = each concept's immediate PATH parent (the full chain) plus any curated
                 # extra parent AXIS the id-prefix alone misses (asserted, conf 1.0); co_occurs = concept
