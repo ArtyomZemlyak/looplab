@@ -51,15 +51,22 @@ export function breadcrumb(path = '') {
   })
 }
 
-// Does a node (its raw concept id list) match ANY selected concept (OR)? A selected concept matches a
+// Does a node (its raw concept id list) match ANY selected concept (OR)? A plain selected id matches a
 // node tagged with it OR with any DESCENDANT of it (select `loss` -> highlight `loss/contrastive/dcl`).
-// Empty selection matches everything (no dimming).
+// A selection prefixed with `=` is an EXACT match — it matches ONLY a node tagged with that id verbatim,
+// not its descendants (the "· here" chip after drilling: `=loss` highlights only bare-`loss` nodes). A
+// concept id is `axis/slug` (lower-case, hyphenated) and never begins with `=`, so the marker is
+// unambiguous. Empty selection matches everything (no dimming).
 export function conceptMatches(nodeConceptIds, selected, rename = {}) {
   if (!selected || !selected.length) return true
   for (const raw of (nodeConceptIds || [])) {
     const c = canonicalId(raw, rename)
     if (!c) continue
-    for (const s of selected) if (c === s || c.startsWith(s + '/')) return true
+    for (const s of selected) {
+      const exact = s[0] === '='
+      const id = exact ? s.slice(1) : s
+      if (exact ? c === id : (c === id || c.startsWith(id + '/'))) return true
+    }
   }
   return false
 }

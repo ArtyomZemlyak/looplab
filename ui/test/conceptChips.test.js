@@ -71,6 +71,15 @@ test('conceptMatches is prefix-aware OR', () => {
   assert.equal(conceptMatches(['x'], []), true)                               // empty selection = all
 })
 
+test('conceptMatches supports the `=` exact-match marker (the "here" chip)', () => {
+  assert.equal(conceptMatches(['loss'], ['=loss']), true)                     // exact tag matches
+  assert.equal(conceptMatches(['loss/contrastive/dcl'], ['=loss']), false)    // descendant does NOT match exact
+  assert.equal(conceptMatches(['loss/contrastive/dcl'], ['loss']), true)      // plain id still prefix-matches
+  // mixed selection: exact bare-loss OR the whole architecture subtree
+  assert.equal(conceptMatches(['architecture/moe'], ['=loss', 'architecture']), true)
+  assert.equal(conceptMatches(['loss/mnr'], ['=loss']), false)
+})
+
 test('matchingNodeIds highlights the union (OR)', () => {
   const ids = matchingNodeIds(NC, ['loss/contrastive'])
   assert.deepEqual([...ids].sort((a, b) => a - b), [0, 1])

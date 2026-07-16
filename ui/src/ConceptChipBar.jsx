@@ -22,19 +22,30 @@ export default function ConceptChipBar({ state, onHighlight }) {
   // The highlighted node set is a pure function of (nodeConcepts, selected, rename). Push it up whenever
   // its VALUE changes — keyed on a stable signature so a live SSE tick that only re-refs node_concepts
   // (same matching ids) doesn't churn the parent, while a genuinely new/vanished match still updates.
+  // The signature must distinguish "no selection" (highlight === null -> no dim) from "selection matches
+  // zero nodes" (empty Set -> everything dims): else, if the matches vanish while selected and the user
+  // then clicks Clear, both map to the same key, the effect never re-fires, and the graph stays fully
+  // dimmed. Prefix null with `none` and a Set with `s:`.
   const highlight = useMemo(
     () => matchingNodeIds(nodeConcepts, selected, rename), [nodeConcepts, selected, rename])
-  const sig = highlight ? [...highlight].sort((a, b) => a - b).join(',') : ''
+  const sig = highlight ? 's:' + [...highlight].sort((a, b) => a - b).join(',') : 'none'
   useEffect(() => { onHighlight && onHighlight(highlight) }, [sig])       // onHighlight is a stable setter
   useEffect(() => () => { onHighlight && onHighlight(null) }, [])         // clear the dim when unmounted
 
-  const toggleSelect = (id) =>
-    setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id])
-  const removeSelected = (id) => setSelected(s => s.filter(x => x !== id))
+  // A chip's SELECTION KEY: a normal chip selects its subtree (plain id, prefix match); the "· here"
+  // chip selects EXACTLY the nodes tagged at `path` (an `=`-prefixed key, exact match) so its count and
+  // its highlight agree. `selected` holds these keys; conceptMatches interprets the `=` marker.
+  const keyOf = (chip) => (chip.atLevel ? '=' : '') + chip.id
+  const toggleSelect = (key) =>
+    setSelected(s => s.includes(key) ? s.filter(x => x !== key) : [...s, key])
+  const removeSelected = (key) => setSelected(s => s.filter(x => x !== key))
   const clearSelection = () => setSelected([])
 
   if (!hasConcepts) return null
   const leaf = (id) => String(id).split('/').pop()
+  // Display a selection key: strip the `=` exact marker for the label, keep a hint that it's level-exact.
+  const keyLabel = (key) => leaf(key[0] === '=' ? key.slice(1) : key)
+  const keyExact = (key) => key[0] === '='
 
   return (
     <div className="concept-bar" role="group" aria-label="Concept filter">
@@ -58,10 +69,12 @@ export default function ConceptChipBar({ state, onHighlight }) {
 
       {selected.length > 0 &&
         <div className="cb-selected" aria-label="Selected concepts">
-          {selected.map(id => <button key={id} type="button" className="cb-pill"
-            onClick={() => removeSelected(id)} title={`${id} — click to remove`}>
-            {leaf(id)}<span className="cb-x" aria-hidden="true">×</span>
-            <span className="sr-only"> remove filter {id}</span>
+          {selected.map(key => <button key={key} type="button" className="cb-pill"
+            onClick={() => removeSelected(key)}
+            title={`${keyExact(key) ? key.slice(1) + ' (exactly)' : key} — click to remove`}>
+            {keyExact(key) && <span className="cb-here" aria-hidden="true">·</span>}
+            {keyLabel(key)}<span className="cb-x" aria-hidden="true">×</span>
+            <span className="sr-only"> remove filter {keyExact(key) ? key.slice(1) : key}</span>
           </button>)}
         </div>}
 
@@ -69,13 +82,14 @@ export default function ConceptChipBar({ state, onHighlight }) {
         {chips.length === 0
           ? <span className="muted cb-empty">No concepts at this level.</span>
           : chips.map(chip => {
-            const on = selected.includes(chip.id)
+            const key = keyOf(chip)
+            const on = selected.includes(key)
             return (
               <span key={chip.id + (chip.atLevel ? '#here' : '')}
                 className={'cb-chip' + (on ? ' on' : '') + (chip.atLevel ? ' here' : '')}>
                 <button type="button" className="cb-chip-main" aria-pressed={on}
-                  onClick={() => toggleSelect(chip.id)}
-                  title={`${chip.id} · ${chip.count} experiment(s)${chip.atLevel ? ' tagged here (not deeper)' : ''}`}>
+                  onClick={() => toggleSelect(key)}
+                  title={`${chip.id} · ${chip.count} experiment(s)${chip.atLevel ? ' tagged here (not deeper) — highlights only these' : ''}`}>
                   {chip.atLevel && <span className="cb-here" aria-hidden="true">·</span>}
                   <span className="cb-name">{chip.label}</span>
                   <span className="cb-count">{chip.count}</span>
