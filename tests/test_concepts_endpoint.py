@@ -169,6 +169,55 @@ def test_derive_lens_endpoint_requires_a_prompt(tmp_path):
     assert client.post("/api/runs/demo/concepts/lens", json={}).status_code == 400
 
 
+def test_concepts_endpoint_bare_concept_gets_a_metrics_row(tmp_path):
+    # A single-segment authored concept ("agents") is a legitimate top-level concept: the tree, the
+    # touch counts, AND the metric table must all include it (they read one node_concepts input). A node
+    # tagged ONLY with a bare id must not become falsely untagged / metric-less.
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                       "concepts": ["agents", "loss/contrastive"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    s.append("node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}, "rationale": "r",
+                                       "concepts": ["agents"]}})       # tagged ONLY with a bare id
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.5})
+    client = TestClient(make_app(tmp_path))
+    data = client.get("/api/runs/demo/concepts").json()
+    assert "agents" in data["tree"]["nodes"] and data["tree"]["nodes"]["agents"]["tagged"] is True
+    assert data["touch"]["agents"] == 2
+    # the bare concept must have a metric row (both nodes touch it, best is 0.9)
+    assert data["metrics"]["rows"]["agents"]["best"] == 0.9
+    assert data["metrics"]["rows"]["agents"]["touched"] == 2
+
+
+def test_folded_concepts_edge_collapse_mirrors_fold_tiebreak(tmp_path):
+    # On a confidence TIE, the post-rename edge collapse keeps the same survivor the fold would: higher
+    # provenance rank (asserted > evidenced) wins, regardless of raw-key order.
+    from looplab.serve.routers.runs import _folded_concepts
+    from looplab.events.replay import fold
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                       "concepts": ["a/x", "b/y"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    # two edges that collapse to the SAME canonical triple at equal confidence, different provenance
+    s.append("concept_edge", {"edges": [{"src": "a/x", "rel": "uses", "dst": "b-raw",
+                                         "confidence": 0.5, "provenance": "evidenced"}]})
+    s.append("concept_edge", {"edges": [{"src": "a/x", "rel": "uses", "dst": "b/y",
+                                         "confidence": 0.5, "provenance": "asserted"}]})
+    s.append("concept_consolidation", {"rename": {"b-raw": "b/y"}})
+    _nc, _cids, edges, _touch = _folded_concepts(fold(s.read_all()))
+    survivor = edges[("a/x", "uses", "b/y")]
+    assert survivor["provenance"] == "asserted"        # higher rank wins the confidence tie
+
+
 def test_concepts_get_replays_a_derived_lens_via_rels(tmp_path):
     # A derived lens is reproducible without another LLM call: GET with &rels=<subset> projects the exact
     # relation subset, so the derived lens refetches as the run grows like any default lens.

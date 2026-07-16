@@ -111,9 +111,20 @@ def _folded_concepts(st):
         ce = dict(e); ce["src"], ce["dst"] = src, dst
         key = (src, ce.get("rel"), dst)
         prev = edges.get(key)
-        if prev is None or float(ce.get("confidence") or 0.0) > float(prev.get("confidence") or 0.0):
+        if prev is None or _edge_rank(ce) > _edge_rank(prev):
             edges[key] = ce
     return nc, cids, edges, concept_touch_counts(nc)
+
+
+# Confidence, then provenance-rank (asserted > evidenced > unknown), then raw provenance — the SAME total
+# order the fold uses in `replay._on_concept_edge`, so the endpoint's post-rename collapse keeps the same
+# survivor per (src, rel, dst) triple the fold would, not merely the max-confidence one.
+_EDGE_PROV_RANK = {"asserted": 2, "evidenced": 1}
+
+
+def _edge_rank(e):
+    prov = str(e.get("provenance") or "")
+    return (float(e.get("confidence") or 0.0), _EDGE_PROV_RANK.get(prov, 0), prov)
 
 
 def build_router(srv) -> APIRouter:

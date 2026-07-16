@@ -24,6 +24,17 @@ def _run(tmp_path, rows, direction="max"):
     return st, concept_metrics(st, graph, tags)
 
 
+def test_bare_single_segment_concepts_produce_metrics_rows(tmp_path):
+    # A single-segment authored concept ("agents") is a first-class top-level concept: it is kept in the
+    # graph/tags (not dropped as a non-path id), so a node tagged ONLY with a bare id is not falsely
+    # untagged and concept_metrics produces its row alongside the deeper concepts.
+    st, res = _run(tmp_path, [(["agents", "loss/dcl"], 0.9), (["agents"], 0.5)])
+    graph, tags = graph_from_node_concepts(st.node_concepts)
+    assert tags[0] == frozenset({"agents", "loss/dcl"})
+    assert tags[1] == frozenset({"agents"})                   # not falsely untagged
+    assert res["rows"]["agents"]["touched"] == 2 and res["rows"]["agents"]["best"] == 0.9
+
+
 def test_median_helper():
     assert _median([]) is None
     assert _median([3.0, 1.0, 2.0]) == 2.0
