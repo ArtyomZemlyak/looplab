@@ -508,9 +508,9 @@ class Settings(BaseSettings):
     # concept-graph coverage + uncovered-region snapshot (deterministic heuristic tagger over the
     # task-type skeleton) and, on an `explore` stance, the Researcher's novelty hint names the exact
     # uncovered regions ("0 coverage in {negatives/external-mining, distillation} — go there") instead
-    # of the vague "broaden". OPT-IN (default off): it only enriches an already-mode-gated explore
-    # hint, never forces exploration, and no-ops for a task with no curated concept skeleton. Audit +
-    # prompt-cue only; never touches selection. See search/concept_graph.py.
+    # of the vague "broaden". ON by default in the product Settings (ce4a379), EngineOptions off: it
+    # only enriches an already-mode-gated explore hint, never forces exploration, and no-ops for a task
+    # with no curated concept skeleton. Audit + prompt-cue only; never touches selection. See search/concept_graph.py.
     concept_pivot: bool = True
     # PART IV Phase 2b — D3 graded novelty into the LIVE novelty gate (§21.4/§21.13). When on and the
     # task has a curated concept skeleton, the novelty gate first grades a proposal over the concept
@@ -519,8 +519,8 @@ class Settings(BaseSettings):
     # dedup gate can't tell "this DCL tweak" from "the whole DCL branch" and would wrongly reject a
     # legitimate variant or never re-open a sound-but-killed direction (the node_63 archetype). Levels
     # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Deterministic
-    # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. OPT-IN (default off);
-    # no-ops for a task with no skeleton. See search/graded_novelty.py.
+    # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. ON by default in the product
+    # Settings (ce4a379), EngineOptions off; no-ops for a task with no skeleton. See search/graded_novelty.py.
     graded_novelty: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
@@ -536,15 +536,16 @@ class Settings(BaseSettings):
     # ASCII-only `[a-z0-9]` allowlist on goal keywords so a non-Latin goal (Russian, CJK, …) is NOT
     # silently dropped from its cross-run fingerprint (today such a goal keys only on kind/dir/metric and
     # never reaches SIMILAR-task priors/lessons/cases). Uses `[^\W_]+`/`.casefold()` — same splitting as
-    # before, any script. OPT-IN (default off) because it changes which stored fingerprints a LIVE run
-    # matches; a running portfolio must not silently re-key mid-flight. See engine/memory.py.
+    # before, any script. ON by default in the product Settings (ce4a379); the bare-library EngineOptions
+    # default stays off, so a run pinned to it won't silently re-key a portfolio mid-flight. See engine/memory.py.
     fingerprint_universal: bool = True
     # PART IV cross-run Step 2 (§21.20). Fill graded-novelty's `prior_concepts` from the cross-run
     # ConceptCapsuleStore: at run end write a per-run concept capsule (the shipped `node_concepts` tags +
     # best outcome, keyed by task_fingerprint) to `memory_dir`; when a later SIMILAR run proposes an idea
     # whose concept was tried before, SURFACE the prior outcome as a `cross_run_prior` audit event (never
-    # reject — D3 level 3). Audit-only, off the selection path; OPT-IN (default off). Needs a `memory_dir`
-    # to share capsules. See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
+    # reject — D3 level 3). Audit-only, off the selection path; ON by default in the product Settings
+    # (ce4a379), EngineOptions off. Needs a `memory_dir` to share capsules.
+    # See engine/memory.py (ConceptCapsuleStore) + engine/novelty.py.
     # PREREQUISITES (CODEX — this flag is NOT standalone): the WRITE needs per-run concept tags
     # (`node_concepts`, produced by `concept_pivot`/F1 tagging) — no tags => no capsule; the SURFACE path
     # runs inside the graded-novelty precheck, so it also needs `graded_novelty` on. With only this flag +
@@ -557,22 +558,26 @@ class Settings(BaseSettings):
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
     # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
     # prompt-grounding, never touches node selection (§21.7). Reads `memory_dir` (lessons.jsonl +
-    # concept_capsules.jsonl); "" when empty. OPT-IN (default off) — the gated flip of Step 2 from audit-only
-    # to a live prompt cue; measure the effect via a frozen A/B before defaulting on. See engine/proposal_cues.py.
+    # concept_capsules.jsonl); "" when empty. ON by default in the product Settings (ce4a379 — the audit-only
+    # Step 2 flipped to a live prompt cue after the frozen A/B cleared it); the bare-library EngineOptions
+    # default stays off (engine/options.py, frozen in test_options_divergence). See engine/proposal_cues.py.
     cross_run_advisory: bool = True
     # PART IV cross-run §21.20.13 (full CR of the lean fuzzy claim merge). Switch the claim read-model to the
     # SCOPE+POLARITY-safe STRUCTURED claim key (engine/claim_key.py): claims from different tasks never
     # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
     # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
     # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
-    # Affects the `cross_run_advisory` context pack only; OPT-IN (default off). See engine/claims.py.
+    # Affects the `cross_run_advisory` context pack only; ON by default in the product Settings (ce4a379);
+    # the bare-library EngineOptions default stays off (engine/options.py). See engine/claims.py.
     cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC taxonomy steward). At finalize, when an LLM client is available, let
     # the concept steward (engine/concept_steward.py) review the freshly-updated portfolio concept graph and
     # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
     # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
     # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
-    # retries finalize). OPT-IN (default off); needs `memory_dir` + an LLM backend. See engine/lessons.py.
+    # retries finalize). ON by default in the product Settings (ce4a379 — proposal-only, so safe to default on);
+    # needs `memory_dir` + an LLM backend. The bare-library EngineOptions default stays off (engine/options.py).
+    # See engine/lessons.py.
     cross_run_curation: bool = True
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
@@ -622,8 +627,8 @@ class Settings(BaseSettings):
     # repeated + criteria-decomposed: `foresight_criteria` — likely to improve the objective, and
     # sound/feasible) and THAT calibrated score becomes the confidence the `foresight_min_confidence` gate
     # and the telemetry use. Degrades to the self-reported confidence without a client or on any verifier
-    # error (the telemetry records which source was used). OPT-IN (default off); a few extra LLM calls per
-    # acted-on proposal. See looplab/trust/verifier.py + search/foresight.py.
+    # error (the telemetry records which source was used). ON by default in the product Settings (ce4a379),
+    # EngineOptions off; a few extra LLM calls per acted-on proposal. See looplab/trust/verifier.py + search/foresight.py.
     foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
@@ -829,7 +834,8 @@ class Settings(BaseSettings):
     # / `cross_run_atlas` over the §21.20 read-models (concept overview + claim assessments + atlas), read
     # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). ADVISORY ONLY — an agent may cite what it
     # finds but never mutates cross-run truth (facts are engine-written, verdicts operator-ratified, §22.4).
-    # OPT-IN (default off) because the cross-run stores only exist once the Part-IV features have run.
+    # ON by default in the product Settings (ce4a379), EngineOptions off; the cross-run stores only
+    # exist once the Part-IV features have run.
     cross_run_read_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.

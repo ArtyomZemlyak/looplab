@@ -91,6 +91,24 @@ test('virtual timeline is bounded, variable-height, generation-scoped, and polit
   assert.match(css, /\.dock-body\.chat-body \{ overflow: hidden; \}/)
 })
 
+test('feed-hidden bookkeeping keeps the pagebar and unread badge honest about what renders', async () => {
+  const dock = await source('Dock.jsx')
+  // The hidden set stays bookkeeping-only (finalize gates + per-call cost); un-hiding these would
+  // flood the feed the user asked to keep clean.
+  assert.match(dock, /const FEED_HIDDEN = new Set\(\['finalize_step', 'finalization_finished', 'llm_usage'\]\)/)
+  // A run carrying any hidden row is detected so the counts can compensate.
+  assert.match(dock, /const hiddenPresent = useMemo\(\(\) => log\.some\(\(e\) => FEED_HIDDEN\.has\(e\.type\)\), \[log\]\)/)
+  // Pagebar: whenever the feed is a strict subset of the loaded window (hidden rows or a time-scrub),
+  // it names the shown count instead of silently mismatching `${log.length} loaded`.
+  assert.match(dock, /feed\.length !== log\.length[\s\S]*?\$\{feed\.length\} \$\{\(filter\.trim\(\) \|\| kinds\.size\) \? 'matching' : 'shown'\}/)
+  // Unread badge: an exact number only when no hidden row can inflate it; otherwise the numberless
+  // "new activity" affordance rather than a count the feed can't honor.
+  assert.match(dock, /unread=\{atLiveView && !hiddenPresent \? timeline\.unread : 0\}/)
+  assert.match(dock, /unreadUnknown=\{atLiveView && \(timeline\.unreadUnknown \|\| \(hiddenPresent && timeline\.unread > 0\)\)\}/)
+  // A window that loaded only hidden rows must not read as "no events yet".
+  assert.match(dock, /only background bookkeeping in this window — page older for run events/)
+})
+
 test('bounded omissions and loaded-window search limitations are explicit on both event surfaces', async () => {
   const [dock, panels] = await Promise.all([source('Dock.jsx'), source('panels.jsx')])
   assert.match(dock, /details omitted \(\$\{omittedBytes\.toLocaleString\(\)\} source bytes exceed page limit\)/)

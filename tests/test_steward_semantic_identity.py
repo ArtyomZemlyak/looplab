@@ -427,3 +427,62 @@ def test_source_identity_never_falls_back_between_run_task_or_finish():
     ]
     keys = {LessonMemory._curation_source_key(state) for state in states}
     assert len(keys) == len(states)
+
+
+def test_v2_run_never_creates_a_run_keyed_legacy_lock(tmp_path):
+    # Regression: `_interprocess_lock` opens (creates) a `<name>.lock` and never unlinks it. The legacy
+    # (v1) claim path is keyed by the UNIQUE run_id, so acquiring its lock unconditionally accreted one
+    # orphan lock per run in `.curation_invocations/` forever — an unbounded disk/inode leak. A v2-only
+    # run (no pre-existing legacy claim) must not create that lock at all.
+    memory = LessonMemory(_engine(tmp_path, _ToolClient({})))
+    memory.reflect_client = lambda: (_ for _ in ()).throw(AssertionError("provider initialized"))
+
+    for run in ("v2-a", "v2-b", "v2-c"):
+        final = RunState(run_id=run, task_id="task", goal="   ")
+        legacy = memory._legacy_curation_claim_path("concept_curation_log.jsonl", final)
+        memory.store_concept_curation(final)
+        assert legacy is not None
+        assert not Path(str(legacy) + ".lock").exists(), run
+    # And no run-keyed legacy lock survives across the three distinct runs.
+    scratch = tmp_path / ".curation_invocations"
+    lock_digests = {p.name for p in scratch.glob("*.json.lock")} if scratch.exists() else set()
+    for run in ("v2-a", "v2-b", "v2-c"):
+        legacy = memory._legacy_curation_claim_path(
+            "concept_curation_log.jsonl", RunState(run_id=run, task_id="task"))
+        assert Path(legacy).name + ".lock" not in lock_digests, run
+
+
+def test_prune_curation_scratch_bounds_orphan_locks(tmp_path, monkeypatch):
+    import os
+    import time
+
+    from looplab.engine import lessons as _lessons
+
+    memory = LessonMemory(_engine(tmp_path))
+    scratch = tmp_path / ".curation_invocations"
+    scratch.mkdir(parents=True)
+    monkeypatch.setattr(_lessons, "_CURATION_SCRATCH_MAX_ENTRIES", 8)
+    old = time.time() - (_lessons._CURATION_SCRATCH_MIN_AGE_S + 3600)
+
+    # 20 OLD orphan locks (no `.json` claim) — all prunable back down to the cap.
+    for i in range(20):
+        p = scratch / f"orphan{i:02d}.json.lock"
+        p.write_text("", encoding="utf-8")
+        os.utime(p, (old, old))
+    # A FRESH orphan lock — an in-flight decision on another process may still hold it; keep it.
+    fresh = scratch / "fresh.json.lock"
+    fresh.write_text("", encoding="utf-8")
+    # A lock PAIRED with a live recovery claim — never pruned regardless of age.
+    paired_claim = scratch / "paired.json"
+    paired_claim.write_text("{}", encoding="utf-8")
+    paired_lock = scratch / "paired.json.lock"
+    paired_lock.write_text("", encoding="utf-8")
+    os.utime(paired_lock, (old, old))
+
+    memory._prune_curation_scratch(scratch)
+
+    remaining = {p.name for p in scratch.iterdir()}
+    assert fresh.name in remaining          # too young to prune
+    assert paired_claim.name in remaining   # durable recovery claim untouched
+    assert paired_lock.name in remaining    # paired with a live claim
+    assert len(remaining) <= _lessons._CURATION_SCRATCH_MAX_ENTRIES + 2  # + the two intentional keeps

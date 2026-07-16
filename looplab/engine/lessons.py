@@ -25,6 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,6 +53,15 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
 _CURATION_CLAIM_DIR = ".curation_invocations"
 _CURATION_CLAIM_MAX_BYTES = 16 * 1024
 _FINALIZE_STEWARD_PARSER = "tool_call_once"
+# Soft cap on `.curation_invocations/`. `_interprocess_lock` opens (creates) a `<name>.lock` per paid
+# decision and never unlinks it, and the concept/claim curation keys carry the EVOLVING portfolio digest,
+# so the scratch dir would otherwise accrete a lock file per finalize forever. Past this cap we best-effort
+# prune the oldest ORPHAN lock files (no matching `.json` recovery claim). Claim `.json` markers are durable
+# crash-recovery state and are never pruned here.
+_CURATION_SCRATCH_MAX_ENTRIES = 512
+# Never prune a lock younger than a finalize's worst-case wall-clock, so a GC pass can never unlink a lock
+# an in-flight decision on another process still holds (the paid LLM call runs inside the lock).
+_CURATION_SCRATCH_MIN_AGE_S = 6 * 3600
 _CURATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 _CURATION_THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -572,13 +582,57 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         claim_path.parent.mkdir(parents=True, exist_ok=True)
         if created_dir:
             strict_fsync_parent(claim_path.parent)
+        self._prune_curation_scratch(claim_path.parent)
         key = str(claim_path.absolute())
         with _curation_thread_lock(key):
-            legacy_guard = (_interprocess_lock(Path(str(legacy_path) + ".lock"), required=True)
-                            if legacy_path is not None else nullcontext())
+            # The legacy (v1, run-keyed) claim is NEVER written by this v2 path — it is only READ
+            # (`_curation_attempt_already_resolved_locked`). Its interprocess lock therefore only matters
+            # when a legacy claim actually exists on disk (a v1-era writer left one). Acquiring it
+            # unconditionally would open (create) a `<run_id>.json.lock` — and since the legacy path is
+            # keyed by the unique run_id and `_interprocess_lock` never unlinks, that accreted one orphan
+            # lock per run in `.curation_invocations/` forever. Serialize against it only when there is a
+            # legacy claim to serialize against; the v2 claim lock below always fences the paid decision.
+            legacy_guard = (
+                _interprocess_lock(Path(str(legacy_path) + ".lock"), required=True)
+                if legacy_path is not None and legacy_path.exists() else nullcontext())
             with legacy_guard:
                 with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
                     yield
+
+    def _prune_curation_scratch(self, scratch: Path) -> None:
+        """Best-effort bound on `.curation_invocations/`. Once the dir grows past the soft cap, unlink the
+        OLDEST orphan `<digest>.json.lock` files — locks with no matching `<digest>.json` recovery claim,
+        i.e. pure interprocess-mutex scratch left behind by empty/unavailable/evolving-digest decisions.
+        Skips any lock younger than a finalize's worst-case wall-clock so an in-flight paid decision's lock
+        is never pulled out from under it, and never touches the durable `.json` claim markers. Never
+        raises — a hiccup in scratch GC must not perturb finalize."""
+        try:
+            entries = list(scratch.iterdir())
+        except OSError:
+            return
+        if len(entries) <= _CURATION_SCRATCH_MAX_ENTRIES:
+            return
+        claims = {p.name for p in entries if p.name.endswith(".json")}
+        now = time.time()
+        prunable: list[tuple[float, Path]] = []
+        for p in entries:
+            if not p.name.endswith(".json.lock"):
+                continue
+            if p.name[:-len(".lock")] in claims:
+                continue  # keep a lock paired with a live recovery claim
+            try:
+                mtime = p.stat().st_mtime
+            except OSError:
+                continue
+            if now - mtime < _CURATION_SCRATCH_MIN_AGE_S:
+                continue  # a lock this fresh may be held by an in-flight decision on another process
+            prunable.append((mtime, p))
+        prunable.sort()  # oldest first
+        for _mtime, p in prunable[: len(entries) - _CURATION_SCRATCH_MAX_ENTRIES]:
+            try:
+                p.unlink()
+            except OSError:
+                pass
 
     @contextmanager
     def _paid_curation_attempt_locked(self, log_name: str, kind: str, final: RunState,

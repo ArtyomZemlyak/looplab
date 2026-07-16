@@ -142,7 +142,11 @@ def test_graph_from_node_concepts_rebuilds_deterministically():
     """The cached LLM tags reconstruct into a graph + tags with NO LLM (Feature-1 reuse)."""
     from looplab.search.concept_graph import graph_from_node_concepts
     g, tags = graph_from_node_concepts({0: ["loss/decoupled-contrastive"], 1: ["negatives/external-mining"]})
-    assert sorted(c.id for c in g.concepts()) == ["loss/decoupled-contrastive", "negatives/external-mining"]
+    # `ensure()` materializes the full ANCESTOR CHAIN (arbitrary-depth concepts, 3ca45bf), so each leaf
+    # id also registers its intermediate id-prefix roots (`loss`, `negatives`) as first-class concepts.
+    assert sorted(c.id for c in g.concepts()) == [
+        "loss", "loss/decoupled-contrastive", "negatives", "negatives/external-mining"]
+    # The per-node TAG assignment stays the exact named leaf — intermediates are graph structure, not tags.
     assert tags == {0: frozenset({"loss/decoupled-contrastive"}), 1: frozenset({"negatives/external-mining"})}
     # a grown id's axis comes from its prefix; malformed/empty ids are dropped
     g2, t2 = graph_from_node_concepts({5: ["", "badnoslash", "axis/ok"]})

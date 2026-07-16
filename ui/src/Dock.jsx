@@ -760,6 +760,12 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
       && (atLiveView || event.seq <= viewSeq)
       && kindMatch(event) && (!filterQuery || search.includes(filterQuery))).map(item => item.event),
     [searchableLog, atLiveView, viewSeq, filterQuery, kinds])
+  // High-volume bookkeeping (llm_usage per LLM call, finalize_step gates) is hidden from the feed but
+  // still counted in `timeline.totalEvents`/`timeline.unread` (server counts the raw log). When any such
+  // row is in the loaded window, those counts over-state what actually renders — so the pagebar shows a
+  // separate "shown" figure and the unread badge falls back to the numberless "new activity" affordance
+  // rather than promising a precise count the feed can't honor. See finding: FEED_HIDDEN count desync.
+  const hiddenPresent = useMemo(() => log.some((e) => FEED_HIDDEN.has(e.type)), [log])
   useEffect(() => {
     if (!atLiveView && viewSeq != null) timeline.ensureSeq(viewSeq)
   }, [atLiveView, viewSeq, timeline.revision, timeline.ensureSeq])
@@ -1123,7 +1129,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             onClick={timeline.loadOlder}>{timeline.loading.older ? 'Loading…' : 'Load older'}</button>
           <span className="muted">
             {timeline.totalEvents != null ? `${log.length} loaded of ${timeline.totalEvents}` : `${log.length} loaded`}
-            {(filter.trim() || kinds.size) ? ` · ${feed.length} matching loaded events` : ''}
+            {feed.length !== log.length
+              ? ` · ${feed.length} ${(filter.trim() || kinds.size) ? 'matching' : 'shown'}`
+              : ''}
           </span>
           {timeline.hasMore.newer && <button type="button" className="btn sm ghost"
             disabled={timeline.loading.newer} onClick={timeline.loadNewer}>
@@ -1149,14 +1157,16 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
             : 'The final source row is incomplete or non-canonical; showing the last verified event prefix.'}
         </div>}
         {feed.length === 0 && timeline.status === 'ready' && !timeline.loading.around
-          ? <div className="timeline-resource muted">{(filter.trim() || kinds.size) ? 'nothing matches the loaded window' : 'no events yet'}</div>
+          ? <div className="timeline-resource muted">{(filter.trim() || kinds.size)
+              ? 'nothing matches the loaded window'
+              : log.length > 0 ? 'only background bookkeeping in this window — page older for run events' : 'no events yet'}</div>
           : <VirtualTimeline rows={feed} getKey={timelineEventKey}
               identity={`${runId}:${timeline.generation || 'pending'}`}
               className="feed chat-feed" ariaLabel="Run events"
               followingTail={atLiveView && timeline.followingTail}
               windowAtTail={atLiveView && timeline.windowAtTail}
-              unread={atLiveView ? timeline.unread : 0}
-              unreadUnknown={atLiveView && timeline.unreadUnknown}
+              unread={atLiveView && !hiddenPresent ? timeline.unread : 0}
+              unreadUnknown={atLiveView && (timeline.unreadUnknown || (hiddenPresent && timeline.unread > 0))}
               busy={Object.values(timeline.loading).some(Boolean)}
               onFollowingTailChange={value => { if (atLiveView) timeline.setFollowingTail(value) }}
               onJumpToLive={returnToLive}
