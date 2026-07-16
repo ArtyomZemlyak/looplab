@@ -772,6 +772,14 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                                  finalize=_fin, fallback=_force)
         # Prefer a SUBSTANTIVE agent report; a blank/all-default emit (or empty forced synthesis) drops
         # through to the honest metrics rollup rather than persisting an empty report.
+        # REVIEW(2026-07-16): DOUBLE-SANITIZE — both candidates here were ALREADY produced by
+        # _sanitize_content (_fin stores _sanitize_content(raw) in box['r']; `result` is _fin's return),
+        # and _sanitize_content unconditionally prepends its structural + auto caveats before appending
+        # the source's caveat list. Sanitizing again therefore persists every structural/auto caveat
+        # TWICE ([structural, *auto] + [structural, *auto, *model]) in every successful agent-authored
+        # report, and the duplicates consume the 32-item caveat cap that should carry the model's real
+        # caveats. Either return the candidate as-is here (it is already sanitized), or make
+        # _sanitize_content idempotent (skip prepending caveats it already finds at the head).
         for cand in (result, box.get("r")):
             if _has_content(cand):
                 return _sanitize_content(cand, briefs, coverage)

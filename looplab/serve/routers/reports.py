@@ -897,6 +897,18 @@ def build_router(srv) -> APIRouter:
         rec, legacy_authority = _public_scope_record(rec)
         stale = legacy_authority or _scope_sig(cur_ids) != rec.get("sig")
         source_revisions = rec.get("source_revisions")
+        # REVIEW(2026-07-16): this loop runs on EVERY GET after the cheap stat-based _scope_sig above
+        # already matched — and capture_scope_source reads the run's ENTIRE events.jsonl (up to 32 MB/
+        # run, 128 MB/scope), sha256-hashes it, and Pydantic-parses every event line, per run, per
+        # request, with no cache (the client also sends cache:'no-store'). Opening the report dialog
+        # for a 30-run project re-reads ~100+ MB and builds hundreds of thousands of Event objects
+        # per click just to conclude "not stale" — information the already-matched per-run log_sig
+        # (dev/ino/ctime/size/mtime identity) essentially proves. The full capture only adds pre-v2
+        # detection (a field-presence check, zero I/O) and the small task/config snapshot digests
+        # (re-hashable from two capped files); keep the full byte-level revalidation for exotic
+        # same-stat rewrites behind a probe mismatch, not on the per-request hot path. The generate
+        # job compounds this with up to FOUR full sweeps per generation (initial + 3 _inputs_unchanged
+        # calls) — cache per-run revisions keyed by log_sig within the job.
         if not stale and isinstance(source_revisions, list):
             try:
                 remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
@@ -1046,6 +1058,17 @@ def build_router(srv) -> APIRouter:
                 content = _gen(scope, briefs, None)
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+            # REVIEW(2026-07-16): the persisted `sig` covers only the runs that CONTRIBUTED briefs —
+            # the capture loop above `continue`s on ScopeSourceError, dropping an uncapturable run
+            # from brief_ids/source_revisions — while GET's staleness compare is `_scope_sig(cur_ids)`
+            # over ALL current scope runs, which always emits a row per run (a fallback row when the
+            # probe fails). A scope containing one PERMANENTLY uncapturable run (e.g. a corrupt
+            # events.jsonl that passes the lstat preflight but fails _parse_events) therefore persists
+            # a record whose sig can NEVER match: stale=true forever, the UI quarantine hides the
+            # just-paid-for content, and "Regenerate" repeats the LLM spend with the identical
+            # outcome. The record must persist the same vocabulary GET compares against — include
+            # fallback rows for skipped runs (plus an `omitted_runs` receipt), or GET must compare
+            # over rec["run_ids"] instead of cur_ids and surface added/removed runs separately.
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
                    "generated_at": int(time.time() * 1000), "run_ids": brief_ids,
                    "sig": [row["log_sig"] for row in source_revisions],
