@@ -519,13 +519,19 @@ def cross_run_concepts_cmd(
     """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
     `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
     runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
+    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     p = Path(memory_dir)
     path = p if p.is_file() else p / "concept_capsules.jsonl"
     if not path.exists():
         typer.echo(f"no concept capsules at {path} (run with cross_run_concepts on to populate)")
         raise typer.Exit(1)
-    ov = portfolio_concept_overview(ConceptCapsuleStore(path).all())
+    # Honor recorded operator/steward taxonomy governance (merge/purge/split), consistent with
+    # cross-run-digest, the Atlas and the agent tools — otherwise this inspector shows the STALE raw graph
+    # after a merge/split/purge (live-test finding). The alias/split ledgers live in the memory DIR.
+    base = str(p if p.is_dir() else p.parent)
+    ov = portfolio_concept_overview(ConceptCapsuleStore(path).all(),
+                                    aliases=load_concept_aliases(base), splits=load_concept_splits(base))
     if as_json:
         typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
         return
@@ -944,9 +950,14 @@ def claims_cmd(
     claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                fuzzy=fuzzy, structured=structured)
     if pack:
-        # compose with the concept overview (Step 3) from the same memory dir when present
+        # compose with the concept overview (Step 3) from the same memory dir when present — honor the
+        # recorded taxonomy governance (aliases/splits), consistent with every other consumer (live-test).
+        from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+        base = p if p.is_dir() else p.parent
         caps_path = base / "concept_capsules.jsonl"
-        overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all())
+        overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all(),
+                                               aliases=load_concept_aliases(str(base)),
+                                               splits=load_concept_splits(str(base)))
                     if caps_path.exists() else None)
         cp = build_context_pack(claims, concept_overview=overview, max_claims=top)
         typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
