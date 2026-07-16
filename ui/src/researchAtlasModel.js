@@ -135,10 +135,10 @@ const normalizeClaim = value => {
   const nSupport = Math.max(count(row.n_support), support.length)
   const nOppose = Math.max(count(row.n_oppose), oppose.length)
   // The backend's structured `mixed` state can encode assertion-level counter-evidence that is not
-  // counted in n_oppose. Honor it when the row carries evidence, while still deriving malformed or
-  // contradictory support/refute labels from sanitized counts.
-  const explicitMixed = row.epistemic === 'mixed' && (nSupport > 0 || nOppose > 0)
-  const mixed = contradicts.length > 0 || explicitMixed || (nSupport > 0 && nOppose > 0)
+  // counted in n_oppose. Honor it only with supporting evidence, matching the backend rule, while
+  // still deriving malformed or contradictory support/refute labels from sanitized counts.
+  const mixed = nSupport > 0
+    && (contradicts.length > 0 || row.epistemic === 'mixed' || nOppose > 0)
   const epistemic = mixed
     ? 'mixed'
     : (nSupport > 0 ? 'supported' : (nOppose > 0 ? 'refuted' : 'inconclusive'))
@@ -147,6 +147,7 @@ const normalizeClaim = value => {
     statement,
     epistemic,
     maturity,
+    decisionFresh: typeof row.decision_fresh === 'boolean' ? row.decision_fresh : null,
     nSupport,
     nOppose,
     nUnverified: Math.max(count(row.n_unverified), unverified.length),

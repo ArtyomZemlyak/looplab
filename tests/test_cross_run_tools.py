@@ -144,6 +144,32 @@ def test_execute_never_raises_on_junk(tmp_path):
     assert "non-empty string" in t.execute("cross_run_prior_attempts", {})
 
 
+def test_cross_run_read_failure_never_reaches_tool_result_or_logs(
+        tmp_path, monkeypatch, caplog):
+    import logging
+
+    leak = (
+        "read failed at https://api-user:api-secret@provider.invalid/v1?token=hidden "
+        r"for C:\Users\private-user\cross-run\lessons.jsonl"
+    )
+    (tmp_path / "lessons.jsonl").write_text("{}\n", encoding="utf-8")
+
+    def fail_read(*_args, **_kwargs):
+        raise OSError(leak)
+
+    monkeypatch.setattr("looplab.events.eventstore.read_jsonl_lenient", fail_read)
+    with caplog.at_level(logging.WARNING, logger="looplab.tools.cross_run_tools"):
+        out = CrossRunTools(tmp_path).execute("cross_run_claims", {})
+
+    assert out == "(cross-run tool unavailable)"
+    rendered = out + caplog.text
+    for fragment in (
+            "api-user", "api-secret", "provider.invalid", "token=hidden",
+            "private-user", "lessons.jsonl"):
+        assert fragment not in rendered
+    assert "tool=cross_run_claims failure=storage" in caplog.text
+
+
 # --------------------------------------------------------------------------- #
 # Developer-scoped wiring (§22.5) — the repo developer's read-only scouts include the dev-scoped tool
 # --------------------------------------------------------------------------- #

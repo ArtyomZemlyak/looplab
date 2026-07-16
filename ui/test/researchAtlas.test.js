@@ -1,6 +1,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
+import { fileURLToPath } from 'node:url'
+import React from 'react'
+import { renderToStaticMarkup } from 'react-dom/server'
+import { createServer } from 'vite'
 import {
   ATLAS_RENDER_LIMITS,
   boundedAtlasText,
@@ -15,6 +19,7 @@ import {
 } from '../src/api.js'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
+const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const claim = (index = 0) => ({
   claim_uid: `claim-${index}`,
@@ -95,6 +100,45 @@ test('Atlas preserves bounded structured contradictions and cannot render them s
   assert.equal(view.claims[0].contradicts.length, ATLAS_RENDER_LIMITS.evidence)
   assert.ok(view.claims[0].contradicts.every(value => value.length <= 300 && !value.includes('\n')))
   assert.equal(view.claims[1].epistemic, 'mixed', 'explicit structured mixed state must survive')
+})
+
+test('Atlas requires support before structured contradictions become mixed evidence', () => {
+  const view = buildResearchAtlasView({}, { claims: [{
+    ...claim(10), epistemic: 'mixed', n_support: 0, support: [],
+    n_oppose: 0, oppose: [], contradicts: ['opposite assertion'],
+  }] }, {})
+
+  assert.equal(view.claims[0].nSupport, 0)
+  assert.equal(view.claims[0].nContradicts, 1)
+  assert.equal(view.claims[0].epistemic, 'inconclusive')
+})
+
+test('Atlas preserves decision freshness and warns only on stale or unknown governed decisions', async () => {
+  const rows = [
+    { ...claim(20), maturity: 'operator-ratified', decision_fresh: false },
+    { ...claim(21), maturity: 'operator-pinned' },
+    { ...claim(22), maturity: 'operator-rejected', decision_fresh: true },
+    { ...claim(23), maturity: 'machine-proposed' },
+  ]
+  const view = buildResearchAtlasView({}, { claims: rows }, {})
+  assert.deepEqual(view.claims.map(row => row.decisionFresh), [false, null, true, null])
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { ClaimCard } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const markup = view.claims.map(row => renderToStaticMarkup(
+      React.createElement(ClaimCard, { claim: row }),
+    ))
+    assert.match(markup[0], /operator ratified · ⚠ stale/)
+    assert.match(markup[1], /operator pinned · ⚠ freshness unknown/)
+    assert.doesNotMatch(markup[2], /⚠/)
+    assert.doesNotMatch(markup[3], /⚠/)
+  } finally {
+    await vite.close()
+  }
 })
 
 test('Atlas projection applies hard caps before React receives portfolio collections', () => {

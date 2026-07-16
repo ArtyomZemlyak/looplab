@@ -77,6 +77,17 @@ def _report_success(result: object, generation: str) -> bool:
             and result.get("generation") == generation)
 
 
+def _report_refresh_identity(row: object) -> Optional[str]:
+    """Return a persisted paid-report identity only when it is safe to correlate exactly."""
+    if not isinstance(row, dict):
+        return None
+    intent = row.get("report_refresh")
+    if not isinstance(intent, dict):
+        return None
+    key = intent.get("idempotency_key")
+    return key if isinstance(key, str) and key and len(key) <= 512 else None
+
+
 def _staged_command(event_type: str, data: dict, idempotency_key: str,
                     expected_generation: str) -> dict:
     """Build the durable pre-POST envelope used to recover an unconfirmed submission.
@@ -924,6 +935,9 @@ class Tui:
             update["error"] = turn["error"]
         if turn.get("report_code"):
             update["report_code"] = turn["report_code"]
+        report_refresh_id = _report_refresh_identity(turn)
+        if report_refresh_id:
+            update["report_refresh_id"] = report_refresh_id
         self._persist(run_id, update)
 
     def _append_and_show(self, run_id: str, history: list, turn: dict) -> None:
@@ -949,6 +963,7 @@ class Tui:
             return []
         history: list[dict] = []
         by_command: dict[str, dict] = {}
+        by_report: dict[str, dict] = {}
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -959,7 +974,13 @@ class Tui:
                 staged_id = row_command.get("staged_id")
                 if target is None and staged_id:
                     target = by_command.get(str(staged_id))
-                if target is None and not row_command_id and isinstance(row.get("action_index"), int):
+                report_refresh_id = row.get("report_refresh_id")
+                safe_report_id = (report_refresh_id if isinstance(report_refresh_id, str)
+                                  and report_refresh_id and len(report_refresh_id) <= 512 else None)
+                if target is None and not row_command_id and not staged_id and safe_report_id:
+                    target = by_report.get(safe_report_id)
+                if (target is None and not row_command_id and not staged_id and not safe_report_id
+                        and isinstance(row.get("action_index"), int)):
                     index = row["action_index"]
                     if 0 <= index < len(history) and history[index].get("role") == "action":
                         target = history[index]
@@ -973,6 +994,8 @@ class Tui:
                         target.pop("error", None)
                     if row.get("report_code"):
                         target["report_code"] = row["report_code"]
+                    elif _report_refresh_identity(target):
+                        target.pop("report_code", None)
                     current_id = (target.get("command") or {}).get("id")
                     if current_id:
                         by_command[str(current_id)] = target
@@ -982,6 +1005,9 @@ class Tui:
                 command_id = (row.get("command") or {}).get("id")
                 if command_id:
                     by_command[str(command_id)] = row
+                report_refresh_id = _report_refresh_identity(row)
+                if report_refresh_id:
+                    by_report[report_refresh_id] = row
         return history
 
     def _run_help(self) -> None:

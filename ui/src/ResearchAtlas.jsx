@@ -25,9 +25,9 @@ const EPISTEMIC_COPY = Object.freeze({
   inconclusive: 'insufficient evidence',
 })
 const SOURCE_STATE_COPY = Object.freeze({
-  current: 'current from the latest successful refresh',
-  'retained-stale': 'retained stale after this source failed to refresh',
-  failed: 'failed to load; no prior response is available',
+  current: 'current',
+  'retained-stale': 'stale',
+  failed: 'failed',
 })
 const curationOutcomeLabel = entry => {
   if (entry.applied > 0) return `${entry.applied} applied`
@@ -48,7 +48,7 @@ function SourceWatermark({ sourceKey, label, source, children }) {
   </p>
 }
 
-function ClaimCard({ claim, compact = false }) {
+export function ClaimCard({ claim, compact = false }) {
   const evidence = claim.support.length + claim.oppose.length + claim.unverified.length
     + claim.contradicts.length
   const hiddenEvidence = Math.max(0, claim.nSupport - claim.support.length)
@@ -60,13 +60,17 @@ function ClaimCard({ claim, compact = false }) {
     ...claim.runs.map(value => `run · ${value}`),
   ]
   const epistemicCopy = EPISTEMIC_COPY[claim.epistemic] || EPISTEMIC_COPY.inconclusive
+  const decisionWarning = claim.maturity !== 'machine-proposed' && claim.decisionFresh !== true
   return <article className={`atlas-claim atlas-state-${claim.epistemic}`}>
     <div className="atlas-claim-head">
       <span className={`chip xs atlas-epistemic ${claim.epistemic}`}
         title="Machine-derived evidence balance; not a proposition verdict or applicability decision">
         {epistemicCopy}
       </span>
-      <span className="pill">{claim.maturity.replaceAll('-', ' ')}</span>
+      <span className="pill">
+        {claim.maturity.replaceAll('-', ' ')}
+        {decisionWarning && ` · ⚠ ${claim.decisionFresh === false ? 'stale' : 'freshness unknown'}`}
+      </span>
     </div>
     <p>{claim.statement}</p>
     <div className="atlas-claim-counts" aria-label="Claim evidence counts">
@@ -83,9 +87,9 @@ function ClaimCard({ claim, compact = false }) {
       {context.length > 3 && <span className="muted">+{context.length - 3} more</span>}
     </div>}
     {!compact && (evidence > 0 || hiddenEvidence > 0) && <details>
-      <summary>Show bounded evidence context</summary>
+      <summary>Show evidence context</summary>
       <div className="atlas-evidence">
-        {evidence === 0 && <span className="atlas-evidence-boundary">No evidence context was included in this response.</span>}
+        {evidence === 0 && <span className="atlas-evidence-boundary">No evidence context returned.</span>}
         {claim.support.map((ref, index) => <code key={`s-${index}`}>support attempt · {ref}</code>)}
         {claim.oppose.map((ref, index) => <code key={`o-${index}`}>oppose attempt · {ref}</code>)}
         {claim.unverified.map((ref, index) => <code key={`u-${index}`}>unverified attempt · {ref}</code>)}
@@ -93,7 +97,7 @@ function ClaimCard({ claim, compact = false }) {
           contradicting claim · {statement}
         </code>)}
         {hiddenEvidence > 0 && <span className="atlas-evidence-boundary">
-          {countLabel(hiddenEvidence, 'additional reference')} omitted by the per-claim render limit.
+          {countLabel(hiddenEvidence, 'additional reference')} omitted by the claim limit.
         </span>}
       </div>
     </details>}
@@ -104,15 +108,14 @@ function RouteState({ kind, errors, onRetry }) {
   if (kind === 'loading') return <div className="run-resource-state" role="status" aria-live="polite">
     <span className="dag-empty-spinner" aria-hidden="true" />
     <h1>Loading Research Atlas preview</h1>
-    <p>Reading bounded concept observations, claim records, and recent steward proposals from shared memory.</p>
   </div>
   const memoryMissing = errors.length > 0 && errors.every(error =>
     error.status === 400 && /memory[_\s-]*dir|memory directory/i.test(error.message))
   return <div className="run-resource-state" role={memoryMissing ? 'status' : 'alert'}>
     <div className="resource-state-icon" aria-hidden="true">×</div>
-    <h1>{memoryMissing ? 'Research Atlas preview is not configured' : 'Research Atlas preview unavailable'}</h1>
+    <h1>{memoryMissing ? 'Research Atlas is not configured' : 'Research Atlas preview unavailable'}</h1>
     <p>{memoryMissing
-      ? 'Choose a shared Memory dir in Settings before reading cross-run research.'
+      ? 'Set Memory dir in Settings.'
       : errors.map(error => `${error.label}: ${error.message}`).join(' · ')}</p>
     <div className="resource-state-actions">
       {memoryMissing && <a className="btn primary" href="#/settings">Open Settings</a>}
@@ -205,17 +208,15 @@ export default function ResearchAtlas({ onBack }) {
             <div>
               <p className="atlas-eyebrow">Experimental Part IV/V portfolio projection</p>
               <h1>Bounded portfolio evidence preview</h1>
-              <p>This is not the complete Atlas: it has no frozen snapshot, CoverageFrame, or server-paged
-                exploration. Refresh may observe newly finalized runs or steward-log outcomes, but cannot change claims,
-                taxonomy, runs, or selection state. Claim identity and applicability remain experimental.
-                Rows, context, and model-authored text are clipped to client render limits. “Observed in one
-                run” does not mean untried elsewhere.</p>
+              <p>Bounded live view, not a complete Atlas or frozen snapshot. Refresh only reads.
+                Claim identity and applicability remain experimental;
+                clipped rows are not coverage. “Observed in one run” does not mean untried elsewhere.</p>
             </div>
           </header>
 
           {resource.errors.length > 0 && <div className="notice resource-warning atlas-degraded" role="status">
             <b>{resource.stale
-              ? 'Refresh failed; showing previously loaded source data.'
+              ? 'Refresh failed; showing last-good data.'
               : hasRetainedStale
                 ? 'Partial refresh; preserving last-loaded data for failed sources.'
                 : 'Degraded view; some sources have not loaded.'}</b>
@@ -225,8 +226,7 @@ export default function ResearchAtlas({ onBack }) {
 
           {view.invalidRows.total > 0 && <div className="notice resource-warning atlas-degraded" role="alert">
             <b>Some portfolio records were ignored.</b>
-            <span>{countLabel(view.invalidRows.total, 'malformed record')} could not be shown safely;
-              summary counts may still include server-reported rows.</span>
+            <span>{countLabel(view.invalidRows.total, 'record')}; server totals may still include them.</span>
           </div>}
 
           <section className="atlas-summary" aria-label="Portfolio summary">
@@ -242,11 +242,11 @@ export default function ResearchAtlas({ onBack }) {
 
           {view.empty && <div className="notice resource-empty atlas-empty" role="status">
             <div><b>{view.invalidRows.total > 0 || resource.errors.length > 0
-              ? 'No valid portfolio records are available from the loaded sources.'
+              ? 'No valid records are available.'
               : 'No cross-run memory yet.'}</b><br />
               {view.invalidRows.total > 0 || resource.errors.length > 0
-                ? 'Retry the missing sources or repair malformed shared-memory records.'
-                : 'Configure a Memory dir and finalize runs with the Part IV concept/claim flags to populate this read-only preview.'}</div>
+                ? 'Retry missing sources or repair shared-memory records.'
+                : 'Configure Memory dir and finalize Part IV runs.'}</div>
           </div>}
 
           {!view.empty && <div className="atlas-grid">
@@ -256,7 +256,7 @@ export default function ResearchAtlas({ onBack }) {
                 <span className="muted">showing {view.concepts.length} of {view.totals.concepts}</span>
               </div>
               {view.concepts.length === 0
-                ? <p className="atlas-section-empty">No concept capsules are available.</p>
+                ? <p className="atlas-section-empty">No concepts returned.</p>
                 : <ul className="atlas-concepts" tabIndex={0} aria-label="Bounded explored concepts">
                   {view.concepts.map((concept, index) => <li key={`${concept.concept}-${index}`}>
                     <div><strong>{concept.concept}</strong><span>{countLabel(concept.nRuns, 'run')}</span></div>
@@ -277,7 +277,7 @@ export default function ResearchAtlas({ onBack }) {
                 <h3>Observed in one run <span>{view.thin.length}</span></h3>
                 {view.thin.length > 0
                   ? <div className="atlas-tags">{view.thin.map((name, index) => <span className="pill" key={`${name}-${index}`}>{name}</span>)}</div>
-                  : <p className="atlas-section-empty">No single-run concept observations in this response.</p>}
+                  : <p className="atlas-section-empty">None returned.</p>}
                 {view.hiddenThin > 0 && <p className="atlas-inline-boundary">
                   +{view.hiddenThin} more single-run concept{view.hiddenThin === 1 ? '' : 's'}
                 </p>}
@@ -297,7 +297,7 @@ export default function ResearchAtlas({ onBack }) {
                 ? <div className="atlas-claim-list compact" role="region" tabIndex={0}
                     aria-label="Bounded mixed-evidence claim records">{view.contradictions.map((claim, index) =>
                     <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} compact />)}</div>
-                : <p className="atlas-section-empty">No mixed-evidence claim records in this response.</p>}
+                : <p className="atlas-section-empty">None returned.</p>}
               {view.hiddenContradictions > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenContradictions, 'additional mixed-evidence record')} omitted by the bounded projection.
               </p>}
@@ -316,13 +316,13 @@ export default function ResearchAtlas({ onBack }) {
                 ? <div className="atlas-claim-list" role="region" tabIndex={0}
                     aria-label="Bounded portfolio claims">{view.claims.map((claim, index) =>
                     <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} />)}</div>
-                : <p className="atlas-section-empty">No claim records are available.</p>}
+                : <p className="atlas-section-empty">No claims returned.</p>}
               {view.hiddenClaims > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenClaims, 'additional claim')} omitted by the client render limit.
               </p>}
               <SourceWatermark sourceKey="claims" label="Claim records"
                 source={sourceStates.claims}>
-                current bounded response; labels summarize evidence balance and operator maturity is shown separately.
+                bounded response; evidence balance and operator maturity are separate.
               </SourceWatermark>
             </section>
 
@@ -354,7 +354,7 @@ export default function ResearchAtlas({ onBack }) {
                       </div>
                     </li>
                   })}</ol>
-                : <p className="atlas-section-empty">No steward proposal or outcome records have been logged.</p>}
+                : <p className="atlas-section-empty">No steward records returned.</p>}
               {view.hiddenCuration > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenCuration, 'older entry', 'older entries')} omitted by the client render limit.
               </p>}

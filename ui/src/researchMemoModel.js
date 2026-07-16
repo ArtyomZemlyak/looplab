@@ -53,8 +53,14 @@ function textList(value, maximum, textMaximum, budget) {
 function normalizeVerification(value, budget) {
   if (!record(value)) return null
   const rawVerdicts = field(value, 'verdicts')
-  const totalVerdicts = arrayLength(rawVerdicts)
-  const length = Math.min(totalVerdicts, MAX_VERDICTS)
+  const rawTotal = arrayLength(rawVerdicts)
+  const declaredTotal = field(value, 'total_verdicts')
+  const declaredOmitted = field(value, 'omitted_verdicts')
+  // Backend writer and replay sanitizers may already have capped the rows. Carry their omission
+  // receipt only when both counters are internally consistent; otherwise derive from visible input.
+  const totalVerdicts = Number.isSafeInteger(declaredTotal) && declaredTotal >= rawTotal
+    && declaredOmitted === declaredTotal - rawTotal ? declaredTotal : rawTotal
+  const length = Math.min(rawTotal, MAX_VERDICTS)
   const verdicts = []
   const allowed = new Set(['supported', 'unsupported', 'unclear', 'cited'])
   for (let index = 0; index < length && budget.remaining > 0; index++) {

@@ -80,6 +80,9 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
       [true, true], 'an expired process receipt must retry only the durable request identity')
     assert.deepEqual(reportRefreshFailure({ status: 422 }, true).slice(1),
       [false], 'an authoritative client error must not be called an ambiguous paid submission')
+    assert.deepEqual(reportRefreshFailure({
+      status: 400, submissionMayHaveSucceeded: true,
+    }, true).slice(1), [true, true], 'a poll error after acceptance must retain the paid identity')
     assert.match(reportRefreshFailure({ error_kind: 'accounting_pending' })[0],
       /durable cost accounting/i)
     root = createRoot(document.querySelector('#root'))

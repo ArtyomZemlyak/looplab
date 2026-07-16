@@ -82,6 +82,33 @@ test('memo verifier truncation is explicit even when unsupported verdicts are in
   assert.equal(memo.verification.omittedVerdicts, 1)
 })
 
+test('memo verifier preserves backend omission receipts after durable row capping', () => {
+  const verdicts = Array.from({ length: RESEARCH_MEMO_LIMITS.verificationVerdicts }, (_, index) => ({
+    verdict: 'supported', statement: `persisted ${index}`,
+  }))
+  const memo = normalizeResearchMemo({
+    verification: {
+      method: 'llm', verdicts,
+      total_verdicts: verdicts.length + 1,
+      omitted_verdicts: 1,
+    },
+  })
+
+  assert.equal(memo.verification.totalVerdicts, verdicts.length + 1)
+  assert.equal(memo.verification.omittedVerdicts, 1)
+  assert.equal(memo.verification.unsupported, 0)
+
+  const inconsistent = normalizeResearchMemo({
+    verification: {
+      verdicts: [{ verdict: 'supported', statement: 'visible' }],
+      total_verdicts: 1_000_000,
+      omitted_verdicts: 0,
+    },
+  })
+  assert.equal(inconsistent.verification.totalVerdicts, 1)
+  assert.equal(inconsistent.verification.omittedVerdicts, 0)
+})
+
 test('memo collection enforces per-memo and aggregate text budgets newest-first', () => {
   const huge = 'x'.repeat(250_000)
   const hugeMemo = {

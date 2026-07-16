@@ -65,6 +65,7 @@ const RUN_COMMAND_LOCK_EVENT = 'll:command-lock'
 const LAUNCH_TRANSPORT_EVENT = 'll:launch-transport'
 const COMMAND_ID_RE = /^cmd_[0-9a-f]{32}$/
 const RUN_GENERATION_RE = /^[0-9a-f]{64}$/
+const UUID_V4_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
 const validRunGeneration = value => typeof value === 'string' && RUN_GENERATION_RE.test(value)
 const observedRunGenerations = new Map()
 const MAX_OBSERVED_RUN_GENERATIONS = 512   // exceeds any realistic in-view working set; bounds the map
@@ -819,14 +820,18 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
   consume = response => response) {
   const timeout = Math.max(0, Number(timeoutMs) || 0)
   const controller = typeof AbortController === 'undefined' ? null : new AbortController()
-  const signal = options.signal && controller
-    ? AbortSignal.any([options.signal, controller.signal]) : options.signal || controller?.signal
+  const externalSignal = options.signal
+  const forwardAbort = () => controller?.abort()
+  const unlink = () => externalSignal?.removeEventListener?.('abort', forwardAbort)
+  externalSignal?.addEventListener?.('abort', forwardAbort, { once: true })
+  if (externalSignal?.aborted) forwardAbort()
+  const signal = controller?.signal || externalSignal
   let timedOut = false, timer = null
   const work = Promise.resolve().then(async () => {
     const response = await fetch(apiUrl(path), signal ? { ...options, signal } : options)
     return consume(response)
   })
-  if (!timeout) return work
+  if (!timeout) return work.finally(unlink)
   const deadline = new Promise((_, reject) => {
     timer = setTimeout(() => {
       timedOut = true
@@ -839,7 +844,10 @@ async function commandFetch(path, options = {}, timeoutMs = COMMAND_REQUEST_TIME
     if (timedOut) throw cause?.code === 'COMMAND_REQUEST_TIMEOUT'
       ? cause : commandTimeoutError(path, timeout, cause)
     throw cause
-  } finally { clearTimeout(timer) }
+  } finally {
+    clearTimeout(timer)
+    unlink()
+  }
 }
 
 const notifyCommandRecord = (callback, record) => {
@@ -1049,8 +1057,9 @@ export function reportRefreshIntent(runId, generation, completedKey = '', storag
       return true
     }
     const saved = backing.getItem(key)
-    const candidate = saved?.startsWith(prefix) ? saved.slice(prefix.length) : ''
-    const idempotencyKey = safeIdentityText(candidate) ? candidate : createIdempotencyKey()
+    const candidate = saved?.startsWith(prefix) ? saved.slice(prefix.length) : null
+    if (candidate !== null && !UUID_V4_RE.test(candidate)) throw new Error('invalid stored report identity')
+    const idempotencyKey = candidate ?? createIdempotencyKey()
     backing.setItem(key, prefix + idempotencyKey)
     if (backing.getItem(key) !== prefix + idempotencyKey) throw new Error('storage write failed')
     return { generation, idempotencyKey }

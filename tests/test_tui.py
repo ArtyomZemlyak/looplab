@@ -487,6 +487,31 @@ def test_report_refresh_poll_auth_loss_preserves_same_paid_identity(monkeypatch,
     assert result["idempotency_key"] == "same-report"
 
 
+@pytest.mark.parametrize("status", [401, 403])
+def test_report_refresh_reconciliation_auth_loss_preserves_paid_identity(
+        monkeypatch, status):
+    api = tui.Api("http://x")
+    posts = 0
+
+    def request(method, _path, **_kwargs):
+        nonlocal posts
+        if method == "POST":
+            posts += 1
+            if posts == 1:
+                raise tui.ApiError("first response was lost", status=None)
+            raise tui.ApiError("authorization lost", status=status)
+        raise AssertionError("no job id was observed")
+
+    monkeypatch.setattr(api, "_request", request)
+    monkeypatch.setattr("looplab.serve.tui_api.time.sleep", lambda _seconds: None)
+    result = api.refresh_report(
+        "demo", expected_generation=GENERATION, idempotency_key="same-report")
+
+    assert result["code"] == "job_authorization_lost" and result["ambiguous"] is True
+    assert result["idempotency_key"] == "same-report"
+    assert posts == 2
+
+
 @pytest.mark.parametrize("generation", [None, "A" * 64, "a" * 63, 123])
 def test_run_generation_and_submission_fail_closed_on_noncanonical_token(
         monkeypatch, generation):
@@ -1227,6 +1252,49 @@ def test_command_status_staged_alias_folds_semantic_reattach_after_reload():
     history = _command_tui(FakeApi())._load_chat("demo")
     assert len(history) == 1 and history[0]["status"] == "done"
     assert history[0]["command"]["id"] == "cmd-existing"
+
+
+def test_report_status_folds_by_paid_identity_despite_interleaved_transcript():
+    class FakeApi:
+        def get(self, path, timeout=None):
+            return [
+                {"role": "action", "action": {"type": "__refresh_report__"},
+                 "status": "pending", "report_code": "report_refresh_uncertain",
+                 "report_refresh": {"expected_generation": GENERATION,
+                                    "idempotency_key": "report-a"}},
+                {"role": "user", "content": "concurrent browser message"},
+                {"role": "action", "action": {"type": "__refresh_report__"},
+                 "status": "pending", "report_refresh": {
+                     "expected_generation": GENERATION, "idempotency_key": "report-b"}},
+                # The legacy index now points at the second report. The durable paid identity must
+                # still update the first one, and a terminal success must clear its stale code.
+                {"role": "command_status", "command_id": None, "action_index": 2,
+                 "report_refresh_id": "report-a", "status": "done", "command": {}},
+            ]
+
+    history = _command_tui(FakeApi())._load_chat("demo")
+    assert history[0]["status"] == "done"
+    assert "report_code" not in history[0]
+    assert history[2]["status"] == "pending"
+
+
+def test_report_status_persists_its_paid_identity():
+    class FakeApi:
+        pass
+
+    app = _command_tui(FakeApi())
+    updates = []
+    app._persist = lambda _run_id, row: updates.append(row)
+    app._persist_command_status("demo", {
+        "status": "done", "command": {},
+        "report_refresh": {"expected_generation": GENERATION,
+                           "idempotency_key": "same-paid-report"},
+    }, action_index=4)
+
+    assert updates == [{
+        "role": "command_status", "command_id": None, "status": "done", "command": {},
+        "action_index": 4, "report_refresh_id": "same-paid-report",
+    }]
 
 
 def test_unresolved_persisted_command_blocks_next_boss_turn():

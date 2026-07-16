@@ -227,8 +227,10 @@ class Api:
             else self.run_generation(run_id))
         key = str(idempotency_key or uuid.uuid4())
         path = f"/api/runs/{_path_segment(run_id)}/report_refresh"
+        accepted = False
 
         def submit() -> dict:
+            nonlocal accepted
             response = None
             for attempt in range(max(0, int(submit_retries)) + 1):
                 try:
@@ -236,10 +238,19 @@ class Api:
                         "POST", path,
                         body={EXPECTED_RUN_GENERATION_FIELD: generation}, timeout=60,
                         headers={"Idempotency-Key": key})
+                    accepted = True
                     break
                 except ApiError as exc:
+                    if accepted and exc.status in {401, 403}:
+                        return {
+                            "ok": False, "code": "job_authorization_lost", "ambiguous": True,
+                            "error": "authorization was lost while reconciling the paid report",
+                        }
                     if not command_error_transient(exc) or attempt >= max(0, int(submit_retries)):
                         raise
+                    # The server may have accepted a POST whose response was lost. Every later
+                    # retry is reconciliation of that paid identity, even before any response lands.
+                    accepted = True
                     time.sleep(0.15)
             try:
                 return self._await_job(

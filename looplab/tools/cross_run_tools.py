@@ -14,6 +14,7 @@ ratified by the operator (§22.4). `role` scopes the claim stream so the Develop
 from __future__ import annotations
 
 import json
+import logging
 import re
 import unicodedata
 from pathlib import Path
@@ -21,6 +22,11 @@ from pathlib import Path
 from looplab.tools._base import fn_spec
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
+_LOG = logging.getLogger(__name__)
+_TOOL_NAMES = frozenset({
+    "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
+})
+_TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 
 
 def _toks(s: str) -> set[str]:
@@ -155,8 +161,22 @@ class CrossRunTools:
         # the agent phase — drive_tool_loop does not guard tools.execute).
         try:
             return self._execute(name, args or {})
-        except Exception as e:  # noqa: BLE001
-            return f"(cross-run tool error: {e})"
+        except Exception as exc:  # noqa: BLE001
+            # Storage/parser exceptions can contain credentialed URLs, provider hosts and
+            # absolute paths. Tool results become prompt/event material, so they are allow-listed;
+            # observability records only a stable operation/category, never the exception string.
+            tool = name if isinstance(name, str) and name in _TOOL_NAMES else "unknown"
+            if isinstance(exc, OSError):
+                failure = "storage"
+            elif isinstance(exc, (ValueError, TypeError, KeyError)):
+                failure = "invalid_data"
+            else:
+                failure = "internal"
+            try:
+                _LOG.warning("cross-run tool unavailable: tool=%s failure=%s", tool, failure)
+            except Exception:  # noqa: BLE001 - observability must not violate the never-raise contract
+                pass
+            return _TOOL_UNAVAILABLE
 
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:

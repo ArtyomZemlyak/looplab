@@ -70,6 +70,18 @@ test('report refresh intent fails closed on unavailable or silently broken stora
     error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')
 })
 
+test('a corrupt same-generation report identity is quarantined, never replaced', () => {
+  const storage = memoryStorage()
+  const key = 'll.report-refresh.' + encodeURIComponent('corrupt/run')
+  const corrupt = GENERATION + ':truncated key?'
+  storage.setItem(key, corrupt)
+
+  assert.throws(
+    () => reportRefreshIntent('corrupt/run', GENERATION, '', storage),
+    error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')
+  assert.equal(storage.getItem(key), corrupt)
+})
+
 test('a completed report identity is tombstoned even when storage removal fails', () => {
   const values = new Map()
   const storage = {
@@ -145,6 +157,36 @@ test('background-job polling aborts an in-flight request body', async () => {
   }
 })
 
+test('report requests do not require AbortSignal.any support', async () => {
+  const previous = {
+    any: globalThis.AbortSignal?.any, fetch: globalThis.fetch,
+    location: globalThis.location, sessionStorage: globalThis.sessionStorage,
+  }
+  globalThis.location = { pathname: '/', hash: '' }
+  globalThis.sessionStorage = memoryStorage()
+  Object.defineProperty(globalThis.AbortSignal, 'any', {
+    configurable: true, writable: true, value: undefined,
+  })
+  globalThis.fetch = async () => ({
+    ok: true, json: async () => ({ ok: true, seq: 3, generation: GENERATION }),
+  })
+  try {
+    const result = await CONTROL.refreshReport('demo', {
+      expectedGeneration: GENERATION, idempotencyKey: 'portable-signal',
+      signal: new AbortController().signal,
+    })
+    assert.equal(result.seq, 3)
+  } finally {
+    Object.defineProperty(globalThis.AbortSignal, 'any', {
+      configurable: true, writable: true, value: previous.any,
+    })
+    for (const key of ['fetch', 'location', 'sessionStorage']) {
+      if (previous[key] === undefined) delete globalThis[key]
+      else globalThis[key] = previous[key]
+    }
+  }
+})
+
 test('background-job polling aborts its interval sleep', async () => {
   const previous = {
     fetch: globalThis.fetch, location: globalThis.location,
@@ -187,6 +229,34 @@ test('malformed background-job receipts become same-request ambiguity', async ()
       { status: 'running', job_id: 'malformed' }, { intervalMs: 0 })
     assert.equal(result.code, 'job_protocol_error')
     assert.equal(result.ambiguous, true)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('poll protocol and client errors retain the accepted paid identity', async () => {
+  const previous = {
+    fetch: globalThis.fetch, location: globalThis.location,
+    sessionStorage: globalThis.sessionStorage,
+  }
+  globalThis.location = { pathname: '/', hash: '' }
+  globalThis.sessionStorage = memoryStorage()
+  try {
+    for (const response of [
+      { ok: true, status: 200, json: async () => { throw new SyntaxError('html') } },
+      {
+        ok: false, status: 400, headers: { get: () => null },
+        json: async () => ({ detail: { message: 'bad poll request' } }),
+      },
+    ]) {
+      globalThis.fetch = async () => response
+      await assert.rejects(
+        jobAwait({ status: 'running', job_id: 'accepted-paid-job' }, { intervalMs: 0 }),
+        error => error?.submissionMayHaveSucceeded === true)
+    }
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[key]

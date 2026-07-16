@@ -17,6 +17,7 @@ _MAX_ADVISORY_TEXT = 64_000
 _MAX_TREE_ITEMS = 512
 _MAX_VERIFICATION_TEXT = 24_000
 _MAX_VERIFICATION_VERDICTS = 64
+_MAX_ADVISORY_COUNT = (1 << 63) - 1
 _VERDICTS = frozenset({"supported", "unsupported", "unclear", "cited"})
 
 
@@ -80,7 +81,21 @@ def _verification(value, budget: list[int], items: list[int]):
     if not isinstance(value, dict) or not isinstance(value.get("verdicts"), (list, tuple)):
         return _tree(value, budget, items)
 
-    raw_rows = list(itertools.islice(value["verdicts"], _MAX_VERIFICATION_VERDICTS))
+    raw_verdicts = value["verdicts"]
+    raw_total = min(len(raw_verdicts), _MAX_ADVISORY_COUNT)
+    declared_total = value.get("total_verdicts")
+    declared_omitted = value.get("omitted_verdicts")
+    # Writer and replay boundaries both sanitize the memo. Preserve an earlier canonical omission
+    # receipt only when both bounded counters agree exactly with the rows now present; inconsistent
+    # provider aggregates can never conceal rows or turn a complete check into a trusted one.
+    metadata_is_canonical = (
+        type(declared_total) is int and 0 <= declared_total <= _MAX_ADVISORY_COUNT
+        and type(declared_omitted) is int and 0 <= declared_omitted <= _MAX_ADVISORY_COUNT
+        and declared_total >= raw_total
+        and declared_omitted == declared_total - raw_total
+    )
+    total_verdicts = declared_total if metadata_is_canonical else raw_total
+    raw_rows = list(itertools.islice(raw_verdicts, _MAX_VERIFICATION_VERDICTS))
     method = _text(value.get("method", "unknown"), 64, budget, single_line=True) or "unknown"
     verdicts = []
     for index, raw in enumerate(raw_rows):
@@ -105,6 +120,10 @@ def _verification(value, budget: list[int], items: list[int]):
         # Recompute the aggregate from the bounded positional rows; never persist a conflicting
         # model/provider aggregate beside the verdicts the operator can actually inspect.
         "unsupported": sum(row["verdict"] == "unsupported" for row in verdicts),
+        # These counts describe the pre-cap positional contract. They survive the second sanitizer
+        # pass so the UI never mistakes a durable 64-row projection for a complete verification.
+        "total_verdicts": total_verdicts,
+        "omitted_verdicts": max(0, total_verdicts - len(verdicts)),
     }
 
 
