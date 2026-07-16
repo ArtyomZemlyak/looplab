@@ -6,6 +6,16 @@
 // The chips to show at a breadcrumb `path` ('' = top-level roots): the distinct next-level concepts
 // under `path`, each with the count of nodes touching that subtree. Sorted by count desc, then id.
 export function chipsAtPath(nodeConcepts = {}, rename = {}, path = '') {
+  // REVIEW(2026-07-16): this replicates conceptViewModel.js's unsafe plain-object-map pattern in two
+  // MORE places (here and conceptMatches): `rename[raw] || raw` reads through the prototype chain and
+  // `counts[childId] ||= new Set()` on childId="__proto__" reads Object.prototype (truthy), skips the
+  // assignment and TypeErrors on `.add()` — one LLM-authored tag can crash the chip bar. The hazard is
+  // now copy-pasted across three functions in two files; extract ONE shared safe canonicalizer
+  // (`canonicalId(raw, rename)` with a hasOwnProperty guard) + use Map for accumulators, instead of
+  // fixing each copy separately. Also a semantic gap: a node tagged EXACTLY at `path` (not deeper) is
+  // skipped by the `parts.length <= depth` guard, so after drilling into `loss` a node tagged bare
+  // `loss` contributes to NO chip — child counts silently sum below the parent count the user just
+  // clicked, with nothing showing where the remainder went (needs an "· at this level" chip or count).
   const prefix = path ? path + '/' : ''
   const depth = path ? path.split('/').length : 0
   const counts = {}                                   // childId -> Set(nodeId)
