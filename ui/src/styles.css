@@ -323,6 +323,16 @@ button { font: inherit; }
 .node-card-shell { position: relative; width: 188px; height: 84px; }
 .node-card-shell > .node-card { width: 100%; }
 .node-card-shell > .node-card:not(.lod) > .row:first-of-type { padding-right: 27px; }
+/* View 2: on-node concept tags — an absolute strip just below the fixed-height card, so it never
+   changes the layout geometry. pointer-events:none keeps the card fully clickable through it. */
+.node-concepts { position: absolute; top: 100%; left: 0; margin-top: 2px; display: flex; gap: 3px;
+  max-width: 188px; overflow: hidden; pointer-events: none; z-index: 2; }
+.node-concepts .nc-tag { font-size: 9px; line-height: 1.4; padding: 0 5px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-1)); color: var(--fg-mut);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line)); white-space: nowrap;
+  max-width: 84px; overflow: hidden; text-overflow: ellipsis; }
+.node-concepts .nc-tag.more { background: var(--bg-1); }
+.node-card-shell > .node-card.dim ~ .node-concepts { opacity: .35; }
 .node-select-trigger { position: absolute; z-index: 3; inset: 0; width: 100%; height: 100%; padding: 0;
   border: 0; border-radius: var(--radius); background: transparent; color: transparent;
   pointer-events: none; }
