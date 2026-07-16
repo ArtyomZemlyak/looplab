@@ -63,12 +63,22 @@ export function isValidAtlasSourceEnvelope(key, value) {
 // refresh can never make retained concept/log slices look current. `successful` contains only the
 // slices fulfilled by this attempt: omitted last-good slices become retained-stale and never-loaded
 // slices remain explicitly failed.
-export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loadedAt) {
+export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loadedAt,
+  attemptedKeys = ATLAS_SOURCE_KEYS) {
   const previous = record(previousValue)
   const successful = record(successfulValue)
+  const attempted = list(attemptedKeys).slice(0, ATLAS_SOURCE_KEYS.length)
   const timestamp = boundedAtlasText(loadedAt, 80)
   const statuses = {}
+  const failed = { state: 'failed', loadedAt: '', revision: '' }
   for (const key of ATLAS_SOURCE_KEYS) {
+    const prior = record(previous[key])
+    // # CODEX AGENT: a source-local retry says nothing about the other ledgers. Their provenance
+    // must survive byte-for-byte instead of being silently promoted to current or demoted to stale.
+    if (!attempted.includes(key)) {
+      statuses[key] = prior.state ? prior : failed
+      continue
+    }
     if (Object.hasOwn(successful, key)) {
       statuses[key] = {
         state: 'current', loadedAt: timestamp,
@@ -76,10 +86,9 @@ export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loa
       }
       continue
     }
-    const prior = record(previous[key])
     statuses[key] = ['current', 'retained-stale'].includes(prior.state)
       ? { ...prior, state: 'retained-stale' }
-      : { state: 'failed', loadedAt: '', revision: '' }
+      : failed
   }
   return statuses
 }

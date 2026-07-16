@@ -296,6 +296,53 @@ test('Atlas source provenance distinguishes current, retained-stale, and failed 
   }
 })
 
+test('a source-local retry changes only the attempted Atlas slice', () => {
+  const before = reconcileAtlasSourceStatuses({}, {
+    atlas: { explored: [], thin_coverage: [], contradictions: [] },
+    claims: { claims: [] },
+    conceptCuration: { entries: [] },
+    claimCuration: { entries: [{ revision: 2 }] },
+  }, 'before')
+  const failed = reconcileAtlasSourceStatuses(before, {}, 'failed', ['claimCuration'])
+
+  assert.equal(failed.claimCuration.state, 'retained-stale')
+  assert.equal(failed.claimCuration.loadedAt, 'before')
+  for (const key of ['atlas', 'claims', 'conceptCuration']) {
+    assert.deepEqual(failed[key], before[key], `${key} was not attempted and must remain current`)
+  }
+
+  const recovered = reconcileAtlasSourceStatuses(failed, {
+    claimCuration: { entries: [{ revision: 3 }] },
+  }, 'after', ['claimCuration'])
+  assert.equal(recovered.claimCuration.state, 'current')
+  assert.equal(recovered.claimCuration.loadedAt, 'after')
+  assert.equal(recovered.claimCuration.revision, '3')
+})
+
+test('partial Atlas UI never presents an unavailable source as an empty current fact', async () => {
+  const atlas = await source('ResearchAtlas.jsx')
+
+  assert.match(atlas, /requestedSources = request\.key \? SOURCES\.filter[\s\S]*reconcileAtlasSourceStatuses\([\s\S]*attemptedKeys\)/)
+  assert.match(atlas, /loaded \? value : 'not loaded'/,
+    'summary values from a never-loaded slice need an explicit unavailable state')
+  assert.match(atlas, /view\.empty && allCurrent/,
+    'a successful empty state requires every independent source to be current')
+  assert.match(atlas, /atlasLoaded && <>[\s\S]*No concepts returned\./)
+  assert.match(atlas, /claimsLoaded && \(view\.claims\.length > 0[\s\S]*No claims returned\./)
+  assert.match(atlas, /curationCurrent[\s\S]*incomplete merge/)
+  assert.doesNotMatch(atlas, /shown · incomplete merge/,
+    'an incomplete two-ledger merge must not expose a false combined count')
+  assert.doesNotMatch(atlas, /errorText|result\.reason\?\.message/,
+    'transport failures must use client-owned copy instead of reflecting internal error text')
+  assert.match(atlas, /errors\.every\(error => error\.status === 400\)/)
+  assert.match(atlas, /state !== 'current'[\s\S]*retry\(sourceKey\)[\s\S]*aria-label=\{`Retry \$\{label\}`\}/,
+    'failed and retained-stale watermarks both need their own retry action')
+  for (const key of ['atlas', 'claims']) {
+    assert.match(atlas, new RegExp(`sourceKey="${key}"[\\s\\S]*?retry=\\{retry\\}`))
+  }
+  assert.match(atlas, /\[\['conceptCuration', 'Concept'\], \['claimCuration', 'Claim'\]\][\s\S]*sourceKey=\{sourceKey\}[\s\S]*retry=\{retry\}/)
+})
+
 test('Atlas has a discoverable owner-only route and complete resource states', async () => {
   const [app, runList, atlas, api, css] = await Promise.all([
     source('App.jsx'), source('RunList.jsx'), source('ResearchAtlas.jsx'), source('api.js'),
@@ -313,7 +360,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(runList, /aria-label="Open Research Atlas preview"/)
   assert.match(atlas, /Promise\.allSettled/)
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
-    /No cross-run memory yet/, /Degraded view; some sources have not loaded\./]) assert.match(atlas, state)
+    /No cross-run memory yet/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
   // Keep the implicit list role: role="region" would erase list semantics for assistive technology.
   assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
@@ -321,21 +368,21 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(atlas, /aria-label="Bounded mixed-evidence claim records"/)
   assert.doesNotMatch(atlas, /aria-label="[^"]*[Cc]ontradictory claims"/)
   assert.match(atlas, /Some portfolio records were ignored\./)
-  assert.match(atlas, /Partial refresh; preserving last-loaded data for failed sources\./)
+  assert.match(atlas, /Refresh incomplete; showing stale last-good data\./)
   assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)
   assert.match(css, /\.atlas-source-failed \{[^}]*color: var\(--fail-text\)/)
   assert.match(atlas, /Concept observations[\s\S]*Concepts seen across runs/)
   assert.match(atlas, /Observed in one run/)
   assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Coverage<\/p>|<h3>Thin coverage/)
   assert.match(atlas, /support-only evidence/)
-  assert.match(atlas, /not a proposition verdict or applicability decision/)
+  assert.match(atlas, /not a proposition verdict or an applicability decision/)
   assert.match(atlas, /claim grouping ·/)
   assert.match(atlas, /supporting attempt refs/)
   assert.doesNotMatch(atlas, /scope ·|>support <b>|>oppose <b>/)
   assert.match(atlas, /Steward invocation log[\s\S]*Recent proposals \+ outcomes/)
   assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Audit trail<\/p>|Concept \+ claim governance/)
-  assert.equal((atlas.match(/<SourceWatermark sourceKey=/g) || []).length, 5,
-    'every panel must disclose its live/bounded source; the shared Atlas slice appears twice')
+  assert.equal((atlas.match(/<SourceWatermark (?:key=\{sourceKey\} )?sourceKey=/g) || []).length, 4,
+    'every panel must disclose its source; the mapped curation watermark renders twice')
   assert.match(atlas, /not a\s+CoverageFrame, frozen snapshot, or completeness estimate/)
   assert.match(atlas, /logged proposals and outcomes; not a current governance snapshot/)
   assert.match(atlas, /data-route-main tabIndex=\{-1\}/)
