@@ -130,6 +130,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const { live, seq, generation, eventCount: liveEventCount, connected,
     status: runStatus, error: runError, retry: retryRun } =
     useRunState(runId, { pollOnly: reviewMode })
+  const gen = generation?.slice(0, 8) || 'unknown'
   const route = useRunRouteState({ generation, reviewMode })
   const { state: routeState, generationMismatch, generationPending } = route
   const viewSeq = routeState.sequence
@@ -883,7 +884,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     </div>
     <div className="history-banner" role="status">
       <span className="history-lock" aria-hidden="true">◷</span>
-      <b>Historical snapshot · seq {viewSeq} of {seq}</b>
+      <b>Historical snapshot · gen {gen} · seq {viewSeq} of {seq}</b>
       <span>read-only</span>
       <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
     </div>
@@ -965,7 +966,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         </button>
         <EnergyToggle />
         <span className="pill phase">{displayedPhase}</span>
-        <span className="muted" style={{ maxWidth: 280, overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis' }} title={state.goal}>{state.goal || state.task_id}</span>
+        <span className="muted" title={state.goal}>
+          <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>{state.goal || state.task_id}
+        </span>
         <span className={'live ' + (reviewMode ? 'off' : liveStatus)}><span className="led" />{reviewMode ? 'read-only' : liveLabel}{historyActive && ' · history'}</span>
         <span className="spacer" />
         {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
@@ -1014,7 +1017,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
       {historyActive && <div className="history-banner" role="status">
         <span className="history-lock" aria-hidden="true">◷</span>
-        <b>Historical snapshot · seq {history.resolvedSeq} of {seq}</b>
+        <b>Historical snapshot · gen {gen} · seq {history.resolvedSeq} of {seq}</b>
         <span>read-only · actions target live and are disabled</span>
         <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
       </div>}

@@ -133,7 +133,9 @@ button { font: inherit; }
    size, so e.g. the Search/Report toggle never shrinks below its content and wraps its own buttons. */
 .topbar.run-head { flex-wrap: nowrap; }
 .topbar.run-head > * { flex-shrink: 0; }
-.topbar.run-head > .muted { flex-shrink: 1; min-width: 0; }
+.topbar.run-head > .muted { flex-shrink: 1; min-width: 0; max-width: 280px; overflow: hidden;
+  white-space: nowrap; text-overflow: ellipsis; }
+.topbar.run-head > .muted b { display: none; }
 .topbar.run-head > .spacer { flex: 1 0 0; }        /* grows to fill, never shrinks */
 .topbar.run-head .view-toggle { flex-wrap: nowrap; }
 .brand { font-weight: 700; letter-spacing: .4px; font-size: 14px; }
@@ -2050,9 +2052,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .copy-link-fallback label { white-space: nowrap; }
 .copy-link-fallback input { min-width: 0; flex: 1; height: 28px; padding: 3px 7px; border: 1px solid var(--line-2);
   border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); font: 11px ui-monospace, Consolas, monospace; }
-.route-generation-detail { display: flex; align-items: center; gap: 9px; color: var(--fg-mut); }
+.route-generation-detail { display: flex; align-items: center; flex-wrap: wrap; max-width: 100%; gap: 9px;
+  color: var(--fg-mut); }
 .route-generation-detail code { padding: 4px 7px; border: 1px solid var(--line-2); border-radius: var(--radius-sm);
-  background: var(--bg-2); color: var(--fg-dim); }
+  max-width: 100%; overflow-wrap: anywhere; background: var(--bg-2); color: var(--fg-dim); }
 
 .workspace-pane-toggle {
   position: absolute; top: 10px; right: 10px; z-index: 30; align-items: center; min-height: 32px;
@@ -2077,12 +2080,18 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 @media (max-width: 900px) {
   html, body, #root { min-width: 0; overflow-x: hidden; }
 
-  .run-head { gap: 6px; }
-  .run-head .brand, .run-head > .phase, .run-head > .muted,
-  .run-head > .chip, .run-head > .spacer, .run-head > .fx-switch { display: none; }
-  .run-head .view-toggle { margin-right: auto; }
+  .topbar.run-head { gap: 6px; flex-wrap: wrap; align-items: stretch; }
+  .run-head .brand, .run-head > .phase, .run-head > .chip,
+  .run-head > .spacer, .run-head > .fx-switch { display: none; }
+  .run-head .view-toggle { flex: 1 1 180px; min-width: 0; margin-right: 0; }
+  .run-head .view-toggle .vt { flex: 1; min-width: 0; padding-inline: 4px; }
+  .run-head > .muted { display: block; order: 2; flex: 1 1 calc(100% - 110px); max-width: none; overflow: visible;
+    white-space: normal; text-overflow: clip; overflow-wrap: anywhere; line-height: 1.35; }
+  .run-head > .live { order: 2; align-self: flex-start; max-width: 100%; white-space: normal; }
+  .topbar.run-head > .muted b { display: block; color: var(--fg); }
+  .run-head button, .history-banner .btn, .run-resource-state .btn { min-height: 44px; }
   .copy-view-label { display: none; }
-  .copy-view-btn { min-width: 36px; justify-content: center; }
+  .copy-view-btn { min-width: 44px; justify-content: center; }
   .directions-overview { padding-block: 6px; }
   .do-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
   .do-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
