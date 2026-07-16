@@ -955,15 +955,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           : <span className="pill">read-only review</span>}
         <div className="view-toggle" role="group" aria-label="Run workspace views">
           <button type="button" aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
-          {/* REVIEW(2026-07-16): this tab is enabled in REVIEW mode (historyActive is impossible
-              there — runRouteState strips `sequence` when reviewMode), but ConceptView's fetch goes
-              through api.js reviewReadPath, which rewrites it to /api/review/concepts — a route
-              serve/routers/reviews.py never registered (it exposes only state/comments/config/cost/
-              nodes). The server hard-404s, and ConceptView renders "Concepts are unavailable …
-              retry when the server is reachable" with a Retry that can never succeed — a permanent
-              404 dressed as a transient outage for every reviewer. Either register a read-only
-              /api/review/concepts passthrough in reviews.py or disable this tab when reviewMode. */}
-          <button type="button" aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')} disabled={historyActive}
+          {/* Disabled in REVIEW mode too: ConceptView's fetch goes through api.js reviewReadPath, which
+              rewrites it to /api/review/concepts — a route the isolated reviewer namespace (reviews.py)
+              does not register, so a reviewer would get a permanent 404 dressed as a transient outage
+              (and the lens-creation POST spends tokens, which a read-only review must not). */}
+          <button type="button" aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')} disabled={historyActive || reviewMode}
             onClick={() => setView('concepts')} title="concept tree — group experiments by concept, any lens">Concepts</button>
           <button type="button" aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
             title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
@@ -1147,11 +1143,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 }} />
             </LazyBoundary>
           </div></div>
-        : view === 'concepts' && !historyActive
-        // Fenced against history: the Concepts view (View 1) fetches the LIVE, non-seq-aware /concepts
-        // projection, so rendering it against a historical fold would blend a live tree/metrics with
-        // historical experiment rows (and its lens-creation POST spends tokens in a read-only context).
-        // A historical scrub / deep link falls through to the graph, which reads the folded `state`.
+        : view === 'concepts' && !historyActive && !reviewMode
+        // Fenced against history AND review mode. History: the Concepts view fetches the LIVE, non-seq
+        // /concepts projection, so it would blend a live tree/metrics with historical rows (and its
+        // lens POST spends tokens read-only). Review: reviewReadPath rewrites the fetch to the isolated
+        // /api/review namespace, which does not register /concepts — a deep link would hard-404. Both
+        // fall through to the graph, which reads the folded `state` directly.
         ? <div className="main"><LazyBoundary label="concept tree" resetKey={`${runId}:${generation || 'pending'}`}>
             <ConceptView runId={runId} state={state} onPickNode={(id) => {
               route.update(current => ({ ...current, view: 'dag', nodeId: id,
