@@ -55,6 +55,12 @@ import {
 // session — the background worker persists the reply — so "could not reach" no longer strands a turn.
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms))
+const boundedRead = (request, ms = 12000) => {
+  let timer
+  return Promise.race([request, new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('request timed out')), ms)
+  })]).finally(() => clearTimeout(timer))
+}
 
 // Run-control commands safe to fire directly (no model). `arg:true` needs a node id (e.g. /approve #12).
 const DIRECT = {
@@ -210,6 +216,8 @@ export default function AssistantBar({ runId, hidden = false }) {
   currentRunIdRef.current = runId
   const abortRef = useRef(null)
   const runningRef = useRef(false)   // a turn is live (stream OR reattach poll); stop clears it to halt both
+  const turnCaptureRef = useRef(false) // closes session-create/send races before React can publish busy
+  const openSessionSeqRef = useRef(0) // late reads must never replace a newer session choice
   const directCaptureRef = useRef(false) // closes the pre-storage generation-read window to double clicks
   const cancelReqRef = useRef(null)  // in-flight server-cancel POST; the next send awaits it so a late
                                      // cancel can't land on (and instantly kill) the NEW turn's event
@@ -350,16 +358,16 @@ export default function AssistantBar({ runId, hidden = false }) {
     // Re-opening the session that is ALREADY live-streaming would abort its own stream (and downgrade
     // to polling) — the thread is already on screen, so just no-op.
     if (id === sidRef.current && runningRef.current) return
-    // Leaving a live turn: the departing turn's finally is sid-guarded (it must not clobber the session
-    // we switch TO), so IT won't reset the shared flags once sidRef changes — reset them here, or busy
-    // stays true forever and the composer wedges on ■.
-    if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
-    if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
-    sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
-    storageSet('ll.asstSid', id)
+    const seq = ++openSessionSeqRef.current
     try {
-      const s = await assistantGet(id)
-      if (!mountedRef.current || sidRef.current !== id) return
+      // Keep the current transcript intact until the target is known to exist. The sequence fence
+      // rejects a slow A response after the user has already selected B (or started a new chat).
+      const s = await boundedRead(assistantGet(id))
+      if (!mountedRef.current || seq !== openSessionSeqRef.current) return
+      if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
+      if (runningRef.current) { runningRef.current = false; setBusy(false); setPending([]) }
+      sidRef.current = id; setSid(id); setMsgs([]); setPreview('')
+      storageSet('ll.asstSid', id)
       const arr = s.messages || []
       setMsgs(arr); if (s.meta?.mode) setMode(s.meta.mode)
       const la = [...arr].reverse().find(m => m.role === 'assistant' && m.content)
@@ -453,12 +461,12 @@ export default function AssistantBar({ runId, hidden = false }) {
         })
       }
     } catch (e) {
-      if (sidRef.current !== id) return
+      if (!mountedRef.current || seq !== openSessionSeqRef.current) return
       // The stored/opened session no longer exists (deleted here or in another tab, run-root reset).
       // Don't leave the dead id in `sid`/localStorage — that wedges the chat (every send targets the
       // 404'd session). Drop it back to a fresh composer.
-      if ((e.status === 404 || /404/.test(e.message)) && sidRef.current === id) { newChat() }
-      else flash(e.message)
+      if (e?.status === 404 && (!sidRef.current || sidRef.current === id)) newChat()
+      else flash(e?.status === 404 ? 'This Assistant chat no longer exists' : 'Could not open this Assistant chat')
     }
   }
   openSessionRef.current = openSession
@@ -540,6 +548,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     return () => window.removeEventListener('ll:focus-assistant', onFocusAssistant)
   }, [hasChat, input])
   const newChat = () => {
+    ++openSessionSeqRef.current
     if (abortRef.current) { try { abortRef.current.abort() } catch { /* gone */ } abortRef.current = null }
     // the departing turn's finally is sid-guarded — reset the shared flags here (see openSession)
     runningRef.current = false; setBusy(false); setPending([])
@@ -567,7 +576,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       setLaunchDrafts(current => clearLaunchDraftSession(current, id))
       if (id === storageGet('ll.asstSid')) storageRemove('ll.asstSid')
       if (id === sidRef.current) newChat()
-    } catch (e2) { flash(e2.message); refreshSessions() }
+    } catch { flash('Could not delete this Assistant chat'); refreshSessions() }
   }
 
   const resolvePerm = async (reqId, decision) => {
@@ -589,8 +598,8 @@ export default function AssistantBar({ runId, hidden = false }) {
         })
         return next
       })
-    } catch (error) {
-      flash(error?.message || 'Could not submit the permission decision')
+    } catch {
+      flash('Could not confirm the permission decision; checking its current status')
       // The POST response may have been lost after the server committed the decision. Re-read the
       // registry before offering another click; on a true network outage the original card remains.
       try {
@@ -606,7 +615,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   const onRevert = async (absPath) => {
     if (historical) { flash(readOnlyAction); return }
-    try { const r = await assistantRevert(absPath); flash(r.result || 'reverted') } catch (e) { flash(e.message) }
+    try { await assistantRevert(absPath); flash('File change reverted') } catch { flash('Could not revert this file change') }
   }
 
   const directLabels = entry => entry.spec.arg && entry.arg == null ? {
@@ -735,7 +744,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     }
     const next = { ...entry, record: recoveryRecord, statusUnavailable: true,
       observationKind: assistantDirectObservationKind(error), checking: false,
-      lastError: error?.message || String(error) }
+      lastError: 'Command status could not be verified.' }
     if (!persistDirect(next)) {
       saveRunCommandLock(entry.runId, { ...next, source: 'assistant' })
     }
@@ -744,6 +753,7 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   const failDirectObservation = (entry, error) => {
     const record = commandFailureRecord(error, entry.record)
+    if (record.error) { delete record.error.message; delete record.error.remediation }
     const failure = { ...entry, record, statusUnavailable: false, checking: false, retrying: false }
     if (!persistDirect(failure)) {
       clearAssistantRunTransport(entry.runId, undefined, { idempotencyKey: entry.idempotencyKey })
@@ -798,9 +808,11 @@ export default function AssistantBar({ runId, hidden = false }) {
         clearAssistantRunTransport(bound.runId, undefined, { idempotencyKey: bound.idempotencyKey })
         if (mountedRef.current) setCurrentDirect(bound, null)
         const conflict = error?.existingCommandId ? ` (active command ${String(error.existingCommandId).slice(0, 12)}…)` : ''
-        const failure = { ...bound, record: commandFailureRecord(error), retrying: false }
+        const record = commandFailureRecord(error)
+        if (record.error) { delete record.error.message; delete record.error.remediation }
+        const failure = { ...bound, record, retrying: false }
         if (mountedRef.current) setCurrentFailure(bound, failure)
-        flashDirect(bound, `/${bound.name} failed: ${error?.message || error}${conflict}`)
+        flashDirect(bound, `/${bound.name} failed${conflict}`)
       }
     }
   }
@@ -837,8 +849,8 @@ export default function AssistantBar({ runId, hidden = false }) {
       setCurrentFailure(entry, null)
       setDirectPending(entry)
       await executeDirect(entry)
-    } catch (error) {
-      flash(`/${d.name} failed: ${error?.message || error}`)
+    } catch {
+      flash(`/${d.name} could not start; refresh the run and try again`)
     } finally { directCaptureRef.current = false }
   }
   const checkDirect = async () => {
@@ -866,7 +878,7 @@ export default function AssistantBar({ runId, hidden = false }) {
     } catch (error) {
       const kind = assistantDirectObservationKind(error)
       if (entry.protocolInvalid) {
-        protocolDirect(entry, entry.record, error?.message || 'Stored command could not be verified')
+        protocolDirect(entry, entry.record, 'Stored command could not be verified')
       } else if (kind === 'transport' || kind === 'access' || kind === 'protocol') {
         unavailableDirect(entry, error, entry.record)
       } else failDirectObservation(entry, error)
@@ -909,7 +921,7 @@ export default function AssistantBar({ runId, hidden = false }) {
         }
         const conflict = error?.existingCommandId
           ? ` Active command: ${String(error.existingCommandId).slice(0, 12)}…` : ''
-        flashDirect(failure, `Retry failed: ${error?.message || error}.${conflict}`)
+        flashDirect(failure, `Retry failed.${conflict}`)
       }
     }
   }
@@ -1081,17 +1093,27 @@ export default function AssistantBar({ runId, hidden = false }) {
   // model receives (run context + attached files appended, not shown in the bubble).
   const runLLM = async (instruction, { userText = null, ensureVisible = false, context = null,
     retryFiles = null, turnMode = null, clearComposer = false } = {}) => {
+    if (turnCaptureRef.current || runningRef.current) { flash('Assistant is busy'); return }
+    turnCaptureRef.current = true
     if (ensureVisible && view === 'bar') setView('side')
     const wasBar = view === 'bar' && !ensureVisible
     setPreview(''); setHasNew(false)
     const atts = retryFiles || files
     const effectiveMode = turnMode || mode
+    const sessionSeq = openSessionSeqRef.current
     let id = sid
     if (!id) {
       // Create the session FIRST; only then clear the attached-file chips — else a create failure
       // strands the user with their files already gone.
-      try { const m = await assistantCreate((userText || instruction).slice(0, 60), effectiveMode); id = m.id; sidRef.current = id; storageSet('ll.asstSid', id); if (mountedRef.current) setSid(id) }
-      catch { flash('assistant offline'); return }
+      try {
+        const m = await assistantCreate((userText || instruction).slice(0, 60), effectiveMode)
+        if (!mountedRef.current || sessionSeq !== openSessionSeqRef.current) { turnCaptureRef.current = false; return }
+        id = m.id; sidRef.current = id; storageSet('ll.asstSid', id); setSid(id)
+      } catch {
+        turnCaptureRef.current = false
+        if (sessionSeq === openSessionSeqRef.current) flash('Could not start the chat — your draft is preserved')
+        return
+      }
     }
     // Keep a typed /new goal intact if creating the Assistant session failed.  Once a durable session
     // exists, the exact visible/raw turn below owns recovery and the composer can safely clear.
@@ -1195,6 +1217,7 @@ export default function AssistantBar({ runId, hidden = false }) {
       }
     } finally {   // guard shared-ref/state cleanup on still-current session (see reattach finally)
       polling = false
+      turnCaptureRef.current = false
       if (mountedRef.current && sidRef.current === id) { runningRef.current = false; abortRef.current = null; setBusy(false); setPending([]) }
     }
   }
@@ -1295,13 +1318,13 @@ export default function AssistantBar({ runId, hidden = false }) {
     if (direct) { setInput(''); runDirect(direct); return }
     const pr = runId ? preRoute(t) : null
     if (pr) { setInput(''); runDirect(pr); return }
-    setInput('')
     const refs = runId ? refNodes(t) : []
     const safeRun = String(runId).replace(/[\]"\r\n]/g, ' ').slice(0, 200)   // can't break the preamble/stripCtx or inject
     const ctx = runId
       ? `\n\n[UI context: run "${safeRun}" is open.${refs.length ? ` The user is referring to experiment(s) ${refs.map(i => '#' + i).join(', ')} — read them with the run tools.` : ''} Use the run tools if this is about it.]`
       : ''
-    runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)', context: { run: runId || null, refs } })
+    runLLM((t || 'See the attached file(s).') + ctx, { userText: t || '(attached files)',
+      context: { run: runId || null, refs }, clearComposer: true })
   }
   useEffect(() => {
     const onNewRun = (event) => {
@@ -1671,7 +1694,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           {ctxChip}
           {launchRecoveryButton}
           {sid && <button className="btn sm ghost" title="fork this chat into a new session" onClick={async () => {
-            try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch (e) { flash(e.message) }
+            try { const c = await assistantFork(sid); await refreshSessions(); openSession(c.id) } catch { flash('Could not fork this Assistant chat') }
           }}>⑂ fork</button>}
           {sid && <button className="btn sm ghost" title="share a read-only link to this chat" onClick={async () => {
             try {
@@ -1679,7 +1702,7 @@ export default function AssistantBar({ runId, hidden = false }) {
               const url = location.origin + location.pathname + r.url
               try { await navigator.clipboard.writeText(url) } catch { /* clipboard blocked */ }
               location.hash = r.url.replace(/^#/, '')   // navigate AFTER copying (the bar hides on the shared page)
-            } catch (e) { flash(e.message) }
+            } catch { flash('Could not create a share link for this Assistant chat') }
           }}>⤴ share</button>}
           <button className="btn sm ghost" title="dock to the right" onClick={openSide}>▧ side</button>
           <button className="btn sm ghost" title="fold to the bar" onClick={collapseToBar}>▾ bar</button>
