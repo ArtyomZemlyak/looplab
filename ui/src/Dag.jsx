@@ -118,6 +118,12 @@ function NodeSelectionTrigger({ nodeId, selected, label, onSelect }) {
     aria-current={selected ? 'true' : undefined} onClick={() => onSelect(nodeId)} />
 }
 
+export function dagFeasibilityLabel(feasible) {
+  if (feasible === false) return 'infeasible'
+  if (feasible === true) return 'feasible'
+  return 'constraint status not reported'
+}
+
 function ExpNode({ data }) {
   const { node, state, workId, selectedId, onSelect, themeFilter, groupTint,
     onOpenActions, actionsOpen } = data
@@ -145,7 +151,7 @@ function ExpNode({ data }) {
   const selectionLabel = [
     `Experiment #${node.id}`, op.label, node.status || 'unknown status',
     m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
-    node.feasible === false ? 'infeasible' : 'feasible',
+    dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,
     node.idea?.theme ? `theme ${node.idea.theme}` : null,
@@ -428,7 +434,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const p = pos[superId(key)]; if (!p) return
       const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter)
       rfNodes.push({
-        id: superId(key), type: 'groupSuper', position: p, zIndex: 1,
+        id: superId(key), type: 'groupSuper', position: p, zIndex: 1, draggable: false,
         data: {
           label: key, count: agg.matchedCount, totalCount: agg.totalCount,
           best: agg.best, series: agg.series, status: agg.status,
@@ -584,7 +590,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       <LodWatcher lod={lod} onChange={setLod} />
       <ZoomFontWatcher />
       <RefitBoundedGraph signature={graphSignature} count={interactiveNodeCount} mode={groupMode} />
-      <Background color="#20252f" gap={22} />
+      <Background color="var(--line)" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
         <span className="muted">group by</span>
@@ -615,12 +621,12 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           </div>) })}
       </Panel>}
       {showMap && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
-        const nd = n.data?.node; if (!nd) return '#3a4250'
-        if (nd.id === state.best_node_id) return '#ffd54a'
-        if (nd.status === 'failed') return '#ef4444'
-        if (nd.status === 'evaluated') return '#2ecc71'
-        return '#6b7686'
-      }} style={{ background: '#12151c', width: 180, height: 130 }} />}
+        const nd = n.data?.node; if (!nd) return 'var(--bg-3)'
+        if (nd.id === state.best_node_id) return 'var(--best)'
+        if (nd.status === 'failed') return 'var(--fail)'
+        if (nd.status === 'evaluated') return 'var(--ok)'
+        return 'var(--pending)'
+      }} style={{ background: 'var(--bg-1)', width: 180, height: 130 }} />}
     </ReactFlow>
     {mergeArm != null && <div className="merge-arm-hint">click a node to merge with #{mergeArm} · Esc to cancel</div>}
     {menu && <>

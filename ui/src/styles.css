@@ -2188,6 +2188,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   border: 1px solid var(--line-2); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
 .merge-destination-bar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 600px) {
+  .grp-control { max-width: calc(100vw - 30px); max-width: calc(100dvw - 30px); flex-wrap: wrap; }
+  .grp-control .text { flex: 1 1 140px; min-width: 0; max-width: 100%; min-height: 44px; }
+  .grp-control .btn { flex: 1 1 auto; min-height: 44px; }
   .merge-destination-bar { align-items: stretch; padding: 9px; }
   .merge-destination-bar label, .merge-destination-bar .muted { flex-basis: 100%; }
   .merge-destination-bar select { flex: 1 1 100%; min-height: 44px; }
