@@ -145,15 +145,19 @@ def test_read_run_trace_without_spans_is_graceful(tmp_path):
 
 
 def test_read_run_trace_soft_fails_on_malformed_spans(tmp_path):
-    """A JSON-valid but malformed spans.jsonl (a null `attributes` → AttributeError inside
-    build_conversation) must soft-fail to a string, never crash the tool loop."""
+    """A JSON-valid but malformed spans.jsonl (a null `attributes`) must SOFT-FAIL to a string, never
+    crash the tool loop. Two backstops now cover this: build_conversation was hardened to tolerate a
+    null-attributes span at the projection level (so it yields an EMPTY trace → "no trace stages
+    recorded"), and the tool-loop try/except still catches any other malformation ("could not read
+    trace"). Either way the result is a non-crashing soft-fail string — that invariant is the contract."""
     root = _make_run(tmp_path)
     (root / "demo" / "spans.jsonl").write_text(
         json.dumps({"span_id": "s1", "trace_id": "tr", "parent_id": None, "attributes": None}) + "\n",
         encoding="utf-8")
     rts = MachineRunsTools(root)
     out = rts.execute("read_run_trace", {"run_id": "demo", "node_id": 0})
-    assert isinstance(out, str) and "could not read trace" in out
+    assert isinstance(out, str)
+    assert ("could not read trace" in out) or ("no trace" in out)
 
 
 # --------------------------------------------------- read-file allowlist covers logs + jsonl data
