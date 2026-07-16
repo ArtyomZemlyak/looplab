@@ -280,17 +280,17 @@ def folded_concepts(state):
     return (inputs["memberships"], inputs["concept_ids"], inputs["edges"], inputs["touch"])
 
 
-def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict],
-                generation: Optional[str], requested_seq: Optional[int], captured_seq: int,
-                max_seq: int, source_divergence: Optional[dict],
-                requested_spec: Optional[dict] = None,
-                lens_registration: str = "shipped") -> dict:
-    """Build the bounded payload after one exact event-prefix fold."""
-    from looplab.search.concept_graph import concept_metrics, project_hierarchy, project_lens
+def build_core(state, *, run_id: str, lens_pack: list[dict],
+               generation: Optional[str], requested_seq: Optional[int], captured_seq: int,
+               max_seq: int, source_divergence: Optional[dict]) -> dict:
+    """Build the bounded, lens-independent core for one exact folded event prefix.
 
-    registered = {item.get("name"): item for item in lens_pack
-                  if isinstance(item, dict) and isinstance(item.get("name"), str)}
-    requested_spec = dict(requested_spec or registered[requested_lens])
+    The returned object is deliberately an internal transport shape: every collection retained in it
+    is bounded by this module's public ConceptFrame limits, so a small process-local snapshot cache can
+    retain it without retaining the (potentially much larger) folded ``RunState``.
+    """
+    from looplab.search.concept_graph import concept_metrics
+
     inputs = bounded_inputs(state, lens_pack)
     memberships = inputs["memberships"]
     concept_ids = inputs["concept_ids"]
@@ -303,18 +303,6 @@ def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict
         reasons.add("event_log_corruption")
     if not generation:
         reasons.add("generation_unavailable")
-    requested_relations = set(requested_spec.get("rels") or [])
-    lens_edges = {key: edge for key, edge in edges.items()
-                  if edge.get("rel") in requested_relations}
-    if requested_spec.get("kind") == "path" and requested_relations == {"is_a"}:
-        effective_lens = requested_lens
-        tree = project_hierarchy(concept_ids, lens=effective_lens)
-    elif not lens_edges:
-        effective_lens = "is_a"
-        tree = project_hierarchy(concept_ids, lens=effective_lens)
-    else:
-        effective_lens = requested_lens
-        tree = project_lens(concept_ids, lens_edges, requested_spec, touch=touch)
 
     metrics = concept_metrics(state, graph, tags)
     if metrics.get("baseline") is not None and finite_metric(metrics["baseline"]) is None:
@@ -359,9 +347,69 @@ def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict
             provenance_counts[provenance] = provenance_counts.get(provenance, 0) + 1
             reference_count += 1
 
-    complete = not reasons
     source_authoritative = source_divergence is None and bool(generation)
-    authoritative = source_authoritative and complete
+    return {
+        "run_id": run_id,
+        RUN_GENERATION_FIELD: generation or None,
+        "requested_seq": requested_seq,
+        "captured_seq": captured_seq,
+        "max_seq": max_seq,
+        "concept_ids": concept_ids,
+        "edges": edges,
+        "touch": touch,
+        "metrics": metrics,
+        "experiment_refs": experiment_refs,
+        "reasons": tuple(sorted(reasons)),
+        "source_authoritative": source_authoritative,
+        "source_membership_nodes": inputs["source_membership_nodes"],
+        "source_edges": inputs["source_edges"],
+        "included_membership_nodes": len(memberships),
+        "membership_count": inputs["membership_count"],
+        "reference_count": reference_count,
+        "provenance_counts": dict(sorted(provenance_counts.items())),
+        "source_integrity": ({"complete": True, "generation_identified": bool(generation)}
+                             if source_divergence is None else {
+                                 "complete": False,
+                                 "generation_identified": bool(generation),
+                                 "corrupt_line": source_divergence.get("corrupt_line"),
+                                 "dropped_lines": source_divergence.get("dropped_lines"),
+                             }),
+    }
+
+
+def core_lens_inputs(core: dict) -> dict:
+    """Return the already-bounded vocabulary used by the paid lens minting prompt."""
+    return {"concept_ids": core["concept_ids"], "edges": core["edges"]}
+
+
+def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
+                  requested_spec: Optional[dict] = None,
+                  lens_registration: str = "shipped") -> dict:
+    """Pure lens-specific projection over one immutable-by-convention bounded core."""
+    from looplab.search.concept_graph import project_hierarchy, project_lens
+
+    registered = {item.get("name"): item for item in lens_pack
+                  if isinstance(item, dict) and isinstance(item.get("name"), str)}
+    requested_spec = dict(requested_spec or registered[requested_lens])
+    concept_ids = core["concept_ids"]
+    edges = core["edges"]
+    touch = core["touch"]
+    requested_relations = set(requested_spec.get("rels") or [])
+    lens_edges = {key: edge for key, edge in edges.items()
+                  if edge.get("rel") in requested_relations}
+    if requested_spec.get("kind") == "path" and requested_relations == {"is_a"}:
+        effective_lens = requested_lens
+        tree = project_hierarchy(concept_ids, lens=effective_lens)
+    elif not lens_edges:
+        effective_lens = "is_a"
+        tree = project_hierarchy(concept_ids, lens=effective_lens)
+    else:
+        effective_lens = requested_lens
+        tree = project_lens(concept_ids, lens_edges, requested_spec, touch=touch)
+
+    reasons = set(core["reasons"])
+    complete = not reasons
+    authoritative = core["source_authoritative"] and complete
     completeness = {
         "complete": complete,
         "truncated": any(reason.endswith("_cap") for reason in reasons),
@@ -374,30 +422,27 @@ def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict
             "edges": MAX_EDGES,
             "edge_endpoints": MAX_EDGE_ENDPOINTS,
         },
-        "source": {"membership_nodes": inputs["source_membership_nodes"],
-                   "edges": inputs["source_edges"]},
+        "source": {"membership_nodes": core["source_membership_nodes"],
+                   "edges": core["source_edges"]},
         "included": {
-            "membership_nodes": len(memberships), "memberships": inputs["membership_count"],
-            "concepts": len(concept_ids), "tree_nodes": len(tree.get("nodes") or {}),
-            "edges": len(edges), "experiment_refs": reference_count,
+            "membership_nodes": core["included_membership_nodes"],
+            "memberships": core["membership_count"],
+            "concepts": len(concept_ids),
+            "tree_nodes": len(tree.get("nodes") or {}),
+            "edges": len(edges),
+            "experiment_refs": core["reference_count"],
         },
-        "source_integrity": ({"complete": True, "generation_identified": bool(generation)}
-                             if source_divergence is None else {
-                                 "complete": False,
-                                 "generation_identified": bool(generation),
-                                 "corrupt_line": source_divergence.get("corrupt_line"),
-                                 "dropped_lines": source_divergence.get("dropped_lines"),
-                             }),
+        "source_integrity": core["source_integrity"],
     }
     return {
         "schema": CONCEPT_FRAME_SCHEMA,
         "status": "complete" if complete else "partial",
-        "run_id": run_id,
-        RUN_GENERATION_FIELD: generation or None,
-        "requested_seq": requested_seq,
-        "captured_seq": captured_seq,
-        "max_seq": max_seq,
-        "historical": captured_seq < max_seq,
+        "run_id": core["run_id"],
+        RUN_GENERATION_FIELD: core[RUN_GENERATION_FIELD],
+        "requested_seq": core["requested_seq"],
+        "captured_seq": core["captured_seq"],
+        "max_seq": core["max_seq"],
+        "historical": core["captured_seq"] < core["max_seq"],
         "requested_lens": requested_lens,
         "effective_lens": effective_lens,
         "lens": effective_lens,
@@ -415,15 +460,15 @@ def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict
         },
         "lenses": lens_pack,
         "tree": tree,
-        "metrics": metrics,
+        "metrics": core["metrics"],
         "touch": touch,
         "edges_present": bool(edges),
         "lens_edges_present": (False if requested_spec.get("kind") == "path" else bool(lens_edges)),
-        "experiment_refs": experiment_refs,
+        "experiment_refs": core["experiment_refs"],
         "authoritative": authoritative,
         "authority": {
             "authoritative": authoritative,
-            "source_authoritative": source_authoritative,
+            "source_authoritative": core["source_authoritative"],
             "complete": complete,
             "scope": "captured_recoverable_event_prefix",
             # Membership is authoritative AS A RECORDED CLAIM, not proof of taxonomy truth.
@@ -433,8 +478,23 @@ def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict
             "source": "events.jsonl",
             "projection": "event_log_fold",
             "membership_semantics": "recorded_claims",
-            "membership_counts": dict(sorted(provenance_counts.items())),
+            "membership_counts": core["provenance_counts"],
         },
         "complete": complete,
         "completeness": completeness,
     }
+
+
+def build_frame(state, *, run_id: str, requested_lens: str, lens_pack: list[dict],
+                generation: Optional[str], requested_seq: Optional[int], captured_seq: int,
+                max_seq: int, source_divergence: Optional[dict],
+                requested_spec: Optional[dict] = None,
+                lens_registration: str = "shipped") -> dict:
+    """Compatibility wrapper: build one core, then apply one pure lens projection."""
+    core = build_core(
+        state, run_id=run_id, lens_pack=lens_pack, generation=generation,
+        requested_seq=requested_seq, captured_seq=captured_seq, max_seq=max_seq,
+        source_divergence=source_divergence)
+    return project_frame(
+        core, requested_lens=requested_lens, lens_pack=lens_pack,
+        requested_spec=requested_spec, lens_registration=lens_registration)

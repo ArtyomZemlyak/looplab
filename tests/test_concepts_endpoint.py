@@ -1,5 +1,5 @@
 """Phase 3c: the GET /api/runs/{id}/concepts serve endpoint — per-lens hierarchy + per-concept
-metrics/Δ + the lens pack, end to end (fold -> read-models -> JSON). Pure; recomputed each call."""
+metrics/Δ + the lens pack, end to end (fold -> bounded core -> pure lens projection -> JSON)."""
 import pytest
 
 pytest.importorskip("fastapi")
@@ -457,3 +457,155 @@ def test_derive_lens_caps_body_prompt_and_refuses_partial_source(tmp_path, monke
     assert partial.status_code == 200 and partial.headers["cache-control"] == "no-store"
     assert payload["ok"] is False and payload["reason"] == "concept_frame_partial"
     assert payload["status"] == "partial" and payload["authoritative"] is False
+
+
+def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_path, monkeypatch):
+    # CODEX AGENT: lens changes are view-only. They must not replay the same event prefix, while every
+    # byte-version transition (append, corruption, atomic replacement) must force a new generation-safe
+    # core and must never turn the process-local optimization into an HTTP-cacheable response.
+    import looplab.serve.routers.runs as runs_router
+
+    fold_calls = 0
+    core_calls = 0
+    real_fold = runs_router.fold
+    real_build_core = runs_router._build_concept_core
+
+    def counted_fold(events):
+        nonlocal fold_calls
+        fold_calls += 1
+        return real_fold(events)
+
+    def counted_build_core(*args, **kwargs):
+        nonlocal core_calls
+        core_calls += 1
+        return real_build_core(*args, **kwargs)
+
+    monkeypatch.setattr(runs_router, "fold", counted_fold)
+    monkeypatch.setattr(runs_router, "_build_concept_core", counted_build_core)
+    rd = _edge_run(tmp_path)
+    log = rd / "events.jsonl"
+    client = TestClient(make_app(tmp_path))
+
+    first = client.get("/api/runs/demo/concepts")
+    first_payload = first.json()
+    assert first.status_code == 200 and first.headers["cache-control"] == "no-store"
+    assert (fold_calls, core_calls) == (1, 1)
+    for params in ({"lens": "uses"}, {"lens": "usage", "rels": "uses"}):
+        response = client.get("/api/runs/demo/concepts", params=params)
+        assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert (fold_calls, core_calls) == (1, 1)                    # same core, two pure lenses
+
+    historical = client.get("/api/runs/demo/concepts", params={"seq": 2})
+    assert historical.status_code == 200 and (fold_calls, core_calls) == (2, 2)
+    historical_other_lens = client.get(
+        "/api/runs/demo/concepts", params={"seq": 2, "lens": "uses"})
+    assert historical_other_lens.status_code == 200 and (fold_calls, core_calls) == (2, 2)
+
+    EventStore(log).append(
+        "node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
+                         "idea": {"operator": "improve", "params": {}, "rationale": "r",
+                                  "concepts": ["cache/append"]}})
+    appended = client.get("/api/runs/demo/concepts").json()
+    assert "cache/append" in appended["tree"]["nodes"]
+    assert (fold_calls, core_calls) == (3, 3)
+    client.get("/api/runs/demo/concepts", params={"lens": "uses"})
+    assert (fold_calls, core_calls) == (3, 3)                    # appended version is reusable too
+
+    with log.open("ab") as stream:
+        stream.write(b"{not-json}\n")
+    corrupt = client.get("/api/runs/demo/concepts").json()
+    assert corrupt["status"] == "partial"
+    assert "event_log_corruption" in corrupt["completeness"]["reasons"]
+    assert (fold_calls, core_calls) == (4, 4)                    # corruption invalidates clean core
+    client.get("/api/runs/demo/concepts", params={"lens": "uses"})
+    assert (fold_calls, core_calls) == (4, 4)                    # corrupt prefix stays reusable
+
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    replacement_log = replacement_dir / "events.jsonl"
+    replacement = EventStore(replacement_log)
+    replacement.append(
+        "run_started", {"run_id": "demo", "task_id": "new", "goal": "new", "direction": "max"})
+    replacement.append(
+        "node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                         "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                  "concepts": ["replacement/generation"]}})
+    replacement_log.replace(log)
+    replaced = client.get("/api/runs/demo/concepts").json()
+    assert (fold_calls, core_calls) == (5, 5)
+    assert replaced["generation"] != first_payload["generation"]
+    assert "replacement/generation" in replaced["tree"]["nodes"]
+    assert "cache/append" not in replaced["tree"]["nodes"]
+
+
+def test_concept_core_cache_bounds_prefixes_and_total_entries(monkeypatch):
+    import looplab.serve.routers.runs as runs_router
+
+    monkeypatch.setattr(runs_router, "_CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE", 2)
+    monkeypatch.setattr(runs_router, "_CONCEPT_CORE_CACHE_MAX_ENTRIES", 3)
+    cache = runs_router._ConceptCoreCache()
+    source_a = ("a/events.jsonl", 1, 10, 100, 100, 100)
+    source_b = ("b/events.jsonl", 1, 20, 100, 100, 100)
+    source_c = ("c/events.jsonl", 1, 30, 100, 100, 100)
+    for seq in (1, 2, 3):
+        cache.put(source_a, seq, {"generation": "a"})
+    assert len(cache._entries) == 2
+    assert {key[1] for key in cache._entries} == {2, 3}
+
+    cache.put(source_b, None, {"generation": "b"})
+    cache.put(source_c, None, {"generation": "c"})
+    assert len(cache._entries) == 3
+    assert all(key[0] != source_a or key[1] == 3 for key in cache._entries)
+
+    # A new byte identity at the same path proactively retires the prior generation's entries.
+    replaced_a = ("a/events.jsonl", 1, 11, 101, 101, 101)
+    assert cache.get(replaced_a, None) is None
+    assert all(key[0][0] != source_a[0] for key in cache._entries)
+
+
+def test_concept_core_cache_retries_unknown_identity_before_replacement(tmp_path, monkeypatch):
+    import looplab.serve.routers.runs as runs_router
+
+    rd = _demo_run(tmp_path)
+    log = rd / "events.jsonl"
+    replacement_dir = tmp_path / "replacement"
+    replacement_dir.mkdir()
+    replacement_log = replacement_dir / "events.jsonl"
+    replacement = EventStore(replacement_log)
+    replacement.append(
+        "run_started", {"run_id": "demo", "task_id": "new", "goal": "new", "direction": "max"})
+    replacement.append(
+        "node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                         "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                  "concepts": ["replacement/stable"]}})
+
+    real_identity = runs_router._concept_event_file_identity
+    identity_calls = 0
+
+    def replace_after_unknown_before(path):
+        nonlocal identity_calls
+        identity_calls += 1
+        if identity_calls == 1:
+            return None
+        if identity_calls == 2:
+            replacement_log.replace(log)
+        return real_identity(path)
+
+    monkeypatch.setattr(runs_router, "_concept_event_file_identity", replace_after_unknown_before)
+    client = TestClient(make_app(tmp_path))
+    first = client.get("/api/runs/demo/concepts").json()
+    second = client.get("/api/runs/demo/concepts").json()
+    assert "replacement/stable" in first["tree"]["nodes"]
+    assert "replacement/stable" in second["tree"]["nodes"]
+    assert "loss/contrastive/dcl" not in first["tree"]["nodes"]
+
+
+def test_concept_core_cache_partitions_request_run_id_aliases():
+    import looplab.serve.routers.runs as runs_router
+
+    cache = runs_router._ConceptCoreCache()
+    identity = ("real/events.jsonl", 1, 10, 100, 100, 100)
+    first = {"generation": "g", "run_id": "first-alias"}
+    cache.put(identity, None, first)
+    assert cache.get(identity, None, run_id="second-alias") is None
+    assert cache.get(identity, None, run_id="first-alias") is first

@@ -3,8 +3,10 @@ traces, provenance, artifacts, config and cost. Handler bodies are verbatim move
 `serve/server.py::make_app` (BACKLOG §4); captured locals now live on `srv` (AppState)."""
 from __future__ import annotations
 
+from collections import OrderedDict
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Optional
@@ -32,12 +34,13 @@ from looplab.serve.concept_frame import (
     MAX_LENS_BODY_BYTES as _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
     MAX_LENS_PROMPT_BYTES as _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
     MAX_LENS_PROMPT_CHARS as _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS,
-    bounded_inputs as _bounded_concept_inputs,
     bounded_lens_label as _bounded_lens_label,
-    build_frame as _build_concept_frame,
+    build_core as _build_concept_core,
+    core_lens_inputs as _concept_core_lens_inputs,
     folded_concepts as _folded_concepts,  # noqa: F401 - compatibility seam for pure callers/tests
     lens_request as _concept_lens_request,
     normalized_custom_lens_name as _normalized_custom_lens_name,
+    project_frame as _project_concept_frame,
 )
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
@@ -58,6 +61,82 @@ from looplab.serve.run_commands import run_generation_token
 # fallback in node_logs deliberately stays per-poll: looplab_stages.json is written mid-node by the
 # Developer's STAGES phase, so it can appear between polls and differs node to node.
 _OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
+
+
+_CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
+_CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
+
+
+def _concept_event_file_identity(path: Path) -> Optional[tuple]:
+    """Identity of the exact on-disk byte version a ConceptFrame core was folded from."""
+    try:
+        status = path.stat()
+    except OSError:
+        return None
+    return (
+        str(path.absolute()),
+        status.st_dev,
+        status.st_ino,
+        status.st_ctime_ns,
+        status.st_mtime_ns,
+        status.st_size,
+    )
+
+
+def _concept_relation_registry_identity(lens_pack: list[dict]) -> tuple[str, ...]:
+    """Only the shipped relation vocabulary influences bounded core edge acceptance."""
+    return tuple(sorted({relation for lens in lens_pack if isinstance(lens, dict)
+                         for relation in (lens.get("rels") or []) if isinstance(relation, str)}))
+
+
+class _ConceptCoreCache:
+    """Small thread-safe LRU of bounded, lens-independent ConceptFrame cores.
+
+    Keys retain generation and the relation-registry version in addition to file identity and requested
+    prefix. Generation is not separately read on a hit (that would itself scan the log); instead the
+    lookup matches the exact file identity + seq pair and the stored key records the generation proved
+    by that folded prefix.
+    """
+
+    def __init__(self):
+        self._entries: OrderedDict[tuple, dict] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def get(self, identity: tuple, requested_seq: Optional[int],
+            relation_registry: tuple[str, ...] = (),
+            run_id: Optional[str] = None) -> Optional[dict]:
+        with self._lock:
+            source = identity[0]
+            # CODEX AGENT: an append, same-path replacement, or corruption changes at least one exact
+            # stat field. Drop every old version for that path before lookup so generations and damaged
+            # versus authoritative prefixes cannot coexist indefinitely in this bounded cache.
+            for key in [key for key in self._entries
+                        if key[0][0] == source and key[0] != identity]:
+                del self._entries[key]
+            for key in reversed(tuple(self._entries)):
+                # CODEX AGENT: run_id is request identity echoed in the cached core. Two legal URL
+                # aliases can resolve to one events file, so sharing their source identity must not
+                # make one endpoint return the other alias in its versioned response.
+                if (key[0] == identity and key[1] == requested_seq
+                        and key[3] == relation_registry and key[4] == run_id):
+                    core = self._entries[key]
+                    self._entries.move_to_end(key)
+                    return core
+        return None
+
+    def put(self, identity: tuple, requested_seq: Optional[int], core: dict,
+            relation_registry: tuple[str, ...] = ()) -> None:
+        key = (identity, requested_seq, core.get(RUN_GENERATION_FIELD), relation_registry,
+               core.get("run_id"))
+        with self._lock:
+            self._entries[key] = core
+            self._entries.move_to_end(key)
+            source_keys = [existing for existing in self._entries
+                           if existing[0][0] == identity[0]]
+            while len(source_keys) > _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE:
+                del self._entries[source_keys.pop(0)]
+            while len(self._entries) > _CONCEPT_CORE_CACHE_MAX_ENTRIES:
+                self._entries.popitem(last=False)
 
 
 def _operator_stage_names(rd: Path) -> tuple:
@@ -110,6 +189,58 @@ def build_router(srv) -> APIRouter:
         return {"schema": TRACE_PROJECTION_SCHEMA, **shape,
                 "projection": unavailable_projection()}
     _state_payload = srv.state_payload
+    concept_core_cache = _ConceptCoreCache()
+
+    def _materialize_concept_core(rd: Path, run_id: str, requested_seq: Optional[int],
+                                  lens_pack: list[dict]) -> dict:
+        """Fold one stable event-file snapshot and cache only its bounded ConceptFrame core."""
+        path = rd / "events.jsonl"
+        relation_registry = _concept_relation_registry_identity(lens_pack)
+
+        def _from_snapshot(events, source_divergence):
+            if not events:
+                raise HTTPException(409, {
+                    "code": "run_generation_unavailable",
+                    "message": "The run has no durable generation identity.",
+                    "remediation": "Wait for run_started, then refresh concepts.",
+                })
+            projected = (events if requested_seq is None
+                         else [event for event in events if event.seq <= requested_seq])
+            generation = run_generation_token(projected)
+            max_seq = max((event.seq for event in events), default=-1)
+            captured_seq = max((event.seq for event in projected), default=-1)
+            return _build_concept_core(
+                fold(projected), run_id=run_id, lens_pack=lens_pack,
+                generation=generation, requested_seq=requested_seq,
+                captured_seq=captured_seq, max_seq=max_seq,
+                source_divergence=source_divergence)
+
+        # A read raced by an append/replacement is still a coherent prefix, but it has no stat identity
+        # we can safely reuse. Retry a few times for a cacheable stable view, then serve one uncached
+        # coherent snapshot rather than delaying a busy live run indefinitely.
+        for _attempt in range(3):
+            identity = _concept_event_file_identity(path)
+            if identity is not None:
+                cached = concept_core_cache.get(
+                    identity, requested_seq, relation_registry, run_id=run_id)
+                if (cached is not None
+                        and _concept_event_file_identity(path) == identity):
+                    return cached
+            source = EventStore(path)
+            events = source.read_all()
+            after = _concept_event_file_identity(path)
+            # CODEX AGENT: equality is required even when the first stat failed. Treating
+            # ``None -> identity B`` as stable could cache bytes read from replaced generation A
+            # under B's identity and poison every later hit until the file changed again.
+            if after != identity:
+                continue
+            core = _from_snapshot(events, source.divergence)
+            if identity is not None:
+                concept_core_cache.put(after, requested_seq, core, relation_registry)
+            return core
+
+        source = EventStore(path)
+        return _from_snapshot(source.read_all(), source.divergence)
 
     # ------------------------------------------------------------------ runs list
     # File identity is part of the signature: reset replaces events.jsonl and can preserve both
@@ -210,28 +341,12 @@ def build_router(srv) -> APIRouter:
                 "message": "Historical concept sequence must be -1 or greater.",
             })
 
-        # CODEX AGENT: one event snapshot owns fold + seq/max_seq + generation. Separate reads can
-        # combine generation A's taxonomy with generation B's identity during same-id replacement.
-        source = EventStore(rd / "events.jsonl")
-        all_events = source.read_all()
-        if not all_events:
-            raise HTTPException(409, {
-                "code": "run_generation_unavailable",
-                "message": "The run has no durable generation identity.",
-                "remediation": "Wait for run_started, then refresh concepts.",
-            })
-        projected_events = (all_events if seq is None
-                            else [event for event in all_events if event.seq <= seq])
-        # A historical prefix before run_started has NO generation. Never borrow the current log's token:
-        # that would identify empty generation-less state as a snapshot of work that did not exist yet.
-        generation = run_generation_token(projected_events)
-        max_seq = max((event.seq for event in all_events), default=-1)
-        captured_seq = max((event.seq for event in projected_events), default=-1)
-        frame = _build_concept_frame(
-            fold(projected_events), run_id=run_id, requested_lens=canonical_lens, lens_pack=lens_pack,
-            generation=generation, requested_seq=seq, captured_seq=captured_seq, max_seq=max_seq,
-            source_divergence=source.divergence, requested_spec=requested_spec,
-            lens_registration=lens_registration)
+        # CODEX AGENT: the exact event-prefix fold and every lens-independent bounded read model are
+        # cached together; switching lenses now performs only this pure tree projection.
+        core = _materialize_concept_core(rd, run_id, seq, lens_pack)
+        frame = _project_concept_frame(
+            core, requested_lens=canonical_lens, lens_pack=lens_pack,
+            requested_spec=requested_spec, lens_registration=lens_registration)
         response.headers["Cache-Control"] = "no-store"
         return frame
 
@@ -269,25 +384,20 @@ def build_router(srv) -> APIRouter:
                 "max_bytes": _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
             })
 
-        source = EventStore(rd / "events.jsonl")
-        events = source.read_all()
-        generation = run_generation_token(events)
+        lens_pack = default_lenses()
+        core = _materialize_concept_core(rd, run_id, None, lens_pack)
+        generation = core[RUN_GENERATION_FIELD]
         if not generation:
             raise HTTPException(409, {
                 "code": "run_generation_unavailable",
                 "message": "The run has no durable generation identity.",
             })
-        max_seq = max((event.seq for event in events), default=-1)
-        state = fold(events)
-        lens_pack = default_lenses()
-        base_frame = _build_concept_frame(
-            state, run_id=run_id, requested_lens="is_a", lens_pack=lens_pack,
-            generation=generation, requested_seq=None, captured_seq=max_seq, max_seq=max_seq,
-            source_divergence=source.divergence)
+        base_frame = _project_concept_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
         response.headers["Cache-Control"] = "no-store"
         if not base_frame["complete"]:
             return {**base_frame, "ok": False, "reason": "concept_frame_partial"}
-        inputs = _bounded_concept_inputs(state, lens_pack)
+        inputs = _concept_core_lens_inputs(core)
         # The LLM call (client build + one structured turn) runs off the event loop; both offline client
         # construction and any model failure fall through derive_lens' own best-effort None / this guard.
         def _mint():
@@ -319,11 +429,9 @@ def build_router(srv) -> APIRouter:
         })
         if spec.get("root") in set(inputs["concept_ids"]):
             validated_spec["root"] = spec["root"]
-        frame = _build_concept_frame(
-            state, run_id=run_id, requested_lens=canonical_name, lens_pack=lens_pack,
-            generation=generation, requested_seq=None, captured_seq=max_seq, max_seq=max_seq,
-            source_divergence=source.divergence, requested_spec=validated_spec,
-            lens_registration=registration)
+        frame = _project_concept_frame(
+            core, requested_lens=canonical_name, lens_pack=lens_pack,
+            requested_spec=validated_spec, lens_registration=registration)
         return {**frame, "ok": True, "spec": validated_spec}
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
