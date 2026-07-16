@@ -1006,6 +1006,58 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
     return {"lens": lens_name, "roots": roots, "nodes": nodes}
 
 
+def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_call") -> Optional[dict]:
+    """Agentically MINT a lens in the moment from a natural-language request — the "create a lens" tool.
+    A lens is a pure PROJECTION spec (a relation-subset + optional root + labels); it writes NO events
+    and grows NO edges, so it is entirely view-state and REPLAY-CLEAN. The model picks which of the
+    AVAILABLE relation types (those present in `edges`, plus is_a) count as nesting, and optionally a
+    root concept to focus on. Best-effort: returns None on no client / empty prompt / any failure / an
+    empty-or-invalid choice, so the caller falls back to a default lens. Impure (one LLM call) by
+    design; the returned spec is consumed by project_lens / project_hierarchy."""
+    if client is None or not str(prompt or "").strip():
+        return None
+    try:
+        from pydantic import BaseModel, Field
+
+        from looplab.core.parse import parse_structured
+
+        avail = sorted({str(e.get("rel")) for e in (edges or {}).values()
+                        if isinstance(e, dict) and e.get("rel")} | {"is_a"})
+        vocab = sorted({v for e in (edges or {}).values() if isinstance(e, dict)
+                        for v in (_normalize_concept_id(e.get("src")), _normalize_concept_id(e.get("dst")))
+                        if v} | {c for c in (_normalize_concept_id(x) for x in (concepts or [])) if c})
+
+        class _LensOut(BaseModel):
+            name: str = ""
+            label: str = ""
+            rels: list[str] = Field(default_factory=list)
+            root: str = ""
+
+        system = (
+            "You turn a user's request into a LENS over a concept graph — a way to VIEW its hierarchy. A "
+            "lens picks which RELATION TYPES count as nesting (the tree follows edges of those types). "
+            "Choose ONLY from the AVAILABLE relations below. Optionally name a ROOT concept to focus the "
+            "view on (from the vocabulary), else leave it empty. Give a short lower-case `name` slug and a "
+            "human `label`. Call `emit` once.\n\nAVAILABLE RELATIONS: " + ", ".join(avail)
+            + ("\n\nCONCEPT VOCABULARY (sample):\n" + "\n".join(f"- {c}" for c in vocab[:60])
+               if vocab else ""))
+        out = parse_structured(client, [{"role": "system", "content": system},
+                                        {"role": "user", "content": str(prompt).strip()[:800]}],
+                               _LensOut, parser)
+        rels = [r for r in (out.rels or []) if r in set(avail)]
+        if not rels:
+            return None
+        name = _normalize_concept_id(out.name) or "-".join(rels)[:24] or "lens"
+        spec = {"name": name, "label": (out.label or name).strip()[:60], "rels": rels,
+                "kind": "path" if rels == ["is_a"] else "edge", "provenance": "agent"}
+        root = _normalize_concept_id(out.root)
+        if root:
+            spec["root"] = root
+        return spec
+    except Exception:  # noqa: BLE001 — minting a lens is best-effort; fall back to a default lens
+        return None
+
+
 def uncovered_regions(state: RunState, graph: ConceptGraph,
                       tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
     """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
