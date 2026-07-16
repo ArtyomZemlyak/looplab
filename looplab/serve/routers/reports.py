@@ -58,6 +58,7 @@ _PRIOR_REPORT_MAX_FILES = 256
 _PRIOR_REPORT_MAX_RECORDS = 20
 _PRIOR_REPORT_MAX_NEXT_DIRECTIONS = 2
 _PRIOR_REPORT_MAX_BYTES = 8 * 1024
+_PRIOR_REPORT_PARSE_MAX_BYTES = 16 * 1024 * 1024
 _SCOPE_REPORT_RECORD_MAX_BYTES = 512 * 1024
 
 
@@ -444,10 +445,25 @@ def _prior_learnings_index(reports_dir: Path) -> str:
     except OSError:
         return ""
 
+    def _safe_text(value: object, max_chars: int) -> str:
+        clean = redact_persisted_text(
+            value, max_chars=max_chars, entropy=True, single_line=True)
+        return " ".join(clean.split())
+
     records: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
+    parsed_bytes = 0
+    parse_limited = False
     for filename in sorted(discovered_names):
         try:
             p = _confined_report_path(base, filename)
+            candidate_bytes = int(p.lstat().st_size)
+            if candidate_bytes < 0 or (
+                    parsed_bytes + candidate_bytes > _PRIOR_REPORT_PARSE_MAX_BYTES):
+                parse_limited = True
+                continue
+            # Count attempted bytes too: a directory full of corrupt bounded JSON must not bypass
+            # the aggregate work budget merely because none of it becomes prompt evidence.
+            parsed_bytes += candidate_bytes
             rec = _read_json_record(p)
             if rec is None:
                 continue
@@ -471,36 +487,33 @@ def _prior_learnings_index(reports_dir: Path) -> str:
                 )
             if not valid:
                 continue
+            content = rec.get("content") or {}
+            raw_directions = content.get("next_directions")
+            directions = (
+                raw_directions if isinstance(raw_directions, (list, tuple)) else ())
+            projection = {
+                "scope": {
+                    "type": _safe_text(scope_type, 32),
+                    "id": _safe_text(scope_id, 160),
+                    "label": _safe_text(
+                        (rec.get("scope") or {}).get("label") or "scope report", 200),
+                },
+                "headline": _safe_text(content.get("headline") or "", 500),
+                "next_directions": [
+                    _safe_text(value, 300)
+                    for value in directions[:_PRIOR_REPORT_MAX_NEXT_DIRECTIONS]
+                ],
+            }
         except (OSError, RuntimeError, UnicodeError, json.JSONDecodeError,
                 _ScopeReportStorageConflict):
             continue
         key = (scope_type, scope_id)
         if key not in records or priority > records[key][0]:
-            records[key] = (priority, rec)
+            # Keep only the already-redacted compact projection. Retaining the full parsed record for
+            # every eligible file would amplify a 16 MiB byte budget into far larger Python objects.
+            records[key] = (priority, projection)
 
-    def _safe_text(value: object, max_chars: int) -> str:
-        clean = redact_persisted_text(
-            value, max_chars=max_chars, entropy=True, single_line=True)
-        return " ".join(clean.split())
-
-    projected = []
-    for (scope_type, scope_id), (_priority, rec) in sorted(records.items()):
-        c = rec.get("content") or {}
-        raw_directions = c.get("next_directions")
-        directions = raw_directions if isinstance(raw_directions, (list, tuple)) else ()
-        projected.append({
-            "scope": {
-                "type": _safe_text(scope_type, 32),
-                "id": _safe_text(scope_id, 160),
-                "label": _safe_text(
-                    (rec.get("scope") or {}).get("label") or "scope report", 200),
-            },
-            "headline": _safe_text(c.get("headline") or "", 500),
-            "next_directions": [
-                _safe_text(value, 300)
-                for value in directions[:_PRIOR_REPORT_MAX_NEXT_DIRECTIONS]
-            ],
-        })
+    projected = [row for _key, (_priority, row) in sorted(records.items())]
 
     if not projected:
         return ""
@@ -518,11 +531,14 @@ def _prior_learnings_index(reports_dir: Path) -> str:
                 # Reaching the scan ceiling is conservatively reported as limited without reading a
                 # 257th entry solely to discover whether it exists.
                 "scan_limited": inspected_files >= _PRIOR_REPORT_MAX_FILES,
+                "parse_limited": parse_limited,
+                "parsed_bytes": parsed_bytes,
                 "limits": {
                     "max_files": _PRIOR_REPORT_MAX_FILES,
                     "max_records": _PRIOR_REPORT_MAX_RECORDS,
                     "max_next_directions": _PRIOR_REPORT_MAX_NEXT_DIRECTIONS,
                     "max_bytes": _PRIOR_REPORT_MAX_BYTES,
+                    "max_parse_bytes": _PRIOR_REPORT_PARSE_MAX_BYTES,
                 },
             },
         }

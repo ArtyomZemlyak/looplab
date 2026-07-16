@@ -2716,12 +2716,42 @@ def test_prior_learnings_index_is_bounded_redacted_json(tmp_path):
     assert all(len(row["next_directions"]) <= 2 for row in payload["records"])
     assert payload["receipt"]["eligible_records"] == 24
     assert payload["receipt"]["omitted_records"] == 24 - len(payload["records"])
+    assert payload["receipt"]["parse_limited"] is False
+    assert payload["receipt"]["parsed_bytes"] > 0
     assert payload["receipt"]["limits"] == {
         "max_bytes": 8 * 1024,
         "max_files": 256,
         "max_next_directions": 2,
+        "max_parse_bytes": 16 * 1024 * 1024,
         "max_records": 20,
     }
+
+
+def test_prior_learnings_index_discards_full_records_under_aggregate_budget(
+        tmp_path, monkeypatch):
+    """Prior evidence retains compact projections and stops parsing at a total byte budget."""
+    from looplab.serve.routers import reports
+
+    _seed_scope_run(tmp_path, "prior-run", "seed-task")
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    monkeypatch.setattr(reports, "_PRIOR_REPORT_PARSE_MAX_BYTES", 4_000)
+    for index in range(3):
+        task_id = f"budgeted-prior-{index}"
+        record = _legacy_scope_record(
+            tmp_path, "prior-run", task_id, f"headline {index}")
+        record["scope_identity"] = {"type": "task", "id": task_id}
+        record["private_padding"] = "x" * 1_200
+        reports._scope_report_path(reports_dir, "task", task_id).write_text(
+            json.dumps(record), encoding="utf-8")
+
+    payload = json.loads(reports._prior_learnings_index(reports_dir))
+
+    assert 0 < len(payload["records"]) < 3
+    assert payload["receipt"]["parse_limited"] is True
+    assert payload["receipt"]["parsed_bytes"] <= 4_000
+    assert payload["receipt"]["limits"]["max_parse_bytes"] == 4_000
+    assert "private_padding" not in json.dumps(payload)
 
 
 def test_prior_learnings_index_inspects_at_most_256_directory_entries(
