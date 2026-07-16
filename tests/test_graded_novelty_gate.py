@@ -101,6 +101,9 @@ def test_f2_grades_from_the_cached_llm_tags_and_agentic_idea_tag(tmp_path):
     s = _run(tmp_path, task_id="totally-unknown-task")     # no curated skeleton -> vocab must come from cache
     # the agentic node tagger (Feature 1) assigned node 0 a grown concept the skeleton never had:
     s.append("node_concepts", {"node_id": 0, "concepts": ["encoderarch/adapter-tuning"], "mode": "llm"})
+    # An explicit empty classifier result is still a complete receipt. The admission override must
+    # never infer "no concepts" merely because a node has not reached the classifier cadence yet.
+    s.append("node_concepts", {"node_id": 1, "concepts": [], "mode": "llm"})
     eng = _GateEngine(s, graded=True)
     eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
     # a materially-different proposal on that SAME grown direction (different params + rationale)
@@ -108,9 +111,28 @@ def test_f2_grades_from_the_cached_llm_tags_and_agentic_idea_tag(tmp_path):
     out = eng._graded_novelty_precheck(fold(s.read_all()), idea)
     assert out is idea                                     # level-4 ALLOW short-circuit
     replayed = fold(s.read_all())
-    assert replayed.node_concept_provenance == {0: "classifier"}
+    assert replayed.node_concept_provenance == {0: "classifier", 1: "classifier"}
     g = replayed.novelty_grades[-1]
     assert g["level"] == 4 and "encoderarch/adapter-tuning" in g["shared_concepts"]
+
+
+def test_partial_classifier_cache_defers_instead_of_treating_new_nodes_as_concept_free(tmp_path):
+    """A mixed classified/unknown snapshot cannot certify a graded-novelty admission override."""
+    s = _run(tmp_path, task_id="totally-unknown-task")
+    s.append("node_concepts", {"node_id": 0,
+                                "concepts": ["encoderarch/adapter-tuning"], "mode": "llm"})
+    state = fold(s.read_all())
+    assert state.node_concept_provenance == {0: "classifier"}  # node 1 is still UNKNOWN
+
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a different adapter bottleneck size")
+
+    # CODEX AGENT: deferral preserves the ordinary novelty gate; an incomplete cadence may not hide
+    # the newest duplicate/win and manufacture a level-4 or level-5 short-circuit.
+    assert eng._graded_novelty_precheck(state, candidate) is None
+    assert fold(s.read_all()).novelty_grades == []
 
 
 def test_researcher_authored_concepts_cannot_certify_agentic_bypass(tmp_path):

@@ -266,7 +266,7 @@ class NoveltyGateMixin:
         this bypass. It degrades to the skeleton + deterministic heuristic when the trusted cache is empty."""
         if not getattr(self, "_graded_novelty", False) or not state.nodes:
             return None
-        from looplab.search.concept_graph import graph_from_node_concepts, skeleton_for
+        from looplab.search.concept_graph import _experiment_nodes, graph_from_node_concepts, skeleton_for
         from looplab.search.graded_novelty import grade_novelty, tag_idea_llm
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
@@ -276,23 +276,22 @@ class NoveltyGateMixin:
         # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
         # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
         # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
-        # REVIEW(2026-07-16): this filter is fail-closed only when it empties the map ENTIRELY (the
-        # case the 6b3eac4 tests cover). The mixed case is fail-OPEN: classifier events are emitted
-        # only at the strategist cadence (every `strategist_every` nodes), so every node created SINCE
-        # the last cadence is filtered out here yet grade_novelty/failed_directions treat absence as
-        # "touches no concepts" (tags.get(nid, frozenset())). Consequences on an all-default run:
-        # (1) a reworded near-repeat of the NEWEST node cannot grade level 2 (that node is invisible
-        # to same_concept_nodes), grades 4/5 via an older node, and the param-delta backstop below
-        # compares only against grade.near_node — the OLDER node — so it short-circuits past the flat
-        # gate pre-6b3eac4 authored tags would have caught; (2) a direction whose newest un-classified
-        # node just WON still grades level-5 wrongly_abandoned (failed_directions can't see the win).
-        # The filter should treat not-yet-classified nodes as UNKNOWN (defer/exclude from grading),
-        # not as concept-free evidence — e.g. fall back to authored tags for nodes with no classifier
-        # receipt, marked as untrusted for the bypass decision only.
+        experiment_ids = {nd.id for nd in _experiment_nodes(state)}
+        classifier_ids = {
+            nid for nid in experiment_ids
+            if nid in all_node_concepts
+            and concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+        }
+        # CODEX AGENT: a partial cadence is UNKNOWN coverage, not evidence that the remaining nodes
+        # touch no concepts. Once any classifier receipt exists, every experiment must have one (an
+        # explicit empty list is valid) before this precheck may issue an L4/L5 admission override.
+        # Otherwise a post-cadence near-repeat or win could disappear from the grade; defer to the
+        # ordinary flat gate without mixing proposer-authored labels into the trusted channel.
+        if classifier_ids and classifier_ids != experiment_ids:
+            return None
         node_concepts = {
-            nid: concepts
-            for nid, concepts in all_node_concepts.items()
-            if concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+            nid: all_node_concepts[nid]
+            for nid in classifier_ids
         }
         # Everything below is guarded: a reconstruction / tagger / grader hiccup must NEVER block proposing.
         try:
