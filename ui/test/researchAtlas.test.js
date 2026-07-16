@@ -330,8 +330,10 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
     'each source needs a bounded liveness escape')
   assert.match(atlas, /loaded \? value : 'not loaded'/,
     'summary values from a never-loaded slice need an explicit unavailable state')
-  assert.match(atlas, /view\.empty && allCurrent/,
-    'a successful empty state requires every independent source to be current')
+  assert.match(atlas, /view\.empty && <AtlasEmptyState/,
+    'empty and partial-empty projections need compact source-level readiness')
+  assert.match(atlas, /!view\.empty && <div className="atlas-grid">/,
+    'empty projections must not render four oversized empty panels')
   assert.match(atlas, /atlasLoaded && <>[\s\S]*No concepts returned\./)
   assert.match(atlas, /claimsLoaded && \(view\.claims\.length > 0[\s\S]*No claims returned\./)
   assert.match(atlas, /curationCurrent[\s\S]*incomplete merge/)
@@ -346,6 +348,53 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
     assert.match(atlas, new RegExp(`sourceKey="${key}"[\\s\\S]*?retry=\\{retry\\}`))
   }
   assert.match(atlas, /\[\['conceptCuration', 'Concept'\], \['claimCuration', 'Claim'\]\][\s\S]*sourceKey=\{sourceKey\}[\s\S]*retry=\{retry\}/)
+})
+
+test('Atlas empty state distinguishes evidence runs and each independent source', async () => {
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  const current = { state: 'current', loadedAt: '2026-07-16T10:00:00Z', revision: '1' }
+  const failed = { state: 'failed', loadedAt: '', revision: '' }
+  const stale = { state: 'retained-stale', loadedAt: '2026-07-16T09:00:00Z', revision: '1' }
+  try {
+    const { AtlasEmptyState } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const allCurrent = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+      sourceStates: {
+        atlas: current, claims: current, conceptCuration: current, claimCuration: current,
+      }, pending: [], retry() {}, busy: false, onBack() {},
+    }))
+    const currentDom = new JSDOM(allCurrent)
+    assert.match(currentDom.window.document.querySelector('h2').textContent, /No cross-run evidence/)
+    assert.match(currentDom.window.document.body.textContent,
+      /does not mean the project has no runs/)
+    assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source').length, 4)
+    assert.deepEqual([...currentDom.window.document.querySelectorAll('.atlas-readiness-state')]
+      .map(node => node.textContent), ['Empty', 'Empty', 'Empty', 'Empty'])
+    assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source .btn').length, 0)
+    assert.equal(currentDom.window.document.querySelector('a[href="#/settings"]')?.textContent,
+      'Memory settings')
+    assert.equal(currentDom.window.document.querySelector('.atlas-empty-actions button')?.textContent,
+      'Back to runs')
+
+    const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+      sourceStates: {
+        atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
+      }, pending: ['conceptCuration'], retry() {}, busy: false, onBack() {},
+    }))
+    const partialDom = new JSDOM(partial)
+    assert.match(partialDom.window.document.querySelector('h2').textContent,
+      /No current Atlas records/)
+    assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-readiness-state')]
+      .map(node => node.textContent), ['Empty', 'Unavailable', 'Loading', 'Stale'])
+    assert.deepEqual([...partialDom.window.document.querySelectorAll('.atlas-empty-source .btn')]
+      .map(node => node.getAttribute('aria-label')),
+    ['Retry Claim records', 'Retry Claim steward log'])
+    assert.equal(partialDom.window.document.querySelector('.atlas-empty-source-loading .btn'), null)
+  } finally {
+    await vite.close()
+  }
 })
 
 test('mounted Atlas settles sources progressively and fences timed-out or superseded reads', async () => {
@@ -523,8 +572,10 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(runList, /aria-label="Open Research Atlas preview"/)
   assert.match(atlas, /requestedSources\.forEach/)
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
-    /No cross-run memory yet/, /Some sources unavailable\./]) assert.match(atlas, state)
+    /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
+  assert.match(atlas, /Evidence runs[\s\S]*not the total run count/)
+  assert.match(atlas, /Atlas source readiness/)
   // Keep the implicit list role: role="region" would erase list semantics for assistive technology.
   assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
   assert.doesNotMatch(atlas, /<ul[^>]*role="region"/)
@@ -533,6 +584,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(atlas, /Some portfolio records were ignored\./)
   assert.match(atlas, /Refresh incomplete; showing stale last-good data/)
   assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)
+  assert.match(css, /\.atlas-source-loading \{[^}]*color: var\(--working-text\)/)
   assert.match(css, /\.atlas-source-failed \{[^}]*color: var\(--fail-text\)/)
   assert.match(atlas, /Concept observations[\s\S]*Concepts seen across runs/)
   assert.match(atlas, /Observed in one run/)
