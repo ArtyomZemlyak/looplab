@@ -1609,7 +1609,11 @@ export async function jobAwait(resp, {
 // "returns the final record" contract for callers.
 export async function genScopeReport(type, id) {
   const r = await jobAwait(await post(`${_scopeUrl(type, id)}/generate`, {}))
-  if (r && r.ok === false && r.error) throw new Error(r.error)
+  if (r && r.ok === false) {
+    const error = new Error(r.error || r.message || r.code || 'scope report generation failed')
+    error.code = r.code
+    throw error
+  }
   return r
 }
 

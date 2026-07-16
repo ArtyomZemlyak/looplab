@@ -90,7 +90,7 @@ function VerdictBanner({ v, rep, onOpenPanel }) {
   )
 }
 
-function ChampionCard({ state, best }) {
+function ChampionCard({ best }) {
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
   return (
@@ -300,7 +300,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       onToast?.(message)
     }
   }
-  const impr = (s) => (s.delta == null ? true : (state.direction === 'min' ? s.delta < 0 : s.delta > 0))
+  const impr = s => s.delta == null || (state.direction === 'min' ? s.delta < 0 : s.delta > 0)
   const modelCard = () => JSON.stringify({
     task: state.task_id, goal: state.goal, direction: state.direction, run_id: state.run_id,
     champion: best ? { node_id: best.id, operator: best.operator, metric: best.confirmed_mean ?? best.metric,
@@ -349,20 +349,20 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
           : 'The report will add a champion, trajectory, and reproducible solution after the first successful evaluation.'}</p>
       </div>}
 
-      {best && <><div className="section-h">Champion — the answer</div>
-        <ChampionCard state={state} best={best} />
+      {best && <><h2 className="section-h">Champion — the answer</h2>
+        <ChampionCard best={best} />
         {rep?.champion_summary && <div className="v" style={{ marginTop: 6 }}><Markdown text={rep.champion_summary} /></div>}</>}
 
       {a.steps.length > 0 && <>
-        <div className="section-h">How the metric got better</div>
+        <h2 className="section-h">{a.steps.length > 1 ? 'How the metric got better' : 'Metric baseline'}</h2>
         <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
-        <DataTable caption="Metric improvement steps" card={false}><table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
+        <DataTable caption="Metric trajectory steps" card={false}><table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>
-            <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-label={reportStepIdentity(s.operator, s.theme)}>
-              <span aria-hidden="true">{s.operator || 'unknown operator'}</span>
-              {s.theme && s.theme !== s.operator && <span aria-hidden="true" className="pill report-step-theme">{s.theme}</span>}
-            </span></td>
+            <td>{i + 1}</td><td>#{s.id}</td><td><span className="report-step-kind" aria-hidden="true">
+              {s.operator || 'unknown operator'}
+              {s.theme && s.theme !== s.operator && <span className="pill report-step-theme">{s.theme}</span>}
+            </span><span className="sr-only">{reportStepIdentity(s.operator, s.theme)}</span></td>
             <td>{fmt(s.to)}</td>
             <td className={`report-delta ${s.delta == null ? 'baseline' : (impr(s) ? 'improved' : 'regressed')}`}>{s.delta == null ? 'baseline' : fmt(s.delta)}</td>
             <td className="muted">{paramDiffLabel(s.diff)}</td></tr>)}
@@ -371,7 +371,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       </>}
 
       {(rep?.what_worked?.length || rep?.learnings?.length || rep?.next_directions?.length || memos.length || imp.length) ? <>
-        <div className="section-h">What we learned</div>
+        <h2 className="section-h">What we learned</h2>
         {rep?.what_worked?.length > 0 && <><div className="muted">what worked</div><List items={rep.what_worked} /></>}
         {rep?.learnings?.length > 0 && <><div className="muted">learnings</div><List items={rep.learnings} /></>}
         {rep?.next_directions?.length > 0 && <><div className="muted">next directions</div><List items={rep.next_directions} /></>}
@@ -390,7 +390,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
         </div>}
       </> : null}
 
-      <div className="section-h">What didn't work</div>
+      <h2 className="section-h">What didn't work</h2>
       <div className="cardgrid" style={{ marginBottom: 10 }}>
         {Object.entries(a.failures).map(([r, ns]) => <div key={r} className="stat"><div className="n">{ns.length}</div><div className="l">failed · {r}</div></div>)}
         {a.regressions.length > 0 && <div className="stat"><div className="n">{a.regressions.length}</div><div className="l">regressions</div></div>}
@@ -399,7 +399,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       </div>
       {rep?.what_didnt?.length > 0 && <List items={rep.what_didnt} />}
 
-      {best && <><div className="section-h">Reproduce — winning solution</div>
+      {best && <><h2 className="section-h">Reproduce — winning solution</h2>
         {bestCodeResource.status === 'restricted' && <div className="report-inline-state report-code-state" role="status">
           Solution source was not included in this summary-only review link.
         </div>}

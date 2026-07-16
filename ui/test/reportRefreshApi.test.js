@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  reportRefreshIntent, CONTROL, jobAwait,
+  reportRefreshIntent, CONTROL, genScopeReport, jobAwait,
 } from '../src/api.js'
 
 const GENERATION = 'c'.repeat(64)
@@ -25,6 +25,30 @@ test('report refresh intent survives an ambiguous remount and clears after autho
   reportRefreshIntent('ambiguous/run', GENERATION, first.idempotencyKey, storage)
   const next = reportRefreshIntent('ambiguous/run', GENERATION, '', storage)
   assert.notEqual(next.idempotencyKey, first.idempotencyKey)
+})
+
+test('scope report publication conflicts reject message-only failure receipts', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      ok: false,
+      code: 'scope_report_storage_conflict',
+      message: 'The report store changed during generation.',
+    }),
+  })
+  try {
+    await assert.rejects(
+      genScopeReport('task', 'scope-id'),
+      error => error?.code === 'scope_report_storage_conflict'
+        && /changed during generation/.test(error.message))
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
 })
 
 test('report refresh API quarantines a mismatched 200 receipt as ambiguous', async () => {

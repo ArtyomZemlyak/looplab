@@ -1995,6 +1995,31 @@ def test_scope_report_tool_failure_cannot_be_echoed_into_persisted_content(monke
     assert "provider.example" not in str(content) and "token=hidden" not in str(content)
 
 
+def test_scope_report_rejects_out_of_scope_drill_before_callback(monkeypatch):
+    from looplab.serve import scope_report
+
+    calls = []
+
+    def adversarial_loop(_client, tools, _messages, _emit_spec, **_kwargs):
+        return {
+            "headline": "bounded",
+            "verdict": tools.execute(
+                "inspect_experiment", {"run_id": "outside-secret-run", "node_id": 1}),
+        }
+
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", adversarial_loop)
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "inside", "direction": "min", "best_metric": 0.05}], object(),
+        drill=lambda run_id, node_id: (
+            calls.append((run_id, node_id)) or "PRIVATE OUT-OF-SCOPE EVIDENCE"),
+    )
+
+    assert calls == []
+    assert content["verdict"] == "(no such run in scope: 'outside-secret-run')"
+    assert "PRIVATE OUT-OF-SCOPE EVIDENCE" not in str(content)
+
+
 def test_scope_report_ranks_each_run_by_its_own_direction():
     """A mixed-direction scope (project/super-task spanning tasks) must NOT rank a max-objective run
     backwards under a single set-wide direction."""
@@ -2067,6 +2092,108 @@ def _seed_scope_run(root: Path, run_id: str, task_id: str) -> None:
     })
 
 
+@pytest.mark.parametrize("mutation", ["append", "replace"])
+def test_scope_report_run_change_during_synthesis_preserves_last_good(
+        tmp_path, monkeypatch, mutation):
+    from looplab.events.eventstore import EventStore
+
+    task_id = "frozen-scope"
+    _seed_scope_run(tmp_path, "owned-run", task_id)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    baseline = client.post(url + "/generate").json()
+    assert baseline["ok"] is True
+    report_path = next((tmp_path / "reports").glob("*.json"))
+    last_good = report_path.read_bytes()
+    events_path = tmp_path / "owned-run" / "events.jsonl"
+    mutations = []
+
+    def mutate_during_synthesis(_scope, _briefs, _client, **_kwargs):
+        if not mutations:
+            mutations.append(mutation)
+            if mutation == "append":
+                EventStore(events_path).append("annotation", {"text": "new tail"})
+            else:
+                events_path.rename(events_path.with_name("events.generation-a.jsonl"))
+                EventStore(events_path).append("run_started", {
+                    "run_id": "owned-run", "task_id": task_id,
+                    "goal": "replacement generation", "direction": "min",
+                })
+        return {"headline": "MUST NOT REPLACE LAST GOOD"}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report", mutate_during_synthesis)
+    changed = client.post(url + "/generate").json()
+
+    assert changed["ok"] is False
+    assert changed["code"] == "scope_report_inputs_changed"
+    assert changed["stale"] is True
+    assert mutations == [mutation]
+    assert report_path.read_bytes() == last_good
+    stored = client.get(url).json()
+    assert stored["exists"] is True and stored["stale"] is True
+    assert stored["content"] == baseline["content"]
+
+
+def test_scope_report_drill_refuses_replaced_frozen_generation(tmp_path, monkeypatch):
+    from looplab.events.eventstore import EventStore
+
+    task_id = "drill-generation"
+    _seed_scope_run(tmp_path, "drilled-run", task_id)
+    events_path = tmp_path / "drilled-run" / "events.jsonl"
+    observed = []
+
+    def replace_then_drill(_client, tools, _messages, _emit_spec, **_kwargs):
+        events_path.rename(events_path.with_name("events.generation-a.jsonl"))
+        EventStore(events_path).append("run_started", {
+            "run_id": "drilled-run", "task_id": task_id,
+            "goal": "generation B private evidence", "direction": "min",
+        })
+        observed.append(tools.execute(
+            "inspect_experiment", {"run_id": "drilled-run", "node_id": 1}))
+        return {"headline": "must not publish", "verdict": observed[-1]}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", replace_then_drill)
+    response = TestClient(make_app(tmp_path)).post(
+        f"/api/scope-report/task/{task_id}/generate").json()
+
+    assert observed == ["(drill unavailable: frozen run changed)"]
+    assert response["ok"] is False and response["code"] == "scope_report_inputs_changed"
+    assert not list((tmp_path / "reports").glob("*.json"))
+
+
+def test_scope_report_staleness_detects_same_size_same_mtime_replacement(
+        tmp_path, monkeypatch):
+    import os
+
+    task_id = "metadata-fingerprint"
+    _seed_scope_run(tmp_path, "fingerprinted-run", task_id)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    assert client.post(url + "/generate").json()["ok"] is True
+
+    events_path = tmp_path / "fingerprinted-run" / "events.jsonl"
+    before = events_path.stat()
+    raw = events_path.read_bytes()
+    old_goal = f"goal {task_id}".encode()
+    new_goal = f"GOAL {task_id}".encode()
+    assert old_goal in raw and len(old_goal) == len(new_goal)
+    replacement = events_path.with_name("events.replacement.jsonl")
+    replacement.write_bytes(raw.replace(old_goal, new_goal))
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    replacement.replace(events_path)
+    after = events_path.stat()
+
+    assert after.st_size == before.st_size
+    assert int(after.st_mtime) == int(before.st_mtime)
+    result = client.get(url).json()
+    assert result["exists"] is True and result["stale"] is True
+
+
 def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monkeypatch):
     """Two ids with the same readable filename prefix own different files and different content."""
     from urllib.parse import quote
@@ -2098,6 +2225,125 @@ def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monke
     assert len(list(reports_dir.glob("*.json"))) == 2
     assert client.get(first_url).json()["run_ids"] == ["colon-run"]
     assert client.get(second_url).json()["run_ids"] == ["star-run"]
+
+
+def _legacy_scope_record(root: Path, run_id: str, task_id: str, headline: str) -> dict:
+    event_log = root / run_id / "events.jsonl"
+    stat_result = event_log.stat()
+    return {
+        "scope": {"type": "task", "id": task_id, "label": f"task {task_id}"},
+        "generated_at": 1,
+        "run_ids": [run_id],
+        "sig": [[run_id, stat_result.st_size, int(stat_result.st_mtime)]],
+        "model": "legacy-model",
+        "content": {"headline": headline, "next_directions": ["keep the evidence"]},
+    }
+
+
+def test_scope_report_migrates_real_legacy_path_without_regeneration(tmp_path):
+    """An upgrade keeps the old report visible and copies it to collision-safe storage."""
+    from looplab.serve.routers.reports import (
+        _legacy_scope_report_path,
+        _prior_learnings_index,
+        _scope_report_path,
+    )
+
+    task_id = "legacy:scope"
+    _seed_scope_run(tmp_path, "legacy-run", task_id)
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    legacy_path = _legacy_scope_report_path(reports_dir, "task", task_id)
+    record = _legacy_scope_record(tmp_path, "legacy-run", task_id, "valuable old report")
+    legacy_path.write_text(json.dumps(record), encoding="utf-8")
+
+    assert "valuable old report" in _prior_learnings_index(reports_dir)
+    response = TestClient(make_app(tmp_path)).get(f"/api/scope-report/task/{task_id}")
+
+    assert response.status_code == 200
+    assert response.json()["exists"] is True
+    assert response.json()["content"]["headline"] == "valuable old report"
+    canonical = _scope_report_path(reports_dir, "task", task_id)
+    assert canonical.exists() and legacy_path.exists()
+    assert json.loads(canonical.read_text(encoding="utf-8"))["scope_identity"] == {
+        "type": "task", "id": task_id,
+    }
+
+
+def test_scope_report_refuses_collided_legacy_owner(tmp_path):
+    """A lossy legacy filename can migrate only for the exact scope embedded in its record."""
+    from urllib.parse import quote
+
+    from looplab.serve.routers.reports import _legacy_scope_report_path
+
+    first_id, second_id = "a:b", "a*b"
+    _seed_scope_run(tmp_path, "colon-run", first_id)
+    _seed_scope_run(tmp_path, "star-run", second_id)
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    first_path = _legacy_scope_report_path(reports_dir, "task", first_id)
+    second_path = _legacy_scope_report_path(reports_dir, "task", second_id)
+    assert first_path == second_path
+    first_path.write_text(json.dumps(
+        _legacy_scope_record(tmp_path, "star-run", second_id, "second owner only")),
+        encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    refused = client.get(f"/api/scope-report/task/{quote(first_id, safe='')}")
+    accepted = client.get(f"/api/scope-report/task/{quote(second_id, safe='')}")
+
+    assert refused.status_code == 409
+    assert "second owner only" not in refused.text
+    assert accepted.status_code == 200 and accepted.json()["exists"] is True
+    assert accepted.json()["content"]["headline"] == "second owner only"
+
+
+def test_scope_report_rejects_external_report_directory_symlink(tmp_path):
+    """The configured lexical report store cannot bless a symlink target as its authority."""
+    root = tmp_path / "run-root"
+    root.mkdir()
+    task_id = "symlink-owner"
+    _seed_scope_run(root, "owner-run", task_id)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (root / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    client = TestClient(make_app(root))
+    assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
+    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert list(outside.iterdir()) == []
+
+
+def test_scope_report_revalidates_store_after_slow_generation(tmp_path, monkeypatch):
+    """A store swapped during paid synthesis is rejected before external publication."""
+    root = tmp_path / "run-root"
+    root.mkdir()
+    task_id = "swap-owner"
+    _seed_scope_run(root, "owner-run", task_id)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    probe = tmp_path / "symlink-probe"
+    try:
+        probe.symlink_to(outside, target_is_directory=True)
+        probe.unlink()
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+
+    def swap_store(_scope, _briefs, _client, **_kwargs):
+        (root / "reports").symlink_to(outside, target_is_directory=True)
+        return {"headline": "must not publish"}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", swap_store)
+    result = TestClient(make_app(root)).post(
+        f"/api/scope-report/task/{task_id}/generate").json()
+
+    assert result["ok"] is False
+    assert result["code"] == "scope_report_storage_conflict"
+    assert result["error"]
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize("tamper", ["missing", "mismatch"])

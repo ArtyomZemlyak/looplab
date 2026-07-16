@@ -16,7 +16,7 @@
 .report-view .report-fresh { color: var(--fg-dim); }
 .report-view .report-title { font-size: clamp(20px, 2.2vw, 27px); line-height: 1.2; letter-spacing: -.015em; }
 .report-view .report-sub { color: var(--fg-dim); line-height: 1.55; }
-.report-view .section-h { margin-top: 24px; color: var(--fg); }
+.report-view .section-h { margin-top: 24px; color: var(--fg); font-size: 15px; line-height: 1.35; }
 .report-view .tbl { border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
 .report-view .tbl th { color: var(--fg-dim); font-weight: 650; }
 .report-view .tbl td { padding-block: 7px; vertical-align: top; }
@@ -179,6 +179,7 @@
   .report-view { max-width: none; padding: 0; color: #111; background: #fff; }
   .report-view .tbl { display: table; overflow: visible; width: 100%; }
   .report-view pre, .report-view code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .report-view pre.code { max-height: none !important; overflow: visible !important; }
   .report-view .verdict-banner,
   .report-view .champion-card { break-inside: avoid; box-shadow: none; }
 }

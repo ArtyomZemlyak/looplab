@@ -248,9 +248,12 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
     { key: 'operator', label: 'Operator' }, { key: 'from', label: 'Previous', numeric: true },
     { key: 'to', label: 'Metric', numeric: true }, { key: 'delta', label: 'Delta', numeric: true },
   ]
+  const baselineOnly = steps.length === 1 && steps[0].from == null
   return (
-    <ChartFrame title="Improvement waterfall"
-      description={`Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
+    <ChartFrame title={baselineOnly ? 'Metric baseline' : 'Improvement waterfall'}
+      description={baselineOnly
+        ? 'First feasible metric; no improvement is recorded yet.'
+        : `Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
       columns={columns} rows={rows} csvName="improvement-waterfall.csv">
     {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${width} ${h}`}
       role="img" aria-labelledby={labelledBy}>

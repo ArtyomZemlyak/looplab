@@ -142,9 +142,12 @@ class _CrossRunTools:
                 b = self._briefs.get(str(args.get("run_id")))
                 return run_brief_line(b, full=True) if b else f"(no such run in scope: {args.get('run_id')!r})"
             if name == "inspect_experiment":
+                run_id = str(args.get("run_id"))
+                if run_id not in self._briefs:
+                    return f"(no such run in scope: {args.get('run_id')!r})"
                 if not self._drill:
                     return "(deep experiment access unavailable here)"
-                return self._drill(str(args.get("run_id")), int(args.get("node_id")))
+                return self._drill(run_id, int(args.get("node_id")))
             return f"(unknown tool: {name})"
         except Exception:  # noqa: BLE001 - model/tool payloads must never enter persisted reports
             return "(tool request invalid)"

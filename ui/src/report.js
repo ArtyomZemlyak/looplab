@@ -221,7 +221,13 @@ export function analyze(state) {
     steps,
     firstBest: steps.length ? steps[0].to : null,
     finalBest: steps.length ? steps[steps.length - 1].to : null,
-    totalGain: steps.length > 1 ? steps[steps.length - 1].to - steps[0].to : 0,
+    // `steps` only advances the direction-aware frontier, so improvement is the positive distance
+    // from its first feasible value regardless of whether the objective is minimized or maximized.
+    totalGain: steps.length > 1
+      ? (dir === 'max'
+          ? steps[steps.length - 1].to - steps[0].to
+          : steps[0].to - steps[steps.length - 1].to)
+      : 0,
     operators: operatorEffectiveness(nodes, dir),
     themes: themeEffectiveness(nodes, dir),
     regressions: regressions(nodes, dir),
@@ -329,7 +335,7 @@ export function toMarkdown(state, best) {
   if (rep && (rep.learnings || []).length) { L.push(''); L.push('### What we learned'); L.push(''); rep.learnings.forEach(x => L.push(`- ${x}`)) }
   if (rep && (rep.next_directions || []).length) { L.push(''); L.push('### Next directions'); L.push(''); rep.next_directions.forEach(x => L.push(`- ${x}`)) }
   L.push('')
-  L.push('## What worked — key improvements')
+  L.push(a.steps.length === 1 ? '## Metric baseline' : '## What worked — key improvements')
   if (a.steps.length) {
     L.push('')
     L.push('| step | node | operator | metric | Δ | what changed |')
