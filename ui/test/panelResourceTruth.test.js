@@ -128,7 +128,9 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
       run_id: 'run-1', task_id: 'demo', direction: 'max', best_metric: 1, best_confirmed: null,
       nodes: 2, finished: true, phase: 'finished', label: 'Primary',
     }])
-    await click(button('overlay trajectories'))
+    assert.equal(document.querySelector('select[aria-label="Comparable task"]')?.className, 'text')
+    assert.ok(document.querySelector('.panel-resource-toolbar'))
+    await click(button('Overlay trajectories'))
     await reply(requests.at(-1), { state: { nodes: [] } })
     assert.match(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay: Unavailable.*Retry/)
     assert.doesNotMatch(document.body.textContent, /no comparable run trajectories/)

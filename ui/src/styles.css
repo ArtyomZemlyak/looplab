@@ -894,6 +894,12 @@ button.ptree-row { width: 100%; border: 0; background: transparent; color: inher
 
 input.text, textarea.text, select.text { background: var(--bg); color: var(--fg); border: 1px solid var(--line-2);
   border-radius: 7px; padding: 6px 9px; font: inherit; width: 100%; }
+.panel-resource-toolbar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.panel-resource-toolbar select.text { width: auto; min-width: 180px; max-width: min(360px, 100%); flex: 1 1 220px; }
+.panel-resource-toolbar .btn { margin-left: auto; }
+@media (max-width: 700px) {
+  .panel-resource-toolbar .btn { width: 100%; min-height: 44px; margin-left: 0; justify-content: center; }
+}
 textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospace; }
 .toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: var(--bg-3);
   border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 14px; box-shadow: var(--shadow); z-index: 100; }

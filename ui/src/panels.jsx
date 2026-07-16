@@ -1005,14 +1005,13 @@ export function CrossRunPanel({ state, onClose }) {
   return (
     <Panel title="Cross-run sweep" sub={resource.data ? `${runs.length} runs · ${tasks.length} tasks` : ''} onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
-      {resource.data && <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
+      {resource.data && <div className="panel-resource-toolbar">
         <span className="muted">task:</span>
-        <select className="inp sm" aria-label="Comparable task" value={task} onChange={e => setTask(e.target.value)}>
+        <select className="text" aria-label="Comparable task" value={task} onChange={e => setTask(e.target.value)}>
           {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
         <span className="muted">{rows.length} comparable run(s) · {dir}</span>
-        <span className="spacer" style={{ flex: 1 }} />
         {rows.length > 0 && <button aria-pressed={overlay} className={'btn sm' + (overlay ? ' primary' : '')}
-          onClick={() => setOverlay(o => !o)} title="overlay each run's running-best trajectory on one axis">overlay trajectories</button>}
+          onClick={() => setOverlay(o => !o)} title="Overlay each run's running-best trajectory on one axis">Overlay trajectories</button>}
       </div>}
       {overlay && rows.length > 0 && <CrossRunTrajectories rows={rows} dir={dir} task={task} />}
       {rows.length
