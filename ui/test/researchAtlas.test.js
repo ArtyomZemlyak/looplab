@@ -194,7 +194,11 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run memory yet/, /Degraded view; some sources have not loaded\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
-  assert.match(atlas, /role="region" tabIndex=\{0\} aria-label="Bounded explored concepts"/)
+  // The concepts list stays a real <ul> (its <li> keep listitem semantics) that is ALSO focusable +
+  // labelled — WITHOUT role="region", which would override the implicit list role (mega-review a11y fix).
+  assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts"/)
+  assert.doesNotMatch(atlas, /<ul className="atlas-concepts"[^>]*role="region"/,
+    'role="region" on the <ul> strips its list semantics; keep it a labelled, focusable list')
   assert.match(atlas, /Some portfolio records were ignored\./)
   assert.match(atlas, /Partial refresh; preserving last-loaded data for failed sources\./)
   assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)

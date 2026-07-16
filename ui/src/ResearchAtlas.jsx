@@ -244,7 +244,7 @@ export default function ResearchAtlas({ onBack }) {
               </div>
               {view.concepts.length === 0
                 ? <p className="atlas-section-empty">No concept capsules are available.</p>
-                : <ul className="atlas-concepts" role="region" tabIndex={0} aria-label="Bounded explored concepts">
+                : <ul className="atlas-concepts" tabIndex={0} aria-label="Bounded explored concepts">
                   {view.concepts.map((concept, index) => <li key={`${concept.concept}-${index}`}>
                     <div><strong>{concept.concept}</strong><span>{countLabel(concept.nRuns, 'run')}</span></div>
                     {concept.runs.length > 0 && <div className="atlas-runrefs">
@@ -283,7 +283,7 @@ export default function ResearchAtlas({ onBack }) {
               {view.contradictions.length > 0
                 ? <div className="atlas-claim-list compact" role="region" tabIndex={0}
                     aria-label="Bounded contradictory claims">{view.contradictions.map((claim, index) =>
-                    <ClaimCard key={claim.uid || `${claim.statement}-${index}`} claim={claim} compact />)}</div>
+                    <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} compact />)}</div>
                 : <p className="atlas-section-empty">No mixed-evidence claim records in this response.</p>}
               {view.hiddenContradictions > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenContradictions, 'additional mixed-evidence record')} omitted by the bounded projection.
@@ -302,7 +302,7 @@ export default function ResearchAtlas({ onBack }) {
               {view.claims.length > 0
                 ? <div className="atlas-claim-list" role="region" tabIndex={0}
                     aria-label="Bounded portfolio claims">{view.claims.map((claim, index) =>
-                    <ClaimCard key={claim.uid || `${claim.statement}-${index}`} claim={claim} />)}</div>
+                    <ClaimCard key={`${claim.uid || claim.statement}-${index}`} claim={claim} />)}</div>
                 : <p className="atlas-section-empty">No claim records are available.</p>}
               {view.hiddenClaims > 0 && <p className="atlas-boundary-note">
                 {countLabel(view.hiddenClaims, 'additional claim')} omitted by the client render limit.

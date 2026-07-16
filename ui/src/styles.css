@@ -30,6 +30,9 @@
   --ok-text: color-mix(in srgb, var(--ok) 52%, var(--fg));
   --fail-text: color-mix(in srgb, var(--fail) 52%, var(--fg));
   --best-text: color-mix(in srgb, var(--best) 52%, var(--fg));
+  /* Pending is the most muted status (slate) — mix HARDER toward the foreground so the small
+     collapsed-group count clears AA contrast on --bg-2 in light and dark themes alike. */
+  --pending-text: color-mix(in srgb, var(--pending) 38%, var(--fg));
   --accent-text: color-mix(in srgb, var(--accent) 62%, var(--fg));
   --alarm-text: color-mix(in srgb, var(--alarm) 48%, var(--fg));
   --radius: 9px;
@@ -420,7 +423,7 @@ button { font: inherit; }
   border: none; color: var(--grp-tint); cursor: pointer; font-size: 13px; padding: 0 2px 0 0; line-height: 1; }
 .grp-spark { display: block; margin: 4px 0 2px; }
 .grp-dots { display: flex; gap: 8px; font-size: 11px; font-variant-numeric: tabular-nums; }
-.grp-dots .dot.ok { color: var(--ok); } .grp-dots .dot.fail { color: var(--fail); } .grp-dots .dot.pend { color: var(--pending); }
+.grp-dots .dot.ok { color: var(--ok); } .grp-dots .dot.fail { color: var(--fail); } .grp-dots .dot.pend { color: var(--pending-text); }
 
 /* ---------- cross-run Map view ---------- */
 .seg { display: inline-flex; border: 1px solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; }
