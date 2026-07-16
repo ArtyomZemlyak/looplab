@@ -898,6 +898,166 @@ def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
     return {"lens": lens, "roots": sorted(children.get(None, [])), "nodes": nodes}
 
 
+def concept_touch_counts(node_concepts) -> dict:
+    """Per-concept touch count from `node_concepts` (how many nodes carry each id) — the orientation
+    signal a symmetric (co_occurs) lens needs (higher touch = the hub/parent). Pure/deterministic."""
+    from collections import Counter as _C
+    c: _C = _C()
+    for ids in (node_concepts or {}).values():
+        for cid in (ids or []):
+            k = _normalize_concept_id(cid)
+            if k:
+                c[k] += 1
+    return dict(c)
+
+
+def default_lenses() -> list[dict]:
+    """The shipped lens pack — each a pure PROJECTION spec (no data of its own). `is_a` nests by concept
+    path; the rest nest by a stored typed-edge relation. Order = display order; `is_a` is the default."""
+    return [
+        {"name": "is_a", "label": "Family · is-a", "rels": ["is_a"], "kind": "path"},
+        {"name": "uses", "label": "Usage · uses", "rels": ["uses"], "kind": "edge"},
+        {"name": "part_of", "label": "Composition · part-of", "rels": ["part_of"], "kind": "edge"},
+        {"name": "co_occurs", "label": "Empirical · co-occurs", "rels": ["co_occurs"], "kind": "edge"},
+    ]
+
+
+_SYMMETRIC_RELS = frozenset({"co_occurs", "related_to"})
+
+
+def _lens_rels(lens) -> Optional[set]:
+    if isinstance(lens, str):
+        return None if lens == "is_a" else {lens}
+    rels = lens.get("rels") if isinstance(lens, dict) else None
+    return set(rels) if rels else None
+
+
+def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
+    """Project a hierarchy from the TYPED concept-edge set under a non-`is_a` lens — the multi-lens
+    payoff of the edge substrate. `edges` is `RunState.concept_edges` ({key: {src, rel, dst, confidence}}).
+    A DIRECTED rel (uses / part_of) reads (src, rel, dst) as "src's parent is dst"; a SYMMETRIC rel
+    (co_occurs / related_to) is oriented by `touch` (parent = the higher-touch endpoint; ties → the
+    smaller id), so the most-used concept becomes the hub. Each concept gets ONE primary parent (highest
+    confidence, then id); the rest are kept as `cross_parents`. A greedy, DETERMINISTIC spanning
+    arborescence with cycle-avoidance (a candidate parent that would close a cycle is skipped) — pure +
+    replay-safe. Returns {"lens", "roots", "nodes": {id: {parent, depth, children, tagged,
+    cross_parents}}}."""
+    from collections import deque as _deque
+    tagged = {c for c in (_normalize_concept_id(x) for x in (concept_ids or ())) if c}
+    lens_name = lens if isinstance(lens, str) else str((lens or {}).get("name") or "custom")
+    rels = _lens_rels(lens)
+    touch = touch or {}
+    cand: dict[str, list] = {}                     # child -> [(confidence, parent)]
+    all_ids: set[str] = set(tagged)
+    for e in (edges or {}).values():
+        if not isinstance(e, dict):
+            continue
+        rel = e.get("rel")
+        if rels is not None and rel not in rels:
+            continue
+        src, dst = _normalize_concept_id(e.get("src")), _normalize_concept_id(e.get("dst"))
+        if not src or not dst or src == dst:
+            continue
+        conf = float(e.get("confidence") or 0.0)
+        all_ids.add(src)
+        all_ids.add(dst)
+        if rel in _SYMMETRIC_RELS:
+            ts, td = touch.get(src, 0), touch.get(dst, 0)
+            parent = (src if ts > td else dst if td > ts else min(src, dst))   # higher touch; tie→min id
+            child = dst if parent == src else src
+        else:
+            parent, child = dst, src                # src <rel> dst  =>  dst is the parent
+        cand.setdefault(child, []).append((conf, parent))
+    parent_of: dict[str, str] = {}
+
+    def _would_cycle(child, parent):
+        x, seen = parent, set()
+        while x is not None and x not in seen:
+            if x == child:
+                return True
+            seen.add(x)
+            x = parent_of.get(x)
+        return False
+    for cid in sorted(all_ids):                    # deterministic assignment order
+        for _conf, p in sorted(cand.get(cid, []), key=lambda t: (-t[0], t[1])):
+            if p in all_ids and not _would_cycle(cid, p):
+                parent_of[cid] = p
+                break
+    children: dict[Optional[str], list] = {}
+    for cid in all_ids:
+        children.setdefault(parent_of.get(cid), []).append(cid)
+    roots = sorted(children.get(None, []))
+    depth: dict[str, int] = {}
+    dq = _deque((r, 0) for r in roots)
+    while dq:
+        cid, d = dq.popleft()
+        if cid in depth:
+            continue
+        depth[cid] = d
+        for ch in sorted(children.get(cid, [])):
+            dq.append((ch, d + 1))
+    nodes = {}
+    for cid in all_ids:
+        prim = parent_of.get(cid)
+        cross = sorted({p for _, p in cand.get(cid, []) if p != prim and p in all_ids})
+        nodes[cid] = {"parent": prim, "depth": depth.get(cid, 0),
+                      "children": sorted(children.get(cid, [])),
+                      "tagged": cid in tagged, "cross_parents": cross}
+    return {"lens": lens_name, "roots": roots, "nodes": nodes}
+
+
+def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_call") -> Optional[dict]:
+    """Agentically MINT a lens in the moment from a natural-language request — the "create a lens" tool.
+    A lens is a pure PROJECTION spec (a relation-subset + optional root + labels); it writes NO events
+    and grows NO edges, so it is entirely view-state and REPLAY-CLEAN. The model picks which of the
+    AVAILABLE relation types (those present in `edges`, plus is_a) count as nesting, and optionally a
+    root concept to focus on. Best-effort: returns None on no client / empty prompt / any failure / an
+    empty-or-invalid choice, so the caller falls back to a default lens. Impure (one LLM call) by
+    design; the returned spec is consumed by project_lens / project_hierarchy."""
+    if client is None or not str(prompt or "").strip():
+        return None
+    try:
+        from pydantic import BaseModel, Field
+
+        from looplab.core.parse import parse_structured
+
+        avail = sorted({str(e.get("rel")) for e in (edges or {}).values()
+                        if isinstance(e, dict) and e.get("rel")} | {"is_a"})
+        vocab = sorted({v for e in (edges or {}).values() if isinstance(e, dict)
+                        for v in (_normalize_concept_id(e.get("src")), _normalize_concept_id(e.get("dst")))
+                        if v} | {c for c in (_normalize_concept_id(x) for x in (concepts or [])) if c})
+
+        class _LensOut(BaseModel):
+            name: str = ""
+            label: str = ""
+            rels: list[str] = Field(default_factory=list)
+            root: str = ""
+
+        system = (
+            "You turn a user's request into a LENS over a concept graph — a way to VIEW its hierarchy. A "
+            "lens picks which RELATION TYPES count as nesting (the tree follows edges of those types). "
+            "Choose ONLY from the AVAILABLE relations below. Optionally name a ROOT concept to focus the "
+            "view on (from the vocabulary), else leave it empty. Give a short lower-case `name` slug and a "
+            "human `label`. Call `emit` once.\n\nAVAILABLE RELATIONS: " + ", ".join(avail)
+            + ("\n\nCONCEPT VOCABULARY (sample):\n" + "\n".join(f"- {c}" for c in vocab[:60])
+               if vocab else ""))
+        out = parse_structured(client, [{"role": "system", "content": system},
+                                        {"role": "user", "content": str(prompt).strip()[:800]}],
+                               _LensOut, parser)
+        rels = [r for r in (out.rels or []) if r in set(avail)]
+        if not rels:
+            return None
+        name = _normalize_concept_id(out.name) or "-".join(rels)[:24] or "lens"
+        spec = {"name": name, "label": (out.label or name).strip()[:60], "rels": rels,
+                "kind": "path" if rels == ["is_a"] else "edge", "provenance": "agent"}
+        root = _normalize_concept_id(out.root)
+        if root:
+            spec["root"] = root
+        return spec
+    except Exception:  # noqa: BLE001 — minting a lens is best-effort; fall back to a default lens
+        return None
+
+
 def uncovered_regions(state: RunState, graph: ConceptGraph,
                       tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
     """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
