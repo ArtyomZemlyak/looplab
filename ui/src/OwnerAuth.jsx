@@ -1,33 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { authStatus, clearOwnerToken, verifyOwnerToken } from './api.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 const AUTH_REQUEST_TIMEOUT_MS = 10_000
-
-const withDeadline = (request, controller) => {
-  let timer
-  let timedOut = false
-  let onAbort
-  const deadline = new Promise((_, reject) => {
-    onAbort = () => {
-      if (timedOut) return
-      const error = new Error('owner access request was aborted')
-      error.name = 'AbortError'
-      reject(error)
-    }
-    controller.signal.addEventListener('abort', onAbort, { once: true })
-    timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-      const error = new Error('owner access request timed out')
-      error.name = 'TimeoutError'
-      reject(error)
-    }, AUTH_REQUEST_TIMEOUT_MS)
-  })
-  return Promise.race([request, deadline]).finally(() => {
-    clearTimeout(timer)
-    controller.signal.removeEventListener('abort', onAbort)
-  })
-}
 
 const ownerAccessState = result => {
   if (!result || typeof result !== 'object'
@@ -40,10 +15,6 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
   const [token, setToken] = useState('')
   const [busy, setBusy] = useState(false)
   const mountedRef = useRef(false)
-  const statusBusyRef = useRef(false)
-  const unlockBusyRef = useRef(false)
-  const statusSequenceRef = useRef(0)
-  const unlockSequenceRef = useRef(0)
   const statusRequestRef = useRef(null)
   const unlockRequestRef = useRef(null)
   const inputRef = useRef(null)
@@ -51,27 +22,24 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
   const errorRef = useRef(null)
 
   const check = useCallback(async () => {
-    if (statusBusyRef.current) return
-    statusBusyRef.current = true
-    const id = ++statusSequenceRef.current
-    const controller = new AbortController()
-    statusRequestRef.current = { id, controller }
+    if (statusRequestRef.current) return
+    const timed = deadlineRequest(signal => authStatus({ signal }), AUTH_REQUEST_TIMEOUT_MS)
+    statusRequestRef.current = timed
     setResource({ status: 'loading', error: '' })
     try {
-      const result = await withDeadline(authStatus({ signal: controller.signal }), controller)
-      if (!mountedRef.current || statusRequestRef.current?.id !== id) return
+      const result = await timed.promise
+      if (!mountedRef.current || statusRequestRef.current !== timed) return
       const status = ownerAccessState(result)
       if (!status) throw new Error('invalid owner access response')
       setResource({ status, error: '' })
     } catch (error) {
-      if (!mountedRef.current || statusRequestRef.current?.id !== id) return
+      if (!mountedRef.current || statusRequestRef.current !== timed) return
       setResource({ status: 'error', error: error?.name === 'TimeoutError'
         ? 'Owner access check timed out. Check your connection and retry.'
         : 'Owner access could not be checked. Retry when the service is reachable.' })
     } finally {
-      if (statusRequestRef.current?.id === id) {
+      if (statusRequestRef.current === timed) {
         statusRequestRef.current = null
-        statusBusyRef.current = false
       }
     }
   }, [])
@@ -81,10 +49,6 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
     check()
     return () => {
       mountedRef.current = false
-      statusBusyRef.current = false
-      unlockBusyRef.current = false
-      statusSequenceRef.current += 1
-      unlockSequenceRef.current += 1
       statusRequestRef.current?.controller.abort()
       unlockRequestRef.current?.controller.abort()
       statusRequestRef.current = null
@@ -102,26 +66,23 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
 
   const unlock = async event => {
     event.preventDefault()
-    if (!token || unlockBusyRef.current) return
-    unlockBusyRef.current = true
+    if (!token || unlockRequestRef.current) return
     setBusy(true)
     setResource({ status: 'locked', error: '' })
     const submittedToken = token
-    const id = ++unlockSequenceRef.current
-    const controller = new AbortController()
-    unlockRequestRef.current = { id, controller }
+    const timed = deadlineRequest(signal => verifyOwnerToken(submittedToken, { signal }),
+      AUTH_REQUEST_TIMEOUT_MS)
+    unlockRequestRef.current = timed
     try {
-      const result = await withDeadline(
-        verifyOwnerToken(submittedToken, { signal: controller.signal }), controller,
-      )
-      if (!mountedRef.current || unlockRequestRef.current?.id !== id) return
+      const result = await timed.promise
+      if (!mountedRef.current || unlockRequestRef.current !== timed) return
       if (!result || typeof result !== 'object' || result.ok !== true) {
         throw new Error('invalid owner verification response')
       }
       setToken('')
       setResource({ status: 'ready', error: '' })
     } catch (error) {
-      if (!mountedRef.current || unlockRequestRef.current?.id !== id) return
+      if (!mountedRef.current || unlockRequestRef.current !== timed) return
       if (error?.status === 401) clearOwnerToken()
       setResource({ status: 'locked', error: error?.status === 401
         ? 'That owner token was not accepted.'
@@ -129,9 +90,8 @@ export default function OwnerAuth({ children, label = 'LoopLab' }) {
           ? 'Token verification timed out. Your entry was kept; retry when the service is reachable.'
           : 'The owner token could not be verified. Your entry was kept; try again.' })
     } finally {
-      if (unlockRequestRef.current?.id === id) {
+      if (unlockRequestRef.current === timed) {
         unlockRequestRef.current = null
-        unlockBusyRef.current = false
         if (mountedRef.current) setBusy(false)
       }
     }

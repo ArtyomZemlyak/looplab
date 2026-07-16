@@ -1,44 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { get } from './util.js'
 import { Turn } from './AssistantChat.jsx'
+import { deadlineRequest } from './requestDeadline.js'
 
 const SHARED_REQUEST_TIMEOUT_MS = 15_000
-
-// REVIEW(2026-07-16): e8d5249 pasted this `withDeadline` VERBATIM into OwnerAuth.jsx and here (only
-// the message strings differ), and RunList.jsx carries `settleWithin`, a third variant of the same
-// deadline/abort idea from 998f864 — three hand-rolled timeout helpers in one day. Any fix (e.g. to
-// the abort-listener cleanup or timeout semantics) now needs three edits that will drift; extract one
-// shared helper (ui/src/requestDeadline.js, parameterized by timeout + error copy) before a fourth
-// copy appears. Separately: `validSharedMessage` rejects the ENTIRE shared transcript when one
-// activity item has an unrecognized `type` — additive server evolution (a new activity kind) bricks
-// every existing share link with "invalid shared chat response". The repo's own forward-compat rule
-// (invariant 5: unknown event types are ignored) argues for skipping unknown items, not failing the
-// whole session; reserve the hard reject for structurally unsafe shapes (non-string content etc.).
-const withDeadline = (request, controller) => {
-  let timer
-  let timedOut = false
-  let onAbort
-  const deadline = new Promise((_, reject) => {
-    onAbort = () => {
-      if (timedOut) return
-      const error = new Error('shared chat request was aborted')
-      error.name = 'AbortError'
-      reject(error)
-    }
-    controller.signal.addEventListener('abort', onAbort, { once: true })
-    timer = setTimeout(() => {
-      timedOut = true
-      controller.abort()
-      const error = new Error('shared chat request timed out')
-      error.name = 'TimeoutError'
-      reject(error)
-    }, SHARED_REQUEST_TIMEOUT_MS)
-  })
-  return Promise.race([request, deadline]).finally(() => {
-    clearTimeout(timer)
-    controller.signal.removeEventListener('abort', onAbort)
-  })
-}
 
 const record = value => !!value && typeof value === 'object' && !Array.isArray(value)
 const labelItems = value => value == null || (Array.isArray(value) && value.every(item => record(item)
@@ -69,36 +34,31 @@ const sharedLoadError = error => error?.status === 404
 export default function SharedAssistant({ sid, onBack }) {
   const [resource, setResource] = useState({ status: 'loading', data: null, error: '' })
   const dataRef = useRef(null)
-  const busyRef = useRef(false)
   const mountedRef = useRef(false)
-  const sequenceRef = useRef(0)
   const requestRef = useRef(null)
   const errorRef = useRef(null)
 
   const load = useCallback(async ({ preserve = false } = {}) => {
-    if (busyRef.current) return
-    busyRef.current = true
+    if (requestRef.current) return
     const retained = preserve ? dataRef.current : null
-    const id = ++sequenceRef.current
-    const controller = new AbortController()
-    requestRef.current = { id, controller }
+    const timed = deadlineRequest(signal => get(
+      `/api/assistant/shared/${encodeURIComponent(sid)}`, { signal },
+    ), SHARED_REQUEST_TIMEOUT_MS)
+    requestRef.current = timed
     setResource({ status: retained ? 'refreshing' : 'loading', data: retained, error: '' })
     try {
-      const data = await withDeadline(
-        get(`/api/assistant/shared/${encodeURIComponent(sid)}`, { signal: controller.signal }), controller,
-      )
-      if (!mountedRef.current || requestRef.current?.id !== id) return
+      const data = await timed.promise
+      if (!mountedRef.current || requestRef.current !== timed) return
       if (!validSharedSession(data)) throw new Error('invalid shared chat response')
       dataRef.current = data
       setResource({ status: 'ready', data, error: '' })
     } catch (error) {
-      if (!mountedRef.current || requestRef.current?.id !== id) return
+      if (!mountedRef.current || requestRef.current !== timed) return
       const errorMessage = sharedLoadError(error)
       setResource({ status: retained ? 'stale' : 'error', data: retained, error: errorMessage })
     } finally {
-      if (requestRef.current?.id === id) {
+      if (requestRef.current === timed) {
         requestRef.current = null
-        busyRef.current = false
       }
     }
   }, [sid])
@@ -109,8 +69,6 @@ export default function SharedAssistant({ sid, onBack }) {
     load()
     return () => {
       mountedRef.current = false
-      busyRef.current = false
-      sequenceRef.current += 1
       requestRef.current?.controller.abort()
       requestRef.current = null
     }

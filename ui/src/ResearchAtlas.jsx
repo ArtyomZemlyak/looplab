@@ -7,6 +7,7 @@ import {
   isValidAtlasSourceEnvelope, reconcileAtlasSourceStatuses,
 } from './researchAtlasModel.js'
 import './research-atlas.css'
+import { deadlineRequest } from './requestDeadline.js'
 
 const SOURCES = [
   { key: 'atlas', read: signal => getCrossRunAtlas(24, { signal }) },
@@ -187,7 +188,6 @@ export default function ResearchAtlas({ onBack }) {
   useEffect(() => {
     let active = true
     const controllers = []
-    const timers = []
     const id = ++requestId.current
     const requestedSources = request.key ? SOURCES.filter(source => source.key === request.key) : SOURCES
     const keys = requestedSources.map(source => source.key)
@@ -217,22 +217,12 @@ export default function ResearchAtlas({ onBack }) {
       })
     }
     requestedSources.forEach(source => {
-      const controller = new AbortController()
-      controllers.push(controller)
-      let done = false
-      const finish = (value, error) => {
-        if (done) return
-        done = true
-        clearTimeout(timer)
-        settle(source, value, error)
-      }
-      const timer = setTimeout(() => { controller.abort(); finish(null) }, SOURCE_TIMEOUT_MS)
-      timers.push(timer)
-      source.read(controller.signal).then(value => finish(value), error => finish(null, error))
+      const timed = deadlineRequest(source.read, SOURCE_TIMEOUT_MS)
+      controllers.push(timed.controller)
+      timed.promise.then(value => settle(source, value), error => settle(source, null, error))
     })
     return () => {
       active = false
-      timers.forEach(clearTimeout)
       controllers.forEach(controller => controller.abort())
     }
   }, [request])

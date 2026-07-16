@@ -321,12 +321,15 @@ test('a source-local retry changes only the attempted Atlas slice', () => {
 })
 
 test('partial Atlas UI never presents an unavailable source as an empty current fact', async () => {
-  const atlas = await source('ResearchAtlas.jsx')
+  const [atlas, deadline] = await Promise.all([
+    source('ResearchAtlas.jsx'), source('requestDeadline.js'),
+  ])
 
   assert.match(atlas, /const id = \+\+requestId\.current[\s\S]*requestedSources\.forEach[\s\S]*settle\(source/)
   assert.match(atlas, /!active \|\| id !== requestId\.current/,
     'late results must be fenced to the mounted request')
-  assert.match(atlas, /setTimeout\([\s\S]*SOURCE_TIMEOUT_MS[\s\S]*controller\.abort/,
+  assert.match(atlas, /deadlineRequest\(source\.read, SOURCE_TIMEOUT_MS\)/)
+  assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/,
     'each source needs a bounded liveness escape')
   assert.match(atlas, /loaded \? value : 'not loaded'/,
     'summary values from a never-loaded slice need an explicit unavailable state')

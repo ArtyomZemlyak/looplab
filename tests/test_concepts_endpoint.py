@@ -169,6 +169,31 @@ def test_derive_lens_endpoint_requires_a_prompt(tmp_path):
     assert client.post("/api/runs/demo/concepts/lens", json={}).status_code == 400
 
 
+def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
+    # A lens is a pure PROJECTION — deriving one must append ZERO events (invariant 3: every side effect
+    # is gated on a domain event; the lens writes none, so replay is unaffected). Lock it in.
+    rd = _edge_run(tmp_path)
+    log = rd / "events.jsonl"
+    before = log.read_text().count("\n")
+    import looplab.serve.server as server_mod
+    monkeypatch.setattr(server_mod, "make_llm_client",
+                        lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"}).json()["ok"] is True
+    assert log.read_text().count("\n") == before   # no events appended by the projection
+
+
+def test_concepts_get_tolerates_malformed_rels(tmp_path):
+    # Empty / whitespace / unknown-relation `rels` must degrade gracefully (never 500): empty -> is_a,
+    # an unknown relation -> a valid (flat) projection over the tagged concepts.
+    _edge_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/runs/demo/concepts?lens=x&rels=").status_code == 200
+    assert client.get("/api/runs/demo/concepts?lens=x&rels=%20%2C%20").status_code == 200   # " , "
+    r = client.get("/api/runs/demo/concepts?lens=x&rels=teleports_to")
+    assert r.status_code == 200 and isinstance(r.json()["tree"]["nodes"], dict)
+
+
 def test_concepts_endpoint_bare_concept_gets_a_metrics_row(tmp_path):
     # A single-segment authored concept ("agents") is a legitimate top-level concept: the tree, the
     # touch counts, AND the metric table must all include it (they read one node_concepts input). A node
