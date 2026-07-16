@@ -38,7 +38,7 @@ controls, approvals, terminal scopes, and numeric LLM usage. The engine writes d
 server writes serialized control intents; and the durable accountant may append `llm_usage` from a
 background callback. `EventStore` serializes these writers across processes.
 
-Not every artifact is an event. Full trace I/O (`spans.jsonl`), Assistant/run chat, logs, and node
+Not every artifact is an event. Bounded diagnostic trace representations (`spans.jsonl`), Assistant/run chat, logs, and node
 workspaces are independent sidecars. They are useful evidence, but replay does not reconstruct them
 and their absence does not change the folded research state.
 
@@ -86,7 +86,8 @@ The agent tool-loop re-sends the whole growing conversation to the LLM every tur
 each generation's recorded input a near-duplicate of the last. That input is now **delta-encoded** at
 write time — a generation that only appended to the prior turn stores just the appended messages plus a
 back-reference — so `spans.jsonl` itself is ~6× smaller before the index even applies; the trace views
-reconstruct the full verbatim prompt on demand when you expand a single call.
+reconstruct the stored canonicalized/redacted diagnostic representation on demand. It is not byte-exact
+provider I/O, and older JSONL is not rewritten by this encoding.
 
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 
@@ -497,8 +498,11 @@ are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge 
 This shipped lesson/case memory should not be confused with the complete **portfolio research index**.
 An opt-in experimental Part-IV slice now ships: rebuildable run passports/facts, per-run concept capsules,
 versioned concept-key alias/split overlays, v2 D8 claims, task facets, bounded retrieval, and backend
-Atlas/claims projections. Its bound agent tools use role, direction and exact-task-or-strict-goal-fingerprint
-filters (task facets are ranking-only), and proactive prompt influence carries lean digest receipts. Typed
+Atlas/claims projections. Its bound agent tools use role and compatible direction; lessons/capsules accept
+exact task or a strict related-goal fingerprint, while v2 D8 is exact-task-only because it stores no goal
+fingerprint. Task facets are advisory metadata reserved for future ranking and currently neither grant
+visibility nor change ordering. External coding-agent Developer backends receive no D8 provider. Proactive
+prompt influence carries lean digest receipts. Typed
 owner governance actions add revision/action fencing and explicit clear operations. The remaining heuristic
 scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
 families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
@@ -533,8 +537,10 @@ event log or the canonical `cases.jsonl`.
 ## Observability
 
 Every step emits a trace **span** to `spans.jsonl` (files-as-truth, zero-dep). With `trace_llm_io`
-on (default), each LLM call's full prompt + completion is captured so the UI can show exactly what
-the model read and wrote per node. Installing the `[otel]` extra and setting `OTEL_*` sends the same
+on (default), each LLM call records a bounded, canonicalized, heuristically redacted diagnostic
+representation of its input/output. The provider still receives the original input; trace capture is not
+byte-exact, short unlabeled secrets can evade heuristics, and existing JSONL is not retroactively rewritten.
+Installing the `[otel]` extra and setting `OTEL_*` sends the same
 spans to any OTLP collector (Jaeger / Tempo / Honeycomb) with no code change. Spans are diagnostics
 only — `replay` never reads them.
 

@@ -38,6 +38,7 @@ class _ClaimDecision(_GovernedBody):
 
 
 class _ConceptSource(_GovernedBody):
+    expected_governance_revision: StrictInt = Field(ge=0)
     from_concept: str = Field(min_length=1, max_length=500)
 
 
@@ -68,7 +69,7 @@ def build_router(srv) -> APIRouter:
     _steward_locks = {"concept": threading.Lock(), "claim": threading.Lock()}
 
     def _memory_dir() -> str:
-        memory_dir = getattr(srv.llm_settings(), "memory_dir", None)
+        memory_dir = getattr(srv.global_settings(), "memory_dir", None)
         if not memory_dir:
             raise HTTPException(400, "no memory_dir configured")
         return str(memory_dir)
@@ -81,17 +82,22 @@ def build_router(srv) -> APIRouter:
 
     def _revisions(memory_dir: str) -> dict:
         from looplab.engine.claims import claim_governance_revision
-        from looplab.engine.concept_registry import concept_governance_revision
+        from looplab.engine.concept_registry import (
+            concept_governance_global_revision,
+            concept_governance_revision,
+        )
         return {
             "claims": claim_governance_revision(memory_dir),
             "concept_aliases": concept_governance_revision(memory_dir, "aliases"),
             "concept_splits": concept_governance_revision(memory_dir, "splits"),
+            "concept_governance": concept_governance_global_revision(memory_dir),
         }
 
     def _raise_governance_error(exc: Exception) -> None:
         from looplab.engine.claims import ClaimDecisionConflict, ClaimDecisionIdempotencyConflict
         from looplab.engine.concept_registry import (
             ConceptGovernanceConflict,
+            ConceptGovernanceGlobalConflict,
             ConceptGovernanceIdempotencyConflict,
         )
         from looplab.events.eventstore import EventStoreLockError
@@ -108,6 +114,12 @@ def build_router(srv) -> APIRouter:
                 "ledger": exc.path.name,
                 "expected_revision": exc.expected,
                 "current_revision": exc.actual,
+            }) from exc
+        if isinstance(exc, ConceptGovernanceGlobalConflict):
+            raise HTTPException(409, detail={
+                "code": "concept_governance_revision_conflict",
+                "expected_governance_revision": exc.expected,
+                "current_governance_revision": exc.actual,
             }) from exc
         if isinstance(exc, (ClaimDecisionIdempotencyConflict,
                             ConceptGovernanceIdempotencyConflict)):
@@ -185,12 +197,27 @@ def build_router(srv) -> APIRouter:
             # claim must also exist in the current evidence projection, and that projection must be the one
             # the operator reviewed. This callback runs after action-id replay and governance CAS while the
             # decision ledger lock is held, so lost-response retries remain idempotent.
-            if body.decision == "clear" and body.claim_uid in load_claim_decisions(memory_dir):
-                # Clearing targets an existing policy record, not live evidence. It must stay possible after
-                # retention retires the claim and for a global fallback whose UID differs from a scoped row.
-                return
             current = next((claim for claim in claims_for_memory(memory_dir, structured=True)
                             if claim.get("claim_uid") == body.claim_uid), None)
+            if body.decision == "clear":
+                decisions = load_claim_decisions(memory_dir)
+                if body.claim_uid in decisions:
+                    # Clearing targets an existing policy record, not live evidence. It must stay possible
+                    # after retention retires the claim.
+                    return
+                active = (current or {}).get("decision") or {}
+                actual_uid = str(active.get("claim_uid") or "")
+                if actual_uid and actual_uid != body.claim_uid:
+                    # A scoped row may inherit a portfolio-wide fallback. Silently appending a scoped clear
+                    # would report success while leaving that global policy active. Return the exact durable
+                    # target so the owner can explicitly acknowledge its wider blast radius and resubmit.
+                    raise HTTPException(409, detail={
+                        "code": "claim_clear_target_mismatch",
+                        "claim_uid": actual_uid,
+                        "scope": str(active.get("scope") or ""),
+                        "metric": str(active.get("metric") or ""),
+                    })
+                raise HTTPException(409, detail={"code": "claim_decision_missing"})
             if current is None:
                 raise HTTPException(409, detail={"code": "claim_target_missing"})
             if current.get("evidence_digest") != body.evidence_digest:
@@ -218,11 +245,15 @@ def build_router(srv) -> APIRouter:
             rec = record_concept_alias(
                 _memory_dir(), from_concept=body.from_concept, to_concept=body.to_concept,
                 by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                action_id=body.action_id,
+                expected_governance_revision=body.expected_governance_revision,
+                action_id=body.action_id, require_existing=True,
             )
         except Exception as exc:
             _raise_governance_error(exc)
-        return {"ok": True, "alias": rec, "revision": rec["revision"]}
+        return {
+            "ok": True, "alias": rec, "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"],
+        }
 
     @router.post("/api/cross-run/concept-purge")
     def concept_purge(body: _ConceptPurge):
@@ -233,11 +264,15 @@ def build_router(srv) -> APIRouter:
             rec = record_concept_alias(
                 _memory_dir(), from_concept=body.from_concept, to_concept="",
                 by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                action_id=body.action_id,
+                expected_governance_revision=body.expected_governance_revision,
+                action_id=body.action_id, require_existing=True,
             )
         except Exception as exc:
             _raise_governance_error(exc)
-        return {"ok": True, "alias": rec, "revision": rec["revision"]}
+        return {
+            "ok": True, "alias": rec, "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"],
+        }
 
     @router.post("/api/cross-run/concept-alias-clear")
     def concept_alias_clear(body: _ConceptSource):
@@ -247,11 +282,16 @@ def build_router(srv) -> APIRouter:
         try:
             rec = clear_concept_alias(
                 _memory_dir(), from_concept=body.from_concept, by=_actor(), at=_timestamp(),
-                expected_revision=body.expected_revision, action_id=body.action_id,
+                expected_revision=body.expected_revision,
+                expected_governance_revision=body.expected_governance_revision,
+                action_id=body.action_id, require_existing=True,
             )
         except Exception as exc:
             _raise_governance_error(exc)
-        return {"ok": True, "alias": rec, "revision": rec["revision"]}
+        return {
+            "ok": True, "alias": rec, "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"],
+        }
 
     @router.post("/api/cross-run/concept-split")
     def concept_split(body: _ConceptSplit):
@@ -263,11 +303,15 @@ def build_router(srv) -> APIRouter:
                 _memory_dir(), from_concept=body.from_concept,
                 rules=[rule.model_dump() for rule in body.rules], default=body.default,
                 by=_actor(), at=_timestamp(), expected_revision=body.expected_revision,
-                action_id=body.action_id,
+                expected_governance_revision=body.expected_governance_revision,
+                action_id=body.action_id, require_existing=True,
             )
         except Exception as exc:
             _raise_governance_error(exc)
-        return {"ok": True, "split": rec, "revision": rec["revision"]}
+        return {
+            "ok": True, "split": rec, "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"],
+        }
 
     @router.post("/api/cross-run/concept-split-clear")
     def concept_split_clear(body: _ConceptSource):
@@ -277,11 +321,16 @@ def build_router(srv) -> APIRouter:
         try:
             rec = clear_concept_split(
                 _memory_dir(), from_concept=body.from_concept, by=_actor(), at=_timestamp(),
-                expected_revision=body.expected_revision, action_id=body.action_id,
+                expected_revision=body.expected_revision,
+                expected_governance_revision=body.expected_governance_revision,
+                action_id=body.action_id, require_existing=True,
             )
         except Exception as exc:
             _raise_governance_error(exc)
-        return {"ok": True, "split": rec, "revision": rec["revision"]}
+        return {
+            "ok": True, "split": rec, "revision": rec["revision"],
+            "governance_revision": rec["governance_revision"],
+        }
 
     def _iter_log(path: Path):
         """Stream valid object rows without materializing an unbounded curation ledger."""

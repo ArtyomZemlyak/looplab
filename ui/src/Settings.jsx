@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getSettings, saveSettings, saveSecret, llmHealth } from './util.js'
-import { toForm, settingsSavePayload, FIELD_BY_KEY, SETTINGS_GROUPS } from './settingsSchema.js'
-import { filterSettingsGroups, settingsViewStats } from './settingsModel.js'
+import { toForm, fromForm, settingsSavePayload, settingsValidationErrors, FIELD_BY_KEY, SETTINGS_GROUPS } from './settingsSchema.js'
+import { filterSettingsGroups, reconcileAcceptedRecord, settingsViewStats } from './settingsModel.js'
 import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
 
@@ -40,6 +40,8 @@ export default function Settings({ onBack }) {
   const [toast, setToast] = useState(null)
   const [mode, setMode] = useState('essential')
   const [query, setQuery] = useState('')
+  const [mutationBusy, setMutationBusy] = useState('')
+  const mutationRef = useRef(null)
 
   const load = () => {
     setLoadError('')
@@ -83,6 +85,8 @@ export default function Settings({ onBack }) {
     return changed
   }, [form, saved, agentControl, savedAC])
   const unsaved = unsavedKeys.size > 0
+  const validationErrors = useMemo(() => form ? settingsValidationErrors(form) : {}, [form])
+  const invalidCount = Object.keys(validationErrors).length
 
   const visibleGroups = useMemo(() => filterSettingsGroups(SETTINGS_GROUPS, { mode, query }), [mode, query])
   const visibleStats = useMemo(() => settingsViewStats(visibleGroups), [visibleGroups])
@@ -104,33 +108,91 @@ export default function Settings({ onBack }) {
     setToast(message)
     setTimeout(() => setToast(null), 2500)
   }
+  // State-driven `disabled` attributes render one tick after a click. The token closes that gap so
+  // save and secret-clear can never issue overlapping writes, even under a same-tick double click.
+  const beginMutation = kind => {
+    if (mutationRef.current) return null
+    const token = { kind }
+    mutationRef.current = token
+    setMutationBusy(kind)
+    return token
+  }
+  const finishMutation = token => {
+    if (mutationRef.current !== token) return
+    mutationRef.current = null
+    setMutationBusy('')
+  }
   const onSave = async () => {
+    if (invalidCount) {
+      show(`Fix ${countLabel(invalidCount, 'invalid numeric setting')} before saving`)
+      return
+    }
+    const mutation = beginMutation('saving')
+    if (!mutation) { show('A settings update is already in progress'); return }
+    const submittedForm = form
+    const submittedControl = agentControl
+    const apiKey = (submittedForm.llm_api_key || '').trim()
     try {
-      const apiKey = (form.llm_api_key || '').trim()
-      const result = await saveSettings(settingsSavePayload(form, agentControl))
+      const settingsPatch = settingsSavePayload(submittedForm, submittedControl, saved, savedAC)
+      const settingsChanged = Object.keys(settingsPatch).length > 0
+      // PATCH only edits since this tab's baseline; replaying the full stale form
+      // would overwrite disjoint settings saved by another tab after this one loaded.
+      const result = await saveSettings(settingsPatch)
+      const acceptedForm = toForm(result.settings)
+      const acceptedControl = result.settings.agent_control || {}
+
+      // Commit the ordinary-settings ACK immediately. If the independent secret write fails, the
+      // accepted baseline must not be resent, while the API-key input remains available to retry.
+      setSaved(acceptedForm)
+      setSavedAC(acceptedControl)
+      const formBeforeSecretAck = apiKey
+        ? { ...acceptedForm, llm_api_key: submittedForm.llm_api_key }
+        : acceptedForm
+      setForm(current => reconcileAcceptedRecord(current, submittedForm, formBeforeSecretAck))
+      setAgentControl(current => reconcileAcceptedRecord(current, submittedControl, acceptedControl))
       if (apiKey) {
-        const resultSecret = await saveSecret('llm_api_key', apiKey)
-        setSecretState(current => ({ ...current, llm_api_key: !!resultSecret.set }))
+        let resultSecret
+        try {
+          resultSecret = await saveSecret('llm_api_key', apiKey)
+        } catch (error) {
+          const prefix = settingsChanged
+            ? 'Settings saved, but the API key was not stored: '
+            : 'API key was not stored: '
+          show(prefix + (error.message || error))
+          return
+        }
+        setSecretState(current => ({ ...current, llm_api_key: resultSecret.set === true }))
+        if (resultSecret.set !== true) {
+          show(settingsChanged
+            ? 'Settings saved, but the API key was not stored'
+            : 'API key was not stored')
+          return
+        }
+        // Clear only the submitted credential. A replacement typed while either request was in
+        // flight remains an unsaved edit instead of being erased by the older acknowledgement.
+        setForm(current => reconcileAcceptedRecord(current, submittedForm, acceptedForm))
       }
-      const nextForm = toForm(result.settings)
-      setForm(nextForm)
-      setSaved(nextForm)
-      const control = result.settings.agent_control || {}
-      setAgentControl(control)
-      setSavedAC(control)
-      show(`Settings saved${apiKey ? ' · API key stored securely' : ''} — applied to new runs`)
+      const savedParts = [settingsChanged ? 'Submitted settings saved' : '', apiKey ? 'API key stored securely' : ''].filter(Boolean)
+      show(`${savedParts.join(' · ') || 'No persisted changes'} — applied to new runs`)
     } catch (error) {
       show('Save failed: ' + error.message)
+    } finally {
+      finishMutation(mutation)
     }
   }
   const onClearSecret = async key => {
+    const mutation = beginMutation('clearing secret')
+    if (!mutation) { show('A settings update is already in progress'); return }
+    const submittedForm = form
     try {
       await saveSecret(key, '')
       setSecretState(current => ({ ...current, [key]: false }))
-      setForm(current => ({ ...current, [key]: '' }))
+      setForm(current => reconcileAcceptedRecord(current, submittedForm, { ...submittedForm, [key]: '' }))
       show('API key cleared')
     } catch (error) {
       show('Clear failed: ' + error.message)
+    } finally {
+      finishMutation(mutation)
     }
   }
   const resetToDefaults = () => {
@@ -211,6 +273,7 @@ export default function Settings({ onBack }) {
         </section>
 
         <SettingsForm form={form} onChange={onChange} dirty={dirty} unsaved={unsavedKeys}
+                      errors={validationErrors}
                       agentControl={agentControl} onToggleAgent={onToggleAgent}
                       secretState={secretState} onClearSecret={onClearSecret}
                       mode={mode} query={query} />
@@ -220,12 +283,16 @@ export default function Settings({ onBack }) {
     {form && <div className="settings-actions"><div className="sa-inner">
       <LlmHealth />
       <span className="spacer" style={{ flex: 1 }} />
-      <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '')} role="status" aria-live="polite">
-        {unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
+      <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '') + (invalidCount ? ' is-invalid' : '')}
+            role="status" aria-live="polite">
+        {invalidCount ? countLabel(invalidCount, 'invalid numeric setting')
+          : unsaved ? countLabel(unsavedKeys.size, 'unsaved change') : 'All changes saved'}
       </span>
       <button className="btn sm ghost" onClick={resetToDefaults}
               title="Reset every field to the engine default">↻ Defaults</button>
-      <button className="btn sm primary" disabled={!unsaved} onClick={onSave}>Save</button>
+      <button className="btn sm primary" disabled={!unsaved || invalidCount > 0 || !!mutationBusy} onClick={onSave}>
+        {mutationBusy === 'saving' ? 'Saving...' : 'Save'}
+      </button>
     </div></div>}
     {toast && <div className="toast" role="status">{toast}</div>}
   </div>

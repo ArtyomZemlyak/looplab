@@ -27,6 +27,7 @@ from typing import TYPE_CHECKING
 
 import orjson
 
+from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import RunState
 from looplab.engine.lessons_distill import LessonDistillMixin
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
@@ -98,10 +99,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         base = Path(self._e.memory_dir)
         base.mkdir(parents=True, exist_ok=True)
         path = base / "lessons.jsonl"
-        payload = "".join(orjson.dumps(lz).decode() + "\n" for lz in lessons)
+        payload = b"\n".join(orjson.dumps(lz) for lz in lessons)
         with _interprocess_lock(Path(str(path) + ".lock")):
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(payload)
+            append_jsonl_bytes_locked(path, payload)
             if hygiene:
                 # D2 hygiene: consolidate the store after appending — merge duplicate claims into
                 # an evidence_count, retire contradicted verdicts (newest wins), THEN bound size. The
@@ -141,6 +141,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             "at_node": n, "trigger": "cadence", "count": len(lessons),
             "pairs": [[pr["a"], pr["b"]] for pr in pairs],
             "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                         "claim_stance": lz.get("claim_stance"),
                          "evidence": lz.get("evidence")} for lz in lessons]})
         # Hygiene deferred to run end: the read path dedups/quarantines already, and a full-file
         # rewrite of the shared store every few nodes would race other runs' appends for nothing.
@@ -263,6 +264,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             if not node_concepts:
                 return                          # nothing tagged this run -> no capsule (no-op)
             from looplab.engine.memory import build_concept_capsule
+            from looplab.events.replay import promotion_eligible_nodes
             direction = final.direction or "min"
 
             def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
@@ -270,15 +272,16 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
             # NOTE (CODEX): raw per-run concept LABELS — no `concept_consolidation` canonicalization / UID /
             # taxonomy version yet (the CR1a concept_uid resolver is the §21.20.13 TODO), so a later reader
-            # matches by exact string. And the per-concept outcome is the best CONFIRMED metric among a
-            # concept's EVALUATED nodes (failed/unscored nodes carry robust_metric None and are skipped);
-            # full node-qualified measurement eligibility/uncertainty is the same CR TODO.
+            # matches by exact string. Attempt coverage retains every tagged node, while a durable numeric
+            # outcome may come only from the same feasible, live, unflagged pool used for promotion.
             concepts, outcomes = set(), {}
+            eligible_ids = {node.id for node in promotion_eligible_nodes(final)}
             for nd in final.nodes.values():
                 m = getattr(nd, "robust_metric", None)
                 for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
                     concepts.add(str(c))
-                    if m is not None and (outcomes.get(c) is None or _better(m, outcomes[c])):
+                    if (nd.id in eligible_ids and m is not None
+                            and (outcomes.get(c) is None or _better(m, outcomes[c]))):
                         outcomes[str(c)] = m
             if not concepts:
                 return
@@ -477,4 +480,5 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         from looplab.engine.claims import record_research_claims
         record_research_claims(self._e.memory_dir, run_id=final.run_id or final.task_id,
-                               task_id=final.task_id, claims=claims)
+                               task_id=final.task_id, claims=claims,
+                               direction=final.direction)

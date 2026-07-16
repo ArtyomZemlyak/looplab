@@ -28,7 +28,9 @@ def ui(run_root: Path = typer.Option(
                     "Auto-derived from JUPYTERHUB_SERVICE_PREFIX when unset; harmless for a stripping "
                     "proxy. Lets `looplab ui` work behind both proxy styles without raw uvicorn."),
        build: bool = typer.Option(True, "--build/--no-build",
-                                  help="Auto-build the React bundle if it's missing (needs Node/npm)."),
+                                   help="Auto-build the React bundle when missing or stale (needs Node/npm). "
+                                        "A requested refresh failure will not serve old/partial output; "
+                                        "use --no-build only to serve it explicitly."),
        rebuild: bool = typer.Option(False, "--rebuild",
                                     help="Force a fresh `npm run build` even if a bundle exists.")):
     """Serve the live React UI over the run dirs (needs the [ui] extra: pip install 'looplab[ui]').
@@ -36,12 +38,25 @@ def ui(run_root: Path = typer.Option(
     A separate read/control process (ADR-18): tails events.jsonl -> SSE, serves the built React
     app, and turns UI actions into appended control events. Does not change the engine.
 
-    On launch the React bundle is built automatically when it's missing and Node/npm are on PATH,
-    so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. Use --no-build to skip or
-    --rebuild to force one."""
+    On launch the React bundle is built automatically when it's missing or stale and Node/npm are on
+    PATH, so a fresh `pip install -e ".[ui]"` needs no manual `npm run build`. A failed requested
+    build refuses to serve existing or partial output; use --no-build to accept that risk explicitly,
+    or --rebuild to force a fresh build."""
     if build or rebuild:
-        from looplab.serve.uibuild import ensure_ui_built  # stdlib-only; fine to import before the [ui] check
-        ensure_ui_built(force=rebuild, log=typer.echo)
+        # Capture whether a previous bundle exists before Vite can empty dist. If refreshing that
+        # bundle fails, do not silently serve the stale UI under a successful `looplab ui` launch.
+        # Operators may still choose that exact risk explicitly with --no-build.
+        from looplab.serve.uibuild import (  # stdlib-only; fine before the [ui] dependency check
+            ensure_ui_built,
+            is_built,
+            ui_dist_dir,
+        )
+        had_bundle = is_built(ui_dist_dir())
+        built = ensure_ui_built(force=rebuild, log=typer.echo)
+        if not built and (had_bundle or is_built(ui_dist_dir())):
+            typer.echo("UI build failed; refusing to serve a stale or partial bundle. "
+                       "Fix the build, or pass --no-build to serve it explicitly.")
+            raise typer.Exit(1)
     try:
         from looplab.serve.server import serve  # lazy: keeps the core import-free of fastapi/uvicorn
     except ModuleNotFoundError as e:

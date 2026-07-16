@@ -16,6 +16,7 @@ Windows process-group flags, UTF-8 capture) so timeouts/tree-kill behave identic
 from __future__ import annotations
 
 import json
+import math
 import os
 import posixpath
 import re
@@ -163,7 +164,14 @@ def read_metric(stdout: str, workdir: str, spec: dict, wrap=None,
                 return None
         except (OSError, ValueError):
             return None
-        labels_path = Path(spec["labels"]).resolve()   # operator-declared host path (trusted)
+        # A host_score spec with no `labels` path is malformed — `_valid_metric_kind` accepts it (it
+        # only checks `kind`), so guard here and FAIL THE NODE (return None) rather than raising a
+        # KeyError that has no terminal event and crashes the whole run (like every other malformed-spec
+        # branch in this function).
+        _lbl = spec.get("labels")
+        if not _lbl:
+            return None
+        labels_path = Path(_lbl).resolve()   # operator-declared host path (trusted)
         # Enforce the invariant the docstring asserts: the answer key must live OUTSIDE the
         # candidate's workspace. Under the untrusted/hostile tier the whole MOUNT ROOT (the run root)
         # is bind-mounted into the container — not just the eval cwd — so a labels path anywhere under
@@ -291,8 +299,10 @@ def _fmt(v) -> str:
     epochs=50.0), everything else as-is."""
     try:
         f = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return str(v)
+    if not math.isfinite(f):        # inf/-inf/nan: int(f) below raises OverflowError/ValueError, which
+        return repr(f)              # would crash build_command with no terminal event — pass it through
     return str(int(f)) if f == int(f) else repr(f)
 
 
@@ -574,7 +584,8 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     _w = (lambda argv, hc: wrap(argv, hc)) if wrap else (lambda argv, hc: argv)
     # Live, tail-able logs of the setup + eval subprocesses (e.g. training epochs), so a long
     # eval isn't opaque until it returns. None -> buffered fast path (unchanged).
-    _log = lambda name: (str(Path(log_dir) / name) if log_dir else None)
+    def _log(name):
+        return str(Path(log_dir) / name) if log_dir else None
 
     def _sp(name, **attrs):                              # child span when a tracer is wired
         return tracer.span(name, **attrs) if tracer is not None else nullcontext(None)

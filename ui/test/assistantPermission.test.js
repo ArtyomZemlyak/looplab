@@ -114,3 +114,21 @@ test('scope rendering omits identity digests and duplicate verb copy', () => {
   assert.match(view.scope, /background: false/)
   assert.doesNotMatch(view.scope, /argv digest|hidden copy|a{20}/)
 })
+
+import { reconcilePendingPermissions } from '../src/assistantPermission.js'
+
+test('reconcilePendingPermissions hides a locally-resolved card a lagging poll re-adds, then self-heals', () => {
+  const resolved = new Set(['req-2'])   // user just approved req-2
+  // A stale poll snapshot still lists req-2 (server hasn't reflected the resolution yet).
+  const stale = [{ id: 'req-1' }, { id: 'req-2' }]
+  assert.deepEqual(reconcilePendingPermissions(stale, resolved).map(r => r.id), ['req-1'],
+    'the resolved card must not reappear from a lagging poll')
+  assert.ok(resolved.has('req-2'), 'resolved id is retained while the server still reports it')
+  // Next poll: the server has dropped req-2 → it is pruned from the set (self-heal, no unbounded growth).
+  const fresh = [{ id: 'req-1' }]
+  assert.deepEqual(reconcilePendingPermissions(fresh, resolved).map(r => r.id), ['req-1'])
+  assert.ok(!resolved.has('req-2'), 'a server-dropped id is pruned so it can never hide a re-issued id')
+  // Non-array / malformed inputs degrade to [] without throwing.
+  assert.deepEqual(reconcilePendingPermissions(null, new Set()), [])
+  assert.deepEqual(reconcilePendingPermissions([null, { id: 'x' }], new Set()).map(r => r.id), ['x'])
+})

@@ -35,7 +35,9 @@ def to_int(v):
     """`int(float(v))` or None when unparseable (nvidia-smi CSV cells and similar)."""
     try:
         return int(float(v))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float('inf'/'1e400')) — a non-finite value is "unparseable" per the
+        # contract above, not a crash (float() itself accepts 'inf'/'Infinity', int() then rejects it).
         return None
 
 T = TypeVar("T", bound=BaseModel)

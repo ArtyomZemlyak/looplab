@@ -193,12 +193,15 @@ def test_reconcile_comparative_pair_flip_retires_and_rederives(tmp_path, monkeyp
     assert not any("OLD STALE" in r.get("statement", "") for r in rows)  # stale row retired
     fresh = [r for r in rows if r.get("source") == "comparative"]
     assert len(fresh) == 1 and "regressed" in fresh[0]["statement"]      # re-derived from corrected state
+    assert fresh[0]["outcome"] == "failed" and fresh[0]["claim_stance"] == "support"
     assert fresh[0]["evidence_sig"]["1"] == "evaluated:6.0"              # re-stamped with the NEW sig
     # ledger: the re-derived pair is (re-)spent + an audit event records the reconcile
     final = fold(eng.store.read_all())
-    assert [d for d in final.lessons_distilled if d.get("trigger") == "reconcile"]
+    spends = [d for d in final.lessons_distilled if d.get("trigger") == "reconcile"]
+    assert spends and spends[0]["lessons"][0]["claim_stance"] == "support"
     rec = [e for e in eng.store.read_all() if e.type == "lessons_reconciled"]
     assert len(rec) == 1 and rec[0].data["n_retired"] == 1 and rec[0].data["n_added"] == 1
+    assert rec[0].data["lessons"][0]["claim_stance"] == "support"
 
 
 def test_reconcile_records_spend_even_if_consolidate_fails_after_write(tmp_path, monkeypatch):

@@ -223,7 +223,6 @@ def concept_coverage(
 
     client = None
     if not offline:
-        from looplab.core.config import Settings
         settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
@@ -286,6 +285,8 @@ def asset_brief_cmd(
         raise typer.Exit(2)
     client = None
     if llm:
+        # asset-brief sweeps a repo, not a run directory, so there is no config snapshot to resolve here.
+        # Start from ambient settings and layer the explicit --model override on top.
         settings = _settings_for_run(None, model)
         try:
             client = _make_llm_client(settings)
@@ -351,7 +352,6 @@ def board_dedup(
     elif hyps:
         client = None
         try:
-            from looplab.core.config import Settings
             settings = _settings_for_run(run_dir, model)
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — no endpoint => heuristic tags, noted
@@ -414,7 +414,6 @@ def novelty_recall_cmd(
     # most-similar candidate pairs), each sending two truncated idea texts. `--offline` skips the LLM
     # entirely (candidate clusters only); docs/guide/cli-reference.md states the send-by-default contract.
     if not offline:
-        from looplab.core.config import Settings
         settings = _settings_for_run(run_dir, model)
         try:
             client = _make_llm_client(settings)
@@ -435,7 +434,6 @@ def lesson_guard_cmd(
     from looplab.trust.lesson_guard import contradiction_scan, guard_lessons
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
-    from looplab.core.config import Settings
     settings = _settings_for_run(run_dir, model)
     try:
         client = _make_llm_client(settings)
@@ -644,22 +642,29 @@ def concept_split_cmd(
 @app.command(name="concept-steward")
 def concept_steward_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds concept_capsules.jsonl)."),
-    apply: bool = typer.Option(False, "--apply", help="RECORD the proposals (merge/split/purge) instead of "
-                               "just showing them. Reversible (append-only governance ledger)."),
+    apply: bool = typer.Option(False, "--apply", help="DEPRECATED compatibility option; rejected before "
+                               "any LLM call. The steward is proposal-only."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
     max_proposals: int = typer.Option(12, help="Max curation proposals."),
     as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
 ):
     """PART IV cross-run §21.20.13 / §22.4 — the AGENTIC taxonomy steward: an LLM reviews the cross-run
     concept graph and PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise).
-    Advisory by default (shows proposals for operator ratification); `--apply` records them through the SAME
-    reversible governance writes as the manual `concept-merge`/`concept-split`. Needs a reachable LLM."""
+    Proposal-only: review the exact output, then record selected operations through `concept-merge`,
+    `concept-split`, or owner HTTP governance. The deprecated `--apply` option is rejected before any paid
+    LLM call or mutation. Needs a reachable LLM."""
+    if apply:
+        typer.echo("error: --apply is deprecated and disabled; concept-steward is proposal-only. "
+                   "Run without --apply, review the exact proposal, then use concept-merge/concept-split "
+                   "or owner HTTP governance.")
+        raise typer.Exit(2)
     from looplab.core.config import Settings
     from looplab.engine.concept_steward import curation_is_empty, steward_concepts
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
@@ -683,13 +688,8 @@ def concept_steward_cmd(
         typer.echo(f"  split  '{s['from_concept']}' -> {{{', '.join(r['to'] for r in s['rules'])}}}")
     for p in prop["purges"]:
         typer.echo(f"  purge  '{p['from_concept']}'")
-    if apply and out.get("receipt"):
-        rc = out["receipt"]
-        typer.echo(f"applied {len(rc['applied'])}, skipped {len(rc['skipped'])}")
-        for s in rc["skipped"]:
-            typer.echo(f"  skip {s['action']} {s.get('from_concept')}: {s['reason']}")
-    elif not apply:
-        typer.echo("(dry run — re-run with --apply to record; reversible)")
+    typer.echo("(proposal only — review the exact proposal above; apply selected changes with "
+               "concept-merge/concept-split or owner HTTP governance)")
 
 
 @app.command(name="claim-decide")
@@ -706,7 +706,7 @@ def claim_decide_cmd(
     """PART V §22.4 — the OPERATOR governance write: ratify / reject / pin a cross-run claim. This is the
     ONLY way to change cross-run MEANING by hand (agents can only read + cite). Append-only, overlaid on
     the machine-proposed assessment by normalized statement; a rejected claim is dropped from agent
-    context packs, a ratified one is surfaced first. Reversible (re-decide; last write wins)."""
+    context packs, a ratified one is surfaced after explicit pins. Reversible (re-decide; last write wins)."""
     from looplab.engine.claims import record_claim_decision
     picked = [d for d, on in (("ratified", ratify), ("rejected", reject), ("pinned", pin)) if on]
     if len(picked) != 1:
@@ -734,13 +734,15 @@ def task_facets_cmd(
     """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM classifies a task's goal into facets
     (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
-    fingerprint); used as an extra cross-task scope-match signal. `--apply` records for `--task-id`."""
+    fingerprint); currently stored/surfaced as metadata and reserved for future post-scope ranking. It
+    does not grant visibility or change retrieval order. `--apply` records for `--task-id`."""
     from looplab.core.config import Settings
     from looplab.engine.task_facets import steward_task_facets
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001
@@ -762,21 +764,29 @@ def task_facets_cmd(
 @app.command(name="claim-steward")
 def claim_steward_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (holds lessons.jsonl)."),
-    apply: bool = typer.Option(False, "--apply", help="RECORD the proposed decisions (reversible)."),
+    apply: bool = typer.Option(False, "--apply", help="DEPRECATED compatibility option; rejected before "
+                               "any LLM call. The steward is proposal-only."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
     max_proposals: int = typer.Option(10, help="Max decision proposals."),
     as_json: bool = typer.Option(False, "--json", help="Emit proposals + receipt as JSON."),
 ):
     """PART IV cross-run §22.4 — the AGENTIC CLAIM steward: an LLM reviews the evidence-grounded claims and
     PROPOSES operator decisions (ratify well-evidenced / reject contradicted-or-noise / pin load-bearing).
-    Advisory by default; `--apply` records them through the SAME reversible governance write as
-    `claim-decide`. Scope-precise via the structured claim key. Needs a reachable LLM."""
+    Proposal-only: review the exact output, then record selected decisions through `claim-decide` or owner
+    HTTP governance. The deprecated `--apply` option is rejected before any paid LLM call or mutation.
+    Scope-precise via the structured claim key. Needs a reachable LLM."""
+    if apply:
+        typer.echo("error: --apply is deprecated and disabled; claim-steward is proposal-only. "
+                   "Run without --apply, review the exact proposal, then use claim-decide or owner HTTP "
+                   "governance.")
+        raise typer.Exit(2)
     from looplab.core.config import Settings
     from looplab.engine.claim_steward import curation_is_empty, steward_claims
     import datetime as _dt
     settings = Settings()
     if model:
-        settings = settings.model_copy(update={"model": model})
+        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
+        #                              phantom attr and silently kept the default endpoint (--model no-op)
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
@@ -794,10 +804,8 @@ def claim_steward_cmd(
     typer.echo(f"claim-steward proposals — {len(prop['decisions'])} decision(s):")
     for d in prop["decisions"]:
         typer.echo(f"  {d['decision']:9} {d['statement'][:80]}" + (f"   ({d['why']})" if d.get("why") else ""))
-    if apply and out.get("receipt"):
-        typer.echo(f"applied {len(out['receipt']['applied'])}, skipped {len(out['receipt']['skipped'])}")
-    elif not apply:
-        typer.echo("(dry run — re-run with --apply to record; reversible)")
+    typer.echo("(proposal only — review the exact proposal above; apply selected decisions with "
+               "claim-decide or owner HTTP governance)")
 
 
 @app.command(name="cross-run-digest")
@@ -908,21 +916,27 @@ def claims_cmd(
     """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
     each with support vs oppose node-id evidence and an epistemic state (supported/refuted/mixed/
     inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
-    renders the bounded agent context pack (contested-first, caveat slot reserved). Pure read of
+    renders the hard-capped agent context pack (pinned → ratified → mixed → supported → refuted →
+    inconclusive; a caveat may replace the weakest non-pinned positive). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
     from looplab.engine.claims import (build_context_pack, claims_for_memory,
                                        load_research_claims, render_context_pack)
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
-    path = p if p.is_file() else p / "lessons.jsonl"
-    base = p if p.is_dir() else p.parent
     if p.is_file():
+        path, base = p, p.parent
         lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-    elif path.exists():
-        lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+    elif p.is_dir():
+        path, base = p / "lessons.jsonl", p
+        # A memory directory may legitimately contain D8 research claims without distilled lessons.
+        lessons = (read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+                   if path.exists() else [])
     else:
-        lessons = []
+        # Reject before selecting a parent directory; otherwise an explicit missing file
+        # silently reads an unrelated sibling research_claims.jsonl and reports success for the wrong input.
+        typer.echo(f"cross-run memory path does not exist or is not a file/directory: {p}")
+        raise typer.Exit(1)
     research = load_research_claims(base)
     if not lessons and not research:
         typer.echo(f"no lessons at {path}")

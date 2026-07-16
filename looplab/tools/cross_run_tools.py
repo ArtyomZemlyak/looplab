@@ -47,9 +47,12 @@ class CrossRunTools:
         self._bound = False
 
     def bind_state(self, state, parent=None) -> None:
-        """Learn the CURRENT run's scope so queries reach SIMILAR tasks, not the whole portfolio (the
-        live-test leak fix): scope = same `task_id` OR a shared goal keyword. When the tool is used
-        UNBOUND (CLI/human), no scope is set and every row passes — the human wants portfolio-wide."""
+        """Learn the current run's direction and scope before any agent query.
+
+        Lessons/capsules may match an exact task or the strict related-goal fingerprint predicate;
+        v2 D8 rows carry no goal fingerprint and therefore pass only by exact task. An unbound
+        CLI/human provider remains portfolio-wide.
+        """
         if state is None:
             return
         self._bound = True
@@ -58,13 +61,14 @@ class CrossRunTools:
         self._direction = direction if direction in ("min", "max") else ""
         self._scope_terms = _toks(getattr(state, "goal", "") or "")
         # Agentic facets are intentionally not loaded into this visibility predicate. They are
-        # untrusted advisory labels and belong in ranking, after a hard scope match.
+        # untrusted advisory metadata reserved for a future post-scope ranking experiment.
 
     def _in_scope(self, row: dict) -> bool:
-        """True when the row belongs to the bound run's scope (same task, or overlapping goal terms), or
-        when the tool is unbound. Goal terms come from the row's `fingerprint` bare tokens (the kind:/dir:/
-        metric: prefixed tokens are excluded). Exact `task_id` always passes — robust even when a legacy
-        (ASCII) fingerprint dropped a non-Latin goal's keywords."""
+        """True for compatible direction plus exact task or strict related-goal fingerprint.
+
+        Goal terms come from bare fingerprint tokens; rows without that fingerprint (including v2 D8)
+        are exact-task-only. Facets are not a visibility input.
+        """
         if not self._bound:
             return True                                        # unbound -> portfolio-wide
         row_direction = str(row.get("direction") or "")
@@ -78,7 +82,8 @@ class CrossRunTools:
             shared = row_terms & self._scope_terms
             # A single generic word ("model", "retrieval", "training") is not a security scope.  Similar
             # cross-task transfer requires at least two salient terms covering half of the smaller side;
-            # exact task ids remain authoritative. Agent-proposed facets are ranking hints only.
+            # exact task ids remain authoritative. Agent-proposed facets currently affect neither this
+            # visibility predicate nor retrieval order.
             if len(shared) >= 2 and len(shared) / max(1, min(len(row_terms), len(self._scope_terms))) >= 0.5:
                 return True
         return False
@@ -88,31 +93,31 @@ class CrossRunTools:
             return []
         return [
             fn_spec("cross_run_prior_attempts",
-                "Check whether an idea's CONCEPTS were already explored in earlier runs across the "
-                "portfolio, and with what outcome — so you don't re-invent a settled result (or can "
-                "deliberately extend/replicate it). Surfaces prior runs, never rejects.",
+                "Check whether an idea's CONCEPTS were observed in earlier runs across the "
+                "portfolio, and with what recorded outcome — so you can inspect, extend or replicate the "
+                "prior observation. It is not proof that a result is settled and never rejects.",
                 {"idea": {"type": "string", "description": "The idea / technique / concept to look up "
                           "(e.g. 'hard-negative mining', 'distillation')."}},
                 ["idea"]),
             fn_spec("cross_run_claims",
-                "What the ACCUMULATED cross-run evidence suggests: claims with support vs opposition and "
-                "an epistemic state (supported / refuted / mixed / inconclusive). `contested` shows only "
-                "the claims the portfolio disagrees with itself on — the highest-signal ones to resolve.",
+                "A bounded machine projection of accumulated claim references: support-only, opposition-only, "
+                "mixed, or insufficient evidence. `contested` selects mixed-evidence records; it does not "
+                "establish proposition truth or independent replication.",
                 {"query": {"type": "string", "description": "Keywords to filter claims (blank = top "
                            "claims by evidence)."},
                  "contested": {"type": "boolean", "description": "Only mixed (support+oppose) claims."}},
                 []),
             fn_spec("cross_run_atlas",
-                "A portfolio MAP: which concepts have been explored (and in how many runs), which are "
-                "thinly explored (a single run — a gap to consider), and which claims are contradictory. "
-                "Use it to pick an under-explored or unresolved direction.",
+                "A bounded live portfolio summary: observed concepts and their returned run counts, concepts "
+                "observed in one returned run, and mixed-evidence claim records. It has no frozen scope or "
+                "coverage denominator, so one-run observations are not proof of a gap.",
                 {}, []),
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
                 "hybrid lexical+keyword+semantic query. Use it to find whatever the portfolio knows about a "
                 "free-text idea, when a specific concept lookup isn't enough. Set `intent` to bias results: "
-                "'failed'/'contested' surface counter-evidence and disagreements, 'worked' surfaces proven "
-                "wins, 'explore' is neutral.",
+                "'failed'/'contested' surface counter-evidence and mixed records, 'worked' biases toward "
+                "support-labelled observations, and 'explore' is neutral.",
                 {"query": {"type": "string", "description": "Free-text query (idea, technique, question)."},
                  "intent": {"type": "string", "enum": ["worked", "failed", "contested", "explore"],
                             "description": "Why you're searching — biases eligibility + contradiction quota."}},
@@ -140,7 +145,7 @@ class CrossRunTools:
         return [c for c in caps if self._in_scope(c)]
 
     def _role_research_claims(self) -> list[dict]:
-        """D8 memos are researcher evidence, never developer lessons; apply the same task/facet scope."""
+        """D8 is researcher evidence, never developer memory; bound rows are exact-task-only."""
         if self.role == "developer":
             return []
         return [r for r in self._load("research_claims.jsonl") if self._in_scope(r)]
@@ -156,7 +161,7 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.concept_registry import load_concept_aliases
+        from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
         from looplab.engine.memory import portfolio_concept_overview
 
         if name == "cross_run_prior_attempts":
@@ -166,7 +171,8 @@ class CrossRunTools:
             if len(idea) > 4000:
                 return "(cross-run tool error: idea exceeds 4000 characters)"
             qt = _toks(idea)
-            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir))
+            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir),
+                                            splits=load_concept_splits(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
@@ -209,13 +215,13 @@ class CrossRunTools:
                     "inconclusive": "inconclusive"}
             def _claim_line(c):
                 refs = (c.get("support") or [])[:4] + (c.get("oppose") or [])[:4]
-                evidence = ",".join(_safe_text(ref, 120) for ref in refs) or "-"
+                evidence = "[" + ", ".join(repr(_safe_text(ref, 120)) for ref in refs) + "]"
                 contradicts = "; ".join(
                     repr(_safe_text(statement, 180)) for statement in (c.get("contradicts") or [])[:3])
                 return (f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / "
                         f"{c['n_oppose']} against] "
                         f"UNTRUSTED_MEMORY={_safe_text(c['statement'], 240)!r}; "
-                        f"evidence={evidence}; maturity={_safe_text(c.get('maturity'), 40)!r}"
+                        f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={_safe_text(c.get('maturity'), 40)!r}"
                         + (f"; contradicts={contradicts}" if contradicts else ""))
 
             return "\n".join(_claim_line(c) for c in claims)
@@ -225,18 +231,18 @@ class CrossRunTools:
             atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
                                      capsules=self._scoped_capsules(),
                                      research_claims=self._role_research_claims(), structured=True)
-            lines = [f"Portfolio: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
-                     f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested."]
+            lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
+                     f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
             if atlas["explored"]:
                 lines.append("Most explored: "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
                                          f"(×{e['n_runs']})" for e in atlas["explored"][:6]))
             if atlas["thin_coverage"]:
-                lines.append("Thin (1 run — a gap): "
+                lines.append("Observed in one returned run (not a coverage gap): "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(x, 120)!r}"
                                          for x in atlas["thin_coverage"][:8]))
             if atlas["contradictions"]:
-                lines.append("Contradictory: "
+                lines.append("Mixed-evidence claim records: "
                              + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
                                          for c in atlas["contradictions"][:4]))
             return "\n".join(lines)
@@ -251,6 +257,8 @@ class CrossRunTools:
             intent = args.get("intent")
             if intent is not None and not isinstance(intent, str):
                 return "(cross-run tool error: intent must be a string)"
+            if intent is not None and intent not in {"worked", "failed", "contested", "explore"}:
+                return "(cross-run tool error: intent must be worked, failed, contested, or explore)"
             # Pass one fully-scoped snapshot. `_in_scope` already applies exact-task or bounded fingerprint
             # transfer to every source; applying an additional exact scope_task filter here would silently
             # discard the intentionally-related rows.

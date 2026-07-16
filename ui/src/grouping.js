@@ -146,3 +146,21 @@ export function groupAggregate(memberIds, nodesObj, direction) {
   })
   return { best, series, status, count: memberIds.length }
 }
+
+// A direction chip is a semantic filter, not just decoration. Collapsed cards therefore aggregate
+// only matching experiments while retaining the full membership count as context. This prevents an
+// operator/theme super-node from presenting a cross-theme best as if it belonged to the active theme.
+export function themeFilteredGroupAggregate(memberIds, nodesObj, direction, themeFilter = null) {
+  const totalCount = memberIds.length
+  const matchedIds = themeFilter
+    ? memberIds.filter(id => nodesObj[id]?.idea?.theme === themeFilter)
+    : memberIds
+  return {
+    ...groupAggregate(matchedIds, nodesObj, direction),
+    matchedIds,
+    totalCount,
+    matchedCount: matchedIds.length,
+    filterActive: !!themeFilter,
+    themeFilter,
+  }
+}

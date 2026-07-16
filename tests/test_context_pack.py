@@ -48,6 +48,30 @@ def test_no_caveat_swap_when_none_exist():
     assert len(pack["claims"]) == 2 and all(c["epistemic"] == "supported" for c in pack["claims"])
 
 
+def test_caveat_slot_never_evicts_an_all_pinned_cutoff():
+    pins = [
+        {**_claim(f"pinned {index}", "supported", 5 - index, 0), "maturity": "operator-pinned"}
+        for index in range(2)
+    ]
+    caveat = _claim("lower-priority caveat", "refuted", 0, 3)
+    pack = build_context_pack([*pins, caveat], max_claims=2)
+    assert [claim["statement"] for claim in pack["claims"]] == ["pinned 0", "pinned 1"]
+
+
+def test_pin_overflow_is_explicit_in_pack_and_rendering():
+    pins = [
+        {**_claim(f"pinned {index}", "supported", 9 - index, 0),
+         "maturity": "operator-pinned"}
+        for index in range(6)
+    ]
+    pack = build_context_pack(pins, max_claims=5)
+    assert len(pack["claims"]) == 5
+    assert pack["n_pinned_total"] == 6 and pack["n_pinned_omitted"] == 1
+    rendered = render_context_pack(pack)
+    assert "1 operator-pinned claim(s) omitted" in rendered
+    assert "full claims ledger" in rendered
+
+
 def test_coverage_block_from_concept_overview():
     ov = {"n_runs": 4, "n_concepts": 7,
           "concepts": [{"concept": "hard-neg"}, {"concept": "distillation"}]}

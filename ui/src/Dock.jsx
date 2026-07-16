@@ -4,7 +4,7 @@ import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runComma
   commandActionForEvent, commandRecordMatchesAction, commandEventForAction,
   loadRunTransport, saveRunTransport, clearRunTransport, isTransientCommandReadError,
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
-  COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet } from './util.js'
+  COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
 import Markdown from './markdown.jsx'
 import { NodeTrace } from './Inspector.jsx'
@@ -200,7 +200,7 @@ function LiveTrace({ runId, active }) {
   const [tail, setTail] = useState([])
   const [open, setOpen] = useState(false)
   const bodyRef = useRef(null)
-  usePoll((alive) => get(`/api/runs/${runId}/trace/tail?limit=40`)
+  usePoll((alive) => get(runApiPath(runId, '/trace/tail?limit=40'))
     .then(r => { if (alive()) setTail(r.tail || []) }).catch(() => {}),
     3000, [runId, active, open], { enabled: active && open })
   useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
@@ -411,7 +411,7 @@ function OpTrace({ runId, traceId }) {
   useEffect(() => {
     let on = true
     setSpans(null)
-    get(`/api/runs/${runId}/trace/by_trace/${traceId}`)
+    get(runApiPath(runId, `/trace/by_trace/${encodeURIComponent(traceId)}`))
       .then(d => on && setSpans(d?.spans || [])).catch(() => on && setSpans([]))
     return () => { on = false }
   }, [runId, traceId])
@@ -462,16 +462,17 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const exactBuilding = liveBuilding != null && traceNid === liveBuilding.nodeId
     && traceGeneration != null
     && traceGeneration === liveBuilding.generation
-  const loadNodeTrace = (alive) => get(`/api/runs/${runId}/nodes/${traceNid}/trace`)
-    .then(d => { if (alive()) setNodeTrace(d) })
+  // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
+  // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
+  const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, '/trace'))
+    .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
-  usePoll((alive) => { setNodeTraceError(false); loadNodeTrace(alive) }, 4000,
+  usePoll((alive) => loadNodeTrace(alive), 4000,
     [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce],
     { enabled: open && !readOnly && traceNid != null && exactBuilding })
   useEffect(() => {
     if (!open || readOnly || traceNid == null || exactBuilding) return undefined
     let alive = true
-    setNodeTraceError(false)
     loadNodeTrace(() => alive)
     return () => { alive = false }
   }, [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce])

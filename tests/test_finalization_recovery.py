@@ -59,6 +59,21 @@ class _EngineStub:
     def _store_research_claims(self, _state):
         self.research_claim_calls += 1
 
+    # Keep the rest of the real Engine's optional finalization surface explicit on the stub. Concepts and
+    # curation are disabled here; these methods ensure a future gate change fails in the test body rather
+    # than as an unrelated missing-attribute error.
+    def _store_concept_capsule(self, _state):
+        pass
+
+    def _store_concept_curation(self, _state):
+        pass
+
+    def _store_claim_curation(self, _state):
+        pass
+
+    def _store_task_facets(self, _state):
+        pass
+
     def _write_reflection_note(self, _state):
         self.reflection_calls += 1
 

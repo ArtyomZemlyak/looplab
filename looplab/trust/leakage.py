@@ -64,7 +64,12 @@ def target_leakage(features: dict[str, list[float]], target: list[float],
 
 
 _FIT_RE = re.compile(r"\.(fit|fit_transform)\s*\(([^)]*)\)")
-_SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold|StratifiedKFold|\.split\s*\(")
+# Every alternative must be a CALL/USE site, not a bare name: `KFold`/`StratifiedKFold` without the
+# `\s*\(` matched their own IMPORT line (`from sklearn.model_selection import KFold`), which — being at
+# the top of the file — set `split_at` to line 0 and silently disabled the fit_before_split detector for
+# the WHOLE solution (a real `scaler.fit(X)` before any split then reads as `line_i >= split_at`). Require
+# the instantiation `KFold(` / `StratifiedKFold(`; the actual split still also matches via `.split(`.
+_SPLIT_RE = re.compile(r"train_test_split\s*\(|KFold\s*\(|StratifiedKFold\s*\(|\.split\s*\(")
 # The early-stopping monitor kwarg (split off from the fit ARGS so a benign eval_set on VALIDATION
 # isn't read as fit-on-validation) and the TEST-monitor tell. The monitor tell matches the substring
 # `test` (NOT `\bx_test\b`): a suffixed name like `X_test_scaled`/`X_testing`/`y_test_final` has no
@@ -109,7 +114,7 @@ def code_leakage_scan(code: str) -> dict:
     an honest solution. Keep this scan's precision high whenever it feeds a non-audit trust gate."""
     flags: list[dict] = []
     lines = code.splitlines()
-    split_at = next((i for i, l in enumerate(lines) if _SPLIT_RE.search(l)), None)
+    split_at = next((i for i, line in enumerate(lines) if _SPLIT_RE.search(line)), None)
     # finditer over the FULL code (not per-line via `.search`): `.search` returned only the FIRST fit on
     # a line and could not see an argument that spans lines, so `model.fit(X_train); m2.fit(X_test)` and
     # a multiline `.fit(\n  X_test\n)` both slipped through (arch-review §4 P1-7). `_FIT_RE`'s `[^)]*`

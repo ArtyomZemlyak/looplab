@@ -20,9 +20,13 @@ pip install -e ".[ui]"
 looplab ui                      # serves http://127.0.0.1:8765 over ./runs
 ```
 
-On the first launch `looplab ui` **builds the React bundle automatically** when it's missing and
-Node/npm are on your `PATH` (`npm ci` + `npm run build`, once) — so a fresh `pip install` needs no
-manual build step. If Node isn't installed it prints how to build by hand and still starts the API.
+On launch `looplab ui` checks a SHA-256 freshness stamp over the UI source/configuration and **builds the React
+bundle automatically** when the default bundle is missing, unstamped or stale and Node/npm are on your `PATH`.
+It also reinstalls dependencies when `package.json`/the lockfile no longer match the installed dependency stamp.
+A failed requested refresh never silently serves an older bundle: if one existed, the command exits and tells
+you how to repair it. Pass `--no-build` only when you deliberately want to serve that prebuilt/stale output. If
+Node isn't installed and no previous bundle exists, the command prints manual build guidance and still starts
+the API with the not-built placeholder.
 
 | Option | Default | Description |
 |---|---|---|
@@ -30,7 +34,7 @@ manual build step. If Node isn't installed it prints how to build by hand and st
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
 | `--root-path PATH` | `""` | ASGI prefix for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
-| `--build / --no-build` | `--build` | Auto-build the bundle if missing (`--no-build` to skip) |
+| `--build / --no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (`--no-build` explicitly skips the freshness check) |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
 ```bash
@@ -137,6 +141,12 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   revocable, expiring capability for one run. Summary links expose the DAG/report and derived metrics;
   an explicit evidence option adds redacted node source/results. Assistant, actions, raw
   logs/prompts/traces, artifacts, and owner settings are never available to the recipient.
+- **Comment threads** — event-sourced operator discussion pinned to a run or a specific node, with an
+  edit history and a resolve/reopen state. The view is served as authenticated current + history
+  projections (`GET /api/runs/{run_id}/comments`, `…/comments/{id}/history`); the operator writes the
+  `comment_created` / `comment_edited` / `comment_resolution_changed` control intents and the projection
+  (`events/comment_projection.py`) derives the threaded state — the engine stays the sole writer of
+  domain events (distinct from the legacy single `annotation` event).
 - **Trust panel** — surfaces the safety monitors (reward-hack, code-leakage, critic flags); set
   `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a flagged node ineligible
   to win, not just logged.
@@ -144,14 +154,19 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   tested / abandoned). Each experiment states the hypothesis it tests; deep-research directions and
   your own "+ Add" questions land here too, then get tracked to a verdict with links to the evidence
   nodes. Audit-only — it never changes which node wins.
-- **Per-node trace** — when `trace_llm_io` is on, see exactly what the model read and wrote per node.
+- **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
+  redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
   snapshot (resume reads it, not the global UI defaults).
 - **Settings page** — every engine knob, grouped into tabs (Search, Strategist & operators,
   Resilience, Budgets, LLM, Developer agent, Safety & trust, Knowledge & memory). The **API key**
   field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
   to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
-  via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it.
+  via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it. Global Save sends only
+  schema-owned edits since this tab's last successful load/save; blank edited fields explicitly clear an
+  override, and agent-governance roles are a nested sparse patch. The server validates and merges the whole
+  read/modify/write under local + required interprocess locking, so stale tabs preserve disjoint edits. There
+  is no Settings revision/ETag/CAS: two concurrent edits to the same field remain last-writer-wins.
 
 ## Which graph am I looking at?
 
@@ -162,7 +177,7 @@ questions; the Atlas preview is deliberately **not** another force/DAG graph:
 |---|---|---|
 | **Runs → Map** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the map topology. |
 | **Run → Search** | The experiment DAG for one run. `group by` can project nodes into `theme`, `operator`, metric tercile, or parameter `niche` regions; direction chips filter the DAG by the node's `idea.theme`. | A theme is a per-node proposer label. It is not the Part-IV concept ID/taxonomy, and grouping does not show cross-run concept coverage or claim evidence. |
-| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over the current portfolio-wide Atlas, claims and recent curation-log projections. It shows bounded explored concepts/run links, thin coverage, contradictions, claim evidence references and proposal history; partial endpoint failure is labelled as a degraded view. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18: there is no saved/fail-closed scope, CoverageFrame, compatible comparison, complete Atlas exploration paging/health receipt, interactive concept topology, or governance workbench. It cannot change claims, taxonomy, runs or selection. |
+| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration paging/health receipt, interactive concept topology or governance workbench. |
 
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
@@ -174,11 +189,17 @@ home Map, run theme grouping, or Atlas preview as the canonical concept/evidence
 
 The preview intentionally exposes **no mutation controls**. Separately, authenticated owner API clients can
 use typed claim/concept governance POSTs: they require the revision the operator observed plus an idempotent
-action ID, derive actor/time on the server, return 409 on stale/colliding actions, and provide explicit clear
+action ID; concept actions also require the shared governance revision so alias and split ledgers cannot race.
+The server derives actor/time, returns 409 on stale/colliding actions, and provides explicit clear
 operations. A claim decision must also name a currently projected structured claim and its observed evidence
-digest. The steward POSTs are proposal-only. This closes blind last-write and stale-claim-evidence semantics;
-it does not yet provide validated concept targets/backfill, taxonomy/assignment or evidence-family releases, impact preview, ACL/RBAC or
-a complete history workbench, so those writes are not surfaced in the preview.
+digest. Structured decisions resolve exact scope+metric, scope-only, global metric, then global, so an unscoped
+decision is intentionally portfolio-wide while a scoped decision stays task-specific. The steward POSTs are
+proposal-only. This closes blind last-write and stale-claim-evidence semantics;
+merge/purge sources and merge targets must exist as live canonical concepts; split sources are likewise live,
+while split children may be newly introduced provisional entities. Validation and CAS run inside the shared
+lock and receipts carry the observed concept projection digest. It does not provide release-pinned semantic
+concept identity, migration/backfill, taxonomy/assignment or evidence-family releases,
+impact preview, ACL/RBAC or a complete history workbench, so those writes are not surfaced in the preview.
 
 ## Exposure & auth
 
@@ -209,8 +230,9 @@ forwarding, start uvicorn with a matching `root_path` (set `--host`/port as usua
 
 ## Developing the UI
 
-The frontend lives in `ui/` (Vite + React). Changes to the JSX require a rebuild — the server serves
-the built bundle, not the source. Easiest is to let the CLI do it:
+The frontend lives in `ui/` (Vite + React). The server serves the built bundle, not the source. A normal
+`looplab ui` launch verifies the default bundle's source stamp and rebuilds after JSX/CSS/config/public/script or
+dependency-manifest changes. Easiest for an explicit CI/warm-up build is:
 
 ```bash
 looplab build-ui --force   # npm ci (first time) + npm run build into ui/dist
@@ -218,8 +240,13 @@ looplab build-ui --force   # npm ci (first time) + npm run build into ui/dist
 cd ui && npm install && npm run build
 ```
 
-`looplab ui --rebuild` does the same and then serves. For live HMR while hacking on the UI, run the
-Vite dev server (`cd ui && npm run dev`) against the API.
+`looplab ui --rebuild` forces the same checks/build and then serves. `LOOPLAB_UI_DIST` means “use this exact
+prebuilt bundle” and is never rebuilt. For live HMR while hacking on the UI, run the Vite dev server
+(`cd ui && npm run dev`) against the API.
+
+Production HTML and non-versioned assets revalidate. Only content-hashed files listed by Vite's build manifest
+receive long-lived immutable caching. Eligible ordinary responses can use gzip when the client accepts it;
+server-sent event streams are always excluded so live updates are not buffered by compression.
 
 A preview launcher (`tools/ui_preview.py`) serves the built UI with the dev `.env.dev` on a dedicated port
 (`:8771`) so a review session can run alongside the main instance.

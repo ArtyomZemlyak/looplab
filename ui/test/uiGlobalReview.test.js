@@ -2,7 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { initialDagOverviewDecision, shouldAutoFitDag, shouldRefitDag } from '../src/dagViewport.js'
-import { safeExternalHref } from '../src/urlSafety.js'
+import { safeExternalHref, safeMarkdownHref } from '../src/urlSafety.js'
+import {
+  CONTROL, runApiPath, runNodeApiPath, patchProject, deleteProject, renameSupertask, deleteSupertask,
+} from '../src/api.js'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
@@ -12,6 +15,24 @@ test('untrusted research source URLs allow only credential-free HTTP(S)', () => 
     '/relative', 'https://user:secret@example.com/private', 'https://example.com/\nheader']) {
     assert.equal(safeExternalHref(href), null, href)
   }
+})
+
+test('Markdown links share the bounded URL policy and reject active or credential-bearing URLs', async () => {
+  for (const href of ['https://example.com/docs?q=1', 'mailto:owner@example.com', '#evidence',
+    '/runs/one', './local', '../parent', 'plain-relative']) {
+    assert.equal(safeMarkdownHref(href), href)
+  }
+  for (const href of ['javascript:alert(1)', 'data:text/html,boom', 'vbscript:boom',
+    '//attacker.invalid/x', '\\\\attacker.invalid\\x', '/\\attacker.invalid/x',
+    'https://user:secret@example.com/private', 'https://user@example.com/private',
+    'https://example.com/\nheader', 'mailto://attacker.invalid', 'mailto:x@y.test?body=%0aBcc:z@y.test',
+    `https://example.com/${'x'.repeat(4096)}`]) {
+    assert.equal(safeMarkdownHref(href), null, href)
+  }
+  const markdown = await source('markdown.jsx')
+  assert.match(markdown, /import \{ safeMarkdownHref \} from '\.\/urlSafety\.js'/)
+  assert.match(markdown, /export const safeHref = safeMarkdownHref/)
+  assert.match(markdown, /const href = safeMarkdownHref\(mm\[2\]\)/)
 })
 
 test('large graph starts bounded and preserves exact deep links', async () => {
@@ -48,17 +69,84 @@ test('compact graph controls remain named and vertically bounded', async () => {
   ])
   assert.match(runView, /copy-view-btn[\s\S]*?aria-label=\{reviewMode/)
   assert.match(directions, /role="group" aria-label="Research directions"/)
+  assert.match(directions, /type="button" aria-pressed=\{sel\}/)
+  assert.match(directions, /best observed/)
+  assert.match(directions, /difference from run baseline/)
+  assert.match(directions, /Δ from baseline/)
+  assert.match(directions, /not a causal effect or winner claim/)
+  assert.doesNotMatch(directions, /var\(--ok\)|var\(--alarm\)|gain vs baseline/)
   assert.match(css, /\.do-chips \{ flex-wrap: nowrap; max-height: none; overflow-x: auto/)
   assert.match(css, /\.do-chip \{ flex: 0 0 auto; max-width: min\(78vw, 320px\); min-height: 44px/)
+  assert.match(css, /\.do-chip \.do-meta \{ min-width: 0; overflow: hidden;/)
+})
+
+test('collapsed group drill-down preserves the active direction projection', async () => {
+  const [runView, inspector, dag, groupnodes] = await Promise.all([
+    source('RunView.jsx'), source('Inspector.jsx'), source('Dag.jsx'), source('groupnodes.jsx'),
+  ])
+  assert.match(runView, /<GroupSummary[\s\S]*?themeFilter=\{themeFilter\}/)
+  assert.match(inspector, /themeFilteredGroupAggregate\(memberIds \|\| \[\], state\.nodes, dir, themeFilter\)/)
+  assert.match(inspector, /aggregate\.matchedIds\.map/)
+  assert.match(inspector, /No experiments in this group match direction/)
+  assert.match(groupnodes, /className="grp-super-select"[\s\S]*?aria-pressed=\{!!selected\}/)
+  assert.match(dag, /<button type="button" className="grp-chev btn-chev"/)
 })
 
 test('stale async resources are cancelled and run ids are encoded at every transport boundary', async () => {
-  const [shared, hooks] = await Promise.all([source('SharedAssistant.jsx'), source('hooks.js')])
+  const [shared, hooks, api, dock, inspector, panels] = await Promise.all([
+    source('SharedAssistant.jsx'), source('hooks.js'), source('api.js'), source('Dock.jsx'),
+    source('Inspector.jsx'), source('panels.jsx'),
+  ])
   assert.match(shared, /const controller = new AbortController\(\)/)
   assert.match(shared, /e\?\.name !== 'AbortError'/)
   assert.match(shared, /return \(\) => \{ active = false; controller\.abort\(\) \}/)
   assert.match(shared, /shared\/\$\{encodeURIComponent\(sid\)\}/)
-  assert.match(hooks, /new EventSource\(apiUrl\(`\/api\/runs\/\$\{encodeURIComponent\(runId\)\}\/events`\)\)/)
+  assert.match(hooks, /fetchEventStream\(runApiPath\(runId, '\/events'\), \{/)
+  assert.match(hooks, /const controller = new AbortController\(\)/)
+  assert.match(hooks, /lastEventId: lastStreamEventId/)
+  assert.match(hooks, /streamRef\.current\?\.abort\(\)/)
+  assert.doesNotMatch(hooks, /new EventSource\(/)
+  for (const [name, body] of Object.entries({ api, dock, inspector, panels })) {
+    assert.doesNotMatch(body, /`\/api\/runs\/\$\{(?!encodeURIComponent\()/,
+      `${name} must not interpolate a raw run identity into a URL`)
+  }
+  for (const body of [api, dock, inspector, panels]) assert.match(body, /run(?:Node)?ApiPath\(/)
+})
+
+test('dynamic API paths preserve fragment syntax and a literal encoded slash as one identity segment', async () => {
+  assert.equal(runApiPath('trial#1', '/state'), '/api/runs/trial%231/state')
+  assert.equal(runApiPath('literal%2Fname', '/state'), '/api/runs/literal%252Fname/state')
+  assert.equal(runNodeApiPath('trial#1', 'node%2F4', '/metrics'),
+    '/api/runs/trial%231/nodes/node%252F4/metrics')
+  const previous = {
+    fetch: globalThis.fetch, location: globalThis.location, sessionStorage: globalThis.sessionStorage,
+  }
+  const calls = []
+  globalThis.location = { pathname: '/proxy/app/', hash: '' }
+  globalThis.sessionStorage = { getItem: () => '' }
+  globalThis.fetch = async url => {
+    calls.push(String(url))
+    return { ok: true, json: async () => ({ ok: true }) }
+  }
+  try {
+    await CONTROL.refreshReport('trial#1')
+    await CONTROL.refreshReport('literal%2Fname')
+    await patchProject('project#1', { name: 'renamed' })
+    await deleteProject('literal%2Fproject')
+    await renameSupertask('task#1', 'renamed')
+    await deleteSupertask('literal%2Ftask')
+    assert.match(calls[0], /\/api\/runs\/trial%231\/report_refresh$/)
+    assert.match(calls[1], /\/api\/runs\/literal%252Fname\/report_refresh$/)
+    assert.match(calls[2], /\/api\/projects\/project%231$/)
+    assert.match(calls[3], /\/api\/projects\/literal%252Fproject$/)
+    assert.match(calls[4], /\/api\/supertasks\/task%231$/)
+    assert.match(calls[5], /\/api\/supertasks\/literal%252Ftask$/)
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[name]
+      else globalThis[name] = value
+    }
+  }
 })
 
 test('fresh workspaces are canvas-first and dense settings tabs stay on one scrollable row', async () => {

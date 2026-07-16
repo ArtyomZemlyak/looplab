@@ -133,10 +133,12 @@ def _trace_preview(value, cap: int = RESULT_CAP) -> str:
         if depth > 5:
             return "<depth-limited>"
         if isinstance(obj, dict):
+            # Do not materialize an untrusted mapping merely to retain its first
+            # fields. A diagnostic preview must not allocate a second full-sized tool result.
             return {str(k): ("<redacted>" if secret.search(str(k)) else _redact(v, depth + 1))
-                    for k, v in list(obj.items())[:128]}
+                    for k, v in itertools.islice(obj.items(), 128)}
         if isinstance(obj, (list, tuple)):
-            return [_redact(v, depth + 1) for v in list(obj)[:128]]
+            return [_redact(v, depth + 1) for v in itertools.islice(obj, 128)]
         return obj
 
     try:
@@ -144,18 +146,21 @@ def _trace_preview(value, cap: int = RESULT_CAP) -> str:
                                separators=(",", ":")) if isinstance(value, (dict, list, tuple))
                     else str(value))
     except Exception:  # noqa: BLE001 — tracing must never perturb tool execution
-        rendered = str(value)
+        rendered = "<trace preview unavailable>"
     # Values can contain credentials even when their enclosing key is harmless (for example a
     # command's plain-text stdout containing ``Authorization: Bearer ...``).  Apply the canonical
     # redactor to the fully rendered observation before either hashing or persisting it.  Trace
     # previews always enable the conservative entropy pass because they are durable diagnostics,
     # not byte-exact evaluator output.
     rendered = redact_secrets(rendered, entropy=True)
+    cap = max(0, int(cap))
     if len(rendered) <= cap:
-        return rendered
+        return rendered[:cap]
     digest = hashlib.sha256(rendered.encode("utf-8", errors="replace")).hexdigest()
     marker = f"\n…[trace preview: original_chars={len(rendered)} sha256={digest}]"
-    return rendered[:max(0, cap - len(marker))] + marker
+    if len(marker) >= cap:
+        return marker[-cap:] if cap else ""
+    return rendered[:cap - len(marker)] + marker
 
 
 def _plan_spec() -> dict:
@@ -589,12 +594,14 @@ def agentic_struct(client, tools, messages, model_cls, *, parser="tool_call",
 def _summarizer(client):
     """Build a `summarize(text) -> str` callable from an LLM client for `compact_history` (C2).
     Best-effort: any failure makes the caller fall back to deterministic truncation."""
-    msgs_for = lambda text: [
-        {"role": "system",
-         "content": "Summarize the earlier agent steps below into a few tight bullet points: "
-                    "what was tried, what was learned, and any decisions. Keep only what future "
-                    "turns need."},
-        {"role": "user", "content": text}]
+    def msgs_for(text):
+        return [
+            {"role": "system",
+             "content": "Summarize the earlier agent steps below into a few tight bullet points: "
+                        "what was tried, what was learned, and any decisions. Keep only what future "
+                        "turns need."},
+            {"role": "user", "content": text},
+        ]
 
     def _summarize(text: str) -> str:
         # Prefer the tool-free text completion: a `chat(..., tools=[], tool_choice="none")` is

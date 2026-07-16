@@ -16,9 +16,10 @@ const named = name => Object.freeze({ name })
 // split output — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Part V adds one measured, route-lazy Atlas preview. Its own incremental closure below keeps
-    // that feature bounded; 2 KiB of total headroom also avoids zlib-version flakes across supported Node.
-    js: { gzip: 312 * KIB },
+    // Measured July 2026 baseline after audited bounded memo/report normalization, settings truth
+    // controls, and route-lazy Atlas provenance. Per-route/eager/closure guards below remain strict;
+    // this total leaves only modest zlib-version headroom and is not an eager-loading waiver.
+    js: { gzip: 318 * KIB },
     css: { gzip: 45 * KIB },
   },
   individual: {
@@ -96,12 +97,18 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Research Atlas preview increment',
       roots: [source('src/ResearchAtlas.jsx')],
       baselineRoots: [entry],
-      limits: { js: { gzip: 6 * KIB }, css: { gzip: 3 * KIB } },
+      // Audited July 2026 baseline includes independent current/stale/failed + revision/loaded-at
+      // watermarks for Atlas, claims, and both steward logs. It stays isolated behind this route.
+      limits: { js: { gzip: 7 * KIB }, css: { gzip: 3 * KIB } },
     },
     {
       name: 'React Flow increment',
       roots: [named('vendor-flow')],
-      limits: { js: { gzip: 110 * KIB } },
+      // The graph is an interaction after the app shell has loaded. Rolldown keeps React/runtime in
+      // explicit shared chunks, so measure only bytes newly fetched for the graph, just like the
+      // panel and Atlas interaction budgets above.
+      baselineRoots: [entry],
+      limits: { js: { gzip: 75 * KIB } },
     },
   ],
   forbidden: [

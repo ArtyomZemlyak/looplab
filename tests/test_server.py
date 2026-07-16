@@ -134,10 +134,11 @@ def test_raw_content_read_routes_are_token_gated(tmp_path, monkeypatch):
         assert client.get(light).status_code == 401, light
         assert client.get(light, headers={"X-LoopLab-Token": "sekret"}).status_code == 200, light
     assert client.get("/api/health").status_code == 200          # zero-model liveness stays open
-    # F3: the live-state SSE stream is the ONE deny-default exception. The browser consumes it via a
-    # headerless EventSource that CANNOT send X-LoopLab-Token, and its payload is already redacted, so
-    # it MUST serve without the token — else every live update 401-loops and the dashboard freezes.
-    with client.stream("GET", "/api/runs/demo/events") as resp:
+    # The redacted live projection still contains private portfolio state. The React client uses
+    # authenticated fetch-SSE, so the stream follows the same deny-default rule as /state.
+    assert client.get("/api/runs/demo/events").status_code == 401
+    with client.stream("GET", "/api/runs/demo/events",
+                       headers={"X-LoopLab-Token": "sekret"}) as resp:
         assert resp.status_code == 200
 
 
@@ -1209,12 +1210,82 @@ def test_settings_partial_put_preserves_hidden_overrides_and_null_clears(tmp_pat
     assert cleared.json()["overrides"] == {"max_nodes": 17, "policy": "mcts"}
 
 
+def test_concurrent_disjoint_settings_puts_do_not_lose_updates(tmp_path, monkeypatch):
+    """Two deterministically overlapping PATCH-like PUTs retain both disjoint fields.
+
+    Both request threads arrive immediately before lock acquisition at the first barrier. Neither
+    response completes until both serialized transactions have left the lock at the second one.
+    Atomic rename without the surrounding transaction could let both requests load ``{}``, after
+    which the later rename silently discarded the other request's field.
+    """
+    from contextlib import contextmanager
+    from threading import Barrier
+
+    app = make_app(tmp_path)
+    store = app.state.looplab.settings
+    original_transaction = store.ui_settings_transaction
+    arrived = Barrier(3)
+    completed = Barrier(3)
+
+    @contextmanager
+    def synchronized_transaction():
+        arrived.wait(timeout=5)
+        try:
+            with original_transaction():
+                yield
+        finally:
+            completed.wait(timeout=5)
+
+    monkeypatch.setattr(store, "ui_settings_transaction", synchronized_transaction)
+    clients = (TestClient(app), TestClient(app))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(
+            clients[0].put, "/api/settings", json={"settings": {"max_nodes": 91}})
+        second = executor.submit(
+            clients[1].put, "/api/settings", json={"settings": {"policy": "mcts"}})
+        arrived.wait(timeout=5)
+        completed.wait(timeout=5)
+        responses = (first.result(timeout=10), second.result(timeout=10))
+
+    assert all(response.status_code == 200 for response in responses)
+    overrides = clients[0].get("/api/settings").json()["overrides"]
+    assert overrides == {"max_nodes": 91, "policy": "mcts"}
+
+
+def test_sparse_agent_control_patches_from_stale_tabs_merge_by_setting(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    baseline = client.get("/api/settings").json()["settings"]["agent_control"]
+
+    first = client.put(
+        "/api/settings", json={"settings": {"agent_control": {"timeout": ["strategist"]}}})
+    second = client.put(
+        "/api/settings", json={"settings": {"agent_control": {"max_nodes": ["boss"]}}})
+
+    assert first.status_code == second.status_code == 200
+    merged = second.json()["settings"]["agent_control"]
+    assert merged["timeout"] == ["strategist"]
+    assert merged["max_nodes"] == ["boss"]
+    assert merged["policy"] == baseline["policy"]
+
+
 def test_settings_put_rejects_bad_shape_and_invalid_value_without_writing(tmp_path):
     client = TestClient(make_app(tmp_path))
     assert client.put("/api/settings", json={"settings": []}).status_code == 400
     invalid = client.put("/api/settings", json={"settings": {"max_nodes": 0}})
     assert invalid.status_code == 422
     assert client.get("/api/settings").json()["overrides"] == {}
+
+
+def test_settings_store_recovers_from_valid_json_with_wrong_top_level_shape(tmp_path):
+    (tmp_path / "ui_settings.json").write_text("[]", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    loaded = client.get("/api/settings")
+    assert loaded.status_code == 200
+    assert loaded.json()["overrides"] == {}
+    saved = client.put("/api/settings", json={"settings": {"max_nodes": 19}})
+    assert saved.status_code == 200
+    assert saved.json()["overrides"] == {"max_nodes": 19}
 
 
 def test_settings_profile_is_persisted_instead_of_diffed_away(tmp_path):
@@ -1305,6 +1376,122 @@ def test_put_run_config_preserves_secret_and_unknown_keys(tmp_path):
     assert out["llm_api_key"] == "***"            # secret never overwritten via this endpoint
     assert out["some_future_key"] == "keepme"     # unknown key preserved verbatim
     assert "llm_api_key" not in r.json()["changed"]
+
+
+def test_run_config_uses_folded_launch_pins_and_repairs_legacy_snapshot_drift(tmp_path):
+    """Old UI saves could change the snapshot while re-entry kept using run_started. API/form truth
+    must be the effective folded values, and the next ordinary save should heal the stale snapshot."""
+    from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
+
+    rd = tmp_path / "pinned"
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "pinned", "task_id": "t", "goal": "g", "direction": "max",
+        "holdout_fraction": 0.4, "holdout_select": True,
+        "select_verifier": True, "verifier_ci_tie": True,
+        "select_verifier_samples": 7,
+    })
+    snapshot = Settings(
+        timeout=30.0, holdout_fraction=0.1, holdout_select=False,
+        select_verifier=False, verifier_ci_tie=False, select_verifier_samples=1,
+    ).masked_snapshot()
+    (rd / "config.snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    shown = client.get("/api/runs/pinned/config").json()
+    assert shown["holdout_fraction"] == 0.4 and shown["holdout_select"] is True
+    assert shown["select_verifier"] is True and shown["verifier_ci_tie"] is True
+    assert shown["select_verifier_samples"] == 7
+    meta = shown["_looplab_config_meta"]
+    assert set(meta["run_start_pinned_fields"]) == RUN_START_PINNED_FIELDS
+    assert set(meta["snapshot_mismatch_fields"]) == RUN_START_PINNED_FIELDS
+
+    saved = client.put("/api/runs/pinned/config", json={"settings": {"timeout": 45.0}})
+    assert saved.status_code == 200
+    assert set(saved.json()["normalized_pinned"]) == RUN_START_PINNED_FIELDS
+    healed = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    for key in RUN_START_PINNED_FIELDS:
+        assert healed[key] == shown[key]
+
+
+def test_put_run_config_rejects_every_run_start_pinned_field(tmp_path):
+    from looplab.core.config import RUN_START_PINNED_FIELDS, Settings
+
+    rd = tmp_path / "pinned"
+    EventStore(rd / "events.jsonl").append("run_started", {
+        "run_id": "pinned", "task_id": "t", "goal": "g", "direction": "max",
+        "holdout_fraction": 0.4, "holdout_select": True,
+        "select_verifier": True, "verifier_ci_tie": True,
+        "select_verifier_samples": 7,
+    })
+    (rd / "config.snapshot.json").write_text(
+        json.dumps(Settings().masked_snapshot()), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    attempted = {
+        "holdout_fraction": 0.2,
+        "holdout_select": False,
+        "select_verifier": False,
+        "verifier_ci_tie": False,
+        "select_verifier_samples": 2,
+    }
+
+    assert set(attempted) == RUN_START_PINNED_FIELDS
+    for field, value in attempted.items():
+        response = client.put(
+            "/api/runs/pinned/config", json={"settings": {field: value}})
+        assert response.status_code == 422, field
+        assert field in response.json()["detail"]
+
+
+def test_put_run_config_rejects_malformed_json_and_non_object_shapes(tmp_path):
+    _build_run(tmp_path)
+    _write_snapshot(tmp_path / "demo", timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+
+    assert client.put(
+        "/api/runs/demo/config", content="{", headers={"Content-Type": "application/json"},
+    ).status_code == 400
+    assert client.put("/api/runs/demo/config", json=[]).status_code == 400
+    assert client.put("/api/runs/demo/config", json={"settings": []}).status_code == 400
+    persisted = json.loads(
+        (tmp_path / "demo" / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert persisted["timeout"] == 30.0
+
+
+def test_put_run_config_repairs_trust_gate_after_append_failure_without_duplicate(
+        tmp_path, monkeypatch):
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, trust_gate="audit")
+    client = TestClient(make_app(tmp_path))
+    original_append = EventStore.append
+    failed = False
+
+    def fail_first_gate_append(self, event_type, data, *args, **kwargs):
+        nonlocal failed
+        if event_type == "trust_gate_changed" and not failed:
+            failed = True
+            raise OSError("injected append failure")
+        return original_append(self, event_type, data, *args, **kwargs)
+
+    monkeypatch.setattr(EventStore, "append", fail_first_gate_append)
+    first = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    assert first.status_code == 500
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["trust_gate"] == "gate"
+    assert fold(EventStore(rd / "events.jsonl").read_all()).trust_gate == "audit"
+
+    retry = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    assert retry.status_code == 200
+    assert retry.json()["changed"] == []
+    assert retry.json()["trust_gate_event_appended"] is True
+    again = client.put("/api/runs/demo/config", json={"settings": {"trust_gate": "gate"}})
+    assert again.status_code == 200 and again.json()["trust_gate_event_appended"] is False
+    gate_events = [
+        event for event in EventStore(rd / "events.jsonl").read_all()
+        if event.type == "trust_gate_changed"
+    ]
+    assert len(gate_events) == 1
+    assert fold(EventStore(rd / "events.jsonl").read_all()).trust_gate == "gate"
 
 
 def test_boss_command_flags_stalled_run(tmp_path, monkeypatch):

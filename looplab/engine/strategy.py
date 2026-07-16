@@ -51,7 +51,12 @@ class StrategyCadenceMixin:
         REAL change so the engine doesn't re-record/re-apply an identical strategy every iteration."""
         if not s:
             return {}
-        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity", "novelty_stance", "request_research")}
+        # `timeout`/`max_parallel` are here because _apply_strategy applies them (resource-budget retune);
+        # omitting them meant a decision that changed ONLY one of them was never seen as a change, so it
+        # was never recorded or applied (the P8 live-budget retune silently no-op'd unless bundled with a
+        # change to another tracked field).
+        return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
+                                      "novelty_stance", "request_research", "timeout", "max_parallel")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
@@ -93,9 +98,12 @@ class StrategyCadenceMixin:
         )
 
     def _cross_run_note_for_ctx(self, state: Optional[RunState] = None) -> str:
-        """PART V §22 — a bounded cross-run coverage note (portfolio explored / thin / contested) for the
-        Strategist's brief. On only under `cross_run_advisory` + a memory dir; best-effort ("" on any hiccup
-        or empty store), so it never blocks the cadence. Advisory prose; honors operator claim decisions."""
+        """PART V §22 — a bounded live cross-run observation note for the Strategist's brief.
+
+        It reports returned run/concept and mixed-evidence counts, not corpus coverage or proposition truth.
+        On only under `cross_run_advisory` + a memory dir; best-effort ("" on any hiccup or empty store), so
+        it never blocks the cadence. Advisory prose; honors operator claim decisions.
+        """
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
             self._cross_run_note_receipt = {}
             return ""
@@ -116,23 +124,39 @@ class StrategyCadenceMixin:
             run_id = str(getattr(state, "run_id", "") or "") if state is not None else ""
             if state is not None:
                 def _visible(row):
-                    return (bool(task_id) and str(row.get("task_id") or "") == task_id
+                    row_direction = str(row.get("direction") or "")
+                    current_direction = str(getattr(state, "direction", "") or "")
+                    direction_compatible = (row_direction not in ("min", "max")
+                                            or current_direction not in ("min", "max")
+                                            or row_direction == current_direction)
+                    return (direction_compatible
+                            and bool(task_id) and str(row.get("task_id") or "") == task_id
                             and (not run_id or str(row.get("run_id") or "") != run_id))
                 lessons, caps, research = ([row for row in rows if _visible(row)]
                                            for rows in (lessons, caps, research))
             if not lessons and not caps and not research:
                 self._cross_run_note_receipt = {}
                 return ""
-            a = atlas_for_memory(base, lessons=lessons, capsules=caps, research_claims=research)
-            parts = [f"{a['n_runs']} run(s), {a['n_concepts']} concept(s), {a['n_contested']} contested"]
+            # Use the same scope+polarity-safe projection as the Researcher advisory while
+            # retaining the already-filtered, current-run-excluding snapshot used for the audit receipt.
+            a = atlas_for_memory(
+                base,
+                lessons=lessons,
+                capsules=caps,
+                research_claims=research,
+                structured=getattr(self, "_cross_run_structured_claims", False),
+            )
+            parts = [f"{a['n_runs']} returned run(s), {a['n_concepts']} observed concept(s), "
+                     f"{a['n_contested']} mixed-evidence claim record(s)"]
             def _safe(value, limit):
                 return "".join(ch for ch in " ".join(str(value or "").split()) if ch.isprintable())[:limit]
             if a["thin_coverage"]:
-                parts.append("thinly-explored: " + ", ".join(repr(_safe(x, 80))
-                                                              for x in a["thin_coverage"][:6]))
+                parts.append("observed in one returned run (not a gap): "
+                             + ", ".join(repr(_safe(x, 80)) for x in a["thin_coverage"][:6]))
             if a["contradictions"]:
-                parts.append("unresolved: " + "; ".join(repr(_safe(c.get("statement"), 120))
-                                                          for c in a["contradictions"][:2]))
+                parts.append("mixed-evidence records: "
+                             + "; ".join(repr(_safe(c.get("statement"), 120))
+                                          for c in a["contradictions"][:2]))
             note = "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts))
             corpus = json.dumps({"lessons": lessons, "capsules": caps, "research": research},
                                 ensure_ascii=False, sort_keys=True, default=str,
@@ -543,6 +567,11 @@ class StrategyCadenceMixin:
         (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
         if not state.select_verifier_tiebreak:
             return state
+        # The producer and replay validator must agree on the selection contract before any paid
+        # verification work starts.  A future/unknown recorded contract is intentionally fail-closed:
+        # this process cannot safely emit a v1 treatment for selection rules it does not understand.
+        if state.select_verifier_contract != VERIFIER_SELECTION_CONTRACT:
+            return state
         groups = self._metric_tie_groups(state)
         if not groups:
             return state
@@ -588,6 +617,8 @@ class StrategyCadenceMixin:
                     break
                 verdicts.append((n, v))
             if not failed:
+                # Publish the complete selector-reachable tie group in one durable event;
+                # per-node appends expose crash prefixes that can change the winner during replay.
                 self.store.append(EV_VERIFIER_GROUP_SCORED, {
                     "v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
                     "requested_samples": state.select_verifier_samples,
@@ -610,6 +641,8 @@ class StrategyCadenceMixin:
         and validator. Recorded run state is authoritative here: live engine fields may not silently change
         selection semantics after resume or a config edit.
         """
+        # Use folded run flags and the validator's helper; live engine config must not produce
+        # a treatment that replay rejects or select a tie shadowed by the final holdout selector.
         from looplab.events.replay import verifier_tie_groups
         return verifier_tie_groups(state)
 

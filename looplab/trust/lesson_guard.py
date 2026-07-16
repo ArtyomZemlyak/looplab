@@ -58,6 +58,7 @@ def _lesson_records(state: RunState) -> list[dict]:
             node_ids = ([i for i in ev_ids if isinstance(i, int)]
                         if isinstance(ev_ids, list) else list(pair_children))
             out.append({"statement": stmt, "outcome": str(lz.get("outcome", "") or ""),
+                        "claim_stance": str(lz.get("claim_stance", "") or ""),
                         "at_node": at_node, "node_ids": node_ids})
     return out
 
@@ -68,6 +69,8 @@ def _evidence_text(rec: dict, state: RunState) -> str:
     parts: list[str] = []
     if rec.get("outcome"):
         parts.append(f"distilled outcome: {rec['outcome']}")
+    if rec.get("claim_stance"):
+        parts.append(f"literal-claim stance: {rec['claim_stance']}")
     for nid in (rec.get("node_ids") or [])[:8]:
         n = state.nodes.get(nid)
         if n is None:

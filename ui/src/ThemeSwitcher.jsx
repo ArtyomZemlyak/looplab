@@ -73,7 +73,8 @@ export default function ThemeSwitcher() {
 
   return <div className="theme-switch">
     <button type="button" ref={triggerRef} className="btn sm ghost" title="UI theme" aria-haspopup="menu"
-      aria-expanded={open} aria-controls="theme-switcher-menu" onClick={() => setOpen(!open)}>
+      aria-expanded={open} aria-controls="theme-switcher-menu" aria-label={`UI theme: ${cur.name}`}
+      onClick={() => setOpen(!open)}>
       <span className="th-dot" style={{ background: cur.ac, boxShadow: `0 0 0 2px ${cur.bg}` }} /> Theme
     </button>
     {open && <>

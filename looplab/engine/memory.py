@@ -91,6 +91,17 @@ _NEGATIVE = {"tested", "abandoned", "failed", "refuted"}
 _NEUTRAL = "noted"
 # The full verdict vocabulary a row can carry; anything outside it never wins a duplicate group.
 _VERDICTS = _NEGATIVE | {"supported"}
+_CLAIM_STANCES = frozenset({"support", "oppose", "neutral"})
+
+
+def distilled_claim_stance(outcome: str) -> str:
+    """Relation of newly distilled evidence to its literal statement.
+
+    ``outcome`` remains action guidance (reuse/avoid), so both a GOOD conclusion and a BAD
+    conclusion such as "raising LR regressed validation" support the sentence they assert.
+    Untagged/unknown conclusions are neutral rather than silently promoted.
+    """
+    return "support" if str(outcome or "") in _VERDICTS else "neutral"
 
 
 def _verdict_base(rows_newest_last: list[dict]) -> dict:

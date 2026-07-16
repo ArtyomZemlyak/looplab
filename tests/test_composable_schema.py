@@ -183,7 +183,7 @@ def test_declare_stages_reports_errors(bad, needle):
     assert "looplab_stages.json" not in t.files            # nothing staged on error
 
 
-def test_declare_stages_rejects_a_nonexistent_absolute_data_path():
+def test_declare_stages_rejects_a_nonexistent_absolute_data_path(tmp_path):
     # The #1 real failure: the Developer copies the repo's argparse-default `--train_dataset
     # /…/train.pck` that isn't on this machine. declare_stages must BOUNCE it (with a "ls the real
     # data" message) so the Developer re-declares with a path that exists — the run doesn't ship a
@@ -202,16 +202,15 @@ def test_declare_stages_rejects_a_nonexistent_absolute_data_path():
     assert "DO NOT EXIST" in msg2 and "/nope/val.parquet" in msg2
 
     # RELATIVE paths (resolve to mounts at eval time) and %params% are NOT flagged; an EXISTING
-    # absolute path is fine — here /tmp exists so a real file under it passes.
-    import os
-    p = os.path.join("/tmp", "ll_exists.pck"); open(p, "wb").close()
-    try:
-        ok = t.execute("declare_stages", {"stages": [
-            {"name": "prep", "command": ["python", "prep.py", "--out", "./data/train.pck"]},
-            {"name": "train", "command": ["python", "train.py", "--train_dataset", p, "--lr", "%params%"]}]})
-        assert ok.startswith("declared")
-    finally:
-        os.remove(p)
+    # absolute path is fine. Use pytest's platform-native writable temporary directory rather than
+    # assuming POSIX `/tmp` exists and is writable on Windows.
+    p = tmp_path / "ll_exists.pck"
+    p.write_bytes(b"")
+    ok = t.execute("declare_stages", {"stages": [
+        {"name": "prep", "command": ["python", "prep.py", "--out", "./data/train.pck"]},
+        {"name": "train", "command": ["python", "train.py", "--train_dataset", str(p),
+                                     "--lr", "%params%"]}]})
+    assert ok.startswith("declared")
 
 
 def test_declare_stages_allows_a_pipeline_produced_intermediate_path():

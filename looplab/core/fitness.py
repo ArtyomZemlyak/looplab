@@ -28,6 +28,19 @@ import math
 VERIFIER_SELECTION_CONTRACT = "selection-criteria:v1"
 
 
+def is_usable_metric(value) -> bool:
+    """Whether an untrusted persisted value is a finite real scalar usable for ordering."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (TypeError, OverflowError, ValueError):
+        # JSON integers are arbitrary precision.  A syntactically valid, hand-edited value such as
+        # ``10**400`` is still not representable by the float-valued selection contract and must not
+        # brick replay while this predicate is trying to reject it.
+        return False
+
+
 def is_better(direction: str, a: float, b: float) -> bool:
     """Direction-aware strict improvement: lower wins when minimizing, higher when maximizing. THE
     comparator — `RunState.is_better` delegates here so there is exactly one spelling of "better"."""
@@ -37,8 +50,7 @@ def is_better(direction: str, a: float, b: float) -> bool:
 def standard_error_difference(std: float, n: int, incumbent_std: float, incumbent_n: int) -> float:
     """Pooled SE of two independent mean estimates; shared by confirm and verifier CI selection."""
     def _se(value, count):
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(float(value)) or value <= 0
+        if (not is_usable_metric(value) or value <= 0
                 or isinstance(count, bool) or not isinstance(count, int) or count <= 1):
             return 0.0
         return float(value) / math.sqrt(count)
@@ -62,10 +74,9 @@ def verifier_evidence_snapshot(direction: str, node) -> dict:
     """
 
     def _finite(value):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if not is_usable_metric(value):
             return None
-        value = float(value)
-        return value if math.isfinite(value) else None
+        return float(value)
 
     rationale = " ".join((getattr(getattr(node, "idea", None), "rationale", "") or "").split())[:250]
     metric = _finite(getattr(node, "metric", None))
@@ -156,8 +167,7 @@ class SearchFitness:
     @staticmethod
     def _usable_verifier(node) -> bool:
         vs = node.verifier_score
-        return (isinstance(vs, (int, float)) and not isinstance(vs, bool)
-                and math.isfinite(float(vs)) and 0.0 <= float(vs) <= 1.0)
+        return is_usable_metric(vs) and 0.0 <= float(vs) <= 1.0
 
     def _vc(self, node):
         """The direction-oriented calibrated-verifier tie-break component for `node` (goes BETWEEN the
@@ -208,7 +218,7 @@ class SearchFitness:
         `bool` explicitly (it is an `int`/`float`-passing subclass): a foreign/hand-edited `confirmed_std:
         true` must NOT become std=1.0 and inflate the band into a §21.7 violation (mirrors `_vc`'s guard)."""
         std, n = node.confirmed_std, node.confirmed_seeds
-        if isinstance(std, bool) or not isinstance(std, (int, float)) or std != std or std < 0:
+        if not is_usable_metric(std) or std < 0:
             return None
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             return None
@@ -295,4 +305,4 @@ class SearchFitness:
         flagged filter — and ranks by `promotion_key` (the plain `(robust_metric, id)` when the verifier
         tie-break is off), not this predicate.)"""
         return (node.feasible and node.id not in flagged and node.id not in aborted
-                and node.robust_metric is not None)
+                and is_usable_metric(node.robust_metric))

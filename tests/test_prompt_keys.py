@@ -54,3 +54,14 @@ def test_prompt_store_override_roundtrip(tmp_path):
     assert render(store, "developer_system", "default", x="1") == "OVERRIDDEN 1"
     assert render(store, "researcher_system", "default") == "default"   # no file -> default
     assert render(None, "developer_system", "default") == "default"     # no store -> default
+
+
+def test_prompt_vars_named_name_or_default_do_not_collide(tmp_path):
+    # A template may use $name/$default as substitution vars; get()/render() take name/default as
+    # positional-only params, so those vars pass cleanly through **vars instead of raising TypeError.
+    from looplab.core.prompts import PromptStore, render
+    (tmp_path / "researcher_system.md").write_text("Hi $name ($default)", encoding="utf-8")
+    store = PromptStore(str(tmp_path))
+    assert render(store, "researcher_system", "unused", name="Ada", default="D") == "Hi Ada (D)"
+    assert store.get("researcher_system", "unused", name="Ada", default="D") == "Hi Ada (D)"
+    assert render(None, "k", "Hi $name", name="Bob") == "Hi Bob"

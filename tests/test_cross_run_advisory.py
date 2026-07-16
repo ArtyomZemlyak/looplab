@@ -32,8 +32,12 @@ def _seed(memory_dir, *, lessons=None, capsules=None):
             store.add(c)
 
 
-def _lesson(statement, outcome, evidence, run_id="r1"):
-    return {"statement": statement, "outcome": outcome, "evidence": evidence, "run_id": run_id, "task_id": "t"}
+def _lesson(statement, outcome, evidence, run_id="r1", direction=""):
+    row = {"statement": statement, "outcome": outcome, "evidence": evidence,
+           "run_id": run_id, "task_id": "t"}
+    if direction:
+        row["direction"] = direction
+    return row
 
 
 def test_off_is_empty(tmp_path):
@@ -68,8 +72,8 @@ def test_on_includes_coverage_line_from_capsules(tmp_path):
           lessons=[_lesson("x helps", "supported", [1])],
           capsules=[build_concept_capsule(run_id="r1", fingerprint=["kind:dataset"], direction="max",
                                           concepts=["hard-neg", "distillation"], concept_outcomes={})])
-    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(RunState())
-    assert "Portfolio coverage" in txt and "hard-neg" in txt
+    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(RunState(direction="max"))
+    assert "Bounded live concept observations (not coverage)" in txt and "hard-neg" in txt
 
 
 def test_d8_only_memory_is_visible_and_exact_task_scoped(tmp_path):
@@ -85,6 +89,39 @@ def test_d8_only_memory_is_visible_and_exact_task_scoped(tmp_path):
         RunState(run_id="current", task_id="task-b", direction="max"))
     assert "doc2query expands recall" in same
     assert "doc2query expands recall" not in other
+
+
+def test_d8_exact_task_advisory_rejects_opposite_direction(tmp_path):
+    from looplab.engine.claims import record_research_claims
+
+    def claim(statement):
+        return [{
+            "statement": statement, "node_ids": [7],
+            "verification": {"verdict": "supported", "method": "llm"},
+        }]
+    record_research_claims(str(tmp_path), run_id="same", task_id="task-a",
+                           direction="max", claims=claim("same direction research"))
+    record_research_claims(str(tmp_path), run_id="opposite", task_id="task-a",
+                           direction="min", claims=claim("opposite direction research"))
+    host = _Host(tmp_path, on=True)
+    text = host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="task-a", direction="max"))
+    assert "same direction research" in text
+    assert "opposite direction research" not in text
+    assert host._cross_run_advisory_receipt["n_research"] == 1
+
+
+def test_exact_task_advisory_still_rejects_opposite_direction(tmp_path):
+    _seed(tmp_path, lessons=[
+        _lesson("same objective evidence", "supported", [1], run_id="same", direction="max"),
+        _lesson("opposite objective contamination", "supported", [2], run_id="opposite", direction="min"),
+    ])
+    host = _Host(tmp_path, on=True)
+    text = host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
+    assert "same objective evidence" in text
+    assert "opposite objective contamination" not in text
+    assert host._cross_run_advisory_receipt["n_lessons"] == 1
 
 
 def test_malformed_store_never_raises(tmp_path):

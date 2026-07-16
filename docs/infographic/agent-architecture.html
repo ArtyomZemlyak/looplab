@@ -54,7 +54,7 @@ function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
 /* ============ SETUP row ============ */
 box("genesis",40,44,300,72,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo · dataset · cmd · kaggle (kind inferred)","generative kind → backend=llm (CLI + web /api/start)"]);
 box("onboard",370,44,360,58,"Onboarding · repo","□",C.ev,["agent proposes → human ratifies eval spec","ratify_freeze | autonomous | ratify_freeze_drift"]);
-box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","UI writes control intents; engine writes events"]);
+box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","UI sends intents; server/engine serialize events"]);
 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
@@ -70,7 +70,7 @@ const DY=300;
 // PROPOSE — the read funnel (reads flow UP into propose)
 stack(40,330,DY,[
  {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","causal ‘why the winner won’ (≤700c)"]},
- {id:"f_less",h:108,t:"② Cross-run lessons",tag:"Rsch ×5",c:C.mem,sub:["§role-split: Researcher-role + shared only (dev's ride the idea)","fingerprint Jaccard ≥ 0.34 (exact=1.0)","harmonic expand k=8 / min 0.15","rank (−sim, −(conf×min3,ev), −recency)","quarantine → dedup → top 5"]},
+ {id:"f_less",h:108,t:"② Cross-run evidence",tag:"off",c:C.mem,sub:["lessons · concept capsules · v2 claims","direction + exact-task / strict goal for lessons/capsules","v2 D8 exact-task only · no goal fingerprint","facets metadata only · no visibility/order effect","rejected claims never steer prompts"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
@@ -109,7 +109,7 @@ stack(1360,360,DY,[
  {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
  {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
  {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
- {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["select_verifier off · §12 verifier scores a metric-TIE (node_verified)","breaks mean + holdout ties by soundness · never overrides the metric (§21.7)"]},
+ {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["atomic verifier_group_scored · complete final tie set","generation · evidence · samples validate all-or-none","never overrides the metric (§21.7)"]},
  {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric(+verifier tie)→confirmed→holdout(+verifier tie)→approval"]},
 ]);
 // REFINE
@@ -155,7 +155,7 @@ box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips o
 const TY=1360;
 box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
-box("mC",672,TY,320,92,"C · Cross-run lessons","cross-run",C.mem,["~/.looplab/memory/lessons.jsonl · concept capsules/overlays","stewards @finalize (opt-in): proposals only","explicit operator CLI/API applies overlays"]);
+box("mC",672,TY,320,92,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules/overlays · v2 claims","stewards @finalize: proposals only","operator CLI / typed owner API applies overlays"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);

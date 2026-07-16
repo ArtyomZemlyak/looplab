@@ -742,6 +742,8 @@
   "run_setup_done": [],
   "rungs": [],
   "search_epoch": 0,
+  "select_verifier_contract": "selection-criteria:v1",
+  "select_verifier_samples": 3,
   "select_verifier_tiebreak": false,
   "setup_done": true,
   "setup_manifest": "",

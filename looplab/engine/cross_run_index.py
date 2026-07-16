@@ -26,9 +26,9 @@ from typing import Optional
 from looplab.core.models import RunState
 
 
-# Schema/mode version for the passport. `fp_mode` records the tokenizer generation IN the record (CODEX:
-# "version the tokenizer/fingerprint/schema") so a reader never joins fingerprints built under different
-# modes by accident. The CR0 index uses ONE consistent mode (universal) for every run it folds — it does
+# Schema/mode version for the passport. `fp_mode` records the tokenizer generation in the record, so a
+# reader never joins fingerprints built under different modes by accident. The CR0 index uses ONE
+# consistent mode (universal) for every run it folds — it does
 # not inherit each run's live `fingerprint_universal` flag, so the index is internally self-consistent.
 SCOPE_SCHEMA_VERSION = 1
 
@@ -36,7 +36,7 @@ SCOPE_SCHEMA_VERSION = 1
 # to describe every projection choice that can change cached facts independently of the source digest:
 # the cache envelope, the facts projector, the passport schema, and the fingerprint/tokenizer mode.
 # A cache written before this contract existed is intentionally cold-started instead of being guessed at.
-INDEX_CACHE_SCHEMA_VERSION = 2
+INDEX_CACHE_SCHEMA_VERSION = 3
 INDEX_PROJECTOR_VERSION = 1
 _DIGEST_CHUNK_BYTES = 1024 * 1024
 
@@ -62,6 +62,15 @@ def _cached_facts_match_contract(facts: object, expected: dict) -> bool:
     return (isinstance(scope, dict)
             and scope.get("v") == expected["scope_v"]
             and scope.get("fp_mode") == expected["fp_mode"])
+
+
+def _cached_entry_matches_contract(entry: object, expected: dict, *, source_digest: str = "") -> bool:
+    """Validate the projection contract plus a corruption checksum over the complete facts payload."""
+    if not isinstance(entry, dict) or (source_digest and entry.get("digest") != source_digest):
+        return False
+    facts, digest = entry.get("facts"), entry.get("facts_digest")
+    return (_cached_facts_match_contract(facts, expected) and isinstance(digest, str)
+            and digest == _content_digest(facts))
 
 
 def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric: str = "",
@@ -167,8 +176,8 @@ def build_index(entries: list[tuple[RunState, str, str]], *, universal: bool = T
     facts = [run_facts(st, kind=kind, metric=metric, universal=universal) for st, kind, metric in entries]
     # `run_id` is the unique run identity, but two folded logs COULD carry the same run_id (a copied dir);
     # sort by (run_id, task_id, n_attempts, best) and then the FULL-RECORD content digest so the canonical
-    # order is input-order-INDEPENDENT even when copies share all coarse keys but differ in their attempts
-    # (CODEX: stable-sort would otherwise leak traversal order). A source_uid dedup contract is the
+    # order is input-order-INDEPENDENT even when copies share all coarse keys but differ in their attempts;
+    # a stable sort alone would otherwise leak traversal order. A source_uid dedup contract is the
     # portfolio-scale TODO (§21.20.3); this at least makes the published order content-deterministic.
     facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"], f["n_attempts"],
                               str((f.get("best") or {}).get("metric")), _content_digest(f)))
@@ -233,32 +242,38 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
         prior_runs = {}
     runs: dict[str, dict] = {}
     receipts = {"built": [], "cached": [], "skipped": []}
-    entries: list[tuple[RunState, str, str]] = []
     for ev in sorted(root.glob("*/events.jsonl")):
         name = ev.parent.name                         # stable per-run cache key (the run dir name)
-        digest = run_source_digest(ev.parent)
-        cached = prior_runs.get(name)
-        if (digest and isinstance(cached, dict) and cached.get("digest") == digest
-                and _cached_facts_match_contract(cached.get("facts"), contract)):
-            runs[name] = {"digest": digest, "facts": cached["facts"]}
-            receipts["cached"].append(name)
-            continue
         try:
-            st = fold(EventStore(ev).read_all())
+            # Digesting and snapshot projection are I/O too. Keep the whole per-run pipeline inside the
+            # resilience boundary so one unreadable directory becomes an explicit skip instead of
+            # aborting an otherwise healthy portfolio rebuild.
+            digest = run_source_digest(ev.parent)
+            cached = prior_runs.get(name)
+            if digest and _cached_entry_matches_contract(cached, contract, source_digest=digest):
+                runs[name] = {"digest": digest, "facts_digest": cached["facts_digest"],
+                              "facts": cached["facts"]}
+                receipts["cached"].append(name)
+                continue
+            store = EventStore(ev)
+            events = store.read_all()
+            if store.divergence is not None:
+                raise ValueError(
+                    f"corrupt complete event record at line {store.divergence.get('corrupt_line')}")
+            st = fold(events)
+            kind, metric = _snapshot_kind_metric(ev.parent)
+            facts = run_facts(st, kind=kind, metric=metric, universal=universal)
         except Exception as e:  # noqa: BLE001 — an unreadable run becomes an explicit skip receipt, not a gap
             receipts["skipped"].append({"dir": name, "reason": f"{type(e).__name__}: {e}"[:200]})
             continue
-        kind, metric = _snapshot_kind_metric(ev.parent)
-        facts = run_facts(st, kind=kind, metric=metric, universal=universal)
         # A torn log folds LENIENTLY to an identity-less empty state (no run_started parsed): the lenient
         # reader never raised, but a run with no run_id AND no attempts cannot be joined/deduped and would
         # otherwise index as a phantom "" run (CODEX). Report it as a skip, not silent portfolio evidence.
         if not facts["run_id"] and facts["n_attempts"] == 0:
             receipts["skipped"].append({"dir": name, "reason": "empty/unreadable projection (no run identity)"})
             continue
-        runs[name] = {"digest": digest, "facts": facts}
+        runs[name] = {"digest": digest, "facts_digest": _content_digest(facts), "facts": facts}
         receipts["built"].append(name)
-        entries.append((st, kind, metric))
     # Rebuild the canonical sorted index from ALL kept facts (cached + freshly built), so the output order is
     # identical to a from-scratch `build_index` regardless of which runs were cached this pass.
     all_facts = [r["facts"] for r in runs.values()]
@@ -277,7 +292,11 @@ def save_index(path: str | Path, result: dict) -> None:
     contract = _cache_contract(universal=fp_mode == "universal")
     if not _cache_contract_matches(result, contract):
         raise ValueError("incremental index result uses an incompatible cache contract")
-    payload = {**contract, "runs": result.get("runs") or {}}
+    runs = result.get("runs") or {}
+    if not isinstance(runs, dict) or any(not _cached_entry_matches_contract(entry, contract)
+                                         for entry in runs.values()):
+        raise ValueError("incremental index result contains invalid cached facts")
+    payload = {**contract, "runs": runs}
     atomic_write_bytes(Path(path), json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
@@ -295,5 +314,7 @@ def load_index(path: str | Path) -> Optional[dict]:
         return None
     expected = _cache_contract(universal=payload["fp_mode"] == "universal")
     if not _cache_contract_matches(payload, expected) or not isinstance(payload.get("runs"), dict):
+        return None
+    if any(not _cached_entry_matches_contract(entry, expected) for entry in payload["runs"].values()):
         return None
     return {**expected, "runs": payload["runs"]}

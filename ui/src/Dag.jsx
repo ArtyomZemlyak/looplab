@@ -12,7 +12,7 @@ import EnergyEdge from './EnergyEdge.jsx'
 import { useFx } from './fx.js'
 import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
-  groupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
+  themeFilteredGroupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
 } from './grouping.js'
 import { DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag } from './dagViewport.js'
 
@@ -231,19 +231,26 @@ function GroupLane({ data }) {
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
 function GroupSuper({ data }) {
-  const { label, count, best, series, status, tint, selected, onExpand, onSelect } = data
+  const { label, count, totalCount, best, series, status, tint, selected, onExpand, onSelect,
+    filterActive, themeFilter } = data
+  const zeroMatch = filterActive && count === 0
+  const countText = filterActive ? `${count}/${totalCount}` : String(count)
+  const matchText = filterActive
+    ? `${count} of ${totalCount} experiments match direction ${themeFilter}`
+    : `${count} experiments`
+  const metricText = zeroMatch ? 'no matching experiments' : `best ${fmt(best)}`
   return (
-    <SuperShell tint={tint} selected={selected} onClick={() => onSelect(label)}
-      title={`Select collapsed group ${label}, ${count} experiments, best ${fmt(best)}`}>
+    <SuperShell tint={tint} selected={selected} dimmed={zeroMatch} onClick={() => onSelect(label)}
+      title={`Select collapsed group ${label}, ${matchText}, ${metricText}`}>
       <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
       <div className="row">
-        <button className="grp-chev btn-chev" aria-label={`Expand group ${label}`}
+        <button type="button" className="grp-chev btn-chev" aria-label={`Expand group ${label}`}
           onClick={(e) => { e.stopPropagation(); onExpand(label) }}>▸</button>
         <b className="grp-name">{label}</b>
         <span className="spacer" style={{ flex: 1 }} />
-        <span className="grp-n">{count}</span>
+        <span className="grp-n" title={matchText}>{countText}</span>
       </div>
-      <div className="metric">best {fmt(best)}</div>
+      <div className="metric">{metricText}</div>
       <Spark series={series} />
       <div className="grp-dots">
         {status.evaluated ? <span className="dot ok" title={`${status.evaluated} evaluated`}>●{status.evaluated}</span> : null}
@@ -365,7 +372,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
-  const { nodes, edges, groupKeys } = useMemo(() => {
+  const base = useMemo(() => {
     const ns = state?.nodes || {}
     const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode)
     // Group ORDER → a curated tint per group, so adjacent groups stay visually distinct (vs a hash
@@ -417,11 +424,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     groups.forEach((ids, key) => {
       if (!collapsed.has(key)) return
       const p = pos[superId(key)]; if (!p) return
-      const agg = groupAggregate(ids, ns, state.direction)
+      const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter)
       rfNodes.push({
         id: superId(key), type: 'groupSuper', position: p, zIndex: 1,
         data: {
-          label: key, count: agg.count, best: agg.best, series: agg.series, status: agg.status,
+          label: key, count: agg.matchedCount, totalCount: agg.totalCount,
+          best: agg.best, series: agg.series, status: agg.status,
+          filterActive: agg.filterActive, themeFilter: agg.themeFilter,
           tint: tintOf(key), selected: key === selectedGroup, onExpand: onToggleGroup, onSelect: onSelectGroup,
         },
       })
@@ -446,7 +455,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         focusable: false,
         data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
                 groupTint: inLane ? tintOf(gkey) : null, onOpenActions: onNodeAction ? openActions : null,
-                actionsOpen: menu?.nodeId === n.id } })
+                // actionsOpen is injected by the cheap `nodes` memo below, keyed on menu?.nodeId — so
+                // opening/moving the action menu does NOT rebuild this whole (layout-heavy) memo.
+                actionsOpen: false } })
     })
 
     // (Deep-research memos are no longer drawn in the DAG — they live in the Dock timeline + the
@@ -487,7 +498,17 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter, fx, onNodeAction, openActions, menu?.nodeId])
+      themeFilter, fx, onNodeAction, openActions])
+  const { edges, groupKeys } = base
+  // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
+  // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the
+  // open node, others returned by reference) — so toggling the menu never re-runs the layout memo above.
+  const nodes = useMemo(() => {
+    const openId = menu?.nodeId
+    if (openId == null) return base.nodes
+    return base.nodes.map(n => (n.type === 'exp' && n.data.node?.id === openId)
+      ? { ...n, data: { ...n.data, actionsOpen: true } } : n)
+  }, [base.nodes, menu?.nodeId])
   const interactiveNodeCount = nodes.filter(node => node.type === 'exp' || node.type === 'groupSuper').length
   const graphSignature = `${groupMode}:${nodes.map(node => node.id).sort().join('|')}`
   const autoFit = shouldAutoFitDag(interactiveNodeCount)
@@ -553,6 +574,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                    const dd = Math.hypot(dx, dy)
                    if (dd < bestD) { bestD = dd; hit = n.data?.node?.id }
                  }
+                 // Overlap is only a pair-selection gesture. RunView owns the explicit confirmation
+                 // boundary; this callback must never be interpreted as permission to mutate the run.
                  if (hit != null) onNodeAction('merge', { from, to: hit })
                }}
                onPaneClick={() => { closeMenu(false); onSelect(null); onSelectGroup && onSelectGroup(null) }}>

@@ -9,6 +9,9 @@ export const ATLAS_RENDER_LIMITS = Object.freeze({
   evidence: 6,
   curation: 20,
 })
+export const ATLAS_SOURCE_KEYS = Object.freeze([
+  'atlas', 'claims', 'conceptCuration', 'claimCuration',
+])
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
@@ -17,10 +20,55 @@ const count = (value, fallback = 0) => {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
+const sourceRevision = (key, value) => {
+  const envelope = record(value)
+  if (key === 'atlas') {
+    const revisions = record(envelope.revisions)
+    const concept = count(revisions.concept_governance, -1)
+    const claims = count(revisions.claims, -1)
+    const parts = []
+    if (concept >= 0) parts.push(`concept ${concept}`)
+    if (claims >= 0) parts.push(`claims ${claims}`)
+    return parts.join(' · ')
+  }
+  if (key === 'claims') {
+    const revision = count(envelope.revision, -1)
+    return revision >= 0 ? String(revision) : ''
+  }
+  const revisions = list(envelope.entries)
+    .map(entry => count(record(entry).revision, -1)).filter(value => value >= 0)
+  return revisions.length ? String(Math.max(...revisions)) : ''
+}
+
+// Four Atlas endpoints refresh independently. Preserve source-local provenance so a successful claims
+// refresh can never make retained concept/log slices look current. `successful` contains only the
+// slices fulfilled by this attempt: omitted last-good slices become retained-stale and never-loaded
+// slices remain explicitly failed.
+export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loadedAt) {
+  const previous = record(previousValue)
+  const successful = record(successfulValue)
+  const timestamp = boundedAtlasText(loadedAt, 80)
+  const statuses = {}
+  for (const key of ATLAS_SOURCE_KEYS) {
+    if (Object.hasOwn(successful, key)) {
+      statuses[key] = {
+        state: 'current', loadedAt: timestamp,
+        revision: sourceRevision(key, successful[key]),
+      }
+      continue
+    }
+    const prior = record(previous[key])
+    statuses[key] = ['current', 'retained-stale'].includes(prior.state)
+      ? { ...prior, state: 'retained-stale' }
+      : { state: 'failed', loadedAt: '', revision: '' }
+  }
+  return statuses
+}
+
 export function boundedAtlasText(value, max = 360) {
   if (!['string', 'number', 'boolean'].includes(typeof value)) return ''
   const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
-  // Slice before normalization so a single oversized model-authored field cannot force an unbounded regex pass.
+  // Slice before normalization so one model-authored field cannot force an unbounded regex pass.
   const text = String(value).slice(0, limit)
   return text.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/gu, ' ').trim().slice(0, limit)
 }
@@ -209,7 +257,9 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
       rawClaims.length - ATLAS_RENDER_LIMITS.claims),
     hiddenCuration: Math.max(0, totals.curation - curation.length,
       rawCuration.length - ATLAS_RENDER_LIMITS.curation),
-    empty: totals.runs === 0 && totals.concepts === 0 && totals.claims === 0 && totals.curation === 0
-      && concepts.length === 0 && claims.length === 0 && curation.length === 0,
+    empty: totals.runs === 0 && totals.concepts === 0 && totals.claims === 0
+      && totals.contested === 0 && totals.curation === 0
+      && concepts.length === 0 && thin.length === 0 && contradictions.length === 0
+      && claims.length === 0 && curation.length === 0,
   }
 }

@@ -97,9 +97,9 @@ def test_owner_secret_is_never_embedded_in_owner_or_review_html(tmp_path, monkey
     assert client.get("/api/auth/status", headers=OWNER).json()["authenticated"] is True
     assert client.post("/api/auth/verify", headers=OWNER, json={}).status_code == 200
     assert client.post("/api/auth/verify", headers={"X-LoopLab-Token": "wrong"}, json={}).status_code == 401
-    # Owner auth must not disable caching for content-hashed static assets.  The HTML shell and API
-    # remain no-store, while /assets keeps the static server's independent cache policy.
-    assert client.get("/assets/app.js").headers.get("Cache-Control") != "no-store"
+    # Owner auth must not disable the static server's independent cache policy. This handcrafted
+    # asset is absent from a Vite manifest, so it must revalidate rather than become immutable.
+    assert client.get("/assets/app.js").headers["Cache-Control"] == "no-cache"
 
 
 def test_summary_capability_is_one_run_read_only_and_revocable(tmp_path, monkeypatch):

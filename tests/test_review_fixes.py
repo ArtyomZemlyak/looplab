@@ -97,14 +97,13 @@ def test_options_preflight_not_gated_by_ui_token(monkeypatch):
     assert client.post("/api/runs/demo/control", json={"etype": "pause", "data": {}}).status_code == 401
 
 
-# ---------------------------------------------------------- F3: headerless SSE + share stay unauth-safe
-def test_unauth_api_ok_allows_sse_and_share_not_state():
-    """F3/F21: the redacted SSE stream and the intentionally-untokened share route must be servable
-    without the UI token (EventSource can't send it); ordinary reads/controls must NOT be."""
+# ---------------------------------------------------------- authenticated SSE + public share boundary
+def test_unauth_api_ok_allows_share_but_not_sse_or_state():
+    """The public share route stays tokenless; private live state uses authenticated fetch-SSE."""
     from looplab.serve.server import _unauth_api_ok
     assert _unauth_api_ok("/api/health")
-    assert _unauth_api_ok("/api/runs/demo/events")
     assert _unauth_api_ok("/api/assistant/shared/abc123")
+    assert not _unauth_api_ok("/api/runs/demo/events")
     assert not _unauth_api_ok("/api/runs/demo/state")
     assert not _unauth_api_ok("/api/runs/demo/control")
     assert not _unauth_api_ok("/api/runs/demo/nodes/0")

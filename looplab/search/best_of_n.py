@@ -23,8 +23,10 @@ def _score(code: str) -> float:
     try:
         compile(code, "<candidate>", "exec")
         s += 1.0
-    except SyntaxError:
-        return 0.0          # un-runnable: worst usable score
+    except (SyntaxError, ValueError):
+        # SyntaxError/IndentationError = malformed; ValueError = e.g. a NUL byte in the source. Both mean
+        # un-runnable — score it worst, never let a bad candidate raise out of the best-of-N ranking.
+        return 0.0
     if validate_agent_code(code).ok:
         s += 2.0
     if "metric" in code:

@@ -9,6 +9,19 @@ import { splitRouteHash } from './runRouteState.js'
 const OWNER_TOKEN_KEY = 'll.owner-token'
 let volatileOwnerToken = ''
 
+// One constructor for every owner-style per-run endpoint. Run IDs are filesystem names rather than
+// URL slugs and may legitimately contain URL syntax such as `#` or a literal `%2F`; interpolating
+// them directly can therefore drop the fragment or turn one path segment into several. Keep the
+// suffix explicit at call sites while making the identity boundary impossible to forget.
+export const runApiPath = (runId, suffix = '') =>
+  `/api/runs/${encodeURIComponent(String(runId))}${suffix}`
+
+// Node identity is currently numeric, but keeping the second dynamic segment encoded makes that
+// contract robust to imported/legacy identifiers and prevents future callers from weakening the
+// already-safe run boundary while composing a node endpoint.
+export const runNodeApiPath = (runId, nodeId, suffix = '') =>
+  runApiPath(runId, `/nodes/${encodeURIComponent(String(nodeId))}${suffix}`)
+
 export function isReviewLocation(loc = (typeof location !== 'undefined' ? location : null)) {
   return !!loc && /\/review\/?$/.test(loc.pathname || '')
 }
@@ -1078,7 +1091,7 @@ export const CONTROL = {
   // endpoint (not /control) — appends a `report_generated` event. Runs as a background job, so we
   // jobAwait the response (a slow/large regen can't 504 behind a proxy; a fast one returns inline).
   // Contract preserved: resolves to {ok, seq, content} (or {ok:false} offline), never a job_id.
-  refreshReport: async (rid) => jobAwait(await post(`/api/runs/${rid}/report_refresh`, {})),
+  refreshReport: async (rid) => jobAwait(await post(runApiPath(rid, '/report_refresh'), {})),
   // Generic authoritative command by {type, data}; slash commands and action routers share this path.
   raw: (rid, type, data = {}) => runCommand(rid, type, data),
 }
@@ -1097,7 +1110,7 @@ export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/rese
 // Clear ONE node's trace: erase its spans from spans.jsonl so a reset+rebuild's fresh bands don't
 // stack on top of the old attempt's. Server refuses (409) while the engine is live (sole writer).
 export const clearNodeTrace = (rid, id) =>
-  post(`/api/runs/${encodeURIComponent(rid)}/nodes/${id}/clear_trace`, {})
+  post(runNodeApiPath(rid, id, '/clear_trace'), {})
 
 export const llmHealth = () => get('/api/llm/health')
 
@@ -1120,8 +1133,18 @@ async function _throw(r, path) {
   let detail = '', payload = null
   try { payload = await r.json(); detail = (payload && (payload.detail ?? payload.error)) ?? '' } catch { /* no body */ }
   const structured = detail && typeof detail === 'object' && !Array.isArray(detail) ? detail : null
+  // FastAPI validation errors (422) put `detail` as an ARRAY of {loc, msg, type}. String(array) would
+  // render "[object Object],[object Object]" in the toast — flatten each entry to "field: msg" instead.
+  const arrayDetail = Array.isArray(detail)
+    ? detail.map(d => {
+        if (!d || typeof d !== 'object') return String(d)
+        const field = Array.isArray(d.loc) ? d.loc.filter(x => x !== 'body' && x !== 'query').join('.') : ''
+        return (field ? `${field}: ` : '') + String(d.msg || d.type || JSON.stringify(d))
+      }).filter(Boolean).join('; ')
+    : null
   const message = structured
     ? String(structured.message || structured.detail || structured.error || structured.code || `${path}: ${r.status}`)
+    : arrayDetail ? arrayDetail
     : detail ? String(detail) : `${path}: ${r.status}`
   const err = new Error(message)
   err.status = r.status   // callers branch on the code (e.g. 409 = run live / name taken), not a regex on the message
@@ -1164,6 +1187,107 @@ export function reviewReadPath(path) {
   const m = String(path || '').match(/^\/api\/runs\/[^/?#]+(\/[^?#]*)?(\?[^#]*)?$/)
   if (!m) return path
   return `/api/review${m[1] || ''}${m[2] || ''}`
+}
+
+const EVENT_STREAM_MAX_FRAME_CHARS = 2 * 1024 * 1024
+
+// Incremental WHATWG event-stream parser. Fetch chunks can split CRLF, UTF-8 code points and any
+// field at arbitrary boundaries, so parsing per network chunk (or only `\n\n`) is not sufficient.
+// Keeping this pure also makes reconnect/id semantics testable without React or a browser.
+export function createEventStreamParser(onEvent, initialLastEventId = '') {
+  let buffer = ''
+  let eventType = ''
+  let dataLines = []
+  let dataChars = 0
+  let lastEventId = String(initialLastEventId || '')
+  let retry = null
+
+  const dispatch = () => {
+    if (dataLines.length) {
+      onEvent?.({
+        type: eventType || 'message',
+        data: dataLines.join('\n'),
+        lastEventId,
+        retry,
+      })
+    }
+    eventType = ''
+    dataLines = []
+    dataChars = 0
+  }
+  const line = rawLine => {
+    const valueLine = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (!valueLine) { dispatch(); return }
+    if (valueLine.startsWith(':')) return
+    const separator = valueLine.indexOf(':')
+    const field = separator < 0 ? valueLine : valueLine.slice(0, separator)
+    let value = separator < 0 ? '' : valueLine.slice(separator + 1)
+    if (value.startsWith(' ')) value = value.slice(1)
+    if (field === 'event') eventType = value
+    else if (field === 'data') {
+      dataChars += value.length
+      if (dataChars > EVENT_STREAM_MAX_FRAME_CHARS) throw new Error('Event-stream frame is too large')
+      dataLines.push(value)
+    } else if (field === 'id' && !value.includes('\0')) {
+      lastEventId = value
+    } else if (field === 'retry' && /^\d+$/.test(value)) {
+      retry = Math.min(Number(value), 60_000)
+    }
+  }
+
+  return {
+    push(text) {
+      buffer += String(text || '')
+      if (buffer.length > EVENT_STREAM_MAX_FRAME_CHARS) throw new Error('Event-stream buffer is too large')
+      let newline
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const next = buffer.slice(0, newline)
+        buffer = buffer.slice(newline + 1)
+        line(next)
+      }
+    },
+    finish() {
+      // EOF without a blank line is an incomplete event and is intentionally discarded, matching
+      // EventSource. A reconnect can replay it from the last complete event id.
+      buffer = ''
+      eventType = ''
+      dataLines = []
+      dataChars = 0
+      return { lastEventId, retry }
+    },
+    state: () => ({ lastEventId, retry }),
+  }
+}
+
+// Authenticated GET-SSE transport for owner live state. Native EventSource cannot attach the owner
+// or review credential, whereas this path uses the exact auth, review-translation and proxy-prefix
+// plumbing as every ordinary API read. The caller owns reconnect timing and abort lifecycle.
+export async function fetchEventStream(path, {
+  signal, lastEventId = '', onEvent,
+} = {}) {
+  const requestPath = reviewReadPath(path)
+  const headers = { Accept: 'text/event-stream', 'Cache-Control': 'no-cache' }
+  if (lastEventId !== '') headers['Last-Event-ID'] = String(lastEventId).slice(0, 256)
+  const response = await fetch(apiUrl(requestPath), {
+    method: 'GET',
+    headers: _authHeaders(headers),
+    signal,
+    cache: 'no-store',
+  })
+  if (!response.ok) await _throw(response, path)
+  if (!response.body || typeof response.body.getReader !== 'function') {
+    throw new Error('The server returned no readable event stream.')
+  }
+  const parser = createEventStreamParser(onEvent, lastEventId)
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    parser.push(decoder.decode(value, { stream: true }))
+  }
+  parser.push(decoder.decode())
+  return parser.finish()
 }
 
 function assertNotReviewMutation(path) {
@@ -1235,8 +1359,8 @@ export const reviewManifest = () => get('/api/review')
 // ---- ClearML-style project API ----
 export const listProjects = () => get('/api/projects')
 export const createProject = (name, parent_id = null) => post('/api/projects', { name, parent_id })
-export const patchProject = (id, body) => send(`/api/projects/${id}`, 'PATCH', body)
-export const deleteProject = (id) => send(`/api/projects/${id}`, 'DELETE')
+export const patchProject = (id, body) => send(`/api/projects/${encodeURIComponent(id)}`, 'PATCH', body)
+export const deleteProject = (id) => send(`/api/projects/${encodeURIComponent(id)}`, 'DELETE')
 export const assignRun = (runId, project_id) => post(`/api/runs/${encodeURIComponent(runId)}/project`, { project_id })
 export const renameRun = (runId, label) => send(`/api/runs/${encodeURIComponent(runId)}`, 'PATCH', { label })
 export const deleteRun = (runId) => send(`/api/runs/${encodeURIComponent(runId)}`, 'DELETE')
@@ -1273,8 +1397,8 @@ export const commentHistory = (runId, commentId, { limit = 100, cursor = null } 
 // to projects). create / rename / delete the bucket, then assign any run (existing or new) to it.
 export const listSupertasks = () => get('/api/supertasks')
 export const createSupertask = (name, task_id = null) => post('/api/supertasks', { name, task_id })
-export const renameSupertask = (id, name) => send(`/api/supertasks/${id}`, 'PATCH', { name })
-export const deleteSupertask = (id) => send(`/api/supertasks/${id}`, 'DELETE')
+export const renameSupertask = (id, name) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'PATCH', { name })
+export const deleteSupertask = (id) => send(`/api/supertasks/${encodeURIComponent(id)}`, 'DELETE')
 export const assignSupertask = (runId, supertask_id) => post(`/api/runs/${encodeURIComponent(runId)}/supertask`, { supertask_id })
 
 export const gpuStat = () => get('/api/gpu')
@@ -1376,7 +1500,11 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
       // Recovery must send the persisted clean display even when it happens to equal `instruction`:
       // the explicit three-field body is the exact durable-turn contract, not a newly composed send.
       body: JSON.stringify(display != null ? { instruction, display, mode } : { instruction, mode }), signal })
-  if (!r.ok || !r.body) { await _throw(r, 'message_stream'); return null }
+  if (!r.ok) { await _throw(r, 'message_stream'); return null }
+  // A 2xx with no readable body (empty stream, or an environment/proxy that doesn't expose one) is NOT
+  // a server error — returning null lets the caller fall back to the non-streaming path instead of
+  // surfacing a misleading "message_stream: 200" toast from _throw's status fallback.
+  if (!r.body) return null
   const reader = r.body.getReader(); const dec = new TextDecoder()
   let buf = ''; let result = null
   for (;;) {
@@ -1412,7 +1540,7 @@ export const spanDetail = (runId, spanId) =>
 // Linear, de-duplicated conversation view of a node's trace (request once per sub-loop, then each
 // generation's delta interleaved with tool calls) — the readable alternative to the raw span tree.
 export const nodeConversation = (runId, nid) =>
-  get(`/api/runs/${encodeURIComponent(runId)}/nodes/${encodeURIComponent(nid)}/conversation`)
+  get(runNodeApiPath(runId, nid, '/conversation'))
 
 // Stop an in-flight assistant turn server-side (survives a page reload, unlike aborting the local
 // stream). Also used to poll whether a turn is still running (reattach after switch/reload).

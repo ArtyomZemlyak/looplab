@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field, field_serializer, field_validator, model_
 # The single direction-comparator owner. fitness.py imports nothing from models (duck-typed on nodes),
 # so this top-level import is cycle-free and keeps RunState.is_better a one-hop delegation, not a
 # per-call import (R1/SearchFitness).
-from looplab.core.fitness import is_better as _is_better
+from looplab.core.fitness import is_better as _is_better, is_usable_metric
 
 
 def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
@@ -27,7 +27,10 @@ def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
     for key, raw in value.items():
         if len(out) >= max_items or isinstance(raw, bool) or not isinstance(raw, (int, float)):
             continue
-        number = float(raw)
+        try:
+            number = float(raw)
+        except (TypeError, OverflowError, ValueError):
+            continue
         if math.isfinite(number):
             out[str(key)[:200]] = number
     return out
@@ -104,7 +107,7 @@ class Idea(BaseModel):
             try:
                 lo, hi = float(min(rng)), float(max(rng))
                 v = float(val)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
             if v < lo or v > hi:
                 self.params[k] = round(min(hi, max(lo, v)), 6)
@@ -124,7 +127,7 @@ class Idea(BaseModel):
             return None
         try:
             f = float(v)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             return None
         return f if math.isfinite(f) and f > 0 else None
 
@@ -749,7 +752,7 @@ class RunState(BaseModel):
         sorted against real metrics nor selected as best, and would raise TypeError in the policies'
         metric-keyed sorts."""
         return [n for n in self.evaluated_nodes()
-                if n.feasible and n.metric is not None and n.id not in self.aborted_nodes]
+                if n.feasible and is_usable_metric(n.metric) and n.id not in self.aborted_nodes]
 
     def breedable_nodes(self) -> list[Node]:
         """Feasible nodes the search may BREED FROM or CONFIRM (improve/merge/ablate/promote/confirm

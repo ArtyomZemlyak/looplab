@@ -1,7 +1,7 @@
 """B3 secret-leak redaction over persisted output tails."""
 from __future__ import annotations
 
-from looplab.trust.redact import redact_secrets
+from looplab.trust.redact import redact_persisted_text, redact_secrets
 
 
 def test_redacts_openai_style_key():
@@ -92,3 +92,22 @@ def test_real_secret_fields_still_redacted():
         masked = redact_secrets(s)
         secret = s.split("=", 1)[1]
         assert "***" in masked and secret not in masked
+
+
+def test_short_quoted_and_authorization_credentials_are_fully_redacted():
+    cases = [
+        ("password=abc", "abc"),
+        ("api_key=xyz", "xyz"),
+        ("password: 'my secret'", "my secret"),
+        ("Authorization: Basic dTpw", "dTpw"),
+        ("Bearer abcdefghijklmnop+SECRET", "abcdefghijklmnop+SECRET"),
+    ]
+    for raw, secret in cases:
+        persisted = redact_persisted_text(raw, max_chars=1_000, entropy=False)
+        assert secret not in persisted and "***" in persisted
+
+
+def test_compound_key_scanner_handles_large_nonsecret_input_without_backtracking_blowup():
+    raw = "ordinary_identifier=" + "x" * 100_000 + " password=z"
+    persisted = redact_persisted_text(raw, max_chars=110_000, entropy=False)
+    assert persisted.endswith("password=***") and "ordinary_identifier=" in persisted

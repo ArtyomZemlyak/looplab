@@ -12,7 +12,7 @@
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
 | **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §14.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
-| **Current Part-IV reviewed range** | Current `master`; post-fix reconciliation in §22.8, doc 18 §34 and doc 21 Round 23. Historical core counts remain pinned to the commits named beside them. |
+| **Current Part-IV reviewed range** | Current `master`; final reconciliation in §22.9, doc 18 §35 and doc 21 Round 24. Historical core counts remain pinned to the commits named beside them. |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
 | **Current implementation disposition** | §6.3 and §14.2 for the core; §22.8 for Part-IV/V cross-run/UI status |
@@ -20,7 +20,7 @@
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
 | **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
-| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-15 (Part III-B/IV and cross-run/UI addenda) |
+| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-16 (Part III-B/IV and cross-run/UI reconciliation) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -4201,13 +4201,14 @@ It does **not** relax §21.20's release gates or rename a bounded diagnostic int
 **Landed since §22.7:**
 
 - **Evidence preservation.** Whenever shared `memory_dir` exists, D8 v2 persists independently of the
-  `cross_run_concepts` capsule/prior flag and retains task/run identity, run-qualified node references, source
+  `cross_run_concepts` capsule/prior flag and retains task/run/direction identity, run-qualified node references, source
   URLs and verifier verdict/method/note. Only verifier-`supported` D8 evidence contributes positive support;
   unsupported, unclear, cited, malformed and legacy rows remain unverified. The `claims` and `atlas` CLIs now
   accept a D8-only store.
-- **Agent visibility is bounded.** Bound `CrossRunTools` first enforces compatible direction, then exact task
-  or a strict goal fingerprint (at least two shared bare terms covering half the smaller set) across lessons,
-  capsules and D8 rows. Task facets are ranking hints only. Genesis binds fail-closed to goal/direction before
+- **Agent visibility is bounded.** Bound `CrossRunTools` first enforces compatible direction. Lessons and
+  capsules then require exact task or a strict goal fingerprint (at least two shared bare terms covering half
+  the smaller set); v2 D8 carries no goal fingerprint and is exact-task-only. Task facets are advisory metadata
+  reserved for future post-scope ranking and currently affect neither visibility nor order. Genesis binds fail-closed to goal/direction before
   a task exists; the in-house Repo Developer binds to its task; unbound human/CLI reads remain deliberately
   portfolio-wide. Applicability filtering still is not an ACL/security boundary.
 - **Prompt influence is attributable.** The proactive Researcher pack excludes the current run, scopes inputs
@@ -4217,15 +4218,31 @@ It does **not** relax §21.20's release gates or rename a bounded diagnostic int
   durably tied to the consuming model turn.
 - **Governance writes are fenced.** Finalize stewards and HTTP steward endpoints are proposal-only;
   `cross_run_curation_auto` is a deprecated inert compatibility input. Typed owner mutations require
-  `expected_revision` and `action_id`, derive actor/time on the server, return stable 409 conflicts and 503
+  `expected_revision` and `action_id`; concept mutations additionally require the shared
+  `expected_governance_revision` so alias and split edits cannot race across ledgers. They derive actor/time
+  on the server, return stable 409 conflicts and 503
   lock failures, and make retry idempotent. Claim decisions additionally validate current `claim_uid` existence
   and the reviewed `evidence_digest` inside the locked CAS; they include `clear`. Concept merge is separate from
-  an explicitly confirmed purge; alias and split policies each have explicit clear actions. Local CLI `--apply`
-  remains an intentional operator action but does not expose the server CAS/action-id/clear contract.
+  an explicitly confirmed purge; alias and split policies each have explicit clear actions. Concept mutation
+  receipts and Atlas reads expose the shared governance revision. Owner HTTP actions validate the live observed
+  vocabulary under that same lock: merge/purge and split sources must be active canonical concepts, merge
+  targets must already be active and canonical, while split children may introduce provisional concepts;
+  existing split targets must be canonical and distinct. On-demand concept
+  and claim stewards are proposal-only as well: deprecated engine `apply=True` and CLI `--apply` compatibility
+  inputs fail before memory reads, model setup, paid inference or mutation. The operator must review the exact
+  proposal and translate selected rows into typed `concept-merge` / `concept-split` / `claim-decide` commands or
+  owner HTTP governance; there is no LLM rerun-and-apply shortcut. Claim overlays resolve exact scope+metric,
+  then scope-only, global metric and finally global; an unscoped decision is therefore an intentional
+  portfolio-wide fallback, while a scoped decision cannot leak into another task.
 - **Read and UI slices are bounded and honest.** Claims GET adds scope, offset paging and revision metadata;
   Atlas GET adds live-projection, scope and ledger-revision metadata with bounded sections. The lazy owner
   `#/atlas` route consumes those projections plus both proposal logs as an abortable, defensive, read-only
   **Experimental portfolio diagnostic**. It is not the canonical snapshot-consistent Atlas.
+- **Global Settings writes are sparse, not revisioned.** The owner form sends only schema-owned fields changed
+  since its last successful load/save (blank means explicit clear), and `agent_control` is a nested sparse patch.
+  The server merges and validates under one local plus required interprocess file-lock transaction, preserving
+  disjoint stale-tab edits. There is no Settings revision/ETag/CAS: concurrent edits to the same field remain
+  last-writer-wins.
 
 **Residual gates after the second review:**
 
@@ -4233,9 +4250,10 @@ It does **not** relax §21.20's release gates or rename a bounded diagnostic int
    dataset/eval/metric identity, access digest, widening policy and a frozen corpus watermark. Add durable
    turn attribution for pull-tool retrieval and one uniform provenance/redaction envelope.
 2. Extend the claim endpoint's current-target/`evidence_digest` fence into a versioned evidence release and
-   DecisionFreshness model; add concept target-existence validation, independent evidence-family/applicability
-   identity, and separate proposition stance from action utility for negative lessons. Attempts, eligible
-   measurements and comparison-compatible results must remain distinct.
+   DecisionFreshness model. New lessons already separate literal `claim_stance` from action guidance; migrate or
+   explicitly surface legacy rows that lack it. Promote the owner HTTP observed-concept checks into release-pinned
+   entity/assignment identity with migration/backfill, and add independent evidence-family/applicability identity.
+   Attempts, eligible measurements and comparison-compatible results must remain distinct.
 3. Replace label-derived concept identity with opaque release-pinned taxonomy entities plus separate assignment
    revisions. Add impact preview, migration/backfill, ACL/RBAC and queryable history; CAS by itself is not a
    taxonomy/evidence release model.
@@ -4248,4 +4266,58 @@ It does **not** relax §21.20's release gates or rename a bounded diagnostic int
 The current safe product label is therefore **experimental bounded owner-only read-only Atlas preview**.
 Production promotion still follows scope/comparison/trust → identity/evidence/release → snapshot/health and
 resource-safe queries → frozen replay/retrieval/adversarial gates → opt-in A/B → default-on only after no
-scope, trust or exploration regression. Doc 21 Round 23 records the corresponding code/test chronology.
+scope, trust or exploration regression. Doc 21 Round 23B records the corresponding code/test chronology.
+
+#### 22.9 Final comprehensive-review reconciliation (2026-07-16)
+
+This is the current Part-IV/V release-order authority. It supersedes §22.8's remaining-status and cross-link
+claims while preserving that checkpoint's chronology. The final independent passes narrowed operational risk;
+they did not satisfy the scientific/product gates in §21.20.
+
+**Additional landed contracts:**
+
+- Concept alias, purge, split and clear mutations now share a governance-wide revision fence in addition to
+  their per-ledger revision. Same-action replay precedes stale-CAS rejection. Owner HTTP existence/canonicality
+  checks and concurrent alias/purge checks occur under the same global lock: merge/purge and split sources plus
+  merge targets must be observed active canonical concepts; split children may be new provisional entities,
+  while existing split targets must be canonical and distinct. Receipts bind the observed projection digest.
+  This closes nonexistent-merge and cross-ledger races; it still is
+  not a release-pinned taxonomy, semantic impact analysis or migration/backfill system.
+- Metric projections, replay and command evaluation reject booleans, non-finite values, integers too large for
+  a finite float and hostile numeric adapters rather than crashing or admitting unusable fitness data. Durable
+  trace and research-memo projections apply global item/byte/depth bounds, integer-domain guards and canonical
+  nested secret-key masking before persistence or display.
+- Newly distilled lessons carry explicit literal `claim_stance`, so both a successful assertion and a confirmed
+  negative factual assertion support the sentence they state while `outcome` remains reuse/avoid guidance.
+  Rows without the field retain the documented legacy mapping rather than being silently reinterpreted.
+- On-demand claim/concept stewards remain proposal-only. Deprecated `apply` compatibility inputs fail before
+  memory reads, model construction, paid inference or writes; selected proposals require a separate explicit
+  typed operator action.
+- The owner UI now uses the truthful vocabulary and surface separation in
+  [doc 18 §35](18-ui-ux-review-2026-07-11.md). The Atlas preview describes concept observations, mixed evidence
+  and steward invocation outcomes instead of claiming complete coverage, verdicts or governance state. It
+  remains four independent live bounded sources, not an atomic corpus snapshot.
+- Frontend delivery is source/dependency-freshness checked. A normal launch rebuilds a missing, unstamped or
+  stale default bundle; a failed requested refresh cannot silently serve the previous bundle. Only an explicit
+  `--no-build` opts into that risk. SSE remains uncompressed, ordinary eligible responses may use gzip, HTML
+  revalidates, and immutable caching is limited to manifest-listed content-hashed assets.
+
+**Canonical next order:**
+
+```text
+P0 current-surface truth + desktop/mobile/keyboard release evidence
+→ R0/R1 sequence-fenced per-run ConceptFrame and Direction × Concept crosswalk
+→ R2/R3 per-run Research Space with bounded focused topology + table equivalent
+‖
+G0/G1 proposition/effect, stable identity and eligible evidence
+→ G2 immutable scope/comparison/access + corpus/snapshot/health
+→ G3 resource-safe queries and attributable/redacted consumers
+→ G4 matrix/proof/compare prototype with responsive equivalents
+→ G5 Research Atlas promotion
+→ G6 governed meaning change with impact/history/migration
+```
+
+The P0 UI wording/delivery changes do not waive P0 validation: the clean integrated Python/UI/docs gates and
+real desktop + 360 px browser pass are recorded only when completed in doc 21 Round 24. Until G5, the safe
+product name remains **Experimental bounded owner-only read-only Research Atlas preview**. Until R3, the current
+run Search/DAG remains an experiment-lineage surface, not a per-run concept graph.

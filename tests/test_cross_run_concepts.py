@@ -53,6 +53,45 @@ def test_store_concept_capsule_writes_best_per_concept_outcome(tmp_path):
     assert c["concept_outcomes"]["data/hard-negative-mining"] == 0.90   # best-of, not last-of
 
 
+def test_concept_outcomes_use_selection_eligible_nodes_but_keep_attempt_coverage(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "max", "trust_gate": "gate",
+    })
+    concepts = {
+        0: ["shared", "valid-only"],
+        1: ["shared", "flagged-only"],
+        2: ["tombstoned-only"],
+        3: ["aborted-only"],
+        4: ["infeasible-only"],
+    }
+    for node_id, metric in enumerate((0.5, 0.99, 0.98, 0.97, 0.96)):
+        store.append("node_created", {
+            "node_id": node_id, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {"x": node_id}, "theme": "x"},
+        })
+        store.append("node_evaluated", {
+            "node_id": node_id, "metric": metric,
+            "violations": ([{"name": "budget"}] if node_id == 4 else []),
+        })
+        store.append("node_concepts", {
+            "node_id": node_id, "concepts": concepts[node_id], "mode": "llm",
+        })
+    store.append("reward_hack_suspected", {
+        "node_id": 1, "signals": [{"signal": "grader_access"}],
+    })
+    store.append("node_tombstoned", {"node_ids": [2]})
+    store.append("node_abort", {"node_id": 3})
+
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(store.read_all()))
+    capsule = ConceptCapsuleStore(mem / "concept_capsules.jsonl").all()[0]
+    all_concepts = set().union(*map(set, concepts.values()))
+    assert all_concepts <= set(capsule["concepts"])
+    assert capsule["concept_outcomes"] == {"shared": 0.5, "valid-only": 0.5}
+
+
 def test_store_concept_capsule_noop_without_tags(tmp_path):
     mem = tmp_path / "mem"; mem.mkdir()
     s = EventStore(tmp_path / "events.jsonl")

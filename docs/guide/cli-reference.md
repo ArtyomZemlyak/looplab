@@ -26,11 +26,11 @@ looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV 
 looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
-looplab concept-steward AGENTIC taxonomy curator: LLM proposes merge/split/purge (--apply records) (PART IV §22.4)
+looplab concept-steward AGENTIC taxonomy curator: proposal-only merge/split/purge review (PART IV §22.4)
 looplab task-facets     AGENTIC task faceting: LLM classifies a goal into domain/language/... facets (PART IV §21.20.2)
 looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
-looplab claim-steward   AGENTIC claim curator: LLM proposes ratify/reject/pin (--apply records) (PART IV §22.4)
+looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
 looplab atlas           Capped Atlas summary: explored / thin / contradictory (PART IV Step 6)
 looplab smoke           Ping the configured LLM endpoint (self-test)
 looplab approve         Ratify a paused run (HITL / onboarding)
@@ -455,7 +455,11 @@ helper is not a release-pinned entity identity, and source/target existence, sco
 validated. Empty sources, self-links and cycles are rejected under the shared append lock, and keys are
 case-normalized. This command has no `expected_revision`, `action_id` or explicit clear verb; a later record can
 replace the effective mapping and raw capsule tags remain intact. The owner HTTP governance surface is stricter:
-it separates merge from confirmed purge and supplies CAS, idempotency and alias-clear actions. Neither surface
+it separates merge from confirmed purge and supplies per-alias-ledger `expected_revision`, cross-ledger
+`expected_governance_revision`, idempotency and alias-clear actions. Mutation receipts and Atlas reads expose
+the resulting shared governance revision. Owner HTTP merge/purge additionally requires a live canonical source,
+and merge requires a live canonical target, from the current capsule/split projection; its receipt carries that
+projection's digest. Neither surface
 provides impact preview, assignment backfill or a queryable taxonomy-history workbench.
 
 ```bash
@@ -475,10 +479,16 @@ looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
 PART IV §21.20.13 — the OPERATOR concept **SPLIT**: declare one coarse concept really covers several finer
 ones, RE-TAGGED per each run's OWN sibling concepts. The append-only `concept_splits.jsonl` overlay is applied
 at READ time and raw per-run tags are never rewritten; the latest record for a source replaces its effective
-split. This local CLI has no expected-revision/action-id/clear options; the owner HTTP surface adds CAS,
-idempotency and `concept-split-clear`, but neither is a revisioned taxonomy/assignment release. For a given run the FIRST rule
+split. This local CLI has no expected-revision/action-id/clear options; the owner HTTP surface requires both the
+per-split-ledger `expected_revision` and cross-ledger `expected_governance_revision`, adds idempotency and
+`concept-split-clear`, and exposes the shared revision in receipts. Neither surface is a revisioned
+taxonomy/assignment release. For a given run the FIRST rule
 whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise `--default` (or the
-original slug). Rejects an empty source, a rule targeting its own source, and an empty ruleset with no default.
+original slug). Under the shared governance lock, writes reject an empty, purged or aliased source and every
+explicit rule/default target that is purged or resolves back to the source; an empty ruleset without a real
+default is also rejected. Owner HTTP additionally requires the source in the live canonical portfolio
+projection; split children may be new provisional taxonomy entities, while any already-known child must be
+canonical and all targets must be distinct.
 
 ```bash
 looplab concept-split MEMORY_DIR FROM_CONCEPT --rule 'TARGET:term1,term2' [--rule ...] [--default TARGET]
@@ -496,10 +506,12 @@ looplab concept-split MEMORY_DIR FROM_CONCEPT --rule 'TARGET:term1,term2' [--rul
 ## `concept-steward`
 
 PART IV §21.20.13 / §22.4 — the **AGENTIC taxonomy steward**: an LLM reviews the cross-run concept graph and
-PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise). Advisory by default (shows
-proposals for operator ratification); `--apply` records them through the SAME locked append-only overlay writes
-as the manual `concept-merge`/`concept-split` (the LLM only proposes — it never mutates `fold()` state).
-Needs a reachable LLM. This is the on-demand CLI companion to the finalize-time `cross_run_curation` flag.
+PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise). It is **proposal-only**:
+review the exact returned rows, then translate only the selected operations into typed `concept-merge` /
+`concept-split` commands or owner HTTP governance actions. The deprecated `--apply` spelling remains so old
+scripts fail clearly, but exits 2 **before model setup, paid inference or mutation**; it never re-runs and applies
+an unreviewed batch. Needs a reachable LLM. This is the on-demand companion to finalize-time
+`cross_run_curation`.
 
 ```bash
 looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [--json]
@@ -508,10 +520,10 @@ looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [-
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` |
-| `--apply` | off | Explicitly record the LLM proposals through the local overlay commands; raw capsules remain unchanged. This CLI path has no CAS/action-id/clear contract. The HTTP steward endpoint is proposal-only and rejects apply |
+| `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `concept-merge` / `concept-split` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
-| `--json` | off | Emit `{proposals, receipt}` as JSON |
+| `--json` | off | Emit `{proposals, receipt}` as JSON; the proposal-only steward always returns `receipt: null` |
 
 ---
 
@@ -544,7 +556,9 @@ The corpus is capped internally at 2,000 records and rebuilt per call.
 It still does not expose each channel's per-hit contribution, carry evidence refs/source/scope/snapshot/index-
 health on each result, enforce a ComparisonContract, or persist the derivation receipt. The CLI has no scope
 option and reads the portfolio-wide stores. Bound agent callers instead pass a role-filtered snapshot scoped by
-direction plus exact task or a strict related-goal fingerprint; task facets are ranking-only. This is useful applicability filtering,
+compatible direction plus exact task or a strict related-goal fingerprint for lessons/capsules. V2 D8 rows carry
+no goal fingerprint and are exact-task-only. Task facets are advisory metadata reserved for future post-scope
+ranking; they grant no visibility and currently do not change order. This is useful applicability filtering,
 not a security boundary. This remains an experimental recall, not the full “Why recalled?” proof contract in
 doc 18, and there is no matching HTTP query route yet.
 
@@ -565,11 +579,12 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 
 PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` plus persisted D8 `research_claims.jsonl` into a
 **statement-grouped lean claim view** with support/oppose/unverified references and
-`supported`/`refuted`/`mixed`/`inconclusive` labels. New v2 D8 rows preserve `task_id`, run-qualified node
+`supported`/`refuted`/`mixed`/`inconclusive` labels. New v2 D8 rows preserve `task_id`, direction, run-qualified node
 references, source URLs, and the verifier verdict/method/note; legacy rows without that payload remain
-`unverified` and never become positive support merely because they cited a node. This is still not an
-independent-evidence assessment: the lean lesson mapping can invert a negative factual statement, and refs are
-attempts rather than independent evidence families. Identity is normalized statement text unless
+`unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
+explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
+fact is no longer inverted; legacy rows without the field keep the historical outcome mapping. This is still not
+an independent-evidence assessment: refs are attempts rather than independent evidence families. Identity is normalized statement text unless
 `--structured` is selected. Pure read; no LLM/endpoint.
 
 ```bash
@@ -581,15 +596,17 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `research_claims.jsonl` (or a lessons file) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
-| `--pack` | off | Render the claim-count-bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a lean portfolio line |
-| `--fuzzy` | off | Suggestion-grade token-Jaccard paraphrase merge; transitive and scope-agnostic, so inspect `merged_from` and do not use it as claim identity |
+| `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → supported → refuted → inconclusive; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly |
+| `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
 | `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
 
 Operator decisions (from `claim-decide`) are overlaid: a `[RATIFIED]`/`[REJECTED]`/`[PINNED]` marker is shown.
+Structured lookup prefers exact scope+metric, then scope-only, global metric and global. An unscoped decision
+is therefore an intentional portfolio-wide fallback; a scoped one does not reach another task.
 A rejected claim remains human-visible in the unfiltered claims CLI/API and can still contribute to Atlas
 top-level `n_claims`/`n_claims_total`; it is excluded from the **active** context pack, Atlas contradictions,
-agent-tool projection and hybrid retrieval. A ratified claim is surfaced first in the context pack. This closes
+agent-tool projection and hybrid retrieval. Pins have first retention priority, followed by ratified claims. This closes
 the earlier steering leak without pretending rejection deletes evidence or history; scope, D8-verification and
 stable-identity gates in [doc 17 §22.8](../17-project-review-and-directions-2026-07-11.md) still block production
 advisory.
@@ -616,11 +633,11 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir (where `claim_decisions.jsonl` is written) |
 | `STATEMENT` | *(required)* | The claim statement (matched by normalized text) |
-| `--ratify` | — | Mark `operator-ratified`; surfaced first in the current context-pack projection |
+| `--ratify` | — | Mark `operator-ratified`; surfaced after explicit pins in the current context-pack projection |
 | `--reject` | — | Mark `operator-rejected`; remains human-visible and may remain in top-level claim totals, but is excluded from active context, Atlas contradictions, agent-tool and hybrid-retrieval projections |
-| `--pin` | — | Mark `operator-pinned`; no additional ordering/retention behavior is currently defined |
+| `--pin` | — | Mark `operator-pinned`; pinned claims receive first retention priority in bounded context packs. The hard claim-count cap still applies, and any omitted pin count is surfaced explicitly |
 | `--note` | `""` | Optional rationale recorded with the decision |
-| `--scope` | `""` | Task scope for the **structured claim key**: the decision is scope-precise (it won't reach a same-worded claim in another task). The record carries a `claim_uid`+scope so the structured projection (`claims --structured`) overlays it exactly; the legacy normalized-statement overlay still applies for the lean view |
+| `--scope` | `""` | Task scope for the **structured claim key**. A non-empty scope is task-precise and will not reach a same-worded claim in another task; the default empty scope intentionally creates the portfolio-wide fallback. The record carries a `claim_uid`+scope so the structured projection (`claims --structured`) overlays it exactly; the legacy normalized-statement overlay still applies for the lean view |
 
 ---
 
@@ -629,9 +646,11 @@ looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--not
 PART IV §22.4 — the **AGENTIC claim steward**: an LLM reviews the evidence-grounded claim assessments (with
 their support/oppose counts and epistemic state) and PROPOSES operator decisions — ratify a well-evidenced
 consistent claim, reject a contradicted/over-generalized/noise claim, pin a load-bearing one. It reviews ONLY
-machine-proposed claims (never re-litigates a human verdict). Advisory by default; `--apply` records the
-decisions through the SAME latest-write `claim-decide` overlay (scope-precise via the structured key —
-the LLM only proposes). Needs a reachable LLM. The on-demand companion to the finalize-time `cross_run_curation`.
+machine-proposed claims (never re-litigates a human verdict). It is **proposal-only**: review the exact returned
+claim identity, scope, metric and decision, then apply only selected decisions through typed `claim-decide` or
+owner HTTP governance. The deprecated `--apply` spelling exits 2 **before model setup, paid inference or
+mutation** and never re-runs an LLM batch for immediate application. Needs a reachable LLM. The on-demand
+companion to finalize-time `cross_run_curation`.
 
 ```bash
 looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--json]
@@ -640,10 +659,10 @@ looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--j
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (+ persisted claims) |
-| `--apply` | off | Explicitly record proposed decisions through the local latest-write overlay; this CLI path has no CAS/action-id/clear contract. The HTTP steward endpoint is proposal-only and rejects apply |
+| `--apply` | off | **Deprecated and disabled.** Exits 2 before any LLM call or write. Run without it, review the exact proposal, then use typed `claim-decide` or owner HTTP governance |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `10` | Cap the total ratify/reject/pin proposals per pass |
-| `--json` | off | Emit `{proposals, receipt}` as JSON |
+| `--json` | off | Emit `{proposals, receipt}` as JSON; the proposal-only steward always returns `receipt: null` |
 
 ---
 
@@ -652,9 +671,10 @@ looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--j
 PART IV §21.20.2 — **AGENTIC task FACETING**: an LLM classifies a task's goal into a small fixed set of facets
 (`domain` / `language` / `modality` / `interaction` / `objective`) so the system can recognize when two
 differently-worded tasks are the same KIND of problem. An advisory OVERLAY only — it never touches the
-deterministic passport fingerprint (`scope_profile`); facets live in their own append-only `task_facets.jsonl`
-and are carried into scope matching only when explicitly passed, so `build_index` stays byte-identical
-rebuildable. `--apply` records the facets for `--task-id` (last write per task wins). Needs a reachable LLM.
+deterministic passport fingerprint (`scope_profile`); facets live in their own append-only `task_facets.jsonl`.
+They are currently stored/surfaced metadata reserved for a future post-scope ranking experiment: they grant no
+visibility and do not change retrieval order. `build_index` stays byte-identical rebuildable. `--apply` records
+the facets for `--task-id` (last write per task wins). Needs a reachable LLM.
 
 ```bash
 looplab task-facets MEMORY_DIR "GOAL" [--task-id ID] [--kind K] [--apply] [--model M]

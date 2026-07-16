@@ -34,8 +34,9 @@ class LessonReconcileMixin:
         a failure. One LLM call for ALL pairs (budget: same order as `_reflect_lessons`); offline,
         the deterministic param-diff credit stands in. Returns (lessons, pairs_used); ([], []) when
         there is nothing informative to compare. Best-effort — never raises."""
-        from looplab.engine.memory import (code_diff, param_credit_statement,
-                                           parse_credit_lessons, select_comparison_pairs)
+        from looplab.engine.memory import (code_diff, distilled_claim_stance,
+                                           param_credit_statement, parse_credit_lessons,
+                                           select_comparison_pairs)
         pairs = select_comparison_pairs(state, k=3, exclude=exclude)
         if not pairs:
             return [], []
@@ -51,6 +52,7 @@ class LessonReconcileMixin:
             d = {"task_id": state.task_id, "fingerprint": fp,
                  "kind": getattr(self._e.task, "kind", ""), "statement": statement,
                  "outcome": outcome, "delta": pr.get("delta") if pr else None,
+                 "claim_stance": distilled_claim_stance(outcome),
                  "confidence": conf, "run_id": state.run_id,
                  "evidence": ev, "evidence_sig": self._evidence_sig_map(state, ev),
                  "source": "comparative"}
@@ -99,7 +101,8 @@ class LessonReconcileMixin:
                   "\n\nFor EACH pair output exactly one line: `P<n> [GOOD] <lesson>` if the "
                   "credited change should be reused, or `P<n> [BAD] <lesson>` if it should be "
                   "avoided. Credit the SPECIFIC difference, stated generally (no exact numbers). "
-                  "No preamble.")
+                  "The lesson sentence itself must be a conclusion supported by the pair evidence; "
+                  "[GOOD]/[BAD] controls reuse guidance, not whether the sentence is true. No preamble.")
         try:
             from looplab.agents.agent import agentic_text
             out = agentic_text(client, self._reflect_tools(state), [{"role": "user", "content": prompt}],
@@ -307,9 +310,14 @@ class LessonReconcileMixin:
                 "at_node": len(state.nodes), "trigger": "reconcile", "count": len(comp),
                 "pairs": [[pr["a"], pr["b"]] for pr in pairs_used],
                 "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                             "claim_stance": lz.get("claim_stance"),
                              "evidence": lz.get("evidence")} for lz in comp]})
         # Audit sidecar (fold ignores it): what drifted and what replaced it.
         self._e.store.append(EV_LESSONS_RECONCILED, {
             "at_node": len(state.nodes), "n_retired": n_retired, "n_added": len(fresh),
-            "reflect": reflect_stale, "pairs": [list(p) for p in stale_pairs]})
+            "reflect": reflect_stale, "pairs": [list(p) for p in stale_pairs],
+            "lessons": [{"statement": lz.get("statement", ""),
+                         "outcome": lz.get("outcome", ""),
+                         "claim_stance": lz.get("claim_stance")}
+                        for lz in fresh[:12] if isinstance(lz, dict)]})
         return fold(self._e.store.read_all())

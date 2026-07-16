@@ -96,8 +96,8 @@ class ProposalCuesMixin:
 
     def _cross_run_advisory_text(self, state: RunState) -> str:
         """§21.20 Step 5 (advisory): the bounded cross-run CONTEXT PACK for the Researcher prompt —
-        evidence-grounded claims with BOTH support and counter-evidence (Step 4) plus a portfolio-coverage
-        line (Step 3), rendered as a short prose block. Folded into the prompt hint EXACTLY like the E4
+        evidence-grounded claims with BOTH support and counter-evidence (Step 4) plus a bounded live concept-
+        observation line (Step 3), rendered as a short prose block. Folded into the prompt hint like the E4
         prior note; advisory only, NEVER touches node selection (§21.7). Off unless `cross_run_advisory`;
         returns "" on no memory dir / empty store / any hiccup, so the prompt is byte-identical when off."""
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
@@ -128,6 +128,13 @@ class ProposalCuesMixin:
             def _scoped(row):
                 if rid and str(row.get("run_id") or "") == rid:
                     return False
+                # Direction is a hard semantic boundary even for an exact task id: support for a
+                # minimisation objective can mean the opposite thing when that id is later reused for
+                # maximisation.  Legacy rows without a direction remain compatible.
+                row_dir = str(row.get("direction") or "")
+                current_dir = str(state.direction or "min")
+                if row_dir in ("min", "max") and row_dir != current_dir:
+                    return False
                 if not tid and not fp:
                     return True                 # compatibility for an explicitly unbound/audit caller
                 if tid and str(row.get("task_id") or "") == tid:
@@ -136,15 +143,15 @@ class ProposalCuesMixin:
                 if not isinstance(stored, list):
                     return False
                 stored = [t for t in stored if not str(t).startswith("param:")]
-                row_dir = str(row.get("direction") or "")
-                return (not row_dir or row_dir == str(state.direction or "min")) \
-                    and fingerprint_similarity(fp, stored) >= 0.34
+                return fingerprint_similarity(fp, stored) >= 0.34
 
             lessons = [r for r in lessons if _scoped(r)]
             capsules = [r for r in capsules if _scoped(r)]
             research = [r for r in load_research_claims(base)
                         if (not rid or str(r.get("run_id") or "") != rid)
-                        and (not tid or str(r.get("task_id") or "") == tid)]
+                        and (not tid or str(r.get("task_id") or "") == tid)
+                        and (str(r.get("direction") or "") not in ("min", "max")
+                             or str(r.get("direction") or "") == str(state.direction or "min"))]
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
             overview = (portfolio_concept_overview(capsules,

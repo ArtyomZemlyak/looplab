@@ -3,7 +3,9 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { layoutWithGroups, similarityRank } from '../src/util.js'
-import { computeGroups, nodeGroupMap, autoCollapseSet, isMergeEntryEdge } from '../src/grouping.js'
+import {
+  computeGroups, nodeGroupMap, autoCollapseSet, isMergeEntryEdge, themeFilteredGroupAggregate,
+} from '../src/grouping.js'
 
 const NODE_W = 188, NODE_H = 78
 
@@ -180,4 +182,31 @@ test('collapsed group: its members vanish into a super-node, no region cell emit
   assert.ok(pos['super:A'] && finite(pos['super:A']), 'collapsed group A has a super-node position')
   assert.ok(!cells.some(c => c.key === 'A'), 'no region cell for the collapsed group')
   assert.ok(cells.some(c => c.key === 'B'), 'expanded group B still has cells')
+})
+
+test('collapsed operator aggregate exposes only the selected direction metric and matched/total count', () => {
+  const ns = twoThemeGraph()
+  const improveIds = computeGroups(ns, 'operator').get('improve')
+  const aggregate = themeFilteredGroupAggregate(improveIds, ns, 'max', 'A')
+  const expected = improveIds.filter(id => ns[id].idea.theme === 'A')
+  assert.ok(expected.length > 0 && expected.length < improveIds.length, 'fixture must be a mixed operator group')
+  assert.equal(aggregate.matchedCount, expected.length)
+  assert.deepEqual(aggregate.matchedIds, expected)
+  assert.equal(aggregate.totalCount, improveIds.length)
+  assert.equal(aggregate.count, expected.length)
+  assert.equal(aggregate.best, Math.max(...expected.map(id => ns[id].metric)))
+  assert.equal(Object.values(aggregate.status).reduce((sum, value) => sum + value, 0), expected.length)
+})
+
+test('collapsed theme aggregate becomes an honest zero-match card for another direction', () => {
+  const ns = twoThemeGraph()
+  const themeA = computeGroups(ns, 'theme').get('A')
+  const aggregate = themeFilteredGroupAggregate(themeA, ns, 'max', 'B')
+  assert.equal(aggregate.filterActive, true)
+  assert.equal(aggregate.matchedCount, 0)
+  assert.deepEqual(aggregate.matchedIds, [])
+  assert.equal(aggregate.totalCount, themeA.length)
+  assert.equal(aggregate.best, null)
+  assert.deepEqual(aggregate.series, [])
+  assert.deepEqual(aggregate.status, { evaluated: 0, failed: 0, pending: 0 })
 })

@@ -74,9 +74,12 @@ _POS_EFFECT = _stems("improve boost help increase raise gain enhance benefit out
                      "stabilize fix solve speed strengthen cause lead")
 _NEG_EFFECT = _stems("hurt degrade worsen reduce decrease harm break fail drop lower lose regress damage "
                      "slow weaken")
-# Pure negation MODIFIERS (flip the sign without being effect verbs themselves).
-_NEGATE = _stems("not never without cannot nor no lacks prevent avoid")
-_SUBJECT_DROP = _STOP | _POS_EFFECT | _NEG_EFFECT | _NEGATE
+# Pure sentential negation modifiers (flip the assertion sign). ``avoid``/``prevent`` are beneficial
+# relation verbs in claims such as "prevent leakage to improve validity"; treating them as global sign
+# flippers inverted otherwise-positive assertions. Keep them out of identity without negating the sentence.
+_NEGATE = _stems("not never without cannot nor no lacks")
+_CONTROL_EFFECT = _stems("prevent avoid")
+_SUBJECT_DROP = _STOP | _POS_EFFECT | _NEG_EFFECT | _NEGATE | _CONTROL_EFFECT
 
 
 def _content(stems, *, allow_symbol: bool = False) -> tuple[str, ...]:

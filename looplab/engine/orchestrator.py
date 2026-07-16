@@ -33,6 +33,7 @@ from looplab.events.types import (
     EV_NODE_BUILDING,
     EV_NODE_FAILED, EV_PAUSE,
     EV_POLICY_DECISION,
+    EV_REPORT_GENERATED,
     EV_RESUME_SERVED, EV_RUN_ABORT, EV_RUN_FINISHED,
     EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SETUP_FINISHED, EV_SETUP_STARTED, EV_SETUP_STEP, EV_SPEC_APPROVAL_REQUESTED,
@@ -70,6 +71,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
@@ -690,7 +692,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # finish CAS below — abandon the scope on a lost race instead of crashing the finish path.
             try:
                 report = self.store.append(
-                    "report_generated",
+                    EV_REPORT_GENERATED,   # the registry constant, not a literal (invariant #7: a typo'd literal silently no-ops)
                     dict(report.data or {}),
                     expected_last_seq=tail_seq,
                 )
@@ -994,6 +996,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # loop body reads as a table of guarded steps. No behavior/ordering/gating change — every event
     # emission, _write_lock point, and fold site stays exactly where it was in the original run().
 
+    def _run_start_pinned_values(self) -> dict:
+        """The config values whose run-start record, not a later snapshot, owns re-entry semantics."""
+        values = {
+            "holdout_fraction": self._holdout_fraction,
+            "holdout_select": self._holdout_select,
+            "select_verifier": self._select_verifier,
+            "select_verifier_samples": self._select_verifier_samples,
+            "verifier_ci_tie": self._verifier_ci_tie,
+        }
+        if values.keys() != RUN_START_PINNED_FIELDS:
+            raise RuntimeError("run-start pinned settings contract drifted")
+        return values
+
     def _setup_phase(self, state: RunState) -> None:
         # Per-RUN reset of the dep-install circuit breaker: it is a module global, so in the long-lived
         # `looplab ui` server a run that latched (egress blip) would leave auto-install disabled for the
@@ -1067,18 +1082,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # gate on replay/resume (config isn't available to `replay.fold`). Absent in
                             # old logs -> "audit" -> byte-identical legacy selection.
                             "trust_gate": self.trust_gate,
-                            # D1 holdout-gated promotion: same recorded-at-start discipline. Absent in
-                            # old logs -> False -> byte-identical legacy selection. The FRACTION is
-                            # pinned too so a resume re-uses the exact split every metric was scored on.
-                            "holdout_select": self._holdout_select,
-                            "holdout_fraction": self._holdout_fraction,
-                            # R1-c: calibrated-verifier metric-tie-break, recorded at start so replay
-                            # applies the same rule. Absent in old logs -> False -> byte-identical pick.
-                            "select_verifier": self._select_verifier,
-                            # R1-d: statistical (CI) verifier tie-break. Absent in old logs -> False ->
-                            # byte-identical exact-tie pick.
-                            "verifier_ci_tie": self._verifier_ci_tie,
-                            "select_verifier_samples": self._select_verifier_samples,
+                            # Holdout and verifier policy are immutable run-start semantics. Re-entry
+                            # restores this shared contract from the fold rather than accepting a later
+                            # snapshot edit that would mix incomparable scores or selection rules.
+                            **self._run_start_pinned_values(),
                             "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                         },
                     )
@@ -1996,6 +2003,22 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             if node_id not in fold(self.store.read_all()).nodes:
                 self._discard_node_build_telemetry()
                 return
+            # Mirror _create_node / _rerun_node: a Developer session that CRASHED returns the
+            # "(developer error: …)" sentinel as its code (an LLM 401/timeout/hard error). Without
+            # this guard the injected node stays pending and its eval runs the PARENT's carried-over
+            # entrypoint/files and inherits the PARENT's metric — a false success (the exact bug the
+            # two sibling create paths already fix). FAIL it now (node_created → node_failed keeps the
+            # one-terminal invariant) and trip the SAME developer-crash circuit-breaker, so an operator
+            # inject during an LLM outage can't silently slip a garbage-code node past it.
+            if isinstance(code, str) and code.startswith("(developer error:"):
+                self.store.append(EV_NODE_FAILED, {
+                    "node_id": node_id, "generation": 0,
+                    "error": code, "reason": "developer_crash", "eval_seconds": 0.0})
+                self.store.append(EV_PAUSE, {
+                    "node_id": node_id, "generation": 0,
+                    "reason": "auto-paused: a Developer session crashed while building an injected node "
+                              "(LLM unreachable or a hard error, unresolved within the node) — resume "
+                              "once it's fixed"})
         if not req.get("code"):
             self._emit_agent_report(node_id)
             # consume predictive telemetry for this node so it can't leak onto the next created node

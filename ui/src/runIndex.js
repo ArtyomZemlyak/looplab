@@ -188,7 +188,13 @@ export function indexProjects(projects = []) {
     const out = new Set([id]); const stack = [id]
     while (stack.length) {
       const current = stack.pop()
-      ;(byParent[current] || []).forEach(child => { out.add(child.id); stack.push(child.id) })
+      // Guard the push on `out` membership: a malformed/cyclic parent_id chain (a -> b -> a) would
+      // otherwise re-push forever and FREEZE the run list / map render — the same "don't break the
+      // whole render on bad data" invariant the name-coerce above protects. A well-formed tree is
+      // unaffected (each node is reachable once).
+      ;(byParent[current] || []).forEach(child => {
+        if (!out.has(child.id)) { out.add(child.id); stack.push(child.id) }
+      })
     }
     return out
   }

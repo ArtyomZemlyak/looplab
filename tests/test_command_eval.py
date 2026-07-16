@@ -9,9 +9,27 @@ import sys
 
 import pytest
 
-from looplab.runtime.command_eval import _drift, read_metric, run_command_eval
+from looplab.runtime.command_eval import _drift, _fmt, read_metric, run_command_eval
 
 _M = {"kind": "stdout_json", "key": "metric"}
+
+
+def test_fmt_non_finite_param_does_not_crash():
+    # _fmt does int(float(v)); int(inf/nan) raises OverflowError/ValueError, which would propagate out
+    # of build_command with NO terminal event and crash the whole run. A non-finite param must format
+    # to a harmless string instead (the node then fails on its own arg-parse, if at all).
+    assert _fmt("inf") == "inf" and _fmt("-inf") == "-inf" and _fmt("nan") == "nan"
+    assert _fmt("1e400") == "inf"
+    huge = 10**400
+    assert _fmt(huge) == str(huge)
+    assert _fmt("50") == "50" and _fmt("3.5") == "3.5" and _fmt("x") == "x"   # normal cases unchanged
+
+
+def test_host_score_spec_without_labels_fails_node_not_run(tmp_path):
+    # A host_score metric spec missing its `labels` answer-key path is malformed; read_metric must
+    # return None (fail the node) rather than raise KeyError (no terminal event -> crashes the run).
+    assert read_metric("", str(tmp_path),
+                       {"kind": "host_score", "predictions": "predictions.json", "scorer": "rmse"}) is None
 
 
 # #3 — NaN/inf metric is rejected at read time (never enters best-selection)
@@ -213,7 +231,6 @@ def test_stage_name_must_be_a_safe_slug():
 
 def test_stage_timeout_must_be_finite_positive():
     from looplab.runtime.command_eval import validate_stages
-    import math
     for bad in (float("nan"), float("inf"), -1.0, 0):
         clean, err = validate_stages([{"name": "t", "command": ["python", "x.py"], "timeout": bad}])
         assert clean is None and "finite" in err, bad

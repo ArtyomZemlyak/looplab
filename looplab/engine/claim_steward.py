@@ -6,9 +6,10 @@ their support/oppose counts, epistemic state and current operator maturity — a
 (ratify a well-evidenced consistent claim, reject a contradicted/over-generalized/noise claim, pin a
 critical one).
 
-Same invariant as the concept steward: the LLM only PROPOSES. An explicit operator-triggered CLI/API caller
-may apply a validated proposal through the deterministic, append-only, reversible `record_claim_decision`;
-finalize never applies it. Degrades to no proposals on no client / any failure; never blocks the caller.
+Same invariant as the concept steward: the LLM only PROPOSES. The operator reviews the exact proposal and
+records selected decisions through typed `claim-decide` or owner HTTP governance; this steward never applies
+an LLM batch. Finalize never applies it. Proposal generation degrades to no proposals on no client / any
+failure and never blocks the caller.
 """
 from __future__ import annotations
 
@@ -92,7 +93,7 @@ def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_ca
             "You are the CLAIM steward for a cross-run ML research memory. You review evidence-grounded "
             "claim records and propose a few "
             "high-confidence operator DECISIONS to keep the memory trustworthy:\n"
-            "- ratified: a well-evidenced, internally-consistent claim worth surfacing FIRST to future runs.\n"
+            "- ratified: a well-evidenced, internally-consistent claim worth surfacing after explicit pins.\n"
             "- rejected: a claim that is contradicted by stronger evidence, over-generalized from one "
             "failure, or noise — it is dropped from agent context.\n"
             "- pinned: a load-bearing claim to always keep visible.\n"
@@ -186,9 +187,11 @@ def curation_is_empty(curation: dict) -> bool:
 
 
 def apply_claim_curation(memory_dir, curation: dict, *, by: str = "steward", at: str = "") -> dict:
-    """Record the proposed decisions through the SAME reversible `record_claim_decision` the operator uses
-    (scope-precise via the structured claim key). Returns `{"applied", "skipped"}`; one bad proposal is
-    skipped with its reason, never sinking the batch."""
+    """Low-level compatibility helper for an already-reviewed batch; the steward never invokes it.
+
+    New operator workflows should use typed `claim-decide` or owner HTTP CAS governance. This helper records
+    scope-precise decisions through `record_claim_decision` and returns an explicit partial-apply receipt.
+    """
     from looplab.engine.claims import record_claim_decision
     applied, skipped = [], []
     if not isinstance(curation, dict):
@@ -217,15 +220,18 @@ def apply_claim_curation(memory_dir, curation: dict, *, by: str = "steward", at:
 def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by: str = "steward",
                    at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS) -> dict:
     """One-call agentic claim steward over a memory dir: load the claim assessments (structured key by
-    default, so decisions are scope-precise), ask the LLM to propose decisions, and — when `apply` — record
-    them. Returns `{"proposals", "receipt"}` (receipt None when not applied)."""
+    default, so decisions are scope-precise) and ask the LLM to propose decisions for review. The deprecated
+    ``apply`` argument is retained only for call compatibility and is rejected before memory reads or LLM work.
+    Returns `{"proposals", "receipt"}` with a permanently-null receipt; never writes governance state."""
+    if apply:
+        raise ValueError(
+            "claim steward is proposal-only; apply=True is disabled. Review the exact proposal, then apply "
+            "selected decisions with claim-decide or owner HTTP governance."
+        )
     from looplab.engine.claims import claims_for_memory
     try:
         claims = claims_for_memory(memory_dir, lessons=lessons, structured=structured)
     except Exception:  # noqa: BLE001 — a damaged advisory store must not fail finalize/inspection
         claims = []
     proposals = propose_claim_curation(claims, client, max_proposals=max_proposals)
-    receipt = None
-    if apply and not curation_is_empty(proposals):
-        receipt = apply_claim_curation(memory_dir, proposals, by=by, at=at)
-    return {"proposals": proposals, "receipt": receipt}
+    return {"proposals": proposals, "receipt": None}

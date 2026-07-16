@@ -7,6 +7,7 @@ import {
   buildResearchAtlasView,
   mergeCurationLogs,
   mergeResearchAtlasPayload,
+  reconcileAtlasSourceStatuses,
 } from '../src/researchAtlasModel.js'
 import {
   getCrossRunAtlas, getCrossRunClaims, getCrossRunCurationLog, getCrossRunClaimCurationLog,
@@ -126,9 +127,58 @@ test('a partial refresh replaces successful slices and preserves last-good faile
   assert.equal(merged.claimCuration, previous.claimCuration)
 })
 
+test('Atlas source provenance distinguishes current, retained-stale, and failed slices', () => {
+  const first = reconcileAtlasSourceStatuses({}, {
+    claims: { revision: 7, claims: [claim(1)] },
+  }, '2026-07-16T03:00:00Z')
+  assert.deepEqual(Object.fromEntries(Object.entries(first).map(([key, value]) => [key, value.state])), {
+    atlas: 'failed', claims: 'current', conceptCuration: 'failed', claimCuration: 'failed',
+  })
+  assert.equal(first.claims.loadedAt, '2026-07-16T03:00:00Z')
+  assert.equal(first.claims.revision, '7')
+
+  const second = reconcileAtlasSourceStatuses(first, {
+    atlas: { revisions: { concept_governance: 4, claims: 9 } },
+  }, '2026-07-16T04:00:00Z')
+  assert.deepEqual(Object.fromEntries(Object.entries(second).map(([key, value]) => [key, value.state])), {
+    atlas: 'current', claims: 'retained-stale', conceptCuration: 'failed', claimCuration: 'failed',
+  })
+  assert.equal(second.claims.loadedAt, first.claims.loadedAt)
+  assert.equal(second.claims.revision, first.claims.revision)
+  assert.equal(second.atlas.revision, 'concept 4 · claims 9')
+
+  const failedRefresh = reconcileAtlasSourceStatuses(second, {}, '2026-07-16T05:00:00Z')
+  assert.deepEqual(Object.fromEntries(Object.entries(failedRefresh).map(([key, value]) => [key, value.state])), {
+    atlas: 'retained-stale', claims: 'retained-stale', conceptCuration: 'failed', claimCuration: 'failed',
+  })
+
+  const allCurrent = reconcileAtlasSourceStatuses(failedRefresh, {
+    atlas: { revisions: { concept_governance: 5, claims: 10 } },
+    claims: { revision: 8 },
+    conceptCuration: { entries: [{ revision: 11 }, { revision: 12 }] },
+    claimCuration: { entries: [{ revision: 13 }] },
+  }, '2026-07-16T06:00:00Z')
+  assert.deepEqual(Object.fromEntries(Object.entries(allCurrent).map(([key, value]) => [key, value.state])), {
+    atlas: 'current', claims: 'current', conceptCuration: 'current', claimCuration: 'current',
+  })
+  assert.equal(allCurrent.conceptCuration.revision, '12')
+  assert.equal(allCurrent.claimCuration.revision, '13')
+
+  const claimsOnly = reconcileAtlasSourceStatuses(allCurrent, {
+    claims: { revision: 9 },
+  }, '2026-07-16T07:00:00Z')
+  assert.equal(claimsOnly.claims.state, 'current')
+  assert.equal(claimsOnly.claims.loadedAt, '2026-07-16T07:00:00Z')
+  for (const key of ['atlas', 'conceptCuration', 'claimCuration']) {
+    assert.equal(claimsOnly[key].state, 'retained-stale')
+    assert.equal(claimsOnly[key].loadedAt, '2026-07-16T06:00:00Z')
+  }
+})
+
 test('Atlas has a discoverable owner-only route and complete resource states', async () => {
-  const [app, runList, atlas, api, settings] = await Promise.all([
-    source('App.jsx'), source('RunList.jsx'), source('ResearchAtlas.jsx'), source('api.js'), source('Settings.jsx'),
+  const [app, runList, atlas, api, css] = await Promise.all([
+    source('App.jsx'), source('RunList.jsx'), source('ResearchAtlas.jsx'), source('api.js'),
+    source('research-atlas.css'),
   ])
 
   assert.match(app, /lazy\(\(\) => import\('\.\/ResearchAtlas\.jsx'\)\)/)
@@ -142,15 +192,30 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(runList, /aria-label="Open Research Atlas preview"/)
   assert.match(atlas, /Promise\.allSettled/)
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
-    /No cross-run memory yet/, /Degraded view\./]) assert.match(atlas, state)
+    /No cross-run memory yet/, /Degraded view; some sources have not loaded\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
   assert.match(atlas, /role="region" tabIndex=\{0\} aria-label="Bounded explored concepts"/)
   assert.match(atlas, /Some portfolio records were ignored\./)
   assert.match(atlas, /Partial refresh; preserving last-loaded data for failed sources\./)
+  assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)
+  assert.match(css, /\.atlas-source-failed \{[^}]*color: var\(--fail-text\)/)
+  assert.match(atlas, /Concept observations[\s\S]*Concepts seen across runs/)
+  assert.match(atlas, /Observed in one run/)
+  assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Coverage<\/p>|<h3>Thin coverage/)
+  assert.match(atlas, /support-only evidence/)
+  assert.match(atlas, /not a proposition verdict or applicability decision/)
+  assert.match(atlas, /claim grouping ·/)
+  assert.match(atlas, /supporting attempt refs/)
+  assert.doesNotMatch(atlas, /scope ·|>support <b>|>oppose <b>/)
+  assert.match(atlas, /Steward invocation log[\s\S]*Recent proposals \+ outcomes/)
+  assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Audit trail<\/p>|Concept \+ claim governance/)
+  assert.equal((atlas.match(/<SourceWatermark sourceKey=/g) || []).length, 5,
+    'every panel must disclose its live/bounded source; the shared Atlas slice appears twice')
+  assert.match(atlas, /not a\s+CoverageFrame, frozen snapshot, or completeness estimate/)
+  assert.match(atlas, /logged proposals and outcomes; not a current governance snapshot/)
   assert.match(atlas, /data-route-main tabIndex=\{-1\}/)
   assert.match(api, /crossRunRead[\s\S]*cache: 'no-store'/)
   assert.match(api, /cross-run\/claims\?limit=\$\{args\.limit\}&offset=/)
-  assert.match(settings, /settingsSavePayload\(form, agentControl\)/)
 })
 
 test('Atlas reads are no-store, abortable, and clamp every paging input', async () => {
@@ -204,4 +269,22 @@ test('empty and malformed envelopes degrade to a stable empty projection', () =>
   assert.deepEqual(buildResearchAtlasView(null, null, null).totals,
     { runs: 0, concepts: 0, claims: 0, contested: 0, curation: 0 })
   assert.equal(buildResearchAtlasView(null, null, null).empty, true)
+})
+
+test('thin observations and contested/contradiction records prevent a false empty Atlas', () => {
+  assert.equal(buildResearchAtlasView({ thin_coverage: ['one-run-only'] }, {}, {}).empty, false)
+  assert.equal(buildResearchAtlasView({ n_contested: 2 }, {}, {}).empty, false)
+  assert.equal(buildResearchAtlasView({ contradictions: [claim(1)] }, {}, {}).empty, false)
+})
+
+test('curation metadata keeps long run identity and time readable at 360px', async () => {
+  const [atlas, css] = await Promise.all([source('ResearchAtlas.jsx'), source('research-atlas.css')])
+  assert.match(atlas, /className="atlas-curation-meta"/)
+  assert.match(atlas, /className="atlas-curation-run"/)
+  assert.match(atlas, /title=\{entry\.runId\}/)
+  assert.match(atlas, /className="atlas-curation-time"[\s\S]*?title=\{timeLabel\}/)
+  assert.match(css, /\.atlas-curation-run \{ flex: 1 1 auto; min-width: 0; \}/)
+  assert.match(css, /\.atlas-curation-run a \{[^}]*overflow: hidden;[^}]*text-overflow: ellipsis;[^}]*white-space: nowrap;/)
+  assert.match(css, /@media \(max-width: 600px\) \{[\s\S]*?\.atlas-curation-meta \{ flex-wrap: wrap;/)
+  assert.match(css, /\.atlas-curation-time \{ max-width: 100%; text-align: left; \}/)
 })

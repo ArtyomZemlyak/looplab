@@ -18,6 +18,17 @@ from looplab.serve.settings_store import SettingsStore
 _STUCK_BUILD_SECONDS = 1200.0
 
 
+def global_settings(store: SettingsStore) -> "Settings":
+    """Typed global defaults resolved from environment plus the UI settings store.
+
+    Saved settings are launch defaults, but several owner-side read surfaces (portfolio memory, Atlas,
+    authoring paths, run-less Genesis) also need the same resolved values. Keeping this separate from the
+    per-run snapshot overlay prevents those surfaces from silently falling back to environment-only state.
+    """
+    overrides = {key: value for key, value in store.load_ui_settings().items() if value is not None}
+    return Settings(**overrides)
+
+
 def _client_tokens(client) -> Optional[dict]:
     """Best-effort token usage for ONE chat request. `make_llm_client` mints a fresh client per
     request, so its accountant totals already SUM every sub-call this turn made (the boss tool-loop
@@ -50,8 +61,7 @@ def llm_settings(store: SettingsStore, rd: Optional[Path] = None) -> "Settings":
     # honor the same per-run / global caps as the engine agents — unlimited by default.
     _keys = ("llm_model", "llm_base_url", "llm_temperature",
              "agent_max_turns", "agent_time_budget_s")
-    over = {k: v for k, v in store.load_ui_settings().items()
-            if k in _keys and v is not None}
+    over = {k: v for k, v in store.load_ui_settings().items() if v is not None}
     if rd is not None:
         try:
             cfg = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))

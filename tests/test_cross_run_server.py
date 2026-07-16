@@ -24,6 +24,15 @@ def _seed_memory(statement="hard-neg helps"):
     (md / "lessons.jsonl").write_bytes(orjson.dumps(
         {"statement": statement, "outcome": "supported", "evidence": [1],
          "run_id": "r1", "task_id": "t"}) + b"\n")
+    # Owner concept mutations are fenced to the live canonical portfolio projection. Keep a compact
+    # vocabulary here so governance tests exercise CAS/action semantics rather than fabricated names.
+    (md / "concept_capsules.jsonl").write_bytes(orjson.dumps({
+        "v": 1, "run_id": "concept-seed", "task_id": "t", "fingerprint": ["t"],
+        "direction": "max", "concepts": [
+            "hn", "hard-neg", "z", "data/aug", "data/hard-neg",
+            "x", "y", "coarse", "fine", "a", "b",
+        ], "concept_outcomes": {},
+    }) + b"\n")
     return md
 
 
@@ -125,6 +134,38 @@ def test_claim_decision_clear_can_remove_policy_after_evidence_is_retired(tmp_pa
     assert response.status_code == 200 and response.json()["revision"] == 2
 
 
+def test_scoped_row_cannot_silently_clear_inherited_global_decision(tmp_path):
+    from looplab.engine.claims import record_claim_decision
+
+    md = _seed_memory()
+    record_claim_decision(md, statement="hard-neg helps", decision="rejected",
+                          expected_revision=0, action_id="global-set")
+    client = TestClient(make_app(tmp_path))
+    snapshot = client.get("/api/cross-run/claims").json()
+    row = snapshot["claims"][0]
+    assert row["scope"] == "t" and row["maturity"] == "operator-rejected"
+    assert row["decision"]["scope"] == "" and row["decision"]["claim_uid"] != row["claim_uid"]
+
+    ambiguous = {
+        "statement": row["statement"], "claim_uid": row["claim_uid"],
+        "evidence_digest": row["evidence_digest"], "scope": row["scope"],
+        "metric": row.get("metric", ""), "decision": "clear", "note": "",
+        "expected_revision": snapshot["revision"], "action_id": "ambiguous-clear",
+    }
+    response = client.post("/api/cross-run/claim-decide", json=ambiguous)
+    assert response.status_code == 409
+    target = response.json()["detail"]
+    assert target["code"] == "claim_clear_target_mismatch"
+    assert target["claim_uid"] == row["decision"]["claim_uid"] and target["scope"] == ""
+
+    explicit = {**ambiguous, "claim_uid": target["claim_uid"], "scope": target["scope"],
+                "metric": target["metric"], "action_id": "explicit-global-clear"}
+    cleared = client.post("/api/cross-run/claim-decide", json=explicit)
+    assert cleared.status_code == 200 and cleared.json()["revision"] == 2
+    fresh = client.get("/api/cross-run/claims").json()["claims"][0]
+    assert fresh["maturity"] == "machine-proposed" and fresh["decision"] is None
+
+
 def test_claims_pagination_is_bounded_and_reports_total(tmp_path):
     md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
     md.mkdir(parents=True, exist_ok=True)
@@ -164,46 +205,151 @@ def test_concept_merge_and_split_routes(tmp_path):
     client = TestClient(make_app(tmp_path))
     m = client.post("/api/cross-run/concept-merge", json={
         "from_concept": "hn", "to_concept": "hard-neg",
-        "expected_revision": 0, "action_id": "alias-merge-1"})
-    assert m.status_code == 200 and m.json()["alias"]["to"] == "hard-neg"
-    client.post("/api/cross-run/concept-merge", json={
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "alias-merge-1"})
+    assert (m.status_code == 200 and m.json()["alias"]["to"] == "hard-neg"
+            and m.json()["governance_revision"] == 1)
+    second = client.post("/api/cross-run/concept-merge", json={
         "from_concept": "hard-neg", "to_concept": "z",
-        "expected_revision": 1, "action_id": "alias-merge-2"})
+        "expected_revision": 1, "expected_governance_revision": 1,
+        "action_id": "alias-merge-2"})
+    assert second.status_code == 200 and second.json()["governance_revision"] == 2
     bad = client.post("/api/cross-run/concept-merge", json={
         "from_concept": "z", "to_concept": "hn",
-        "expected_revision": 2, "action_id": "alias-merge-3"})
+        "expected_revision": 2, "expected_governance_revision": 2,
+        "action_id": "alias-merge-3"})
     assert bad.status_code == 422
     s = client.post("/api/cross-run/concept-split", json={
         "from_concept": "data/aug",
-        "rules": [{"to": "data/hard-neg", "when_any": ["hard"]}], "default": "data/aug",
-        "expected_revision": 0, "action_id": "split-set-1"})
-    assert s.status_code == 200 and s.json()["split"]["rules"][0]["to"] == "data/hard-neg"
+        "rules": [{"to": "data/hard-neg", "when_any": ["hard"]}],
+        "expected_revision": 0, "expected_governance_revision": 2,
+        "action_id": "split-set-1"})
+    assert (s.status_code == 200 and s.json()["split"]["rules"][0]["to"] == "data/hard-neg"
+            and s.json()["governance_revision"] == 3)
+
+
+def test_concept_http_fences_nonexistent_entities_but_split_can_create_children(tmp_path):
+    _seed_memory()
+    client = TestClient(make_app(tmp_path))
+
+    missing_source = client.post("/api/cross-run/concept-merge", json={
+        "from_concept": "typo/source", "to_concept": "x", "expected_revision": 0,
+        "expected_governance_revision": 0, "action_id": "missing-source",
+    })
+    missing_target = client.post("/api/cross-run/concept-merge", json={
+        "from_concept": "x", "to_concept": "typo/target", "expected_revision": 0,
+        "expected_governance_revision": 0, "action_id": "missing-target",
+    })
+    assert missing_source.status_code == missing_target.status_code == 422
+    assert "does not exist" in missing_source.text and "does not exist" in missing_target.text
+    assert client.get("/api/cross-run/atlas").json()["revisions"]["concept_governance"] == 0
+
+    split = client.post("/api/cross-run/concept-split", json={
+        "from_concept": "coarse",
+        "rules": [{"to": "new/provisional-child", "when_any": ["match"]}],
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "split-creates-child",
+    })
+    assert split.status_code == 200
+    receipt = split.json()["split"]
+    assert len(receipt["concept_snapshot_digest"]) == 64 and receipt["concept_snapshot_count"] > 0
+
+    missing_clear = client.post("/api/cross-run/concept-alias-clear", json={
+        "from_concept": "x", "expected_revision": 0,
+        "expected_governance_revision": 1, "action_id": "clear-without-policy",
+    })
+    assert missing_clear.status_code == 422 and "no active alias" in missing_clear.text
 
 
 def test_governance_cas_typed_purge_and_reversible_clear(tmp_path):
     _seed_memory()
     client = TestClient(make_app(tmp_path))
     merge = {"from_concept": "hn", "to_concept": "hard-neg",
-             "expected_revision": 0, "action_id": "merge-retry"}
+             "expected_revision": 0, "expected_governance_revision": 0,
+             "action_id": "merge-retry"}
     first = client.post("/api/cross-run/concept-merge", json=merge)
-    assert first.status_code == 200 and first.json()["revision"] == 1
-    assert client.post("/api/cross-run/concept-merge", json=merge).json()["revision"] == 1
+    assert (first.status_code == 200 and first.json()["revision"] == 1
+            and first.json()["governance_revision"] == 1)
+    retry = client.post("/api/cross-run/concept-merge", json=merge).json()
+    assert retry["revision"] == 1 and retry["governance_revision"] == 1
 
     stale = client.post("/api/cross-run/concept-merge", json={
         "from_concept": "x", "to_concept": "y",
-        "expected_revision": 0, "action_id": "stale-merge"})
+        "expected_revision": 0, "expected_governance_revision": 1,
+        "action_id": "stale-merge"})
     assert stale.status_code == 409 and stale.json()["detail"]["current_revision"] == 1
     assert client.post("/api/cross-run/concept-merge", json={
         "from_concept": "x", "to_concept": "", "expected_revision": 1,
+        "expected_governance_revision": 1,
         "action_id": "unsafe-empty"}).status_code == 422
 
     purge = client.post("/api/cross-run/concept-purge", json={
-        "from_concept": "hn", "confirm": "purge", "expected_revision": 1,
+        # `hn` is now an alias; destructive actions must name the live canonical concept.
+        "from_concept": "hard-neg", "confirm": "purge", "expected_revision": 1,
+        "expected_governance_revision": 1,
         "action_id": "purge-explicit"})
-    assert purge.status_code == 200 and purge.json()["alias"]["action"] == "purge"
+    assert (purge.status_code == 200 and purge.json()["alias"]["action"] == "purge"
+            and purge.json()["governance_revision"] == 2)
     clear = client.post("/api/cross-run/concept-alias-clear", json={
-        "from_concept": "hn", "expected_revision": 2, "action_id": "alias-clear"})
-    assert clear.status_code == 200 and clear.json()["alias"]["action"] == "clear"
+        "from_concept": "hn", "expected_revision": 2,
+        "expected_governance_revision": 2, "action_id": "alias-clear"})
+    assert (clear.status_code == 200 and clear.json()["alias"]["action"] == "clear"
+            and clear.json()["governance_revision"] == 3)
+
+
+@pytest.mark.parametrize("value", [None, True, -1])
+def test_concept_http_requires_strict_global_governance_revision(tmp_path, value):
+    _seed_memory()
+    client = TestClient(make_app(tmp_path))
+    body = {
+        "from_concept": "x", "to_concept": "y", "expected_revision": 0,
+        "action_id": "invalid-global-revision",
+    }
+    if value is not None:
+        body["expected_governance_revision"] = value
+    response = client.post("/api/cross-run/concept-merge", json=body)
+    assert response.status_code == 422
+
+
+def test_concept_global_cas_fences_alias_and_split_ledgers(tmp_path):
+    _seed_memory()
+    client = TestClient(make_app(tmp_path))
+    alias = client.post("/api/cross-run/concept-merge", json={
+        "from_concept": "x", "to_concept": "y", "expected_revision": 0,
+        "expected_governance_revision": 0, "action_id": "global-alias-first",
+    })
+    assert alias.status_code == 200 and alias.json()["governance_revision"] == 1
+
+    stale_split = client.post("/api/cross-run/concept-split", json={
+        "from_concept": "coarse", "rules": [{"to": "fine", "when_any": ["match"]}],
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "global-split-stale",
+    })
+    assert stale_split.status_code == 409
+    detail = stale_split.json()["detail"]
+    assert detail == {
+        "code": "concept_governance_revision_conflict",
+        "expected_governance_revision": 0,
+        "current_governance_revision": 1,
+    }
+
+    split = client.post("/api/cross-run/concept-split", json={
+        "from_concept": "coarse", "rules": [{"to": "fine", "when_any": ["match"]}],
+        "expected_revision": 0, "expected_governance_revision": 1,
+        "action_id": "global-split-current",
+    })
+    assert (split.status_code == 200 and split.json()["revision"] == 1
+            and split.json()["governance_revision"] == 2)
+
+    stale_alias = client.post("/api/cross-run/concept-merge", json={
+        "from_concept": "a", "to_concept": "b", "expected_revision": 1,
+        "expected_governance_revision": 1, "action_id": "global-alias-stale",
+    })
+    assert stale_alias.status_code == 409
+    assert stale_alias.json()["detail"]["current_governance_revision"] == 2
+    atlas = client.get("/api/cross-run/atlas").json()
+    assert atlas["revisions"]["concept_governance"] == 2
+    assert atlas["revisions"]["concept_aliases"] == atlas["revisions"]["concept_splits"] == 1
 
 
 def test_concept_steward_endpoints(tmp_path, monkeypatch):

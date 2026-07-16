@@ -1,11 +1,13 @@
 """AGENTIC concept-taxonomy steward (§21.20.13/§22.4) — the LLM counterpart of the operator's manual
 merge/split/purge. Pins: the LLM PROPOSES, deterministic guardrails validate (only in-vocabulary,
-reversible), the apply path records through the SAME governance writes, and it degrades to an empty
-curation (no client / bad output) so it never blocks or corrupts the graph.
+reversible), the steward entrypoint is proposal-only, and it degrades to an empty curation (no client /
+bad output) so it never blocks or corrupts the graph.
 """
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from looplab.engine.concept_steward import (
     apply_concept_curation, curation_is_empty, propose_concept_curation, steward_concepts,
@@ -152,19 +154,28 @@ def test_apply_rejects_conflicting_operations_for_same_source(tmp_path):
     assert len([x for x in rc["skipped"] if "conflicting" in x["reason"]]) == 2
 
 
-def test_steward_end_to_end_apply(tmp_path):
+def test_steward_apply_is_rejected_before_llm_or_mutation(tmp_path):
     s = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
     s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
                                 concepts=["data/hn"], concept_outcomes={}))
     s.add(build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
                                 concepts=["data/hard-negative-mining"], concept_outcomes={}))
-    client = _Client({"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
-                      "splits": [], "purges": []})
-    out = steward_concepts(str(tmp_path), client, apply=True)
-    assert out["receipt"]["applied"] and load_concept_aliases(str(tmp_path))["data/hn"]
-    # the overview now collapses the two under the canonical concept (the steward's merge took effect)
-    ov = portfolio_concept_overview(s.all(), aliases=load_concept_aliases(str(tmp_path)))
-    assert ov["n_concepts"] == 1
+    calls = []
+
+    class _CountingClient(_Client):
+        def complete_tool(self, messages, json_schema):
+            calls.append("paid")
+            return super().complete_tool(messages, json_schema)
+
+    client = _CountingClient({
+        "merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+        "splits": [], "purges": [],
+    })
+    with pytest.raises(ValueError, match="proposal-only"):
+        steward_concepts(str(tmp_path), client, apply=True)
+    assert calls == []
+    assert not (tmp_path / "concept_aliases.jsonl").exists()
+    assert not (tmp_path / "concept_splits.jsonl").exists()
 
 
 # --------------------------------------------------------------------------- #
@@ -292,11 +303,39 @@ def test_cli_concept_steward(tmp_path, monkeypatch):
                                 concepts=["data/hn"], concept_outcomes={}))
     s.add(build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
                                 concepts=["data/hard-negative-mining"], concept_outcomes={}))
-    monkeypatch.setattr(cli, "make_llm_client", lambda *a, **k: _Client(
-        {"merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
-         "splits": [], "purges": []}))
+    calls = []
+
+    def _client(*args, **kwargs):
+        calls.append("paid")
+        return _Client({
+            "merges": [{"from_concept": "data/hn", "to_concept": "data/hard-negative-mining"}],
+            "splits": [], "purges": [],
+        })
+
+    monkeypatch.setattr(cli, "make_llm_client", _client)
     r = CliRunner().invoke(app, ["concept-steward", str(tmp_path)])
-    assert r.exit_code == 0 and "merge  'data/hn'" in r.stdout and "dry run" in r.stdout
+    assert r.exit_code == 0 and "merge  'data/hn'" in r.stdout and "proposal only" in r.stdout
+    assert calls == ["paid"]
     r2 = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--apply"])
-    assert r2.exit_code == 0 and "applied 1" in r2.stdout
-    assert load_concept_aliases(str(tmp_path))["data/hn"] == "data/hard-negative-mining"
+    assert r2.exit_code == 2 and "deprecated and disabled" in r2.stdout
+    assert "concept-merge/concept-split" in r2.stdout
+    assert calls == ["paid"]
+    assert not (tmp_path / "concept_aliases.jsonl").exists()
+
+
+def test_cli_steward_model_override_reaches_the_client(tmp_path, monkeypatch):
+    # regression (6f6240f): the steward CLIs used model_copy(update={"model":...}) but the field is
+    # `llm_model`, so --model was a silent no-op (ran against the default endpoint). Assert the override
+    # actually reaches make_llm_client's Settings.
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    import looplab.cli as cli
+    s = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    s.add(build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                concepts=["data/hn"], concept_outcomes={}))
+    seen = {}
+    monkeypatch.setattr(cli, "make_llm_client",
+                        lambda settings, *a, **k: seen.setdefault("model", settings.llm_model) or _Client(
+                            {"merges": [], "splits": [], "purges": []}))
+    r = CliRunner().invoke(app, ["concept-steward", str(tmp_path), "--model", "some-other-model"])
+    assert r.exit_code == 0 and seen.get("model") == "some-other-model"   # --model actually applied

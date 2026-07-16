@@ -37,7 +37,32 @@ def test_report_generated_folds_latest_wins():
         Event(seq=2, type="report_generated", data={"content": {"headline": "second", "at_node": 2}}),
     ]
     st = fold(evs)
-    assert st.report == {"headline": "second", "at_node": 2}
+    assert st.report["headline"] == "second" and st.report["at_node"] == 2
+    assert st.report["next_directions"] == []
+
+
+def test_replay_canonicalizes_malformed_and_oversized_advisory_sidecars():
+    secret = "tiny-secret"
+    evs = [
+        Event(seq=0, type="run_started", data={
+            "run_id": "r", "task_id": "t", "direction": "min"}),
+        Event(seq=1, type="research_completed", data={
+            "memo": {"summary": f"password={secret}\x1b[2J", "findings": "not-a-list",
+                     "recommended_directions": list(range(10_000)),
+                     "reasoning": "r" * 100_000}}),
+        Event(seq=2, type="report_generated", data={"content": {
+            "headline": "h\x00", "next_directions": "legacy string",
+            "what_worked": ["x" * 10_000] * 100}}),
+    ]
+    state = fold(evs)
+    memo = state.research[-1]
+    assert isinstance(memo, dict) and memo["findings"] == []
+    assert len(memo["recommended_directions"]) == 16 and len(memo["reasoning"]) <= 12_000
+    assert secret not in memo["summary"] and "\x1b" not in memo["summary"]
+    assert state.report["next_directions"] == []
+    assert len(state.report["what_worked"]) == 32
+    assert all(len(item) <= 1_200 for item in state.report["what_worked"])
+    assert "\x00" not in state.report["headline"]
 
 
 def test_make_report_writer_offline_is_none():
@@ -1200,7 +1225,7 @@ def test_command_reply_carries_token_usage(tmp_path, monkeypatch):
 
 def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
     """Robustness (review-found): a report whose list-fields hold a STRING (or is nested under
-    'content') must be kept whole — not iterated character-by-character, and never crash."""
+    'content') must be quarantined as malformed — never iterated character-by-character or crash."""
     from looplab.events.eventstore import EventStore
     _build_run(tmp_path, "demo", writer=None)
     EventStore(tmp_path / "demo" / "events.jsonl").append("report_generated", {"content": {
@@ -1219,8 +1244,8 @@ def test_boss_context_report_handles_malformed_fields(tmp_path, monkeypatch):
     r = client.post("/api/runs/demo/chat", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.json()["ok"]                          # did not crash on the non-list field
     sysp = captured["sys"]
-    assert "try a finer sweep" in sysp             # the string stayed whole
-    assert "t; r; y" not in sysp                   # NOT char-split into "t; r; y; ..."
+    assert "try a finer sweep" not in sysp         # wrong-shaped list data was quarantined
+    assert "t; r; y" not in sysp                   # and was never character-split
 
 
 def test_command_endpoint_soft_fails_offline(tmp_path, monkeypatch):

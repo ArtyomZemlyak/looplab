@@ -33,25 +33,31 @@ function changeDot(unsaved, changed) {
 
 const safeId = value => String(value).replace(/[^a-zA-Z0-9_-]/g, '-')
 
-function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onToggleAgent,
-                 secretSet, onClearSecret }) {
+function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
+                 secretSet, onClearSecret, readOnly }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
   const warningId = `${inputId}-warning`
+  const errorId = `${inputId}-error`
+  const readOnlyId = `${inputId}-readonly`
   const hasDescription = !!f.help || f.type === 'secret'
-  const describedBy = [hasDescription ? helpId : '', f.warning ? warningId : ''].filter(Boolean).join(' ') || undefined
+  const describedBy = [hasDescription ? helpId : '', f.warning ? warningId : '', error ? errorId : '',
+    readOnly ? readOnlyId : '']
+    .filter(Boolean).join(' ') || undefined
   let input
 
   if (f.type === 'bool') {
     input = <label className="switch" title={`Toggle ${f.label}`}>
       <input id={inputId} name={f.key} type="checkbox" checked={!!value}
-             aria-describedby={describedBy} onChange={e => set(e.target.checked)} />
+             aria-describedby={describedBy} disabled={readOnly}
+             onChange={e => set(e.target.checked)} />
       <span className="track" aria-hidden="true" />
     </label>
   } else if (f.type === 'enum') {
     input = <select id={inputId} name={f.key} className="text" value={value ?? ''}
-                    aria-describedby={describedBy} onChange={e => set(e.target.value)}>
+                    aria-describedby={describedBy} disabled={readOnly}
+                    onChange={e => set(e.target.value)}>
       {f.options.map(o => <option key={o || '__default'} value={o}>{o === '' ? 'Use provider default' : o}</option>)}
     </select>
   } else if (f.type === 'secret') {
@@ -59,6 +65,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onTogg
     input = <div className="sf-secret">
       <input id={inputId} name={f.key} className="text" type="password" autoComplete="new-password"
              value={value ?? ''} aria-describedby={describedBy}
+             disabled={readOnly}
              placeholder={secretSet ? 'Stored — leave blank to keep' : 'Not set'}
              onChange={e => set(e.target.value)} />
       {secretSet && onClearSecret &&
@@ -66,20 +73,31 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onTogg
                 title="remove the stored key" onClick={() => onClearSecret(f.key)}>Clear</button>}
     </div>
   } else {
+    const numeric = f.type === 'int' || f.type === 'float'
+    // Keep the operator's raw transitional text (`-`, `1e`, etc.) intact. Native number inputs
+    // sanitize those states to an empty string, which is our deliberate clear/null operation.
     input = <input id={inputId} name={f.key} className="text"
-                   type={f.type === 'int' || f.type === 'float' ? 'number' : 'text'}
-                   step={f.type === 'float' ? 'any' : undefined} value={value ?? ''}
-                   aria-describedby={describedBy} placeholder={f.placeholder || ''}
+                   type="text" inputMode={f.type === 'int' ? 'numeric' : f.type === 'float' ? 'decimal' : undefined}
+                   value={value ?? ''} spellCheck={numeric ? false : undefined}
+                   aria-describedby={describedBy} aria-invalid={error ? 'true' : undefined}
+                   aria-readonly={readOnly || undefined} readOnly={readOnly}
+                   placeholder={f.placeholder || ''}
                    onChange={e => set(e.target.value)} />
   }
 
   const dot = changeDot(unsaved, changed)
-  return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '')}>
+  return <div className={'sf-field' + (unsaved ? ' unsaved' : changed ? ' changed' : '') + (error ? ' invalid' : '') + (readOnly ? ' readonly' : '')}>
     <div className="sf-label-row">
-      <label className="sf-label" htmlFor={inputId}>{f.label}{dot}</label>
-      <AgentPills f={f} granted={granted || []} onToggleAgent={onToggleAgent} />
+      <label className="sf-label" htmlFor={inputId}>{f.label}{dot}
+        {readOnly && <span className="muted" title="Fixed when this run started"> · launch-pinned</span>}
+      </label>
+      <AgentPills f={f} granted={granted || []} onToggleAgent={readOnly ? undefined : onToggleAgent} />
     </div>
     <div className="sf-input">{input}</div>
+    {error && <div id={errorId} className="sf-error" role="alert">{error}</div>}
+    {readOnly && <div id={readOnlyId} className="sf-help" role="note">
+      Fixed when this run started. Create a new run to use a different value; resume and replay keep this recorded value.
+    </div>}
     {hasDescription && <div id={helpId} className="sf-help">
       {f.type === 'secret' && <span className="sf-secret-state">
         {secretSet ? 'A credential is stored. Enter a value only to replace it. ' : 'No credential is stored. '}
@@ -92,8 +110,9 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onTogg
   </div>
 }
 
-function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, agentControl,
-                      onToggleAgent, secretState, onClearSecret, panelId, labelledBy, searchable }) {
+function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
+                      onToggleAgent, secretState, onClearSecret, readOnlyKeys,
+                      panelId, labelledBy, searchable }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
                   role={labelledBy ? 'tabpanel' : undefined}
@@ -104,15 +123,17 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, agentCont
     </div>
     <div className="sf-grid">
       {group.fields.map(f => <Field key={f.key} idPrefix={idPrefix} f={f} value={form[f.key]}
-        changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} onChange={onChange}
+        changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} error={errors?.[f.key]} onChange={onChange}
         granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
-        secretSet={secretState?.[f.key]} onClearSecret={onClearSecret} />)}
+        secretSet={secretState?.[f.key]} onClearSecret={onClearSecret}
+        readOnly={readOnlyKeys?.has(f.key)} />)}
     </div>
   </section>
 }
 
-export default function SettingsForm({ form, onChange, dirty, unsaved, only, agentControl, onToggleAgent,
-                                       secretState, onClearSecret, hideSecret, mode = 'all', query = '' }) {
+export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
+                                       secretState, onClearSecret, readOnlyKeys, hideSecret,
+                                       mode = 'all', query = '' }) {
   const groups = filterSettingsGroups(SETTINGS_GROUPS, { mode, query, only, hideSecret })
   const [active, setActive] = useState(0)
   const reactId = useId()
@@ -131,9 +152,9 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, only, age
   if (searching) return <div className="settings-form settings-search-results" role="form"
                               aria-label="Matching settings">
     {groups.map(gr => <GroupPanel key={gr.title} group={gr} idPrefix={idPrefix} form={form}
-      onChange={onChange} dirty={dirty} unsaved={unsaved} agentControl={agentControl}
+      onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
-      searchable />)}
+      readOnlyKeys={readOnlyKeys} searchable />)}
   </div>
 
   const onTabKeyDown = (event, index) => {
@@ -163,8 +184,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, only, age
       </button>)}
     </div>
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}
-      onChange={onChange} dirty={dirty} unsaved={unsaved} agentControl={agentControl}
+      onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
-      panelId={panelId} labelledBy={tabId} />
+      readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} />
   </div>
 }

@@ -67,7 +67,7 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
   const dock = await source('Dock.jsx')
-  assert.match(dock, /get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)/)
+  assert.match(dock, /get\(runNodeApiPath\(runId, traceNid, '\/trace'\)\)/)
   assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?live\.building\.generation[\s\S]*?return \{ nodeId, generation \}/)
   assert.match(dock, /const exactBuilding =[\s\S]*?traceGeneration === liveBuilding\.generation/)
   assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)

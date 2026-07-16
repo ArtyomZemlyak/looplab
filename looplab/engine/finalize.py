@@ -503,8 +503,8 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             try:
                 final = fold(events)
                 engine._store_case(final)
-                # D8 research memory is a first-class cross-run source, not a concept-capsule side effect.
-                # Persist it whenever shared memory is configured even when concept surfacing is disabled.
+                # D8 research memory is a first-class source, independent of concept surfacing.
+                # Compatibility engines may omit the hook, so keep finalization best-effort across versions.
                 store_research = getattr(engine, "_store_research_claims", None)
                 if callable(store_research):
                     store_research(final)

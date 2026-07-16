@@ -7,11 +7,10 @@ noticing: it reviews the cross-run concept graph (the deterministic `portfolio_c
 PROPOSES a curation — merges, splits, purges — as structured data.
 
 Architectural invariant (why this is a steward, not a fold-time mutation): the LLM only ever PROPOSES.
-Every write goes through the SAME deterministic, append-only, reversible `record_concept_alias` /
-`record_concept_split` the operator CLI uses, so `fold()` and the read-models stay pure and replay-safe.
-Proposals are surfaced for operator ratification. An explicit operator-triggered CLI/API call may apply a
-validated batch through the governance writer; finalize itself never applies agent output. Degrades to an
-empty curation on no client / any failure; never raises, never blocks the caller (mirrors `tag_text_llm`).
+Proposals are surfaced for operator review and are never batch-applied by this steward. The operator must
+translate the selected, exact proposal into a typed `concept-merge` / `concept-split` action or an owner HTTP
+governance request. This prevents a second paid LLM run from silently changing the reviewed batch. Proposal
+generation degrades to an empty curation on no client / any failure and never blocks its caller.
 """
 from __future__ import annotations
 
@@ -177,10 +176,11 @@ def curation_is_empty(curation: dict) -> bool:
 
 
 def apply_concept_curation(memory_dir, curation: dict, *, by: str = "steward", at: str = "") -> dict:
-    """Record a curation as GOVERNANCE writes through the SAME deterministic, reversible `record_*` the
-    operator uses (merge/split/purge). Returns a receipt `{"applied":[...], "skipped":[{action, reason}]}`.
-    A record that raises (e.g. a cycle-closing merge) is skipped with its reason, never aborting the batch.
-    This is intentionally a partial-apply protocol: the returned receipt names every applied/skipped item."""
+    """Low-level compatibility helper for an already-reviewed batch; the steward never invokes it.
+
+    New operator workflows should use one typed concept action at a time (or owner HTTP CAS governance).
+    Records through the deterministic `record_*` writers and returns an explicit partial-apply receipt.
+    """
     from looplab.engine.concept_registry import normalize_key, record_concept_alias, record_concept_split
     applied, skipped = [], []
     if not isinstance(curation, dict):
@@ -242,8 +242,15 @@ def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, spli
                      max_proposals: int = _MAX_PROPOSALS) -> dict:
     """One-call agentic steward over a memory dir: load the concept overview (honoring EXISTING
     aliases/splits so already-curated concepts are not re-proposed), ask the LLM to propose a curation, and
-    — when `apply` — record it through the deterministic writes. Returns `{"proposals", "receipt"}` (receipt
-    is None when not applied). Pure-ish: reads the store + one LLM call; writes only when `apply`."""
+    return it for review. The deprecated ``apply`` argument is retained only for call compatibility and is
+    rejected before reading memory or calling the LLM; governance must use a typed operator action. Returns
+    `{"proposals", "receipt"}` with a permanently-null receipt. Reads the store and makes at most one LLM call;
+    never writes governance state."""
+    if apply:
+        raise ValueError(
+            "concept steward is proposal-only; apply=True is disabled. Review the exact proposal, then "
+            "apply selected changes with concept-merge/concept-split or owner HTTP governance."
+        )
     from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from pathlib import Path
@@ -254,7 +261,4 @@ def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, spli
     splits = load_concept_splits(memory_dir) if splits is None else splits
     overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)
     proposals = propose_concept_curation(overview, client, max_proposals=max_proposals)
-    receipt = None
-    if apply and not curation_is_empty(proposals):
-        receipt = apply_concept_curation(memory_dir, proposals, by=by, at=at)
-    return {"proposals": proposals, "receipt": receipt}
+    return {"proposals": proposals, "receipt": None}

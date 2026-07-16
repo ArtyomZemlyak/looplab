@@ -115,6 +115,28 @@ def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
     assert payload["n_claims"] == 1 and payload["n_runs"] == 1
 
 
+def test_claims_missing_explicit_file_does_not_fall_back_to_sibling_d8(tmp_path):
+    from looplab.engine.claims import record_research_claims
+
+    record_research_claims(tmp_path, run_id="sibling-run", task_id="sibling-task", claims=[{
+        "statement": "this sibling claim must not satisfy an explicit missing path",
+        "node_ids": [1],
+    }])
+    explicit_lessons = tmp_path / "lessons.jsonl"
+    explicit_lessons.write_bytes(b"")
+    valid = runner.invoke(app, ["claims", str(explicit_lessons), "--json"])
+    assert valid.exit_code == 0
+    assert "this sibling claim" in valid.output
+
+    missing_lessons = tmp_path / "missing-lessons.jsonl"
+
+    result = runner.invoke(app, ["claims", str(missing_lessons), "--json"])
+
+    assert result.exit_code == 1
+    assert "does not exist" in result.output
+    assert "this sibling claim" not in result.output
+
+
 def test_asset_brief_llm_uses_ambient_settings_without_a_run_dir(tmp_path, monkeypatch):
     import looplab.cli.inspect_cmds as inspect_cmds
     import looplab.tools.asset_brief as asset_brief_module
@@ -141,6 +163,13 @@ def test_init_writes_parseable_documented_template(tmp_path):
     # The whole template must be valid YAML, incl. the comment alignment (a `#` glued to a value
     # would corrupt e.g. llm_base_url).
     assert doc["settings"]["llm_base_url"].endswith("/v1")
+    # memory_dir/knowledge_dir are ON by default (real path defaults). The scaffold must NOT emit them
+    # as ACTIVE `null` lines — that would override the defaults and silently disable cross-run memory +
+    # the knowledge base in every generated config. Loading the scaffolded settings must keep them set.
+    from looplab.core.config import Settings
+    s = Settings(**doc["settings"])
+    assert s.memory_dir, "scaffolded config disabled cross-run memory (memory_dir came out falsy)"
+    assert s.knowledge_dir, "scaffolded config disabled the knowledge base (knowledge_dir came out falsy)"
 
 
 def test_run_unified_yaml_applies_task_and_settings(tmp_path):
@@ -424,3 +453,22 @@ def test_approve_never_defaults_to_a_different_best_or_preapproves(tmp_path):
     assert approved.exit_code == 0, approved.output
     grant = [event for event in es.read_all() if event.type == "approval_granted"][-1]
     assert grant.data == {"node_id": 0, "generation": 0}  # best is #7, pending subject is #0
+
+
+def test_asset_brief_llm_mode_does_not_crash(tmp_path):
+    # `asset-brief <repo> --llm` referenced an undefined `run_dir`, so the agentic mode raised NameError
+    # and was 100% broken. It must at least reach the offline degrade path (no reachable endpoint here).
+    r = runner.invoke(app, ["asset-brief", str(tmp_path), "--llm"])
+    assert not isinstance(r.exception, NameError), r.exception
+    assert r.exit_code == 0, r.output
+
+
+def test_inspect_model_override_targets_llm_model_field():
+    # concept-steward/task-facets/claim-steward used model_copy(update={"model":...}); the Settings field
+    # is `llm_model`, so the override was silently dropped. Guard the coercion the CLI relies on.
+    from looplab.core.config import Settings
+    s = Settings()
+    s.llm_model = "my-override-model"
+    assert s.llm_model == "my-override-model"
+    # the old buggy form wrote a phantom attr and left llm_model at the default
+    assert Settings().model_copy(update={"model": "x"}).llm_model == Settings().llm_model

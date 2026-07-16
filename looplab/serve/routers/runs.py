@@ -13,9 +13,10 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.config import Settings
+from looplab.core.config import (
+    RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings)
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import EventStore, iter_jsonl
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
 from looplab.events.replay import fold
 from looplab.events.types import EV_TRUST_GATE_CHANGED
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
@@ -319,8 +320,8 @@ def build_router(srv) -> APIRouter:
         # Clamp the client-controlled tail so a hostile/large value can't force an unbounded read; and
         # seek to the tail instead of read_bytes() so we never pull a multi-GB training log into RAM.
         n = min(max(0, tail), _LOG_TAIL_MAX)
-        def _tail(name: str) -> str:
-            p = nd / name
+        def _tail(name: str, base: Path = nd) -> str:
+            p = base / name
             try:
                 size = p.stat().st_size
                 with open(p, "rb") as f:
@@ -358,9 +359,11 @@ def build_router(srv) -> APIRouter:
             if "score" not in stage_names:  # the engine appends a protected `score` stage post-manifest
                 stage_names.append("score")
         stages = {name: body for name in stage_names if (body := _tail(f"{name}.log"))}
+        # run_setup.log lives in the RUN dir (shared setup), not the node dir. Tail-cap it like every
+        # other log here (seek-to-end, byte-bounded) instead of read_text()-ing the whole file into RAM
+        # on every poll — a verbose dependency-install log would otherwise defeat the tail cap.
         return {"eval": _tail("eval.log"), "stages": stages, "setup": _tail("setup.log"),
-                "run_setup": (rd / "run_setup.log").read_text("utf-8", "replace")
-                             if (rd / "run_setup.log").exists() else ""}
+                "run_setup": _tail("run_setup.log", rd)}
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/metrics")
     def node_metrics(run_id: str, nid: int):
@@ -653,9 +656,51 @@ def build_router(srv) -> APIRouter:
     def run_config(run_id: str):
         rd = _run_dir(run_id)
         snap = rd / "config.snapshot.json"
-        if snap.exists():
-            return json.loads(snap.read_text(encoding="utf-8"))   # already secret-masked by `run`
-        return Settings().masked_snapshot()
+        current = (json.loads(snap.read_text(encoding="utf-8"))
+                   if snap.exists() else Settings().masked_snapshot())
+        if not isinstance(current, dict):
+            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+        return _run_config_payload(rd, current)
+
+    def _run_config_payload(rd: Path, snapshot: dict) -> dict:
+        """Flat, backward-compatible config plus metadata for immutable run-start semantics.
+
+        A few older UI versions were allowed to rewrite those fields in the snapshot even though the
+        engine ignored them on re-entry. Overlay the folded values so both API and form show the policy
+        the run actually uses; metadata lets the form render them as read-only without duplicating the
+        Python contract in JavaScript.
+        """
+        pinned = run_start_pinned_settings(srv.state(rd))
+        mismatches = sorted(k for k, value in pinned.items() if snapshot.get(k) != value)
+        effective = dict(snapshot)
+        effective.update(pinned)
+        effective["_looplab_config_meta"] = {
+            "run_start_pinned_fields": sorted(pinned),
+            "snapshot_mismatch_fields": mismatches,
+        }
+        return effective
+
+    def _repair_trust_gate_event(rd: Path, requested: str) -> bool:
+        """Make snapshot/event dual-write retryable without appending duplicate gate events."""
+        store = EventStore(rd / "events.jsonl")
+        for _attempt in range(4):
+            events = store.read_all()
+            if fold(events).trust_gate == requested:
+                return False
+            expected = events[-1].seq if events else -1
+            try:
+                store.append(
+                    EV_TRUST_GATE_CHANGED,
+                    {"trust_gate": requested, "source": "config_edit"},
+                    expected_last_seq=expected,
+                    require_lock=True,
+                )
+                return True
+            except EventStoreConcurrencyError:
+                # Another writer advanced the log. Refold under a fresh CAS: it may already have
+                # applied this exact gate, in which case the retry becomes a no-op.
+                continue
+        raise HTTPException(409, "the run changed while trust_gate was being saved; retry the edit")
 
     @router.put("/api/runs/{run_id}/config")
     async def put_run_config(run_id: str, request: Request):
@@ -677,18 +722,48 @@ def build_router(srv) -> APIRouter:
         snap = rd / "config.snapshot.json"
         if not snap.exists():
             raise HTTPException(404, "run has no config.snapshot.json (it predates self-describing runs)")
-        body = await request.json()
-        incoming = body.get("settings", body) or {}
+        try:
+            body = await request.json()
+        except Exception as e:  # noqa: BLE001 - normalize every JSON decoder/content-type failure
+            raise HTTPException(400, "request body must be a JSON object") from e
+        if not isinstance(body, dict):
+            raise HTTPException(400, "request body must be a JSON object")
+        incoming = body.get("settings", body)
+        if not isinstance(incoming, dict):
+            raise HTTPException(400, "settings must be a JSON object")
         # Use the SHARED single-source sets (settings_store) rather than a hardcoded {"llm_api_key"} —
         # a future SecretStr field is then masked here automatically instead of leaking into
         # config.snapshot.json in plaintext (the whole point of the _SECRET_FIELDS abstraction).
         from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
         allowed, secret = _ALLOWED_FIELDS, _SECRET_FIELDS
         current = json.loads(snap.read_text(encoding="utf-8"))
+        if not isinstance(current, dict):
+            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+        folded = srv.state(rd)
+        pinned = run_start_pinned_settings(folded)
+        attempted_pinned_changes = sorted(
+            key for key, value in incoming.items()
+            if key in pinned and value != pinned[key]
+        )
+        if attempted_pinned_changes:
+            raise HTTPException(
+                422,
+                "run-start pinned settings cannot be changed after creation: "
+                + ", ".join(attempted_pinned_changes)
+                + ". Start a new run to use different holdout/verifier semantics.",
+            )
         updated = dict(current)
+        # Repair snapshots written by older servers. These values are not a new policy decision: the
+        # event fold has always been the authority used by replay/re-entry, and GET already overlays it.
+        normalized_pinned = sorted(k for k, value in pinned.items() if updated.get(k) != value)
+        updated.update(pinned)
+        # A hand-authored/legacy sparse snapshot may omit the mutable trust gate. Preserve the folded
+        # policy in that case rather than manufacturing an "audit" downgrade during an unrelated edit.
+        updated.setdefault("trust_gate", folded.trust_gate)
         changed = {}
         for k, v in incoming.items():        # apply only known, non-secret, actually-set fields
-            if k in allowed and k not in secret and v is not None and current.get(k) != v:
+            if (k in allowed and k not in secret and k not in RUN_START_PINNED_FIELDS
+                    and v is not None and updated.get(k) != v):
                 updated[k] = v
                 changed[k] = v
         # Validate the MERGED config before persisting. Only KNOWN, non-secret fields are passed to
@@ -714,14 +789,15 @@ def build_router(srv) -> APIRouter:
         # trust_gate is enforced by the FOLD (which reads it from the event log, not the snapshot),
         # so a snapshot edit alone would leave the Trust panel claiming an enforcement that never
         # engages. Record the change as an event: every fold — live UI, resume, reset — applies it.
-        if "trust_gate" in changed:
-            try:
-                EventStore(rd / "events.jsonl").append(
-                    EV_TRUST_GATE_CHANGED, {"trust_gate": updated["trust_gate"],
-                                           "source": "config_edit"})
-            except Exception as e:  # noqa: BLE001
-                raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
-        return {"ok": True, "config": updated, "changed": sorted(changed),
+        try:
+            gate_repaired = _repair_trust_gate_event(rd, updated["trust_gate"])
+        except HTTPException:
+            raise
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
+        return {"ok": True, "config": _run_config_payload(rd, updated),
+                "changed": sorted(changed), "normalized_pinned": normalized_pinned,
+                "trust_gate_event_appended": gate_repaired,
                 "engine_running": _engine_liveness(rd)}
 
     @router.get("/api/runs/{run_id}/cost")

@@ -52,7 +52,6 @@ def test_real_engine_run_exports_instrumented_spans(tmp_path):
     # Gap: the bridge was only checked with synthetic direct spans. Run the ACTUAL instrumented
     # engine (offline toy task, no LLM) under a real provider and confirm the engine's own
     # spans (create_node/propose/implement/evaluate + their nesting) reach an OTel exporter.
-    import json
     import pathlib
     root = pathlib.Path(__file__).resolve().parents[1]
     toy = (root / "examples" / "toy_task.json").as_posix()
@@ -116,6 +115,75 @@ def test_exception_sets_otel_span_status_error():
     r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     assert "OTEL_ERR_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_exception_secrets_are_redacted_in_jsonl_and_otel():
+    script = r'''
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
+import tempfile
+
+exp = InMemorySpanExporter(); prov = TracerProvider()
+prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)
+from looplab.core.tracing import Tracer, JsonlSpanExporter
+
+secret = "abcdef0123456789ABCDEF0123456789"
+with tempfile.TemporaryDirectory() as d:
+    path = d + "/s.jsonl"
+    tr = Tracer(JsonlSpanExporter(path), run_id="r")
+    try:
+        with tr.span("provider", new_trace=True):
+            raise RuntimeError("Authorization: Bearer " + secret)
+    except RuntimeError:
+        pass
+    persisted = open(path, encoding="utf-8").read()
+prov.force_flush()
+span = exp.get_finished_spans()[0]
+events = repr([(event.name, dict(event.attributes)) for event in span.events])
+assert span.status.status_code == StatusCode.ERROR
+assert secret not in persisted and secret not in events and secret not in span.status.description
+print("OTEL_REDACT_OK")
+'''
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert "OTEL_REDACT_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
+
+
+def test_tool_call_arguments_are_redacted_in_jsonl_and_otel():
+    script = r'''
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+import tempfile
+
+exp = InMemorySpanExporter(); prov = TracerProvider()
+prov.add_span_processor(SimpleSpanProcessor(exp)); trace.set_tracer_provider(prov)
+from looplab.core import tracing
+from looplab.core.tracing import Tracer, JsonlSpanExporter
+
+secret = "abcdef0123456789ABCDEF0123456789"
+tracing.set_llm_capture(True)
+with tempfile.TemporaryDirectory() as d:
+    path = d + "/s.jsonl"
+    tr = Tracer(JsonlSpanExporter(path), run_id="r")
+    with tr.span("root", new_trace=True):
+        with tracing.generation(op="chat", model="m") as gen:
+            gen.tool_calls([{"name": "fetch", "arguments": "Authorization: Bearer " + secret}])
+    persisted = open(path, encoding="utf-8").read()
+prov.force_flush()
+generation = next(span for span in exp.get_finished_spans() if span.name == "generation")
+mirrored = str(dict(generation.attributes).get("tool_calls", ""))
+assert secret not in persisted and secret not in mirrored
+assert "***" in persisted and "***" in mirrored
+print("OTEL_TOOL_CALL_REDACT_OK")
+'''
+    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+    assert "OTEL_TOOL_CALL_REDACT_OK" in r.stdout, f"stdout={r.stdout!r} stderr={r.stderr!r}"
 
 
 def test_env_auto_wires_a_real_provider():

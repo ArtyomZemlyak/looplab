@@ -26,6 +26,44 @@ _LL_HOME = Path.home() / ".looplab"
 # researcher = per-experiment proposer (per-node sizing, e.g. eval timeout for a heavy model).
 AGENT_ROLES = ("strategist", "boss", "researcher")
 
+# Settings whose semantics are committed by ``run_started`` and restored from the folded event log
+# on every re-entry.  Changing one only in ``config.snapshot.json`` would mix incompatible evidence
+# (a different holdout split) or make the live producer disagree with replay's selection policy.
+# The HTTP config editor and the engine both consume this one contract; keep deliberately mutable
+# controls such as ``trust_gate`` out (that field has its own durable change event).
+RUN_START_PINNED_FIELDS = frozenset({
+    "holdout_fraction",
+    "holdout_select",
+    "select_verifier",
+    "select_verifier_samples",
+    "verifier_ci_tie",
+})
+
+
+def run_start_pinned_settings(state) -> dict:
+    """Return the effective Settings names committed by a folded run-start record.
+
+    Pre-pin legacy logs have no recorded holdout fraction, so their snapshot remains authoritative
+    for both holdout knobs. Verifier fields, however, have always been re-pinned from the legacy-safe
+    fold defaults whenever a valid ``run_started`` identity exists.
+    """
+    if not getattr(state, "run_id", ""):
+        return {}
+    values = {
+        "select_verifier": bool(getattr(state, "select_verifier_tiebreak", False)),
+        "select_verifier_samples": int(getattr(state, "select_verifier_samples", 3)),
+        "verifier_ci_tie": bool(getattr(state, "verifier_ci_tie", False)),
+    }
+    holdout_fraction = getattr(state, "holdout_fraction", None)
+    if holdout_fraction is not None:
+        values.update({
+            "holdout_fraction": holdout_fraction,
+            "holdout_select": bool(getattr(state, "holdout_select", False)),
+        })
+    if not values.keys() <= RUN_START_PINNED_FIELDS:
+        raise RuntimeError("folded run-start pinned settings contract drifted")
+    return values
+
 # --- Run profiles (config-first presets) -------------------------------------------------------
 # A `profile` is a NAMED BUNDLE of setting defaults — nothing more. It only fills fields the user
 # did NOT set explicitly (via file / --set / LOOPLAB_* env / init-kwargs), so any explicit knob

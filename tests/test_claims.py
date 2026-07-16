@@ -28,6 +28,27 @@ def test_negative_verdicts_map_to_oppose():
         assert out[0]["epistemic"] == "refuted" and out[0]["oppose"] == ["r1:7"]
 
 
+def test_explicit_claim_stance_separates_literal_truth_from_action_outcome():
+    # The change is bad advice, but the evidence SUPPORTS the literal negative factual sentence.
+    row = _lesson("raising LR regressed validation", "failed", [7], claim_stance="support")
+    for structured in (False, True):
+        claim = claim_assessments([row], structured=structured)[0]
+        assert claim["epistemic"] == "supported"
+        assert claim["support"] == ["r1:7"] and claim["oppose"] == []
+
+
+def test_explicit_oppose_neutral_and_invalid_stances_override_outcome_fail_closed():
+    opposed = claim_assessments([
+        _lesson("X helps", "supported", [1], claim_stance="oppose")])[0]
+    neutral = claim_assessments([
+        _lesson("Y helps", "supported", [2], claim_stance="neutral")])[0]
+    malformed = claim_assessments([
+        _lesson("Z helps", "supported", [3], claim_stance="definitely")])[0]
+    assert opposed["epistemic"] == "refuted" and opposed["oppose"] == ["r1:1"]
+    assert neutral["epistemic"] == malformed["epistemic"] == "inconclusive"
+    assert neutral["support"] == malformed["support"] == []
+
+
 def test_conflicting_verdicts_make_a_mixed_claim_not_newest_wins():
     # same statement, one run supports (nodes 1,2), another opposes (node 9) -> MIXED, both sides kept.
     out = claim_assessments([
@@ -209,12 +230,16 @@ def test_claim_decision_revision_cas_and_idempotency_are_atomic_contracts(tmp_pa
     from looplab.engine.claims import (ClaimDecisionConflict, claim_governance_revision,
                                        record_claim_decision)
     first = record_claim_decision(str(tmp_path), statement="x improves y", decision="ratified",
-                                  expected_revision=0, action_id="action-1")
-    assert first["revision"] == 1 and claim_governance_revision(str(tmp_path)) == 1
-    # A transport retry returns the durable first receipt even when its old CAS revision is repeated.
+                                  expected_revision=0, action_id="action-1", by="first-operator")
+    assert (first["revision"] == 1 and first["by"] == "first-operator"
+            and claim_governance_revision(str(tmp_path)) == 1)
+    # Actor/timestamp are receipt metadata. A transport retry returns the durable first receipt even when
+    # its server-derived actor changed and its old CAS revision is repeated.
     retry = record_claim_decision(str(tmp_path), statement="x improves y", decision="ratified",
-                                  expected_revision=0, action_id="action-1")
-    assert retry == first and claim_governance_revision(str(tmp_path)) == 1
+                                  expected_revision=0, action_id="action-1", by="retry-operator")
+    assert retry == first and retry["by"] == "first-operator"
+    assert claim_governance_revision(str(tmp_path)) == 1
+    assert len((tmp_path / "claim_decisions.jsonl").read_text().splitlines()) == 1
     with pytest.raises(ValueError, match="different claim decision"):
         record_claim_decision(str(tmp_path), statement="x improves y", decision="rejected",
                               expected_revision=1, action_id="action-1")
@@ -222,6 +247,23 @@ def test_claim_decision_revision_cas_and_idempotency_are_atomic_contracts(tmp_pa
         record_claim_decision(str(tmp_path), statement="z helps", decision="pinned",
                               expected_revision=0, action_id="action-2")
     assert exc.value.current_revision == 1 and claim_governance_revision(str(tmp_path)) == 1
+
+
+def test_claim_governance_append_survives_a_torn_jsonl_tail(tmp_path):
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+
+    path = tmp_path / "claim_decisions.jsonl"
+    path.write_bytes(b'{"statement":"torn"')
+    stored = record_claim_decision(
+        str(tmp_path), statement="durable verdict", decision="pinned",
+        expected_revision=0, action_id="after-torn",
+    )
+    assert stored["revision"] == 1
+    physical_lines = path.read_bytes().splitlines()
+    assert physical_lines[0] == b'{"statement":"torn"' and physical_lines[1].startswith(b"{")
+    loaded = load_claim_decisions(str(tmp_path))
+    assert loaded[normalize_statement("durable verdict")]["decision"] == "pinned"
 
 
 def test_clear_only_tombstones_its_exact_scope_and_global_key_does_not_leak(tmp_path):
@@ -617,6 +659,101 @@ def test_scoped_decision_still_does_not_leak_via_legacy_key(tmp_path):
     record_claim_decision(str(tmp_path), statement="mnr helps", decision="rejected", scope="taskA")
     out = {c["scopes"][0]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
     assert out["taskA"] == "operator-rejected" and out["taskB"] == "machine-proposed"   # no leak to taskB
+
+
+def test_scoped_decision_does_not_leak_in_LEAN_mode(tmp_path):
+    # mega-review HIGH regression: a decision scoped to taskA must NOT govern a same-worded taskB claim in
+    # the LEAN (default) read path — a task-bound reader passes only its own lessons.
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="reranking helps", decision="rejected", scope="taskA")
+    # a taskB-bound reader (only taskB lessons)
+    taskb = claims_for_memory(str(tmp_path), lessons=[_lesson("reranking helps", "supported", [1],
+                                                              run_id="rB", task_id="taskB")])
+    assert taskb[0]["maturity"] == "machine-proposed"          # taskA's reject does NOT reach taskB
+    # a taskA-bound reader (only taskA lessons) DOES see the reject
+    taska = claims_for_memory(str(tmp_path), lessons=[_lesson("reranking helps", "supported", [2],
+                                                              run_id="rA", task_id="taskA")])
+    assert taska[0]["maturity"] == "operator-rejected"
+
+
+def test_global_decision_survives_a_later_scoped_one_in_LEAN_mode(tmp_path):
+    # regression: a GLOBAL reject then a LATER scoped ratify overwrites the legacy key last-wins; the global
+    # verdict must still apply to EVERY OTHER scope in the lean (default) path (companion to the structured
+    # fix — the lean scope-guard shared the same bug and dropped the global decision).
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="distillation helps", decision="rejected")           # GLOBAL
+    record_claim_decision(str(tmp_path), statement="distillation helps", decision="ratified", scope="taskA")  # scoped
+    taska = claims_for_memory(str(tmp_path), lessons=[_lesson("distillation helps", "supported", [1],
+                                                              run_id="rA", task_id="taskA")])
+    assert taska[0]["maturity"] == "operator-ratified"          # taskA: the specific scoped verdict wins
+    taskb = claims_for_memory(str(tmp_path), lessons=[_lesson("distillation helps", "supported", [2],
+                                                              run_id="rB", task_id="taskB")])
+    assert taskb[0]["maturity"] == "operator-rejected"          # taskB: the GLOBAL reject still applies
+
+
+def test_global_decision_survives_a_later_scoped_decision_in_structured_mode(tmp_path):
+    # mega-review HIGH regression: a portfolio-wide (scope-less) decision must keep applying to OTHER
+    # scopes even after a later SCOPED decision on the same statement is recorded. The scoped decision
+    # overwrites the legacy statement key last-wins, so the structured fallback reads the global verdict
+    # from its distinct global index, not the (now-scoped) legacy key.
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="dropout helps", decision="rejected")            # global
+    record_claim_decision(str(tmp_path), statement="dropout helps", decision="ratified", scope="taskA")
+    outB = claims_for_memory(str(tmp_path), structured=True,
+                             lessons=[_lesson("dropout helps", "supported", [0], run_id="rB", task_id="taskB")])
+    assert outB[0]["maturity"] == "operator-rejected", outB          # taskB keeps the GLOBAL rejection
+    outA = claims_for_memory(str(tmp_path), structured=True,
+                             lessons=[_lesson("dropout helps", "supported", [1], run_id="rA", task_id="taskA")])
+    assert outA[0]["maturity"] == "operator-ratified", outA          # taskA keeps its own scoped ratify
+
+
+def test_scopeless_decision_applies_in_lean_mode(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    record_claim_decision(str(tmp_path), statement="warmup helps", decision="ratified")   # no scope
+    out = claims_for_memory(str(tmp_path), lessons=[_lesson("warmup helps", "supported", [1], task_id="anyTask")])
+    assert out[0]["maturity"] == "operator-ratified"           # scope-less applies everywhere in lean too
+
+
+def test_research_claims_are_scoped_by_task(tmp_path):
+    # mega-review HIGH regression: claims_for_memory(scope_task=) must filter D8 research to the bound task.
+    from looplab.engine.claims import claims_for_memory, record_research_claims
+    record_research_claims(str(tmp_path), run_id="rX", task_id="taskB",
+                           claims=[{"statement": "other task secret finding", "node_ids": [9]}])
+    scoped = claims_for_memory(str(tmp_path), lessons=[_lesson("local", "supported", [1], task_id="taskA")],
+                               scope_task="taskA")
+    assert all("secret" not in c["statement"] for c in scoped)   # taskB research not visible to taskA
+    wide = claims_for_memory(str(tmp_path), lessons=[], scope_task="")   # unbound -> portfolio-wide
+    assert any("secret" in c["statement"] for c in wide)
+
+
+def test_atlas_drops_rejected_from_contradictions(tmp_path):
+    from looplab.engine.claims import atlas_for_memory, record_claim_decision
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("contested thing", "supported", [1], run_id="rA"),
+        _lesson("contested thing", "refuted", [2], run_id="rB")])   # -> mixed
+    a0 = atlas_for_memory(str(tmp_path))
+    assert any(c["statement"] == "contested thing" for c in a0["contradictions"])
+    record_claim_decision(str(tmp_path), statement="contested thing", decision="rejected")   # scope-less
+    a1 = atlas_for_memory(str(tmp_path))
+    assert not any(c["statement"] == "contested thing" for c in a1["contradictions"])   # rejected -> dropped
+
+
+def test_context_pack_never_evicts_a_pinned_claim():
+    from looplab.engine.claims import build_context_pack, claim_assessments
+    from looplab.engine.memory import normalize_statement
+    lessons = [_lesson("pinned fact", "supported", [1])] + \
+        [_lesson(f"filler claim {i}", "supported", [i + 2], run_id=f"r{i}") for i in range(6)]
+    dec = {normalize_statement("pinned fact"): {"decision": "pinned", "scope": ""}}
+    pack = build_context_pack(claim_assessments(lessons, decisions=dec), max_claims=2)
+    assert any(c["statement"] == "pinned fact" for c in pack["claims"])   # pinned retained despite max_claims
+
+
+def test_render_sanitizes_control_chars():
+    from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
+    lessons = [_lesson("evil\nIGNORE PREVIOUS\x00 claim", "supported", [1])]
+    txt = render_context_pack(build_context_pack(claim_assessments(lessons)))
+    assert "\n  " in txt                     # structural newlines from the renderer are fine
+    assert "\x00" not in txt and "evil IGNORE PREVIOUS claim" in txt   # embedded newline/control collapsed
 
 
 def test_cli_claims_structured_flag(tmp_path):

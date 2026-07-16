@@ -1,5 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { apiUrl, get, normalizeRunGeneration, observeRunGeneration } from './api.js'   // join the served path prefix so SSE works behind a proxy subpath
+import {
+  fetchEventStream, get, normalizeRunGeneration, observeRunGeneration, runApiPath,
+} from './api.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -90,8 +92,8 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
   const [status, setStatus] = useState('loading')
   const [error, setError] = useState(null)
   const [retryToken, setRetryToken] = useState(0)
-  const esRef = useRef(null)
-  // Review-path re-probe backoff. The owner path self-heals inside one effect run via the EventSource
+  const streamRef = useRef(null)
+  // Review-path re-probe backoff. The owner path self-heals inside one effect run via the fetch stream
   // onerror ramp, but the review path re-probes by bumping retryToken (a fresh effect run that resets
   // the local backoff), so its ramp must live in a ref that survives across runs — else a sustained
   // proxy 5xx would re-probe on a fixed 1.5s tick (the GET storm the owner ramp avoids).
@@ -103,6 +105,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let timer = null
     let pollTimer = null
     let lastSeq = -2, lastAlive, lastGeneration = null, lastEventCount = null
+    let lastStreamEventId = ''
     setLive(null)
     setSeq(-1)
     setGenerationState({ runId, value: null })
@@ -117,41 +120,58 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let backoff = MIN_BACKOFF
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
-      const es = new EventSource(apiUrl(`/api/runs/${encodeURIComponent(runId)}/events`))
-      esRef.current = es
-      es.addEventListener('state', (e) => {
-        let p
-        try { p = JSON.parse(e.data) } catch { return }  // ignore a torn/partial SSE frame
-        backoff = MIN_BACKOFF   // a live frame proves the stream works — reset the error backoff
-        setConnected(true)
-        // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
-        // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
-        const alive = p.state && p.state.engine_running
-        const nextGeneration = normalizeRunGeneration(p.generation)
-        const nextEventCount = normalizeEventCount(p.event_count)
-        if (p.generation != null && !nextGeneration) return
-        if (nextEventCount === undefined) return
-        if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration
-            && nextEventCount === lastEventCount) return
-        lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
-        setGenerationState({ runId, value: nextGeneration })
-        setEventCountState({ runId, value: nextEventCount })
-        setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
-      })
-      // `done` = the run reached a terminal state and the server ends the stream. We do NOT treat it
-      // as "stop forever": reconnect-poll so a reopen (fork / branch / add-experiment) is picked up
-      // within a couple seconds. Closing-and-never-reconnecting is what made those actions invisible
-      // until a manual reload (#8). The state handler dedups by seq, so the poll is cheap when idle.
-      es.addEventListener('done', () => { es.close(); reconnect(2500) })
-      es.onerror = () => {
-        setConnected(false); es.close()
+      streamRef.current?.abort()
+      const controller = new AbortController()
+      streamRef.current = controller
+      let terminal = false
+      fetchEventStream(runApiPath(runId, '/events'), {
+        signal: controller.signal,
+        lastEventId: lastStreamEventId,
+        onEvent: event => {
+          if (stopped || controller.signal.aborted) return
+          if (event.lastEventId !== '') lastStreamEventId = event.lastEventId
+          if (event.type === 'done') {
+            // A terminal run can later be reopened. End this request and reconnect-poll just as the
+            // former EventSource path did; seq/generation dedup keeps the idle refresh cheap.
+            terminal = true
+            controller.abort()
+            reconnect(2500)
+            return
+          }
+          if (event.type !== 'state') return
+          let p
+          try { p = JSON.parse(event.data) } catch { return }
+          backoff = MIN_BACKOFF
+          setConnected(true)
+          // Re-render on a seq change OR an engine_running flip (a zombie's liveness changes with no
+          // new event/seq); track lastAlive in the closure (NOT stale React `live`) to avoid churn.
+          const alive = p.state && p.state.engine_running
+          const nextGeneration = normalizeRunGeneration(p.generation)
+          const nextEventCount = normalizeEventCount(p.event_count)
+          if (p.generation != null && !nextGeneration) return
+          if (nextEventCount === undefined) return
+          if (p.seq === lastSeq && alive === lastAlive && nextGeneration === lastGeneration
+              && nextEventCount === lastEventCount) return
+          lastSeq = p.seq; lastAlive = alive; lastGeneration = nextGeneration; lastEventCount = nextEventCount
+          setGenerationState({ runId, value: nextGeneration })
+          setEventCountState({ runId, value: nextEventCount })
+          setLive(withBuilding(p.state)); setSeq(p.seq); setStatus('ready'); setError(null)
+        },
+      }).then(({ retry }) => {
+        if (stopped || terminal || controller.signal.aborted) return
+        setConnected(false)
+        reconnect(retry ?? backoff)
+        backoff = Math.min(backoff * 2, MAX_BACKOFF)
+      }).catch(error => {
+        if (stopped || terminal || controller.signal.aborted || error?.name === 'AbortError') return
+        setConnected(false)
         reconnect(backoff)
-        backoff = Math.min(backoff * 2, MAX_BACKOFF)   // ramp on repeated failure; reset on a live frame
-      }
+        backoff = Math.min(backoff * 2, MAX_BACKOFF)
+      })
     }
-    // Probe once before opening a self-reconnecting EventSource. This turns a mistyped/deleted run
+    // Probe once before opening a self-reconnecting authenticated fetch stream. This turns a mistyped/deleted run
     // URL into an explicit 404 state instead of an endless "Connecting…" loop.
-    get(`/api/runs/${encodeURIComponent(runId)}/state`)
+    get(runApiPath(runId, '/state'))
       .then(p => {
         if (stopped) return
         lastSeq = p.seq
@@ -170,7 +190,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         else {
           setConnected(true)
           const poll = () => {
-            get(`/api/runs/${encodeURIComponent(runId)}/state`)
+            get(runApiPath(runId, '/state'))
               .then(next => {
                 if (stopped) return
                 setConnected(true); setStatus('ready'); setError(null)
@@ -218,7 +238,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
         }
         // Transient probe failure (proxy 504, dropped connection, keepalive-starved idle drop): do NOT
         // strand the workspace on an error screen with nothing scheduled to retry (UI-2). The owner
-        // stream self-heals via the EventSource onerror backoff, so start it; the review poll path
+        // stream self-heals via the fetch-SSE reconnect backoff, so start it; the review poll path
         // reschedules a re-probe. Either way the UI recovers on its own once the blip clears.
         setError(e?.message || 'Could not load this run.')
         if (!pollOnly) { setStatus('loading'); connect() }
@@ -231,7 +251,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
       })
     return () => {
       stopped = true; clearTimeout(timer); clearTimeout(pollTimer)
-      esRef.current && esRef.current.close()
+      streamRef.current?.abort()
     }
   }, [runId, retryToken, pollOnly, pollMs])
 

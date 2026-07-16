@@ -10,9 +10,11 @@ import json
 import pytest
 
 from looplab.engine.concept_registry import (
-    ConceptGovernanceConflict, ConceptGovernanceIdempotencyConflict, canonicalize_concepts,
-    clear_concept_alias, clear_concept_split,
-    concept_governance_revision, concept_uid, load_concept_aliases, load_concept_splits, normalize_key,
+    ConceptGovernanceConflict, ConceptGovernanceGlobalConflict,
+    ConceptGovernanceIdempotencyConflict, canonicalize_concepts, clear_concept_alias,
+    clear_concept_split,
+    concept_governance_global_revision, concept_governance_revision, concept_uid,
+    load_concept_aliases, load_concept_splits, normalize_key,
     record_concept_alias, record_concept_split, resolve_slug, resolve_split,
 )
 from looplab.engine.memory import build_concept_capsule, portfolio_concept_overview
@@ -25,7 +27,7 @@ def test_uid_is_stable_and_content_addressed():
 
 
 # --------------------------------------------------------------------------- #
-# Versioned normalization contract — ONE key for writes AND reads (CODEX)
+# Versioned normalization contract — one key for writes and reads.
 # --------------------------------------------------------------------------- #
 
 def test_normalize_key_is_nfkc_casefold_and_whitespace_collapsed():
@@ -35,7 +37,7 @@ def test_normalize_key_is_nfkc_casefold_and_whitespace_collapsed():
 
 
 def test_normalize_key_strips_control_chars_no_tombstone_collision():
-    # mega-review regression: an untrusted slug must not normalize to the '\x00purged' sentinel and turn a
+    # An untrusted slug must not normalize to the '\x00purged' sentinel and turn a
     # merge into a covert purge.
     assert "\x00" not in normalize_key("\x00purged")
     assert normalize_key("\x00purged") == "purged"          # sentinel stripped -> ordinary slug
@@ -73,10 +75,13 @@ def test_alias_clear_is_distinct_from_purge_and_revision_is_cas(tmp_path):
 
 def test_alias_action_id_retry_returns_original_before_stale_cas(tmp_path):
     first = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
-                                 expected_revision=0, action_id="req-1", at="first")
+                                 expected_revision=0, action_id="req-1", at="first",
+                                 by="first-operator")
     retry = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
-                                 expected_revision=0, action_id="req-1", at="retry")
-    assert retry == first and retry["revision"] == 1 and retry["at"] == "first"
+                                 expected_revision=0, action_id="req-1", at="retry",
+                                 by="retry-operator")
+    assert (retry == first and retry["revision"] == 1 and retry["at"] == "first"
+            and retry["by"] == "first-operator")
     assert len((tmp_path / "concept_aliases.jsonl").read_text().splitlines()) == 1
     with pytest.raises(ConceptGovernanceIdempotencyConflict):
         record_concept_alias(str(tmp_path), from_concept="hn", to_concept="different",
@@ -108,6 +113,15 @@ def test_governance_expected_revision_is_strict_non_negative_int(tmp_path, revis
     with pytest.raises(ValueError, match="expected_revision"):
         record_concept_alias(str(tmp_path), from_concept="a", to_concept="b",
                              expected_revision=revision)
+
+
+@pytest.mark.parametrize("revision", [True, -1, "1", 1.0])
+def test_governance_expected_global_revision_is_strict_non_negative_int(tmp_path, revision):
+    with pytest.raises(ValueError, match="expected_governance_revision"):
+        record_concept_alias(
+            str(tmp_path), from_concept="a", to_concept="b",
+            expected_governance_revision=revision,
+        )
 
 
 def test_purge_resolves_to_none():
@@ -150,6 +164,16 @@ def test_alias_self_link_and_cycle_are_rejected(tmp_path):
     assert resolve_slug("a", load_concept_aliases(str(tmp_path))) == "c"
 
 
+def test_merge_into_purged_target_is_rejected_without_purging_source(tmp_path):
+    record_concept_alias(str(tmp_path), from_concept="retired", to_concept="")
+    with pytest.raises(ValueError, match="target .* purged"):
+        record_concept_alias(str(tmp_path), from_concept="live", to_concept="retired")
+    aliases = load_concept_aliases(str(tmp_path))
+    assert resolve_slug("retired", aliases) is None
+    assert resolve_slug("live", aliases) == "live"
+    assert concept_governance_revision(str(tmp_path), "aliases") == 1
+
+
 # --------------------------------------------------------------------------- #
 # SPLIT — one coarse concept -> finer ones, re-tagged from each run's OWN sibling concepts (§21.20.13)
 # --------------------------------------------------------------------------- #
@@ -157,11 +181,10 @@ def test_alias_self_link_and_cycle_are_rejected(tmp_path):
 def test_record_and_load_split(tmp_path):
     record_concept_split(str(tmp_path), from_concept="data/augmentation",
                          rules=[{"to": "data/hard-negative-mining", "when_any": ["hard", "negative"]},
-                                {"to": "data/synonym-aug", "when_any": ["synonym", "eda"]}],
-                         default="data/augmentation")
+                                {"to": "data/synonym-aug", "when_any": ["synonym", "eda"]}])
     sp = load_concept_splits(str(tmp_path))
     spec = sp["data/augmentation"]
-    assert spec["default"] == "data/augmentation" and len(spec["rules"]) == 2
+    assert spec["default"] == "" and len(spec["rules"]) == 2
     assert spec["rules"][0]["to"] == "data/hard-negative-mining"
 
 
@@ -189,6 +212,133 @@ def test_split_rejects_no_progress_and_empty(tmp_path):
         record_concept_split(str(tmp_path), from_concept="x", rules=[], default="")
     with pytest.raises(ValueError):        # no rule + bare identity default is also inert
         record_concept_split(str(tmp_path), from_concept="x", rules=[], default="x")
+
+
+def test_split_rejects_purged_rule_and_default_targets(tmp_path):
+    record_concept_alias(str(tmp_path), from_concept="retired", to_concept="")
+    with pytest.raises(ValueError, match="target .* purged"):
+        record_concept_split(
+            str(tmp_path), from_concept="coarse",
+            rules=[{"to": "retired", "when_any": ["legacy"]}], default="live-default")
+    with pytest.raises(ValueError, match="target .* purged"):
+        record_concept_split(
+            str(tmp_path), from_concept="other-coarse",
+            rules=[{"to": "live-target", "when_any": ["fresh"]}], default="retired")
+    assert load_concept_splits(str(tmp_path)) == {}
+    assert concept_governance_revision(str(tmp_path), "splits") == 0
+
+
+def test_split_rejects_aliased_source_and_target_that_resolves_back_to_source(tmp_path):
+    record_concept_alias(
+        str(tmp_path), from_concept="x", to_concept="y",
+        expected_revision=0, expected_governance_revision=0,
+    )
+    with pytest.raises(ValueError, match="source 'x' is aliased to 'y'"):
+        record_concept_split(
+            str(tmp_path), from_concept="x",
+            rules=[{"to": "fine", "when_any": ["match"]}],
+            expected_revision=0, expected_governance_revision=1,
+        )
+    with pytest.raises(ValueError, match="resolves to its source 'y'"):
+        record_concept_split(
+            str(tmp_path), from_concept="y",
+            rules=[{"to": "x", "when_any": ["match"]}],
+            expected_revision=0, expected_governance_revision=1,
+        )
+    assert load_concept_splits(str(tmp_path)) == {}
+    assert concept_governance_revision(str(tmp_path), "splits") == 0
+    assert concept_governance_global_revision(str(tmp_path)) == 1
+
+
+def test_split_rejects_purged_source_without_appending(tmp_path):
+    record_concept_alias(
+        str(tmp_path), from_concept="retired", to_concept="",
+        expected_revision=0, expected_governance_revision=0,
+    )
+    with pytest.raises(ValueError, match="source 'retired' is purged"):
+        record_concept_split(
+            str(tmp_path), from_concept="retired",
+            rules=[{"to": "fine", "when_any": ["match"]}],
+            expected_revision=0, expected_governance_revision=1,
+        )
+    assert concept_governance_revision(str(tmp_path), "splits") == 0
+    assert concept_governance_global_revision(str(tmp_path)) == 1
+
+
+def test_global_governance_cas_is_cross_ledger_and_retry_precedes_it(tmp_path):
+    first = record_concept_alias(
+        str(tmp_path), from_concept="x", to_concept="y", expected_revision=0,
+        expected_governance_revision=0, action_id="global-retry", at="first",
+    )
+    retry = record_concept_alias(
+        str(tmp_path), from_concept="x", to_concept="y", expected_revision=0,
+        expected_governance_revision=0, action_id="global-retry", at="retry",
+    )
+    assert retry == first
+    assert first["governance_revision"] == concept_governance_global_revision(str(tmp_path)) == 1
+
+    with pytest.raises(ConceptGovernanceGlobalConflict) as stale:
+        record_concept_split(
+            str(tmp_path), from_concept="coarse",
+            rules=[{"to": "fine", "when_any": ["match"]}], expected_revision=0,
+            expected_governance_revision=0, action_id="stale-cross-ledger",
+        )
+    assert stale.value.expected == 0 and stale.value.actual == 1
+    assert concept_governance_revision(str(tmp_path), "splits") == 0
+
+
+def test_action_id_is_per_ledger_and_alias_retry_survives_later_split(tmp_path):
+    alias = record_concept_alias(
+        str(tmp_path), from_concept="x", to_concept="y", expected_revision=0,
+        expected_governance_revision=0, action_id="endpoint-scoped-action",
+    )
+    split = record_concept_split(
+        str(tmp_path), from_concept="coarse",
+        rules=[{"to": "fine", "when_any": ["match"]}], expected_revision=0,
+        expected_governance_revision=1, action_id="endpoint-scoped-action",
+    )
+    retry = record_concept_alias(
+        str(tmp_path), from_concept="x", to_concept="y", expected_revision=0,
+        expected_governance_revision=0, action_id="endpoint-scoped-action",
+    )
+    assert retry == alias
+    assert alias["governance_revision"] == 1 and split["governance_revision"] == 2
+    assert concept_governance_global_revision(str(tmp_path)) == 2
+
+
+def test_split_target_validation_is_atomic_with_concurrent_purge(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    start = Barrier(3)
+
+    def split():
+        start.wait(timeout=5)
+        try:
+            return record_concept_split(
+                str(tmp_path), from_concept="coarse",
+                rules=[{"to": "target", "when_any": ["match"]}])
+        except ValueError as exc:
+            return exc
+
+    def purge():
+        start.wait(timeout=5)
+        return record_concept_alias(str(tmp_path), from_concept="target", to_concept="")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        split_future, purge_future = pool.submit(split), pool.submit(purge)
+        start.wait(timeout=5)
+        split_result, purge_result = split_future.result(timeout=10), purge_future.result(timeout=10)
+
+    assert purge_result["action"] == "purge"
+    if isinstance(split_result, ValueError):
+        assert "target" in str(split_result) and "purged" in str(split_result)
+        assert concept_governance_global_revision(str(tmp_path)) == purge_result["governance_revision"] == 1
+    else:
+        # The only legal both-success order is split first, followed by the explicit purge. Receipts make
+        # that cross-ledger linearization visible instead of leaving two incomparable local revisions.
+        assert split_result["governance_revision"] < purge_result["governance_revision"]
+        assert concept_governance_global_revision(str(tmp_path)) == purge_result["governance_revision"] == 2
 
 
 def test_canonicalize_applies_split_then_alias():
@@ -238,7 +388,7 @@ def test_split_trigger_cannot_match_duplicate_or_alias_of_its_source():
 
 def test_overview_re_tags_split_by_sibling_context(tmp_path):
     record_concept_split(str(tmp_path), from_concept="data/aug",
-                         rules=[{"to": "data/hard-neg", "when_any": ["hard"]}], default="data/aug")
+                         rules=[{"to": "data/hard-neg", "when_any": ["hard"]}])
     caps = [
         # run r1 also explored a 'hard' concept -> its data/aug re-tags to data/hard-neg
         build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
@@ -253,7 +403,7 @@ def test_overview_re_tags_split_by_sibling_context(tmp_path):
 
 
 def test_overview_dedupes_aliased_concepts_within_one_run():
-    # two raw concepts in ONE capsule both alias to 'hard-neg' -> ONE run-row, not two (CODEX double-row fix)
+    # Two raw concepts in one capsule both alias to 'hard-neg' -> one run-row, not two.
     caps = [build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
                                   concepts=["hn", "hnm"], concept_outcomes={"hn": 0.9})]
     ov = portfolio_concept_overview(caps, aliases={"hn": "hard-neg", "hnm": "hard-neg"})
@@ -274,7 +424,7 @@ def test_cli_concept_split(tmp_path):
     from typer.testing import CliRunner
     from looplab.cli import app
     r = CliRunner().invoke(app, ["concept-split", str(tmp_path), "data/aug",
-                                 "--rule", "data/hard-neg:hard,negative", "--default", "data/aug"])
+                                 "--rule", "data/hard-neg:hard,negative"])
     assert r.exit_code == 0 and "split: 'data/aug'" in r.stdout and "data/hard-neg" in r.stdout
     sp = load_concept_splits(str(tmp_path))
     assert sp["data/aug"]["rules"][0]["to"] == "data/hard-neg"
@@ -293,3 +443,41 @@ def test_cli_concept_merge_and_purge(tmp_path):
     assert r2.exit_code == 0 and "purged: 'spam'" in r2.stdout
     a = load_concept_aliases(str(tmp_path))
     assert a["hn"] == "hard-neg" and a["spam"] == "\x00purged"
+
+
+def test_append_governance_validation_aborts_append_atomically(tmp_path):
+    # Cycle rejection for record_concept_alias runs as validation UNDER the append lock, so a concurrent
+    # writer cannot slip a cycle-closing edge past a pre-append snapshot. A validation failure must abort
+    # the append without leaving a partial record.
+    from looplab.engine.concept_registry import _append_governance
+    p = tmp_path / "gov.jsonl"
+    p.write_text('{"from": "x", "to": "y"}\n', encoding="utf-8")
+    before = p.read_text(encoding="utf-8")
+
+    class _Boom(Exception):
+        pass
+
+    with pytest.raises(_Boom):
+        _append_governance(
+            p, {"from": "a", "to": "b"},
+            validate=lambda: (_ for _ in ()).throw(_Boom()),
+        )
+    assert p.read_text(encoding="utf-8") == before
+    _append_governance(p, {"from": "c", "to": "d"}, validate=lambda: None)
+    assert '"c"' in p.read_text(encoding="utf-8")
+
+
+def test_governance_append_survives_a_torn_jsonl_tail(tmp_path):
+    from looplab.engine.concept_registry import (concept_governance_revision, load_concept_aliases,
+                                                 record_concept_alias)
+    p = tmp_path / "concept_aliases.jsonl"
+    p.write_text('{"action":"set","from":"partial', encoding="utf-8")
+
+    receipt = record_concept_alias(str(tmp_path), from_concept="b", to_concept="c",
+                                   expected_revision=0, action_id="tail-retry")
+
+    assert receipt["revision"] == 1
+    assert load_concept_aliases(str(tmp_path)) == {"b": "c"}
+    assert concept_governance_revision(str(tmp_path), "aliases") == 1
+    assert record_concept_alias(str(tmp_path), from_concept="b", to_concept="c", expected_revision=0,
+                                action_id="tail-retry") == receipt

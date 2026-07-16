@@ -120,3 +120,15 @@ export function permissionPresentation(req, now = Date.now()) {
     grantDurationLabel: grantTtlSeconds ? durationLabel(grantTtlSeconds) : '',
   }
 }
+
+// Reconcile a server permissions snapshot against ids the user just resolved LOCALLY, so a lagging
+// /permissions poll can't resurrect a card the user already approved/rejected (which would re-enable its
+// buttons and allow a contradictory second decision). Self-healing: an id the server has already dropped
+// is pruned from `resolvedSet` (mutated in place), so it never grows unbounded and a legitimately
+// re-issued id is not hidden forever. Pure aside from the intended set pruning.
+export function reconcilePendingPermissions(serverPending, resolvedSet) {
+  const list = Array.isArray(serverPending) ? serverPending : []
+  const serverIds = new Set(list.map(req => req && req.id))
+  for (const rid of [...resolvedSet]) if (!serverIds.has(rid)) resolvedSet.delete(rid)
+  return list.filter(req => req && !resolvedSet.has(req.id))
+}

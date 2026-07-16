@@ -159,16 +159,25 @@ class ConfirmPhaseMixin:
             if (not self._confirmation_snapshot_current(generations)
                     or not self._confirmation_node_current(nd.id, nd.attempt)):
                 return
-            if i >= must_confirm and max_es is not None and spent >= max_es:
-                break                                     # leaders confirmed; a resume extends the tail
-            if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result
+            if nd.confirmed_mean is not None:  # reuse a prior (crashed) attempt's result — FREE, no eval
                 # Use the REAL seed count from that attempt, not confirm_seeds — some
                 # seeds may have failed, and inflating n shrinks the SE in the variance
-                # gate, overstating significance.
+                # gate, overstating significance. Harvested BEFORE the budget break below: reusing an
+                # already-confirmed mean costs ZERO eval time, so a budget-exhausted resume must still
+                # include it in robust-winner selection (otherwise an already-confirmed lower-metric node
+                # whose confirmed mean is actually the most robust could never win, and the champion
+                # silently reverts to a less-robust, un-demoted seed-lucky leader).
                 summaries.append({"node_id": nd.id, "mean": nd.confirmed_mean,
                                   "std": nd.confirmed_std or 0.0,
                                   "n": nd.confirmed_seeds or self.confirm_seeds})
                 continue
+            # The budget cutoff applies ONLY to UNCONFIRMED tail nodes (a fresh per-seed eval costs time);
+            # every already-confirmed node is harvested for free above regardless of budget. Use `continue`,
+            # NOT `break`: a `break` would also stop harvesting already-confirmed nodes ORDERED AFTER the
+            # first unconfirmed budget-broken node (e.g. topk = [A✓, B✓, C✗(broke), D✓] would drop D's free
+            # confirmed mean) — the same wrong-champion bug this guard exists to prevent.
+            if i >= must_confirm and max_es is not None and spent >= max_es:
+                continue                                  # skip only this unconfirmed node's paid eval; a resume extends it
             # Per-seed resume (#0): reuse seeds already run in a prior (crashed) attempt instead
             # of re-executing every expensive full-profile seed. `done` maps seed -> metric|None.
             done = state.confirm_seed_results.get(nd.id, {})

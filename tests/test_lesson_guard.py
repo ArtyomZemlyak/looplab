@@ -54,11 +54,13 @@ def _run(tmp_path, lessons, *, with_failed_node=True) -> "RunState":
 
 
 def test_lesson_records_flatten(tmp_path):
-    st = _run(tmp_path, [{"statement": "a", "outcome": "o", "evidence": [63]},
+    st = _run(tmp_path, [{"statement": "a", "outcome": "o", "claim_stance": "support",
+                          "evidence": [63]},
                          {"statement": "b", "outcome": "o2", "evidence": [10]}])
     recs = _lesson_records(st)
     assert [r["statement"] for r in recs] == ["a", "b"]
     assert recs[0]["node_ids"] == [63] and recs[0]["at_node"] == 64
+    assert recs[0]["claim_stance"] == "support"
 
 
 def test_flags_the_overgeneralizing_mislesson(tmp_path):

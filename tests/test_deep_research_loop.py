@@ -189,6 +189,103 @@ def test_two_prose_stalls_fall_back_to_forced_memo():
     assert len(nudges) == 1
 
 
+def test_memo_source_ledger_redacts_secrets_controls_and_caps_text():
+    secret = "hunter2secret"
+    bearer = "abcdef0123456789ABCDEF"
+    api_key = "sk-abcdefghijklmnopqrstuvwxyz012345"
+    tools = _FakeTools(result=f"Authorization: Bearer {bearer}\x1b[31mPOISON")
+    client = _FakeChatClient([
+        _tool_call("search", {
+            "query": f"password={secret}\x00QUERY",
+            "url": f"https://token={bearer}@example.test/\x1b[2J",
+        }),
+        _tool_call("emit", {
+            "summary": f"api_key={api_key}\x1b[2J" + "x" * 10_000,
+            "recommended_directions": [f"password={secret}\x00DIR"],
+        }, call_id="c2"),
+    ])
+
+    memo = DeepResearcher(client, tools).research(RunState(goal="g"))
+    rendered = json.dumps(memo.model_dump(mode="json"), ensure_ascii=False)
+    assert secret not in rendered and bearer not in rendered and api_key not in rendered
+    assert "\x00" not in rendered and "\x1b" not in rendered
+    assert "***" in rendered and "POISON" in rendered
+    assert len(memo.summary) <= 4_000
+
+
+def test_memo_sanitizer_globally_bounds_numeric_trees_and_large_integers():
+    from looplab.agents.deep_research import sanitize_research_memo_payload
+
+    nested = [[[list(range(64)) for _ in range(20)] for _ in range(20)] for _ in range(20)]
+    short_secret = "abc"
+    clean = sanitize_research_memo_payload({
+        "proposed_ideas": [{"ａｐｉ＿ｋｅｙ": short_secret, "huge": 10**400, "tree": nested}],
+        "verification": {"tree": nested},
+        "claims": [{"statement": "bounded ids", "node_ids": [1, 10**400]}],
+        "at_node": 10**400,
+    })
+    rendered = json.dumps(clean, ensure_ascii=False)
+    assert len(rendered) < 20_000
+    assert short_secret not in rendered and '"api_key": "***"' in rendered
+    assert "original_chars=401" in rendered
+    assert clean["claims"][0]["node_ids"] == [1] and clean["at_node"] is None
+
+
+def test_durable_memo_writer_sanitizes_before_verify_and_resanitizes_output(monkeypatch):
+    from looplab.core.models import ResearchMemo
+    from looplab.engine.orchestrator import Engine
+
+    class _Store:
+        def __init__(self):
+            self.events = []
+
+        def append(self, event_type, data):
+            self.events.append((event_type, data))
+
+        def read_all(self):
+            return []
+
+    secret = "hunter2secret"
+    memo = ResearchMemo(
+        summary=f"password={secret}\x1b[2J",
+        reasoning="r" * 100_000,
+        sources=[{"title": f"token={secret}\x00", "url": "https://u:p@example.test",
+                  "snippet": f"api_key={secret}"}],
+        claims=[{"statement": f"password={secret}", "node_ids": [],
+                 "urls": ["https://u:p@example.test"]}],
+        recommended_directions=[f"password={secret}\x1b[31mDIRECTION"],
+        at_node=3,
+        trigger="cadence",
+    )
+    eng = Engine.__new__(Engine)
+    eng.store = _Store()
+    eng._research_verify = True
+    eng._track_hypotheses = True
+    eng.deep_researcher = None
+    observed = {}
+
+    def _verify(clean_memo, *_args, **_kwargs):
+        observed["memo"] = json.loads(json.dumps(clean_memo))
+        return {"method": "llm", "unsupported": 0, "verdicts": [
+            {"statement": "ok", "verdict": "supported",
+             "note": f"password={secret}\x1b[31m"},
+        ]}
+
+    import looplab.trust.verify as verify_mod
+    monkeypatch.setattr(verify_mod, "verify_memo", _verify)
+
+    eng._record_deep_research(memo, trigger="cadence", manual=False)
+
+    assert secret not in json.dumps(observed["memo"], ensure_ascii=False)
+    rendered = json.dumps(eng.store.events, ensure_ascii=False)
+    assert secret not in rendered and "https://u:p@" not in rendered
+    assert "\x00" not in rendered and "\x1b" not in rendered
+    assert "***" in rendered and "DIRECTION" in rendered
+    assert [event_type for event_type, _ in eng.store.events] == [
+        "research_completed", "hint", "hypothesis_added"]
+    assert len(json.dumps(eng.store.events[0][1]["memo"])) < 70_000
+
+
 # --- concurrent deep research records IMMEDIATELY when it finishes, independent of the eval + of max_parallel
 def test_spawn_research_records_immediately_via_its_own_task():
     """`_spawn_research` records the memo from the RESEARCH task the moment it finishes — decoupled

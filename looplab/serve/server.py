@@ -20,8 +20,10 @@ the `looplab.server.make_llm_client` monkeypatch point keep working).
 from __future__ import annotations
 
 import hmac
+import json
 import logging
 import os
+import re
 import subprocess  # noqa: F401 — kept as a module attribute: tests patch `looplab.server.subprocess.Popen`
 from pathlib import Path
 from typing import Optional
@@ -49,12 +51,13 @@ _log = logging.getLogger("looplab.server")
 try:
     from fastapi import FastAPI, Request
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.middleware.gzip import GZipMiddleware
     from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 except ModuleNotFoundError as e:  # allow importing pure re-exports without the [ui] extra
     if e.name != "fastapi":
         raise
-    FastAPI = Request = CORSMiddleware = FileResponse = HTMLResponse = JSONResponse = StaticFiles = None  # type: ignore[assignment,misc]
+    FastAPI = Request = CORSMiddleware = GZipMiddleware = FileResponse = HTMLResponse = JSONResponse = StaticFiles = None  # type: ignore[assignment,misc]
 
 # Historical `looplab.server.<name>` import paths for the boss/genesis models + mappers (tests and
 # operator tooling import these from here; the definitions moved with their routes).
@@ -73,6 +76,99 @@ def _ui_dist() -> Path:
     return ui_dist_dir()
 
 
+_IMMUTABLE_ASSET_CACHE = "public, max-age=31536000, immutable"
+_REVALIDATE_ASSET_CACHE = "no-cache"
+_CONTENT_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8,}\.[^/]+$")
+
+
+def _is_live_sse_path(path: str) -> bool:
+    """The two streaming routes that must bypass compression on every supported Starlette version."""
+    parts = str(path or "").strip("/").split("/")
+    # Match an exact route suffix so deployments that leave a proxy/root-path prefix in
+    # ``scope["path"]`` retain the same no-buffering contract without accepting lookalike routes.
+    return ((len(parts) >= 4 and parts[-4:-2] == ["api", "runs"] and parts[-1] == "events")
+            or (len(parts) >= 5 and parts[-5:-2] == ["api", "assistant", "sessions"]
+                and parts[-1] == "message_stream"))
+
+
+class _SSESafeGZipMiddleware:
+    """Use Starlette gzip while guaranteeing known live streams never enter its responder.
+
+    Current Starlette also excludes ``text/event-stream`` by content type. The route guard keeps the
+    no-buffering invariant true on the project's older supported FastAPI/Starlette combinations too.
+    """
+
+    def __init__(self, app, *, minimum_size: int = 500, compresslevel: int = 6):
+        self.app = app
+        self.compressed = GZipMiddleware(
+            app, minimum_size=minimum_size, compresslevel=compresslevel)
+
+    async def __call__(self, scope, receive, send):
+        if scope.get("type") == "http" and _is_live_sse_path(scope.get("path", "")):
+            await self.app(scope, receive, send)
+            return
+        await self.compressed(scope, receive, send)
+
+
+def _vite_manifest_assets(directory: Path) -> set[str]:
+    """Return asset-relative paths that Vite's build manifest marks as versioned outputs."""
+    manifest_path = directory.parent / ".vite" / "manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    if not isinstance(manifest, dict):
+        return set()
+
+    assets: set[str] = set()
+    for entry in manifest.values():
+        if not isinstance(entry, dict):
+            continue
+        candidates = [entry.get("file")]
+        for key in ("css", "assets"):
+            values = entry.get(key)
+            if isinstance(values, list):
+                candidates.extend(values)
+        for candidate in candidates:
+            if not isinstance(candidate, str):
+                continue
+            normalized = candidate.replace("\\", "/")
+            while normalized.startswith("./"):
+                normalized = normalized[2:]
+            normalized = normalized.lstrip("/")
+            if normalized.startswith("assets/"):
+                relative = normalized[len("assets/"):]
+                # Manifest membership proves the file belongs to this build, but a custom Vite output
+                # can still emit a stable URL such as assets/runtime.js. A one-year immutable policy is
+                # safe only when the URL itself also carries Vite's content fingerprint.
+                if _CONTENT_HASHED_ASSET.search(relative):
+                    assets.add(relative)
+    return assets
+
+
+def _immutable_static_files(directory: Path):
+    """StaticFiles with immutable caching only for outputs named by Vite's build manifest."""
+    if StaticFiles is None:  # pragma: no cover - make_app rejects the missing UI extra first
+        raise _ui_extra_error("fastapi")
+    immutable_paths = _vite_manifest_assets(directory)
+
+    class _ImmutableStaticFiles(StaticFiles):
+        async def get_response(self, path, scope):
+            response = await super().get_response(path, scope)
+            # Preserve the policy on conditional hits too; a 304 updates the cached representation's
+            # metadata and must not silently downgrade it to heuristic browser caching.
+            if response.status_code in (200, 304):
+                normalized = str(path).replace("\\", "/").lstrip("/")
+                response.headers["Cache-Control"] = (
+                    _IMMUTABLE_ASSET_CACHE
+                    if normalized in immutable_paths
+                    else _REVALIDATE_ASSET_CACHE
+                )
+            return response
+
+    return _ImmutableStaticFiles(directory=str(directory))
+
+
 # P1-3 default-deny route scoping: when a UI token is set, EVERY /api/ request needs it (reads too,
 # not just mutations + an enumerated sensitive list — a new sensitive route that wasn't added to that
 # list used to leak; deny-default closes that whole class). The ONLY exceptions are the light,
@@ -89,14 +185,13 @@ _SAFE_UNAUTH_API = (
 
 
 def _unauth_api_ok(p: str) -> bool:
-    """Whether an /api/ path is safe to serve WITHOUT the UI token. Beyond the exact zero-model liveness
-    route, this includes the live-state SSE stream `/api/runs/<id>/events`: the browser consumes it via a
-    headerless `EventSource` that CANNOT attach `X-LoopLab-Token`, and its payload is already redacted
-    (`appstate._public_state_value`) precisely so it is safe unauthenticated. Gating it 401-loops every
-    live update and freezes the dashboard on any token-protected deployment (F3). The suffix match is
-    exact to the one SSE route (`runs.py::stream_events`); no other `/api/runs/.../events` route exists."""
+    """Whether an /api/ path is safe to serve WITHOUT the UI token.
+
+    Run-state SSE is intentionally not exempt: even its redacted projection is private portfolio state,
+    and the React client now consumes it through authenticated fetch-SSE rather than headerless
+    ``EventSource``.
+    """
     return (p in _SAFE_UNAUTH_API
-            or (p.startswith("/api/runs/") and p.endswith("/events"))
             # The share route (assistant.py::assistant_shared) is INTENTIONALLY untokened and returns
             # only the read-only, separately-redacted transcript (_shared_message / _shared_text) — so a
             # share link works for a non-token holder. Default-deny would otherwise 401 it (F21).
@@ -167,6 +262,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                ["http://localhost:5173", "http://127.0.0.1:5173"])
     app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"],
                        allow_headers=["*"])
+    # Enforce the same compressed-transfer contract the manifest bundle gate measures while keeping live
+    # EventSource and assistant token streams unbuffered across every supported Starlette version.
+    app.add_middleware(_SSESafeGZipMiddleware, minimum_size=500, compresslevel=6)
     reviews = ReviewStore(root / ".reviews")
     # Owner auth is entered through the SPA unlock gate and never embedded in public HTML.
     allowed_origins = {v for o in origins if (v := _origin_tuple(o)) is not None}
@@ -206,14 +304,13 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                 if supplied is None or (supplied != target and supplied not in allowed_origins):
                     return JSONResponse({"detail": "cross-origin mutation rejected"}, status_code=403)
         return await call_next(request)
-    # G1 server auth (review C3): when LOOPLAB_UI_TOKEN is set, require a matching X-LoopLab-Token
-    # header on every MUTATING /api/* request (GET/HEAD/OPTIONS + SSE stay open for read/stream). The
-    # SPA is served the token in a same-origin <meta> tag (see _index_response). NOTE: "same-origin"
-    # protects the token only when each principal has its OWN origin — true for the default local
-    # bind (127.0.0.1) and a per-user subdomain. On a SHARED origin (jupyter-server-proxy: every
-    # user under https://hub/user/<name>/proxy/<port>/ shares one origin) the token is a
-    # per-DEPLOYMENT secret, not per-user — see _on_shared_hub() and the deployment guide. Unset
-    # (default local single-user) -> no auth, behaviour unchanged.
+    # Owner auth: when LOOPLAB_UI_TOKEN is set, default-deny every owner API request unless it carries
+    # a matching X-LoopLab-Token; only the explicit zero-model/status and review-share
+    # exceptions above remain open. The token is never embedded in HTML: the owner enters it through
+    # the SPA unlock gate and it remains in that tab's sessionStorage. NOTE: a shared origin (notably
+    # jupyter-server-proxy paths under one host) is still one browser principal, so this static token is
+    # a per-DEPLOYMENT credential rather than user identity or RBAC. See the deployment guide. Unset
+    # (the default local single-user mode) leaves the API unauthenticated, preserving existing behavior.
     ui_token = os.environ.get("LOOPLAB_UI_TOKEN")
 
     def _owner_authenticated(request: "Request") -> bool:
@@ -438,7 +535,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         })
 
     if dist.exists():
-        app.mount("/assets", StaticFiles(directory=str(dist / "assets")), name="assets")
+        app.mount("/assets", _immutable_static_files(dist / "assets"), name="assets")
 
         @app.get("/")
         def index(request: Request):

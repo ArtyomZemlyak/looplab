@@ -7,6 +7,9 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
+from contextlib import contextmanager
+from pathlib import Path
 from typing import Optional
 
 from looplab.core.atomicio import atomic_write_text
@@ -34,10 +37,29 @@ class SettingsStore:
     def __init__(self, root):
         self._ui_settings_path = root / "ui_settings.json"
         self._secrets_path = root / "secrets.json"
+        # Atomic rename keeps one write whole, but a PUT is a larger read/merge/validate/write
+        # transaction. Serialize that complete transaction within this server process too.
+        self._ui_settings_lock = threading.Lock()
+
+    @contextmanager
+    def ui_settings_transaction(self):
+        """Serialize one complete UI-settings read/modify/write transaction.
+
+        The sibling file lock extends the local mutex guarantee to multiple server processes.
+        Locking is required: a filesystem without advisory-lock support fails closed instead of
+        silently reintroducing lost updates.
+        """
+        from looplab.events.eventstore import _interprocess_lock
+
+        lock_path = Path(str(self._ui_settings_path) + ".lock")
+        with self._ui_settings_lock, _interprocess_lock(lock_path, required=True):
+            yield
 
     def load_ui_settings(self) -> dict:
         try:
             d = json.loads(self._ui_settings_path.read_text(encoding="utf-8"))
+            if not isinstance(d, dict):
+                return {}
             return {k: v for k, v in d.items() if k in _ALLOWED_FIELDS and k not in _SECRET_FIELDS}
         except (OSError, json.JSONDecodeError):
             return {}
@@ -45,6 +67,8 @@ class SettingsStore:
     def load_secrets(self) -> dict:
         try:
             d = json.loads(self._secrets_path.read_text(encoding="utf-8"))
+            if not isinstance(d, dict):
+                return {}
             return {k: v for k, v in d.items() if k in _SECRET_ENV and isinstance(v, str) and v}
         except (OSError, json.JSONDecodeError):
             return {}

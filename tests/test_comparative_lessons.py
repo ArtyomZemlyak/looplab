@@ -186,6 +186,7 @@ def test_comparative_offline_fallback_lessons(tmp_path):
     st = _state([
         _node(0, metric=9.0, op="draft", params={"x": 1.0, "y": 0.0}),
         _node(1, metric=4.0, parent_ids=[0], params={"x": 3.0, "y": 0.0}),
+        _node(4, metric=10.0, parent_ids=[0], params={"x": 4.0, "y": 0.0}),
         _node(2, status=NodeStatus.failed, metric=None, error_reason="timeout", op="draft"),
         _node(3, metric=7.0, parent_ids=[2], op="debug", rationale="cut the loop count"),
     ])
@@ -194,10 +195,13 @@ def test_comparative_offline_fallback_lessons(tmp_path):
     by_pair = {tuple(lz["evidence"]): lz for lz in lessons}
     solu = by_pair[(1, 0)]
     assert solu["source"] == "comparative" and solu["outcome"] == "supported"
+    assert solu["claim_stance"] == "support"
     assert "x" in solu["statement"] and solu["evidence"] == [1, 0]
     assert solu["run_id"] == "run_me" and solu["delta"] == 5.0
     debug = by_pair[(3, 2)]
     assert "timeout" in debug["statement"] and "cut the loop count" in debug["statement"]
+    regression = by_pair[(4, 0)]
+    assert regression["outcome"] == "failed" and regression["claim_stance"] == "support"
 
 
 def test_comparative_llm_path_prompt_and_attribution(tmp_path, monkeypatch):
@@ -213,6 +217,7 @@ def test_comparative_llm_path_prompt_and_attribution(tmp_path, monkeypatch):
     assert len(pairs) == 1 and len(lessons) == 1
     assert lessons[0]["statement"] == "moving x toward the optimum reduces the loss"
     assert lessons[0]["outcome"] == "supported" and lessons[0]["evidence"] == [1, 0]
+    assert lessons[0]["claim_stance"] == "support"
     prompt = fake.prompts[0]
     assert "Assign CREDIT" in prompt and "P1" in prompt
     assert "-x = 1" in prompt and "+x = 3" in prompt              # code diff is the evidence
@@ -230,6 +235,20 @@ def test_comparative_llm_unattributed_line_not_miscredited(tmp_path, monkeypatch
     lessons, _ = eng._comparative_lessons(st, [])
     assert len(lessons) == 1
     assert lessons[0]["evidence"] == [] and lessons[0]["delta"] is None
+
+
+def test_comparative_bad_and_untagged_conclusions_have_literal_stance(tmp_path, monkeypatch):
+    eng = _engine(tmp_path, reflection_priors=True, memory_dir=str(tmp_path / "mem"),
+                  comparative_lessons=True)
+    st = _state([_node(0, metric=9.0, op="draft", params={"x": 1.0}),
+                 _node(1, metric=10.0, parent_ids=[0], params={"x": 3.0})])
+    fake = FakeClient(
+        "P1 [BAD] increasing x regressed validation quality\n"
+        "an untagged general observation about optimization behavior\n")
+    monkeypatch.setattr(eng, "_reflect_client", lambda: fake)
+    lessons, _ = eng._comparative_lessons(st, [])
+    assert lessons[0]["outcome"] == "failed" and lessons[0]["claim_stance"] == "support"
+    assert lessons[1]["outcome"] == "noted" and lessons[1]["claim_stance"] == "neutral"
 
 
 def test_comparative_llm_error_writes_no_templated_lesson(tmp_path, monkeypatch):
@@ -277,10 +296,13 @@ def test_run_end_writes_comparative_rows_and_records_spent_pairs(tmp_path):
     for r in comp:
         assert r.get("fingerprint") and len(r.get("evidence") or []) == 2
         assert r.get("outcome") in ("supported", "failed", "noted")
+        assert r.get("claim_stance") in ("support", "neutral")
     # run-end spends are event-recorded too, so a REOPENED run can't re-distill these pairs
     final = fold(eng.store.read_all())
     end_events = [d for d in final.lessons_distilled if d.get("trigger") == "run_end"]
     assert end_events and end_events[0]["pairs"]
+    assert all(lz.get("claim_stance") in ("support", "neutral")
+               for event in end_events for lz in event.get("lessons", []))
 
 
 def test_run_end_emits_reflection_note(tmp_path):
@@ -293,6 +315,7 @@ def test_run_end_emits_reflection_note(tmp_path):
     d = notes[0].data
     assert d["task_id"] == "toy_quadratic"
     assert "n_lessons" in d and "n_skills" in d and isinstance(d["lessons"], list)
+    assert all("claim_stance" in lesson for lesson in d["lessons"])
 
 
 def test_no_reflection_note_when_reflection_off(tmp_path):

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, fmt, fmtInt, CONTROL } from './util.js'
+import { get, fmt, fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
 import MemoCard from './MemoCard.jsx'
@@ -7,6 +7,8 @@ import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import { reportStepIdentity } from './trustSemantics.js'
 import { DataTable } from './accessibility.jsx'
+import { normalizeResearchMemos } from './researchMemoModel.js'
+import { normalizeRunReport } from './reportModel.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -17,6 +19,7 @@ const OUTCOME_LABEL = { improved: '▲ improved', flat: '— flat', regressed: '
 // with inline caveat chips that deep-link to the explaining panel.
 function VerdictBanner({ v, rep, onOpenPanel }) {
   const cls = TRUST_CLASS[v.trust] || 'warn'
+  const narrative = rep?.verdict || rep?.summary
   return (
     <div className={'verdict-banner ' + cls}>
       <div className="verdict-row">
@@ -25,7 +28,7 @@ function VerdictBanner({ v, rep, onOpenPanel }) {
         <span className="pill verdict-trust-label">{TRUST_LABEL[v.trust] || v.trust}</span>
       </div>
       <div className="verdict-headline">{rep?.headline || v.headline}</div>
-      {rep?.verdict && <div className="verdict-text"><Markdown text={rep.verdict} /></div>}
+      {narrative && <div className="verdict-text"><Markdown text={narrative} /></div>}
       {v.caveats.length > 0 && <div className="caveat-chips">
         {v.caveats.map((c, i) => <button key={i} className={'caveat-chip ' + c.severity}
           disabled={!onOpenPanel} title={onOpenPanel ? `see ${c.panel} →` : 'Unavailable in historical mode'}
@@ -65,12 +68,13 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
   const v = useMemo(() => verdict(state, a), [state, a])
-  const rep = state.report || null
+  const rep = useMemo(() => normalizeRunReport(state.report), [state.report])
   const imp = useMemo(() => hyperImportance(state).slice(0, 6), [state])
-  const memos = state.research || []
+  const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
+  const memos = memoProjection.memos
   const [bestCodeResource, setBestCodeResource] = useState({ status: 'idle', data: null, error: null })
   const [bestCodeNonce, setBestCodeNonce] = useState(0)
-  const [openMemo, setOpenMemo] = useState(memos.length ? memos.length - 1 : null)
+  const [openMemo, setOpenMemo] = useState(memos.length ? memos[memos.length - 1].sourceIndex : null)
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const lastAt = useRef(rep?.at_node)
@@ -84,7 +88,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     const at = readOnly && historySeq != null
       ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
       : ''
-    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${best.id}${at}`)
+    get(runNodeApiPath(runId, best.id, at))
       .then(data => { if (alive) setBestCodeResource({ status: 'ready', data, error: null }) })
       .catch(() => { if (alive) setBestCodeResource({ status: 'error', data: null, error: 'The node detail request failed.' }) })
     return () => { alive = false }
@@ -136,11 +140,11 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
           ? 'Read-only review · report refresh disabled'
           : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
         <span className="muted report-fresh">{rep
-          ? `agent report @ ${rep.at_node} nodes${rep.trigger ? ` · ${rep.trigger}` : ''}`
+          ? `agent report @ ${rep.at_node ?? 'unknown'} nodes${rep.trigger ? ` · ${rep.trigger}` : ''}`
           : 'deterministic report (no agent narrative yet)'}</span>
         <span className="spacer" style={{ flex: 1 }} />
         <button className="btn sm" onClick={() => window.print()}><OpIcon name="printer" size={12} /> Print / PDF</button>
-        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown(state, best), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
+        <button className="btn sm" onClick={() => dl(`${state.run_id}_report.md`, toMarkdown({ ...state, report: rep }, best), 'text/markdown')}><OpIcon name="download" size={12} /> Markdown</button>
         {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
       </div>
@@ -196,7 +200,11 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
               <td className="muted">{row.r >= 0 ? '+' : ''}{fmt(row.r, 3)}</td><td className="muted">{row.n}</td></tr>)}
           </tbody></table></DataTable></>}
         {memos.length > 0 && <div style={{ marginTop: 8 }}>
-          {memos.map((m, i) => <MemoCard key={i} memo={m} idx={i} open={openMemo === i} onToggle={(k) => setOpenMemo(o => o === k ? null : k)} />)}
+          {memoProjection.omitted > 0 && <div className="muted">
+            Showing the latest {memos.length} of {memoProjection.total} research memos; older, malformed, or over-budget entries are omitted.
+          </div>}
+          {memos.map(m => <MemoCard key={m.sourceIndex} memo={m} idx={m.sourceIndex}
+            open={openMemo === m.sourceIndex} onToggle={(key) => setOpenMemo(current => current === key ? null : key)} />)}
         </div>}
       </> : null}
 

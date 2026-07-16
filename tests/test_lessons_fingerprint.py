@@ -14,13 +14,67 @@ import pytest
 import orjson
 
 from looplab.engine.memory import fingerprint_similarity, task_fingerprint
+from looplab.engine.lessons import LessonMemory
 from looplab.engine.orchestrator import Engine
+from looplab.events.eventstore import read_jsonl_lenient
 from looplab.search.policy import GreedyTree
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
+
+
+def test_lesson_append_after_torn_tail_keeps_new_record_readable(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    path = mem / "lessons.jsonl"
+    path.write_bytes(b'{"crashed":')
+
+    class _Engine:
+        memory_dir = str(mem)
+
+    LessonMemory(_Engine()).append_lessons(
+        [{"statement": "new durable lesson", "outcome": "supported"}], hygiene=False)
+
+    assert read_jsonl_lenient(path) == [
+        {"statement": "new durable lesson", "outcome": "supported"}
+    ]
+
+
+def test_reflection_note_after_torn_tail_keeps_new_record_readable(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    path = mem / "meta_notes.jsonl"
+    path.write_bytes(b'{"crashed":')
+    task = ToyTask.load(TASK)
+    researcher, developer = task.build_roles()
+    eng = Engine(
+        tmp_path / "run",
+        task=task,
+        researcher=researcher,
+        developer=developer,
+        sandbox=SubprocessSandbox(),
+        policy=GreedyTree(n_seeds=1, max_nodes=1),
+        reflection_priors=True,
+        memory_dir=str(mem),
+    )
+    eng.store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": ""},
+    })
+    eng.store.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    eng.store.append("run_finished", {"reason": "done", "finalization_required": True})
+    eng._causal_meta_note = lambda *_args: "new durable note"  # type: ignore[method-assign]
+    eng._reflect_lessons = lambda *_args: []  # type: ignore[method-assign]
+    eng._comparative_lessons_on = False
+
+    from looplab.events.replay import fold
+    eng._write_reflection_note(fold(eng.store.read_all()))
+
+    rows = read_jsonl_lenient(path)
+    assert len(rows) == 1
+    assert rows[0]["note"] == "new durable note"
 
 
 def test_fingerprint_similar_beats_different():

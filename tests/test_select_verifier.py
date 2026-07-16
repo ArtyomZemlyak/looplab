@@ -132,6 +132,54 @@ def test_verifier_score_tracks_confirm_and_holdout_evidence_revision(tmp_path):
     assert fold(s.read_all()).nodes[0].verifier_score is None
 
 
+@pytest.mark.parametrize("new_evidence", ["confirmation", "holdout"])
+def test_digestless_legacy_score_cannot_return_after_revisioned_evidence(tmp_path, new_evidence):
+    s = _run(tmp_path, "max", select_verifier=True)
+    _add(s, 0, 0.9)
+    # Digestless legacy rows remain readable while the score refers only to the raw metric.
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.7})
+    assert fold(s.read_all()).nodes[0].verifier_score == 0.7
+
+    if new_evidence == "confirmation":
+        s.append("node_confirmed", {"node_id": 0, "generation": 0,
+                                    "mean": 0.88, "std": 0.01, "seeds": 3})
+    else:
+        s.append("holdout_evaluated", {"node_id": 0, "generation": 0,
+                                        "search_epoch": 0, "metric": 0.84})
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+
+    # A late pre-revision legacy result must not restore the invalidated score.  Modern producers can
+    # still publish a score by binding it to the current evidence digest.
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.99})
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+
+
+@pytest.mark.parametrize("invalid_field", [
+    {"mean": float("nan")},
+    {"std": float("inf")},
+    {"std": -0.01},
+    {"seeds": 0},
+    {"seeds": True},
+    {"seeds": "3"},
+])
+def test_malformed_confirmation_cannot_overwrite_valid_evidence(tmp_path, invalid_field):
+    s = _run(tmp_path, "max", select_verifier=True)
+    _add(s, 0, 0.9)
+    s.append("node_confirmed", {"node_id": 0, "generation": 0,
+                                "mean": 0.88, "std": 0.02, "seeds": 3})
+    confirmed = fold(s.read_all())
+    digest = verifier_evidence_digest(confirmed.direction, confirmed.nodes[0])
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.81,
+                               "evidence_digest": digest})
+
+    malformed = {"node_id": 0, "generation": 0, "mean": 0.70, "std": 0.01, "seeds": 5}
+    malformed.update(invalid_field)
+    s.append("node_confirmed", malformed)
+    node = fold(s.read_all()).nodes[0]
+    assert (node.confirmed_mean, node.confirmed_std, node.confirmed_seeds) == (0.88, 0.02, 3)
+    assert node.verifier_score == 0.81
+
+
 def test_old_logs_default_off(tmp_path):
     s = _run(tmp_path)                                                     # no select_verifier key
     _add(s, 0, 0.9)
@@ -224,8 +272,13 @@ def test_holdout_override_breaks_tie_by_verifier(tmp_path):
     _add(s, 1, 0.90)                     # the mean pick alone would prefer #1 (higher search metric)
     _holdout(s, 0, 0.80)
     _holdout(s, 1, 0.80)                 # ...but they TIE on the holdout metric
-    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.9})   # #0 sounder
-    s.append("node_verified", {"node_id": 1, "generation": 0, "score": 0.2})
+    evidence = fold(s.read_all())
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.9,
+                               "evidence_digest": verifier_evidence_digest(
+                                   evidence.direction, evidence.nodes[0])})   # #0 sounder
+    s.append("node_verified", {"node_id": 1, "generation": 0, "score": 0.2,
+                               "evidence_digest": verifier_evidence_digest(
+                                   evidence.direction, evidence.nodes[1])})
     assert fold(s.read_all()).best_node_id == 0     # holdout override breaks the 0.80 tie by soundness
 
 
@@ -396,6 +449,23 @@ def test_non_significant_confirm_does_not_erase_best_ci(tmp_path):
     st.verifier_ci_tie = False
     _select_best(st, set(), best_confirmed=0, best_confirmed_significant=False)
     assert st.best_node_id == 0
+
+
+def test_best_confirmed_rejects_non_boolean_significance_atomically(tmp_path):
+    s = _run(tmp_path, "min")
+    _add(s, 0, 2.0)
+    _add(s, 1, 1.0)
+    # Truthy string "false" used to close the confirmation gate and override the raw winner with #0.
+    s.append("best_confirmed", {"node_id": 0, "significant": "false"})
+    rejected = fold(s.read_all())
+    assert rejected.confirmed_done is False
+    assert rejected.best_node_id == 1
+
+    # Missing `significant` is the explicitly supported legacy form and still defaults to True.
+    s.append("best_confirmed", {"node_id": 0})
+    legacy = fold(s.read_all())
+    assert legacy.confirmed_done is True
+    assert legacy.best_node_id == 0
 
 
 def test_metric_tie_groups_includes_holdout_ties_when_holdout_select(tmp_path):
@@ -589,6 +659,23 @@ def test_maybe_verify_ties_noop_when_off(tmp_path):
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     _Host(s, select_verifier=True, client=_VClient())._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
+
+
+def test_maybe_verify_ties_unknown_recorded_contract_fails_before_paid_calls(tmp_path):
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max",
+                             "select_verifier": True, "select_verifier_samples": 1,
+                             "select_verifier_contract": "selection-criteria:v999"})
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    client = _VClient()
+    host = _Host(s, client=client, samples=1)
+
+    # Repeated cadence invocations must remain a true no-op: no client traffic and no rejected audit rows.
+    host._maybe_verify_ties(fold(s.read_all()))
+    host._maybe_verify_ties(fold(s.read_all()))
+    assert client.calls == 0
     assert not any(e.type == "verifier_group_scored" for e in s.read_all())
 
 

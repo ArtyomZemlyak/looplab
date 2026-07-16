@@ -187,6 +187,19 @@ def test_incremental_rejects_old_or_different_projector_cache(tmp_path):
     assert build_index_incremental(root, prior=wrong_projector)["receipts"]["built"] == ["ra"]
 
 
+def test_incremental_rejects_corrupted_cached_facts(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    current = build_index_incremental(root)
+    tampered = orjson.loads(orjson.dumps(current))
+    tampered["runs"]["ra"]["facts"]["run_id"] = "CACHE-INJECTED-RUN"
+
+    rebuilt = build_index_incremental(root, prior=tampered)
+
+    assert rebuilt["receipts"]["built"] == ["ra"] and rebuilt["receipts"]["cached"] == []
+    assert [row["run_id"] for row in rebuilt["index"]] == ["ra"]
+
+
 def test_incremental_matches_full_rebuild(tmp_path):
     root = tmp_path / "runs"
     _make_run_dir(root, "rb", "t2", "goal two", "min", "rmse", [(0, {"a": 1.0}, 0.5)])
@@ -203,6 +216,38 @@ def test_torn_run_becomes_a_skip_receipt_not_a_gap(tmp_path):
     res = build_index_incremental(root)
     assert [f["run_id"] for f in res["index"]] == ["ok"]                # the good run still indexes
     assert any(s["dir"] == "bad" for s in res["receipts"]["skipped"])   # the torn run is REPORTED, not silent
+
+
+def test_valid_prefix_with_a_corrupt_complete_record_is_skipped(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "damaged", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    with open(root / "damaged" / "events.jsonl", "ab") as f:
+        f.write(b"{not-json}\n")
+
+    result = build_index_incremental(root)
+
+    assert result["index"] == [] and result["receipts"]["built"] == []
+    assert any(row["dir"] == "damaged" and "corrupt complete event record" in row["reason"]
+               for row in result["receipts"]["skipped"])
+
+
+def test_unreadable_digest_skips_only_that_run(tmp_path, monkeypatch):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "good", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    _make_run_dir(root, "blocked", "t2", "goal", "max", "recall", [(0, {"a": 2.0}, 0.7)])
+    blocked_log = root / "blocked" / "events.jsonl"
+    original_open = Path.open
+
+    def selective_open(path, *args, **kwargs):
+        if path == blocked_log and args and "r" in str(args[0]):
+            raise PermissionError("simulated unreadable run")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", selective_open)
+    result = build_index_incremental(root)
+    assert [row["run_id"] for row in result["index"]] == ["good"]
+    assert any(row["dir"] == "blocked" and "PermissionError" in row["reason"]
+               for row in result["receipts"]["skipped"])
 
 
 def test_save_and_load_index_round_trip(tmp_path):
@@ -224,6 +269,14 @@ def test_load_index_rejects_pre_contract_cache(tmp_path):
     cache = tmp_path / "old-index.json"
     cache.write_bytes(orjson.dumps({"v": 1, "runs": {}}))
     assert load_index(cache) is None
+
+
+def test_load_index_rejects_stale_schema_version(tmp_path):
+    # mega-review regression: a cache written under a different schema version must force a clean rebuild.
+    import orjson as _oj
+    p = tmp_path / "idx.json"
+    p.write_bytes(_oj.dumps({"v": 999, "runs": {"ra": {"digest": "s_x", "facts": {"run_id": "ra"}}}}))
+    assert load_index(p) is None                     # incompatible version -> None (forces full rebuild)
 
 
 def test_cli_cross_run_index_incremental(tmp_path):

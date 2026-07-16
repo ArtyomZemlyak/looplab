@@ -21,13 +21,17 @@ export default defineConfig({
     chunkSizeWarningLimit: 500,
     rollupOptions: {
       output: {
-        onlyExplicitManualChunks: true,
         // Keep the only deliberate vendor split tied to the graph interaction boundary. React and
-        // every other dependency remain under Rollup's graph-driven sharing; broad vendor buckets
-        // would make lightweight routes download code they never execute.
-        manualChunks(id) {
-          if (/[/\\]node_modules[/\\]@xyflow[/\\]/.test(id)) return 'vendor-flow'
-          return undefined
+        // every other dependency remain under Rolldown's graph-driven sharing; broad vendor buckets
+        // would make lightweight routes download code they never execute. Capturing dependencies
+        // recursively would pull React into this graph-only chunk and make every route load it.
+        strictExecutionOrder: true,
+        codeSplitting: {
+          groups: [{
+            name: 'vendor-flow',
+            test: /[/\\]node_modules[/\\]@xyflow[/\\]/,
+            includeDependenciesRecursively: false,
+          }],
         },
       },
     },

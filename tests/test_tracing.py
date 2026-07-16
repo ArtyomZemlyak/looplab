@@ -32,7 +32,7 @@ def test_nesting_and_trace_ids(tmp_path):
             ctid, csid = current_ids()
             assert ctid == ptid                       # same trace
             assert csid != psid                       # distinct span
-    recs = [orjson.loads(l) for l in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    recs = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
     by_name = {r["name"]: r for r in recs}
     assert by_name["child"]["parent_id"] == by_name["parent"]["span_id"]
     assert by_name["child"]["trace_id"] == by_name["parent"]["trace_id"]
@@ -52,7 +52,7 @@ def test_generation_and_tool_are_first_class_observations(tmp_path):
             g.output("hey").usage({"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}).cost(0.0)
         with tracing.tool("kb_search", {"q": "x"}) as to:
             to.output("(3 hits)")
-    recs = [orjson.loads(l) for l in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    recs = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
     by = {r["name"]: r for r in recs}
     assert by["generation"]["kind"] == "generation" and by["tool"]["kind"] == "tool"
     assert by["generation"]["parent_id"] == by["propose"]["span_id"]          # nested under the op
@@ -73,6 +73,84 @@ def test_generation_noop_without_active_tracer():
         to.output("r")
 
 
+def test_generation_tool_calls_follow_capture_and_redaction_boundary(tmp_path):
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    secret = "abc"
+    try:
+        t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+        tracing.set_llm_capture(False)
+        with t.span("off-root", new_trace=True):
+            with tracing.generation(op="capture-off", model="m") as g:
+                g.tool_calls([{"name": "fetch", "arguments": "api_key=" + secret}])
+
+        tracing.set_llm_capture(True)
+        with t.span("on-root", new_trace=True):
+            with tracing.generation(op="capture-on", model="m") as g:
+                g.tool_calls([
+                    {"name": "fetch", "arguments": "api_key=" + secret + "\x1b[2J" + "x" * 40_000}
+                    for _ in range(40)
+                ])
+
+        recs = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+        generations = {rec["attributes"]["op"]: rec["attributes"]
+                       for rec in recs if rec["name"] == "generation"}
+        assert "tool_calls" not in generations["capture-off"]
+        captured = generations["capture-on"]["tool_calls"]
+        persisted = orjson.dumps(captured).decode()
+        assert captured[0]["name"] == "fetch"
+        assert secret not in persisted and "\x1b" not in persisted and "***" in persisted
+        assert len(captured) <= 32 and len(orjson.dumps(captured)) <= 65_000
+    finally:
+        tracing.set_llm_capture(saved)
+
+
+def test_tool_trace_structured_input_masks_secret_keys_and_bounds_shape(tmp_path):
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    tracing.set_llm_capture(True)
+    try:
+        path = tmp_path / "s.jsonl"
+        tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+        with tracer.span("root", new_trace=True):
+            with tracing.tool("fetch\nunsafe", {
+                "password": "abc", "nested": {"api_key": "xyz"}, "safe": "ok",
+                "items": list(range(100)),
+            }):
+                pass
+        records = [orjson.loads(line) for line in path.read_bytes().splitlines()]
+        attrs = next(record["attributes"] for record in records if record["kind"] == "tool")
+        assert attrs["tool"] == "fetch unsafe"
+        assert attrs["input"]["password"] == "***"
+        assert attrs["input"]["nested"]["api_key"] == "***"
+        assert attrs["input"]["safe"] == "ok" and len(attrs["input"]["items"]) == 64
+        persisted = path.read_text(encoding="utf-8")
+        assert '"abc"' not in persisted and '"xyz"' not in persisted
+    finally:
+        tracing.set_llm_capture(saved)
+
+
+def test_trace_sanitizer_has_a_global_tree_item_budget():
+    from looplab.core.tracing import sanitize_trace_value
+
+    # A per-container cap alone still permits exponential 64**depth expansion.  The durable preview
+    # must retain only a globally bounded prefix even when every child is another numeric container
+    # (numeric leaves consume no character budget).
+    nested = [[[list(range(64)) for _ in range(20)] for _ in range(20)] for _ in range(20)]
+    clean = sanitize_trace_value(nested)
+
+    def count_items(value):
+        if isinstance(value, dict):
+            return len(value) + sum(count_items(child) for child in value.values())
+        if isinstance(value, list):
+            return len(value) + sum(count_items(child) for child in value)
+        return 0
+
+    assert count_items(clean) <= 256
+
+
 def test_tool_trace_preview_redacts_structured_and_free_text_secrets():
     structured = _trace_preview({
         "api_key": "sk-abcdefghijklmnopqrstuvwxyz012345",
@@ -90,6 +168,64 @@ def test_tool_trace_preview_is_bounded_and_hashes_only_redacted_rendering():
     assert len(preview) <= 180
     assert token not in preview
     assert "original_chars=" in preview and "sha256=" in preview
+    assert len(_trace_preview("x" * 100, cap=12)) == 12
+
+
+def test_tool_trace_preview_does_not_retry_a_broken_string_conversion():
+    class Broken:
+        def __str__(self):
+            raise RuntimeError("do not perturb execution")
+
+    assert _trace_preview(Broken()) == "<trace preview unavailable>"
+
+
+def test_generation_trace_redacts_replayed_tool_content_and_controls(tmp_path):
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    tracing.set_llm_capture(True)
+    try:
+        secret = "hunter2secret"
+        bearer = "abcdef0123456789ABCDEF"
+        t = Tracer(JsonlSpanExporter(tmp_path / "s.jsonl"), run_id="r")
+        with t.span("deep_research", new_trace=True):
+            with tracing.generation(
+                    op="chat", model="m",
+                    messages=[{"role": "tool", "content":
+                               f"password={secret}\x00 Authorization: Bearer {bearer}\x1b[2J"}]) as g:
+                g.output(f"api_key={secret}\x1b[31m" + "x" * 70_000)
+        recs = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+        attrs = next(rec["attributes"] for rec in recs if rec["name"] == "generation")
+        prompt = attrs["input"][0]["content"]
+        output = attrs["output"]
+        assert secret not in prompt + output and bearer not in prompt + output
+        assert "\x00" not in prompt + output and "\x1b" not in prompt + output
+        assert "***" in prompt + output
+        assert len(output) <= 64_000 and "sha256=" in output
+    finally:
+        tracing.set_llm_capture(saved)
+
+
+def test_generation_trace_bounds_the_whole_replayed_conversation(tmp_path):
+    from looplab.core import tracing
+
+    saved = tracing._CAPTURE_LLM_IO
+    tracing.set_llm_capture(True)
+    try:
+        messages = [{"role": "tool", "content": f"old-{i}-" + "x" * 2_000}
+                    for i in range(100)]
+        path = tmp_path / "s.jsonl"
+        tracer = Tracer(JsonlSpanExporter(path), run_id="r")
+        with tracer.span("root", new_trace=True):
+            with tracing.generation(op="chat", model="m", messages=messages):
+                pass
+        attrs = next(orjson.loads(line)["attributes"] for line in path.read_bytes().splitlines()
+                     if orjson.loads(line)["name"] == "generation")
+        persisted = orjson.dumps(attrs["input"])
+        assert len(attrs["input"]) <= 64 and len(persisted) < 66_000
+        assert "old-99-" in persisted.decode() and "old-0-" not in persisted.decode()
+    finally:
+        tracing.set_llm_capture(saved)
 
 
 def test_new_trace_starts_fresh_trace(tmp_path):
@@ -98,7 +234,7 @@ def test_new_trace_starts_fresh_trace(tmp_path):
         pass
     with t.span("b", new_trace=True):
         pass
-    recs = [orjson.loads(l) for l in (tmp_path / "s.jsonl").read_bytes().splitlines()]
+    recs = [orjson.loads(line) for line in (tmp_path / "s.jsonl").read_bytes().splitlines()]
     assert recs[0]["trace_id"] != recs[1]["trace_id"] and recs[0]["parent_id"] is None
 
 
@@ -110,6 +246,23 @@ def test_exception_marks_span_error_and_reraises(tmp_path):
     rec = orjson.loads((tmp_path / "s.jsonl").read_bytes().splitlines()[0])
     assert rec["status"] == "ERROR"
     assert any(e.get("name") == "exception" for e in rec["events"])
+
+
+def test_exception_and_observation_errors_redact_secrets_before_jsonl(tmp_path):
+    from looplab.core import tracing
+
+    secret = "abcdef0123456789ABCDEF0123456789"
+    path = tmp_path / "s.jsonl"
+    tracer = Tracer(JsonlSpanExporter(path))
+    with pytest.raises(RuntimeError):
+        with tracer.span("provider", new_trace=True):
+            raise RuntimeError(f"Authorization: Bearer {secret}")
+    with tracer.span("tool-parent", new_trace=True):
+        with tracing.tool("provider-call") as observation:
+            observation.error(f"api_key={secret}")
+    persisted = path.read_text(encoding="utf-8")
+    assert secret not in persisted
+    assert "Authorization: Bearer" in persisted or "redact" in persisted.lower() or "***" in persisted
 
 
 # --------------------------- correlation: events <-> spans --------------------
@@ -126,7 +279,8 @@ def test_event_store_stamps_active_span(tmp_path):
 
 # ------------------------------ engine end-to-end -----------------------------
 def _engine(tmp_path):
-    repo = tmp_path / "repo"; repo.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
     (repo / "run.py").write_text('import json; print(json.dumps({"metric": 1.0}))\n',
                                  encoding="utf-8")
     t = RepoTask(id="tr", direction="max", editable_path=str(repo), edit_surface=["*.txt"],
@@ -231,7 +385,8 @@ def test_span_error_status(tmp_path):
 # #9 — confirm events are correlated to their span (carry a trace_id)
 def test_confirm_events_carry_trace_id(tmp_path):
     from looplab.events.eventstore import EventStore
-    repo = tmp_path / "repo"; repo.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
     (repo / "run.py").write_text('import json; print(json.dumps({"metric": 1.0}))\n',
                                  encoding="utf-8")
     t = RepoTask(id="ce", direction="max", editable_path=str(repo), edit_surface=["*.txt"],

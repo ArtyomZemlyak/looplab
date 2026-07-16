@@ -1,4 +1,4 @@
-﻿"""Observability (I14, ADR-17): full tracing that stays files-as-truth by default and bridges
+﻿"""Observability (I14, ADR-17): structured diagnostic tracing that stays files-as-truth by default and bridges
 to real OpenTelemetry when the SDK is installed.
 
 Design (see 08-tracing-architecture.md):
@@ -21,13 +21,115 @@ and survive resume, and the run-level tree is reconstructed from events, not a s
 from __future__ import annotations
 
 import contextvars
+import math
 import os
 import time
 from contextlib import contextmanager
+from itertools import islice
 from pathlib import Path
 from typing import Optional
 
 import orjson
+
+from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+
+
+_TRACE_TEXT_CAP = 64_000
+_TRACE_TOOL_CALLS_MAX = 32
+_TRACE_TOOL_ARGUMENT_CAP = 16_000
+_TRACE_MESSAGES_MAX = 64
+_TRACE_TREE_ITEMS_MAX = 64
+_TRACE_TREE_DEPTH_MAX = 5
+_TRACE_TREE_TOTAL_ITEMS_MAX = 256
+
+
+def _trace_text(value, *, cap: int = _TRACE_TEXT_CAP, single_line: bool = False) -> str:
+    """Always-safe text for JSONL and mirrored OTel diagnostics."""
+    return redact_persisted_text(
+        value, max_chars=cap, entropy=True, single_line=single_line)
+
+
+def _trace_messages(messages) -> list[dict]:
+    """Keep a globally bounded, newest-first-budgeted suffix of one replayed conversation."""
+    if not isinstance(messages, (list, tuple)):
+        return []
+    remaining = _TRACE_TEXT_CAP
+    newest: list[dict] = []
+    # A tool loop resends its whole history. Retain the most recent turns and spend the aggregate text
+    # budget from newest to oldest, rather than allowing every historical message its own 64 KiB cap.
+    for raw in reversed(messages[-_TRACE_MESSAGES_MAX:]):
+        if remaining <= 0:
+            break
+        message = raw if isinstance(raw, dict) else {"role": "user", "content": raw}
+        role = _trace_text(message.get("role", "user"), cap=min(32, remaining), single_line=True)
+        remaining = max(0, remaining - len(role))
+        content = _trace_text(_as_text(message.get("content")), cap=remaining)
+        remaining = max(0, remaining - len(content))
+        newest.append({"role": role, "content": content})
+    newest.reverse()
+    return newest
+
+
+def sanitize_trace_value(value, *, max_chars: int = _TRACE_TEXT_CAP,
+                         max_items: int = _TRACE_TREE_ITEMS_MAX,
+                         max_depth: int = _TRACE_TREE_DEPTH_MAX,
+                         max_total_items: int = _TRACE_TREE_TOTAL_ITEMS_MAX):
+    """Bound and redact an untrusted structured value while preserving a small JSON-compatible shape."""
+    remaining = [max(0, int(max_chars))]
+    total_items = [max(0, int(max_total_items))]
+    item_cap = max(0, int(max_items))
+    depth_cap = max(0, int(max_depth))
+
+    def safe_text(item, *, cap=None, single_line=False):
+        allowed = remaining[0] if cap is None else min(remaining[0], max(0, int(cap)))
+        text = _trace_text(item, cap=allowed, single_line=single_line)
+        remaining[0] = max(0, remaining[0] - len(text))
+        return text
+
+    def walk(item, depth):
+        if remaining[0] <= 0:
+            return ""
+        if item is None or isinstance(item, bool):
+            return item
+        if isinstance(item, str):
+            return safe_text(item)
+        if isinstance(item, int):
+            return item if -(1 << 63) <= item <= (1 << 63) - 1 else safe_text(item, cap=128)
+        if isinstance(item, float):
+            return item if math.isfinite(item) else safe_text(item, cap=32)
+        if depth >= depth_cap:
+            return safe_text("<depth-limited>", cap=32, single_line=True)
+        if isinstance(item, dict):
+            out = {}
+            try:
+                for key, child in islice(item.items(), item_cap):
+                    if total_items[0] <= 0:
+                        break
+                    total_items[0] -= 1
+                    safe_key = safe_text(key, cap=160, single_line=True)
+                    if not safe_key:
+                        continue
+                    if is_secret_key_name(key):
+                        out[safe_key] = "***"
+                        remaining[0] = max(0, remaining[0] - 3)
+                    else:
+                        out[safe_key] = walk(child, depth + 1)
+                    if remaining[0] <= 0:
+                        break
+                return out
+            except Exception:  # noqa: BLE001 - tracing must never perturb the operation
+                return safe_text("<mapping unavailable>", cap=64, single_line=True)
+        if isinstance(item, (list, tuple)):
+            out = []
+            for child in islice(item, item_cap):
+                if remaining[0] <= 0 or total_items[0] <= 0:
+                    break
+                total_items[0] -= 1
+                out.append(walk(child, depth + 1))
+            return out
+        return safe_text(item)
+
+    return walk(value, 0)
 
 # Active span stack (per async task / thread — contextvars are copied across anyio.to_thread
 # and task spawns, so nesting works through the worker-thread eval too).
@@ -45,7 +147,7 @@ _current_tracer: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_tracer
 # span deep inside the Developer's tool-loop is attributable to the node being built, even when the
 # tool-loop opens its spans in a long-lived trace of its own (the LLM client / agent don't nest under
 # create_node's trace). Without this, per-node trace views come back empty for the very spans a user
-# most wants to see (what the agent thought + which tools it called). Copied across task/thread spawns
+# most wants to inspect (the bounded recorded model I/O + tool calls). Copied across task/thread spawns
 # like the other contextvars, so it survives the worker-thread eval + anyio.to_thread offloads.
 _node_ctx: contextvars.ContextVar = contextvars.ContextVar("LOOPLAB_node", default=None)
 
@@ -123,8 +225,8 @@ def current_ids() -> tuple[Optional[str], Optional[str]]:
 
 # LLM I/O capture (ADR-17): off by default at import; the engine flips it on per run from
 # Settings.trace_llm_io. When on, record_llm_call attaches the prompt+completion as a span
-# event on whatever operation span is active (propose/implement/repair), so the UI sees exactly
-# what the model read and wrote — without a new transport or any change to the event log.
+# event on whatever operation span is active (propose/implement/repair), so the UI gets a bounded,
+# canonicalized and heuristically redacted diagnostic view — without a new transport or event-log change.
 _CAPTURE_LLM_IO = False
 
 
@@ -136,11 +238,11 @@ def set_llm_capture(enabled: bool) -> None:
 def record_llm_call(*, op: str, model: str, messages: list[dict], completion: str,
                     thinking: Optional[str] = None, usage: Optional[dict] = None) -> None:
     """Append an `llm_call` event to the active span record (no-op when capture is off or there
-    is no active span — e.g. an LLM call outside any traced operation). Full text by design;
-    secrets are masked upstream at the config layer, prompts/completions are task content.
+    is no active span — e.g. an LLM call outside any traced operation). Persisted text is bounded,
+    canonicalized and heuristically redacted here; it is a diagnostic representation, not an exact transcript.
 
     `completion` is the model's clean answer (the conclusion the UI surfaces). `thinking`, when
-    present, is the raw <think> chain-of-thought — stored on a SEPARATE field so the UI can keep
+    present, is the provider-returned reasoning after the same sanitizer — stored separately so the UI can keep
     it as a collapsed debug-only disclosure rather than the primary view."""
     if not _CAPTURE_LLM_IO:
         return
@@ -157,14 +259,12 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
         "name": "llm_call",
         "op": op,
         "model": model,
-        # store messages verbatim (role + content) so the UI can render the conversation
-        "prompt": [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
-                   for m in (messages or [])],
-        "completion": completion or "",
+        "prompt": _trace_messages(messages),
+        "completion": _trace_text(completion or ""),
         "tokens": tokens,
     }
     if thinking:
-        ev["thinking"] = thinking
+        ev["thinking"] = _trace_text(thinking)
     rec["events"].append(ev)
     # Mirror to the active OpenTelemetry span when the bridge is live, so OTLP collectors
     # (Jaeger/Tempo/…) see LLM I/O too — not just spans.jsonl. Best-effort; primitives only.
@@ -175,7 +275,7 @@ def record_llm_call(*, op: str, model: str, messages: list[dict], completion: st
                 "op": op, "model": model,
                 "prompt_tokens": tokens["prompt"], "completion_tokens": tokens["completion"],
                 "total_tokens": tokens["total"],
-                "completion": (completion or "")[:2000],
+                "completion": _trace_text(completion or "", cap=2000),
             })
         except Exception:  # noqa: BLE001 - mirroring must never affect the run
             pass
@@ -198,11 +298,16 @@ def _norm_usage(tokens) -> dict:
     return {"prompt": p, "completion": c, "total": int(t.get("total_tokens") or t.get("total") or (p + c))}
 
 
+def _redacted_error(value) -> str:
+    """Bounded durable error text; tracing must never persist credentials from provider failures."""
+    return _trace_text(value, cap=500)
+
+
 class ObservationHandle:
     """Fluent handle for a first-class observation (a `generation` = one LLM call, or a `tool` = one
     tool invocation) — the Langfuse-style tree node. Wraps a SpanHandle (or None when untraced) and
     lets the caller attach the OUTPUT / token usage / cost / reasoning AFTER the call returns, so the
-    span carries the full input→output record with real latency (the enclosing span's duration)."""
+    span carries a bounded diagnostic input→output record with real latency (the enclosing span's duration)."""
 
     def __init__(self, h: "SpanHandle | None"):
         self._h = h
@@ -212,13 +317,15 @@ class ObservationHandle:
         return self._h is not None
 
     def set(self, key: str, value) -> "ObservationHandle":
+        if key == "tool_calls":
+            return self.tool_calls(value)
         if self._h is not None:
             self._h.set(key, value)
         return self
 
     def output(self, text) -> "ObservationHandle":
         if self._h is not None and _CAPTURE_LLM_IO and text is not None:
-            self._h.set("output", text if isinstance(text, str) else _as_text(text))
+            self._h.set("output", _trace_text(text if isinstance(text, str) else _as_text(text)))
         return self
 
     def usage(self, tokens) -> "ObservationHandle":
@@ -229,19 +336,47 @@ class ObservationHandle:
     def cost(self, c) -> "ObservationHandle":
         if self._h is not None and c is not None:
             try:
-                self._h.set("cost", float(c))
-            except (TypeError, ValueError):
+                value = float(c)
+                if math.isfinite(value):
+                    self._h.set("cost", value)
+            except (TypeError, ValueError, OverflowError):
                 pass
         return self
 
     def thinking(self, t) -> "ObservationHandle":
         if self._h is not None and _CAPTURE_LLM_IO and t:
-            self._h.set("thinking", t)
+            self._h.set("thinking", _trace_text(t))
+        return self
+
+    def tool_calls(self, calls) -> "ObservationHandle":
+        """Attach a bounded, redacted preview of model-requested tools when I/O capture is enabled.
+
+        Tool arguments are model output and commonly contain file bodies, URLs, tokens, or credentials
+        echoed from context. They therefore follow the same opt-in and durable-redaction boundary as prompt
+        and completion text instead of going through the generic attribute setter.
+        """
+        if self._h is None or not _CAPTURE_LLM_IO or not isinstance(calls, (list, tuple)):
+            return self
+        safe = []
+        remaining = _TRACE_TEXT_CAP
+        for call in islice(calls, _TRACE_TOOL_CALLS_MAX):
+            if not isinstance(call, dict):
+                continue
+            name = _trace_text(call.get("name"), cap=min(128, remaining), single_line=True)
+            remaining = max(0, remaining - len(name))
+            arguments = _trace_text(
+                call.get("arguments"), cap=min(_TRACE_TOOL_ARGUMENT_CAP, remaining))
+            remaining = max(0, remaining - len(arguments))
+            safe.append({"name": name, "arguments": arguments})
+            if remaining <= 0:
+                break
+        if safe:
+            self._h.set("tool_calls", safe)
         return self
 
     def error(self, msg: str) -> "ObservationHandle":
         if self._h is not None:
-            self._h.set("level", "ERROR").event("exception", error=str(msg)[:500])
+            self._h.set("level", "ERROR").event("exception", error=_redacted_error(msg))
         return self
 
 
@@ -261,18 +396,19 @@ def generation(*, op: str, model: str, messages: Optional[list] = None,
         return
     attrs = {"op": op, "model": model}
     if model_parameters:
-        attrs["model_parameters"] = model_parameters
+        attrs["model_parameters"] = sanitize_trace_value(model_parameters)
     with tr.span("generation", kind="generation", **attrs) as h:
         if messages is not None and _CAPTURE_LLM_IO:
-            cur = [{"role": m.get("role", "user"), "content": _as_text(m.get("content"))}
-                   for m in messages]
+            # Generation input replays tool observations on the next turn. Sanitize the
+            # whole conversation here, not only the dedicated tool span, before delta encoding/OTel.
+            cur = _trace_messages(messages)
             # Delta-encode the re-sent history: when this generation STRICTLY EXTENDS the prior one IN
             # THIS TRACE (only appended to it), store just the appended tail, plus a back-ref
             # (`input_from`) + carried-prefix count (`input_carry`). A fresh trace / sub-loop whose
             # history diverges just stores a full base (input_from=None). ~6x smaller spans.jsonl;
             # `/spans/{sid}` and `/trace/by_trace`
-            # reconstruct the full verbatim input from the chain (traceview.hydrate_inputs). The reader
-            # tolerates old logs (no input_carry ⇒ the `input` IS the full list).
+            # reconstruct the full retained diagnostic input from the chain (traceview.hydrate_inputs). The
+            # reader tolerates old logs (no input_carry ⇒ the `input` IS the complete retained list).
             prev = _prev_gen.get()
             tid, sid = h._rec.get("trace_id"), h._rec.get("span_id")
             # Chain ONLY when this generation STRICTLY EXTENDS the prior one in the same trace (a
@@ -303,10 +439,10 @@ def tool(name: str, arguments=None):
     if tr is None:
         yield _NULL_OBS
         return
-    with tr.span("tool", kind="tool", tool=name) as h:
+    safe_name = _trace_text(name, cap=128, single_line=True)
+    with tr.span("tool", kind="tool", tool=safe_name) as h:
         if arguments is not None and _CAPTURE_LLM_IO:
-            h.set("input", arguments if isinstance(arguments, (str, int, float, bool, dict, list))
-                  else str(arguments))
+            h.set("input", sanitize_trace_value(arguments))
         yield ObservationHandle(h)
 
 
@@ -455,29 +591,36 @@ class Tracer:
         # child observations against the right run's exporter. Reset with the stack in `finally`.
         tok_tr = _current_tracer.set(self)
         start, mono0 = time.time(), time.monotonic()
-        exc: BaseException | None = None
         try:
             yield SpanHandle(rec, otel_span)
         except BaseException as e:  # noqa: BLE001 - record on the span, then re-raise
-            exc = e
             rec["status"] = "ERROR"
-            rec["events"].append({"name": "exception", "error": repr(e)[:500]})
-            # NB: don't manually record_exception here — the OTel cm's __exit__ (below) records
-            # it AND sets ERROR status when we pass the exc info, so doing both double-logs it.
+            safe_error = _redacted_error(e)
+            rec["events"].append({"name": "exception", "error": safe_error,
+                                  "type": type(e).__name__})
+            # Never hand the raw exception to the OTel context manager: its automatic
+            # record_exception path would export the original provider message verbatim. Mirror only a
+            # sanitized event/status and close the context normally in `finally`.
+            if otel_span is not None:
+                try:
+                    from opentelemetry.trace import Status, StatusCode
+                    otel_span.add_event("exception", {
+                        "exception.type": type(e).__name__,
+                        "exception.message": safe_error,
+                    })
+                    otel_span.set_status(Status(StatusCode.ERROR, description=safe_error))
+                except Exception:  # noqa: BLE001 - mirroring must never mask the original failure
+                    pass
             raise
         finally:
             rec["start"] = start
             # monotonic delta: a wall-clock (time.time) delta can go negative on an NTP/clock step
             rec["duration_s"] = round(time.monotonic() - mono0, 6)
             if otel_cm is not None:
-                # Pass the real exc info so the OTel SDK sets the span status to ERROR (its
-                # __exit__ defaults to set_status_on_exception=True) — keeps Jaeger/Tempo in
-                # sync with spans.jsonl instead of showing the failed span as OK.
                 try:
-                    if exc is not None:
-                        otel_cm.__exit__(type(exc), exc, exc.__traceback__)
-                    else:
-                        otel_cm.__exit__(None, None, None)
+                    # ERROR status/event were set above from sanitized text. A normal exit prevents the
+                    # OTel SDK from auto-recording the raw exception and leaking its message.
+                    otel_cm.__exit__(None, None, None)
                 except Exception:  # noqa: BLE001
                     pass
             _stack.reset(token)

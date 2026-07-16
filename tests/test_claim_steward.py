@@ -1,11 +1,13 @@
 """AGENTIC claim steward (§22.4) — the LLM counterpart of the operator's manual claim decisions. Pins:
 the LLM PROPOSES ratify/reject/pin over the evidence-grounded claims, guardrails validate (only listed
-claims, valid decisions, scope-precise), the apply path records through record_claim_decision, and it
-degrades to empty (no client / bad output / already-decided) so it never corrupts governance.
+claims, valid decisions, scope-precise), the steward entrypoint is proposal-only, and it degrades to empty
+(no client / bad output / already-decided) so it never corrupts governance.
 """
 from __future__ import annotations
 
 import json
+
+import pytest
 
 from looplab.engine.claim_steward import (
     apply_claim_curation, curation_is_empty, propose_claim_curation, steward_claims,
@@ -138,18 +140,23 @@ def test_apply_records_metric_precise_decision_and_dedupes_batch(tmp_path):
         "adapter helps", scope="taskA", metric="mrr")]["decision"] == "ratified"
 
 
-def test_steward_end_to_end_apply(tmp_path):
+def test_steward_apply_is_rejected_before_llm_or_mutation(tmp_path):
     import orjson
-    from looplab.engine.claims import claims_for_memory
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(
         {"statement": "hybrid retrieval helps", "outcome": "supported", "evidence": [1],
          "run_id": "r1", "task_id": "t"}) + b"\n")
-    client = _Client([{"statement": "hybrid retrieval helps", "decision": "ratified"}])
-    out = steward_claims(str(tmp_path), client, apply=True)
-    assert out["receipt"]["applied"]
-    # the ratification now shows on the claims read-model (structured, scope-precise)
-    got = {c["statement"]: c["maturity"] for c in claims_for_memory(str(tmp_path), structured=True)}
-    assert got["hybrid retrieval helps"] == "operator-ratified"
+    calls = []
+
+    class _CountingClient(_Client):
+        def complete_tool(self, messages, json_schema):
+            calls.append("paid")
+            return super().complete_tool(messages, json_schema)
+
+    client = _CountingClient([{"statement": "hybrid retrieval helps", "decision": "ratified"}])
+    with pytest.raises(ValueError, match="proposal-only"):
+        steward_claims(str(tmp_path), client, apply=True)
+    assert calls == []
+    assert not (tmp_path / "claim_decisions.jsonl").exists()
 
 
 def test_finalize_claim_curation_gating(tmp_path):
@@ -203,9 +210,20 @@ def test_cli_claim_steward(tmp_path, monkeypatch):
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(
         {"statement": "warmup stabilizes training", "outcome": "supported", "evidence": [1],
          "run_id": "r1", "task_id": "t"}) + b"\n")
-    monkeypatch.setattr(cli, "make_llm_client", lambda *a, **k: _Client(
-        [{"statement": "warmup stabilizes training", "decision": "ratified", "why": "consistent"}]))
+    calls = []
+
+    def _client(*args, **kwargs):
+        calls.append("paid")
+        return _Client([
+            {"statement": "warmup stabilizes training", "decision": "ratified", "why": "consistent"},
+        ])
+
+    monkeypatch.setattr(cli, "make_llm_client", _client)
     r = CliRunner().invoke(app, ["claim-steward", str(tmp_path)])
-    assert r.exit_code == 0 and "ratified" in r.stdout and "dry run" in r.stdout
+    assert r.exit_code == 0 and "ratified" in r.stdout and "proposal only" in r.stdout
+    assert calls == ["paid"]
     r2 = CliRunner().invoke(app, ["claim-steward", str(tmp_path), "--apply"])
-    assert r2.exit_code == 0 and "applied 1" in r2.stdout
+    assert r2.exit_code == 2 and "deprecated and disabled" in r2.stdout
+    assert "claim-decide" in r2.stdout
+    assert calls == ["paid"]
+    assert not (tmp_path / "claim_decisions.jsonl").exists()

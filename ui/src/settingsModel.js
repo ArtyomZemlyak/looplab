@@ -65,3 +65,43 @@ export function settingsViewStats(groups) {
     keys: new Set(groups.flatMap(group => group.fields.map(field => field.key))),
   }
 }
+
+// Per-run config stays a flat Settings object for compatibility. The server adds one reserved
+// metadata member so this client can render event-log-owned launch semantics truthfully without a
+// second request or a duplicated JavaScript field list.
+export function splitRunConfigPayload(payload) {
+  const record = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
+  const config = { ...record }
+  const rawMeta = config._looplab_config_meta
+  delete config._looplab_config_meta
+  const meta = rawMeta && typeof rawMeta === 'object' && !Array.isArray(rawMeta) ? rawMeta : {}
+  const cleanNames = value => Array.isArray(value)
+    ? [...new Set(value.filter(name => typeof name === 'string' && name.length > 0))]
+    : []
+  return {
+    config,
+    pinnedFields: new Set(cleanNames(meta.run_start_pinned_fields)),
+    mismatchFields: cleanNames(meta.snapshot_mismatch_fields),
+  }
+}
+
+const sameSettingValue = (left, right) => JSON.stringify(left) === JSON.stringify(right)
+
+// Rebase an authoritative save response onto the edits made while that request was in flight.
+// Fields that still equal the submitted snapshot accept the server value (including deletion or
+// canonicalisation); fields changed after submit keep the user's newer local value. The helper is
+// deliberately record-agnostic so the same rule covers both settings and agent-control matrices.
+export function reconcileAcceptedRecord(current, submitted, accepted) {
+  const currentRecord = current && typeof current === 'object' && !Array.isArray(current) ? current : {}
+  const submittedRecord = submitted && typeof submitted === 'object' && !Array.isArray(submitted) ? submitted : {}
+  const acceptedRecord = accepted && typeof accepted === 'object' && !Array.isArray(accepted) ? accepted : {}
+  const reconciled = { ...acceptedRecord }
+  const localKeys = new Set([...Object.keys(currentRecord), ...Object.keys(submittedRecord)])
+
+  for (const key of localKeys) {
+    if (sameSettingValue(currentRecord[key], submittedRecord[key])) continue
+    if (Object.hasOwn(currentRecord, key)) reconciled[key] = currentRecord[key]
+    else delete reconciled[key]
+  }
+  return reconciled
+}

@@ -52,8 +52,16 @@ def test_nt_ending_words_do_not_flip_polarity():
         assert claim_signature(s)["polarity"] == 1, s
     # real contractions still negate
     assert claim_signature("dropout doesn't help")["polarity"] == -1
-    # 'prevent' negates exactly once (was double-counted by the nt-regex before the fix)
-    assert claim_signature("dropout prevents overfitting")["polarity"] == -1
+    # relation-local prevention is a positive assertion, not a sentential negator
+    assert claim_signature("dropout prevents overfitting")["polarity"] == 1
+
+
+def test_avoid_and_prevent_do_not_invert_positive_effect_assertions():
+    avoid = claim_signature("Avoiding overfitting improves generalization")
+    prevent = claim_signature("Preventing overfitting improves generalization")
+    assert avoid["polarity"] == prevent["polarity"] == 1
+    assert avoid["merge_key"] == prevent["merge_key"]
+    assert avoid["contra_key"] == prevent["contra_key"]
 
 
 def test_short_negation_no_still_flips():

@@ -100,7 +100,11 @@ class ResearchCadenceMixin:
         """Append the memo to the event log. Called from BOTH the main-task cadence AND the
         concurrent research task — see the note above; every append here must stay in
         BACKGROUND_APPENDABLE."""
-        memo_d = memo.model_dump(mode="json")
+        from looplab.core.advisory_payloads import sanitize_research_memo_payload
+        # Verify the same canonical, redacted payload that can be persisted. Otherwise a custom
+        # researcher can expose secrets/prompt controls to the verifier and receive a verdict over
+        # evidence that is later truncated into a materially different durable memo.
+        memo_d = sanitize_research_memo_payload(memo.model_dump(mode="json"))
         # D8 · decoupled Verifier: check the memo's claims against their CITED evidence before the
         # memo is recorded — synthesis is the documented weak link (Kosmos: 57.9% accurate).
         # Deterministic layer always (refs exist? quoted numbers match?); LLM rubric pass when a
@@ -116,27 +120,31 @@ class ResearchCadenceMixin:
                     memo_d["verification"] = ver
             except Exception:  # noqa: BLE001 — verification must never block the memo
                 pass
+        # The model, tool ledger, and verifier are all untrusted text producers. This
+        # writer-side pass is the invariant: custom researchers cannot bypass redaction, control
+        # stripping, list caps, or the aggregate text budget before any durable derivative.
+        memo_d = sanitize_research_memo_payload(memo_d)
         assert EV_RESEARCH_COMPLETED in BACKGROUND_APPENDABLE   # see the method-level note
         self.store.append(EV_RESEARCH_COMPLETED, {
             "memo": memo_d,
             "at_node": memo.at_node, "trigger": trigger, "served_manual": manual})
         # Steer the next proposals: surface the memo's directions as a standing operator hint (the
         # same channel the Researcher already reads), so deep research actually informs planning.
-        if memo.recommended_directions:
+        directions = [d for d in memo_d.get("recommended_directions", []) if str(d).strip()]
+        if directions:
             assert EV_HINT in BACKGROUND_APPENDABLE             # see the method-level note
             self.store.append(EV_HINT, {
-                "text": "deep-research directions: " + "; ".join(memo.recommended_directions[:5]),
+                "text": "deep-research directions: " + "; ".join(directions[:5]),
                 "source": "deep_research"})
             # P1: also register each direction as an OPEN hypothesis so a deep-research idea is
             # tracked to a verdict (was fire-and-forget) — it accrues evidence when a matching node
             # runs, and shows on the board as an open question the search should resolve.
             if self._track_hypotheses:
                 assert EV_HYPOTHESIS_ADDED in BACKGROUND_APPENDABLE   # see the method-level note
-                for direction in memo.recommended_directions[:5]:
-                    if str(direction).strip():
-                        self.store.append(EV_HYPOTHESIS_ADDED, {
-                            "statement": str(direction).strip(), "source": "deep_research",
-                            "at_node": memo.at_node})
+                for direction in directions[:5]:
+                    self.store.append(EV_HYPOTHESIS_ADDED, {
+                        "statement": str(direction).strip(), "source": "deep_research",
+                        "at_node": memo.at_node})
 
     def _due_research_trigger(self, state: RunState) -> str | None:
         """Is an AUTO deep-research trigger (cadence/strategist) due at the current node-count? Used by

@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState, useRef } from 'react'
-import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace, commandFeedback } from './util.js'
+import { get, fmt, fmtInt, isSweep, spanDetail, nodeConversation, CONTROL, clearNodeTrace, commandFeedback,
+  runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
 import { Trajectory, ParallelCoords, Scatter, MetricLines } from './charts.jsx'
-import { groupAggregate } from './grouping.js'
+import { themeFilteredGroupAggregate } from './grouping.js'
 import { mergeSummary, nodeChip } from './report.js'
 import { OpIcon } from './icons.jsx'
 import Markdown from './markdown.jsx'
@@ -123,7 +124,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     const at = readOnly && historySeq != null
       ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
       : ''
-    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}${at}`)
+    get(runNodeApiPath(runId, nodeId, at))
       .then(d => {
         if (on && detailMatchesAttempt(d)) {
           setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready')
@@ -157,7 +158,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     // alive() gates the async resolution: if the user selects a different node (or the poll is
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
     // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
-    get(`/api/runs/${encodeURIComponent(runId)}/nodes/${nodeId}`).then(d => {
+    get(runNodeApiPath(runId, nodeId)).then(d => {
       if (alive() && detailMatchesAttempt(d)) {
         setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready'); setDetailError('')
       }
@@ -236,10 +237,16 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
-export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose }) {
-  const members = (memberIds || []).map(id => state.nodes[id]).filter(Boolean).sort((a, b) => a.id - b.id)
+export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, onSelectNode, onClose }) {
   const dir = state.direction
-  const best = groupAggregate(memberIds || [], state.nodes, dir).best   // same aggregate as the super-node card
+  // Keep the drill-down on exactly the same semantic projection as its collapsed super-node. Without
+  // this, a truthful 2/8 card could open a cross-direction best, trajectory, and member table.
+  const aggregate = themeFilteredGroupAggregate(memberIds || [], state.nodes, dir, themeFilter)
+  const members = aggregate.matchedIds.map(id => state.nodes[id]).filter(Boolean).sort((a, b) => a.id - b.id)
+  const zeroMatch = aggregate.filterActive && aggregate.matchedCount === 0
+  const countLabel = aggregate.filterActive
+    ? `${aggregate.matchedCount}/${aggregate.totalCount}`
+    : String(aggregate.totalCount)
   const themes = [...new Set(members.map(n => n.idea?.theme).filter(Boolean))]
   return <>
     <div className="tabs">
@@ -249,17 +256,22 @@ export function GroupSummary({ groupKey, memberIds, state, onSelectNode, onClose
     </div>
     <div className="insp-body">
       <div className="kv">
-        <KV k="experiments" v={members.length} />
-        <KV k="best" v={fmt(best)} />
+        <KV k={aggregate.filterActive ? 'matching experiments' : 'experiments'} v={countLabel} />
+        {aggregate.filterActive && <KV k="direction filter" v={themeFilter} />}
+        <KV k="best" v={zeroMatch ? 'No matching result' : fmt(aggregate.best)} />
         {themes.length > 0 && <KV k="themes" v={themes.join(', ')} />}
       </div>
-      <div className="section-h">Best over members</div>
-      <Trajectory nodes={members} direction={dir} height={150} onPick={onSelectNode} />
-      <div className="section-h">Members <span className="pill">{members.length}</span></div>
-      <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
-        <tbody>{members.map(n => <tr key={n.id}>
-          <td><button type="button" className="btn xs ghost" onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
-          <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
+      {zeroMatch
+        ? <div className="insp-empty" role="status">No experiments in this group match direction {themeFilter}.</div>
+        : <>
+          <div className="section-h">Best over {aggregate.filterActive ? 'matching ' : ''}members</div>
+          <Trajectory nodes={members} direction={dir} height={150} onPick={onSelectNode} />
+          <div className="section-h">{aggregate.filterActive ? 'Matching members' : 'Members'} <span className="pill">{countLabel}</span></div>
+          <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
+            <tbody>{members.map(n => <tr key={n.id}>
+              <td><button type="button" className="btn xs ghost" onClick={() => onSelectNode(n.id)}>#{n.id}</button></td>
+              <td>{n.operator}</td><td>{fmt(n.confirmed_mean ?? n.metric)}</td><td>{n.status}</td></tr>)}</tbody></table></DataTable>
+        </>}
     </div>
   </>
 }
@@ -777,6 +789,7 @@ function StageLog({ text, live }) {
 function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   const m = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
+  const [allTurns, setAllTurns] = useState(false)
   const roll = st.rollup || {}
   const tk = roll.tokens || {}
   const nTurns = (st.turns || []).length
@@ -800,8 +813,15 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
       {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </button>
     {open && <div className="conv-turns">
-      {(st.turns || []).map((t, j) => t.type === 'request' ? <ConvRequest key={j} t={t} />
-        : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+      {/* Cap the mounted turns like the raw span view (SPAN_CAP): a heavily-repaired / tool-looping stage
+          can carry hundreds of turns, and ConvGen eagerly renders each turn's Markdown — mounting them all
+          froze the browser (the exact black-screen the raw view's cap was built to avoid). Show the first
+          SPAN_CAP, then reveal the rest one click away; nothing is lost. */}
+      {(allTurns ? (st.turns || []) : (st.turns || []).slice(0, SPAN_CAP)).map((t, j) =>
+        t.type === 'request' ? <ConvRequest key={j} t={t} />
+          : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
+      {!allTurns && (st.turns || []).length > SPAN_CAP && <button className="span-more"
+        onClick={() => setAllTurns(true)}>… show {(st.turns || []).length - SPAN_CAP} more turns</button>}
       {log ? <StageLog text={log} live={live} /> : null}
     </div>}
   </div>
@@ -818,7 +838,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
     nodeConversation(runId, n.id).then(d => alive() && setConv(d || { stages: [] })).catch(() => alive() && setConv({ stages: [] }))
     // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
     // band renders its own live log inside it, so opening "Train" shows the training output in place.
-    get(`/api/runs/${runId}/nodes/${n.id}/logs`).then(d => alive() && setLogs(d || {})).catch(() => {})
+    get(runNodeApiPath(runId, n.id, '/logs')).then(d => alive() && setLogs(d || {})).catch(() => {})
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
   [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
@@ -986,9 +1006,12 @@ function MetricCurves({ runId, nodeId, status }) {
     if (nodeId == null) return
     setMetrics({})    // node changed → drop the previous node's curves before the first fetch resolves
   }, [runId, nodeId, done])
-  usePoll((alive) => get(`/api/runs/${runId}/nodes/${nodeId}/metrics`)
+  // A terminal node's metrics are immutable — fetch ONCE (ms=null: immediate, no interval) instead of
+  // polling every 15s forever. A running node still polls at 3s; a status change (via the `done` dep)
+  // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
+  usePoll((alive) => get(runNodeApiPath(runId, nodeId, '/metrics'))
     .then(d => alive() && setMetrics((d && d.metrics) || {})).catch(() => {}),
-    done ? 15000 : 3000, [runId, nodeId, done], { enabled: nodeId != null })
+    done ? null : 3000, [runId, nodeId, done], { enabled: nodeId != null })
   return <MetricLines series={metrics} />
 }
 

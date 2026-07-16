@@ -765,9 +765,9 @@ class OpenAICompatibleClient:
             gen.output(_assistant_text({**msg, "content": answer})).thinking(thinking) \
                .usage(usage).cost(_usage_cost(usage))
             if msg.get("tool_calls"):
-                gen.set("tool_calls", [{"name": (c.get("function") or {}).get("name"),
-                                        "arguments": (c.get("function") or {}).get("arguments")}
-                                       for c in msg["tool_calls"]])
+                gen.tool_calls([{"name": (c.get("function") or {}).get("name"),
+                                 "arguments": (c.get("function") or {}).get("arguments")}
+                                for c in msg["tool_calls"]])
             return msg
 
     def complete_tool(self, messages: list[dict], json_schema: dict) -> dict:

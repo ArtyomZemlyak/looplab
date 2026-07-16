@@ -7,12 +7,12 @@ really covers two distinct techniques. This module adds an identity layer WITHOU
 
 - ONE versioned normalization contract (`CONCEPT_KEY_VERSION` / `normalize_key`) used for BOTH writes and
   reads — NFKC + casefold + whitespace-collapse — so `Hard-Neg`, `hard-neg`, and `  hard-neg  ` are one key
-  (closing the CODEX gap where alias keys were only stripped while `concept_uid` casefolded).
+  (closing the earlier mismatch between strip-only alias keys and case-folded `concept_uid` keys).
 - `concept_uid(slug, aliases=None)` — a stable opaque UID for a concept's CANONICAL identity (aliases
   resolved first), content-addressed so a display re-spelling that aliases to the same canonical keeps the
   UID; wide enough (64-bit) to be a durable identifier, not just a test fixture.
 - an append-only `concept_aliases.jsonl` of operator-governed renames {from -> to}; a write that would close a
-  CYCLE or self-link is REJECTED (a cycle has no canonical result, per CODEX), so the resolver always
+  CYCLE or self-link is REJECTED (a cycle has no canonical result), so the resolver always
   terminates at a real canonical slug.
 - an append-only `concept_splits.jsonl` (SPLIT): one coarse concept -> several finer ones, re-tagged
   DETERMINISTICALLY at read time from each run's OWN sibling concepts/goal terms (the "needs re-tagging"
@@ -28,14 +28,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
 import unicodedata
 from collections.abc import Callable
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
 # Versioned identity contract. Bump only on a normalization change that would re-key existing concepts; a
 # record carries no version today (the algorithm is the contract), but the constant pins the intent and
-# lets a future migration detect a mode change (CODEX: "one versioned Unicode normalization/key contract").
+# lets a future migration detect a normalization mode change.
 CONCEPT_KEY_VERSION = 1
 
 _TOMBSTONE = "\x00purged"   # canonical target that marks a concept purged (dropped from cross-run views)
@@ -47,6 +49,7 @@ _MAX_SPLIT_RULES = 64
 _MAX_SPLIT_TERMS = 32
 _MAX_SPLIT_TERM = 200
 _MAX_ACTION_ID = 160
+_CONCEPT_GOVERNANCE_THREAD_LOCK = threading.Lock()
 
 
 class ConceptGovernanceConflict(ValueError):
@@ -59,6 +62,18 @@ class ConceptGovernanceConflict(ValueError):
         super().__init__(f"stale governance revision for {path.name}: expected {expected}, current {actual}")
 
 
+class ConceptGovernanceGlobalConflict(ValueError):
+    """Optimistic-concurrency failure across the combined alias/split policy."""
+
+    def __init__(self, expected: int, actual: int):
+        self.expected = expected
+        self.actual = actual
+        super().__init__(
+            "stale concept governance revision: "
+            f"expected {expected}, current {actual}"
+        )
+
+
 class ConceptGovernanceIdempotencyConflict(ValueError):
     """An action id was already committed with a different semantic payload in this ledger."""
 
@@ -69,14 +84,14 @@ class ConceptGovernanceIdempotencyConflict(ValueError):
 
 
 def normalize_key(s: str) -> str:
-    """The ONE canonical key normalization used for every write and read (CODEX): NFKC (fold compatibility
+    """The canonical key normalization used for every write and read: NFKC (fold compatibility
     forms), casefold (case-insensitive incl. non-ASCII), strip, and collapse internal whitespace runs. A
     slug that differs only by case/spacing/compat-form maps to a single key. Preserves '/', '-' (the slug
     structure); the display label is whatever the caller stored — this is identity, not presentation."""
     t = unicodedata.normalize("NFKC", str(s or "")).casefold().strip()
     # Strip C0/C1 control chars (except the \t\n\r that the \s+ collapse handles) so NO untrusted slug can
     # normalize to a string containing the internal tombstone sentinel '\x00purged' and turn a MERGE into a
-    # covert PURGE (mega-review finding). The sentinel is only ever assigned internally, never via this path.
+    # covert PURGE. The sentinel is only ever assigned internally, never via this path.
     t = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]", "", t)
     return re.sub(r"\s+", " ", t)
 
@@ -98,9 +113,9 @@ def _bounded_text(value, field: str, maximum: int) -> str:
     return out
 
 
-def _validate_expected_revision(value: Optional[int]) -> None:
+def _validate_expected_revision(value: Optional[int], field: str = "expected_revision") -> None:
     if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
-        raise ValueError("expected_revision must be a non-negative integer")
+        raise ValueError(f"{field} must be a non-negative integer")
 
 
 def _validated_action_id(value: str) -> str:
@@ -143,15 +158,17 @@ def _would_cycle(src: str, dst: str, aliases: dict) -> bool:
 
 def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: str = "operator",
                          at: str = "", expected_revision: Optional[int] = None,
-                         action_id: str = "") -> dict:
+                         expected_governance_revision: Optional[int] = None,
+                         action_id: str = "", require_existing: bool = False) -> dict:
     """Operator MERGE (§22.4): declare `from_concept` is really `to_concept` (append-only, reversible by a
     later alias). Pass `to_concept=""` to PURGE/tombstone `from_concept` (dropped from cross-run views).
-    Rejects an empty source, a self-link, or an edge that would close a cycle (CODEX: a cycle has no
+    Rejects an empty source, a self-link, or an edge that would close a cycle (a cycle has no
     canonical result), and a missing dir — all real operator errors. The stored keys are normalized under
     the ONE versioned contract, so writes and reads agree."""
     src = _bounded_key(from_concept, "from_concept", required=True)
     dst = _bounded_key(to_concept, "to_concept")
     _validate_expected_revision(expected_revision)
+    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -165,17 +182,48 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
     path = Path(memory_dir) / "concept_aliases.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Validate while holding the append lock.  A pre-lock check has a TOCTOU race: concurrent writers can
+    # Validate while holding the append lock. A pre-lock check has a TOCTOU race: writers can
     # both observe an acyclic ledger and append a->b / b->a.
     def _validate_locked() -> None:
-        if dst and _would_cycle(src, dst, load_concept_aliases(memory_dir)):
+        aliases = load_concept_aliases(memory_dir)
+        if require_existing:
+            known, digest = _observed_concept_snapshot(memory_dir, aliases=aliases)
+            resolved_source = resolve_slug(src, aliases)
+            if resolved_source is None:
+                raise ValueError(f"concept source {src!r} is purged")
+            if resolved_source != src:
+                raise ValueError(
+                    f"concept source {src!r} is aliased to {resolved_source!r}; mutate the canonical concept"
+                )
+            if src not in known:
+                raise ValueError(f"concept source {src!r} does not exist in the current portfolio")
+            if dst:
+                resolved_target = resolve_slug(dst, aliases)
+                if resolved_target != dst:
+                    raise ValueError(
+                        f"merge target {dst!r} is not live canonical; current canonical is "
+                        f"{resolved_target!r}"
+                    )
+                if dst not in known:
+                    raise ValueError(f"merge target {dst!r} does not exist in the current portfolio")
+            rec["concept_snapshot_digest"] = digest
+            rec["concept_snapshot_count"] = len(known)
+        if dst and resolve_slug(dst, aliases) is None:
+            raise ValueError(f"merge target {dst!r} is purged; use the explicit purge action")
+        if dst and _would_cycle(src, dst, aliases):
             raise ValueError(f"alias {src!r} -> {dst!r} would close a cycle")
 
-    return _append_governance(path, rec, validate=_validate_locked, expected_revision=expected_revision)
+    with _concept_governance_transaction(memory_dir):
+        return _append_governance(path, rec, validate=_validate_locked,
+                                  expected_revision=expected_revision,
+                                  governance_memory_dir=memory_dir,
+                                  expected_governance_revision=expected_governance_revision)
 
 
 def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
-                        expected_revision: Optional[int] = None, action_id: str = "") -> dict:
+                        expected_revision: Optional[int] = None,
+                        expected_governance_revision: Optional[int] = None,
+                        action_id: str = "", require_existing: bool = False) -> dict:
     """Undo the current MERGE/PURGE policy for one source without deleting history.
 
     A clear is an explicit append-only tombstone for the *policy edge*, distinct from a purge (whose empty
@@ -184,6 +232,7 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
     """
     src = _bounded_key(from_concept, "from_concept", required=True)
     _validate_expected_revision(expected_revision)
+    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -195,7 +244,17 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
         rec["action_id"] = action_id
     path = Path(memory_dir) / "concept_aliases.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    return _append_governance(path, rec, expected_revision=expected_revision)
+
+    def _validate_clear() -> None:
+        if require_existing and src not in load_concept_aliases(memory_dir):
+            raise ValueError(f"no active alias or purge policy exists for {src!r}")
+
+    with _concept_governance_transaction(memory_dir):
+        return _append_governance(
+            path, rec, validate=_validate_clear, expected_revision=expected_revision,
+            governance_memory_dir=memory_dir,
+            expected_governance_revision=expected_governance_revision,
+        )
 
 
 def load_concept_aliases(memory_dir) -> dict:
@@ -259,7 +318,8 @@ def resolve_slug(slug: str, aliases: dict) -> Optional[str]:
 
 def record_concept_split(memory_dir, *, from_concept: str, rules, default: str = "", by: str = "operator",
                          at: str = "", expected_revision: Optional[int] = None,
-                         action_id: str = "") -> dict:
+                         expected_governance_revision: Optional[int] = None,
+                         action_id: str = "", require_existing: bool = False) -> dict:
     """Operator SPLIT (§22.4): declare `from_concept` is too coarse and must be RE-TAGGED into finer
     concepts. `rules` is an ordered list of `{"to": slug, "when_any": [term, ...]}`: for a given run, the
     FIRST rule whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise
@@ -270,6 +330,7 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
     ruleset with no default, and a missing dir — real operator errors."""
     src = _bounded_key(from_concept, "from_concept", required=True)
     _validate_expected_revision(expected_revision)
+    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -294,8 +355,6 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
         if to == src:
             raise ValueError(f"split rule targets its own source {src!r} (no progress)")
         norm_rules.append({"to": to, "when_any": sorted(set(terms))})
-    # `default == src` is allowed: it is the natural "keep the original slug when no rule matches" fallback
-    # (resolve_split is single-pass, so there is no re-split loop). An EMPTY default already means "keep it".
     dflt = _bounded_key(default, "default")
     if not norm_rules and (not dflt or dflt == src):
         raise ValueError("split needs at least one rule (a bare identity default is inert)")
@@ -306,14 +365,62 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
         rec["action_id"] = action_id
     path = Path(memory_dir) / "concept_splits.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    return _append_governance(path, rec, expected_revision=expected_revision)
+
+    def _validate_targets() -> None:
+        # Validate against one alias snapshot while holding the memory-wide governance lock. Otherwise an
+        # alias can make a previously useful split dormant (or turn a target back into its source) between
+        # validation and append.
+        aliases = load_concept_aliases(memory_dir)
+        splits = load_concept_splits(memory_dir)
+        resolved_source = resolve_slug(src, aliases)
+        if resolved_source is None:
+            raise ValueError(f"split source {src!r} is purged")
+        if src in aliases or resolved_source != src:
+            raise ValueError(
+                f"split source {src!r} is aliased to {resolved_source!r}; split the canonical concept"
+            )
+        if require_existing:
+            known, digest = _observed_concept_snapshot(
+                memory_dir, aliases=aliases, splits=splits)
+            if src not in known:
+                raise ValueError(f"split source {src!r} does not exist in the current portfolio")
+            rec["concept_snapshot_digest"] = digest
+            rec["concept_snapshot_count"] = len(known)
+        targets = [rule["to"] for rule in norm_rules]
+        if dflt:
+            targets.append(dflt)
+        if len(set(targets)) != len(targets):
+            raise ValueError("split targets must be distinct")
+        for target in targets:
+            resolved_target = resolve_slug(target, aliases)
+            if resolved_target is None:
+                raise ValueError(
+                    f"split target {target!r} is purged; use the explicit purge action")
+            if resolved_target == src:
+                raise ValueError(
+                    f"split target {target!r} resolves to its source {src!r} (no progress)"
+                )
+            if target in aliases or resolved_target != target:
+                raise ValueError(
+                    f"split target {target!r} is not live canonical; current canonical is "
+                    f"{resolved_target!r}"
+                )
+
+    with _concept_governance_transaction(memory_dir):
+        return _append_governance(path, rec, validate=_validate_targets,
+                                  expected_revision=expected_revision,
+                                  governance_memory_dir=memory_dir,
+                                  expected_governance_revision=expected_governance_revision)
 
 
 def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", at: str = "",
-                        expected_revision: Optional[int] = None, action_id: str = "") -> dict:
+                        expected_revision: Optional[int] = None,
+                        expected_governance_revision: Optional[int] = None,
+                        action_id: str = "", require_existing: bool = False) -> dict:
     """Undo the active split rule for one source through an append-only clear record."""
     src = _bounded_key(from_concept, "from_concept", required=True)
     _validate_expected_revision(expected_revision)
+    _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
@@ -325,7 +432,17 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
         rec["action_id"] = action_id
     path = Path(memory_dir) / "concept_splits.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    return _append_governance(path, rec, expected_revision=expected_revision)
+
+    def _validate_clear() -> None:
+        if require_existing and src not in load_concept_splits(memory_dir):
+            raise ValueError(f"no active split policy exists for {src!r}")
+
+    with _concept_governance_transaction(memory_dir):
+        return _append_governance(
+            path, rec, validate=_validate_clear, expected_revision=expected_revision,
+            governance_memory_dir=memory_dir,
+            expected_governance_revision=expected_governance_revision,
+        )
 
 
 def load_concept_splits(memory_dir) -> dict:
@@ -441,10 +558,46 @@ def canonicalize_concepts(concepts, aliases: Optional[dict] = None,
     return sorted(out)
 
 
+def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
+                               splits: Optional[dict] = None) -> tuple[set[str], str]:
+    """Live canonical concept vocabulary plus a content digest for governance receipts.
+
+    Capsules are the evidence-backed entities. Active split children are provisional taxonomy
+    entities introduced by the split itself, so a later action may target them even before a run
+    happens to exercise that branch. The caller holds the memory-wide governance lock; capsule
+    replacement is atomic, therefore this observes one coherent old-or-new file snapshot.
+    """
+    from looplab.events.eventstore import read_jsonl_lenient
+
+    aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
+    splits = load_concept_splits(memory_dir) if splits is None else splits
+    path = Path(memory_dir) / "concept_capsules.jsonl"
+    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    known: set[str] = set()
+    for capsule in rows:
+        version = capsule.get("v", 1)
+        concepts = capsule.get("concepts")
+        if version != 1 or not isinstance(capsule.get("run_id"), str) or not capsule.get("run_id"):
+            continue
+        if not isinstance(concepts, list):
+            continue
+        known.update(canonicalize_concepts(concepts, aliases=aliases, splits=splits))
+    for spec in (splits or {}).values():
+        targets = [rule.get("to") for rule in spec.get("rules", []) if isinstance(rule, dict)]
+        if spec.get("default"):
+            targets.append(spec["default"])
+        for target in targets:
+            canonical = resolve_slug(target, aliases) if aliases else normalize_key(target)
+            if canonical:
+                known.add(canonical)
+    encoded = json.dumps(sorted(known), ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return known, hashlib.sha256(encoded).hexdigest()
+
+
 # --------------------------------------------------------------------------- #
-# Durable governance append — a locked, fsynced append shared by alias/split writes (CODEX: these policy
-# ledgers had no interprocess lock/fsync). `load_*` still applies last-write-wins, but the physical line is
-# now written atomically under an exclusive lock so concurrent UI/CLI writers cannot interleave a line.
+# Durable governance append — a locked, fsynced append shared by alias/split writes. `load_*` still applies
+# last-write-wins, but the physical line is written atomically under an exclusive lock so concurrent UI/CLI
+# writers cannot interleave a line.
 # --------------------------------------------------------------------------- #
 
 def _ledger_revision(path: Path) -> int:
@@ -467,24 +620,68 @@ def concept_governance_revision(memory_dir, kind: str) -> int:
     return _ledger_revision(Path(memory_dir) / name)
 
 
+def concept_governance_global_revision(memory_dir) -> int:
+    """Monotonic ordering shared by alias and split ledgers (0 when absent)."""
+    from looplab.events.eventstore import read_jsonl_lenient
+
+    if not memory_dir:
+        return 0
+    rows: list[dict] = []
+    for name in ("concept_aliases.jsonl", "concept_splits.jsonl"):
+        path = Path(memory_dir) / name
+        if path.exists():
+            rows.extend(read_jsonl_lenient(path, loads=json.loads, dicts_only=True))
+    explicit = [row.get("governance_revision") for row in rows
+                if isinstance(row.get("governance_revision"), int)
+                and not isinstance(row.get("governance_revision"), bool)]
+    return max([len(rows), *explicit], default=0)
+
+
+@contextmanager
+def _concept_governance_transaction(memory_dir):
+    """Serialize alias-dependent policy writes across both physical ledgers.
+
+    Per-file locks prevent torn appends but cannot make split-target validation atomic with a concurrent
+    alias purge. A memory-wide lock supplies that linearization point; the shared revision makes the
+    resulting cross-ledger order visible in every mutation receipt.
+    """
+    from looplab.events.eventstore import _interprocess_lock
+
+    base = Path(memory_dir)
+    with _CONCEPT_GOVERNANCE_THREAD_LOCK:
+        with _interprocess_lock(base / "concept_governance.lock", required=True):
+            yield
+
+
 def _idempotency_payload(rec: dict) -> str:
     """Canonical semantic payload; actor/timestamp/revision are receipt metadata, not mutation identity."""
-    semantic = {k: rec.get(k) for k in ("v", "action", "from", "to", "rules", "default", "by") if k in rec}
+    semantic = {k: rec.get(k) for k in ("v", "action", "from", "to", "rules", "default") if k in rec}
     return json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[], None]] = None,
-                       expected_revision: Optional[int] = None) -> dict:
+                       guard: Optional[Callable[[], None]] = None,
+                       expected_revision: Optional[int] = None,
+                       governance_memory_dir=None,
+                       expected_governance_revision: Optional[int] = None) -> dict:
     """Append one governance record under a required cross-platform interprocess lock.
 
     Lenient JSONL replay can tolerate a torn tail, but it cannot recover an interleaved or lost policy
     decision.  Governance therefore fails closed when the locking guarantee is unavailable.  `validate`,
     when supplied, runs in the same critical section as the append.
     """
+    if validate is not None and guard is not None:
+        raise ValueError("pass either validate or guard, not both")
+    # Retain the shipped `guard` spelling while executing both forms inside the required lock.
+    validator = validate or guard
+
     from looplab.core.atomicio import best_effort_fsync
     from looplab.events.eventstore import _interprocess_lock
 
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        # Idempotency keys are namespaced by the physical governance ledger. Alias and split endpoints may
+        # use the same caller-generated key; changing that boundary requires a durable cross-ledger action
+        # index rather than an unlocked scan of the sibling file.
         action_id = str(rec.get("action_id") or "")
         if action_id and path.exists():
             from looplab.events.eventstore import read_jsonl_lenient
@@ -496,15 +693,39 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                 if _idempotency_payload(existing) == _idempotency_payload(rec):
                     return dict(existing)
                 raise ConceptGovernanceIdempotencyConflict(path, action_id)
+        governance_revision = None
+        if governance_memory_dir is not None:
+            # Public concept writes hold the memory-wide governance lock before entering this per-ledger
+            # lock. Resolve action-id replay first so a lost-response retry can return its original receipt
+            # even though both revision tokens are now stale.
+            governance_revision = concept_governance_global_revision(governance_memory_dir)
+            _validate_expected_revision(
+                expected_governance_revision, "expected_governance_revision"
+            )
+            if (expected_governance_revision is not None
+                    and expected_governance_revision != governance_revision):
+                raise ConceptGovernanceGlobalConflict(
+                    expected_governance_revision, governance_revision
+                )
         current = _ledger_revision(path)
         _validate_expected_revision(expected_revision)
         if expected_revision is not None and expected_revision != current:
             raise ConceptGovernanceConflict(path, expected_revision, current)
-        if validate is not None:
-            validate()
+        if validator is not None:
+            validator()
+        if governance_revision is not None:
+            rec["governance_revision"] = governance_revision + 1
         # Allocate the CAS revision inside the same required lock as validation and append.
         rec["revision"] = current + 1
-        line = json.dumps(rec) + "\n"
+        separator = ""
+        if path.exists() and path.stat().st_size:
+            with open(path, "rb") as existing:
+                existing.seek(-1, 2)
+                if existing.read(1) not in (b"\n", b"\r"):
+                    # Lenient replay ignores a torn tail, but appending JSON directly to it would also hide
+                    # the new acknowledged action. Separate the fragments in the same locked/fsynced write.
+                    separator = "\n"
+        line = separator + json.dumps(rec) + "\n"
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()

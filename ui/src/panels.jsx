@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, operatorMeta,
-  commandFeedback, getRunCommand, COMMAND_SUCCEEDED, COMMAND_FAILED,
+  commandFeedback, getRunCommand, COMMAND_SUCCEEDED, COMMAND_FAILED, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
@@ -10,7 +10,8 @@ import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import SettingsForm from './SettingsForm.jsx'
-import { toForm, fromForm, FIELD_BY_KEY } from './settingsSchema.js'
+import { toForm, fromForm, settingsValidationErrors, FIELD_BY_KEY } from './settingsSchema.js'
+import { reconcileAcceptedRecord, splitRunConfigPayload } from './settingsModel.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
@@ -18,6 +19,7 @@ import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
 import { safeExternalHref } from './urlSafety.js'
+import { normalizeResearchMemos } from './researchMemoModel.js'
 
 export { default as Panel } from './PanelShell.jsx'
 
@@ -66,7 +68,8 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
 // ACTIONABLE directions — "steer →" posts a hint the Researcher folds into the next proposal. Deep
 // research is no longer a DAG node; this drawer + the Dock timeline marker are its home.
 export function ResearchPanel({ state, runId, onToast, onClose }) {
-  const memos = [...(state.research || [])].reverse()   // newest first
+  const memoProjection = useMemo(() => normalizeResearchMemos(state.research), [state.research])
+  const memos = [...memoProjection.memos].reverse()   // newest retained first
   const steer = async (text) => {
     try {
       const feedback = commandFeedback(await CONTROL.hint(runId, 'try this research direction: ' + text), {
@@ -78,11 +81,14 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
   return (
     <Panel title="Deep research" sub={memos.length ? `${memos.length} memo${memos.length === 1 ? '' : 's'}` : 'none yet'} onClose={onClose} wide>
       {!memos.length && <div className="muted">No deep-research memos yet. Trigger one with <code>/deep-research</code> in the chat, or set a cadence in Config.</div>}
-      {memos.map((m, i) => (
+      {memoProjection.omitted > 0 && <div className="muted">
+        Showing {memos.length} of {memoProjection.total} newest valid memos; older, malformed, or over-budget entries are omitted.
+      </div>}
+      {memos.map(m => (
         // Key by the STABLE original index (research is append-only), not the reversed position:
         // keyed by `i`, a new memo landing at index 0 reuses the prior memo's DOM node and its open
         // <details> state bleeds onto the new one.
-        <div className="rsch-memo" key={memos.length - 1 - i}>
+        <div className="rsch-memo" key={m.sourceIndex}>
           <div className="rsch-h">
             <span className="rsch-ic"><OpIcon name="search" /></span>
             <b>{m.summary || '(no summary)'}</b>
@@ -111,6 +117,8 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
                         onClick={() => steer(d)}>steer →</button></li>))}</ul></>}
           {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
             <ul className="bul">{m.sources.map((source, index) => {
+              // Deep-research sources are untrusted provider output. Only credential-free HTTP(S)
+              // URLs become links; unsafe, oversized or malformed values remain bounded inert text.
               const href = safeExternalHref(source?.url)
               const label = String(source?.title ?? source?.url ?? 'source').slice(0, 300)
               const snippet = source?.snippet == null ? '' : String(source.snippet).slice(0, 160)
@@ -408,15 +416,32 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [saved, setSaved] = useState(null)   // last-persisted form (to detect unsaved edits)
   const [agentControl, setAgentControl] = useState({})   // per-run governance matrix (agent_control)
   const [savedAC, setSavedAC] = useState({})
+  const [configMeta, setConfigMeta] = useState({ pinnedFields: new Set(), mismatchFields: [] })
   const [sec, setSec] = useState('')
   const [busy, setBusy] = useState(false)
   const [restartPending, setRestartPending] = useState(null) // {stage:'pause'|'resume', record}
   const [raw, setRaw] = useState(false)
-  const load = () => get(`/api/runs/${runId}/config`).then(c => {
-    setCfg(c); const f = toForm(c); setForm(f); setSaved(f)
-    const ac = c.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
-  }).catch(() => {})
-  useEffect(() => { load() }, [runId])
+  const loadGenerationRef = useRef(0)
+  const mutationRef = useRef(null)
+  useEffect(() => {
+    const generation = ++loadGenerationRef.current
+    const controller = new AbortController()
+    // A reused panel must never display or reconcile the previous run while the next config loads.
+    mutationRef.current = null
+    setBusy(false); setRestartPending(null); setCfg(null); setForm(null); setSaved(null)
+    setAgentControl({}); setSavedAC({})
+    setConfigMeta({ pinnedFields: new Set(), mismatchFields: [] })
+    get(runApiPath(runId, '/config'), { signal: controller.signal }).then(c => {
+      if (controller.signal.aborted || generation !== loadGenerationRef.current) return
+      const parsed = splitRunConfigPayload(c)
+      setCfg(parsed.config); setConfigMeta(parsed)
+      const f = toForm(parsed.config); setForm(f); setSaved(f)
+      const ac = parsed.config.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
+    }).catch(error => {
+      if (error?.name !== 'AbortError' && generation === loadGenerationRef.current) setCfg(null)
+    })
+    return () => controller.abort()
+  }, [runId])
 
   // A live engine keeps its in-memory settings until it restarts; gate on `live` (not the possibly
   // historical `state`) so time-travel doesn't misreport liveness.
@@ -426,8 +451,9 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     executing: 'Pause requested — waiting for the current experiment to stop', failure: 'Pause failed' }
   const resumeLabels = { success: 'Resumed with the saved settings', noop: 'Run was already running',
     executing: 'Resume requested — waiting for the engine to load the saved settings', failure: 'Resume failed' }
-  const acceptResume = async () => {
-    const record = await CONTROL.resume(runId)
+  const acceptResume = async (expectedGeneration = loadGenerationRef.current, requestedRunId = runId) => {
+    const record = await CONTROL.resume(requestedRunId)
+    if (expectedGeneration !== loadGenerationRef.current) return null
     const feedback = commandFeedback(record, resumeLabels)
     onToast(feedback.message)
     setRestartPending(feedback.kind === 'pending' ? { stage: 'resume', record } : null)
@@ -436,6 +462,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   useEffect(() => {
     const pending = restartPending
     if (!pending?.record?.id || !['accepted', 'executing'].includes(pending.record.status)) return
+    const generation = loadGenerationRef.current
     let active = true, timer = null
     const poll = async () => {
       try {
@@ -447,8 +474,11 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             onToast(feedback.message); setRestartPending(null); return
           }
           onToast('Pause completed — resuming with the saved settings…')
-          try { await acceptResume() }
-          catch (error) { onToast(`Resume failed: ${error.message || error}`); setRestartPending(null) }
+          try { await acceptResume(generation, runId) }
+          catch (error) {
+            if (!active || generation !== loadGenerationRef.current) return
+            onToast(`Resume failed: ${error.message || error}`); setRestartPending(null)
+          }
           return
         }
       } catch (error) {
@@ -471,59 +501,102 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     return s
   }, [form, saved])
   const acDirty = useMemo(() => JSON.stringify(agentControl) !== JSON.stringify(savedAC), [agentControl, savedAC])
-  const canSave = dirty.size > 0 || acDirty
+  const validationErrors = useMemo(() => form ? settingsValidationErrors(form) : {}, [form])
+  const invalidCount = Object.keys(validationErrors).length
+  const hasChanges = dirty.size > 0 || acDirty
+  const canSave = hasChanges && invalidCount === 0
   const onChange = (k, v) => setForm(f => ({ ...f, [k]: v }))
   const onToggleAgent = (key, role) => setAgentControl(ac => {
     const cur = new Set(ac[key] || []); cur.has(role) ? cur.delete(role) : cur.add(role)
     return { ...ac, [key]: [...cur] }
   })
-  const onSave = async () => {
-    const cur = fromForm(form), changed = {}
-    for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
-    if (acDirty) changed.agent_control = agentControl
-    if (!Object.keys(changed).length) return
+  const beginMutation = () => {
+    if (mutationRef.current) return null
+    const token = { generation: loadGenerationRef.current }
+    mutationRef.current = token
     setBusy(true)
+    return token
+  }
+  const finishMutation = token => {
+    if (mutationRef.current !== token) return
+    mutationRef.current = null
+    if (token.generation === loadGenerationRef.current) setBusy(false)
+  }
+  const onSave = async () => {
+    if (invalidCount) { onToast('Fix invalid numeric settings before saving'); return }
+    const submittedForm = form
+    const submittedControl = agentControl
+    const cur = fromForm(submittedForm), changed = {}
+    for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
+    if (acDirty) changed.agent_control = submittedControl
+    if (!Object.keys(changed).length) return
+    const mutation = beginMutation()
+    if (!mutation) return
+    const submittedRunId = runId
     try {
-      const r = await saveRunConfig(runId, changed)
-      const f = toForm(r.config); setCfg(r.config); setForm(f); setSaved(f)
-      const ac = r.config.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
-      const what = r.changed?.length ? `saved ${r.changed.join(', ')}` : 'saved'
+      const r = await saveRunConfig(submittedRunId, changed)
+      if (mutation.generation !== loadGenerationRef.current) return
+      const parsed = splitRunConfigPayload(r.config)
+      const acceptedForm = toForm(parsed.config)
+      const acceptedControl = parsed.config.agent_control || {}
+      setCfg(parsed.config); setConfigMeta(parsed); setSaved(acceptedForm); setSavedAC(acceptedControl)
+      setForm(current => reconcileAcceptedRecord(current, submittedForm, acceptedForm))
+      setAgentControl(current => reconcileAcceptedRecord(current, submittedControl, acceptedControl))
+      const repaired = r.normalized_pinned?.length
+        ? `; repaired legacy snapshot drift in ${r.normalized_pinned.join(', ')}` : ''
+      const what = (r.changed?.length ? `saved ${r.changed.join(', ')}` : 'saved') + repaired
       onToast(what + (r.engine_running ? ' — applies when the live run restarts' : ' — applies on next resume'))
-    } catch (e) { onToast('save failed: ' + e.message) }   // e.message now carries the server detail (e.g. which field)
-    finally { setBusy(false) }
+    } catch (e) {
+      if (mutation.generation === loadGenerationRef.current) onToast('save failed: ' + e.message)
+    } finally { finishMutation(mutation) }
   }
   const onResume = async () => {           // stalled/finished: just spawn the engine (re-reads the snapshot)
     if (restartPending) return
-    setBusy(true)
+    const mutation = beginMutation()
+    if (!mutation) return
     try {
-      await acceptResume()
-    } catch (e) { onToast('Resume failed: ' + e.message) }
-    finally { setBusy(false) }
+      await acceptResume(mutation.generation, runId)
+    } catch (e) {
+      if (mutation.generation === loadGenerationRef.current) onToast('Resume failed: ' + e.message)
+    }
+    finally { finishMutation(mutation) }
   }
   const onPauseResume = async () => {      // command service owns both postconditions and engine policy
     if (restartPending) return
-    setBusy(true)
+    const mutation = beginMutation()
+    if (!mutation) return
+    const submittedRunId = runId
     try {
       onToast('pausing — the current experiment finishes first…')
-      const record = await CONTROL.pause(runId)
+      const record = await CONTROL.pause(submittedRunId)
+      if (mutation.generation !== loadGenerationRef.current) return
       const stopped = commandFeedback(record, pauseLabels)
       onToast(stopped.message)
       if (stopped.kind === 'error') return
       if (stopped.kind === 'pending') { setRestartPending({ stage: 'pause', record }); return }
-      await acceptResume()
-    } catch (e) { onToast('Pause/resume failed: ' + e.message) }
-    finally { setBusy(false) }
+      await acceptResume(mutation.generation, submittedRunId)
+    } catch (e) {
+      if (mutation.generation === loadGenerationRef.current) onToast('Pause/resume failed: ' + e.message)
+    }
+    finally { finishMutation(mutation) }
   }
   const extendBudget = async () => {
     if (!sec || controlBusy) return
-    setBusy(true)
+    const mutation = beginMutation()
+    if (!mutation) return
+    const submittedRunId = runId
+    const submittedSeconds = sec
     try {
-      const feedback = commandFeedback(await CONTROL.budget(runId, Number(sec)), {
-        success: `Budget extended +${sec}s`, noop: 'That budget extension was already applied',
-        executing: `Budget extension +${sec}s requested — waiting for the run`, failure: 'Budget extension failed',
+      const record = await CONTROL.budget(submittedRunId, Number(submittedSeconds))
+      if (mutation.generation !== loadGenerationRef.current) return
+      const feedback = commandFeedback(record, {
+        success: `Budget extended +${submittedSeconds}s`, noop: 'That budget extension was already applied',
+        executing: `Budget extension +${submittedSeconds}s requested — waiting for the run`, failure: 'Budget extension failed',
       }); onToast(feedback.message)
-    } catch (error) { onToast(`Budget extension failed: ${error.message || error}`) }
-    finally { setBusy(false) }
+    } catch (error) {
+      if (mutation.generation === loadGenerationRef.current) onToast(`Budget extension failed: ${error.message || error}`)
+    }
+    finally { finishMutation(mutation) }
   }
 
   const rawTable = <DataTable caption="Raw run configuration" card={false}><table className="tbl"><tbody>{cfg && Object.entries(cfg).map(([k, v]) =>
@@ -544,6 +617,14 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
             : <>Edits are saved to this run's <code>config.snapshot.json</code> and applied on the next <b>resume</b>.</>}
           {' '}<span className="sf-dot unsaved">●</span> = changed.
         </div>
+        {configMeta.pinnedFields.size > 0 && <div className="notice" role="note" style={{ marginBottom: 10 }}>
+          Fields marked <b>launch-pinned</b> show the values recorded in this run's event log and cannot
+          be changed on resume. Start a new run to change holdout or verifier semantics.
+          {configMeta.mismatchFields.length > 0 && <>
+            {' '}A legacy snapshot disagrees for {configMeta.mismatchFields.join(', ')}; the effective
+            launch values are shown and will be repaired when another editable setting is saved.
+          </>}
+        </div>}
         {restartPending && <div className="notice" role="status" style={{ marginBottom: 10 }}>
           {restartPending.stage === 'pause'
             ? 'Pause requested. Waiting for the current experiment to stop before resuming with the saved settings…'
@@ -552,14 +633,19 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
         <div className="toolbar" style={{ marginBottom: 10 }}>
           <span className="spacer" style={{ flex: 1 }} />
           <button className="btn sm ghost" onClick={() => setRaw(r => !r)}>{raw ? 'form' : 'raw'}</button>
-          <button className="btn sm ghost" disabled={controlBusy || !canSave} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
+          {invalidCount > 0 && <span className="settings-save-state is-invalid" role="alert">
+            {invalidCount} invalid numeric setting{invalidCount === 1 ? '' : 's'}
+          </span>}
+          <button className="btn sm ghost" disabled={controlBusy || !hasChanges} onClick={() => { setForm(saved); setAgentControl(savedAC) }}>↺ revert</button>
           <button className="btn sm primary" disabled={controlBusy || !canSave} onClick={onSave}>Save</button>
           {engineLive
-            ? <button className="btn sm" disabled={controlBusy || canSave} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
-            : <button className="btn sm" disabled={controlBusy || canSave} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
+            ? <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onPauseResume} title="pause the run, then resume it with the saved settings">Pause &amp; resume ▸</button>
+            : <button className="btn sm" disabled={controlBusy || hasChanges} onClick={onResume} title="continue this run with the saved settings">Resume ▸</button>}
         </div>
         {/* This panel's `dirty` is changed-vs-saved (unsaved), so feed it as `unsaved` → the amber dot that clears on Save. */}
-        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty} agentControl={agentControl} onToggleAgent={onToggleAgent} hideSecret />}
+        {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty}
+          errors={validationErrors} agentControl={agentControl} onToggleAgent={onToggleAgent}
+          readOnlyKeys={configMeta.pinnedFields} hideSecret />}
       </>}
     </Panel>
   )
@@ -687,7 +773,7 @@ export function RegistryPanel({ state, onClose }) {
         <div className="k">metric</div><div className="v">{fmt(champ.confirmed_mean ?? champ.metric)}</div></div> : <div className="muted">no champion yet</div>}
       <div className="toolbar" style={{ marginTop: 6 }}>
         <button className="btn sm" onClick={async () => {
-          const p = await get(`/api/runs/${state.run_id}/prov`)
+          const p = await get(runApiPath(state.run_id, '/prov'))
           const blob = new Blob([JSON.stringify(p, null, 2)], { type: 'application/json' })
           const a = document.createElement('a'); a.href = URL.createObjectURL(blob)
           a.download = `${state.run_id}_prov.json`; a.click(); URL.revokeObjectURL(a.href)
@@ -784,7 +870,7 @@ export function CrossRunPanel({ state, onClose }) {
   useEffect(() => {   // U4: fetch each run's node metrics and build a running-best trajectory to overlay
     if (!overlay || !rows.length) { setTraj([]); return }
     let cancelled = false
-    Promise.all(rows.slice(0, 8).map(r => get(`/api/runs/${r.run_id}/state`).then(p => {
+    Promise.all(rows.slice(0, 8).map(r => get(runApiPath(r.run_id, '/state')).then(p => {
       const ns = Object.values(p.state?.nodes || {}).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
       let best = null; const series = []
       for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
@@ -966,7 +1052,7 @@ function useNodeResource(runId, nodeId) {
     if (nodeId == null) { setResource({ nodeId, status: 'idle', data: null, error: null }); return }
     let alive = true; const requested = nodeId
     setResource({ nodeId: requested, status: 'loading', data: null, error: null })
-    get(`/api/runs/${runId}/nodes/${requested}`)
+    get(runNodeApiPath(runId, requested))
       .then(data => { if (alive) setResource({ nodeId: requested, status: 'ready', data, error: null }) })
       .catch(error => { if (alive) setResource({ nodeId: requested, status: 'error', data: null, error: error.message }) })
     return () => { alive = false }

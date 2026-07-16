@@ -53,44 +53,59 @@ def build_router(srv) -> APIRouter:
         # diffing against bare defaults would persist every profile value as an explicit override
         # (a one-way ratchet the profile selector could never undo) while dropping an explicit
         # knob that happens to equal the bare default (breaking "explicit knob wins").
-        current = store.load_ui_settings()
-        candidate = dict(current)
-        for k, v in incoming.items():
-            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
-                continue
-            if v is None:
-                candidate.pop(k, None)
-            else:
-                candidate[k] = v
-        profile = candidate.get("profile") or "default"
-        try:
-            base = Settings(profile=profile).model_dump()
-        except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
-            base = Settings().model_dump()
-        # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
-        # when the profile changes, those echoes must fall away with the old profile, not stick.
-        prev = store.resolved_settings()
-        overrides = {}
-        profile_changed = "profile" in incoming and profile != prev.get("profile")
-        for k, v in candidate.items():
-            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
-                continue
-            if k == "profile":
-                if v != Settings.model_fields["profile"].default:
-                    overrides[k] = v
-                continue
-            if base.get(k) == v:
-                continue
-            if profile_changed and k in incoming and k not in current and prev.get(k) == v:
-                continue                       # unchanged echo of the old profile's expansion
-            overrides[k] = v
-        try:
-            Settings(**overrides)
-        except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
-            raise HTTPException(422, f"invalid settings: {exc}") from exc
-        # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
-        store.write_ui_settings(overrides)
-        return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides}
+        # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
+        # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
+        with store.ui_settings_transaction():
+            current = store.load_ui_settings()
+            prev = store.resolved_settings()
+            candidate = dict(current)
+            for k, v in incoming.items():
+                if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                    continue
+                if k == "agent_control" and isinstance(v, dict):
+                    # Governance is a nested sparse PATCH too. Start from the resolved map so
+                    # the first customization retains shipped defaults; sparse edits from stale tabs
+                    # then merge by governed setting instead of replacing one another wholesale.
+                    old_control = prev.get("agent_control")
+                    merged_control = dict(old_control) if isinstance(old_control, dict) else {}
+                    for setting_key, roles in v.items():
+                        if roles is None:
+                            merged_control.pop(setting_key, None)
+                        else:
+                            merged_control[setting_key] = roles
+                    candidate[k] = merged_control
+                elif v is None:
+                    candidate.pop(k, None)
+                else:
+                    candidate[k] = v
+            profile = candidate.get("profile") or "default"
+            try:
+                base = Settings(profile=profile).model_dump()
+            except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
+                base = Settings().model_dump()
+            # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
+            # when the profile changes, those echoes must fall away with the old profile, not stick.
+            overrides = {}
+            profile_changed = "profile" in incoming and profile != prev.get("profile")
+            for k, v in candidate.items():
+                if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                    continue
+                if k == "profile":
+                    if v != Settings.model_fields["profile"].default:
+                        overrides[k] = v
+                    continue
+                if base.get(k) == v:
+                    continue
+                if profile_changed and k in incoming and k not in current and prev.get(k) == v:
+                    continue                       # unchanged echo of the old profile's expansion
+                overrides[k] = v
+            try:
+                Settings(**overrides)
+            except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
+                raise HTTPException(422, f"invalid settings: {exc}") from exc
+            # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
+            store.write_ui_settings(overrides)
+            return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides}
 
     @router.put("/api/settings/secret")
     async def put_secret(request: Request):
@@ -199,7 +214,7 @@ def build_router(srv) -> APIRouter:
         # the UI can show cases / lessons / notes each with their own shape. MUST be declared BEFORE the
         # `/api/{kind}` catch-all below, else it's swallowed as an unknown kind (→ 404, the reason the
         # Memory panel was silently empty). `cases` stays populated for back-compat.
-        s = Settings()
+        s = srv.global_settings()
         out = {"dir": None, "cases": [], "lessons": [], "notes": []}
         if not s.memory_dir:
             return out
@@ -222,7 +237,7 @@ def build_router(srv) -> APIRouter:
 
     # ------------------------------------------------------------------ authoring (files-as-truth)
     def _author_dir(kind: str) -> Optional[Path]:
-        s = Settings()
+        s = srv.global_settings()
         m = {"prompts": s.prompt_dir, "skills": s.skills_dir, "knowledge": s.knowledge_dir}
         d = m.get(kind)
         return Path(d) if d else None

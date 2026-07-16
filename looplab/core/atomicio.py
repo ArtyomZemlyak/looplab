@@ -82,3 +82,32 @@ def atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
 
 def atomic_write_text(path: str | os.PathLike, text: str) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
+
+
+def append_jsonl_bytes_locked(path: str | os.PathLike, payload: bytes) -> None:
+    """Durably append one or more already-encoded JSONL records.
+
+    The caller must hold the file's interprocess lock for the complete operation.  Keeping
+    locking outside this helper lets a read/modify/rewrite transaction (for example lesson-store
+    hygiene) share the same critical section.  If a previous process left a torn final record, a
+    separator is inserted before the new payload so the new records remain independently readable;
+    lenient readers can then ignore only the torn record instead of losing every later append.
+    """
+    if not payload:
+        return
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    normalized = payload.rstrip(b"\r\n") + b"\n"
+    with open(p, "a+b") as f:
+        f.seek(0, os.SEEK_END)
+        size = f.tell()
+        needs_separator = False
+        if size:
+            f.seek(-1, os.SEEK_END)
+            needs_separator = f.read(1) not in {b"\n", b"\r"}
+        f.seek(0, os.SEEK_END)
+        if needs_separator:
+            f.write(b"\n")
+        f.write(normalized)
+        f.flush()
+        best_effort_fsync(f.fileno())

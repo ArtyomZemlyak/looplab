@@ -14,20 +14,21 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from looplab.core.advisory_payloads import sanitize_report_payload
 from looplab.events.digest import experiments_digest, node_metric
 from looplab.core.models import NodeStatus, RunState
 
 
 class _ReportOut(BaseModel):
     """Structured, conclusion-first report the LLM fills (validated, then stored as state.report)."""
-    headline: str = ""                                   # one-sentence bottom line (the takeaway)
-    verdict: str = ""                                    # short paragraph: improved? robust? trustworthy?
-    champion_summary: str = ""                           # what the winning solution is, in plain words
-    what_worked: list[str] = Field(default_factory=list)
-    learnings: list[str] = Field(default_factory=list)
-    what_didnt: list[str] = Field(default_factory=list)
-    next_directions: list[str] = Field(default_factory=list)
-    caveats: list[str] = Field(default_factory=list)     # trust caveats stated plainly
+    headline: str = Field(default="", max_length=800)     # one-sentence bottom line
+    verdict: str = Field(default="", max_length=4_000)    # improved? robust? trustworthy?
+    champion_summary: str = Field(default="", max_length=4_000)
+    what_worked: list[str] = Field(default_factory=list, max_length=32)
+    learnings: list[str] = Field(default_factory=list, max_length=32)
+    what_didnt: list[str] = Field(default_factory=list, max_length=32)
+    next_directions: list[str] = Field(default_factory=list, max_length=32)
+    caveats: list[str] = Field(default_factory=list, max_length=32)
 
 
 _SYSTEM = (
@@ -144,7 +145,7 @@ def generate_report(state: RunState, client, *, parser: str = "tool_call", trigg
                              verdict=f"(report generation failed: {e})").model_dump(mode="json")
     content["at_node"] = len(state.nodes)
     content["trigger"] = trigger
-    return content
+    return sanitize_report_payload(content)
 
 
 class ReportWriter:

@@ -41,16 +41,25 @@ test('compact Inspector dialog has an explicit close or collapse accessible name
     /aria-label=\{`\$\{compactWorkspace \? 'Close' : 'Collapse'\} \$\{selectedGroup != null \? 'group details' : 'experiment inspector'\}`\}/)
 })
 
-test('run view modes are truthful toggles and merge has a native keyboard destination', async () => {
-  const runView = await source('RunView.jsx')
+test('run view modes are truthful toggles and merge has one explicit confirmation boundary', async () => {
+  const [runView, dag] = await Promise.all([source('RunView.jsx'), source('Dag.jsx')])
   assert.match(runView, /className="view-toggle" role="group" aria-label="Run workspace views"/)
   assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
   assert.match(runView, /aria-pressed=\{view === 'report'\}/)
   assert.match(runView, /<form className="merge-destination-bar"/)
   assert.match(runView, /<label htmlFor="merge-destination-select">/)
-  assert.match(runView, /<select id="merge-destination-select"[\s\S]*?autoFocus>/)
+  assert.match(runView, /<select ref=\{mergeSelectRef\} id="merge-destination-select"[\s\S]*?autoFocus>/)
   assert.match(runView, /onSubmit=\{submitMergeTarget\}/)
-  assert.match(runView, /You can also choose the destination directly on the graph/)
+  assert.match(runView, /ref=\{mergeConfirmRef\} type="submit"[\s\S]*?Confirm merge/)
+  assert.match(runView, /Graph gestures only choose the pair; nothing is sent until you confirm/)
+  assert.equal((runView.match(/CONTROL\.merge\(/g) || []).length, 1,
+    'only the confirmation submit path may call the merge API')
+  assert.match(runView, /const submitMergeTarget = async[\s\S]*?await CONTROL\.merge\(/)
+  assert.match(runView, /drag drop only preselects A \+ B[\s\S]*?openMergeChooser\(arg\.from, arg\.to/)
+  assert.match(runView, /node click only preselects the destination[\s\S]*?setMergeTarget\(String\(id\)\)/)
+  assert.match(dag, /Overlap is only a pair-selection gesture[\s\S]*?onNodeAction\('merge', \{ from, to: hit \}\)/)
+  assert.match(runView, /mergeSubmittingRef\.current = true[\s\S]*?await CONTROL\.merge[\s\S]*?mergeSubmittingRef\.current = false/,
+    'a synchronous lock must cover the entire request, including events before React re-renders')
 })
 
 test('reset and merge workflows restore focus after temporary controls close', async () => {
@@ -63,6 +72,12 @@ test('reset and merge workflows restore focus after temporary controls close', a
   assert.match(inspector, /event\.relatedTarget !== triggerRef\.current && !event\.currentTarget\.contains\(event\.relatedTarget\)/)
   assert.match(dag, /closeMenu\(action !== 'merge'\)[\s\S]*?onNodeAction\(action, id, \{ returnFocus \}\)/)
   assert.match(runView, /const closeMergeChooser = \(restoreFocus = true\) => \{[\s\S]*?data-node-action-id/)
+  assert.match(runView, /fallback \|\| document\.querySelector\('\[data-route-main\]'\)/,
+    'focus must still land on the main view if a merged source disappears')
+  assert.match(runView, /targetId == null \? mergeSelectRef\.current : mergeConfirmRef\.current[\s\S]*?preventScroll: true/,
+    'every merge gesture moves focus to the pending confirmation controls')
+  assert.match(runView, /e\.key !== 'Escape'[\s\S]*?mergeSubmittingRef\.current[\s\S]*?closeMergeChooser\(true\)/,
+    'Escape cancels and restores focus, but cannot dismiss an in-flight merge')
   assert.match(runView, /onClick=\{\(\) => closeMergeChooser\(true\)\}>Cancel<\/button>/)
 })
 
@@ -239,10 +254,14 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
-  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?nodes\/\$\{nodeId\}`\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
+  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?get\(runNodeApiPath\(runId, nodeId\)\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
-  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(`\/api\/runs\/\$\{runId\}\/nodes\/\$\{traceNid\}\/trace`\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) setNodeTrace\(d\) \}\)/)
-  assert.match(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\); loadNodeTrace\(alive\) \}[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
+  // persistent failure does not flicker the error/Retry banner every 4s.
+  assert.match(dock, /const loadNodeTrace = \(alive\) => get\(runNodeApiPath\(runId, traceNid, '\/trace'\)\)[\s\S]*?\.then\(d => \{ if \(alive\(\)\) \{ setNodeTrace\(d\); setNodeTraceError\(false\) \} \}\)/)
+  assert.match(dock, /usePoll\(\(alive\) => loadNodeTrace\(alive\)[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
+  assert.doesNotMatch(dock, /usePoll\(\(alive\) => \{ setNodeTraceError\(false\)/,
+    'the trace error flag must clear only on a successful load, not eagerly each poll tick (no banner flicker)')
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/,
     'the timeline must not regress to a whole-run trace fold/poll')
 })

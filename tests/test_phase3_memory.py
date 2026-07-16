@@ -119,6 +119,37 @@ def test_ablation_attribution_aggregates_across_probes():
     assert "Component attribution" in out
 
 
+def test_experiments_digest_excludes_tombstoned_nodes():
+    # §6.3: tombstoned (logically-deleted) nodes are invisible to selection; the always-on Researcher
+    # context (fail count, failures list, theme rollup) must hide them too — else a deleted dead-end
+    # keeps steering proposals. The winners path already excludes them via feasible_nodes().
+    from looplab.events.digest import theme_rollup
+    live_fail = _node(1, op="improve", status=NodeStatus.failed)
+    dead_fail = _node(2, op="improve", status=NodeStatus.failed)
+    dead_fail.tombstoned = True
+    st = _state([_node(0, metric=1.0), live_fail, dead_fail])
+    st.best_node_id = 0
+    st.nodes[1].idea.theme = "beta"
+    st.nodes[2].idea.theme = "beta"          # tombstoned -> must NOT add to the 'beta' rollup
+    assert "1 failed" in experiments_digest(st).splitlines()[1]     # only the live failure counted
+    assert theme_rollup(st).get("beta", {}).get("count") == 1       # tombstoned 'beta' node excluded
+
+
+def test_sibling_and_lineage_digests_exclude_tombstoned_nodes():
+    # §6.3: the always-on Researcher context (sibling_digest diversity pressure, lineage_lessons inherited
+    # outcomes) must not surface a logically-deleted node — else a deleted dead-end keeps steering proposals.
+    root = _node(0, metric=1.0)
+    live = _node(1, op="improve", parents=[0], metric=0.6)
+    dead = _node(2, op="improve", parents=[0], metric=0.4)
+    dead.tombstoned = True
+    dead.idea.rationale = "DELETED dead-end approach"
+    st = _state([root, live, dead], direction="min")
+    sd, ll = sibling_digest(st, root), lineage_lessons(st, root)
+    assert "#2" not in sd and "DELETED" not in sd, sd     # tombstoned sibling hidden
+    assert "#2" not in ll and "DELETED" not in ll, ll     # tombstoned descendant not an inherited lesson
+    assert "#1" in sd                                       # the live sibling still shows
+
+
 # --------------------------------------------------------------------------- #
 # D2 memory hygiene
 # --------------------------------------------------------------------------- #
@@ -126,10 +157,12 @@ def test_ablation_attribution_aggregates_across_probes():
 def test_consolidate_merges_duplicates_and_counts_evidence():
     rows = [
         {"statement": "Deeper trees help", "outcome": "supported", "task_id": "t"},
-        {"statement": "deeper trees   help", "outcome": "supported", "task_id": "t"},
+        {"statement": "deeper trees   help", "outcome": "supported", "task_id": "t",
+         "claim_stance": "support"},
     ]
     out = consolidate_lessons(rows)
     assert len(out) == 1 and out[0]["evidence_count"] == 2
+    assert out[0]["claim_stance"] == "support"
 
 
 def test_consolidate_dedups_evidence_by_run_id():
@@ -204,7 +237,7 @@ def test_agentic_merge_base_skips_noted(monkeypatch):
     from looplab.engine.memory import _agentic_merge_lessons
     rows = [
         {"statement": "raise the learning rate", "outcome": "supported", "task_id": "t",
-         "evidence_count": 2},
+         "evidence_count": 2, "claim_stance": "support"},
         {"statement": "increase the learning rate", "outcome": "noted", "task_id": "t",
          "evidence_count": 1},
     ]
@@ -214,6 +247,7 @@ def test_agentic_merge_base_skips_noted(monkeypatch):
     assert len(out) == 1
     assert out[0]["outcome"] == "supported" and out[0]["statement"] == "increase the LR"
     assert out[0]["evidence_count"] == 2          # only members AGREEING with the verdict add support
+    assert out[0]["claim_stance"] == "support"
 
 
 def test_agentic_merge_legacy_outcomeless_row_is_inert(monkeypatch):
@@ -299,7 +333,11 @@ def test_reflection_writes_consolidated_lessons_and_skill(tmp_path):
     from looplab.search.policy import GreedyTree
 
     class _T:
-        id = "mem-task"; goal = "maximize accuracy on churn"; direction = "max"; kind = "dataset"
+        id = "mem-task"
+        goal = "maximize accuracy on churn"
+        direction = "max"
+        kind = "dataset"
+
         def model_dump(self, mode="json"):
             return {"id": self.id}
 
@@ -341,8 +379,13 @@ def test_lessons_route_by_role(tmp_path):
     from looplab.search.policy import GreedyTree
 
     class _T:
-        id = "role-task"; goal = "g"; direction = "max"; kind = "dataset"
-        def model_dump(self, mode="json"): return {"id": self.id}
+        id = "role-task"
+        goal = "g"
+        direction = "max"
+        kind = "dataset"
+
+        def model_dump(self, mode="json"):
+            return {"id": self.id}
 
     class _R:
         def propose(self, state, parent): return Idea(operator="draft", params={"x": 1.0})

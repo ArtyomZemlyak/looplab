@@ -24,7 +24,7 @@ from looplab.events.eventstore import iter_jsonl
 from looplab.events.replay import fold
 from looplab.serve.engine_proc import _engine_liveness
 from looplab.serve.jobs import JobRegistry
-from looplab.serve.llm_context import llm_settings
+from looplab.serve.llm_context import global_settings, llm_settings
 from looplab.serve.projects import ProjectStore
 from looplab.serve.protocol import (
     PHASE_APPROVAL, PHASE_FINALIZING, PHASE_FINISHED, PHASE_GROUNDING, PHASE_ONBOARDING, PHASE_PAUSED,
@@ -321,6 +321,10 @@ class AppState:
     def llm_settings(self, rd: Optional[Path] = None):
         """Per-run LLM settings (see `llm_context.llm_settings`) over THIS app's settings store."""
         return llm_settings(self.settings, rd)
+
+    def global_settings(self):
+        """Typed environment + saved UI defaults for run-independent owner surfaces."""
+        return global_settings(self.settings)
 
     def make_llm_client(self, *args, **kwargs):
         """Late-bound client factory — resolves `looplab.serve.server.make_llm_client` at call time

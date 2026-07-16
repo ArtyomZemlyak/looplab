@@ -8,8 +8,9 @@ FACETS (domain, language, modality, interaction, objective) that describe what K
 Kept strictly OFF the deterministic index path (CR0 gate): facets live in their OWN append-only
 `task_facets.jsonl` keyed by task_id, and `scope_profile` only carries them when EXPLICITLY passed — so
 `build_index`/`rebuild_index_from_run_root` (which never pass facets) stay byte-identical rebuildable. The
-facets are an advisory OVERLAY: surfaced as metadata and usable as a ranking hint only *after* a deterministic
-task/direction/fingerprint scope match. Agent-proposed labels never grant cross-task visibility.
+facets are an advisory OVERLAY: surfaced as metadata and reserved for a future ranking hint only *after* a
+deterministic task/direction/fingerprint scope match. They do not currently change retrieval order, and
+agent-proposed labels never grant cross-task visibility.
 
 LLM proposes -> recorded via `record_task_facets`. Degrades to no facets on no client / any failure.
 """

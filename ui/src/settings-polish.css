@@ -154,6 +154,7 @@
 .settings-summary-divider { color: var(--line-2); }
 .settings-summary .is-unsaved,
 .settings-save-state.is-unsaved { color: var(--working-text); }
+.settings-save-state.is-invalid { color: var(--fail-text); font-weight: 700; }
 
 .settings-summary-link {
   margin-left: auto;
@@ -226,6 +227,13 @@
 .settings-empty strong { color: var(--fg); font-size: 14px; }
 .settings-empty span { color: var(--fg-mut); font-size: 12px; }
 .sf-secret-state { color: var(--fg-dim); font-weight: 600; }
+.sf-field.invalid .sf-label { color: var(--fail-text); }
+.sf-field.invalid .sf-input .text { border-color: var(--fail); }
+.sf-field.invalid .sf-input .text:focus { box-shadow: 0 0 0 2px color-mix(in srgb, var(--fail) 22%, transparent); }
+.sf-error { margin-top: 4px; color: var(--fail-text); font-size: 11px; font-weight: 650; line-height: 1.35; }
+.sf-field.readonly .sf-input { opacity: 0.76; }
+.sf-field.readonly .sf-input .text { cursor: not-allowed; background: var(--bg-2); }
+.sf-field.readonly .sf-label { cursor: default; }
 .sf-warning {
   margin-top: 7px;
   padding: 8px 9px;

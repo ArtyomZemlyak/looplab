@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-import looplab.core.llm as llm  # noqa: E402
 from looplab.serve.assistant import run_turn  # noqa: E402
 from looplab.core.llm import OpenAICompatibleClient  # noqa: E402
 from looplab.serve.server import make_app  # noqa: E402
@@ -115,7 +114,12 @@ def test_message_stream_endpoint(tmp_path, monkeypatch):
     sid = client.post("/api/assistant/sessions", json={"mode": "plan"}).json()["id"]
     tokens, done = [], None
     with client.stream("POST", f"/api/assistant/sessions/{sid}/message_stream",
-                       json={"instruction": "hi", "mode": "plan"}) as r:
+                       json={"instruction": "hi", "mode": "plan"},
+                       headers={"Accept-Encoding": "gzip"}) as r:
+        # Compression must never buffer a live token stream. Starlette excludes event-stream responses
+        # even when the client advertises gzip; X-Accel-Buffering pins the proxy half of the contract.
+        assert r.headers.get("Content-Encoding") is None
+        assert r.headers.get("X-Accel-Buffering") == "no"
         event = None
         for line in r.iter_lines():
             if line.startswith("event:"):

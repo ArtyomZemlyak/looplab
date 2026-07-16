@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import pytest
 
+from looplab.core.models import Event
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.replay import fold
 from looplab.search.archive import DiversityArchive
@@ -77,6 +78,54 @@ def test_fold_tolerates_null_metric_node(tmp_path):
     st = fold(s.read_all())                  # raised TypeError before the fix
     assert st.best_node_id == 0              # null-metric node skipped; node 0 wins
     DiversityArchive(0.1).summary(st)        # archive must also tolerate the null-metric node
+
+
+def test_fold_quarantines_non_numeric_and_non_finite_node_metrics(tmp_path):
+    s = EventStore(tmp_path / "events.jsonl")
+    _seed(s)
+    s.append("node_created", {"node_id": 1, "parent_ids": [], "operator": "improve",
+                              "idea": {"operator": "improve", "params": {}}, "code": ""})
+    s.append("node_evaluated", {"node_id": 1, "metric": "oops"})
+    st = fold(s.read_all())
+    assert st.best_node_id == 0 and st.nodes[1].metric is None
+
+    events = list(s.read_all())
+    for node_id, metric in ((2, float("nan")), (3, float("inf")), (4, float("-inf")),
+                            (5, 10**400)):
+        events.extend([
+            Event(type="node_created", data={
+                "node_id": node_id, "parent_ids": [], "operator": "improve",
+                "idea": {"operator": "improve", "params": {}}, "code": ""}),
+            Event(type="node_evaluated", data={"node_id": node_id, "metric": metric}),
+        ])
+    st = fold(events)
+    assert st.best_node_id == 0
+    assert [node.id for node in st.feasible_nodes()] == [0]
+    assert all(st.nodes[node_id].metric is None for node_id in (1, 2, 3, 4, 5))
+
+    class HostileInt(int):
+        def __float__(self):
+            raise TypeError("hostile numeric adapter")
+
+    from looplab.core.fitness import is_usable_metric
+    assert is_usable_metric(HostileInt(1)) is False
+
+
+def test_malformed_confirm_and_holdout_scalars_cannot_poison_selection():
+    events = [
+        Event(type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min",
+                                               "holdout_select": True}),
+        Event(type="node_created", data={"node_id": 0, "parent_ids": [], "operator": "draft",
+                                         "idea": {"operator": "draft", "params": {}}, "code": ""}),
+        Event(type="node_evaluated", data={"node_id": 0, "metric": 1.0}),
+        Event(type="node_confirmed", data={"node_id": 0, "mean": "bad", "std": float("inf"),
+                                           "seeds": "3"}),
+        Event(type="holdout_evaluated", data={"node_id": 0, "metric": float("nan")}),
+    ]
+    st = fold(events)
+    assert st.best_node_id == 0 and st.best().metric == 1.0
+    assert st.nodes[0].confirmed_mean is None and st.nodes[0].confirmed_std is None
+    assert st.nodes[0].confirmed_seeds is None and st.nodes[0].holdout_metric is None
 
 
 def test_fold_skips_malformed_node_created(tmp_path):
@@ -257,7 +306,7 @@ def test_posthoc_finished_node_removal_preserves_finish_and_evidence_until_actua
     s.append(event_type, event_data)
     posthoc = fold(s.read_all())
     assert posthoc.finished and posthoc.search_epoch == 0
-    assert not posthoc.finalization_pending() and posthoc.report == {"summary": "sealed"}
+    assert not posthoc.finalization_pending() and posthoc.report["summary"] == "sealed"
     assert posthoc.confirmed_done and posthoc.approved and posthoc.approved_node_id == 0
     assert posthoc.nodes[0].metric == 2.0 and posthoc.nodes[0].confirmed_mean == 2.1
     assert posthoc.nodes[1].metric == 1.0 and posthoc.nodes[1].holdout_metric == 1.3
@@ -689,6 +738,19 @@ def test_budget_extend_rejects_nonfinite():
     st = fold([base, Event(type="budget_extend", data={"max_eval_seconds": "600", "max_seconds": "30"})])
     assert st.budget_overrides["max_eval_seconds"] == 600.0
     assert st.budget_overrides["max_seconds"] == 30.0
+
+
+def test_policy_decision_tolerates_non_dict_scores():
+    # A non-dict `scores` (list/str/number from a corrupt or hand-edited log) must not brick the fold
+    # with an AttributeError (the whole run would become unopenable). It folds to empty policy_scores.
+    from looplab.core.models import Event
+    base = Event(type="run_started", data={"run_id": "r", "task_id": "t"})
+    for bad in ([1, 2, 3], "oops", 5, None):
+        st = fold([base, Event(type="policy_decision", data={"scores": bad, "chosen": 0})])
+        assert st.policy_scores == {}, bad
+    # a well-formed dict still parses (int-coerced keys)
+    st = fold([base, Event(type="policy_decision", data={"scores": {"3": 0.5}, "chosen": 3})])
+    assert st.policy_scores == {3: 0.5} and st.policy_chosen == 3
 
 
 # A "reused" stage marker (a re-eval that SKIPPED a stage the inline-repair reuse kept) must NOT clobber
@@ -1205,14 +1267,14 @@ def test_finish_report_is_provisional_until_same_cas_or_legacy_adjacent_finish(t
         "trigger": "finish", "content": {"summary": "fresh"}})
     modern.append("run_finished", {"after_seq": fresh_report.seq})
     accepted = fold(modern.read_all())
-    assert accepted.finished and accepted.report == {"summary": "fresh"}
+    assert accepted.finished and accepted.report["summary"] == "fresh"
     assert started.seq < report.seq
 
     adjacent = EventStore(tmp_path / "adjacent.jsonl")
     adjacent.append("report_generated", {
         "trigger": "finish", "content": {"summary": "legacy"}})
     adjacent.append("run_finished", {})
-    assert fold(adjacent.read_all()).report == {"summary": "legacy"}
+    assert fold(adjacent.read_all()).report["summary"] == "legacy"
 
     separated = EventStore(tmp_path / "separated.jsonl")
     separated.append("report_generated", {
@@ -1606,3 +1668,13 @@ def test_legacy_structured_extra_metrics_fold_to_warning_free_numeric_projection
         dumped = state.model_dump(mode="json")
     assert dumped["nodes"]["0"]["extra_metrics"] == {"score2": 0.75}
     assert not any("PydanticSerializationUnexpectedValue" in str(w.message) for w in caught)
+
+
+def test_extra_metric_projection_rejects_hostile_numeric_adapter():
+    from looplab.core.models import normalize_extra_metrics
+
+    class HostileInt(int):
+        def __float__(self):
+            raise TypeError("hostile numeric adapter")
+
+    assert normalize_extra_metrics({"hostile": HostileInt(1), "ok": 2}) == {"ok": 2.0}

@@ -18,9 +18,14 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.agents.agent import drive_tool_loop
+from looplab.core.advisory_payloads import MAX_RESEARCH_SOURCES, sanitize_research_memo_payload
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 from looplab.core.prompts import PromptStore, render
+from looplab.trust.redact import redact_persisted_text
+
+
+_MAX_SOURCES = MAX_RESEARCH_SOURCES
 
 
 class _ClaimOut(BaseModel):
@@ -50,7 +55,9 @@ _SYSTEM = (
     "datasets and write-ups. Then call `emit` exactly once with: a `summary` (your conclusion in "
     "a short paragraph), `findings` (concrete observations), `claims` — EVERY substantive claim "
     "as {statement, node_ids, urls} citing the experiment ids and/or source urls it rests on "
-    "(a claim with no evidence will be flagged by the verifier) — and `recommended_directions` "
+    "(a claim with no evidence will be flagged by the verifier). A claim URL MUST exactly equal a "
+    "URL you actually fetched or otherwise consulted through a tool during this review; a search-result "
+    "URL must be fetched before you cite it — and `recommended_directions` "
     "(specific next experiments to try). Put your detailed deliberation in `reasoning`. Be "
     "concrete and grounded in the actual results, not generic advice."
 )
@@ -138,8 +145,16 @@ class DeepResearcher:
 
         def _record(name: str, args: dict, result: str) -> None:
             # Record which sources were consulted (the query/url + a snippet) for the memo.
-            sources.append({"title": f"{name}({_arg_label(args)})",
-                            "url": _arg_url(args), "snippet": str(result)[:200]})
+            if len(sources) >= _MAX_SOURCES:
+                return
+            sources.append({
+                "title": redact_persisted_text(
+                    f"{name}({_arg_label(args)})", max_chars=400, single_line=True),
+                "url": _arg_url(args),
+                # Preserve the historical first-200 source excerpt after sanitizing the loop's
+                # already-bounded observation; the durable writer applies the same guard again.
+                "snippet": redact_persisted_text(result, max_chars=4_000)[:200],
+            })
 
         try:
             # The shared loop owns the mechanics this stage used to reimplement (prose-stall
@@ -167,24 +182,30 @@ class DeepResearcher:
         except BudgetExceeded:      # a hard budget stop must end the run, not be swallowed as a memo
             raise
         except Exception as e:  # noqa: BLE001 — research is best-effort; never crash the run
-            memo.summary = f"(deep research unavailable: {e})"
+            memo.summary = redact_persisted_text(
+                f"(deep research unavailable: {e})", max_chars=4_000)
             memo.sources = sources
             return memo
 
     def _assemble(self, out: _MemoOut, memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
-        memo.summary = out.summary
-        memo.reasoning = out.reasoning
-        memo.findings = out.findings
-        memo.claims = [c.model_dump() for c in out.claims]   # D8 evidence ledger
-        memo.recommended_directions = out.recommended_directions
-        memo.sources = sources
+        clean = sanitize_research_memo_payload({
+            **out.model_dump(mode="json"), "sources": sources,
+            "at_node": memo.at_node, "trigger": memo.trigger,
+        })
+        memo.summary = clean["summary"]
+        memo.reasoning = clean["reasoning"]
+        memo.findings = clean["findings"]
+        memo.claims = clean["claims"]                  # D8 evidence ledger
+        memo.recommended_directions = clean["recommended_directions"]
+        memo.sources = clean["sources"]
         return memo
 
     def _finalize(self, args: dict, memo: ResearchMemo, sources: list[dict]) -> ResearchMemo:
         try:
             return self._assemble(_MemoOut.model_validate(args), memo, sources)
         except Exception:  # noqa: BLE001 — a junk emit must not crash the run
-            memo.summary = str((args or {}).get("summary", "") or "(empty memo)")[:1000]
+            value = (args or {}).get("summary", "") if isinstance(args, dict) else ""
+            memo.summary = redact_persisted_text(value or "(empty memo)", max_chars=1_000)
             memo.sources = sources
             return memo
 
@@ -204,11 +225,13 @@ class DeepResearcher:
 
 
 def _arg_label(args: dict) -> str:
-    return str((args or {}).get("query") or (args or {}).get("url") or "")[:60]
+    value = (args or {}).get("query") or (args or {}).get("url") or ""
+    return redact_persisted_text(value, max_chars=60, single_line=True)
 
 
 def _arg_url(args: dict) -> str:
-    return str((args or {}).get("url") or "")
+    return redact_persisted_text(
+        (args or {}).get("url") or "", max_chars=1_600, single_line=True)
 
 
 def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepResearcher]:

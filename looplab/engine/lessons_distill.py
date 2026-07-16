@@ -20,9 +20,10 @@ from typing import Optional
 
 import orjson
 
+from looplab.core.atomicio import append_jsonl_bytes_locked
 from looplab.core.models import NodeStatus, RunState
 from looplab.engine.lessons_priors import LESSON_ROLE_RESEARCHER
-from looplab.events.eventstore import read_jsonl_lenient
+from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
 from looplab.events.types import EV_LESSONS_DISTILLED, EV_REFLECTION_NOTE
 
 
@@ -87,16 +88,19 @@ class LessonDistillMixin:
             # only a crash-retry of the SAME finish is skipped. Legacy/off-finalize-path notes (no
             # finish_seq, or -1) fall through to the historical blind append.
             npath = base / "meta_notes.jsonl"
-            _dup = _has_finish_seq and any(
-                o.get("run_id") == final.run_id and o.get("finish_seq") == finish_seq
-                for o in read_jsonl_lenient(npath))
-            if not _dup:
-                rec = {"task_id": final.task_id, "note": note}
-                if _has_finish_seq:
-                    rec["run_id"] = final.run_id
-                    rec["finish_seq"] = finish_seq
-                with open(npath, "a", encoding="utf-8") as f:
-                    f.write(orjson.dumps(rec).decode() + "\n")
+            # The duplicate check and append are one transaction.  Concurrent finalizers can
+            # otherwise both observe absence and append the same note, while a crash-torn last line
+            # can swallow the next valid record for every line-oriented reader.
+            with _interprocess_lock(Path(str(npath) + ".lock")):
+                _dup = _has_finish_seq and any(
+                    o.get("run_id") == final.run_id and o.get("finish_seq") == finish_seq
+                    for o in read_jsonl_lenient(npath))
+                if not _dup:
+                    rec = {"task_id": final.task_id, "note": note}
+                    if _has_finish_seq:
+                        rec["run_id"] = final.run_id
+                        rec["finish_seq"] = finish_seq
+                    append_jsonl_bytes_locked(npath, orjson.dumps(rec))
 
         # M3 · lessons (incl. failures) with an M2 fingerprint. Memory of what DIDN'T work is as
         # valuable as what did (DS-Agent / MARS / ML-Master): it stops a later run re-treading a dead
@@ -121,6 +125,7 @@ class LessonDistillMixin:
                     "at_node": len(final.nodes), "trigger": "run_end", "count": len(comp),
                     "pairs": [[pr["a"], pr["b"]] for pr in pairs],
                     "lessons": [{"statement": lz["statement"], "outcome": lz["outcome"],
+                                 "claim_stance": lz.get("claim_stance"),
                                  "evidence": lz.get("evidence")} for lz in comp]})
             lessons.extend(comp)
         # NOTE: lessons are now EXCLUSIVELY LLM-authored (the `_reflect_lessons` consolidation above +
@@ -156,7 +161,8 @@ class LessonDistillMixin:
             "finish_seq": finish_seq,          # #3: crash-idempotency key for a finalization retry
             "at_nodes": len(final.nodes),      # coverage watermark: re-reflect only if a reopen grows past it
             "n_lessons": len(lessons), "n_skills": len(skills),
-            "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", "")}
+            "lessons": [{"statement": lz.get("statement", ""), "outcome": lz.get("outcome", ""),
+                         "claim_stance": lz.get("claim_stance")}
                         if isinstance(lz, dict) else {"statement": str(lz), "outcome": ""}
                         for lz in lessons[:12]],
             "skills": skills[:8]})
@@ -198,7 +204,8 @@ class LessonDistillMixin:
             return [{"task_id": final.task_id, "fingerprint": fp, "kind": getattr(self._e.task, "kind", ""),
                      "statement": (f"op '{best.operator}' with params {best.idea.params} "
                                    f"reached {best.metric:.4g}"),
-                     "outcome": "supported", "delta": None, "confidence": 0.7,
+                     "outcome": "supported", "claim_stance": "support",
+                     "delta": None, "confidence": 0.7,
                      "run_id": final.run_id, "evidence": [best.id], "role": LESSON_ROLE_RESEARCHER,
                      "evidence_sig": self._evidence_sig_map(final, [best.id])}]
         client = self._e._reflect_client()
@@ -238,7 +245,9 @@ class LessonDistillMixin:
                   "into a single lesson stating the sweet spot AND what hurt); keep genuinely UNRELATED "
                   "findings as SEPARATE lessons — one lesson per distinct theme. Each lesson is ONE "
                   "self-contained sentence (no run-on chains, no 'Experiment A:' labels). Tag each "
-                  "[GOOD] (reuse this) or [BAD] (avoid this). One per line, no preamble.")
+                  "[GOOD] (reuse this) or [BAD] (avoid this). The sentence itself must be a conclusion "
+                  "supported by the run evidence; [GOOD]/[BAD] controls guidance, not truth. One per "
+                  "line, no preamble.")
         try:
             from looplab.agents.agent import agentic_text
             out = agentic_text(client, self._reflect_tools(final), [{"role": "user", "content": prompt}],
@@ -246,7 +255,7 @@ class LessonDistillMixin:
                                answer_desc="generalizable lessons, one theme per line, each tagged [GOOD]/[BAD]") or ""
         except Exception:   # noqa: BLE001 - best-effort; a real run writes NO templated fallback
             return []
-        from looplab.engine.memory import parse_credit_lessons
+        from looplab.engine.memory import distilled_claim_stance, parse_credit_lessons
         # No fixed cap: one lesson per distinct theme (consolidation keeps this small); bound at 8 as a
         # runaway guard, not a target. §role-split: these are generalizable technique/strategy takeaways
         # → the RESEARCHER's context (what to try next). n_pairs=0 (reflection lines carry no valid
@@ -255,6 +264,7 @@ class LessonDistillMixin:
         res = [{"task_id": final.task_id, "fingerprint": fp,
                 "kind": getattr(self._e.task, "kind", ""), "statement": stmt,
                 "outcome": outcome, "delta": None, "confidence": 0.6,
+                "claim_stance": distilled_claim_stance(outcome),
                 "run_id": final.run_id, "evidence": list(ev_ids), "evidence_sig": ev_sig,
                 "role": LESSON_ROLE_RESEARCHER}
                for _, stmt, outcome in parse_credit_lessons(out, 0, limit=8)]

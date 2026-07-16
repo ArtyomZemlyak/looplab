@@ -410,7 +410,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [mergeFrom, setMergeFrom] = useState(null)   // arm: next node click merges with this one
   const [mergeTarget, setMergeTarget] = useState('')
   const [mergeSubmitting, setMergeSubmitting] = useState(false)
+  const mergeSubmittingRef = useRef(false)   // synchronous guard: two submit events can precede a render
   const mergeReturnFocusRef = useRef(null)
+  const mergeSelectRef = useRef(null)
+  const mergeConfirmRef = useRef(null)
   const closeMergeChooser = (restoreFocus = true) => {
     const source = mergeFrom
     const captured = mergeReturnFocusRef.current
@@ -421,8 +424,27 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     requestAnimationFrame(() => {
       const fallback = document.querySelector(`[data-node-action-id="${source}"]`)
         || document.querySelector(`[data-node-select-id="${source}"]`)
-      const target = captured?.isConnected ? captured : fallback
+      const target = captured?.isConnected ? captured : fallback || document.querySelector('[data-route-main]')
       target?.focus?.({ preventScroll: true })
+    })
+  }
+  const openMergeChooser = (source, target = null, returnFocus = null) => {
+    const sourceId = Number(source)
+    const targetId = target == null ? null : Number(target)
+    if (!Number.isSafeInteger(sourceId)
+      || (targetId != null && (!Number.isSafeInteger(targetId) || targetId === sourceId))) {
+      showToast('Choose two different experiments to merge')
+      return
+    }
+    mergeReturnFocusRef.current = returnFocus || null
+    setMergeFrom(sourceId)
+    setMergeTarget(targetId == null ? '' : String(targetId))
+    showToast(targetId == null
+      ? `Choose a destination for #${sourceId}, then confirm the merge`
+      : `Review merge #${sourceId} + #${targetId}, then confirm`)
+    requestAnimationFrame(() => {
+      const control = targetId == null ? mergeSelectRef.current : mergeConfirmRef.current
+      control?.focus?.({ preventScroll: true })
     })
   }
   const [comparePair, setComparePair] = useState(null)   // seed ComparePanel for "diff vs champion"
@@ -519,20 +541,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }
   const onNodeAction = async (action, arg, context = null) => {
     if (readOnlyMode) { showToast(reviewMode ? 'This review link is read-only' : `Historical snapshot seq ${viewSeq} is read-only`); return }
-    if (action === 'merge' && arg && typeof arg === 'object' && mergeSubmitting && !context?.fromChooser) {
+    if (action === 'merge' && mergeSubmittingRef.current) {
       showToast('A merge is already being submitted'); return
     }
     try {
-      if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop A->B
-        const ids = [arg.from, arg.to]
-        const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
-        const f = checkedCommand(await CONTROL.merge(runId, ids, generations), {
-          success: `Merge #${arg.from} + #${arg.to} applied — the engine is processing it`, noop: 'That merge was already satisfied',
-          executing: `Merge #${arg.from} + #${arg.to} requested — waiting for the engine`, failure: 'Merge failed',
-        })
-        showToast(f.message)
-        if (mergeFrom != null) closeMergeChooser(true)
-        else { setMergeFrom(null); setMergeTarget('') }
+      if (action === 'merge' && arg && typeof arg === 'object') {   // drag drop only preselects A + B
+        openMergeChooser(arg.from, arg.to, context?.returnFocus || null)
         return
       }
       const id = arg
@@ -560,9 +574,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         setComparePair([live2?.best_node_id ?? id, id]); setPanel('compare')
       }
       else if (action === 'merge') {
-        mergeReturnFocusRef.current = context?.returnFocus || null
-        setMergeFrom(id); setMergeTarget('')
-        showToast(`Choose a destination below or click a node to merge with #${id}`)
+        openMergeChooser(id, null, context?.returnFocus || null)
       }
       else if (action.startsWith('reset:')) {   // re-run this node IN PLACE from a stage (no new node)
         const stage = action.split(':')[1]
@@ -588,37 +600,37 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       }
     } catch (e) { showToast(e.message || 'Run command failed') }
   }
-  // When armed for merge, a node click completes the merge instead of selecting.
+  // When armed for merge, a node click only preselects the destination. The form's explicit Confirm
+  // action is the sole mutation boundary for context-menu, keyboard, canvas, and drag gestures.
   const onCanvasSelect = (id) => {
-    if (mergeFrom != null && mergeSubmitting) { showToast('A merge is already being submitted'); return }
+    if (mergeFrom != null && mergeSubmittingRef.current) { showToast('A merge is already being submitted'); return }
     if (readOnlyMode && mergeFrom != null) {
-      mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget(''); return
+      closeMergeChooser(false); return
     }
     if (mergeFrom != null && id != null && id !== mergeFrom) {
-      const ids = [mergeFrom, id]
-      const generations = Object.fromEntries(ids.map(i => [i, live2?.nodes?.[i]?.attempt]))
-      CONTROL.merge(runId, ids, generations)
-        .then(record => checkedCommand(record, {
-          success: `Merge #${mergeFrom} + #${id} applied — the engine is processing it`, noop: 'That merge was already satisfied',
-          executing: `Merge #${mergeFrom} + #${id} requested — waiting for the engine`, failure: 'Merge failed',
-        }))
-        .then(feedback => showToast(feedback.message))
-        .catch(error => showToast(error.message || 'Merge failed'))
-      mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget(''); return
+      setMergeTarget(String(id))
+      showToast(`Review merge #${mergeFrom} + #${id}, then confirm`)
+      requestAnimationFrame(() => mergeConfirmRef.current?.focus?.({ preventScroll: true }))
+      return
     }
-    if (mergeFrom != null) { mergeReturnFocusRef.current = null; setMergeFrom(null); setMergeTarget('') }
+    if (mergeFrom != null && id === mergeFrom) {
+      showToast('Choose a different destination experiment')
+      requestAnimationFrame(() => mergeSelectRef.current?.focus?.({ preventScroll: true }))
+      return
+    }
+    if (mergeFrom != null) closeMergeChooser(true)
     selectNode(id)
     if (compactWorkspace && id != null) setCompactInspectorOpen(true)
   }
   useEffect(() => {   // Esc cancels the merge-arm
     if (mergeFrom == null) return
     const h = (e) => {
-      if (e.key !== 'Escape' || e.defaultPrevented || mergeSubmitting) return
+      if (e.key !== 'Escape' || e.defaultPrevented || mergeSubmittingRef.current) return
       if (document.querySelector('[aria-modal="true"]')) return
       closeMergeChooser(true)
     }
     window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h)
-  }, [mergeFrom, mergeSubmitting])
+  }, [mergeFrom])
   // Drill-down from the dock/timeline: select a node, optionally open a tab + jump the scrubber.
   const focusNode = (id, tab, eventSeq) => {
     const value = Number(eventSeq)
@@ -686,11 +698,28 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const submitMergeTarget = async (event) => {
     event.preventDefault()
     if (mergeTarget === '') return
+    const source = mergeFrom
     const target = Number(mergeTarget)
-    if (mergeFrom == null || !Number.isSafeInteger(target) || target === mergeFrom || mergeSubmitting) return
+    if (source == null || !Number.isSafeInteger(target) || target === source) return
+    if (mergeSubmittingRef.current) { showToast('A merge is already being submitted'); return }
+    mergeSubmittingRef.current = true
     setMergeSubmitting(true)
-    try { await onNodeAction('merge', { from: mergeFrom, to: target }, { fromChooser: true }) }
-    finally { setMergeSubmitting(false) }
+    try {
+      const ids = [source, target]
+      const generations = Object.fromEntries(ids.map(id => [id, live2?.nodes?.[id]?.attempt]))
+      const feedback = checkedCommand(await CONTROL.merge(runId, ids, generations), {
+        success: `Merge #${source} + #${target} applied — the engine is processing it`, noop: 'That merge was already satisfied',
+        executing: `Merge #${source} + #${target} requested — waiting for the engine`, failure: 'Merge failed',
+      })
+      showToast(feedback.message)
+      closeMergeChooser(true)
+    } catch (error) {
+      showToast(error.message || 'Merge failed')
+      requestAnimationFrame(() => mergeConfirmRef.current?.focus?.({ preventScroll: true }))
+    } finally {
+      mergeSubmittingRef.current = false
+      setMergeSubmitting(false)
+    }
   }
   const openComment = comment => {
     if (!comment || !Number.isSafeInteger(comment.nodeId)) return
@@ -1021,19 +1050,19 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {mergeFrom != null && !readOnlyMode && <form className="merge-destination-bar"
         aria-label={`Choose a merge destination for experiment ${mergeFrom}`} onSubmit={submitMergeTarget}>
         <label htmlFor="merge-destination-select">Merge <b>#{mergeFrom}</b> with</label>
-        <select id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
+        <select ref={mergeSelectRef} id="merge-destination-select" value={mergeTarget} disabled={mergeSubmitting}
           onChange={event => setMergeTarget(event.target.value)} autoFocus>
           <option value="">Choose an experiment…</option>
           {mergeCandidates.map(node => <option key={node.id} value={node.id}>
             #{node.id} · {node.operator || 'experiment'} · {node.status}
           </option>)}
         </select>
-        <button type="submit" className="btn sm primary" disabled={!mergeTarget || mergeSubmitting}>
-          {mergeSubmitting ? 'Merging…' : 'Merge experiments'}
+        <button ref={mergeConfirmRef} type="submit" className="btn sm primary" disabled={!mergeTarget || mergeSubmitting}>
+          {mergeSubmitting ? 'Merging…' : 'Confirm merge'}
         </button>
         <button type="button" className="btn sm ghost" disabled={mergeSubmitting}
           onClick={() => closeMergeChooser(true)}>Cancel</button>
-        <span className="muted">You can also choose the destination directly on the graph.</span>
+        <span className="muted">Graph gestures only choose the pair; nothing is sent until you confirm.</span>
       </form>}
 
       {view === 'report'
@@ -1101,7 +1130,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   resetKey={selectedGroup != null ? `group:${selectedGroup}` : `node:${selectedId}`}>
                   {selectedGroup != null
                     ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
-                        state={state} onSelectNode={focusNode} onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
+                        state={state} themeFilter={themeFilter} onSelectNode={focusNode}
+                        onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
                     : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}
                         readOnly={readOnlyMode} historySeq={history.resolvedSeq}
