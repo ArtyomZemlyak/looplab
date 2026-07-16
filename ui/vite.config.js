@@ -39,7 +39,9 @@ export default defineConfig({
         // groups consolidate modules used together across the same owner workspaces, avoiding many
         // tiny gzip streams without crossing the route/panel boundaries enforced by the bundle
         // checker. Never capture dependencies recursively: that would pull React/core into a group.
-        strictExecutionOrder: true,
+        // Native ESM ordering avoids Rolldown's runtime ordering shim (about 4.2 KiB gzip here).
+        // check:bundle rejects static manifest cycles, so an unsafe manual-chunk topology fails CI.
+        strictExecutionOrder: false,
         codeSplitting: {
           groups: [
             {
@@ -52,7 +54,10 @@ export default defineConfig({
             },
             {
               name: 'analysis-support',
-              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics)\.js$/,
+              // Charts and analysis projections have the same run/report/panel consumers; the only
+              // narrower consumer is DirectionsOverview, whose app closures already include Dag.
+              // One stream shares their dictionary and removes a redundant gzip/chunk boundary.
+              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|charts)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {

@@ -259,6 +259,54 @@ export function findStaticPath(manifest, roots, targets) {
   return null
 }
 
+/** Find one exact cycle in the emitted static-import graph without recursive stack growth. */
+export function findStaticCycle(manifest) {
+  const state = new Map()
+  const path = []
+  const pathIndex = new Map()
+
+  for (const root of Object.keys(manifest).sort()) {
+    if (state.has(root) || !isRecord(manifest[root])) continue
+    state.set(root, 'visiting')
+    pathIndex.set(root, path.length)
+    path.push(root)
+    const frames = [{
+      key: root,
+      next: 0,
+      dependencies: edgeList(manifest[root], 'imports'),
+    }]
+
+    while (frames.length) {
+      const frame = frames.at(-1)
+      if (frame.next >= frame.dependencies.length) {
+        state.set(frame.key, 'done')
+        pathIndex.delete(frame.key)
+        path.pop()
+        frames.pop()
+        continue
+      }
+
+      const dependency = frame.dependencies[frame.next++]
+      if (typeof dependency !== 'string'
+          || !Object.hasOwn(manifest, dependency)
+          || !isRecord(manifest[dependency])) continue
+      if (state.get(dependency) === 'visiting') {
+        return [...path.slice(pathIndex.get(dependency)), dependency]
+      }
+      if (state.has(dependency)) continue
+      state.set(dependency, 'visiting')
+      pathIndex.set(dependency, path.length)
+      path.push(dependency)
+      frames.push({
+        key: dependency,
+        next: 0,
+        dependencies: edgeList(manifest[dependency], 'imports'),
+      })
+    }
+  }
+  return null
+}
+
 export function assetKind(file) {
   const extension = extname(file).toLowerCase()
   if (extension === '.js' || extension === '.mjs' || extension === '.cjs') return 'js'
@@ -323,6 +371,15 @@ export function validateManifestGraph(manifest) {
         message: `Manifest chunk ${key} has a non-array css field; rebuild before trusting bundle budgets.`,
       })
     }
+  }
+  const cycle = findStaticCycle(manifest)
+  if (cycle) {
+    violations.push({
+      code: 'manifest_cycle',
+      message: `Manifest static import cycle ${cycle.join(' -> ')}; manually grouped chunks `
+        + 'must stay acyclic when native ESM execution ordering is enabled. Break the cycle or revise '
+        + 'the chunk grouping before trusting bundle budgets.',
+    })
   }
   return violations
 }

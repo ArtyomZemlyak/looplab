@@ -209,6 +209,18 @@ test('malformed manifest records fail closed without crashing the pure analyzer'
   assert.ok(result.violations.some(item => item.message.includes('non-array imports')))
 })
 
+test('static manifest cycles fail closed with an exact path', () => {
+  const graph = manifest()
+  graph['_shared.js'].imports = ['src/RunList.jsx']
+  const issues = validateManifestGraph(graph)
+  const cycle = issues.find(item => item.code === 'manifest_cycle')
+  assert.ok(cycle)
+  assert.match(cycle.message, /_shared\.js -> src\/RunList\.jsx -> _shared\.js/)
+
+  const result = evaluateBundle({ manifest: graph, assetStats: stats(), budgets: generous() })
+  assert.ok(result.violations.some(item => item.code === 'manifest_cycle'))
+})
+
 test('asset paths are confined to dist on every host platform', () => {
   const dist = resolve('synthetic-dist')
   assert.equal(safeAssetPath(dist, 'assets/app.js'), resolve(dist, 'assets/app.js'))
