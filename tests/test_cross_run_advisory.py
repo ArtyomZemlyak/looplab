@@ -130,5 +130,6 @@ def test_malformed_store_never_raises(tmp_path):
     assert isinstance(_Host(tmp_path, on=True)._cross_run_advisory_text(RunState()), str)
 
 
-def test_settings_flag_defaults_off():
-    assert Settings().cross_run_advisory is False
+def test_settings_flag_defaults_on():
+    # Part IV/V ships ON by default (advisory prompt cue; opt out per-run).
+    assert Settings().cross_run_advisory is True

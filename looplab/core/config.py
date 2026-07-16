@@ -67,10 +67,16 @@ def run_start_pinned_settings(state) -> dict:
 # --- Run profiles (config-first presets) -------------------------------------------------------
 # A `profile` is a NAMED BUNDLE of setting defaults — nothing more. It only fills fields the user
 # did NOT set explicitly (via file / --set / LOOPLAB_* env / init-kwargs), so any explicit knob
-# always wins (see `_apply_profile`). The whole intelligence of the engine already exists behind
-# individual flags but ships OFF so a toy `looplab run` stays cheap and deterministic; `thorough`
-# turns the built-and-tested machinery ON in one word for real tasks. Every value here is reachable
-# by hand — the profile is a convenience, never a hidden mode.
+# always wins (see `_apply_profile`). Most engine intelligence lives behind individual flags. The
+# PART IV/V cross-run + concept-graph machinery (concept_pivot, graded_novelty, cross_run_concepts /
+# _advisory / _structured_claims / _curation / _read_tools, fingerprint_universal, foresight_verify)
+# now ships ON in the product `Settings` default — it is audit/advisory/proposal-only (never rejects
+# or changes best-metric selection) so it is safe to run by default on real tasks, per the owner's
+# decision to actually use the built-and-tested features. The bare-library `EngineOptions` default
+# stays lean (see tests/test_options_divergence.py — product side is the aggressive one) so a toy
+# `Engine(...)` in a test doesn't fire cross-run LLM work unasked. The trust/confirm/ablate QUALITY
+# bundle still ships OFF and is turned on by `thorough`. Every value here is reachable by hand — the
+# profile is a convenience, never a hidden mode.
 #
 # `thorough` deliberately touches only QUALITY/TRUST machinery, not spend: it does NOT raise
 # max_nodes / max_parallel (those are cost knobs the user owns). It enables multi-seed confirmation
@@ -505,7 +511,7 @@ class Settings(BaseSettings):
     # of the vague "broaden". OPT-IN (default off): it only enriches an already-mode-gated explore
     # hint, never forces exploration, and no-ops for a task with no curated concept skeleton. Audit +
     # prompt-cue only; never touches selection. See search/concept_graph.py.
-    concept_pivot: bool = False
+    concept_pivot: bool = True
     # PART IV Phase 2b — D3 graded novelty into the LIVE novelty gate (§21.4/§21.13). When on and the
     # task has a curated concept skeleton, the novelty gate first grades a proposal over the concept
     # graph: a level-4 "same direction, DIFFERENT implementation" or a level-5 "re-opens a
@@ -515,7 +521,7 @@ class Settings(BaseSettings):
     # 1/2/3 (identical / near-dup / prior-run) still fall through to the existing gate. Deterministic
     # (heuristic tagger, no LLM), audit event `novelty_graded`, replay-safe. OPT-IN (default off);
     # no-ops for a task with no skeleton. See search/graded_novelty.py.
-    graded_novelty: bool = False
+    graded_novelty: bool = True
     # PART IV Phase 2b — D7 capability-expansion forced-jump DIRECTIVE (§21.8/§21.13, issue #7). When on
     # and the concept-graph cadence detects action-space LOCK-IN (the search has stayed inside one D5
     # branch for a long consecutive streak) on an `explore` stance, the Researcher's novelty hint
@@ -532,7 +538,7 @@ class Settings(BaseSettings):
     # never reaches SIMILAR-task priors/lessons/cases). Uses `[^\W_]+`/`.casefold()` — same splitting as
     # before, any script. OPT-IN (default off) because it changes which stored fingerprints a LIVE run
     # matches; a running portfolio must not silently re-key mid-flight. See engine/memory.py.
-    fingerprint_universal: bool = False
+    fingerprint_universal: bool = True
     # PART IV cross-run Step 2 (§21.20). Fill graded-novelty's `prior_concepts` from the cross-run
     # ConceptCapsuleStore: at run end write a per-run concept capsule (the shipped `node_concepts` tags +
     # best outcome, keyed by task_fingerprint) to `memory_dir`; when a later SIMILAR run proposes an idea
@@ -546,28 +552,28 @@ class Settings(BaseSettings):
     # A non-Latin (Russian/CJK) portfolio should ALSO set `fingerprint_universal`, else the capsule's goal
     # tokens are dropped and its fingerprint over-matches on kind/dir/metric alone (the novelty direction
     # gate narrows this, but goal-word similarity is still lost).
-    cross_run_concepts: bool = False
+    cross_run_concepts: bool = True
     # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
     # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
     # prompt-grounding, never touches node selection (§21.7). Reads `memory_dir` (lessons.jsonl +
     # concept_capsules.jsonl); "" when empty. OPT-IN (default off) — the gated flip of Step 2 from audit-only
     # to a live prompt cue; measure the effect via a frozen A/B before defaulting on. See engine/proposal_cues.py.
-    cross_run_advisory: bool = False
+    cross_run_advisory: bool = True
     # PART IV cross-run §21.20.13 (full CR of the lean fuzzy claim merge). Switch the claim read-model to the
     # SCOPE+POLARITY-safe STRUCTURED claim key (engine/claim_key.py): claims from different tasks never
     # merge, opposite polarity ("X helps" vs "X never helps") is surfaced as a CONTRADICTION instead of being
     # collapsed, paraphrase/inflection variants group by exact structured key (no transitive over-merge), and
     # operator governance is scope-precise (a decision in task A cannot reach a same-worded claim in task B).
     # Affects the `cross_run_advisory` context pack only; OPT-IN (default off). See engine/claims.py.
-    cross_run_structured_claims: bool = False
+    cross_run_structured_claims: bool = True
     # PART IV cross-run §22.4 (AGENTIC taxonomy steward). At finalize, when an LLM client is available, let
     # the concept steward (engine/concept_steward.py) review the freshly-updated portfolio concept graph and
     # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
     # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
     # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
     # retries finalize). OPT-IN (default off); needs `memory_dir` + an LLM backend. See engine/lessons.py.
-    cross_run_curation: bool = False
+    cross_run_curation: bool = True
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
@@ -618,7 +624,7 @@ class Settings(BaseSettings):
     # and the telemetry use. Degrades to the self-reported confidence without a client or on any verifier
     # error (the telemetry records which source was used). OPT-IN (default off); a few extra LLM calls per
     # acted-on proposal. See looplab/trust/verifier.py + search/foresight.py.
-    foresight_verify: bool = False
+    foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
     foresight_verify_samples: int = 3
@@ -824,7 +830,7 @@ class Settings(BaseSettings):
     # from `memory_dir` (lessons.jsonl + concept_capsules.jsonl). ADVISORY ONLY — an agent may cite what it
     # finds but never mutates cross-run truth (facts are engine-written, verdicts operator-ratified, §22.4).
     # OPT-IN (default off) because the cross-run stores only exist once the Part-IV features have run.
-    cross_run_read_tools: bool = False
+    cross_run_read_tools: bool = True
     # Agentic retrieval (ADR-16): if set, the LLM Researcher gets grep/kb_search/read
     # tools over this directory of markdown notes and chooses when to use them.
     knowledge_dir: str | None = Field(default_factory=lambda: str(_LL_HOME / "knowledge"))

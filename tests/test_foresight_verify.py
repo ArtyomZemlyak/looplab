@@ -142,4 +142,5 @@ def test_verifier_confidence_returns_none_without_a_client():
 
 def test_settings_defaults():
     s = Settings()
-    assert s.foresight_verify is False and s.foresight_verify_samples == 3
+    # Part IV/V ships ON by default (calibrated foresight verifier); sample count unchanged.
+    assert s.foresight_verify is True and s.foresight_verify_samples == 3

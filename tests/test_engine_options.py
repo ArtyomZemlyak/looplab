@@ -222,6 +222,15 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         surrogate_explore=settings.surrogate_explore,
         unified_agent=settings.unified_agent,
         agent_drives_actions=settings.agent_drives_actions,
+        # Part IV/V flags now ship ON in Settings; pass them through so the old explicit-kwarg
+        # mapping reproduces the same engine as from_settings (else old=library-default False).
+        concept_pivot=settings.concept_pivot,
+        graded_novelty=settings.graded_novelty,
+        cross_run_concepts=settings.cross_run_concepts,
+        cross_run_structured_claims=settings.cross_run_structured_claims,
+        cross_run_curation=settings.cross_run_curation,
+        cross_run_advisory=settings.cross_run_advisory,
+        fingerprint_universal=settings.fingerprint_universal,
     )
 
     # (b) the NEW single-bundle style.
