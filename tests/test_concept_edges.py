@@ -1,0 +1,58 @@
+"""Phase 2b: EV_CONCEPT_EDGE folds COMMUTATIVELY into RunState.concept_edges — max-confidence-wins per
+(src,rel,dst) triple, order-tolerant (invariant 5), never last-write. Empty edge set is the default so
+project_hierarchy falls back to the is_a-from-path tree."""
+from looplab.events.eventstore import EventStore
+from looplab.events.replay import fold
+
+
+def _store(tmp_path, edge_events):
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"})
+    for d in edge_events:
+        s.append("concept_edge", d)
+    return s
+
+
+def test_single_and_batch_edges(tmp_path):
+    st = fold(_store(tmp_path, [
+        {"src": "loss/dcl", "rel": "is_a", "dst": "loss", "provenance": "asserted", "confidence": 1.0},
+        {"edges": [
+            {"src": "loss/dcl", "rel": "co_occurs", "dst": "reg/r-drop", "provenance": "evidenced", "confidence": 5},
+            {"src": "arch/moe", "rel": "is_a", "dst": "arch", "provenance": "asserted", "confidence": 1.0},
+        ]},
+    ]).read_all())
+    edges = st.concept_edges
+    assert edges["loss/dcl\tis_a\tloss"]["dst"] == "loss"
+    assert edges["loss/dcl\tco_occurs\treg/r-drop"]["confidence"] == 5.0    # int coerced to float
+    assert all(len(k.split("\t")) == 3 for k in edges) and len(edges) == 3
+
+
+def test_max_confidence_wins_commutatively(tmp_path):
+    lo = {"src": "a", "rel": "r", "dst": "b", "provenance": "evidenced", "confidence": 1.0}
+    hi = {"src": "a", "rel": "r", "dst": "b", "provenance": "asserted", "confidence": 9.0}
+    a = fold(_store(tmp_path, [lo, hi]).read_all()).concept_edges
+    b = fold(_store(tmp_path, [hi, lo]).read_all()).concept_edges           # reversed order
+    assert a == b                                                          # commutative -> order-tolerant
+    assert a["a\tr\tb"]["confidence"] == 9.0                               # higher confidence wins
+
+
+def test_provenance_rank_breaks_confidence_tie(tmp_path):
+    ev = {"src": "a", "rel": "r", "dst": "b", "provenance": "evidenced", "confidence": 2.0}
+    asrt = {"src": "a", "rel": "r", "dst": "b", "provenance": "asserted", "confidence": 2.0}
+    a = fold(_store(tmp_path, [ev, asrt]).read_all()).concept_edges
+    b = fold(_store(tmp_path, [asrt, ev]).read_all()).concept_edges
+    assert a == b and a["a\tr\tb"]["provenance"] == "asserted"             # asserted outranks on a tie
+
+
+def test_malformed_edges_skipped(tmp_path):
+    st = fold(_store(tmp_path, [
+        {"src": "a", "rel": "", "dst": "b"},        # empty rel -> skip
+        {"src": "a", "dst": "b"},                   # no rel key -> not an inline edge -> skip
+        {"src": "ok", "rel": "r", "dst": "d"},      # valid (confidence defaults 0.0)
+    ]).read_all())
+    assert list(st.concept_edges) == ["ok\tr\td"]
+    assert st.concept_edges["ok\tr\td"]["confidence"] == 0.0
+
+
+def test_empty_default(tmp_path):
+    assert fold(_store(tmp_path, []).read_all()).concept_edges == {}

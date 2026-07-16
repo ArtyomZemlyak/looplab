@@ -89,6 +89,7 @@
   "comments_revision": -1,
   "concept_consolidation": {},
   "concept_coverage_snapshots": [],
+  "concept_edges": {},
   "config_hash": "1f0bc827ac74",
   "confirm_request_generations": [],
   "confirm_requests": [],

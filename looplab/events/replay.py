@@ -24,7 +24,7 @@ from looplab.events.types import (
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
-    EV_CONCEPT_CONSOLIDATION, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
+    EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
@@ -1306,6 +1306,38 @@ def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") 
                 st.concept_consolidation[str(raw)] = str(canon)
 
 
+_EDGE_PROV_RANK = {"asserted": 2, "evidenced": 1}
+
+
+def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    # PART IV concept-edge substrate: fold typed edges (src, rel, dst) COMMUTATIVELY — max-confidence-wins
+    # keyed on the triple, ties by provenance-rank then lexicographic provenance — so replaying the same
+    # edge's events in ANY order yields the same map (invariant 5 order-tolerance), unlike last-write.
+    # Audit-only; NEVER touches selection. Accepts a batch (`edges: [...]`) or one inline edge; a
+    # malformed row is skipped, never crashes the fold.
+    raw = d.get("edges")
+    rows = raw if isinstance(raw, list) else ([d] if all(k in d for k in ("src", "rel", "dst")) else [])
+    for ed in rows:
+        if not isinstance(ed, dict):
+            continue
+        src, rel, dst = (str(ed.get("src") or "").strip(), str(ed.get("rel") or "").strip(),
+                         str(ed.get("dst") or "").strip())
+        if not (src and rel and dst):
+            continue
+        conf = ed.get("confidence")
+        conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+        prov = str(ed.get("provenance") or "")
+        key = "\t".join((src, rel, dst))
+        cur = st.concept_edges.get(key)
+        # A total order on (confidence, provenance-rank, provenance) makes the winner a pure function of
+        # the two candidates, independent of arrival order — a commutative accumulate.
+        if cur is None or ((conf, _EDGE_PROV_RANK.get(prov, 0), prov)
+                           > (cur["confidence"], _EDGE_PROV_RANK.get(cur["provenance"], 0),
+                              cur["provenance"])):
+            st.concept_edges[key] = {"src": src, "rel": rel, "dst": dst,
+                                     "provenance": prov, "confidence": conf}
+
+
 def _on_llm_cost(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     if not ctx.llm_usage_seen:
         # Compatibility base: latest legacy summary before the new ledger. Once a usage delta is
@@ -2045,6 +2077,7 @@ _HANDLERS = {
     EV_NODE_CONCEPTS: _on_node_concepts,
     EV_HYPOTHESIS_CONCEPTS: _on_hypothesis_concepts,
     EV_CONCEPT_CONSOLIDATION: _on_concept_consolidation,
+    EV_CONCEPT_EDGE: _on_concept_edge,
     EV_LLM_COST: _on_llm_cost,
     EV_LLM_USAGE: _on_llm_usage,
     EV_ABLATE: _on_ablate,

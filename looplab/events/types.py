@@ -108,6 +108,13 @@ EV_HYPOTHESIS_CONCEPTS = "hypothesis_concepts"
 # only new concepts are consolidated. Recorded only when `concept_pivot` is on; additive, reader-defaulted;
 # folds (accumulated) into RunState.concept_consolidation. See looplab/search/concept_graph.py.
 EV_CONCEPT_CONSOLIDATION = "concept_consolidation"
+# PART IV concept-edge substrate: a typed concept-graph edge (src, rel, dst) with provenance + confidence.
+# Makes hierarchy a swappable PROJECTION ("any concept can be an axis") instead of the fixed id-prefix
+# tree. Emitted from the strategist cadence (asserted is_a/uses from the graph + evidenced co_occurs mined
+# from node_concepts). Additive + reader-defaulted (empty edge set -> project_hierarchy falls back to the
+# is_a-from-path tree, byte-identical to today). Folds COMMUTATIVELY into RunState.concept_edges
+# (max-confidence-wins keyed on the triple -> order-tolerant). See looplab/search/concept_graph.py.
+EV_CONCEPT_EDGE = "concept_edge"
 EV_LLM_COST = "llm_cost"
 EV_LLM_USAGE = "llm_usage"  # durable sanitized provider-call delta; folded cumulatively
 EV_ABLATE = "ablate"
