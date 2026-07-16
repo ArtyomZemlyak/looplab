@@ -35,7 +35,8 @@ def test_consolidation_conflict_resolves_order_independently(tmp_path):
         for canon in order:
             s.append("concept_consolidation", {"rename": {"x": canon}})
         return fold(s.read_all()).concept_consolidation
-    (tmp_path / "ab").mkdir(); (tmp_path / "ba").mkdir()
+    (tmp_path / "ab").mkdir()
+    (tmp_path / "ba").mkdir()
     assert _fold("ab") == {"x": "a"}
     assert _fold("ba") == {"x": "a"}                      # reversed order -> identical
 
@@ -114,6 +115,21 @@ def test_changed_non_propose_rebuild_discards_stale_classifier_receipt(tmp_path)
     st = fold(s.read_all())
     assert st.node_concepts == {0: ["researcher/new"]}
     assert st.node_concept_provenance == {0: "researcher-authored"}
+    assert st.node_concepts_at_vocab == {}
+
+
+def test_changed_non_propose_rebuild_discards_stale_authored_receipt(tmp_path):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["researcher/old"]))
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    changed = _created(0, None)
+    changed["idea"]["rationale"] = "a replacement idea without authored taxonomy"
+    s.append("node_created", {**changed, "generation": 1})
+
+    st = fold(s.read_all())
+    assert st.nodes[0].idea.rationale == "a replacement idea without authored taxonomy"
+    assert st.node_concepts == {}
+    assert st.node_concept_provenance == {}
     assert st.node_concepts_at_vocab == {}
 
 

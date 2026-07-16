@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from looplab.core.models import RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -373,6 +375,46 @@ def test_late_classifier_event_cannot_cross_a_propose_generation(tmp_path):
     current = fold(s.read_all())
     assert current.node_concepts == {0: ["classifier/current"]}
     assert current.node_concept_provenance == {0: "classifier"}
+
+
+@pytest.mark.parametrize("stage", ["eval", "implement"])
+def test_legacy_unstamped_classifier_receipt_survives_same_idea_retry(tmp_path, stage):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    created = {"node_id": 0, "parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}, "rationale": "same idea"}}
+    s.append("node_created", created)
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.7, "generation": 0})
+    s.append("node_reset", {"node_id": 0, "from_stage": stage})
+    if stage == "implement":
+        s.append("node_created", {**created, "generation": 1})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8, "generation": 1})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/current"],
+                                "at_vocab": 11})
+
+    st = fold(s.read_all())
+    assert st.nodes[0].attempt == 1
+    assert st.node_concepts == {0: ["classifier/current"]}
+    assert st.node_concept_provenance == {0: "classifier"}
+    assert st.node_concepts_at_vocab == {0: 11}
+
+
+def test_legacy_unstamped_classifier_receipt_cannot_cross_subject_replacement(tmp_path):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "old"}})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "new"},
+                              "generation": 1})
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/ambiguous"]})
+
+    st = fold(s.read_all())
+    assert st.node_concepts == {}
+    assert st.node_concept_provenance == {}
 
 
 def test_concept_consolidation_event_accumulates_and_is_replay_safe(tmp_path):
