@@ -71,6 +71,14 @@ def _bounded_json_value(value, *, depth: int = 0, budget: Optional[list[int]] = 
             if key in out:
                 truncated = True
                 continue
+            # REVIEW(2026-07-16): this is the ONLY bounded JSON projector in the repo with NO
+            # is_secret_key_name masking — both siblings (core/advisory_payloads._tree and
+            # trust/cross_run's walk) emit "***" for a secret-NAMED key before looking at the value.
+            # Here a cross-run memory row {"api_key": "<short low-entropy secret>"} sails through:
+            # _memory_text's entropy redaction only catches high-entropy strings, so short/wordlike
+            # credentials leak into the memory-browser response that the key-name rule exists to
+            # catch. Add the same `if is_secret_key_name(raw_key): out[key] = "***"` gate (classified
+            # on the ORIGINAL key, per 8d1bcda) before projecting the child.
             projected, cut = _bounded_json_value(value[raw_key], depth=depth + 1, budget=budget)
             out[key] = projected
             truncated = truncated or cut

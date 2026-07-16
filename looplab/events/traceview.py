@@ -365,6 +365,12 @@ def _normalize_span(value) -> Optional[dict]:
                 budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
+    # REVIEW(2026-07-16): _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
+    # are SETS, so these four loops insert into `attributes` in string-hash order — randomized per
+    # process via PYTHONHASHSEED. The serialized projection (and any persisted index record built from
+    # it) is therefore not byte-stable across two server runs, the same raw-set-iteration defect this
+    # change series fixed in project_hierarchy/project_lens/concept_graph. Iterate sorted(...) (or
+    # make the field groups tuples) so identical spans serialize identically everywhere.
     for key in _ATTR_TEXT_FIELDS:
         if key in raw_attributes:
             attributes[key] = budget.text(

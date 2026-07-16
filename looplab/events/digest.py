@@ -80,6 +80,17 @@ def node_theme(node) -> Optional[str]:
     theme = getattr(idea, "theme", None)
     if theme:
         return theme
+    # REVIEW(2026-07-16): two distortions in this fallback. (1) FIRST-concept-only: a node tagged
+    # ['loss/contrastive', 'data/aug-mix'] projects theme "loss" and its data-side effort vanishes —
+    # a run diverse on second axes reads as dominant_theme_frac ~1.0 / theme_entropy ~0, so the
+    # Strategist's narrowing detector fires explore pressure against a genuinely broad run (or,
+    # ordered the other way, never fires on a truly narrow one): cadence decisions keyed to the
+    # Researcher's authoring ORDER, an artifact. (2) It reads idea.concepts (frozen at creation), not
+    # the folded state.node_concepts — cadence re-tags and consolidation renames never reach any
+    # theme surface, so the /runs theme map can disagree with the /concepts vocabulary in the same
+    # UI. coverage_signal should aggregate natively over the folded per-node concept AXES (a node
+    # counted under every axis it touches, post-rename), keeping this helper as display glue for
+    # genuinely legacy runs only.
     for concept in (getattr(idea, "concepts", None) or []):
         axis = str(concept).strip().split("/", 1)[0].strip()
         if axis:

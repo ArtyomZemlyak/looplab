@@ -49,6 +49,15 @@ def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
 
     tokens: list[str] = []
     token: list[str] = []
+    # REVIEW(2026-07-16): boundary inconsistency at exactly _IDEA_IDENTITY_MAX_TOKENS. A text whose
+    # 2048th token is flushed by a SEPARATOR (e.g. a trailing period) hits the cap check and marks
+    # complete=False even though that was the LAST token — while the byte-identical text WITHOUT the
+    # trailing separator flushes token #2048 in the for/else and stays complete=True. Same token
+    # tuple, divergent completeness — and completeness now carries real weight: one such prior makes
+    # `_cached_prior_idea_identity` permanently "incomplete", `_warn_incomplete_prior_identity` fires,
+    # and the level-4/5 short-circuit disables itself for the rest of the run on content whose
+    # identity WAS fully captured. Only mark incomplete when input genuinely remains after the cap
+    # (e.g. check a lookahead/remaining-chars flag before setting complete=False on the flush).
     for char in normalized:
         category = unicodedata.category(char)
         if category[0] in {"L", "N"} or (token and category[0] == "M"):
