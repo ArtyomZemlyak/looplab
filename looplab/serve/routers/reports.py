@@ -69,8 +69,8 @@ _SCOPE_SOURCE_TOO_LARGE = {
     "remediation": "Generate a narrower scope report or compact oversized run history.",
 }
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
-_SERVER_VERDICT_AUTHORITY = "server-derived-v2"
-_SERVER_CONTENT_SCHEMA = 4
+_SERVER_VERDICT_AUTHORITY = "server-derived-v3"
+_SERVER_CONTENT_SCHEMA = 5
 _SCOPE_STORE_THREAD_LOCK = threading.Lock()
 _PRIOR_REPORT_MAX_FILES = 256
 _PRIOR_REPORT_MAX_RECORDS = 20
@@ -410,33 +410,171 @@ def _read_or_migrate_scope_record(
     return _read_scope_record(canonical, scope_type, scope_id)
 
 
+def _valid_observational_groups(rec: dict[str, Any], groups: object) -> bool:
+    """Validate schema-v5's server-owned, outcome-free comparison projection."""
+    run_ids = rec.get("run_ids")
+    if (not isinstance(run_ids, list)
+            or not all(isinstance(run_id, str) for run_id in run_ids)
+            or len(run_ids) != len(set(run_ids))
+            or not isinstance(groups, list) or len(groups) > MAX_SCOPE_REPORT_RUNS):
+        return False
+    scope_run_ids = set(run_ids)
+    seen_contracts: set[str] = set()
+    seen_measurements: set[str] = set()
+    sources = {
+        "search": "best.metric",
+        "confirmed": "best.confirmed_mean",
+        "holdout": "best.holdout_metric",
+    }
+    allowed_reasons = {
+        "incomplete_measurements",
+        "incomplete_runs",
+        "insufficient_population",
+        "point_estimates_only",
+        "minimum_effect_not_declared",
+        "incomplete_population",
+    }
+
+    for group in groups:
+        if not isinstance(group, dict):
+            return False
+        contract_id = group.get("contract_id")
+        direction = group.get("direction")
+        phase = group.get("measurement_phase")
+        protocol = group.get("uncertainty_protocol")
+        reason = group.get("indeterminate")
+        measurements = group.get("measurements")
+        unavailable = group.get("unavailable_measurements")
+        incomplete = group.get("incomplete_runs")
+        if (
+            not isinstance(contract_id, str)
+            or _RUN_GENERATION_RE.fullmatch(contract_id) is None
+            or contract_id in seen_contracts
+            or direction not in {"min", "max"}
+            or phase not in sources
+            or not isinstance(protocol, str)
+            or not protocol
+            or group.get("contract_authority") != "declared"
+            or group.get("outcome_policy") != "observations-only-v1"
+            or group.get("winner") is not None
+            or group.get("tied_winners") != []
+            or reason not in allowed_reasons
+            or not isinstance(measurements, list)
+            or len(measurements) > MAX_SCOPE_REPORT_RUNS
+            or not isinstance(unavailable, list)
+            or not isinstance(incomplete, list)
+        ):
+            return False
+        seen_contracts.add(contract_id)
+        measured_ids: set[str] = set()
+        for row in measurements:
+            if not isinstance(row, dict):
+                return False
+            run_id = row.get("run_id")
+            uncertainty = row.get("uncertainty")
+            if (
+                not isinstance(run_id, str)
+                or run_id not in scope_run_ids
+                or run_id in seen_measurements
+                or row.get("authority") != "declared"
+                or finite_measurement(row.get("metric")) is None
+                or row.get("direction") != direction
+                or row.get("phase") != phase
+                or row.get("source") != sources[phase]
+                or not isinstance(uncertainty, dict)
+                or uncertainty.get("protocol") != protocol
+            ):
+                return False
+            if phase == "confirmed":
+                if set(uncertainty) != {
+                    "protocol", "std", "std_source", "seeds", "seeds_source",
+                }:
+                    return False
+                if (
+                    finite_measurement(uncertainty.get("std")) is None
+                    or uncertainty["std"] < 0
+                    or type(uncertainty.get("seeds")) is not int
+                    or uncertainty["seeds"] <= 0
+                    or uncertainty.get("std_source") != "best.confirmed_std"
+                    or uncertainty.get("seeds_source") != "best.confirmed_seeds"
+                ):
+                    return False
+            elif set(uncertainty) != {"protocol"}:
+                return False
+            measured_ids.add(run_id)
+            seen_measurements.add(run_id)
+
+        def valid_id_list(value: list) -> bool:
+            return (
+                all(isinstance(run_id, str) and run_id in scope_run_ids for run_id in value)
+                and len(value) == len(set(value))
+            )
+
+        if (not valid_id_list(unavailable) or not valid_id_list(incomplete)
+                or measured_ids & set(unavailable) or not set(incomplete) <= measured_ids):
+            return False
+        if reason == "incomplete_measurements" and not unavailable:
+            return False
+        if reason == "incomplete_runs" and not incomplete:
+            return False
+        if reason == "insufficient_population" and len(measurements) >= 2:
+            return False
+        if reason == "point_estimates_only" and (
+                phase == "confirmed" or len(measurements) < 2 or unavailable or incomplete):
+            return False
+        if reason == "minimum_effect_not_declared" and (
+                phase != "confirmed" or len(measurements) < 2 or unavailable or incomplete):
+            return False
+    return True
+
+
+def _valid_metric_observations(rec: dict[str, Any], observations: object) -> bool:
+    if not isinstance(observations, list) or len(observations) > MAX_SCOPE_REPORT_RUNS:
+        return False
+    run_ids = set(rec.get("run_ids") or ())
+    allowed = {
+        "uncontracted",
+        "no_valid_comparison_measurement",
+        "contracted_measurement_unavailable",
+        "contracted_group_omitted",
+    }
+    for row in observations:
+        if (not isinstance(row, dict) or not isinstance(row.get("run_id"), str)
+                or row["run_id"] not in run_ids
+                or row.get("comparison_status") not in allowed):
+            return False
+        if "metric" in row and finite_measurement(row.get("metric")) is None:
+            return False
+        contract_id = row.get("contract_id")
+        if (contract_id is not None and (
+                not isinstance(contract_id, str)
+                or _RUN_GENERATION_RE.fullmatch(contract_id) is None)):
+            return False
+    return True
+
+
 def _public_scope_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
-    """Never present a pre-authority model verdict as a server-derived comparison outcome."""
+    """Never present a self-asserted persisted outcome as server-derived authority."""
     content = dict(rec.get("content") or {})
     groups = content.get("comparison_groups")
-    current_groups = (
-        isinstance(groups, list)
-        and len(groups) <= MAX_SCOPE_REPORT_RUNS
-        and all(
-            isinstance(group, dict)
-            and group.get("contract_authority") == "declared"
-            and isinstance(group.get("measurements"), list)
-            and all(
-                isinstance(row, dict) and row.get("authority") == "declared"
-                for row in group["measurements"]
-            )
-            for group in groups
-        )
-    )
     if (content.get("schema") == _SERVER_CONTENT_SCHEMA
             and content.get("verdict_authority") == _SERVER_VERDICT_AUTHORITY
-            and current_groups):
+            and content.get("narrative_authority") == "model-advisory"
+            and _valid_observational_groups(rec, groups)
+            and _valid_metric_observations(rec, content.get("metric_observations"))):
         return {**rec, "authoritative": True}, False
     content["verdict"] = "No authoritative verdict is available for this legacy report; regenerate it."
     content["verdict_authority"] = "legacy-unavailable"
     content["requires_regeneration"] = True
-    # CODEX AGENT: the old model-authored verdict is deliberately not copied to another public field;
-    # renaming it would still let clients accidentally display an invented winner as trusted prose.
+    content["headline"] = "Legacy scope report requires regeneration"
+    content["narrative_authority"] = "legacy-quarantined"
+    for field in (
+        "best_runs", "comparison_groups", "metric_observations", "what_worked", "what_didnt",
+        "learnings", "next_directions", "caveats",
+    ):
+        content[field] = []
+    # CODEX AGENT: outcome-bearing legacy narrative is quarantined, not merely relabelled. Renaming
+    # an invented winner would still let a client accidentally render it as trusted prose.
     return {**rec, "content": content, "authoritative": False}, True
 
 

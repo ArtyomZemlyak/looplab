@@ -54,7 +54,7 @@ class ComparisonContract(BaseModel):
     here would let a report silently rank one phase using another phase's metric.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     schema_version: StrictInt = Field(alias="schema", serialization_alias="schema")
     dataset_lineage: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
@@ -114,7 +114,7 @@ class ComparisonContract(BaseModel):
         expected = hashlib.sha256(encoded).hexdigest()
         if self.contract_id is not None and self.contract_id != expected:
             raise ValueError("contract_id does not match the canonical comparison contract")
-        self.contract_id = expected
+        object.__setattr__(self, "contract_id", expected)
         return self
 
 
@@ -126,7 +126,10 @@ def canonical_comparison_contract(value: object) -> dict | None:
     controls, truncation, or oversized values are rejected rather than lossy-normalised.
     """
     if isinstance(value, ComparisonContract):
-        return value.model_dump(mode="json", by_alias=True, exclude_none=True)
+        # Revalidate even a typed instance. ``frozen=True`` blocks normal mutation, while this path
+        # also catches a foreign/subclass/object.__setattr__ bypass whose semantic fields no longer
+        # match the persisted contract_id.
+        value = value.model_dump(mode="json", by_alias=True, exclude_none=True)
     if not isinstance(value, Mapping):
         return None
     if any(not isinstance(key, str) or is_secret_key_name(key) for key in value):

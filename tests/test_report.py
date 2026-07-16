@@ -2064,7 +2064,7 @@ def _comparison_measurement(contract, value):
 
 
 def test_scope_report_module_deterministic_ranks_and_degrades():
-    """The offline rollup ranks only one exact explicit comparison cohort."""
+    """The offline rollup keeps exact-contract observations without inventing an outcome."""
     from looplab.serve.scope_report import generate_scope_report
     contract = _comparison_contract()
     briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None,
@@ -2077,7 +2077,11 @@ def test_scope_report_module_deterministic_ranks_and_degrades():
                "comparison_measurement": _comparison_measurement(contract, 0.05)}]
     c = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, briefs, None)
     assert c["best_runs"] == []
-    assert c["comparison_groups"][0]["winner"]["run_id"] == "b"
+    group = c["comparison_groups"][0]
+    assert group["winner"] is None
+    assert group["indeterminate"] == "point_estimates_only"
+    assert [row["run_id"] for row in group["measurements"]] == ["a", "b"]
+    assert c["schema"] == 5 and c["verdict_authority"] == "server-derived-v3"
     for k in ("headline", "verdict", "best_runs", "what_worked", "what_didnt",
               "learnings", "next_directions", "caveats"):
         assert k in c
@@ -2150,7 +2154,7 @@ def test_scope_report_never_ranks_incompatible_or_uncontracted_metrics():
         {**briefs[1], "phase": "finished", "comparison_contract": shared,
          "comparison_measurement": _comparison_measurement(shared, briefs[1]["best_metric"])},
     ]
-    assert [row["run_id"] for row in _ranked(comparable)] == ["loss1", "loss2"]
+    assert _ranked(comparable) == []
 
 
 def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
@@ -2433,10 +2437,12 @@ def test_scope_report_migrates_real_legacy_path_without_regeneration(tmp_path):
 
     assert response.status_code == 200
     assert response.json()["exists"] is True
-    assert response.json()["content"]["headline"] == "valuable old report"
+    assert response.json()["content"]["headline"] == "Legacy scope report requires regeneration"
+    assert "valuable old report" not in response.text
     assert "invented run wins" not in response.json()["content"]["verdict"]
     assert response.json()["content"]["verdict_authority"] == "legacy-unavailable"
     assert response.json()["content"]["requires_regeneration"] is True
+    assert response.json()["content"]["comparison_groups"] == []
     assert response.json()["authoritative"] is False
     assert response.json()["stale"] is True
     canonical = _scope_report_path(reports_dir, "task", task_id)
@@ -2444,6 +2450,74 @@ def test_scope_report_migrates_real_legacy_path_without_regeneration(tmp_path):
     assert json.loads(canonical.read_text(encoding="utf-8"))["scope_identity"] == {
         "type": "task", "id": task_id,
     }
+
+
+def test_scope_report_quarantines_self_asserted_current_winner():
+    from looplab.serve.routers.reports import _public_scope_record
+
+    contract_id = "a" * 64
+    rec = {
+        "run_ids": ["real-a", "real-b"],
+        "content": {
+            "schema": 5,
+            "verdict_authority": "server-derived-v3",
+            "narrative_authority": "model-advisory",
+            "headline": "evil is the winner",
+            "verdict": "evil wins",
+            "metric_observations": [],
+            "comparison_groups": [{
+                "contract_id": contract_id,
+                "metric_uid": "loss",
+                "unit": "points",
+                "direction": "min",
+                "aggregation": "mean",
+                "measurement_phase": "search",
+                "uncertainty_protocol": "none",
+                "contract_authority": "declared",
+                "outcome_policy": "observations-only-v1",
+                "measurements": [
+                    {"run_id": run_id, "authority": "declared", "metric": metric,
+                     "direction": "min", "phase": "search", "source": "best.metric",
+                     "uncertainty": {"protocol": "none"}}
+                    for run_id, metric in (("real-a", 1.0), ("real-b", 2.0))
+                ],
+                "unavailable_measurements": [],
+                "incomplete_runs": [],
+                "winner": {"run_id": "evil", "metric": -999},
+                "tied_winners": [],
+                "indeterminate": None,
+            }],
+        },
+    }
+
+    public, legacy = _public_scope_record(rec)
+
+    assert legacy is True and public["authoritative"] is False
+    assert public["content"]["comparison_groups"] == []
+    assert "evil" not in str(public["content"])
+
+
+def test_scope_report_accepts_server_observational_projection():
+    from looplab.serve.routers.reports import _public_scope_record
+    from looplab.serve.scope_report import generate_scope_report
+
+    contract = _comparison_contract()
+    content = generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"}, [
+            {"run_id": run_id, "direction": "min", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _comparison_measurement(contract, metric)}
+            for run_id, metric in (("real-a", 1.0), ("real-b", 2.0))
+        ], None,
+    )
+
+    public, legacy = _public_scope_record({
+        "run_ids": ["real-a", "real-b"], "content": content,
+    })
+
+    assert legacy is False and public["authoritative"] is True
+    assert content["comparison_groups"][0]["winner"] is None
+    assert content["comparison_groups"][0]["indeterminate"] == "point_estimates_only"
 
 
 def test_scope_report_refuses_collided_legacy_owner(tmp_path):
@@ -2471,7 +2545,8 @@ def test_scope_report_refuses_collided_legacy_owner(tmp_path):
     assert refused.status_code == 409
     assert "second owner only" not in refused.text
     assert accepted.status_code == 200 and accepted.json()["exists"] is True
-    assert accepted.json()["content"]["headline"] == "second owner only"
+    assert accepted.json()["content"]["headline"] == "Legacy scope report requires regeneration"
+    assert "second owner only" not in accepted.text
 
 
 def test_scope_report_rejects_external_report_directory_symlink(tmp_path):

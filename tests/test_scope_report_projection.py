@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import json
+import math
 
 from looplab.core.comparison import canonical_comparison_contract
 from looplab.serve import scope_report
 
 
 def _contract(*, split: str = "validation", direction: str = "min",
-              uncertainty: str = "none") -> dict:
+              uncertainty: str | None = None, phase: str = "search") -> dict:
+    uncertainty = uncertainty or ("mean_std" if phase == "confirmed" else "none")
     return {
         "schema": 1,
         "dataset_lineage": "dataset:v1",
@@ -21,15 +23,15 @@ def _contract(*, split: str = "validation", direction: str = "min",
         "direction": direction,
         "aggregation": "mean",
         "cutoff": "none",
-        "measurement_phase": "search",
+        "measurement_phase": phase,
         "uncertainty_protocol": uncertainty,
         "constraints_digest": "none",
     }
 
 
-def _measurement(contract: dict, value: float) -> dict:
+def _measurement(contract: dict, value: float, *, std: float = 0.1, seeds: int = 3) -> dict:
     phase = contract["measurement_phase"]
-    return {
+    measurement = {
         "authority": "declared",
         "value": value,
         "phase": phase,
@@ -40,6 +42,14 @@ def _measurement(contract: dict, value: float) -> dict:
         }[phase],
         "uncertainty": {"protocol": contract["uncertainty_protocol"]},
     }
+    if phase == "confirmed":
+        measurement["uncertainty"].update({
+            "std": std,
+            "std_source": "best.confirmed_std",
+            "seeds": seeds,
+            "seeds_source": "best.confirmed_seeds",
+        })
+    return measurement
 
 
 def test_comparison_contract_is_explicit_exact_and_secret_free():
@@ -140,9 +150,10 @@ def test_scope_projection_only_ranks_within_exact_contract_and_caps_runs():
     assert len(json.dumps(content, ensure_ascii=False)) <= scope_report.MAX_SCOPE_REPORT_CONTENT_CHARS
 
 
-def test_comparison_outcomes_refuse_exact_ties_and_unevaluated_uncertainty():
+def test_schema_v1_comparison_cohorts_are_observational_not_winner_authority():
     tied = _contract(split="tied")
     uncertain = _contract(split="uncertain", uncertainty="bootstrap-v1")
+    confirmed = _contract(split="confirmed", phase="confirmed")
     content = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
         [
@@ -156,17 +167,49 @@ def test_comparison_outcomes_refuse_exact_ties_and_unevaluated_uncertainty():
             {"run_id": "uncertain-b", "direction": "min", "best_metric": 0.3, "phase": "finished",
              "comparison_contract": uncertain,
              "comparison_measurement": _measurement(uncertain, 0.3)},
+            {"run_id": "confirmed-a", "direction": "min", "best_metric": 0.1,
+             "phase": "finished", "comparison_contract": confirmed,
+             "comparison_measurement": _measurement(confirmed, 0.1, std=0.01)},
+            {"run_id": "confirmed-b", "direction": "min", "best_metric": 0.3,
+             "phase": "finished", "comparison_contract": confirmed,
+             "comparison_measurement": _measurement(confirmed, 0.3, std=0.01)},
         ], None)
 
     groups = {group["contract_id"]: group for group in content["comparison_groups"]}
     tie_group = groups[canonical_comparison_contract(tied)["contract_id"]]
     assert tie_group["winner"] is None
-    assert [row["run_id"] for row in tie_group["tied_winners"]] == ["tie-a", "tie-b"]
-    assert tie_group["indeterminate"] == "exact_tie"
+    assert tie_group["tied_winners"] == []
+    assert tie_group["indeterminate"] == "point_estimates_only"
+    assert tie_group["outcome_policy"] == "observations-only-v1"
     uncertain_group = groups[canonical_comparison_contract(uncertain)["contract_id"]]
     assert uncertain_group["winner"] is None
     assert uncertain_group["tied_winners"] == []
-    assert uncertain_group["indeterminate"] == "uncertainty_not_evaluated"
+    assert uncertain_group["indeterminate"] == "point_estimates_only"
+    confirmed_group = groups[canonical_comparison_contract(confirmed)["contract_id"]]
+    assert confirmed_group["winner"] is None
+    assert confirmed_group["tied_winners"] == []
+    assert confirmed_group["indeterminate"] == "minimum_effect_not_declared"
+
+
+def test_epsilon_difference_is_not_promoted_or_metric_sorted():
+    contract = _contract(direction="max")
+    low = 0.8
+    high = math.nextafter(low, 1.0)
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"}, [
+            {"run_id": "z-low", "direction": "max", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, low)},
+            {"run_id": "a-high", "direction": "max", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, high)},
+        ], None)
+
+    group = content["comparison_groups"][0]
+    assert group["winner"] is None
+    assert group["indeterminate"] == "point_estimates_only"
+    assert [row["run_id"] for row in group["measurements"]] == ["a-high", "z-low"]
+    assert "Contract-local winner" not in content["verdict"]
 
 
 def test_incomplete_scope_never_publishes_a_survivor_as_winner():

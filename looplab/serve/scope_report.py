@@ -280,9 +280,9 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
     groups = []
     for contract_id in sorted(cohorts):
         contract, measurements, unavailable, incomplete_runs = cohorts[contract_id]
-        measurements.sort(
-            key=lambda row: ((-row["metric"] if contract["direction"] == "max"
-                              else row["metric"]), row["run_id"]))
+        # Contract v1 proves shared declared semantics, but it does not declare a minimum meaningful
+        # effect or a machine-evaluable decision policy. Metric sorting would itself imply an outcome.
+        measurements.sort(key=lambda row: row["run_id"])
         winner = None
         tied_winners: list[dict] = []
         indeterminate = None
@@ -292,20 +292,10 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             indeterminate = "incomplete_runs"
         elif len(measurements) < 2:
             indeterminate = "insufficient_population"
+        elif contract["measurement_phase"] == "confirmed":
+            indeterminate = "minimum_effect_not_declared"
         else:
-            best_value = measurements[0]["metric"]
-            tied_winners = [row for row in measurements if row["metric"] == best_value]
-            if len(tied_winners) > 1:
-                indeterminate = "exact_tie"
-            elif contract.get("uncertainty_protocol") != "none":
-                # A protocol name in a contract is lineage, not a confidence interval. Until the
-                # brief carries machine-readable uncertainty produced by that protocol, a point
-                # estimate cannot support a statistical winner claim.
-                tied_winners = []
-                indeterminate = "uncertainty_not_evaluated"
-            else:
-                winner = measurements[0]
-                tied_winners = []
+            indeterminate = "point_estimates_only"
         groups.append({
             "contract_id": contract_id,
             "metric_uid": _text(contract["metric_uid"], 128, single_line=True),
@@ -317,11 +307,14 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             "uncertainty_protocol": _text(
                 contract["uncertainty_protocol"], 128, single_line=True),
             "contract_authority": "declared",
+            # CODEX AGENT: schema-v1 contracts are observational. Winner authority requires a future
+            # schema that binds an effect size and a machine-evaluable significance decision.
+            "outcome_policy": "observations-only-v1",
             "measurements": measurements,
             "unavailable_measurements": unavailable,
             "incomplete_runs": incomplete_runs,
-            # CODEX AGENT: a sortable point estimate is not automatically a winner. Singleton,
-            # exact-tie, and unevaluated-uncertainty cohorts publish explicit non-winner semantics.
+            # Compatibility fields stay explicit and empty so older clients fail closed instead of
+            # treating the first observation as a winner.
             "winner": winner,
             "tied_winners": tied_winners,
             "indeterminate": indeterminate,
@@ -342,9 +335,8 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
         or coverage.get("invalid_rows") or coverage.get("duplicate_run_rows"))
     if incomplete_population:
         for group in groups:
-            # CODEX AGENT: a winner over a surviving subset is not a scope winner. Preserve bounded
-            # measurements for inspection, but fail the outcome closed whenever source coverage is
-            # incomplete or ambiguous.
+            # Preserve bounded observations for inspection, while recording that this scope has a
+            # stronger population-level reason to refuse an outcome.
             group["winner"] = None
             group["tied_winners"] = []
             group["indeterminate"] = "incomplete_population"
@@ -410,19 +402,14 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
                 f"{len(groups)} independent cohort(s).")
         else:
             group = groups[0]
-            winner = group.get("winner")
-            if winner:
-                verdict = (
-                    f"Contract-local winner: {winner['run_id']} at {_fmt_metric(winner['metric'])} "
-                    f"{group.get('unit') or ''} ({group['direction']}).").strip()
-            else:
-                reason = str(group.get("indeterminate") or "not_comparable").replace("_", " ")
-                verdict = f"No winner in the exact comparison cohort: {reason}."
+            reason = str(group.get("indeterminate") or "not_comparable").replace("_", " ")
+            verdict = f"No winner in the exact comparison cohort: {reason}."
         return {
-            "schema": 4,
+            "schema": 5,
             "headline": "",
             "verdict": verdict,
-            "verdict_authority": "server-derived-v2",
+            "verdict_authority": "server-derived-v3",
+            "narrative_authority": "model-advisory",
             # CODEX AGENT: numeric authority is derived from frozen measurements and an explicit exact
             # contract. Model-authored run ids, metrics, and rankings are discarded at this boundary.
             "best_runs": [],
@@ -432,7 +419,10 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
             # Coverage/authority caveats are structural receipt text. They are installed before model
             # prose and therefore cannot be crowded out by backslash-heavy or otherwise escape-expanding
             # model output.
-            "caveats": auto_caveats,
+            "caveats": [
+                "Narrative sections are model-authored advisory synthesis, not comparison outcomes.",
+                *auto_caveats,
+            ],
             "what_worked": [],
             "what_didnt": [],
             "learnings": [],

@@ -206,15 +206,16 @@ Model input and drill results are redacted and character/item bounded, and node 
 code, files, stdout or stderr. Metric values without an explicit schema-1 `comparison_contract` and an
 atomic phase/source/uncertainty measurement receipt are shown as **Unranked metric observations**. Contract
 cohorts are explicitly labelled `declared`: equality reflects adapter-declared semantics, not an independent
-fingerprint proving that the actual data, evaluator and achieved budget were unchanged. The server
-publishes a contract-local numeric winner only for at least two finished runs under the same canonical
-contract, with complete scope/cohort measurements, a unique best point and `uncertainty_protocol: none`.
-A singleton is insufficient; missing measurements, live/finalizing runs and incomplete evidence make the
-outcome indeterminate; exact best values become explicit ties; and a non-`none` uncertainty protocol without
-an evaluated machine-readable outcome is never promoted to a winner. The visible verdict is server-derived,
-not model-authored. Reports stored before that authority boundary are marked stale and show no authoritative
-verdict until regeneration. Old stored `best_runs` remain unverified and their model-authored ids/reasons are
-not rendered.
+fingerprint proving that the actual data, evaluator and achieved budget were unchanged. Schema-1 contracts
+are **observational only**: they do not declare a minimum meaningful effect or a machine-evaluable
+significance decision, so the server never publishes a winner from them. Rows stay in identity order rather
+than being implicitly ranked by a point estimate. This applies to search/holdout points and to confirmed
+means with standard deviations alike; a future outcome-authority schema must bind both effect size and the
+decision rule before the word “winner” is available. Missing measurements, live/finalizing runs and
+incomplete evidence remain explicit stronger indeterminate states. The visible no-winner verdict is
+server-derived; narrative sections are separately labelled model-authored advisory synthesis. Reports stored
+before schema 5 / verdict authority v3 are quarantined and show neither legacy outcome-bearing narrative nor
+comparison rows until regeneration. Old stored `best_runs` remain unverified and are not rendered.
 
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and

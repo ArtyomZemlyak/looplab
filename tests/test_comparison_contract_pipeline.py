@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from looplab.adapters.tasks import validate_task  # noqa: E402
 from looplab.cli import app  # noqa: E402
 from looplab.core.comparison import (  # noqa: E402
+    ComparisonContract,
     canonical_comparison_contract,
     comparison_measurement,
 )
@@ -71,6 +72,19 @@ def test_contract_phase_is_strict_and_shared_task_validation_binds_direction():
     assert dumped["comparison_contract"]["contract_id"]
     with pytest.raises(ValueError, match="must match the task direction"):
         validate_task({**_toy(), "comparison_contract": _contract(direction="max")})
+
+
+def test_typed_contract_cannot_reuse_a_digest_after_semantic_mutation():
+    contract = ComparisonContract.model_validate(_contract())
+    original_id = contract.contract_id
+    with pytest.raises(Exception):
+        contract.metric_uid = "different"  # type: ignore[misc]
+
+    # CODEX AGENT: a hostile caller can bypass any Python frozen model with object.__setattr__;
+    # canonicalization must still re-bind semantics instead of trusting the instance marker.
+    object.__setattr__(contract, "metric_uid", "different")
+    assert contract.contract_id == original_id
+    assert canonical_comparison_contract(contract) is None
 
 
 @pytest.mark.parametrize("source", ["inline", "file"])
