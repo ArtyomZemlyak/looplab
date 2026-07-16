@@ -26,6 +26,28 @@ def _created(node_id, concepts=None):
     return {"node_id": node_id, "parent_ids": [], "operator": "draft", "idea": idea}
 
 
+def test_consolidation_conflict_resolves_order_independently(tmp_path):
+    # Invariant 5 (order-tolerance): a CONFLICTING re-map of the same raw id must fold to the same result
+    # regardless of event order — a deterministic winner (lexicographically smallest canonical), never
+    # last-write. (The real producer never conflicts; this hardens adversarial / spliced logs.)
+    def _fold(order):
+        s = _store(tmp_path / order)
+        for canon in order:
+            s.append("concept_consolidation", {"rename": {"x": canon}})
+        return fold(s.read_all()).concept_consolidation
+    (tmp_path / "ab").mkdir(); (tmp_path / "ba").mkdir()
+    assert _fold("ab") == {"x": "a"}
+    assert _fold("ba") == {"x": "a"}                      # reversed order -> identical
+
+
+def test_at_vocab_rejects_bool(tmp_path):
+    # bool is an int subclass; `at_vocab: true` must NOT be stored as a vocabulary size of 1.
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["a/x"]))
+    s.append("node_concepts", {"node_id": 0, "concepts": ["classifier/x"], "at_vocab": True})
+    assert fold(s.read_all()).node_concepts_at_vocab == {}   # bool rejected, no receipt
+
+
 def test_idea_concepts_round_trip():
     idea = Idea(operator="draft", params={"seed": 1.0}, rationale="try dcl",
                 concepts=["loss/contrastive/dcl", "regularization/r-drop"])

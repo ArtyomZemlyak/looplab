@@ -1311,7 +1311,7 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
     # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> no receipt (oldest).
     av = d.get("at_vocab")
-    if isinstance(av, int) and av >= 0:
+    if isinstance(av, int) and not isinstance(av, bool) and av >= 0:   # bool is an int subclass — reject
         st.node_concepts_at_vocab[nid] = av
     else:
         st.node_concepts_at_vocab.pop(nid, None)
@@ -1326,17 +1326,23 @@ def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") ->
     concepts = d.get("concepts")
     st.hypothesis_concepts[str(hid)] = [str(c) for c in concepts] if isinstance(concepts, list) else []
     av = d.get("at_vocab")   # B1-ext: staleness reference (absent on pre-B1 events -> 0/oldest)
-    if isinstance(av, int) and av >= 0:
+    if isinstance(av, int) and not isinstance(av, bool) and av >= 0:   # bool is an int subclass — reject
         st.hypothesis_concepts_at_vocab[str(hid)] = av
 
 def _on_concept_consolidation(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D5 B3 (§21.18): ACCUMULATE the consolidation rename map so decisions stay fixed across
-    # cadences (stable vocabulary). Audit-only. Order-tolerant + idempotent (dict update); malformed-safe.
+    # cadences (stable vocabulary). Audit-only. Idempotent + malformed-safe. ORDER-TOLERANT (invariant 5):
+    # a CONFLICTING re-map of the same raw id (raw->a in one event, raw->b in another) resolves to a
+    # DETERMINISTIC winner — the lexicographically smallest canonical — never last-write, so
+    # fold(perm(events)) is byte-identical. The B3 producer fixes each decision once and never re-maps an
+    # existing raw id, so a conflict only arises in an adversarial / spliced log; this just hardens it.
     rename = d.get("rename")
     if isinstance(rename, dict):
         for raw, canon in rename.items():
             if raw and canon:
-                st.concept_consolidation[str(raw)] = str(canon)
+                raw, canon = str(raw), str(canon)
+                cur = st.concept_consolidation.get(raw)
+                st.concept_consolidation[raw] = canon if cur is None else min(cur, canon)
 
 
 _EDGE_PROV_RANK = {"asserted": 2, "evidenced": 1}
