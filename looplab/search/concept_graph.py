@@ -398,7 +398,8 @@ def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, froze
 
 
 def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str = "tool_call",
-                  grow: bool = True, tools=None, known_tags=None) -> dict[int, frozenset[str]]:
+                  grow: bool = True, tools=None, known_tags=None,
+                  max_workers: int = 8) -> dict[int, frozenset[str]]:
     """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
     the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
     GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
@@ -461,15 +462,24 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
         )
     tags: dict[int, frozenset[str]] = {}
+    # Split into REUSE (no LLM) and TODO (needs an LLM tag). The reuse pass grows the graph with the
+    # previously-recorded ids first, so this cadence's vocabulary is complete before any new tagging.
+    todo = []
     for n in _experiment_nodes(state):
         if n.id in known_tags:
             # REUSE a previously-recorded node's tags — no LLM call. Empty recorded tags fall back to the
             # node's heuristic tags (a recorded empty means "the tagger found nothing", still valid).
             reused = _ensure_ids(known_tags[n.id])
             tags[n.id] = reused if reused else heuristic.get(n.id, frozenset())
-            continue
+        else:
+            todo.append(n)
+
+    def _emit_safe(n) -> tuple[int, Optional[list]]:
+        # PURE per-node LLM tag: returns (node_id, raw concept-id list) with NO graph mutation, so it is
+        # safe to run concurrently. `_system()` snapshots the current (grown) vocabulary at call time.
+        # A failed node degrades to `None` -> heuristic tags, never crashing the harness.
         desc = _describe_node(n)
-        msgs = [{"role": "system", "content": _system()},   # rebuilt from the current (grown) vocabulary
+        msgs = [{"role": "system", "content": _system()},
                 {"role": "user", "content": f"EXPERIMENT (node {n.id}):\n{desc}\n\n"
                                             "Which concepts does it touch? Read the node's code/logs "
                                             "first if a tool is available, then emit."}]
@@ -481,21 +491,45 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                                      fallback=lambda m: parse_structured(client, m, TagOut, parser))
             else:
                 out = parse_structured(client, msgs, TagOut, parser)
-            got: set[str] = set()
-            for raw in out.concept_ids:
-                cid = _normalize_concept_id(raw)
-                if not cid:
-                    continue
-                if cid in graph:
-                    got.add(cid)
-                # A grown concept is single-axis by construction (the LLM proposes `axis/slug`, so its one
-                # parent IS the id prefix); multi-parent DAG membership is for the CURATED skeleton concepts.
-                elif grow and "/" in cid:
-                    graph.ensure(cid, axes=(cid.split("/", 1)[0],))
-                    got.add(cid)
-            tags[n.id] = frozenset(got) if got else heuristic.get(n.id, frozenset())
+            return n.id, list(out.concept_ids)
         except Exception:  # noqa: BLE001 — degrade this node to heuristic, never crash the harness
-            tags[n.id] = heuristic.get(n.id, frozenset())
+            return n.id, None
+
+    def _apply(nid: int, raw_ids: Optional[list]) -> None:
+        # Single-threaded: place the raw ids into the graph (growing it for `axis/slug` proposals) and
+        # record the node's final tag set.
+        if raw_ids is None:
+            tags[nid] = heuristic.get(nid, frozenset())
+            return
+        got: set[str] = set()
+        for raw in raw_ids:
+            cid = _normalize_concept_id(raw)
+            if not cid:
+                continue
+            if cid in graph:
+                got.add(cid)
+            # A grown concept is single-axis by construction (the LLM proposes `axis/slug`, so its one
+            # parent IS the id prefix); multi-parent DAG membership is for the CURATED skeleton concepts.
+            elif grow and "/" in cid:
+                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                got.add(cid)
+        tags[nid] = frozenset(got) if got else heuristic.get(nid, frozenset())
+
+    # Tag the remaining nodes in PARALLEL BATCHES: independent LLM calls run concurrently (the wall-clock
+    # win — retro-tagging a finished N-node run was ~O(N) SEQUENTIAL agentic loops), while graph growth is
+    # applied BETWEEN batches so later nodes still REUSE concepts earlier ones minted; consolidation
+    # normalizes any within-batch duplicate synonyms afterwards. `max_workers=1` == the old sequential path.
+    workers = max(1, int(max_workers))
+    for i in range(0, len(todo), workers):
+        batch = todo[i:i + workers]
+        if workers == 1 or len(batch) == 1:
+            results = [_emit_safe(n) for n in batch]
+        else:
+            import concurrent.futures as _futures
+            with _futures.ThreadPoolExecutor(max_workers=workers) as ex:
+                results = list(ex.map(_emit_safe, batch))
+        for nid, raw_ids in results:
+            _apply(nid, raw_ids)
     return tags
 
 
@@ -920,7 +954,8 @@ def consolidate_concepts(graph: "ConceptGraph", tags: dict, *, client=None, embe
 
 def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tools=None,
                       seed_graph: Optional[ConceptGraph] = None, asset_brief: str = "",
-                      parser: str = "tool_call", known_tags=None, known_renames=None) -> dict:
+                      parser: str = "tool_call", known_tags=None, known_renames=None,
+                      max_workers: int = 8) -> dict:
     """THE primary D5 primitive: an LLM agent BUILDS the concept map for a run end-to-end — it GROWS the
     concept vocabulary from the actual experiments (`tag_nodes_llm`, agentic when read-only run `tools` are
     passed, so it reads each node's real code/logs), computes the pure coverage, and DERIVES the
@@ -944,7 +979,8 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
                 "coverage": concept_coverage(state, graph, tags),
                 "important_uncovered": [], "mode": "offline-heuristic"}
     # `known_tags` lets a repeated cadence reuse already-recorded node tags and only LLM-tag NEW nodes.
-    raw = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True, known_tags=known_tags)
+    raw = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True, known_tags=known_tags,
+                        max_workers=max_workers)
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
     graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser,

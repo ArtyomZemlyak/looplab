@@ -214,6 +214,11 @@ def concept_coverage(
     model: Optional[str] = typer.Option(None, help="Override model id."),
     repo: Optional[Path] = typer.Option(
         None, help="Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief."),
+    jobs: int = typer.Option(
+        8, "--jobs", "-j", help="Concurrent node-tagging LLM calls (the agentic build tags each experiment "
+                                "independently; retro-tagging a large finished run is ~O(nodes) sequential "
+                                "otherwise). 1 = sequential. Quality is unchanged — the vocabulary still "
+                                "grows between batches and consolidation dedups synonyms."),
 ):
     """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
     the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
@@ -261,7 +266,7 @@ def concept_coverage(
             typer.echo(f"(asset-brief grounding skipped: {e})")
     cmap = build_concept_map(state, task_goal=state.goal or "", client=client,
                              tools=_run_tools_for(state), seed_graph=seed, asset_brief=brief_text,
-                             parser=settings.llm_parser)
+                             parser=settings.llm_parser, max_workers=jobs)
     typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
     typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
                f"{len(cmap['graph'].concepts())} concepts grown)")
