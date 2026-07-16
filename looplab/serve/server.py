@@ -177,10 +177,13 @@ class _APIRequestBodyLimitMiddleware:
                 return
             if message.get("type") != "http.request":
                 continue
-            buffered.extend(message.get("body") or b"")
-            if len(buffered) > self.max_bytes:
+            chunk = message.get("body") or b""
+            # # CODEX AGENT: Reject before copying an attacker-sized ASGI chunk. Extending first
+            # defeats the advertised memory envelope even though the eventual response is 413.
+            if len(chunk) > self.max_bytes - len(buffered):
                 await self._reject(send, 413, "API request body is too large")
                 return
+            buffered.extend(chunk)
             if not message.get("more_body", False):
                 break
 
@@ -382,8 +385,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         """CORS controls whether browser JS may READ a response; it does not stop a simple cross-site
         POST from EXECUTING. Reject browser-originated mutations server-side. Requests without Origin
         remain valid for CLI/TUI clients, while same-origin SPA calls and configured Vite origins work."""
+        route_path = _scope_route_path(request.scope)
         if (request.method in ("POST", "PUT", "PATCH", "DELETE")
-                and request.url.path.startswith("/api/")):
+                and route_path.startswith("/api/")):
             origin = request.headers.get("origin")
             if origin:
                 target = _origin_tuple(str(request.base_url))
@@ -437,7 +441,9 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     if ui_token:
         @app.middleware("http")
         async def _require_token(request: "Request", call_next):
-            p = request.url.path
+            # A non-stripping reverse proxy leaves its mount prefix in scope.path while Starlette
+            # routes against root_path-relative URLs. Security policy must use that same identity.
+            p = _scope_route_path(request.scope)
             review_token = request.headers.get(REVIEW_HEADER, "")
             if review_token:
                 try:
@@ -486,7 +492,8 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             except ReviewError as exc:
                 code = 410 if exc.kind in {"expired", "revoked", "generation"} else 401
                 return _review_denial(str(exc), exc.kind, code)
-            if not review_request_allowed(review, request.method, request.url.path):
+            if not review_request_allowed(
+                    review, request.method, _scope_route_path(request.scope)):
                 return _review_denial(
                     "read-only review capability does not permit this request",
                     "review_read_only", 403)
@@ -506,17 +513,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         contract, so polling cannot be frozen by a browser or intermediary.
         """
         response = await call_next(request)
-        parts = request.url.path.split("/")
+        route_path = _scope_route_path(request.scope)
+        parts = route_path.split("/")
         is_command = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                       and parts[4] == "commands")
         is_start_status = (len(parts) == 5 and parts[1] == "api" and parts[2] == "start"
                            and parts[4] == "status")
         is_log_page = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                        and parts[4] == "log-page")
-        is_comments = (request.url.path == "/api/review/comments"
+        is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                            and parts[4] == "comments"))
-        is_attention = request.url.path in {"/api/attention", "/api/assistant/permissions"}
+        is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
         if is_command or is_start_status or is_log_page or is_comments or is_attention:
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}

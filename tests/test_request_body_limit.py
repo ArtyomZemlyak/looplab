@@ -47,6 +47,26 @@ def test_chunked_body_without_content_length_is_counted():
     assert b"too large" in sent[1]["body"]
 
 
+def test_single_oversize_asgi_chunk_is_rejected_before_downstream():
+    called = False
+    sent = []
+
+    async def downstream(scope, receive, send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return {"type": "http.request", "body": b"x" * 4096, "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    scope = {"type": "http", "method": "POST", "path": "/api/settings", "headers": []}
+    anyio.run(_APIRequestBodyLimitMiddleware(downstream, max_bytes=16), scope, receive, send)
+    assert called is False
+    assert sent[0]["status"] == 413
+
+
 def test_non_stripping_root_path_api_body_is_still_counted():
     called = False
     sent = []
