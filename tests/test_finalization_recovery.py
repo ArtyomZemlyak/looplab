@@ -138,6 +138,47 @@ def test_finalize_reflects_before_stewards_and_counts_stewards_before_cost(tmp_p
     assert order == ["reflection", "concept", "claim", "facets", "llm_cost"]
 
 
+def test_upgrade_refreshes_old_cost_rollup_after_new_steward_usage(tmp_path):
+    """A pre-steward cost marker must not hide usage appended by upgraded finalization."""
+    from looplab.engine.finalize import finalize_run
+
+    run_dir = tmp_path / "upgraded-cost-order"
+    store, finish_seq = _terminal_store(run_dir)
+    scope = f"finish:{finish_seq}"
+    store.append("llm_cost", {
+        "cost": 0.0, "calls": 0, "prompt_tokens": 0,
+        "completion_tokens": 0, "total_tokens": 0,
+        "finalize_scope": scope, "finish_seq": finish_seq,
+    })
+    store.append("finalize_step", {"scope": scope, "step": "llm_cost"})
+
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+
+    def append_new_usage(_state):
+        eng.store.append("llm_usage", {
+            "usage_id": "upgraded-steward-usage", "cost": 0.125, "calls": 1,
+            "prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12,
+        })
+
+    eng._store_concept_curation = append_new_usage
+    final = finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    events = eng.store.read_all()
+    usage = next(event for event in events
+                 if event.type == "llm_usage" and event.data.get("usage_id") == "upgraded-steward-usage")
+    rollups = [event for event in events if event.type == "llm_cost"]
+    assert len(rollups) == 2
+    assert rollups[-1].seq > usage.seq
+    assert rollups[-1].data == {
+        "cost": 0.125, "calls": 1, "prompt_tokens": 8,
+        "completion_tokens": 4, "total_tokens": 12,
+        "finalize_scope": scope, "finish_seq": finish_seq,
+    }
+    assert final.llm_cost["cost"] == pytest.approx(0.125)
+    assert not final.finalization_pending()
+
+
 def test_engine_reentry_skips_setup_for_finish_seq_pending(tmp_path, monkeypatch):
     import anyio
     from looplab import cli

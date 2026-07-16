@@ -275,6 +275,44 @@ def _finalize_step_done(
     return False
 
 
+def _llm_cost_rollup_stale(events, scope: str, finish_seq: int) -> bool:
+    """Whether durable usage landed after this finish's presentation roll-up boundary.
+
+    Older builds could write ``llm_cost`` before the Part IV/V stewards existed.  If such a run is
+    resumed with an otherwise-incomplete finalization, the upgraded stewards may append exact
+    ``llm_usage`` deltas after that old marker.  The folded total remains correct, but consumers of
+    the terminal roll-up event would otherwise keep seeing the pre-upgrade total forever.
+    """
+    boundary = -1
+    latest_usage = -1
+    for event in events:
+        seq = event.seq if isinstance(event.seq, int) else -1
+        data = event.data or {}
+        if event.type == EV_LLM_USAGE:
+            latest_usage = max(latest_usage, seq)
+            continue
+        if (
+            event.type == EV_FINALIZE_STEP
+            and data.get("scope") == scope
+            and data.get("step") == "llm_cost"
+        ):
+            boundary = max(boundary, seq)
+            continue
+        if event.type != EV_LLM_COST:
+            continue
+        if (
+            data.get("finalize_scope") == scope
+            or data.get("finish_seq") == finish_seq
+            or (
+                seq > finish_seq
+                and data.get("finalize_scope") is None
+                and data.get("finish_seq") is None
+            )
+        ):
+            boundary = max(boundary, seq)
+    return boundary >= 0 and latest_usage > boundary
+
+
 def _mark_finalize_step(engine: "Engine", scope: str, step: str, **data) -> None:
     engine.store.append(EV_FINALIZE_STEP, {"scope": scope, "step": step, **data})
 
@@ -664,13 +702,19 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 pass
 
         events = engine.store.read_all()
-        if not _finalize_step_done(events, scope, finish_seq, "llm_cost", EV_LLM_COST):
+        cost_step_done = _finalize_step_done(
+            events, scope, finish_seq, "llm_cost", EV_LLM_COST)
+        # CODEX AGENT: a legacy roll-up marker is not proof that newly-added steward usage was
+        # presented.  Refresh only when a later exact usage delta exists; the new roll-up then becomes
+        # the boundary, so repeated recovery remains idempotent.
+        if not cost_step_done or _llm_cost_rollup_stale(events, scope, finish_seq):
             if emit_llm_cost(
                 engine,
                 finalize_scope=scope,
                 finish_seq=finish_seq,
             ):
-                _mark_finalize_step(engine, scope, "llm_cost")
+                if not cost_step_done:
+                    _mark_finalize_step(engine, scope, "llm_cost")
 
         latest_events = engine.store.read_all()
         requirements = (
