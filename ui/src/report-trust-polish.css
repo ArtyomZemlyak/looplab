@@ -94,6 +94,7 @@
 .report-empty-state { padding: 18px; margin: 12px 0 20px; }
 .report-empty-state h2 { color: var(--fg); font-size: 15px; margin: 0 0 4px; }
 .report-empty-state p { margin: 0; }
+.report-inline-state.paid { border-left-color: var(--accent); }
 .report-inline-state.error { border-left-color: var(--alarm); color: var(--trust-alarm-ink); }
 .report-code-state { min-height: 90px; display: grid; place-items: center; padding: 20px; }
 .report-code-state.error { display: flex; justify-content: center; gap: 9px; }

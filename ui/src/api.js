@@ -1036,14 +1036,25 @@ const reportStorageError = cause => Object.assign(
   { code: 'REPORT_REFRESH_STORAGE_UNAVAILABLE', cause },
 )
 
+const reportRefreshStorageKey = runId =>
+  'll.report-refresh.' + encodeURIComponent(String(runId || ''))
+
+// Read-only inspection shares the exact validation path below and never creates, clears, or
+// rewrites an identity.
+export function peekReportRefreshIntent(runId, generation, storage = undefined) {
+  return reportRefreshIntent(runId, generation, '', storage, true)
+}
+
 // Keep one logical refresh identity across component unmounts and ambiguous responses. A retry POST
 // can then rejoin the server's first job. Supplying `completedKey` clears only that exact intent;
 // paid work fails closed when tab storage is unavailable.
-export function reportRefreshIntent(runId, generation, completedKey = '', storage = undefined) {
+export function reportRefreshIntent(
+  runId, generation, completedKey = '', storage = undefined, inspectOnly = false,
+) {
   const backing = transportStorage(storage)
   if (!validRunGeneration(generation)) return null
   if (!backing) throw reportStorageError()
-  const key = 'll.report-refresh.' + encodeURIComponent(String(runId || ''))
+  const key = reportRefreshStorageKey(runId)
   const prefix = generation + ':'
   try {
     if (completedKey) {
@@ -1059,6 +1070,7 @@ export function reportRefreshIntent(runId, generation, completedKey = '', storag
     const saved = backing.getItem(key)
     const candidate = saved?.startsWith(prefix) ? saved.slice(prefix.length) : null
     if (candidate !== null && !UUID_V4_RE.test(candidate)) throw new Error('invalid stored report identity')
+    if (inspectOnly) return candidate === null ? null : { generation, idempotencyKey: candidate }
     const idempotencyKey = candidate ?? createIdempotencyKey()
     backing.setItem(key, prefix + idempotencyKey)
     if (backing.getItem(key) !== prefix + idempotencyKey) throw new Error('storage write failed')
@@ -1663,8 +1675,7 @@ export async function assistantMessageStream(sid, instruction, mode, cbs = {}, s
   }
   return result
 }
-// Full (uncapped) I/O for one trace observation — fetched lazily when the user expands a
-// generation/tool in the trace tree (the tree itself is served light, without prompts/outputs).
+// Bounded/redacted I/O projection for one observation, with explicit omission metadata.
 export const spanDetail = (runId, spanId) =>
   get(`/api/runs/${encodeURIComponent(runId)}/spans/${encodeURIComponent(spanId)}`)
 

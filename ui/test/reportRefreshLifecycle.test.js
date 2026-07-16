@@ -12,6 +12,7 @@ const state = {
   nodes: {}, best_node_id: null, reward_hacks: [], drifts: [], research: [], report: null,
 }
 const GENERATION = 'a'.repeat(64)
+const SAVED_REQUEST = '12345678-1234-4234-9234-123456789abc'
 
 test('report refresh is receipt-scoped, double-submit safe, and immune to an older safety timer', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
@@ -21,6 +22,7 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
   const realClearTimeout = globalThis.clearTimeout
   const safetyTimers = []
   const requests = []
+  const queuedResults = []
   let fetches = 0
   let nextReceipt = 10
   let root
@@ -39,7 +41,9 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
       requests.push({ url: String(url), options })
       const seq = nextReceipt++
       return { ok: true, json: async () => ({
-        ok: true, seq, generation: GENERATION, content: { trigger: 'manual' },
+        ...(queuedResults.shift() || {
+          ok: true, seq, generation: GENERATION, content: { trigger: 'manual' },
+        }),
       }) }
     },
   }
@@ -70,9 +74,9 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
     ])
     const { default: ReportView, reportRefreshFailure } = reportModule
     assert.deepEqual(reportRefreshFailure({ code: 'report_refresh_uncertain' }).slice(1),
-      [false, true], 'an uncertain paid outcome must disable retry and retain its intent')
+      [true, true], 'an uncertain paid outcome may resume only its retained identity')
     assert.match(reportRefreshFailure({ code: 'report_refresh_uncertain' })[0],
-      /outcome is uncertain.*reconcile/i)
+      /outcome unknown.*saved paid request.*never start another.*operator recovery/i)
     assert.deepEqual(reportRefreshFailure({
       status: 409, code: 'report_refresh_in_progress',
     }).slice(1), [false], 'an unused competing identity is cleared and must not offer a retry POST')
@@ -86,16 +90,28 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
     assert.match(reportRefreshFailure({ error_kind: 'accounting_pending' })[0],
       /durable cost accounting/i)
     root = createRoot(document.querySelector('#root'))
-    const render = (observedSeq, runId = 'demo') => React.act(async () => {
+    const render = (observedSeq, runId = 'demo', expectedGeneration = GENERATION) => React.act(async () => {
       root.render(React.createElement(ReportView, {
-        state, runId, observedSeq, expectedGeneration: GENERATION,
+        state, runId, observedSeq, expectedGeneration,
       }))
       await Promise.resolve()
     })
-    const button = () => [...document.querySelectorAll('button')]
-      .find(element => /Refresh/.test(element.textContent))
+    const button = () => document.querySelector('button[aria-describedby="paid-report-refresh-status"]')
+
+    await render(9, 'demo', null)
+    assert.equal(button().disabled, true)
+    assert.match(button().title, /verified generation/i)
+    assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
+      /disabled.*verified generation/i)
+
+    sessionStorage.setItem('ll.report-refresh.' + encodeURIComponent('demo'),
+      GENERATION + ':' + SAVED_REQUEST)
 
     await render(9)
+    assert.equal(fetches, 0, 'mounting a saved paid request must remain read-only')
+    assert.match(button().textContent, /Resume paid refresh/)
+    assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
+      /paid request saved.*same request.*cannot start a second job.*safely leave/i)
     await React.act(async () => {
       button().click()
       button().click()
@@ -104,13 +120,17 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
     })
     assert.equal(fetches, 1, 'the synchronous request ref must reject a second click before render')
     assert.deepEqual(JSON.parse(requests[0].options.body), { expected_generation: GENERATION })
-    assert.match(requests[0].options.headers['Idempotency-Key'],
-      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
-    assert.match(button().textContent, /Refreshing/)
+    assert.equal(requests[0].options.headers['Idempotency-Key'], SAVED_REQUEST,
+      'resume must POST the exact saved paid identity')
+    assert.match(button().textContent, /Paid refresh running/)
+    assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
+      /running with the saved request.*safely leave.*resume it/i)
     assert.equal(safetyTimers.length, 1)
 
     await render(10)
-    assert.match(button().textContent, /Refresh report/)
+    assert.match(button().textContent, /Refresh report.*paid/)
+    assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
+      /Paid AI action.*provider charges.*One request identity.*safely leave.*resume/i)
     assert.equal(safetyTimers[0].cleared, true)
 
     await React.act(async () => {
@@ -121,24 +141,46 @@ test('report refresh is receipt-scoped, double-submit safe, and immune to an old
     assert.equal(fetches, 2)
     assert.notEqual(requests[1].options.headers['Idempotency-Key'],
       requests[0].options.headers['Idempotency-Key'], 'a completed refresh gets a new identity')
-    assert.match(button().textContent, /Refreshing/)
+    assert.match(button().textContent, /Paid refresh running/)
     assert.equal(safetyTimers.length, 2)
 
     await React.act(async () => { safetyTimers[0].callback(); await Promise.resolve() })
-    assert.match(button().textContent, /Refreshing/,
+    assert.match(button().textContent, /Paid refresh running/,
       'a stale timer from request A must not clear request B')
     await render(11)
-    assert.match(button().textContent, /Refresh report/)
+    assert.match(button().textContent, /Refresh report.*paid/)
+
+    queuedResults.push({
+      ok: false, code: 'report_refresh_uncertain', generation: GENERATION,
+    })
+    await React.act(async () => { button().click(); await Promise.resolve(); await Promise.resolve() })
+    assert.equal(fetches, 3)
+    const uncertainKey = requests[2].options.headers['Idempotency-Key']
+    assert.match(button().textContent, /Resume paid refresh/)
+    assert.equal(button().disabled, false, 'the same saved identity remains resumable')
+    assert.match(document.querySelector('[role="alert"]')?.textContent || '',
+      /saved paid request.*operator recovery/i)
+
+    queuedResults.push({
+      ok: true, seq: 12, generation: GENERATION, content: { trigger: 'manual' },
+    })
+    await React.act(async () => { button().click(); await Promise.resolve(); await Promise.resolve() })
+    assert.equal(fetches, 4)
+    assert.equal(requests[3].options.headers['Idempotency-Key'], uncertainKey,
+      'Resume must reconcile the uncertain paid request with exactly the same identity')
+    await render(12)
+    assert.match(button().textContent, /Refresh report.*paid/)
 
     Object.defineProperty(globalThis, 'sessionStorage', {
       configurable: true, writable: true,
       value: { getItem: () => { throw new Error('storage blocked') } },
     })
-    await render(11, 'storage-blocked')
-    await React.act(async () => { button().click(); await Promise.resolve() })
-    assert.equal(fetches, 2, 'paid work must not start when its tab identity cannot be stored')
+    await render(12, 'storage-blocked')
+    assert.equal(fetches, 4, 'paid work must not start when its tab identity cannot be stored')
     assert.match(document.querySelector('[role="alert"]')?.textContent || '',
-      /needs working session storage/i)
+      /needs working session storage.*preserve one request identity/i)
+    assert.match(document.querySelector('#paid-report-refresh-status')?.textContent || '',
+      /disabled.*tab cannot safely save its request identity/i)
     assert.equal(button().disabled, true)
   } finally {
     if (root) await React.act(async () => { root.unmount() })

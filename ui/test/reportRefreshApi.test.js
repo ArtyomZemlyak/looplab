@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  reportRefreshIntent, CONTROL, genScopeReport, jobAwait,
+  peekReportRefreshIntent, reportRefreshIntent, CONTROL, genScopeReport, jobAwait,
 } from '../src/api.js'
 
 const GENERATION = 'c'.repeat(64)
@@ -25,6 +25,28 @@ test('report refresh intent survives an ambiguous remount and clears after autho
   reportRefreshIntent('ambiguous/run', GENERATION, first.idempotencyKey, storage)
   const next = reportRefreshIntent('ambiguous/run', GENERATION, '', storage)
   assert.notEqual(next.idempotencyKey, first.idempotencyKey)
+})
+
+test('report refresh intent can be inspected without creating or rewriting paid work', () => {
+  const values = new Map()
+  let writes = 0
+  let removals = 0
+  const storage = {
+    getItem: key => values.get(key) ?? null,
+    setItem: (key, value) => { writes += 1; values.set(key, String(value)) },
+    removeItem: key => { removals += 1; values.delete(key) },
+  }
+  const key = 'll.report-refresh.' + encodeURIComponent('saved/run')
+  const idempotencyKey = '12345678-1234-4234-9234-123456789abc'
+  values.set(key, GENERATION + ':' + idempotencyKey)
+
+  assert.deepEqual(peekReportRefreshIntent('saved/run', GENERATION, storage), {
+    generation: GENERATION, idempotencyKey,
+  })
+  assert.equal(peekReportRefreshIntent('saved/run', 'd'.repeat(64), storage), null)
+  assert.equal(writes, 0)
+  assert.equal(removals, 0)
+  assert.equal(values.get(key), GENERATION + ':' + idempotencyKey)
 })
 
 test('scope report publication conflicts reject message-only failure receipts', async () => {
@@ -88,6 +110,9 @@ test('report refresh intent fails closed on unavailable or silently broken stora
   assert.throws(
     () => reportRefreshIntent('no-storage', GENERATION, '', null),
     error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')
+  assert.throws(
+    () => peekReportRefreshIntent('no-storage', GENERATION, null),
+    error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')
   const silent = { getItem: () => null, setItem: () => {}, removeItem: () => {} }
   assert.throws(
     () => reportRefreshIntent('silent-storage', GENERATION, '', silent),
@@ -100,6 +125,9 @@ test('a corrupt same-generation report identity is quarantined, never replaced',
   const corrupt = GENERATION + ':truncated key?'
   storage.setItem(key, corrupt)
 
+  assert.throws(
+    () => peekReportRefreshIntent('corrupt/run', GENERATION, storage),
+    error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')
   assert.throws(
     () => reportRefreshIntent('corrupt/run', GENERATION, '', storage),
     error => error?.code === 'REPORT_REFRESH_STORAGE_UNAVAILABLE')

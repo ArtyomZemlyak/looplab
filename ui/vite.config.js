@@ -20,7 +20,17 @@ export default defineConfig({
     manifest: true,
     chunkSizeWarningLimit: 500,
     rollupOptions: {
+      // Prefer the smaller equivalent module wrapper form. The default PIFE wrapper trades a little
+      // more shipped code for startup speed; the UI's measured bundle budget favors transfer size.
+      optimization: {
+        pifeForModuleWrappers: false,
+      },
       output: {
+        minify: {
+          compress: { maxIterations: 10 },
+          mangle: true,
+          codegen: true,
+        },
         // Keep the only vendor split tied to the graph interaction boundary. Small application
         // groups consolidate modules used together across the same owner workspaces, avoiding many
         // tiny gzip streams without crossing the route/panel boundaries enforced by the bundle
@@ -30,7 +40,10 @@ export default defineConfig({
           groups: [
             {
               name: 'vendor-flow',
-              test: /[/\\]node_modules[/\\]@xyflow[/\\]/,
+              // The app adapter and these private graph dependencies are an exact @xyflow
+              // co-closure; no non-graph source imports them. One stream shares a gzip dictionary
+              // without moving graph code onto any non-graph route.
+              test: /(?:[/\\]node_modules[/\\](?:@xyflow|classcat|d3-[^/\\]+|use-sync-external-store|zustand)[/\\]|[/\\]src[/\\]groupnodes\.jsx$)/,
               includeDependenciesRecursively: false,
             },
             {

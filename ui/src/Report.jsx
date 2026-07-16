@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { reportRefreshIntent, isTransientCommandReadError, get, fmt, fmtInt, CONTROL,
-  runNodeApiPath } from './util.js'
+import { peekReportRefreshIntent, reportRefreshIntent, isTransientCommandReadError, get, fmt,
+  fmtInt, CONTROL, runNodeApiPath } from './util.js'
 import { Trajectory, ImprovementWaterfall } from './charts.jsx'
 import { analyze, verdict, paramDiffLabel, toMarkdown, hyperImportance } from './report.js'
 import MemoCard from './MemoCard.jsx'
@@ -31,13 +31,13 @@ export const reportRefreshFailure = (failure, thrown = false) => {
     return ['The report service is busy. Retry shortly.', true]
   }
   if (code === 'report_refresh_in_progress') {
-    return ['Another report refresh is running. Wait, then reload.', false]
+    return ['Another paid report refresh owns this run. Wait for it to finish, then reload.', false]
   }
   if (code === 'report_refresh_uncertain') {
-    return ['The report outcome is uncertain; do not submit new paid work. Reload to reconcile.', false, true]
+    return ['Outcome unknown. Resume rechecks the saved paid request; never start another. A crashed worker may need operator recovery.', true, true]
   }
   if (code === 'REPORT_REFRESH_PROTOCOL_ERROR' || code === 'job_protocol_error') {
-    return ['The report receipt is invalid. Reload to reconcile.', false, true]
+    return ['Receipt invalid. Resume rechecks the saved paid request; completion remains unknown.', true, true]
   }
   const status = Number(failure?.status)
   const transientThrow = thrown && (failure?.submissionMayHaveSucceeded === true
@@ -131,6 +131,8 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
   const [refreshing, setRefreshing] = useState(false)
   const [refreshError, setRefreshError] = useState('')
   const [refreshRetryAllowed, setRefreshRetryAllowed] = useState(true)
+  const [savedRefreshIntent, setSavedRefreshIntent] = useState(null)
+  const refreshStorageReady = savedRefreshIntent !== false
   const refreshGenerationReady = /^[0-9a-f]{64}$/.test(expectedGeneration || '')
   const refreshRequestRef = useRef({
     token: 0, receiptSeq: null, timer: null, busy: false,
@@ -183,6 +185,9 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       request.idempotencyKey = null
       request.generation = null
     }
+    setSavedRefreshIntent(finalPreserveIntent && request.idempotencyKey && request.generation
+      ? { generation: request.generation, idempotencyKey: request.idempotencyKey }
+      : null)
     setRefreshing(false)
     setRefreshError(finalError)
     setRefreshRetryAllowed(finalCanRetry)
@@ -211,6 +216,16 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     setRefreshing(false)
     setRefreshError('')
     setRefreshRetryAllowed(true)
+    setSavedRefreshIntent(null)
+    if (!readOnly && refreshGenerationReady) {
+      try {
+        setSavedRefreshIntent(peekReportRefreshIntent(runId, expectedGeneration))
+      } catch {
+        setSavedRefreshIntent(false)
+        setRefreshError('Paid report refresh needs working session storage to preserve one request identity.')
+        setRefreshRetryAllowed(false)
+      }
+    }
     return () => {
       request.token += 1
       if (request.timer) clearTimeout(request.timer)
@@ -222,7 +237,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       request.idempotencyKey = null
       request.generation = null
     }
-  }, [runId, expectedGeneration])
+  }, [runId, expectedGeneration, readOnly, refreshGenerationReady])
 
   const dl = (name, text, type) => downloadBlob(name, [text], type)
   const refresh = async () => {
@@ -253,6 +268,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     request.receiptSeq = null
     request.generation = intent.generation
     request.idempotencyKey = intent.idempotencyKey
+    setSavedRefreshIntent(intent)
     request.controller = typeof AbortController === 'undefined' ? null : new AbortController()
     if (request.timer) clearTimeout(request.timer)
     request.timer = null
@@ -300,6 +316,25 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       onToast?.(message)
     }
   }
+  const refreshStatus = readOnly ? ''
+    : !refreshGenerationReady
+      ? 'Paid report refresh is disabled: reload the run and wait for its verified generation.'
+      : !refreshStorageReady
+        ? 'Paid refresh is disabled: this tab cannot safely save its request identity. Enable session storage, then reload.'
+        : refreshing
+          ? 'Paid refresh is running with the saved request. You can safely leave and resume it later.'
+          : savedRefreshIntent
+            ? 'Paid request saved. Resume rechecks the same request; it cannot start a second job. You can safely leave.'
+            : 'Paid AI action: provider charges may apply. One request identity is saved so you can safely leave and resume.'
+  const refreshButtonLabel = refreshing ? 'Paid refresh running…'
+    : savedRefreshIntent ? 'Resume paid refresh' : 'Refresh report · paid'
+  const refreshDisabledReason = !refreshGenerationReady
+    ? 'Reload the run and wait for its verified generation before starting a paid refresh.'
+    : !refreshStorageReady
+      ? 'Paid refresh is unavailable because this tab cannot safely store its request identity.'
+      : !refreshRetryAllowed
+        ? (refreshError || 'This paid refresh cannot be resumed safely yet.')
+        : ''
   const impr = s => s.delta == null || (state.direction === 'min' ? s.delta < 0 : s.delta > 0)
   const modelCard = () => JSON.stringify({
     task: state.task_id, goal: state.goal, direction: state.direction, run_id: state.run_id,
@@ -315,8 +350,10 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
     <div className="report-view" aria-busy={refreshing || undefined}>
       <div className="toolbar report-toolbar">
         {!readOnly && <button className="btn sm primary"
-          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady} onClick={refresh}
-          title="Agent rewrites the report from all results so far"><OpIcon name="replay" size={12} /> {refreshing ? 'Refreshing…' : 'Refresh report'}</button>}
+          disabled={refreshing || !refreshRetryAllowed || !refreshGenerationReady || !refreshStorageReady}
+          onClick={refresh}
+          aria-describedby="paid-report-refresh-status"
+          title={refreshDisabledReason || refreshStatus}><OpIcon name="replay" size={12} /> {refreshButtonLabel}</button>}
         {readOnly && <span className="history-inline">{readOnlyReason === 'review'
           ? 'Read-only review · report refresh disabled'
           : `Snapshot seq ${historySeq} · report refresh disabled`}</span>}
@@ -329,10 +366,16 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
         {best && evidenceAvailable && <button className="btn sm" disabled={!bestCode?.code} onClick={() => dl(`solution_node${best.id}.py`, bestCode.code, 'text/x-python')}><OpIcon name="download" size={12} /> Solution</button>}
         <button className="btn sm" onClick={() => dl(`${state.run_id}_model_card.json`, modelCard(), 'application/json')}><OpIcon name="download" size={12} /> Model card</button>
       </div>
+      {!readOnly && <div id="paid-report-refresh-status" className="report-inline-state paid"
+        role="status" aria-live="polite" aria-atomic="true">
+        <OpIcon name={savedRefreshIntent || refreshing ? 'replay' : 'bolt'} size={14} />
+        <span>{refreshStatus}</span>
+      </div>}
       {refreshError && <div className="report-inline-state error" role="alert">
         <OpIcon name="alert" size={14} /><span>{refreshError}</span>
         {!readOnly && refreshRetryAllowed && refreshGenerationReady
-          && <button className="btn sm" onClick={refresh}>Retry</button>}
+          && <button className="btn sm" onClick={refresh}>{savedRefreshIntent
+            ? 'Resume paid request' : 'Retry paid refresh'}</button>}
       </div>}
 
       <h1 className="report-title">{state.goal || state.task_id}</h1>
