@@ -162,7 +162,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
   ]
   return (
     <ChartFrame className="chart" title="Metric trajectory"
-      description={`Evaluated experiments and running ${direction === 'min' ? 'minimum' : 'maximum'}; groups pair colour with marker shape and fill style, while rings and the data table expose constraint status.`}
+      description={`Evaluated experiments and running ${direction === 'min' ? 'minimum' : 'maximum'}; colour, shape, fill and rings encode group and constraint status.${pick ? ' Click the plot for the nearest node; keyboard users can use View data.' : ''}`}
       columns={columns} rows={tableRows} csvName="metric-trajectory.csv">
     {({ labelledBy }) => <>
     <div className="chart-tools">

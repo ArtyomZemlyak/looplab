@@ -1297,6 +1297,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .chart-status-legend > span { display: inline-flex; align-items: center; gap: 5px; }
 .chart-status-ring { display: inline-block; width: 10px; height: 10px; border: 1px solid var(--fg-dim); border-radius: 50%; }
 .chart-status-ring.dashed { border-style: dashed; border-color: var(--fg); }
+.pickable { cursor: crosshair; }
 .chart-pt.pick, .chart-mark.pick, .pc-line.pick { cursor: pointer; }
 .chart-hit-area { pointer-events: all; cursor: pointer; }
 .chart-pt:hover .chart-point-shape { stroke: var(--fg); stroke-width: 1.5; }
