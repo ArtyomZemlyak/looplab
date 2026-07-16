@@ -126,6 +126,23 @@ def test_capsule_store_quarantines_pre_provenance_legacy_rows(tmp_path):
     assert ConceptCapsuleStore(path).all() == [current]
 
 
+def test_upsert_preserves_quarantined_rows_for_future_migration(tmp_path):
+    path = tmp_path / "c.jsonl"
+    legacy = {"v": 1, "run_id": "legacy", "fingerprint": ["k"], "direction": "max",
+              "concepts": ["old/claim"], "concept_outcomes": {}}
+    future = {"v": 999, "run_id": "future", "opaque": {"contract": "unknown"}}
+    path.write_text("".join(json.dumps(row) + "\n" for row in (legacy, future)), encoding="utf-8")
+
+    store = ConceptCapsuleStore(path)
+    assert store.all() == []
+    current = _cap("current", "dense retrieval", ["hard-neg"], metric=0.8)
+    assert store.add(current) is True
+
+    persisted = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert persisted == [legacy, future, current]
+    assert ConceptCapsuleStore(path).all() == [current]
+
+
 def test_build_capsule_caps_large_generated_collections_deterministically():
     capsule = build_concept_capsule(
         run_id="r", fingerprint=[f"f-{index:04}" for index in range(400)], direction="max",

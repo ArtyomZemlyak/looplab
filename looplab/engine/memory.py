@@ -721,10 +721,13 @@ class ConceptCapsuleStore:
             return False
         rid = str(capsule.get("run_id") or "")
         with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
-            self._reload()
-            self.capsules = [c for c in self.capsules if str(c.get("run_id") or "") != rid]
-            self.capsules.append(capsule)
-            write_jsonl_atomic(self.path, self.capsules, dumps=json.dumps)
+            rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+            # CODEX AGENT: quarantine is a read policy, not permission to erase old/future durable data.
+            # Preserve every decoded row we do not understand; an upsert supersedes only the exact run id.
+            persisted = [row for row in rows if str(row.get("run_id") or "") != rid]
+            persisted.append(capsule)
+            write_jsonl_atomic(self.path, persisted, dumps=json.dumps)
+            self.capsules = [row for row in persisted if self._valid_capsule(row)]
         return True
 
     def prior_capsules(self, fingerprint: list[str], *, min_sim: float = 0.3,
