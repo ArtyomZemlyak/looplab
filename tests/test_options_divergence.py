@@ -34,6 +34,18 @@ EXPECTED = {
     "reflection_priors": (True, False),
     "report_every": (3, 0),
     "unified_agent": (True, False),
+    # Part IV/V machinery now ships ON in the product surface (Settings) while the bare-library
+    # EngineOptions stays lean, so a toy `Engine(...)` in a test doesn't fire concept/cross-run
+    # LLM work unasked. All are audit/advisory-or-proposal (never reject/select), so the product
+    # side being the aggressive one keeps the direction rule. Enabled per the owner's decision to
+    # run the built Part IV/V features by default on real tasks.
+    "concept_pivot": (True, False),
+    "graded_novelty": (True, False),
+    "cross_run_concepts": (True, False),
+    "cross_run_structured_claims": (True, False),
+    "cross_run_curation": (True, False),
+    "cross_run_advisory": (True, False),
+    "fingerprint_universal": (True, False),
 }
 # Divergent by SHAPE, not a scalar worth freezing: the product default is a non-trivial
 # structure; the library default is "off". Assert the shape relationship, not the payload.

@@ -40,7 +40,6 @@ _LAYOUT = {
     "advisory_payloads": "core",  # bounded canonical forms for untrusted advisory sidecars (memos/reports)
     "agent": "agents",
     "agents_md": "tools",
-    "advisory_payloads": "core",  # bounded/redacted memo + report projections at durable/read boundaries
     "appconfig": "core",
     "appstate": "serve",
     "attention": "serve",
@@ -180,6 +179,7 @@ _LAYOUT = {
     "span_index": "events",   # derived light span index behind the UI trace views (perf)
     "signal_delivery": "engine",   # §1 signal-delivery registry (docs/14-agent-framework-mega-review)
     "skills": "tools",
+    "source_identity": "trust",   # provenance/source-identity checks among the trust monitors
     "strategist": "agents",
     "strategy": "engine",   # engine strategist-cadence mixin ("strategist" is taken by agents/strategist.py)
     "stuck": "agents",

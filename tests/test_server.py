@@ -1254,16 +1254,17 @@ def test_settings_get_put_roundtrip(tmp_path):
 
 
 def test_settings_partial_put_preserves_hidden_overrides_and_null_clears(tmp_path):
+    # novelty_gate stays default-False, so setting it True is a real (non-default) hidden override.
     (tmp_path / "ui_settings.json").write_text(
-        json.dumps({"cross_run_read_tools": True, "max_nodes": 17}), encoding="utf-8")
+        json.dumps({"novelty_gate": True, "max_nodes": 17}), encoding="utf-8")
     client = TestClient(make_app(tmp_path))
 
     saved = client.put("/api/settings", json={"settings": {"policy": "mcts"}})
     assert saved.status_code == 200
     assert saved.json()["overrides"] == {
-        "cross_run_read_tools": True, "max_nodes": 17, "policy": "mcts"}
+        "novelty_gate": True, "max_nodes": 17, "policy": "mcts"}
 
-    cleared = client.put("/api/settings", json={"settings": {"cross_run_read_tools": None}})
+    cleared = client.put("/api/settings", json={"settings": {"novelty_gate": None}})
     assert cleared.status_code == 200
     assert cleared.json()["overrides"] == {"max_nodes": 17, "policy": "mcts"}
 

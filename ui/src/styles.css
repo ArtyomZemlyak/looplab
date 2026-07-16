@@ -1905,7 +1905,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 
 /* Composer shared by side + full: attach + textarea + send/stop, mode selector BELOW it. */
 .asst-in { border-top: 1px solid var(--line); padding: 8px 10px; flex: none; position: relative; }
-.asst-inrow { display: flex; align-items: flex-end; gap: 6px; }
+.asst-inrow { display: flex; align-items: flex-end; gap: 6px; position: relative; }  /* relative: anchors the /command hint pop above the composer input */
 .asst-inrow .text { flex: 1; min-height: 40px; max-height: 200px; resize: vertical; width: auto; }
 .asst-moderow { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
 .asst-modehint { font-size: 11px; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

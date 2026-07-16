@@ -188,5 +188,6 @@ def test_exploit_stance_unaffected(tmp_path):
     assert "EXPLOIT" in eng.researcher._novelty_hint
 
 
-def test_settings_flag_defaults_off():
-    assert Settings().concept_pivot is False
+def test_settings_flag_defaults_on():
+    # Part IV/V ships ON by default (concept tagging is audit + prompt-cue only; opt out per-run).
+    assert Settings().concept_pivot is True

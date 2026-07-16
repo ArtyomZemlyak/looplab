@@ -160,6 +160,14 @@ function kindOf(type) {
   return { group: g, glyph: TYPE_GLYPH[type] || GROUP_GLYPH[g] || 'dot' }
 }
 
+// Internal bookkeeping the curated Timeline hides: the finalize state-machine's per-step checklist
+// markers (`finalize_step` {scope, step}) and its exact-finish ack (`finalization_finished` {finish_seq})
+// are DUPLICATES of the real wrap-up effects that already narrate cleanly (diversity archive, distilled
+// lessons, run reflection, run finalized); and `llm_usage` is a per-LLM-call cost delta (one row per
+// call — the aggregate `llm_cost` "LLM: N tokens, $X" is the human-facing total). These render as raw
+// {…} blobs / high-frequency noise, so they stay in the event log but out of the readable feed.
+const FEED_HIDDEN = new Set(['finalize_step', 'finalization_finished', 'llm_usage'])
+
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
 const REASONING_TYPES = new Set(['node_created', 'policy_decision', 'strategy_decision', 'research_completed'])
 // Events that OWN a node's agent trace — only these expand to the node's span tree (create_node =
@@ -725,7 +733,8 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
 
   // The chronological feed: events, filtered + time-scrubbed.
   const feed = useMemo(() =>
-    searchableLog.filter(({ event, search }) => (atLiveView || event.seq <= viewSeq)
+    searchableLog.filter(({ event, search }) => !FEED_HIDDEN.has(event.type)
+      && (atLiveView || event.seq <= viewSeq)
       && kindMatch(event) && (!filterQuery || search.includes(filterQuery))).map(item => item.event),
     [searchableLog, atLiveView, viewSeq, filterQuery, kinds])
   useEffect(() => {

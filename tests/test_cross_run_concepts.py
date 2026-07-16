@@ -293,5 +293,6 @@ def test_old_logs_fold_without_the_cross_run_field(tmp_path):
     assert fold(s.read_all()).cross_run_priors == []
 
 
-def test_settings_flag_defaults_off():
-    assert Settings().cross_run_concepts is False
+def test_settings_flag_defaults_on():
+    # Part IV/V ships ON by default (concept capsules + cross-run prior audit; never rejects).
+    assert Settings().cross_run_concepts is True

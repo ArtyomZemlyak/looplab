@@ -319,5 +319,7 @@ def test_capability_expansion_composes_with_pivot(tmp_path):
     assert "Concept-graph pivot" in hint and "Capability expansion" in hint
 
 
-def test_settings_flags_default_off():
-    assert Settings().graded_novelty is False and Settings().capability_expansion is False
+def test_settings_flags_defaults():
+    # graded_novelty ships ON by default (Part IV/V; heuristic tagger, audit-only, never rejects);
+    # capability_expansion stays OFF (separate operator, not part of the Part IV/V default bundle).
+    assert Settings().graded_novelty is True and Settings().capability_expansion is False
