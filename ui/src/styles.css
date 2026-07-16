@@ -797,6 +797,20 @@ table.tbl tr.best-row td { color: var(--best); }
   background: transparent; color: var(--fg); cursor: pointer; text-align: left; }
 .reset-stage-option:hover { background: var(--bg-3); }
 .reset-stage-option:focus-visible { background: var(--bg-3); outline: 2px solid var(--accent); outline-offset: -2px; }
+.reset-control { position: relative; margin-left: 8px; }
+.ctx-chip.ctx-chip-action { padding: 0 6px; cursor: pointer; }
+.reset-stage-menu { position: absolute; z-index: 30; top: 110%; left: 0; min-width: 240px; padding: 4px;
+  background: var(--bg-1); border: 1px solid var(--border); border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.4); }
+.reset-option-title, .reset-option-description { display: block; }
+.reset-option-title b { font-size: 12px; }
+.reset-option-title .muted, .reset-option-description { font-size: 10px; }
+.eval-pipeline { margin: 8px 0; }
+.eval-pipeline-label { margin-bottom: 3px; font-size: 10px; }
+.eval-pipeline-stages { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.eval-pipeline-step { padding: 2px 7px; border: 1px solid var(--stage-tone); border-radius: 4px;
+  background: transparent; color: var(--stage-tone); font-size: 11px; cursor: default; }
+button.eval-pipeline-step { cursor: pointer; }
+.eval-pipeline-arrow { font-size: 10px; }
 .disclosure-button { border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .disclosure-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .span-row.disclosure-button, .llm-line.disclosure-button, .conv-req-h.disclosure-button,
@@ -1249,6 +1263,34 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 /* Node Trace tab: live "what's the LLM doing now" status + scroll nav. */
 .trace-live-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--accent); margin-bottom: 8px; }
 .trace-live-status .tls-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 7px var(--accent); animation: breathe 1.4s infinite; flex: none; }
+.trace-small { font-size: 12px; }
+.trace-loading { padding: 4px 2px; font-size: 12px; }
+.stage-log { margin: 4px 0 2px; }
+.stage-log-label { margin-bottom: 2px; font-size: 10px; }
+.training-log { max-height: 320px; overflow: auto; padding: 8px; background: #0b0e14; border: 1px solid #20252f;
+  border-radius: 6px; font-size: 11px; line-height: 1.4; white-space: pre-wrap; word-break: break-word; }
+.stage-caret { display: inline-block; width: 10px; opacity: .6; font-size: 10px; }
+.stage-hidden-count { margin-left: 6px; font-size: 10px; }
+.trace .stage.stage-dynamic { border-left: 3px solid var(--stage-tone); }
+.stage-dynamic:not(.err) > .stage-h { background: color-mix(in srgb, var(--stage-tone) 12%, transparent); }
+.stage-dynamic .stage-ic, .stage-dynamic .stage-role { color: var(--stage-tone); }
+.trace .stage.run-setup-stage { margin-top: 4px; border-left: 3px solid var(--fg-mut); }
+.normal-weight { font-weight: 400; }
+.trace-live-note { margin-left: 6px; font-size: 11px; }
+.trace-clear-status { font-size: 11px; }
+.trace-clear-error { color: var(--fail); }
+.conv-toggle .trace-collapse { font-size: 10px; }
+.trace-rollup-intro { margin-bottom: 10px; }
+.trace-disclosure { margin-top: 6px; }
+.trace-disclosure-toggle { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+pre.code.event-json { max-height: 220px; }
+.dock-foot-hint { flex: 1; font-size: 11px; }
+.generation-empty { padding: 2px 2px 4px; font-size: 12px; }
+.code-toolbar { margin-bottom: 8px; }
+.helper-file-label, .trials-reveal { margin-top: 6px; }
+.confirmed-metric { margin-top: 8px; }
+.metric-curves-heading { margin-top: 12px; }
+.metric-curves-note { margin-left: 6px; font-weight: 400; }
 .trace-nav { display: inline-flex; gap: 4px; }
 .trace-clear { display: inline-flex; gap: 4px; margin-right: 8px; align-items: center; }
 

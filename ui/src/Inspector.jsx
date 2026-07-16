@@ -75,22 +75,21 @@ function ResetBtn({ runId, id, generation, onToast }) {
     if (next == null) return
     event.preventDefault(); items[next]?.focus()
   }
-  return <span ref={rootRef} style={{ position: 'relative', marginLeft: 8 }}>
-    <button ref={triggerRef} className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }}
+  return <span ref={rootRef} className="reset-control">
+    <button ref={triggerRef} className="ctx-chip ctx-chip-action"
             title="re-run THIS node in place (no new node) from a chosen stage"
             aria-haspopup="menu" aria-expanded={open} aria-disabled={busy} aria-busy={busy}
             onClick={() => { if (!busy) setOpen(!open) }}>{busy ? '↻ Resetting…' : '↻ Reset ▾'}</button>
-    {open && <div ref={menuRef} role="menu" aria-label={`Reset experiment ${id} from stage`}
+    {open && <div ref={menuRef} role="menu" className="reset-stage-menu" aria-label={`Reset experiment ${id} from stage`}
       onKeyDown={onMenuKeyDown}
       onBlur={event => {
         if (event.relatedTarget !== triggerRef.current && !event.currentTarget.contains(event.relatedTarget)) setOpen(false)
-      }}
-      style={{ position: 'absolute', zIndex: 30, top: '110%', left: 0, background: 'var(--bg-1)', border: '1px solid var(--border)', borderRadius: 6, padding: 4, minWidth: 240, boxShadow: '0 4px 16px rgba(0,0,0,.4)' }}>
+      }}>
       {STAGES.map(([stage, label, desc]) =>
         <button type="button" role="menuitem" key={stage} className="reset-stage-option"
              tabIndex={-1} title={desc} onClick={() => doReset(stage)}>
-          <span style={{ display: 'block' }}><b style={{ fontSize: 12 }}>{label}</b> <span className="muted" style={{ fontSize: 10 }}>from {stage}</span></span>
-          <span className="muted" style={{ display: 'block', fontSize: 10 }}>{desc}</span>
+          <span className="reset-option-title"><b>{label}</b> <span className="muted">from {stage}</span></span>
+          <span className="muted reset-option-description">{desc}</span>
         </button>)}
     </div>}
   </span>
@@ -214,14 +213,15 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
                 : 'Summary-only review. Source, live traces, and actions are not included.'
               : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
-          : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) live in the chat. Use the Comments tab for durable review notes, or attach <button className="ctx-chip" style={{ padding: '0 6px', cursor: 'pointer' }} title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
+          : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) live in the chat. Use the Comments tab for durable review notes, or attach <button className="ctx-chip ctx-chip-action" title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
           nodeGeneration={n.attempt} expectedGeneration={expectedGeneration} refreshKey={commentsRevision}
           readOnly={readOnly} reviewMode={readOnlyReason === 'review'} focusCommentId={focusCommentId} />}
         {activeTab === 'Trials' && <Trials n={n} detail={detail} state={state} />}
-        {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking} />}
+        {activeTab === 'Trace' && <Trace n={n} runId={runId} live={live} working={nodeWorking}
+          onReload={() => setDetailNonce(value => value + 1)} />}
         {activeTab === 'Code' && (visibleDetailStatus === 'ready'
           ? <Code n={n} />
           : visibleDetailStatus === 'error'
@@ -252,7 +252,7 @@ export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, o
   return <>
     <div className="tabs">
       <div className="tab active">Group · {groupKey}</div>
-      <span style={{ flex: 1 }} />
+      <span className="spacer" />
       <button className="btn sm ghost" onClick={onClose} title="close group view" aria-label="Close group details">✕</button>
     </div>
     <div className="insp-body">
@@ -298,20 +298,19 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
     } catch (error) { onToast?.(`Re-run failed: ${error.message || error}`) }
     finally { setPendingStage(null) }
   }
-  return <div style={{ margin: '8px 0' }}>
-    <div className="muted" style={{ fontSize: 10, marginBottom: 3 }}>
+  return <div className="eval-pipeline">
+    <div className="muted eval-pipeline-label">
       eval pipeline{failed ? ` — failed at ${failed}` : ''}{runId ? ' · click a stage to re-run from there' : ' · historical result (read-only)'}</div>
-    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+    <div className="eval-pipeline-stages">
       {stages.map((s, i) => <React.Fragment key={i}>
         {runId ? <button type="button" disabled={pendingStage != null} onClick={() => rerun(s.name)}
-          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, cursor: 'pointer', background: 'transparent',
-                   border: `1px solid ${tone(s)}`, color: tone(s) }}
+          className="eval-pipeline-step" style={{ '--stage-tone': tone(s) }}
           title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} — click to re-run the pipeline FROM here (reuse earlier stages)`}>
           {ic(s)} {s.name}</button> : <span
-          style={{ padding: '2px 7px', borderRadius: 4, fontSize: 11, border: `1px solid ${tone(s)}`, color: tone(s) }}
+          className="eval-pipeline-step" style={{ '--stage-tone': tone(s) }}
           title={`${s.name}: ${s.status}${s.seconds != null ? ` · ${s.seconds}s` : ''}${s.exit_code != null ? ` · exit ${s.exit_code}` : ''} · historical result`}>
           {ic(s)} {s.name}</span>}
-        {i < stages.length - 1 && <span className="muted" style={{ fontSize: 10 }}>→</span>}
+        {i < stages.length - 1 && <span className="muted eval-pipeline-arrow">→</span>}
       </React.Fragment>)}
     </div>
   </div>
@@ -457,7 +456,7 @@ function GenBody({ c }) {
     <div className="gen-sec-h">output</div>
     {c.completion
       ? <div className="msg"><pre className="code">{c.completion}</pre></div>
-      : <div className="muted" style={{ fontSize: 12, padding: '2px 2px 4px' }}>
+      : <div className="muted generation-empty">
           {nTools ? `→ called ${nTools} tool${nTools > 1 ? 's' : ''} (shown below)` : '(no text output)'}</div>}
     {c.thinking && <div className="msg think-debug">
       <button type="button" className="msg-role role-think disclosure-button" aria-expanded={think}
@@ -474,6 +473,14 @@ function GenBody({ c }) {
 //    all freezes the browser / black screen). Show the first SPAN_CAP, then a "show N more" button.
 //    This local reveal remains subject to the server's bounded/redacted projection and omission receipt.
 const SPAN_CAP = 60
+
+export function TraceUnavailable({ label = 'Trace unavailable.', onRetry }) {
+  return <div className="notice resource-error compact" role="alert">
+    <span>{label}</span>
+    {onRetry && <button type="button" className="btn sm" onClick={onRetry}>Retry trace</button>}
+  </div>
+}
+
 function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
   const [all, setAll] = useState(false)
   const rows = []
@@ -506,6 +513,8 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name).tone
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
   const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total} runId={runId} parentOp={s.name} />
+  const rowIndent = { paddingLeft: depth * 14 }
+  const detailIndent = { marginLeft: depth * 14 + 16 }
   // On first expand, pull the bounded/redacted detail projection; its omission receipt is rendered.
   useEffect(() => {
     if (open && io === null && runId && s.span_id && (kind === 'generation' || kind === 'tool')) {
@@ -514,7 +523,8 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         .catch(() => on && setIo(unavailableTraceDetail()))
       return () => { on = false }
     }
-  }, [open])
+  }, [open, io, runId, s.span_id, kind])
+  const retryIo = () => setIo(null)
 
   if (kind === 'generation') {
     // Row header from the LIGHT span (op·model·tokens); the prompt/output come from the fetched `io`.
@@ -522,7 +532,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
     const c = genToCall({ ...s, attributes: a }), t = c.tokens
     return <>
       <button type="button" aria-expanded={open} className={'span-row gen disclosure-button' + (err ? ' err' : '')}
-        style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
+        style={rowIndent} onClick={() => setOpen(o => !o)} title="expand for prompt & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         {(() => {   // name the call by ROLE so "who writes code" is unmistakable: the Developer's LLM
           // call (under implement/repair) is "writing code"; the Researcher's (under propose) is "reasoning".
@@ -535,10 +545,10 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
         {(t.prompt != null || t.completion != null) && <span className="badge" title={`${t.prompt || 0} prompt → ${t.completion || 0} completion tokens`}>{ktok(t.prompt)}→{ktok(t.completion)}</span>}
         {err && <span className="badge reason">ERROR</span>}
       </button>
-      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
-        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : io.status === 'unavailable'
-          ? <div className="notice compact">Trace detail unavailable.</div>
-          : <>{io.partial && <div className="notice compact">Trace detail truncated.</div>}<GenBody c={c} /></>}</div>}
+      {open && <div className="span-detail" style={detailIndent}>
+        {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
+          ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} />
+          : <>{io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}<GenBody c={c} /></>}</div>}
       {kids}
     </>
   }
@@ -547,20 +557,20 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
     const inp = asText(a.input), outp = asText(a.output), name = (s.attributes || {}).tool || a.tool || 'tool'
     return <>
       <button type="button" aria-expanded={open} className={'span-row tool disclosure-button' + (err ? ' err' : '')}
-        style={{ paddingLeft: depth * 14 }} onClick={() => setOpen(o => !o)} title="expand for input & output">
+        style={rowIndent} onClick={() => setOpen(o => !o)} title="expand for input & output">
         <span className="span-tw">{open ? '▾' : '▸'}</span>
         <span className="span-name tool"><OpIcon name="gear" className="t-ic" /> <b className="tool-name">{name}</b></span>
         {bar}
         <span className="t">{fmt(s.duration_s, 3)}s</span>
         {err && <span className="badge reason">ERROR</span>}
       </button>
-      {open && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
-        {io === null ? <div className="muted" style={{ fontSize: 12 }}>loading…</div> : io.status === 'unavailable'
-          ? <div className="notice compact">Trace detail unavailable.</div> : <>
-          {io.partial && <div className="notice compact">Trace detail truncated.</div>}
+      {open && <div className="span-detail" style={detailIndent}>
+        {io === null ? <div className="muted trace-small" role="status">loading…</div> : io.status === 'unavailable'
+          ? <TraceUnavailable label="Trace detail unavailable." onRetry={retryIo} /> : <>
+          {io.partial && <div className="notice compact" role="status">Trace detail truncated.</div>}
           {inp && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{inp}</pre></div>}
           {outp && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{outp}</pre></div>}
-          {!inp && !outp && <div className="muted" style={{ fontSize: 12 }}>(no input/output recorded)</div>}</>}
+          {!inp && !outp && <div className="muted trace-small">(no input/output recorded)</div>}</>}
       </div>}
       {kids}
     </>
@@ -574,7 +584,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   return <>
     <OperationHeader type={detail ? 'button' : undefined} aria-expanded={detail ? open : undefined}
          className={'span-row' + (detail ? ' disclosure-button' : '') + (err ? ' err' : '')}
-         style={{ paddingLeft: depth * 14 }} onClick={detail ? () => setOpen(o => !o) : undefined}
+         style={rowIndent} onClick={detail ? () => setOpen(o => !o) : undefined}
          title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
       <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
@@ -582,7 +592,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
       <span className="t">{fmt(s.duration_s, 3)}s</span>
       {err && <span className="badge reason">ERROR</span>}
     </OperationHeader>
-    {open && detail && <div className="span-detail" style={{ marginLeft: depth * 14 + 16 }}>
+    {open && detail && <div className="span-detail" style={detailIndent}>
       {attrs.length > 0 && <div className="kv">{attrs.map(([k, v]) =>
         <KV key={k} k={k} v={typeof v === 'object' ? JSON.stringify(v) : String(v)} />)}</div>}
       {events.map((e, i) => <div key={i} className="span-ev">
@@ -604,7 +614,7 @@ function StageBlock({ s, t0, total, runId }) {
       <span className="stage-ic"><OpIcon name={m.icon} /></span>
       <b>{m.role}</b>
       {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
-      <span className="spacer" style={{ flex: 1 }} />
+      <span className="spacer" />
       <span className="t">{fmt(s.duration_s, 3)}s</span>
     </div>
     <div className="spans">
@@ -617,15 +627,15 @@ function StageBlock({ s, t0, total, runId }) {
 
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
-export function NodeTrace({ spans, runId, projection = {} }) {
+export function NodeTrace({ spans, runId, projection = {}, onRetry }) {
   const roots = spans || []
-  if (traceUnavailable(projection)) return <div className="notice compact">Trace unavailable.</div>
+  if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
   if (!roots.length && tracePartial(projection))
-    return <div className="notice compact">Trace projection is partial; no observations were included.</div>
-  if (!roots.length) return <div className="muted" style={{ fontSize: 12 }}>No LLM/execution spans captured for this node yet.</div>
+    return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
+  if (!roots.length) return <div className="muted trace-small">No LLM/execution spans captured for this node yet.</div>
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
-    {tracePartial(projection) && <div className="notice compact">Trace projection is partial.</div>}
+    {tracePartial(projection) && <div className="notice compact" role="status">Trace projection is partial.</div>}
     {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
   </div>
 }
@@ -639,7 +649,7 @@ function AgentReport({ r }) {
         <OpIcon name={r.ok && !r.fell_back ? 'check' : r.fell_back ? 'replay' : 'cross'} /></span>
       <b>Developer · agent validation</b>
       <span className="muted">{r.fell_back ? 'fell back to template' : r.ok ? 'shipped clean' : 'failed checks'}</span>
-      <span className="spacer" style={{ flex: 1 }} />
+      <span className="spacer" />
       <span className="muted">{r.attempts} attempt{r.attempts === 1 ? '' : 's'}</span>
     </div>
     <DataTable caption="Agent attempt validation checks" card={false}><table className="tbl"><thead><tr><th>check</th><th>ok</th><th>detail</th></tr></thead>
@@ -693,7 +703,7 @@ function ConvGen({ t }) {
       {think && <Markdown className="think-body" text={t.think} />}</div>}
     {text && <div className="conv-out"><Markdown text={text} /></div>}
     {calls.length > 0 && <div className="conv-calls muted">→ called {calls.join(', ')}</div>}
-    {!text && !t.think && calls.length === 0 && <div className="muted" style={{ fontSize: 12 }}>(no output)</div>}
+    {!text && !t.think && calls.length === 0 && <div className="muted trace-small">(no output)</div>}
   </div>
 }
 
@@ -712,7 +722,7 @@ function ConvTool({ t }) {
     {open && <div className="conv-tool-body">
       {t.input && <div className="msg"><div className="msg-role role-user">input</div><pre className="code">{t.input}</pre></div>}
       {t.output && <div className="msg"><div className="msg-role role-completion">output</div><pre className="code">{t.output}</pre></div>}
-      {!t.input && !t.output && <div className="muted" style={{ fontSize: 12 }}>(no input/output recorded)</div>}
+      {!t.input && !t.output && <div className="muted trace-small">(no input/output recorded)</div>}
     </div>}
   </div>
 }
@@ -728,11 +738,9 @@ function StageLog({ text, live }) {
     const el = ref.current
     if (live && el && el.scrollHeight - el.scrollTop - el.clientHeight < 40) el.scrollTop = el.scrollHeight
   }, [text, live])
-  return <div style={{ margin: '4px 0 2px' }}>
-    <div className="muted" style={{ fontSize: 10, marginBottom: 2 }}>📄 stage log{live ? ' · live' : ''}</div>
-    <pre ref={ref} className="training-log" style={{
-      maxHeight: 320, overflow: 'auto', background: '#0b0e14', border: '1px solid #20252f', borderRadius: 6,
-      padding: 8, fontSize: 11, lineHeight: 1.4, whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{shown}</pre>
+  return <div className="stage-log">
+    <div className="muted stage-log-label">📄 stage log{live ? ' · live' : ''}</div>
+    <pre ref={ref} className="training-log">{shown}</pre>
   </div>
 }
 
@@ -746,21 +754,20 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   const err = st.status === 'ERROR'
   // Colour-band the stage by its tone: a left rail + a tinted header, so foresight/strategy/researcher/
   // developer/eval read as distinct bands. Click the header to collapse the whole band.
-  return <div className={'stage' + (err ? ' err' : '')}
-              style={{ borderLeft: `3px solid ${err ? 'var(--fail)' : m.tone}` }}>
+  return <div className={'stage stage-dynamic' + (err ? ' err' : '')}
+              style={{ '--stage-tone': err ? 'var(--fail)' : m.tone }}>
     <button type="button" className="stage-h disclosure-button" aria-expanded={open}
-         title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}
-         style={{ cursor: 'pointer', background: err ? undefined : `color-mix(in srgb, ${m.tone} 12%, transparent)` }}>
-      <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
-      <span className="stage-ic" style={{ color: err ? 'var(--fail)' : m.tone }}><OpIcon name={m.icon} /></span>
-      <b style={{ color: err ? 'var(--fail)' : m.tone }}>{m.role}</b>
+         title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}>
+      <span className="stage-caret">{open ? '▾' : '▸'}</span>
+      <span className="stage-ic"><OpIcon name={m.icon} /></span>
+      <b className="stage-role">{m.role}</b>
       {(roll.generations || roll.tools) ? <span className="stage-roll"
           title={tk.total ? `context window peaked at ${tk.context || 0} tokens; the model generated ${tk.completion || 0}. Billed ${tk.total} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.` : undefined}>
         {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
         {roll.tools ? ` · ${roll.tools} tool call${roll.tools === 1 ? '' : 's'}` : ''}
         {tk.context ? ` · ${ktok(tk.context)} ctx` : ''}
         {tk.completion ? ` · ${ktok(tk.completion)} out` : ''}</span> : null}
-      {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
+      {!open && nTurns ? <span className="muted stage-hidden-count">· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </button>
     {open && <div className="conv-turns">
       {/* Cap the mounted turns like the span-tree view (SPAN_CAP): a heavily-repaired / tool-looping stage
@@ -776,7 +783,7 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   </div>
 }
 
-function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
+function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0, onRetry }) {
   const [conv, setConv] = useState(null)
   const [logs, setLogs] = useState({})   // {eval, stages:{train,score,…}} — the live stage/eval logs
   useEffect(() => {
@@ -790,13 +797,13 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
     // band renders its own live log inside it, so opening "Train" shows the training output in place.
     get(runNodeApiPath(runId, n.id, '/logs')).then(d => alive() && setLogs(d || {})).catch(() => {})
   }, working ? 4000 : null,   // interval only while the agent works this node (live-refresh); null = load once
-  [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
-  if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
+  [runId, n.id, working, reloadNonce])   // reloadNonce also re-runs a finished node's one-shot load
+  if (conv === null) return <div className="muted trace-small" role="status">loading…</div>
   const stages = conv.stages || []
   const unavailable = traceUnavailable(conv.projection)
   const partial = tracePartial(conv.projection)
-  if (unavailable) return <div className="notice compact">Trace unavailable.</div>
-  if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'}>{partial
+  if (unavailable) return <TraceUnavailable onRetry={onRetry} />
+  if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'} role={partial ? 'status' : undefined}>{partial
     ? 'Trace projection is partial.' : 'No conversation captured for this node yet.'}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
   // eval logs to eval.log ("evaluate"/"command"); the dep-install step to setup.log. Anything else
@@ -806,7 +813,7 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   // `allOpen` is owned by the sticky Trace header (so collapse-all lives in the pinned bar). It's folded
   // into each band's key so a collapse/expand-all click remounts them at the new default; a live poll
   // (allOpen unchanged) keeps the key stable, so per-band toggles survive the 4s refresh.
-  return <div className="conv">{partial && <div className="notice compact">Trace projection is partial.</div>}
+  return <div className="conv">{partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
     {stages.map((st, i) => <ConvStage key={`${st.trace_id || ''}:${st.label || ''}:${st.start || i}:${allOpen}`}
                                       st={st} defaultOpen={allOpen} log={logFor(st.label)} live={working} />)}
     {logs.run_setup ? <RunSetupLog text={logs.run_setup} /> : null}
@@ -817,17 +824,17 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
 // tab; a collapsed footnote under the trace so a setup failure is still inspectable without its own tab.
 function RunSetupLog({ text }) {
   const [open, setOpen] = useState(false)
-  return <div className="stage" style={{ borderLeft: '3px solid var(--fg-mut)', marginTop: 4 }}>
+  return <div className="stage run-setup-stage">
     <button type="button" className="stage-h disclosure-button" aria-expanded={open}
       onClick={() => setOpen(o => !o)}>
-      <span className="stage-caret" style={{ opacity: 0.6, fontSize: 10, width: 10, display: 'inline-block' }}>{open ? '▾' : '▸'}</span>
-      <b className="muted">Run setup <span style={{ fontWeight: 400 }}>· deps install (run-level, once)</span></b>
+      <span className="stage-caret">{open ? '▾' : '▸'}</span>
+      <b className="muted">Run setup <span className="normal-weight">· deps install (run-level, once)</span></b>
     </button>
     {open && <div className="conv-turns"><StageLog text={text} live={false} /></div>}
   </div>
 }
 
-function Trace({ n, runId, live, working }) {
+function Trace({ n, runId, live, working, onReload }) {
   const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
@@ -847,14 +854,15 @@ function Trace({ n, runId, live, working }) {
     : building
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
       : '🏋️ training / evaluating…'
-  const status = statusLabel && <div className="trace-live-status"><span className="tls-dot" />{statusLabel}
-    <span className="muted" style={{ marginLeft: 6, fontSize: 11 }}>live — updates on its own</span></div>
+  const status = statusLabel && <div className="trace-live-status" role="status"><span className="tls-dot" />{statusLabel}
+    <span className="muted trace-live-note">live — updates on its own</span></div>
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
   const doClear = async () => {
     setClearing('busy')
     try {
       await clearNodeTrace(runId, n.id)
       setNonce(x => x + 1)          // reload the Conversation bands (now empty until a rebuild re-traces)
+      onReload?.()                  // refresh the parent-owned span tree and rollup as well
       setClearing('')
     } catch (e) {
       // 409 while the engine is live is the common case — surface the server's reason inline.
@@ -870,9 +878,9 @@ function Trace({ n, runId, live, working }) {
     {clearing === 'confirm' && <>
       <button className="seg on" title="confirm: erase this node's spans" onClick={doClear}>✕ confirm clear</button>
       <button className="seg" onClick={() => setClearing('')}>cancel</button></>}
-    {clearing === 'busy' && <span className="muted" style={{ fontSize: 11 }}>clearing…</span>}
+    {clearing === 'busy' && <span className="muted trace-clear-status">clearing…</span>}
     {clearing && clearing !== 'confirm' && clearing !== 'busy' &&
-      <span className="muted" style={{ fontSize: 11, color: 'var(--fail)' }}>{clearing}</span>}
+      <span className="muted trace-clear-status trace-clear-error">{clearing}</span>}
   </span>
   const nav = <span className="trace-nav">
     <button className="seg" aria-label="Scroll trace to top" title="scroll to top" onClick={() => scrollTo('top')}>↑</button>
@@ -886,32 +894,27 @@ function Trace({ n, runId, live, working }) {
       <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
         title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
       <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>span tree</button>
-      {view === 'conversation' && <button className="seg" aria-pressed={allOpen} style={{ fontSize: 10 }} title="collapse or expand every stage"
+      {view === 'conversation' && <button className="seg trace-collapse" aria-pressed={allOpen} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
-      <span style={{ flex: 1 }} />{clearBtn}{nav}
+      <span className="spacer" />{clearBtn}{nav}
     </div>
   </div>
+  if (view === 'conversation')
+    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen}
+      reloadNonce={nonce} onRetry={() => setNonce(value => value + 1)} />
+      {agent && <AgentReport r={agent} />}</div>
   if (!spans.length && !agent) {
-    // While the agent is WORKING this node, node_detail's trace may still be empty (its create_node
-    // root span hasn't closed) — but /conversation rebuilds LIVE from the sub-spans that have already
-    // flushed. So mount the live-polling Conversation (it refreshes every 4s) instead of a dead
-    // placeholder: steps now appear as each generation/tool completes, not all at once at the end.
-    if (working)
-      return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} /></div>
     if (unavailable)
-      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace unavailable.</div></div>
+      return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} /></div>
     if (partial)
-      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace projection is partial; no observations were included.</div></div>
+      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div></div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
   }
-  if (view === 'conversation')
-    return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} />
-      {agent && <AgentReport r={agent} />}</div>
   if (unavailable)
-    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace unavailable.</div>
+    return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} />
       {agent && <AgentReport r={agent} />}</div>
   if (!spans.length && partial)
-    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace projection is partial; no observations were included.</div>
+    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
@@ -921,8 +924,8 @@ function Trace({ n, runId, live, working }) {
   const rtok = roll.tokens || {}
   return <div className="trace" ref={bodyRef}>
     {head}
-    {partial && <div className="notice compact">Trace projection is partial.</div>}
-    <div className="muted" style={{ marginBottom: 10 }}>
+    {partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
+    <div className="muted trace-rollup-intro">
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
       Expand any observation to read its bounded, redacted input/output projection.
       {(roll.generations || roll.tools) ? <span className="trace-totals"
@@ -949,7 +952,7 @@ function Code({ n }) {
     () => diff && n.parent_code != null ? diffLines(n.parent_code, n.code) : null,
     [diff, n.parent_code, n.code])
   return <>
-    <div className="toolbar" style={{ marginBottom: 8 }}>
+    <div className="toolbar code-toolbar">
       {n.parent_code != null && <button className={'btn sm' + (diff ? ' primary' : '')} onClick={() => setDiff(d => !d)}>diff vs parent #{n.parent_id_diffed}</button>}
     </div>
     {codeDiff
@@ -957,7 +960,7 @@ function Code({ n }) {
       : <CodeViewer code={n.code || '(no solution.py — repo task or no code)'} label={`Node ${n.id} code`} />}
     {Object.keys(files).length > 0 && <>
       <div className="section-h">Helper files <span className="pill">{Object.keys(files).length}</span></div>
-      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted" style={{ marginTop: 6 }}>{fn}</div><CodeViewer code={c} label={fn} maxHeight={300} /></div>)}
+      {Object.entries(files).map(([fn, c]) => <div key={fn}><div className="muted helper-file-label">{fn}</div><CodeViewer code={c} label={fn} maxHeight={300} /></div>)}
     </>}
   </>
 }
@@ -1001,15 +1004,15 @@ function Metrics({ n, detail, state, runId }) {
       <tbody>{rows.map(r => <tr key={r.k} className={r.star ? 'chosen-row' : ''}>
         <td>{r.star ? '★ ' : ''}{r.k}</td><td>{fmt(r.mine)}</td>
         {showChamp && <td>{fmt(r.best)}</td>}</tr>)}</tbody></table></DataTable>
-    {n.confirmed_mean != null && <div className="kv" style={{ marginTop: 8 }}>
+    {n.confirmed_mean != null && <div className="kv confirmed-metric">
       <KV k="robust mean ± std" v={`${fmt(n.confirmed_mean)} ± ${fmt(n.confirmed_std)} over ${n.confirmed_seeds || vals.length} seeds`} /></div>}
     {vals.length > 0 && <>
       <div className="section-h">Per-seed confirmation</div>
       <DataTable caption="Per-seed confirmation metrics" card={false}><table className="tbl"><thead><tr><th>seed</th><th>metric</th></tr></thead>
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table></DataTable>
     </>}
-    <div className="section-h" style={{ marginTop: 12 }}>Metric curves
-      <span className="muted" style={{ fontWeight: 400, marginLeft: 6 }}>· live, every logged scalar — collapsible by group</span></div>
+    <div className="section-h metric-curves-heading">Metric curves
+      <span className="muted metric-curves-note">· live, every logged scalar — collapsible by group</span></div>
     <MetricCurves runId={runId} nodeId={n.id} status={n.status} />
   </>
 }
@@ -1080,7 +1083,7 @@ function Trials({ n, detail, state }) {
         <td>{t.metric != null ? fmt(t.metric) : <span className="badge reason">{t.error ? 'error' : 'failed'}</span>}</td>
         <td className="muted">{fmt(t.seconds)}</td></tr>)}</tbody>
     </table></DataTable>
-    {rowsAll.length > CAP && <button className="btn sm ghost" style={{ marginTop: 6 }} onClick={() => setShowAll(s => !s)}>
+    {rowsAll.length > CAP && <button className="btn sm ghost trials-reveal" onClick={() => setShowAll(s => !s)}>
       {showAll ? 'show fewer' : `show all ${rowsAll.length}`}</button>}
   </>
 }

@@ -39,12 +39,19 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     readFile(new URL('../src/Inspector.jsx', import.meta.url), 'utf8'),
     readFile(new URL('../src/Dock.jsx', import.meta.url), 'utf8'),
   ])
-  assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\)[\s\S]*?Trace unavailable\.[\s\S]*?if \(!stages\.length\)/,
+  assert.match(inspector, /const unavailable = traceUnavailable\(conv\.projection\)[\s\S]*?if \(unavailable\) return <TraceUnavailable[\s\S]*?if \(!stages\.length\)/,
     'conversation unavailable must win over the ordinary empty state')
   assert.match(inspector, /catch\(\(\) => alive\(\) && setConv\(\{ stages: \[\], projection: \{ unavailable: true \} \}\)\)/,
     'conversation transport failures need an explicit unavailable receipt')
-  assert.match(inspector, /if \(unavailable\)[\s\S]*?Trace unavailable\.[\s\S]*?if \(partial\)[\s\S]*?no observations were included[\s\S]*?No execution spans/,
+  assert.match(inspector, /if \(!spans\.length && !agent\)[\s\S]*?if \(unavailable\)[\s\S]*?<TraceUnavailable[\s\S]*?if \(partial\)[\s\S]*?no observations were included[\s\S]*?No execution spans/,
     'an empty node trace must check unavailable and partial before successful empty')
+  assert.ok(inspector.indexOf("if (view === 'conversation')") < inspector.indexOf('if (!spans.length && !agent)'),
+    'the selected conversation view must load before raw-tree empty/unavailable branches')
+  assert.match(inspector, /\[open, io, runId, s\.span_id, kind\][\s\S]*?const retryIo = \(\) => setIo\(null\)[\s\S]*?<TraceUnavailable label="Trace detail unavailable\." onRetry=\{retryIo\}/,
+    'span detail unavailable must be retryable even after the first expansion')
+  assert.match(inspector, /function Conversation\(\{[\s\S]*?onRetry[\s\S]*?\[runId, n\.id, working, reloadNonce\][\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/,
+    'a finished conversation one-shot must expose an explicit retry')
+  assert.match(inspector, /export function NodeTrace\(\{ spans, runId, projection = \{\}, onRetry \}\)[\s\S]*?<TraceUnavailable onRetry=\{onRetry\}/)
   assert.match(inspector, />span tree<\/button>/)
   assert.doesNotMatch(inspector, />raw spans<\/button>|every span's full I\/O|nothing is lost|WHOLE re-sent/)
 
@@ -52,9 +59,17 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'operation trace must retain the server projection envelope')
   assert.match(dock, /<NodeTrace spans=\{nodeSpans\}[\s\S]*?projection=\{nodeTrace\.projection\}/,
     'node trace must pass its projection metadata to the shared renderer')
-  assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?Trace unavailable\./,
+  assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?<TraceUnavailable label="Trace unavailable; retrying automatically\." \/>/,
     'live tail transport/unavailable state must not look like an empty waiting feed')
-  assert.match(dock, /partial && tail\.length === 0[\s\S]*?no observations were included[\s\S]*?waiting for the next agent step/,
+  assert.match(dock, /3000, \[runId, active, open\], \{ enabled: active && open \}/,
+    'the open live tail must automatically recover from a transient unavailable state')
+  assert.match(dock, /!current\.loaded[\s\S]*?loading trace…[\s\S]*?partial && tail\.length === 0[\s\S]*?no observations were included[\s\S]*?waiting for the next agent step/,
     'an empty partial live tail must not look like a complete waiting feed')
+  assert.match(dock, /function OpTrace[\s\S]*?\[runId, traceId, retryNonce\][\s\S]*?onRetry=\{retry\}/,
+    'operation trace HTTP-200 unavailable must be retryable')
+  assert.match(dock, /const retryNodeTrace = \(\) => \{[\s\S]*?setNodeTrace\(null\)[\s\S]*?setNodeTraceError\(false\)[\s\S]*?setNodeTraceNonce/,
+    'node trace retry must enter a real loading state before issuing another request')
+  assert.match(dock, /projection=\{nodeTrace\.projection\} runId=\{runId\} onRetry=\{retryNodeTrace\}/,
+    'HTTP-200 unavailable node traces must share the same retry path as transport failures')
   assert.doesNotMatch(dock, /raw <think>|full I\/O of any observation|full, UNtruncated text|FULL content/)
 })

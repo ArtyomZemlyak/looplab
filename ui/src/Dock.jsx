@@ -7,7 +7,7 @@ import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runComma
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
 import Markdown from './markdown.jsx'
-import { NodeTrace } from './Inspector.jsx'
+import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 import { runLifecycle } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
@@ -206,16 +206,18 @@ function collectThinking(trace, nid) {
 // a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Both this feed and
 // per-observation detail are bounded/redacted projections with explicit omission receipts.
 function LiveTrace({ runId, active }) {
-  const [tailState, setTailState] = useState({ runId, items: [], projection: {} })
+  const [tailState, setTailState] = useState({ runId, items: [], projection: {}, loaded: false })
   const [open, setOpen] = useState(false)
   const bodyRef = useRef(null)
   usePoll((alive) => get(runApiPath(runId, '/trace/tail?limit=40'))
     .then(r => { if (alive()) setTailState({
-      runId, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {},
+      runId, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {}, loaded: true,
     }) })
-    .catch(() => { if (alive()) setTailState({ runId, items: [], projection: { unavailable: true } }) }),
+    .catch(() => { if (alive()) setTailState({
+      runId, items: [], projection: { unavailable: true }, loaded: true,
+    }) }),
     3000, [runId, active, open], { enabled: active && open })
-  const current = tailState.runId === runId ? tailState : { items: [], projection: {} }
+  const current = tailState.runId === runId ? tailState : { items: [], projection: {}, loaded: false }
   const tail = current.items
   const unavailable = traceUnavailable(current.projection)
   const partial = tracePartial(current.projection)
@@ -228,13 +230,15 @@ function LiveTrace({ runId, active }) {
         <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
       </button>
       {open && <div className="lt-body" ref={bodyRef}>
-        {unavailable
-          ? <div className="notice compact">Trace unavailable.</div>
+        {!current.loaded
+          ? <div className="muted lt-empty" role="status">loading trace…</div>
+          : unavailable
+          ? <TraceUnavailable label="Trace unavailable; retrying automatically." />
           : partial && tail.length === 0
-          ? <div className="notice compact">Trace projection is partial; no observations were included.</div>
+          ? <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
           : tail.length === 0
           ? <div className="muted lt-empty">waiting for the next agent step…</div>
-          : <>{partial && <div className="notice compact">Trace projection is partial.</div>}
+          : <>{partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
             {tail.map((it, i) => it.kind === 'generation'
             ? <div key={it.span_id || i} className="lt-row lt-gen">
                 <span className="lt-ic">🧠</span>
@@ -301,10 +305,9 @@ function agentStatus(live, log) {
 
 const Disclosure = ({ label, children }) => {
   const [open, setOpen] = useState(false)
-  return <div className="think-debug" style={{ marginTop: 6 }}>
-    <button type="button" className="role-think disclosure-button" aria-expanded={open}
-         onClick={() => setOpen(v => !v)}
-         style={{ cursor: 'pointer', fontSize: 11, textTransform: 'uppercase', letterSpacing: '.5px' }}>
+  return <div className="think-debug trace-disclosure">
+    <button type="button" className="role-think disclosure-button trace-disclosure-toggle" aria-expanded={open}
+         onClick={() => setOpen(v => !v)}>
       {open ? '▾' : '▸'} {label}</button>
     {open && children}
   </div>
@@ -419,7 +422,7 @@ function genericRows(e) {
 
 function GenericDetail({ e }) {
   const rows = genericRows(e)
-  if (!rows.length) return <div className="ev-detail"><pre className="code" style={{ maxHeight: 220 }}>{JSON.stringify(e.data || {}, null, 2)}</pre></div>
+  if (!rows.length) return <div className="ev-detail"><pre className="code event-json">{JSON.stringify(e.data || {}, null, 2)}</pre></div>
   return <div className="ev-detail">{rows.map(([k, v], i) =>
     <React.Fragment key={i}><div className="section-h">{k}</div><div className="v">{v}</div></React.Fragment>)}</div>
 }
@@ -429,6 +432,7 @@ function GenericDetail({ e }) {
 // whole node. Rendered with the same span-tree component as a node's trace.
 function OpTrace({ runId, traceId }) {
   const [trace, setTrace] = useState(null)
+  const [retryNonce, setRetryNonce] = useState(0)
   useEffect(() => {
     let on = true
     setTrace(null)
@@ -438,9 +442,10 @@ function OpTrace({ runId, traceId }) {
       }))
       .catch(() => on && setTrace({ spans: [], projection: { unavailable: true } }))
     return () => { on = false }
-  }, [runId, traceId])
-  if (trace === null) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>loading trace…</div>
-  return <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId} />
+  }, [runId, traceId, retryNonce])
+  const retry = () => { setTrace(null); setRetryNonce(value => value + 1) }
+  if (trace === null) return <div className="muted trace-loading" role="status">loading trace…</div>
+  return <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId} onRetry={retry} />
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
@@ -489,6 +494,11 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, '/trace'))
     .then(d => { if (alive()) { setNodeTrace(d); setNodeTraceError(false) } })
     .catch(() => { if (alive()) { setNodeTrace(null); setNodeTraceError(true) } })
+  const retryNodeTrace = () => {
+    setNodeTrace(null)
+    setNodeTraceError(false)
+    setNodeTraceNonce(value => value + 1)
+  }
   usePoll((alive) => loadNodeTrace(alive), 4000,
     [open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce],
     { enabled: open && !readOnly && traceNid != null && exactBuilding })
@@ -540,10 +550,10 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
           {hasTrace && nodeTrace == null && !nodeTraceError && <div className="muted" role="status">loading node trace…</div>}
           {hasTrace && nodeTraceError && <div className="notice resource-error compact" role="alert">
             <span>Could not load node trace.</span><button type="button" className="btn sm"
-              onClick={() => setNodeTraceNonce(value => value + 1)}>Retry</button>
+              onClick={retryNodeTrace}>Retry</button>
           </div>}
           {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
-            projection={nodeTrace.projection} runId={runId} />}
+            projection={nodeTrace.projection} runId={runId} onRetry={retryNodeTrace} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
@@ -1081,7 +1091,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
         {!showControls && (filter.trim() || kinds.size > 0) &&
           <button type="button" className="hist-tag-mini hist"
                 title="a filter is active — open controls to change it" onClick={toggleControls}>⌕ filtered</button>}
-        <span className="spacer" style={{ flex: 1 }} />
+        <span className="spacer" />
         <button className={'btn sm ghost' + (showControls ? ' on' : '')} title="time-travel & filters"
                 onClick={toggleControls}><OpIcon name="sliders" size={13} /> controls</button>
         <button ref={collapseButtonRef} className="btn sm ghost dock-collapse" title={collapsed ? 'expand' : 'collapse'}
@@ -1168,7 +1178,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
           </div>
         })()}
         <div className="dock-foot">
-          <span className="muted" style={{ fontSize: 11, flex: 1 }}>
+          <span className="muted dock-foot-hint">
             {readOnly ? 'Historical timeline — live controls and sidecar trace details are disabled.' : <>
               Steer this run from the assistant bar below — say what to do, or use <code className="cmd-hint">/stop</code> · <code className="cmd-hint">/finalize</code> · <code className="cmd-hint">/resume</code> · <code className="cmd-hint">/approve #id</code>.
             </>}

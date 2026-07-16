@@ -12,6 +12,22 @@ test('ephemeral command results use polite atomic live regions', async () => {
   assert.match(assistant, /setTimeout\(\(\) => mountedRef\.current && setToast\(null\), 5000\)/)
 })
 
+test('trace loading, partial, and unavailable states expose recovery semantics', async () => {
+  const [inspector, dock, css] = await Promise.all([source('Inspector.jsx'), source('Dock.jsx'), source('styles.css')])
+  assert.match(inspector, /export function TraceUnavailable[\s\S]*?role="alert"[\s\S]*?>Retry trace<\/button>/)
+  assert.match(inspector, /className="muted trace-small" role="status">loading…<\/div>/)
+  assert.match(inspector, /className="notice compact" role="status">Trace projection is partial/)
+  assert.match(inspector, /className="trace-live-status" role="status"/)
+  assert.match(dock, /!current\.loaded[\s\S]*?role="status">loading trace…/)
+  assert.match(dock, /function OpTrace[\s\S]*?className="muted trace-loading" role="status"[\s\S]*?loading trace…/)
+  assert.match(dock, /onClick=\{retryNodeTrace\}>Retry<\/button>/)
+  assert.match(css, /\.trace \.stage\.stage-dynamic \{ border-left: 3px solid var\(--stage-tone\); \}/)
+  assert.match(css, /\.eval-pipeline-step[\s\S]*?cursor: default;[\s\S]*?button\.eval-pipeline-step \{ cursor: pointer; \}/)
+  assert.match(css, /\.conv-toggle \.trace-collapse \{ font-size: 10px; \}/)
+  assert.match(css, /\.ctx-chip\.ctx-chip-action \{ padding: 0 6px; cursor: pointer; \}/)
+  assert.match(css, /pre\.code\.event-json \{ max-height: 220px; \}/)
+})
+
 test('permission cards expose an accessible pending decision and safe default focus', async () => {
   const [chat, bar] = await Promise.all([source('AssistantChat.jsx'), source('AssistantBar.jsx')])
   assert.match(chat, /role="alertdialog" aria-modal="false" aria-labelledby=\{titleId\} aria-describedby=\{detailsId\}/)
