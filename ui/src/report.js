@@ -211,7 +211,9 @@ export function regressions(nodes, direction) {
 }
 
 export function failureBreakdown(nodes) {
-  const by = {}
+  // CODEX AGENT: provider-authored error reasons are untrusted keys. A null-prototype index keeps
+  // values such as "__proto__" and "constructor" as ordinary buckets instead of object internals.
+  const by = Object.create(null)
   Object.values(nodes).filter(n => n.status === 'failed').forEach(n => {
     (by[n.error_reason || 'unknown'] ||= []).push(n)
   })

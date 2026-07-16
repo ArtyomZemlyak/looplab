@@ -4,7 +4,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { layoutWithGroups, similarityRank } from '../src/util.js'
 import {
-  computeGroups, nodeGroupMap, autoCollapseSet, isMergeEntryEdge, themeFilteredGroupAggregate,
+  computeGroups, nodeGroupMap, autoCollapseSet, groupAggregate, isMergeEntryEdge, themeFilteredGroupAggregate,
 } from '../src/grouping.js'
 
 const NODE_W = 188, NODE_H = 84
@@ -209,4 +209,22 @@ test('collapsed theme aggregate becomes an honest zero-match card for another di
   assert.equal(aggregate.best, null)
   assert.deepEqual(aggregate.series, [])
   assert.deepEqual(aggregate.status, { evaluated: 0, failed: 0, pending: 0 })
+})
+
+test('collapsed aggregate ranks only finite selection-eligible observations', () => {
+  const ns = mk([
+    { id: 1, metric: 0.5 },
+    { id: 2, metric: 0.99 },
+    { id: 3, metric: 0.98, status: 'pending' },
+    { id: 4, metric: Infinity },
+    { id: 5, metric: 0.97, status: 'failed' },
+  ])
+  ns[2].feasible = false
+
+  const aggregate = groupAggregate([1, 2, 3, 4, 5], ns, 'max')
+  assert.equal(aggregate.best, 0.5, 'an infeasible 0.99 must not beat the feasible 0.5')
+  assert.deepEqual(aggregate.series, [0.5], 'trajectory contains only finite evaluated feasible rows')
+  assert.equal(aggregate.count, 5, 'all members remain represented in the card count')
+  assert.deepEqual(aggregate.status, { evaluated: 3, failed: 1, pending: 1 },
+    'status totals continue to describe every member, including ineligible observations')
 })

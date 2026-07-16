@@ -8,7 +8,7 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
-import { analyze, buildModelCard, toMarkdown, verdict } from '../src/report.js'
+import { analyze, buildModelCard, failureBreakdown, toMarkdown, verdict } from '../src/report.js'
 import { normalizeRunReport, reportNarrativeCoverage } from '../src/reportModel.js'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -36,6 +36,17 @@ test('total improvement is positive for both objective directions and Markdown n
   const baseline = toMarkdown(state('min', 10))
   assert.match(baseline, /^## Metric baseline$/m)
   assert.doesNotMatch(baseline, /What worked — key improvements/)
+})
+
+test('failure breakdown treats prototype names as ordinary model-authored reasons', () => {
+  const protoFailure = { id: 1, status: 'failed', error_reason: '__proto__' }
+  const constructorFailure = { id: 2, status: 'failed', error_reason: 'constructor' }
+  const breakdown = failureBreakdown({ 1: protoFailure, 2: constructorFailure })
+
+  assert.equal(Object.getPrototypeOf(breakdown), null)
+  assert.deepEqual(breakdown.__proto__, [protoFailure])
+  assert.deepEqual(breakdown.constructor, [constructorFailure])
+  assert.deepEqual(Object.keys(breakdown).sort(), ['__proto__', 'constructor'])
 })
 
 test('Report uses semantic section headings and exposes an unambiguous operator/theme identity', async () => {
