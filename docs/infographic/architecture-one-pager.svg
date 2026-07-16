@@ -20,7 +20,7 @@
 
   <!-- ===================== HEADER ===================== -->
   <text x="48" y="55" font-size="31" font-weight="700" fill="#eaf1f4" letter-spacing="-0.5">LoopLab<tspan fill="#6e828d" font-weight="400"> — architecture</tspan></text>
-  <text x="49" y="82" font-size="13.5" fill="#93a4ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">elements &amp; connections  ·  <tspan fill="#cf8ff2" font-weight="700">magenta = the LLM / agent is invoked here</tspan>  ·  the engine plane is deterministic</text>
+  <text x="49" y="82" font-size="13.5" fill="#93a4ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">capability map  ·  <tspan fill="#cf8ff2" font-weight="700">magenta = the LLM / agent is invoked here</tspan>  ·  selected labels mark optional/off paths</text>
 
   <!-- legend -->
   <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="12.5">
@@ -35,7 +35,7 @@
   <rect x="40" y="96" width="6" height="220" rx="3" fill="#cf8ff2"/>
   <text x="66" y="128" font-size="13.5" letter-spacing="2.5" fill="#cf8ff2" font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-weight="700">AGENT · LLM</text>
   <text x="212" y="128" font-size="13" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">— every step the model performs</text>
-  <text x="66" y="150" font-size="12.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">one unified identity plays these across stages (default)  ·  any OpenAI-compatible model  ·  per-role &amp; per-stage routing</text>
+  <text x="66" y="150" font-size="12.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">LLM-backed runs use one unified identity unless per-role / per-stage routing overrides it  ·  OpenAI-compatible model API</text>
 
   <!-- persona cards -->
   <g filter="url(#sh)">
@@ -52,7 +52,7 @@
     <g><text x="292" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Strategist</text><circle cx="430" cy="190" r="4" fill="#cf8ff2"/><text x="292" y="228" font-size="11.5" fill="#bcabd8">meta-controller:</text><text x="292" y="246" font-size="11.5" fill="#bcabd8">adapts policy /</text><text x="292" y="264" font-size="11.5" fill="#bcabd8">operators · every 3</text></g>
     <g><text x="536" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Researcher</text><circle cx="674" cy="190" r="4" fill="#cf8ff2"/><text x="536" y="228" font-size="11.5" fill="#c6b9e2">propose idea +</text><text x="536" y="246" font-size="11.5" fill="#c6b9e2">hypothesis, pick</text><text x="536" y="264" font-size="11.5" fill="#c6b9e2">operator</text></g>
     <g><text x="724" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Developer</text><circle cx="862" cy="190" r="4" fill="#cf8ff2"/><text x="724" y="228" font-size="11.5" fill="#b8cce6">write the code</text><text x="724" y="246" font-size="11.5" fill="#b8cce6">&amp; repair crashes</text><text x="724" y="264" font-size="11.5" fill="#b8cce6">(inline · debug)</text></g>
-    <g><text x="1052" y="205" font-size="16" font-weight="700" fill="#e9e0f2">Critic</text><text x="1120" y="205" font-size="10.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">optional</text><circle cx="1190" cy="190" r="4" fill="#cf8ff2"/><text x="1052" y="232" font-size="11.5" fill="#bcabd8">audit a solution</text><text x="1052" y="250" font-size="11.5" fill="#bcabd8">· advisory only</text></g>
+    <g><text x="1052" y="205" font-size="16" font-weight="700" fill="#e9e0f2">Critic</text><text x="1120" y="205" font-size="10.5" fill="#8f80ab" font-family="ui-monospace,'DejaVu Sans Mono',monospace">optional</text><circle cx="1190" cy="190" r="4" fill="#cf8ff2"/><text x="1052" y="232" font-size="11.5" fill="#bcabd8">broad warnings advisory</text><text x="1052" y="250" font-size="11.5" fill="#bcabd8">hardcoded flag can gate</text></g>
     <g><text x="1452" y="205" font-size="16" font-weight="700" fill="#f2ecfa">Reflector</text><circle cx="1590" cy="190" r="4" fill="#cf8ff2"/><text x="1452" y="228" font-size="11.5" fill="#bcabd8">at run end: distil</text><text x="1452" y="246" font-size="11.5" fill="#bcabd8">the winner + lessons</text><text x="1452" y="264" font-size="11.5" fill="#bcabd8">(incl. negatives)</text></g>
   </g>
 
@@ -78,8 +78,8 @@
   <g font-family="'DejaVu Sans',sans-serif" text-anchor="middle">
     <text x="360"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Policy</text><text x="360"  y="511" font-size="11.5" fill="#9dabb3">pick node to expand</text><text x="360"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">greedy tree · pure fn</text>
     <text x="700"  y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Create node</text><text x="700"  y="511" font-size="11.5" fill="#9dabb3">apply patch · git commit</text><text x="700"  y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">edit-surface gate</text>
-    <text x="1010" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Sandbox</text><text x="1010" y="511" font-size="11.5" fill="#9dabb3">run · isolated · timed</text><text x="1010" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">n_seeds · tree-kill</text>
-    <text x="1320" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Evaluate</text><text x="1320" y="511" font-size="11.5" fill="#9dabb3">CV · variance gate</text><text x="1320" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">verdict, not a number</text>
+    <text x="1010" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Sandbox</text><text x="1010" y="511" font-size="11.5" fill="#9dabb3">run · isolated · timed</text><text x="1010" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">one search eval · tree-kill</text>
+    <text x="1320" y="490" font-size="16.5" font-weight="700" fill="#eaf1f4">Evaluate</text><text x="1320" y="511" font-size="11.5" fill="#9dabb3">raw metric · trust signals</text><text x="1320" y="529" font-size="10.5" fill="#6f828c" font-family="ui-monospace,'DejaVu Sans Mono',monospace">holdout / confirm when available</text>
   </g>
 
   <!-- engine forward flow -->
@@ -108,15 +108,15 @@
     <rect x="1506" y="374" width="226" height="104" rx="13" fill="#152430" stroke="#2d4653"/>
     <rect x="1506" y="504" width="226" height="122" rx="13" fill="#241d10" stroke="#e7b24a" stroke-width="1.6"/>
   </g>
-  <text x="1528" y="401" font-size="10.5" letter-spacing="1.5" fill="#4fb8ac" font-family="ui-monospace,'DejaVu Sans Mono',monospace">⚙ CONFIRM</text>
+  <text x="1528" y="401" font-size="10.5" letter-spacing="1.5" fill="#4fb8ac" font-family="ui-monospace,'DejaVu Sans Mono',monospace">OPTIONAL CONFIRM · OFF</text>
   <text x="1528" y="425" font-size="15.5" font-weight="700" fill="#eaf1f4">multi-seed · top-k</text>
-  <text x="1528" y="447" font-size="11.5" fill="#9dabb3">re-run best candidates ·</text>
-  <text x="1528" y="465" font-size="11.5" fill="#9dabb3">promote only if &gt; 1 SE</text>
+  <text x="1528" y="447" font-size="11.5" fill="#9dabb3">pick best confirmed mean ·</text>
+  <text x="1528" y="465" font-size="11.5" fill="#9dabb3">&gt; 1 SE = significance flag</text>
   <path d="M1620 478 L1620 502" fill="none" stroke="#e7b24a" stroke-width="2.2" stroke-linecap="round" marker-end="url(#gold)"/>
   <text x="1528" y="532" font-size="10.5" letter-spacing="1.5" fill="#e7b24a" font-family="ui-monospace,'DejaVu Sans Mono',monospace">CHAMPION</text>
-  <text x="1528" y="560" font-size="17" font-weight="700" fill="#f3ecdb">🏆 best verified</text>
-  <text x="1528" y="583" font-size="11.5" fill="#cbb98c">reported with variance ·</text>
-  <text x="1528" y="601" font-size="11.5" fill="#cbb98c">metric ± CI · reproducible</text>
+  <text x="1528" y="560" font-size="17" font-weight="700" fill="#f3ecdb">🏆 best observed</text>
+  <text x="1528" y="583" font-size="11.5" fill="#cbb98c">under configured gates ·</text>
+  <text x="1528" y="601" font-size="11.5" fill="#cbb98c">uncertainty when recorded</text>
   <text x="1528" y="619" font-size="11.5" fill="#cbb98c">tree.html · MLflow · nb</text>
 
   <!-- ===================== PLANE C · STORES ===================== -->
@@ -137,9 +137,9 @@
   <text x="1128" y="730" text-anchor="end" font-size="10.5" fill="#8a7c58" font-family="ui-monospace,'DejaVu Sans Mono',monospace">memora index</text>
   <g font-family="'DejaVu Sans',sans-serif">
     <rect x="612" y="742" width="255" height="68" rx="9" fill="#120f08" stroke="#40361d"/><text x="630" y="764" font-size="12.5" font-weight="700" fill="#f0e6cf">Cases</text><text x="630" y="782" font-size="11" fill="#c9b78a">best config per task</text><text x="630" y="798" font-size="11" fill="#c9b78a">(retain-on-improve)</text>
-    <rect x="875" y="742" width="255" height="68" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="764" font-size="12.5" font-weight="700" fill="#f0e6cf">Research claims</text><text x="893" y="782" font-size="11" fill="#c9b78a">v2 scoped evidence</text><text x="893" y="798" font-size="11" fill="#c9b78a">+ decision overlay</text>
+    <rect x="875" y="742" width="255" height="68" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="764" font-size="12.5" font-weight="700" fill="#f0e6cf">Research claims</text><text x="893" y="782" font-size="11" fill="#c9b78a">v2 scoped evidence store</text><text x="893" y="798" font-size="11" fill="#c9b78a">decision overlay · reads opt-in</text>
     <rect x="612" y="818" width="255" height="64" rx="9" fill="#120f08" stroke="#40361d"/><text x="630" y="840" font-size="12.5" font-weight="700" fill="#f0e6cf">Lessons + concepts</text><text x="630" y="858" font-size="11" fill="#c9b78a">capsules · alias/split overlays</text>
-    <rect x="875" y="818" width="255" height="64" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="840" font-size="12.5" font-weight="700" fill="#f0e6cf">Skills + meta-notes</text><text x="893" y="858" font-size="11" fill="#c9b78a">techniques · causal why</text>
+    <rect x="875" y="818" width="255" height="64" rx="9" fill="#120f08" stroke="#40361d"/><text x="893" y="840" font-size="12.5" font-weight="700" fill="#f0e6cf">Skills + meta-notes</text><text x="893" y="858" font-size="11" fill="#c9b78a">techniques · hypothesis / stats</text>
   </g>
   <!-- KNOWLEDGE -->
   <g filter="url(#sh)"><rect x="1180" y="700" width="540" height="198" rx="16" fill="#0e1826" stroke="#23394f"/></g>
@@ -149,7 +149,7 @@
   <g font-family="'DejaVu Sans',sans-serif">
     <rect x="1202" y="742" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="762" font-size="12.5" font-weight="700" fill="#dfe7ea">KB notes</text><text x="1220" y="778" font-size="11" fill="#93a4ab">markdown + frontmatter · grep · kb_search (lexical / semantic)</text>
     <rect x="1202" y="794" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="814" font-size="12.5" font-weight="700" fill="#dfe7ea">Skills library</text><text x="1220" y="830" font-size="11" fill="#93a4ab">SKILL.md recipes the Researcher can list &amp; load</text>
-    <rect x="1202" y="846" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="866" font-size="12.5" font-weight="700" fill="#dfe7ea">Deep research / external grounding</text><text x="1220" y="882" font-size="11" fill="#93a4ab">deep research cadence 3 · literature/web tools opt-in and off by default</text>
+    <rect x="1202" y="846" width="496" height="44" rx="9" fill="#0a121c" stroke="#20344a"/><text x="1220" y="866" font-size="12.5" font-weight="700" fill="#dfe7ea">Deep research / external grounding</text><text x="1220" y="882" font-size="11" fill="#93a4ab">LLM stage: cadence 3 when present · literature/web tools off by default</text>
   </g>
 
   <!-- ===================== STORE CONNECTIONS ===================== -->

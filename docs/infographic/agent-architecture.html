@@ -24,9 +24,9 @@
 </head>
 <body>
 <div class="head">
-  <div class="eyebrow">LoopLab · full engine process · code default</div>
-  <h1>The whole loop — boxes &amp; arrows, every nuance</h1>
-  <p class="lede">Read the top row left→right: one node is proposed → novelty-gated <em>(LLM by default)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Every number is a built-in default.</p>
+  <div class="eyebrow">LoopLab · core process capability map</div>
+  <h1>The core loop — defaults and optional paths</h1>
+  <p class="lede">Read the top row left→right: one node is proposed → passes the novelty stage <em>(shipped mode: LLM when a client is available)</em> → built → run → scored &amp; trust-checked → refined, then loops. Under each stage sit its detail boxes; the hypothesis board, cross-run memory and the event spine hang below. Numbers can be caps, thresholds or cadences. Important status copy calls out selected default, opt-in and off paths; configuration remains authoritative.</p>
   <div class="legend">
     <span class="lg"><span class="sw" style="background:var(--r)"></span>Researcher</span>
     <span class="lg"><span class="sw" style="background:var(--d)"></span>Developer</span>
@@ -59,17 +59,17 @@ box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
 box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
-box("novelty",410,LY,210,LH,"NOVELTY GATE","llm",C.r,["LLM adjudicates novelty (default novelty_mode=llm): reads the real experiments, forces one informed re-propose","the algo cosine/L2 gate below is opt-in (novelty_mode=algo / explore stance)"]);
+box("novelty",410,LY,210,LH,"NOVELTY STAGE","llm",C.r,["shipped mode: LLM if client","no client: pass; algo opt-in"]);
 box("implement",660,LY,300,LH,"DEVELOPER","D",C.d,["stages → plan → implement (fresh repo node)","repair = 1 session · every edit auto-compiled"]);
-box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run isolated across seeds","repair a mechanical crash in place"]);
-box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → holdout re-rank","then the rigor layer (below)"]);
+box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run one isolated search evaluation","repair a mechanical crash in place"]);
+box("score",1360,LY,360,LH,"SCORE · TRUST","R/✓",C.trust,["metric in → host-graded holdout when available","then the configured rigor layer (below)"]);
 box("refine",1760,LY,300,LH,"REFINE","R",C.r,["policy picks next move over the DAG","improve · merge · ablate · debug"]);
 
 /* ============ detail stacks under each loop stage ============ */
 const DY=300;
 // PROPOSE — the read funnel (reads flow UP into propose)
 stack(40,330,DY,[
- {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","causal ‘why the winner won’ (≤700c)"]},
+ {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","model hypothesis or stats fallback (≤700c)"]},
  {id:"f_less",h:108,t:"② Cross-run evidence",tag:"mixed defaults",c:C.mem,sub:["reflection lessons/meta-notes on with memory","concept/advisory/structured-claim reads opt-in","direction + exact-task / strict goal for lessons/capsules","v2 D8 exact-task only · no goal fingerprint","rejected claims never steer prompts"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
@@ -96,21 +96,21 @@ stack(660,300,DY,[
 stack(1000,320,DY,[
  {id:"e_box",h:66,t:"Sandbox tiers",tag:"□",c:C.ev,sub:["trusted_local subprocess | untrusted Docker --network none","data mounts bound :ro (editable data must be a mount:false copy)"]},
  {id:"e_stg",h:72,t:"Stage pipeline",tag:"□",c:C.ev,sub:["stages phase / cmd.stages → …prep → train → protected score (cmd)","one shared validator · %params% per stage · stage-scoped re-run"]},
- {id:"e_seed",h:60,t:"Seeds & holdout",tag:"□",c:C.ev,sub:["search seed 0 · n_seeds 3 · holdout 25% reserved (Knuth hash)"]},
+ {id:"e_seed",h:60,t:"Drafts · confirm · holdout",tag:"mixed",c:C.ev,sub:["n_seeds=3 initial drafts; search eval seed=0","confirm: disjoint seeds; host holdout: 25%"]},
  {id:"e_ir",h:92,t:"Inline repair",tag:"□",c:C.ev,sub:["reasons crash/timeout/oom","abandon at 4 identical errors (norm. signature)","late-stage fix reuses train ckpt · abandon at 2 full re-trains"]},
  {id:"e_dep",h:72,t:"Auto-install deps",tag:"□",c:C.ev,sub:["allow-list ~55 · ≤6 rounds/node","stop after 2 pip timeouts (no egress)"]},
  {id:"e_dr",h:82,t:"Deep repair",tag:"D",c:C.d,sub:["timeout→cut compute · oom→cut memory","+ lineage prior fixes · taxonomy"]},
 ]);
 // SCORE / TRUST
 stack(1360,360,DY,[
- {id:"t_rh",h:74,t:"Reward-hack",tag:"✓",c:C.trust,sub:["grader/answer-key access · write to frozen file","metric at 0.0/1.0 floor/ceiling"]},
- {id:"t_lk",h:74,t:"Leakage",tag:"✓",c:C.trust,sub:["train↔test · target |r|≥0.98 · temporal","code: fit-on-test / fit-before-split"]},
- {id:"t_cr",h:58,t:"Critic + CV",tag:"advisory",c:C.trust,sub:["stub · hardcoded metric · params ignored · mean/std/SE"]},
- {id:"t_gate",h:86,t:"Trust gate",tag:"select",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
- {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","robust=best mean; demote by ≥1 SE (variance gate)"]},
- {id:"t_ho",h:64,t:"Holdout-select",tag:"top-3",c:C.ev,sub:["re-rank top-3 on reserved 25% · no retrain"]},
+ {id:"t_rh",h:74,t:"Reward-hack",tag:"off",c:C.trust,sub:["detector default OFF · grader/answer-key access","write to frozen file · metric floor/ceiling"]},
+ {id:"t_lk",h:74,t:"Leakage",tag:"off",c:C.trust,sub:["detector default OFF · train↔test / temporal","target |r|≥0.98 · fit-on-test / fit-before-split"]},
+ {id:"t_cr",h:58,t:"Critic + CV",tag:"critic off",c:C.trust,sub:["broad critic warnings advisory · mean/std/SE","hardcoded flag can gate under gate/block"]},
+ {id:"t_gate",h:86,t:"Trust gate",tag:"audit default",c:C.trust,sub:["audit = surface only","gate = can’t be best AND not bred/confirmed (feasible for diversity)","block = also feasible=False"]},
+ {id:"t_conf",h:82,t:"Confirm",tag:"off",c:C.ev,sub:["default OFF · top-K on disjoint seeds [base=1…)","pick best confirmed mean; >1 SE is a significance flag"]},
+ {id:"t_ho",h:64,t:"Holdout-select",tag:"host default",c:C.ev,sub:["host-graded: top-3 on reserved 25%; no retrain"]},
  {id:"t_verify",h:80,t:"Verifier tie-break",tag:"off",c:C.ev,sub:["atomic verifier_group_scored · complete final tie set","generation · evidence · samples validate all-or-none","never overrides the metric (§21.7)"]},
- {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible→non-flagged→metric(+verifier tie)→confirmed→holdout(+verifier tie)→approval"]},
+ {id:"t_best",h:64,t:"Best-selection order",tag:"",c:C.ev,sub:["feasible → gate/block trust exclusion","→ metric/tie → confirm → host holdout → approval"]},
 ]);
 // REFINE
 stack(1760,300,DY,[
@@ -121,8 +121,8 @@ stack(1760,300,DY,[
 ]);
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
- {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
- {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agentic tool-loop (default: agent — reads run·data·siblings·KB·memory)","agent_control allow-list per role"]},
+ {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open hypothesis"]},
+ {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agent","shipped agent mode uses tools with a client","no client → deterministic rule fallback","agent_control allow-list per role"]},
  {id:"concept",h:120,t:"Concept graph (Part IV)",tag:"off",c:C.s,sub:["tagger over task skeleton (heuristic | agentic) — pure/replayable · audit-only, never selection","concept_pivot: 2a coverage snapshot at strat cadence → uncovered-region explore hint","graded_novelty: pre-gate flags L4 same-dir-new-impl / L5 wrongly-abandoned (needs skeleton)","capability_expansion: lock-in forced-jump read off the 2a snapshot (needs concept_pivot)"]},
 ]);
 
@@ -139,8 +139,8 @@ box("w_order",40,WY,260,72,"Write order","fin",C.mem,["budget → diversity → 
 box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
 box("w_reflect",630,WY,300,72,"Lessons: reflect (LLM)","R",C.mem,["consolidate run: nodes + resolved hyps + fail themes","→ 1 lesson/theme · conf 0.6 · role: researcher · evidence_sig"]);
 box("w_hyp",950,WY,300,72,"Lessons: offline only","",C.mem,["no-LLM/toy: winner record + param-diff pairs","real run: LLM-authored only — no templated/verbatim dump"]);
-box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["credit-assign which change won (pairs≤3)","conf 0.65/0.5 · every 4 nodes · debug→dev / improve→rsch"]);
-box("w_meta",1590,WY,260,72,"Meta-note","R",C.mem,["causal ‘why won’ ≤700c","→ meta_notes.jsonl"]);
+box("w_comp",1270,WY,300,72,"Comparative (M6)","≤3",C.mem,["candidate change attribution (pairs≤3)","not causal proof · cadence 4 nodes"]);
+box("w_meta",1590,WY,260,72,"Meta-note","R / stats",C.mem,["model hypothesis or stats fallback","not causal proof → meta_notes.jsonl"]);
 box("w_skill",1870,WY,290,72,"Auto-skill","R",C.mem,["supported hyp & Δ>0 → SKILL.md","candidate→promoted when fp sim < 0.6"]);
 
 /* ============ HYGIENE (row y≈1240) ============ */

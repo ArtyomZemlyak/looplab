@@ -4284,8 +4284,11 @@ they did not satisfy the scientific/product gates in §21.20.
 - Concept alias, purge, split and clear mutations now share a governance-wide revision fence in addition to
   their per-ledger revision. Same-action replay precedes stale-CAS rejection. Owner HTTP existence/canonicality
   checks and concurrent alias/purge checks occur under the same global lock: merge/purge and split sources plus
-  merge targets must be observed active canonical concepts; split children may be new provisional entities,
-  while existing split targets must be canonical and distinct. Receipts bind the observed projection digest.
+  merge targets must be observed active canonical concepts. For a split, conditional rule targets differ from
+  the source and from one another; a non-empty default differs from every rule target but may equal the source
+  to retain unmatched observations. A bare identity default is therefore invalid. A new child is provisional,
+  while a child already observed in the portfolio must be active canonical. Receipts bind the observed
+  projection digest.
   This closes nonexistent-merge and cross-ledger races; it still is
   not a release-pinned taxonomy, semantic impact analysis or migration/backfill system.
 - Metric projections, replay and command evaluation reject booleans, non-finite values, integers too large for

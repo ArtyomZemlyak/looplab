@@ -5,10 +5,11 @@ hide:
 
 # Architecture at a glance
 
-Two views of the **whole engine**: a **high-level one-pager** for the mental model, and the
-**full process diagram** — every stage, agent, memory tier and trust gate with the exact numbers,
-cadences, thresholds and their default/opt-in/off status. Both are kept in sync with the code (the
-diagram's numbers and defaults are verified against `looplab/`).
+Two **capability maps** of the engine: a **high-level one-pager** for the mental model, and a
+**detailed process diagram** covering the main stages, agents, memory tiers and trust controls.
+They are navigation aids, not an exhaustive executable specification. Where shown, status labels
+distinguish shipped defaults from opt-in and off-by-default capabilities; the configuration and
+event contracts remain the authority for a particular run.
 
 ## The one-pager
 
@@ -22,8 +23,8 @@ authoritative for replayable `RunState`, not for every value shown in the produc
 
 ## The full process diagram
 
-A boxes-and-arrows flowchart of one turn of the engine and everything around it. Read the top row
-left→right: **Propose → Novelty gate → Implement → Evaluate → Score · Trust → Refine**, then loop.
+A boxes-and-arrows flowchart of one turn of the engine and its main adjacent systems. Read the top row
+left→right: **Propose → Novelty stage → Implement → Evaluate → Score · Trust → Refine**, then loop.
 Under each stage sit its detail boxes (the memory funnel under Propose, the trust/confirm stack under
 Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene → the five tiers) and the
 **event spine** hang below. Colour = which agent acts.
@@ -42,9 +43,13 @@ Score, …); the **hypothesis kanban**, **cross-run memory** (write → hygiene 
     writes. Two edges break the circle: a **repair ↺** loop (a crash/timeout is fed back with its
     stderr, fixed in place) and a **merge** branch (two strong lineages fused into one multi-parent
     child). The **hypothesis board** is *derived on every fold* — beliefs are deduped (exact hash +
-    an agentic paraphrase merge), prioritized (foresight), and tracked to a verdict. Cross-run memory
-    is **on by default** (`~/.looplab/memory` + `~/.looplab/knowledge`): a run distills lessons,
-    a KB case, a causal meta-note and auto-skills, then the next similar run reads them back.
+    an agentic paraphrase merge), prioritized (foresight), and tracked to a verdict. The base
+    cross-run memory paths and reflection priors are **on by default** (`~/.looplab/memory` +
+    `~/.looplab/knowledge`); Part-IV concept, advisory and structured-claim reads remain opt-in.
+    A run with an eligible best result can write a case and reflection artifacts, while only a
+    supported improving hypothesis can seed an auto-skill. Later matching runs may retrieve the
+    applicable records. A model-authored meta-note is an explanatory hypothesis over recorded
+    observations, not causal proof.
 
 ## Where each piece lives in the code
 
