@@ -850,6 +850,45 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
             "direction": direction, "rows": rows}
 
 
+def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
+                      edges=None, lens: str = "is_a") -> dict:
+    """Project a HIERARCHY (tree) from a SET of concept ids under a chosen LENS — the pure read-model
+    behind "any concept can be an axis". A hierarchy is COMPUTED, never stored: swap the lens and the
+    same concepts re-project. Deterministic (id-sorted), no I/O → replay-safe.
+
+    lens="is_a" (the default, and today's only wired lens): nesting follows the concept PATH — the
+    parent of `a/b/c` is `a/b`, roots are the top segment `a`. Every ancestor PREFIX is materialized as
+    a node even when only a deep leaf was tagged, so `loss` shows as a group when only
+    `loss/contrastive/dcl` was touched. `edges` (a typed concept-edge set) is accepted for the FUTURE
+    lenses (uses / co_occurs / …) and ignored under is_a; `graph` is accepted for future multi-parent
+    resolution and unused here (an LLM-grown concept is single-parent by its path).
+
+    Returns {"lens", "roots": [top ids sorted], "nodes": {id: {"parent": id|None, "depth": int,
+    "children": [ids sorted], "tagged": bool}}} — `tagged` marks ids actually in the input (vs a
+    synthetic ancestor materialized only for structure)."""
+    tagged: set[str] = set()
+    for cid in (concept_ids or ()):
+        c = _normalize_concept_id(cid)
+        if c:
+            tagged.add(c)
+    all_ids: set[str] = set()
+    for cid in tagged:
+        parts = cid.split("/")
+        for k in range(1, len(parts) + 1):
+            all_ids.add("/".join(parts[:k]))
+    children: dict[Optional[str], list[str]] = {}
+    nodes: dict[str, dict] = {}
+    for cid in all_ids:
+        parts = cid.split("/")
+        parent = "/".join(parts[:-1]) if len(parts) > 1 else None
+        nodes[cid] = {"parent": parent, "depth": len(parts) - 1,
+                      "children": [], "tagged": cid in tagged}
+        children.setdefault(parent, []).append(cid)
+    for cid in nodes:
+        nodes[cid]["children"] = sorted(children.get(cid, []))
+    return {"lens": lens, "roots": sorted(children.get(None, [])), "nodes": nodes}
+
+
 def uncovered_regions(state: RunState, graph: ConceptGraph,
                       tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
     """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
