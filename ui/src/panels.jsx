@@ -25,6 +25,47 @@ export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
 
+// Small read-resource state machine shared by the secondary panels below. A request sequence fence
+// prevents an older response from replacing a newer retry/poll, while a failed refresh keeps the
+// last successful payload visibly marked stale instead of turning it into an authoritative empty.
+function usePanelResource(loader, key = '', pollMs = null) {
+  const [value, setValue] = useState({ key, state: 'loading', data: null })
+  const [nonce, setNonce] = useState(0)
+  const sequence = useRef(0)
+  usePoll(alive => {
+    // # CODEX AGENT: a failed refresh is not an authoritative empty response; retain the last-good
+    // payload as visibly stale, and fence late poll/retry responses by their request sequence.
+    const request = ++sequence.current
+    loader().then(data => {
+      if (alive() && request === sequence.current) setValue({ key, state: 'ready', data })
+    }).catch(() => {
+      if (!alive() || request !== sequence.current) return
+      setValue(previous => {
+        const data = previous.key === key ? previous.data : null
+        return { key, state: data == null ? 'error' : 'stale', data }
+      })
+    })
+  }, pollMs, [key, nonce])
+  const resource = value.key === key ? value : { key, state: 'loading', data: null }
+  const retry = () => {
+    setValue(previous => previous.key === key && previous.data == null
+      ? { ...previous, state: 'loading' } : previous)
+    setNonce(n => n + 1)
+  }
+  return [resource, retry]
+}
+
+function PanelResourceNotice({ resource, label, onRetry }) {
+  if (resource.state === 'ready') return null
+  if (resource.state === 'loading') return <div className="muted" role="status">Loading {label}…</div>
+  const stale = resource.state === 'stale'
+  return <div className={'report-inline-state' + (stale ? '' : ' error')} role={stale ? 'status' : 'alert'}>
+    <OpIcon name="alert" size={14} />
+    <span>{label}: {stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'}</span>
+    <button className="btn sm" onClick={onRetry}>Retry</button>
+  </div>
+}
+
 // Overall-info tab (round-8): the run's at-a-glance metrics, lifted out of the cramped top bar so the
 // header stays a single line. Everything derives from the folded state (+ maxEval from config).
 export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
@@ -627,23 +668,24 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
 
 export function AuthoringPanel({ onClose, onToast }) {
   const [kind, setKind] = useState('prompts')
-  const [data, setData] = useState({ dir: null, files: [] })
   const [sel, setSel] = useState(null)
   const [text, setText] = useState('')
-  const load = (k) => get(`/api/${k}`).then(d => { setData(d); setSel(null); setText('') }).catch(() => setData({ dir: null, files: [] }))
-  useEffect(() => { load(kind) }, [kind])
+  const [source, retry] = usePanelResource(() => get(`/api/${kind}`), kind)
+  const data = source.data || { dir: null, files: [] }
   return (
     <Panel title="Authoring — configure the scientist" sub="hot-reloaded next run" onClose={onClose} wide>
       <div className="toolbar" style={{ marginBottom: 10 }}>
-        {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')} onClick={() => setKind(k)}>{k}</button>)}
-        <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>
+        {['prompts', 'skills', 'knowledge'].map(k => <button key={k} className={'btn sm' + (k === kind ? ' primary' : '')}
+          onClick={() => { setKind(k); setSel(null); setText('') }}>{k}</button>)}
+        {source.state === 'ready' && <span className="muted">{data.dir || `no ${kind} dir configured (set LOOPLAB_${kind.toUpperCase()}_DIR)`}</span>}
       </div>
+      <PanelResourceNotice resource={source} label={`${kind} files`} onRetry={retry} />
       <div className="authoring-layout">
         <div className="authoring-list">
-          {data.files.map(f => <button type="button" key={f.name}
+          {(data.files || []).map(f => <button type="button" key={f.name}
             className={'run-card authoring-file' + (sel === f.name ? ' sel' : '')}
             onClick={() => { setSel(f.name); setText(f.text) }}>{f.name}</button>)}
-          {!data.files.length && <div className="muted">no files</div>}
+          {source.state === 'ready' && !data.files?.length && <div className="muted">no files</div>}
         </div>
         <div className="authoring-editor">
           {sel ? <>
@@ -669,23 +711,24 @@ function KbNote({ note }) {
 export function MemoryPanel({ onClose }) {
   // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
-  const [mem, setMem] = useState({ dir: null, cases: [], lessons: [], notes: [] })
-  const [kb, setKb] = useState({ dir: null, files: [] })   // /api/knowledge → {dir, files:[{name,text}]}
+  const [memory, retryMemory] = usePanelResource(() => get('/api/memory'))
+  const [knowledge, retryKnowledge] = usePanelResource(() => get('/api/knowledge'))
+  const mem = memory.data || { dir: null, cases: [], lessons: [], notes: [] }
+  const kb = knowledge.data || { dir: null, files: [] }   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
   const [lessonRole, setLessonRole] = useState('all')      // §role-split: Researcher vs Developer lessons
-  useEffect(() => {
-    get('/api/memory').then(setMem).catch(() => {})
-    get('/api/knowledge').then(setKb).catch(() => {})
-  }, [])
   const kbFiles = kb.files || []
-  const tabs = [['lessons', 'Lessons', mem.lessons.length], ['cases', 'Cases', mem.cases.length],
-    ['notes', 'Notes', mem.notes.length], ['knowledge', 'Knowledge', kbFiles.length]]
+  const tabs = [['lessons', 'Lessons', mem.lessons?.length], ['cases', 'Cases', mem.cases?.length],
+    ['notes', 'Notes', mem.notes?.length], ['knowledge', 'Knowledge', kbFiles.length]]
+  const selectedResource = tab === 'knowledge' ? knowledge : memory
   return (
-    <Panel title="Memory & knowledge — what the runs have learned" sub={mem.dir || 'no memory dir'} onClose={onClose} wide>
+    <Panel title="Memory & knowledge — what the runs have learned" sub={memory.data ? (mem.dir || 'no memory dir') : ''} onClose={onClose} wide>
       <div className="conv-toggle" style={{ marginBottom: 12 }}>
         {tabs.map(([k, label, n]) => <button key={k} aria-pressed={tab === k} className={'seg' + (tab === k ? ' on' : '')}
-          onClick={() => setTab(k)}>{label} <span className="muted">{n}</span></button>)}
+          onClick={() => setTab(k)}>{label} <span className="muted">{(k === 'knowledge' ? knowledge : memory).data ? n : '…'}</span></button>)}
       </div>
+      <PanelResourceNotice resource={selectedResource} label={tab === 'knowledge' ? 'Knowledge notes' : 'Cross-run memory'}
+        onRetry={tab === 'knowledge' ? retryKnowledge : retryMemory} />
       {/* General orientation shown on every tab; the role-split detail (§role-split) is lessons-only. */}
       <div className="muted" style={{ fontSize: 11, marginBottom: 10, lineHeight: 1.5 }}>
         Cross-run memory reused to guide future runs. Cases, notes and the knowledge base are shared;
@@ -703,7 +746,7 @@ export function MemoryPanel({ onClose }) {
       {tab === 'lessons' && (() => {
         // Researcher/Developer filters ALSO include untagged (shared) lessons — mirrors the backend
         // routing where an untagged lesson reaches both roles.
-        const shown = mem.lessons.filter(l => lessonRole === 'all' || !l.role || l.role === lessonRole)
+        const shown = (mem.lessons || []).filter(l => lessonRole === 'all' || !l.role || l.role === lessonRole)
         return shown.length
           ? shown.map((l, i) => <div key={i} className="mem-card">
               <div>{l.statement}</div>
@@ -717,28 +760,28 @@ export function MemoryPanel({ onClose }) {
                 {l.task_id && <span className="muted" style={{ fontSize: 11 }}>· {l.task_id}</span>}
               </div>
             </div>)
-          : <div className="muted">No {lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).</div>
+          : memory.state === 'ready' && <div className="muted">No {lessonRole === 'all' ? '' : lessonRole + ' '}lessons yet — they accrue as runs finish (reflection distils them into memory).</div>
       })()}
-      {tab === 'cases' && (mem.cases.length
+      {tab === 'cases' && ((mem.cases || []).length
         ? <DataTable caption="Stored memory cases" card={false}><table className="tbl"><thead><tr><th>task</th><th>goal</th><th>metric</th><th>params</th></tr></thead><tbody>
           {mem.cases.map((c, i) => <tr key={i}><td>{c.task_id}</td><td className="muted">{c.goal}</td><td>{fmt(c.metric)}</td><td className="muted">{JSON.stringify(c.params)}</td></tr>)}</tbody></table></DataTable>
-        : <div className="muted">No cases stored.</div>)}
-      {tab === 'notes' && (mem.notes.length
+        : memory.state === 'ready' && <div className="muted">No cases stored.</div>)}
+      {tab === 'notes' && ((mem.notes || []).length
         ? mem.notes.map((n, i) => <div key={i} className="mem-card">
             {n.task_id && <div className="muted" style={{ fontSize: 11, marginBottom: 2 }}>{n.task_id}</div>}
             <Markdown text={n.note || n.statement || JSON.stringify(n)} /></div>)
-        : <div className="muted">No meta-notes yet.</div>)}
+        : memory.state === 'ready' && <div className="muted">No meta-notes yet.</div>)}
       {tab === 'knowledge' && (kbFiles.length
         ? <><div className="muted" style={{ fontSize: 11, marginBottom: 6 }}>{kb.dir} — agents save + retrieve these via kb_search</div>
           {kbFiles.map((n, i) => <KbNote key={i} note={n} />)}</>
-        : <div className="muted">No knowledge notes ({kb.dir || 'no knowledge dir'}).</div>)}
+        : knowledge.state === 'ready' && <div className="muted">No knowledge notes ({kb.dir || 'no knowledge dir'}).</div>)}
     </Panel>
   )
 }
 
 export function RegistryPanel({ state, onClose }) {
-  const [runs, setRuns] = useState([])
-  useEffect(() => { get('/api/runs').then(setRuns).catch(() => {}) }, [])
+  const [resource, retry] = usePanelResource(() => get('/api/runs'))
+  const runs = resource.data || []
   const champ = state.champion != null ? state.nodes[state.champion] : (state.best_node_id != null ? state.nodes[state.best_node_id] : null)
   return (
     <Panel title="Solution registry & cross-run" onClose={onClose} wide>
@@ -758,10 +801,12 @@ export function RegistryPanel({ state, onClose }) {
         ? <DataTable caption="Promoted solution nodes" card={false}><table className="tbl"><thead><tr><th>node</th><th>alias</th></tr></thead><tbody>{state.promotions.map((p, i) => <tr key={i}><td>#{p.node_id}</td><td>{p.alias || 'champion'}</td></tr>)}</tbody></table></DataTable>
         : <div className="muted">none — use Promote on a node</div>}
       <div className="section-h">Cross-run leaderboard</div>
-      <DataTable caption="Cross-run solution leaderboard" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
+      <PanelResourceNotice resource={resource} label="Cross-run leaderboard" onRetry={retry} />
+      {runs.length > 0 && <DataTable caption="Cross-run solution leaderboard" card={false}><table className="tbl"><thead><tr><th>run</th><th>task</th><th>phase</th><th>best</th><th>nodes</th></tr></thead><tbody>
         {[...runs].sort((a, b) => (b.best_confirmed ?? b.best_metric ?? -Infinity) - (a.best_confirmed ?? a.best_metric ?? -Infinity))
           .map(r => <tr key={r.run_id}><td>{r.run_id}</td><td className="muted">{r.task_id}</td><td>{r.phase}</td><td>{fmt(r.best_confirmed ?? r.best_metric)}</td><td>{r.nodes}</td></tr>)}
-      </tbody></table></DataTable>
+      </tbody></table></DataTable>}
+      {resource.state === 'ready' && !runs.length && <div className="muted">No runs in the registry yet.</div>}
     </Panel>
   )
 }
@@ -769,15 +814,18 @@ export function RegistryPanel({ state, onClose }) {
 // Live GPU telemetry (nvidia-smi via /api/gpu). Polls while open so an operator can watch
 // utilization / VRAM / power during a real training run without leaving the browser.
 export function GpuPanel({ onClose }) {
-  const [data, setData] = useState(null)
-  usePoll((alive) => gpuStat().then(d => alive() && setData(d)).catch(() => alive() && setData({ available: false })), 2000, [])
+  const [resource, retry] = usePanelResource(gpuStat, '', 2000)
+  const data = resource.data
   const bar = (v, max, hot) => <div className="bar" style={{ height: 8 }}>
     <div className={'fill' + (hot ? ' hot' : '')} style={{ width: Math.min(100, max ? v / max * 100 : 0) + '%' }} /></div>
   return (
     <Panel title="GPU monitor" sub="nvidia-smi · live" onClose={onClose} wide>
-      {!data ? <div className="muted">polling…</div>
-        : !data.available ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
-          : (data.gpus || []).map((g, i) => (
+      <PanelResourceNotice resource={resource} label="GPU telemetry" onRetry={retry} />
+      {resource.state === 'ready' && !data?.available
+        ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
+        : resource.state === 'ready' && !data?.gpus?.length
+          ? <div className="notice">No GPU devices reported.</div>
+        : data?.available && (data.gpus || []).map((g, i) => (
             <div key={i} style={{ marginBottom: 16 }}>
               <div className="section-h">{g.name}</div>
               <div className="cardgrid" style={{ marginBottom: 10 }}>
@@ -823,39 +871,39 @@ export function HyperImportancePanel({ state, onClose }) {
 
 // F2 · Cross-run sweep aggregation — a lab dashboard overlaying every run of the same task:
 // best-metric comparison + which settings won. Uses the /api/runs summary (no per-run refetch).
+function CrossRunTrajectories({ rows, dir, task }) {
+  const rowKey = rows.map(r => r.run_id).join(',')
+  const [resource, retry] = usePanelResource(() => Promise.all(rows.slice(0, 8).map(r =>
+    get(runApiPath(r.run_id, '/state')).then(p => {
+      const ns = Object.values(p.state?.nodes || {}).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
+      let best = null; const series = []
+      for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
+      return { run_id: r.run_id, label: r.label || r.run_id, series }
+    }))), `${task}:${dir}:${rowKey}`)
+  return <div style={{ marginBottom: 12 }}>
+    <PanelResourceNotice resource={resource} label="Trajectory overlay" onRetry={retry} />
+    {resource.data && <MultiTrajectory runs={resource.data} />}
+  </div>
+}
+
 export function CrossRunPanel({ state, onClose }) {
-  const [runs, setRuns] = useState(null)
+  const [resource, retry] = usePanelResource(() => get('/api/runs'))
+  const runs = resource.data || []
   const [task, setTask] = useState(state.task_id || '')
   const [overlay, setOverlay] = useState(false)   // U4: convergence-trajectory overlay
-  const [traj, setTraj] = useState([])
-  useEffect(() => { get('/api/runs').then(setRuns).catch(() => setRuns([])) }, [])
-  // All hooks must run on every render — the loading early-return sits AFTER the effects
-  // (a conditional hook here unmounts the whole app once /api/runs resolves).
-  const tasks = [...new Set((runs || []).map(r => r.task_id).filter(Boolean))].sort()
-  const dir = ((runs || []).find(r => r.task_id === task)?.direction) || state.direction
-  const rows = (runs || []).filter(r => r.task_id === task)
+  const tasks = [...new Set(runs.map(r => r.task_id).filter(Boolean))].sort()
+  const dir = (runs.find(r => r.task_id === task)?.direction) || state.direction
+  const rows = runs.filter(r => r.task_id === task)
     .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
     .filter(r => r.m != null)
     .sort((a, b) => dir === 'min' ? a.m - b.m : b.m - a.m)
   const top = rows[0]?.m
   const worst = rows.length ? rows[rows.length - 1].m : 0
   const span = Math.abs((top ?? 0) - worst) || 1
-  const rowKey = rows.map(r => r.run_id).join(',')
-  useEffect(() => {   // U4: fetch each run's node metrics and build a running-best trajectory to overlay
-    if (!overlay || !rows.length) { setTraj([]); return }
-    let cancelled = false
-    Promise.all(rows.slice(0, 8).map(r => get(runApiPath(r.run_id, '/state')).then(p => {
-      const ns = Object.values(p.state?.nodes || {}).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
-      let best = null; const series = []
-      for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
-      return { run_id: r.run_id, label: r.label || r.run_id, series }
-    }).catch(() => ({ run_id: r.run_id, label: r.label || r.run_id, series: [] })))).then(res => { if (!cancelled) setTraj(res) })
-    return () => { cancelled = true }
-  }, [overlay, task, rowKey])
-  if (!runs) return <Panel title="Cross-run sweep" onClose={onClose} wide><div className="muted">Loading runs…</div></Panel>
   return (
-    <Panel title="Cross-run sweep" sub={`${runs.length} runs · ${tasks.length} tasks`} onClose={onClose} wide>
-      <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
+    <Panel title="Cross-run sweep" sub={resource.data ? `${runs.length} runs · ${tasks.length} tasks` : ''} onClose={onClose} wide>
+      <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
+      {resource.data && <div className="row" style={{ gap: 8, alignItems: 'center', marginBottom: 8 }}>
         <span className="muted">task:</span>
         <select className="inp sm" aria-label="Comparable task" value={task} onChange={e => setTask(e.target.value)}>
           {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
@@ -863,8 +911,8 @@ export function CrossRunPanel({ state, onClose }) {
         <span className="spacer" style={{ flex: 1 }} />
         {rows.length > 0 && <button aria-pressed={overlay} className={'btn sm' + (overlay ? ' primary' : '')}
           onClick={() => setOverlay(o => !o)} title="overlay each run's running-best trajectory on one axis">overlay trajectories</button>}
-      </div>
-      {overlay && <div style={{ marginBottom: 12 }}><MultiTrajectory runs={traj} /></div>}
+      </div>}
+      {overlay && rows.length > 0 && <CrossRunTrajectories rows={rows} dir={dir} task={task} />}
       {rows.length
         ? <DataTable caption="Comparable run results" card={false}><table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th>relative score</th></tr></thead><tbody>
             {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
@@ -874,8 +922,8 @@ export function CrossRunPanel({ state, onClose }) {
               <td style={{ width: 180 }}><div className="bar" style={{ height: 8 }}>
                 <div className="fill" style={{ width: Math.max(4, 100 - Math.abs(r.m - top) / span * 100) + '%' }} /></div></td></tr>)}
           </tbody></table></DataTable>
-        : <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
-      <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>
+        : resource.state === 'ready' && <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
+      {resource.data && <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>}
     </Panel>
   )
 }
