@@ -32,6 +32,7 @@ const Dag = lazy(() => import('./Dag.jsx'))
 const Dock = lazy(() => import('./Dock.jsx'))
 const ReportView = lazy(() => import('./Report.jsx'))
 const DirectionsOverview = lazy(() => import('./DirectionsOverview.jsx'))
+const ConceptView = lazy(() => import('./ConceptView.jsx'))
 
 let inspectorPromise
 const loadInspector = () => inspectorPromise || (inspectorPromise = import('./Inspector.jsx'))
@@ -950,6 +951,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           : <span className="pill">read-only review</span>}
         <div className="view-toggle" role="group" aria-label="Run workspace views">
           <button type="button" aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+          <button type="button" aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')} disabled={historyActive}
+            onClick={() => setView('concepts')} title="concept tree — group experiments by concept, any lens">Concepts</button>
           <button type="button" aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
             title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
           <button type="button" aria-pressed={panel === 'overview'} className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
@@ -1132,6 +1135,16 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 }} />
             </LazyBoundary>
           </div></div>
+        : view === 'concepts'
+        ? <div className="main"><LazyBoundary label="concept tree" resetKey={`${runId}:${generation || 'pending'}`}>
+            <ConceptView runId={runId} state={state} onPickNode={(id) => {
+              route.update(current => ({ ...current, view: 'dag', nodeId: id,
+                nodeGeneration: null, commentId: null }))
+              setSelectedGroup(null)
+              if (compactWorkspace) setCompactInspectorOpen(true)
+              else setSideC(false)
+            }} />
+          </LazyBoundary></div>
         : <>
       <LazyBoundary label="direction overview" resetKey={`${runId}:${generation || 'pending'}`}>
         <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
