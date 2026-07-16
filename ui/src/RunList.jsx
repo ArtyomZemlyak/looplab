@@ -66,7 +66,13 @@ function useMutation() {
   const run = async action => {
     if (lock.current) return false
     lock.current = true; setState(true)
-    try { await action(); setState(null); return true }
+    try {
+      const outcome = await action()
+      // A caller may own a stronger reconciliation contract (for example useListMutation below).
+      // Keep its explicit unknown/failure result authoritative instead of closing the menu as success.
+      if (outcome === false) { setState(null); return false }
+      setState(null); return true
+    }
     catch (error) { setState(mutationMessage(error)); return false }
     finally { lock.current = false }
   }
@@ -406,6 +412,10 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }), [runs, sel, proj.projects, query, taskFilter, stFilter, statusFilter])
   const visible = useMemo(() => sortRuns(filtered, sortKey, sortDir), [filtered, sortKey, sortDir])
   const metricSortAvailable = taskFilter !== ALL && metricComparable(filtered)
+  const hasActiveFilters = !!query.trim() || taskFilter !== ALL || statusFilter !== 'all' || stFilter !== ALL
+  const clearFilters = () => {
+    setQuery(''); setTaskFilter(ALL); setStatusFilter('all'); setStFilter(ALL)
+  }
   useEffect(() => {
     if (sortKey === 'metric' && !metricSortAvailable) setSortKey('time')
   }, [sortKey, metricSortAvailable])
@@ -481,23 +491,16 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     if (removed) requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
     else focusSoon(returnFocus)
   }
-  // REVIEW(2026-07-16): the SAME move-run mutation now has two different consistency contracts
-  // depending on the gesture. Drag/drop (onDrop below) goes through useListMutation — ambiguity-safe
-  // (never replays), reconciles with a follow-up read, and shows the kind-specific 409 message. This
-  // menu path ("Move to project" in RunMenu, via act→useMutation) is the OLD draft-keeping lock: no
-  // reconcile read after an ambiguous transport failure, and the generic "Save failed; current input
-  // or selection kept." copy, which is written for prompt drafts and is meaningless for a move. The
-  // 998f864 intent ("destructive list actions and drag/drop share one lock") only holds transitively
-  // via navigationBusy button-disabling; route this through mutateList('move-run', ...) too so one
-  // operation has one failure semantics regardless of gesture.
-  const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }
+  const moveRun = async (runId, project_id) => {
+    const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
+    return mutateList('move-run', `Moving run to “${target}”…`,
+      async () => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }, refresh)
+  }
   const onDrop = async (project_id) => {
     const runId = dragRun
     if (!runId || listBusy) return
     setDragRun(null)
-    const target = project_id === UNASSIGNED ? 'Unassigned' : (projName[project_id] || 'project')
-    await mutateList('move-run', `Moving run to “${target}”…`,
-      async () => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }, refresh)
+    await moveRun(runId, project_id)
   }
   const submitRunRename = async (label) => {
     await renameRun(runRename.run_id, label); await loadRuns()
@@ -659,6 +662,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               <option value="phase">phase</option>
             </select>
             <button className="btn sm ghost"
+                    aria-label={`Sort ${sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}`}
                     title={sortKey === 'metric' ? (sortDir === 'asc' ? 'best first' : 'worst first') : (sortDir === 'asc' ? 'ascending' : 'descending')}
                     onClick={() => setSortDir(d => d === 'asc' ? 'desc' : 'asc')}>
               {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
@@ -668,11 +672,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
           {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
           {(!compactNav || !projectsOpen) && mutationNotice}
-          {runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
+          {runsState === 'ready' && runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
             {sel === ALL
               ? <button className="btn sm primary" disabled={navigationBusy} onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
-          {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
+          {runs && !!runsOf(sel).length && !visible.length && <div className="notice" role="status">
+            {runsState === 'stale' ? 'No runs in the last loaded data match the filters.' : 'No runs match the filters.'}
+            {hasActiveFilters && <button type="button" className="btn sm" disabled={navigationBusy} onClick={clearFilters}>Clear filters</button>}
+          </div>}
           {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && visible.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
               <MapView onOpen={id => { if (!navigationBusy) onOpen(id) }} runs={visible} projects={proj.projects}

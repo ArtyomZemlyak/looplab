@@ -45,3 +45,15 @@ test('project and super-task empties require a successful current response', asy
   assert.match(text, /<SuperTaskModal supertasks=\{superdata\.supertasks\} state=\{superState\} onRetry=\{loadSupers\}/,
     'the active modal must own the super-task error and retry surface')
 })
+
+test('run empties and filtered recovery preserve current resource truth', async () => {
+  const text = await source()
+
+  assert.match(text, /runsState === 'ready' && runs && !runsOf\(sel\)\.length[\s\S]*No runs here\./,
+    'a stale empty snapshot must not be presented as a current empty workspace')
+  assert.match(text, /runsState === 'stale' \? 'No runs in the last loaded data match the filters\.'/)
+  assert.match(text, /hasActiveFilters && <button[^>]*onClick=\{clearFilters\}>Clear filters<\/button>/,
+    'a zero-result combination must have one-step recovery')
+  assert.match(text, /aria-label=\{`Sort \$\{sortKey === 'metric'/,
+    'the direction control needs a semantic name, not an arrow glyph alone')
+})

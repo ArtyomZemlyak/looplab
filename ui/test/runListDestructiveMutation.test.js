@@ -16,6 +16,7 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
   const deadline = between(text, 'const settleWithin', '// Destructive list actions')
   const hook = between(text, 'export function useListMutation', '// Module-scope')
   const projectDelete = between(text, 'const removeProject', 'const moveRun')
+  const menuMove = between(text, 'const moveRun', 'const onDrop')
   const drop = between(text, 'const onDrop', 'const submitRunRename')
   const runDelete = between(text, 'const removeRun', '// super-task CRUD')
   const menu = between(text, 'function RunMenu', '// Manage super-tasks')
@@ -36,8 +37,10 @@ test('destructive and drag/drop writes stay authoritative, bounded, and recovera
   assert.match(projectDelete, /if \(removed && sel === id\) setSel\(ALL\)/,
     'the selected project changes only after authoritative deletion')
   assert.match(drop, /if \(!runId \|\| listBusy\) return/)
-  assert.match(drop, /setDragRun\(null\)[\s\S]*await mutateList\('move-run'/)
-  assert.match(drop, /await assignRun\([\s\S]*await refresh\(\)/)
+  assert.match(menuMove, /return mutateList\('move-run'/)
+  assert.match(menuMove, /await assignRun\([\s\S]*await refresh\(\)/)
+  assert.match(drop, /setDragRun\(null\)[\s\S]*await moveRun\(runId, project_id\)/,
+    'menu and drag/drop must share one authoritative move contract')
   assert.match(runDelete, /confirm\([\s\S]*setRunMenu\(null\)[\s\S]*await mutateList\('delete-run'/)
   assert.doesNotMatch(runDelete.slice(0, runDelete.indexOf('if (!confirm')), /setRunMenu\(null\)/)
   assert.match(menu, /className="mi danger" onClick=\{\(\) => onDelete\(r\)\}/)

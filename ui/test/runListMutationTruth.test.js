@@ -25,6 +25,8 @@ test('the shared RunList mutation guard is single-flight and exposes only bounde
   assert.match(hook, /lock\.current = true; setState\(true\)/)
   assert.equal((hook.match(/await action\(\)/g) || []).length, 1,
     'a mutation intent is sent exactly once')
+  assert.match(hook, /const outcome = await action\(\)[\s\S]*if \(outcome === false\)[\s\S]*return false/,
+    'a stronger caller-owned reconciliation result cannot be relabeled as success')
   assert.match(hook, /catch \(error\) \{ setState\(mutationMessage\(error\)\); return false \}/)
   assert.match(hook, /finally \{ lock\.current = false \}/)
   assert.doesNotMatch(hook, /setTimeout|setInterval|while\s*\(|retry/i,
