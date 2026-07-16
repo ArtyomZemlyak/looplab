@@ -1427,6 +1427,38 @@ pre.code.event-json { max-height: 220px; }
 .do-chip .do-meta { min-width: 0; overflow: hidden; color: var(--fg-mut);
   font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
 
+/* ── View 2: the concept chip bar over the lineage graph ──────────────────────── */
+.concept-bar { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }
+.cb-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
+.cb-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; min-width: 0; }
+.cb-crumb { background: none; border: 0; color: var(--fg-mut); cursor: pointer; padding: 1px 5px;
+  border-radius: 6px; font-size: 12px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cb-crumb:hover { background: var(--bg-3); color: var(--fg); }
+.cb-crumb.on { color: var(--fg); font-weight: 600; }
+.cb-sep { color: var(--line-2); font-size: 11px; }
+.cb-selected { display: flex; flex-wrap: wrap; gap: 5px; margin-bottom: 6px; }
+.cb-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, var(--bg-2)); border: 1px solid var(--accent);
+  color: var(--fg); cursor: pointer; font-size: 11px; }
+.cb-pill:hover { background: color-mix(in srgb, var(--accent) 26%, var(--bg-2)); }
+.cb-pill .cb-x { color: var(--fg-mut); font-size: 13px; line-height: 1; }
+.cb-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 88px; min-width: 0; overflow: auto; }
+.cb-empty { font-size: 12px; }
+.cb-chip { display: inline-flex; align-items: stretch; border-radius: 999px; overflow: hidden;
+  background: var(--bg-2); border: 1px solid var(--line-2); max-width: 100%; min-width: 0; }
+.cb-chip:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-2)); }
+.cb-chip.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cb-chip.here { border-style: dashed; }
+.cb-chip-main { display: inline-flex; align-items: center; gap: 7px; padding: 3px 4px 3px 10px;
+  background: none; border: 0; color: var(--fg); cursor: pointer; font-size: 12px; min-width: 0; white-space: nowrap; }
+.cb-chip .cb-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
+.cb-chip .cb-here { color: var(--fg-mut); font-weight: 700; }
+.cb-chip .cb-count { color: var(--fg-mut); font-variant-numeric: tabular-nums; font-size: 11px;
+  background: var(--bg-1); border-radius: 999px; padding: 0 6px; }
+.cb-drill { background: none; border: 0; border-left: 1px solid var(--line-2); color: var(--fg-mut);
+  cursor: pointer; padding: 0 8px; font-size: 14px; }
+.cb-drill:hover { background: var(--bg-3); color: var(--fg); }
+
 /* ── Panel bar (Workstream D): grouped by importance + process ─────────────────── */
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .panel-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 6px; display: inline-block; }

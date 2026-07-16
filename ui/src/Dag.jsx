@@ -294,7 +294,7 @@ function visibleViewportBounds() {
 
 export default function Dag({ state, selectedId, onSelect, groupMode = 'none', collapsed = new Set(),
                              onToggleGroup, onSetMode, onCollapseAll, onExpandAll, onAutoCollapse, selectedGroup, onSelectGroup,
-                             themeFilter = null, onNodeAction, mergeArm = null }) {
+                             themeFilter = null, highlightIds = null, onNodeAction, mergeArm = null }) {
   const workId = workingId(state)
   const [menu, setMenu] = useState(null)   // U3: right-click node menu {x,y,nodeId}
   const dagRef = useRef(null)
@@ -460,8 +460,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const p = pos[`n:${n.id}`]; if (!p) return
       const gkey = ng.get(n.id)
       const inLane = tintedIds.has(n.id)
-      // dim a node that's outside the selected lineage, or off the active theme filter
-      const dimmed = (focusSet ? !focusSet.has(n.id) : false) || (themeFilter && n.idea?.theme !== themeFilter)
+      // dim a node that's outside the selected lineage, off the active theme filter, or (View 2) not in
+      // the concept-chip highlight set. highlightIds is null when no concept is selected -> no dimming.
+      const dimmed = (focusSet ? !focusSet.has(n.id) : false)
+        || (themeFilter && n.idea?.theme !== themeFilter)
+        || (highlightIds && !highlightIds.has(n.id))
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
         focusable: false,
         data: { node: n, state, workId, selectedId, onSelect, themeFilter, dim: dimmed,
@@ -509,7 +512,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     })
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
-      themeFilter, fx, onNodeAction, openActions])
+      themeFilter, highlightIds, fx, onNodeAction, openActions])
   const { edges, groupKeys } = base
   // Inject the transient `actionsOpen` flag onto ONLY the node whose action menu is open, keyed on
   // menu?.nodeId. This is an O(n) shallow pass over the already-laid-out nodes (one new object for the

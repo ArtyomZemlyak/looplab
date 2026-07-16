@@ -33,6 +33,7 @@ const Dock = lazy(() => import('./Dock.jsx'))
 const ReportView = lazy(() => import('./Report.jsx'))
 const DirectionsOverview = lazy(() => import('./DirectionsOverview.jsx'))
 const ConceptView = lazy(() => import('./ConceptView.jsx'))
+const ConceptChipBar = lazy(() => import('./ConceptChipBar.jsx'))
 
 let inspectorPromise
 const loadInspector = () => inspectorPromise || (inspectorPromise = import('./Inspector.jsx'))
@@ -224,6 +225,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
+  // View 2: the set of graph nodes matching the concept-chip-bar selection (null = no concept filter).
+  // Set by ConceptChipBar, consumed by the Dag to dim non-matching nodes. setState is a stable setter.
+  const [conceptHighlight, setConceptHighlight] = useState(null)
   const graphPreferenceTouchedRef = useRef(false)
   const largeOverviewAppliedRef = useRef(false)
   const liveNodeCount = Object.keys(live?.nodes || {}).length
@@ -1146,6 +1150,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             }} />
           </LazyBoundary></div>
         : <>
+      <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
+        <ConceptChipBar state={state} onHighlight={setConceptHighlight} />
+      </LazyBoundary>
       <LazyBoundary label="direction overview" resetKey={`${runId}:${generation || 'pending'}`}>
         <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       </LazyBoundary>
@@ -1158,7 +1165,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
               onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
               mergeArm={readOnlyMode ? null : mergeFrom}
-              selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} />
+              selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter}
+              highlightIds={conceptHighlight} />
           </LazyBoundary>
           <DagEmptyOverlay presentation={emptyPresentation} transport={transportController}
             onAction={onEmptyAction} />
