@@ -73,12 +73,14 @@ _LAYOUT = {
     "comment_projection": "events",
     "command_eval": "runtime",
     "command_observation": "serve",
+    "comparison": "core",
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
     "context_budget": "core",
     "costs": "engine",
     "critic": "trust",
+    "cross_run": "trust",   # cross-run identity/scope-boundary checks among the trust monitors
     "cv": "trust",
     "harden": "trust",
     "dataset_task": "adapters",
@@ -172,6 +174,7 @@ _LAYOUT = {
     "sandbox": "runtime",
     "schemas": "serve",
     "scope_report": "serve",
+    "scope_sources": "serve",
     "serve_prompts": "serve",   # UI-server prompt strings ("prompts" is taken by core/prompts.py)
     "server": "serve",
     "settings_store": "serve",
