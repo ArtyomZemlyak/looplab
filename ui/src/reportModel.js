@@ -70,7 +70,12 @@ export function normalizeRunReport(value) {
     verdict: boundedAdvisoryText(field(value, 'verdict'), PARAGRAPH_CHARS, budget),
     champion_summary: boundedAdvisoryText(field(value, 'champion_summary'), PARAGRAPH_CHARS, budget),
   }
-  for (const key of REPORT_LIST_FIELDS) result[key] = boundedList(field(value, key), budget)
+  // Trust-significant caveats get budget before ordinary narrative lists. Otherwise a valid, saturated
+  // what_worked/learnings payload can erase the warning while its positive prose remains.
+  result.caveats = boundedList(field(value, 'caveats'), budget)
+  for (const key of REPORT_LIST_FIELDS) {
+    if (key !== 'caveats') result[key] = boundedList(field(value, key), budget)
+  }
   const atNode = field(value, 'at_node')
   result.at_node = Number.isSafeInteger(atNode) && atNode >= 0 ? atNode : null
   result.trigger = boundedAdvisoryText(field(value, 'trigger'), TRIGGER_CHARS, budget, true)

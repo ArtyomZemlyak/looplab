@@ -196,6 +196,15 @@ test('Config restart is one server-owned durable command and config load failure
   assert.match(panels, /loadError[\s\S]*?role="alert"[\s\S]*?setLoadNonce\(value => value \+ 1\)/)
 })
 
+test('Trust enforcement copy distinguishes high-precision gates from advisory warnings', async () => {
+  const panels = await source('panels.jsx')
+  assert.match(panels, /keep a high-precision flag from winning/)
+  assert.match(panels, /high-precision flag is excluded from best-selection and breeding\/confirmation/)
+  assert.match(panels, /broad critic\/perfect-score warnings stay advisory/)
+  assert.match(panels, /critic:hardcoded_metric/)
+  assert.doesNotMatch(panels, /a flagged node is excluded from best-selection/)
+})
+
 test('both command surfaces fail before POST when durable intent persistence fails', async () => {
   const [assistant, dock] = await Promise.all([source('AssistantBar.jsx'), source('Dock.jsx')])
   assert.match(assistant, /if \(!persistDirect\(submitting\)\) \{ localStorageFailure\(bound\); return \}[\s\S]*?submitAssistantDirect/)

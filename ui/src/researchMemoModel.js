@@ -53,7 +53,8 @@ function textList(value, maximum, textMaximum, budget) {
 function normalizeVerification(value, budget) {
   if (!record(value)) return null
   const rawVerdicts = field(value, 'verdicts')
-  const length = Math.min(arrayLength(rawVerdicts), MAX_VERDICTS)
+  const totalVerdicts = arrayLength(rawVerdicts)
+  const length = Math.min(totalVerdicts, MAX_VERDICTS)
   const verdicts = []
   const allowed = new Set(['supported', 'unsupported', 'unclear', 'cited'])
   for (let index = 0; index < length && budget.remaining > 0; index++) {
@@ -66,12 +67,15 @@ function normalizeVerification(value, budget) {
       note: text(field(raw, 'note'), 200, budget),
     })
   }
-  if (!verdicts.length) return null
+  const omittedVerdicts = Math.max(0, totalVerdicts - verdicts.length)
+  if (!verdicts.length && !omittedVerdicts) return null
   return {
     verdicts,
     method: text(field(value, 'method'), 64, budget, true) || 'unknown',
     // Never trust an arbitrary aggregate that can disagree with the bounded visible verdicts.
     unsupported: verdicts.filter(verdict => verdict.verdict === 'unsupported').length,
+    totalVerdicts,
+    omittedVerdicts,
   }
 }
 
@@ -111,14 +115,16 @@ function normalizeCollections(value, budget) {
 function normalizeResearchMemoFrom(value, budget) {
   const src = record(value) ? value : {}
   const summary = text(field(src, 'summary'), SUMMARY_CHARS, budget)
-  const reasoning = text(field(src, 'reasoning'), REASONING_CHARS, budget)
   const trigger = text(field(src, 'trigger'), 64, budget, true)
-  // Match the writer boundary's priority: retain conclusion/debug text before optional collections.
+  // Project verifier evidence before debug prose and optional collections. A saturated memo must
+  // never retain recommendations while silently dropping its unsupported-claim warning.
+  const verification = normalizeVerification(field(src, 'verification'), budget)
+  const reasoning = text(field(src, 'reasoning'), REASONING_CHARS, budget)
   const normalized = normalizeCollections(src, budget)
   normalized.summary = summary
   normalized.reasoning = reasoning
   normalized.trigger = trigger
-  normalized.verification = normalizeVerification(field(src, 'verification'), budget)
+  normalized.verification = verification
   return normalized
 }
 

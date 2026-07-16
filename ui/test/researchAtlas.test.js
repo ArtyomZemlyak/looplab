@@ -5,6 +5,7 @@ import {
   ATLAS_RENDER_LIMITS,
   boundedAtlasText,
   buildResearchAtlasView,
+  isValidAtlasSourceEnvelope,
   mergeCurationLogs,
   mergeResearchAtlasPayload,
   reconcileAtlasSourceStatuses,
@@ -73,6 +74,29 @@ test('Atlas derives evidence balance from sanitized totals instead of payload la
   ])
 })
 
+test('Atlas preserves bounded structured contradictions and cannot render them support-only', () => {
+  const contradicts = Array.from(
+    { length: ATLAS_RENDER_LIMITS.evidence + 3 },
+    (_, index) => `opposite claim ${index}\n${'x'.repeat(500)}`,
+  )
+  const view = buildResearchAtlasView({}, { claims: [
+    {
+      ...claim(8), epistemic: 'mixed', n_support: 1, support: ['run-8:node-1'],
+      n_oppose: 0, oppose: [], contradicts,
+    },
+    {
+      ...claim(9), epistemic: 'mixed', n_support: 1, support: ['run-9:node-1'],
+      n_oppose: 0, oppose: [], contradicts: [],
+    },
+  ] }, {})
+
+  assert.equal(view.claims[0].epistemic, 'mixed')
+  assert.equal(view.claims[0].nContradicts, contradicts.length)
+  assert.equal(view.claims[0].contradicts.length, ATLAS_RENDER_LIMITS.evidence)
+  assert.ok(view.claims[0].contradicts.every(value => value.length <= 300 && !value.includes('\n')))
+  assert.equal(view.claims[1].epistemic, 'mixed', 'explicit structured mixed state must survive')
+})
+
 test('Atlas projection applies hard caps before React receives portfolio collections', () => {
   const concepts = Array.from({ length: ATLAS_RENDER_LIMITS.concepts + 3 }, (_, index) => ({
     concept: `concept-${index}`,
@@ -105,14 +129,22 @@ test('Atlas projection applies hard caps before React receives portfolio collect
   assert.equal(view.hiddenCuration, 7)
 })
 
-test('Atlas source-revision reduces without an unbounded spread on a huge ledger', () => {
-  // sourceRevision (via reconcileAtlasSourceStatuses) reads the RAW, un-take()'d `entries` array; a
-  // pathologically large / mis-limited curation ledger must not throw RangeError via Math.max(...spread)
-  // and crash the Atlas route — it must degrade and still fingerprint the max revision.
-  const huge = { conceptCuration: { entries: Array.from({ length: 200000 }, (_, i) => ({ revision: i })) } }
+test('Atlas source-revision touches only the bounded visible slice of a huge raw ledger', () => {
+  let indexedReads = 0
+  const entries = new Proxy(new Array(200000), {
+    get(target, property, receiver) {
+      if (/^\d+$/u.test(String(property))) {
+        indexedReads += 1
+        return { revision: 200000 - Number(property) }
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const huge = { conceptCuration: { entries } }
   const statuses = reconcileAtlasSourceStatuses({}, huge, 'now')
   assert.equal(statuses.conceptCuration.state, 'current')
-  assert.equal(statuses.conceptCuration.revision, String(199999))   // max revision, computed without crashing
+  assert.equal(statuses.conceptCuration.revision, '200000')
+  assert.ok(indexedReads <= ATLAS_RENDER_LIMITS.curation)
 })
 
 test('concept and claim steward logs merge deterministically by time, revision, then kind', () => {
@@ -152,6 +184,24 @@ test('a partial refresh replaces successful slices and preserves last-good faile
   assert.equal(merged.claims, freshClaims)
   assert.equal(merged.conceptCuration, previous.conceptCuration)
   assert.equal(merged.claimCuration, previous.claimCuration)
+})
+
+test('malformed fulfilled Atlas envelopes are rejected and retain last-good source data', () => {
+  assert.equal(isValidAtlasSourceEnvelope('claims', {}), false)
+  assert.equal(isValidAtlasSourceEnvelope('claims', { claims: [] }), true)
+  assert.equal(isValidAtlasSourceEnvelope('atlas', {
+    explored: [], thin_coverage: [], contradictions: [],
+  }), true)
+  assert.equal(isValidAtlasSourceEnvelope('conceptCuration', { entries: [] }), true)
+
+  const previousPayload = { claims: { revision: 7, claims: [claim(7)] } }
+  const previousStates = reconcileAtlasSourceStatuses({}, previousPayload, 'before')
+  const successful = isValidAtlasSourceEnvelope('claims', {}) ? { claims: {} } : {}
+  const merged = mergeResearchAtlasPayload(previousPayload, successful)
+  const states = reconcileAtlasSourceStatuses(previousStates, successful, 'after')
+  assert.equal(merged.claims, previousPayload.claims)
+  assert.equal(states.claims.state, 'retained-stale')
+  assert.equal(states.claims.loadedAt, 'before')
 })
 
 test('Atlas source provenance distinguishes current, retained-stale, and failed slices', () => {

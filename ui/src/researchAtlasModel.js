@@ -35,13 +35,28 @@ const sourceRevision = (key, value) => {
     const revision = count(envelope.revision, -1)
     return revision >= 0 ? String(revision) : ''
   }
-  // Reduce, don't spread: `envelope.entries` is the RAW server response (not yet passed through
-  // take()), so `Math.max(...revisions)` on a pathologically large / mis-limited / corrupted ledger
-  // would throw RangeError ("Maximum call stack size exceeded") INSIDE the setResource updater and
-  // crash the whole Atlas route — the opposite of this module's "enforce hard render caps" contract.
-  const revisions = list(envelope.entries)
-    .map(entry => count(record(entry).revision, -1)).filter(value => value >= 0)
-  return revisions.length ? String(revisions.reduce((m, v) => (v > m ? v : m), -Infinity)) : ''
+  // The raw envelope is outside the render boundary. Inspect only the bounded visible slice so a
+  // mis-limited/corrupt ledger cannot turn a watermark calculation into O(raw entries) work.
+  const entries = list(envelope.entries)
+  const length = Math.min(entries.length, ATLAS_RENDER_LIMITS.curation)
+  let maximum = -1
+  for (let index = 0; index < length; index++) {
+    const revision = count(record(entries[index]).revision, -1)
+    if (revision > maximum) maximum = revision
+  }
+  return maximum >= 0 ? String(maximum) : ''
+}
+
+export function isValidAtlasSourceEnvelope(key, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  if (key === 'atlas') {
+    return Array.isArray(value.explored)
+      && Array.isArray(value.thin_coverage)
+      && Array.isArray(value.contradictions)
+  }
+  if (key === 'claims') return Array.isArray(value.claims)
+  if (key === 'conceptCuration' || key === 'claimCuration') return Array.isArray(value.entries)
+  return false
 }
 
 // Four Atlas endpoints refresh independently. Preserve source-local provenance so a successful claims
@@ -113,11 +128,20 @@ const normalizeClaim = value => {
   const support = textList(row.support, ATLAS_RENDER_LIMITS.evidence)
   const oppose = textList(row.oppose, ATLAS_RENDER_LIMITS.evidence)
   const unverified = textList(row.unverified, ATLAS_RENDER_LIMITS.evidence)
+  // Structured claims represent opposite-polarity assertions separately from attempt-level `oppose`
+  // refs. Preserve that bounded counter-evidence or a mixed row can misleadingly look support-only.
+  const rawContradicts = list(row.contradicts)
+  const contradicts = textList(rawContradicts, ATLAS_RENDER_LIMITS.evidence, 300)
   const nSupport = Math.max(count(row.n_support), support.length)
   const nOppose = Math.max(count(row.n_oppose), oppose.length)
-  const epistemic = nSupport > 0
-    ? (nOppose > 0 ? 'mixed' : 'supported')
-    : (nOppose > 0 ? 'refuted' : 'inconclusive')
+  // The backend's structured `mixed` state can encode assertion-level counter-evidence that is not
+  // counted in n_oppose. Honor it when the row carries evidence, while still deriving malformed or
+  // contradictory support/refute labels from sanitized counts.
+  const explicitMixed = row.epistemic === 'mixed' && (nSupport > 0 || nOppose > 0)
+  const mixed = contradicts.length > 0 || explicitMixed || (nSupport > 0 && nOppose > 0)
+  const epistemic = mixed
+    ? 'mixed'
+    : (nSupport > 0 ? 'supported' : (nOppose > 0 ? 'refuted' : 'inconclusive'))
   return {
     uid: boundedAtlasText(row.claim_uid, 180),
     statement,
@@ -126,9 +150,11 @@ const normalizeClaim = value => {
     nSupport,
     nOppose,
     nUnverified: Math.max(count(row.n_unverified), unverified.length),
+    nContradicts: Math.max(count(row.n_contradicts), rawContradicts.length, contradicts.length),
     support,
     oppose,
     unverified,
+    contradicts,
     scopes: textList(row.scopes, ATLAS_RENDER_LIMITS.evidence),
     runs: textList(row.runs, ATLAS_RENDER_LIMITS.evidence, 160),
   }

@@ -15,6 +15,9 @@ from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 MAX_RESEARCH_SOURCES = 64
 _MAX_ADVISORY_TEXT = 64_000
 _MAX_TREE_ITEMS = 512
+_MAX_VERIFICATION_TEXT = 24_000
+_MAX_VERIFICATION_VERDICTS = 64
+_VERDICTS = frozenset({"supported", "unsupported", "unclear", "cited"})
 
 
 def _text(value, cap: int, budget: list[int], *, single_line: bool = False) -> str:
@@ -66,28 +69,71 @@ def _tree(value, budget: list[int], items: list[int], depth: int = 0):
     return _text(value, 2_000, budget)
 
 
+def _verification(value, budget: list[int], items: list[int]):
+    """Project the verifier's indexed verdict contract without starving late rows.
+
+    A generic depth-first tree projection lets a few oversized early statements consume the whole
+    allowance and silently drop a later ``unsupported`` verdict. Verdict order is also positional with
+    memo claims, so sorting warnings first would corrupt the contract. Give every bounded row a fair
+    share instead; keep the generic legacy-tree behavior for non-contract verification payloads.
+    """
+    if not isinstance(value, dict) or not isinstance(value.get("verdicts"), (list, tuple)):
+        return _tree(value, budget, items)
+
+    raw_rows = list(itertools.islice(value["verdicts"], _MAX_VERIFICATION_VERDICTS))
+    method = _text(value.get("method", "unknown"), 64, budget, single_line=True) or "unknown"
+    verdicts = []
+    for index, raw in enumerate(raw_rows):
+        remaining_rows = len(raw_rows) - index
+        # Equal-share allocation preserves every positional verdict under the aggregate cap. The note
+        # precedes the duplicated statement so the verifier's reason survives tight legacy payloads.
+        allowance = budget[0] // remaining_rows if remaining_rows else 0
+        row_budget = [allowance]
+        row = raw if isinstance(raw, dict) else {}
+        candidate = _text(row.get("verdict", "unclear"), 32, row_budget,
+                          single_line=True).lower()
+        verdict = candidate if candidate in _VERDICTS else "unclear"
+        note = _text(row.get("note", ""), min(200, row_budget[0]), row_budget,
+                     single_line=True)
+        statement = _text(row.get("statement", ""), min(1_600, row_budget[0]), row_budget)
+        budget[0] -= allowance - row_budget[0]
+        verdicts.append({"statement": statement, "verdict": verdict, "note": note})
+
+    return {
+        "verdicts": verdicts,
+        "method": method,
+        # Recompute the aggregate from the bounded positional rows; never persist a conflicting
+        # model/provider aggregate beside the verdicts the operator can actually inspect.
+        "unsupported": sum(row["verdict"] == "unsupported" for row in verdicts),
+    }
+
+
 def sanitize_research_memo_payload(payload) -> dict:
     """Canonicalize a model-, tool-, or legacy-event research memo."""
     src = payload if isinstance(payload, dict) else {}
     budget = [_MAX_ADVISORY_TEXT]
-    tree_items = [_MAX_TREE_ITEMS]
+    verification_items = [_MAX_TREE_ITEMS // 2]
+    proposal_items = [_MAX_TREE_ITEMS // 2]
     out = {
         "summary": _text(src.get("summary", ""), 4_000, budget),
-        "reasoning": _text(src.get("reasoning", ""), 12_000, budget),
-        "findings": [_text(v, 1_200, budget) for v in _items(src.get("findings"), 32)],
+        "reasoning": "",
+        "findings": [],
         "claims": [],
         "sources": [],
-        "recommended_directions": [
-            _text(v, 1_200, budget, single_line=True)
-            for v in _items(src.get("recommended_directions"), 16)
-        ],
-        "proposed_ideas": [
-            _tree(v, budget, tree_items) for v in _items(src.get("proposed_ideas"), 16)
-        ],
+        "recommended_directions": [],
+        "proposed_ideas": [],
         "at_node": (src.get("at_node") if type(src.get("at_node")) is int
                     and 0 <= src.get("at_node") <= (1 << 63) - 1 else None),
         "trigger": _text(src.get("trigger", ""), 64, budget, single_line=True),
     }
+    if "verification" in src:
+        # Reserve a bounded slice for trust output before model narrative/proposals. The shared 64k
+        # cap must not persist recommendations while silently erasing unsupported verdicts.
+        allowance = min(_MAX_VERIFICATION_TEXT, budget[0])
+        verification_budget = [allowance]
+        out["verification"] = _verification(
+            src["verification"], verification_budget, verification_items)
+        budget[0] -= allowance - verification_budget[0]
     for claim in _items(src.get("claims"), 64):
         if not isinstance(claim, dict):
             continue
@@ -106,12 +152,19 @@ def sanitize_research_memo_payload(payload) -> dict:
             "url": _text(source.get("url", ""), 1_600, budget, single_line=True),
             "snippet": _text(source.get("snippet", ""), 200, budget),
         })
-    if "verification" in src:
-        out["verification"] = _tree(src["verification"], budget, tree_items)
+    out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget)
+    out["findings"] = [_text(v, 1_200, budget) for v in _items(src.get("findings"), 32)]
+    out["recommended_directions"] = [
+        _text(v, 1_200, budget, single_line=True)
+        for v in _items(src.get("recommended_directions"), 16)
+    ]
+    out["proposed_ideas"] = [
+        _tree(v, budget, proposal_items) for v in _items(src.get("proposed_ideas"), 16)
+    ]
     return out
 
 
-_REPORT_LIST_FIELDS = ("what_worked", "learnings", "what_didnt", "next_directions", "caveats")
+_REPORT_LIST_FIELDS = ("caveats", "what_worked", "learnings", "what_didnt", "next_directions")
 
 
 def sanitize_report_payload(payload) -> dict:
@@ -126,6 +179,8 @@ def sanitize_report_payload(payload) -> dict:
         "verdict": _text(src.get("verdict", ""), 4_000, budget),
         "champion_summary": _text(src.get("champion_summary", ""), 4_000, budget),
     }
+    # Caveats are trust-significant narrative. Give them the shared budget before positive/ordinary
+    # lists so a saturated report cannot durably erase its own warnings.
     for field in _REPORT_LIST_FIELDS:
         out[field] = [_text(value, 1_200, budget, single_line=True)
                       for value in _items(src.get(field), 32)]

@@ -4,7 +4,7 @@ import {
 } from './api.js'
 import {
   buildResearchAtlasView, mergeCurationLogs, mergeResearchAtlasPayload,
-  reconcileAtlasSourceStatuses,
+  isValidAtlasSourceEnvelope, reconcileAtlasSourceStatuses,
 } from './researchAtlasModel.js'
 import './research-atlas.css'
 
@@ -50,9 +50,11 @@ function SourceWatermark({ sourceKey, label, source, children }) {
 
 function ClaimCard({ claim, compact = false }) {
   const evidence = claim.support.length + claim.oppose.length + claim.unverified.length
+    + claim.contradicts.length
   const hiddenEvidence = Math.max(0, claim.nSupport - claim.support.length)
     + Math.max(0, claim.nOppose - claim.oppose.length)
     + Math.max(0, claim.nUnverified - claim.unverified.length)
+    + Math.max(0, claim.nContradicts - claim.contradicts.length)
   const context = [
     ...claim.scopes.map(value => `claim grouping · ${value}`),
     ...claim.runs.map(value => `run · ${value}`),
@@ -67,10 +69,11 @@ function ClaimCard({ claim, compact = false }) {
       <span className="pill">{claim.maturity.replaceAll('-', ' ')}</span>
     </div>
     <p>{claim.statement}</p>
-    <div className="atlas-claim-counts" aria-label="Claim attempt reference counts">
+    <div className="atlas-claim-counts" aria-label="Claim evidence counts">
       <span>supporting attempt refs <b>{claim.nSupport}</b></span>
       <span>opposing attempt refs <b>{claim.nOppose}</b></span>
       {claim.nUnverified > 0 && <span>unverified attempt refs <b>{claim.nUnverified}</b></span>}
+      {claim.nContradicts > 0 && <span>contradicting claim records <b>{claim.nContradicts}</b></span>}
       {claim.scopes.length > 0 && <span title={claim.scopes.join(', ')}>
         {countLabel(claim.scopes.length, 'claim grouping')}
       </span>}
@@ -80,12 +83,15 @@ function ClaimCard({ claim, compact = false }) {
       {context.length > 3 && <span className="muted">+{context.length - 3} more</span>}
     </div>}
     {!compact && (evidence > 0 || hiddenEvidence > 0) && <details>
-      <summary>Show bounded attempt references</summary>
+      <summary>Show bounded evidence context</summary>
       <div className="atlas-evidence">
-        {evidence === 0 && <span className="atlas-evidence-boundary">No references were included in this response.</span>}
+        {evidence === 0 && <span className="atlas-evidence-boundary">No evidence context was included in this response.</span>}
         {claim.support.map((ref, index) => <code key={`s-${index}`}>support attempt · {ref}</code>)}
         {claim.oppose.map((ref, index) => <code key={`o-${index}`}>oppose attempt · {ref}</code>)}
         {claim.unverified.map((ref, index) => <code key={`u-${index}`}>unverified attempt · {ref}</code>)}
+        {claim.contradicts.map((statement, index) => <code key={`c-${index}`}>
+          contradicting claim · {statement}
+        </code>)}
         {hiddenEvidence > 0 && <span className="atlas-evidence-boundary">
           {countLabel(hiddenEvidence, 'additional reference')} omitted by the per-claim render limit.
         </span>}
@@ -135,11 +141,18 @@ export default function ResearchAtlas({ onBack }) {
       let loaded = 0
       results.forEach((result, index) => {
         const source = SOURCES[index]
-        if (result.status === 'fulfilled') {
+        if (result.status === 'fulfilled' && isValidAtlasSourceEnvelope(source.key, result.value)) {
           successful[source.key] = result.value
           loaded += 1
         } else {
-          errors.push({ label: source.label, message: errorText(result.reason), status: result.reason?.status })
+          // HTTP success is not schema success. Quarantine malformed envelopes so they cannot replace
+          // last-good evidence or falsely advance a source watermark to "current".
+          const malformed = result.status === 'fulfilled'
+          errors.push({
+            label: source.label,
+            message: malformed ? 'Malformed response envelope' : errorText(result.reason),
+            status: malformed ? null : result.reason?.status,
+          })
         }
       })
       const loadedAt = new Date().toISOString()

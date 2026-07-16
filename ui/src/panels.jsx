@@ -99,12 +99,19 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
           {(m.findings || []).length > 0 && <><div className="section-h">Findings</div>
             <ul className="bul">{m.findings.map((f, j) => <li key={j}>{f}</li>)}</ul></>}
           {/* D8: decoupled Verifier verdicts over the memo's claims (synthesis is the weak link) */}
-          {m.verification && (m.verification.verdicts || []).length > 0 && <>
-            <div className="section-h">Verified claims
+          {m.verification && ((m.verification.verdicts || []).length > 0
+            || m.verification.omittedVerdicts > 0) && <>
+            <div className="section-h">Verification
               {m.verification.unsupported > 0 &&
-                <span className="pill warn" title="claims whose cited evidence does not support them">
+                <span className="chip warn" title="claims whose cited evidence does not support them">
                   {m.verification.unsupported} unsupported</span>}
+              {m.verification.omittedVerdicts > 0 &&
+                <span className="chip warn">verification incomplete</span>}
               <span className="muted"> ({m.verification.method})</span></div>
+            {m.verification.omittedVerdicts > 0 && <p className="memo-verification-incomplete" role="note">
+              Showing {m.verification.verdicts.length} of {m.verification.totalVerdicts} verifier verdicts;
+              omitted verdicts make this check incomplete.
+            </p>}
             <ul className="bul">{m.verification.verdicts.map((v, j) => (
               <li key={j} className={v.verdict === 'supported' ? 'ok'
                 : (v.verdict === 'unclear' || v.verdict === 'cited') ? '' : 'bad'}>
@@ -227,8 +234,10 @@ export function TrustPanel({ state, runId, onClose, onSelect, onToast, readOnly 
           the config snapshot alone can claim a gate the fold never engages. */}
       {(state.trust_gate || cfg) && <div className="muted" style={{ marginBottom: 6 }}>
         enforcement: <b>{state.trust_gate || cfg?.trust_gate || 'audit'}</b>{(state.trust_gate || cfg?.trust_gate || 'audit') === 'audit'
-          ? ' — flags are logged only; set trust_gate=gate/block (or the thorough profile) to keep a flagged node from winning.'
-          : ' — a flagged node is excluded from best-selection.'}</div>}
+          ? ' — signals are logged only; set trust_gate=gate/block (or the thorough profile) to keep a high-precision flag from winning.'
+          : ' — a high-precision flag is excluded from best-selection and breeding/confirmation.'}
+        {' '}Only high-precision signals gate; broad critic/perfect-score warnings stay advisory, except
+        <code> critic:hardcoded_metric</code>, which is classified as high precision.</div>}
       {(state.reward_hacks || []).length
         ? <DataTable caption="Reward-hacking signals" card={false}><table className="tbl"><thead><tr><th>node</th><th>signal</th><th>detail</th><th>action</th></tr></thead><tbody>
           {state.reward_hacks.map((h, i) => <tr key={i}>

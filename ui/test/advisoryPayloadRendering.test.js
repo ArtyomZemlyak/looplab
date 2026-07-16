@@ -40,6 +40,9 @@ test('deep-research memo normalization bounds huge and malformed provider shapes
   assert.ok(memo.findings.length <= RESEARCH_MEMO_LIMITS.findings)
   assert.ok(memo.recommended_directions.length <= RESEARCH_MEMO_LIMITS.directions)
   assert.ok(memo.sources.length <= RESEARCH_MEMO_LIMITS.sources)
+  assert.ok(memo.verification?.verdicts?.length > 0,
+    'verifier verdicts must survive before optional memo collections consume the budget')
+  assert.ok(memo.verification.unsupported > 0)
   assert.equal(memo.at_node, null)
   assert.equal(memo.trigger, '')
   assert.ok(JSON.stringify(memo).length < RESEARCH_MEMO_LIMITS.memoChars + 8_000,
@@ -65,6 +68,18 @@ test('memo collection scans and renders only a bounded newest tail', () => {
   assert.equal(projection.omitted, 10_000 - RESEARCH_MEMO_LIMITS.memos)
   assert.equal(projection.memos[0].sourceIndex, 10_000 - RESEARCH_MEMO_LIMITS.memos)
   assert.equal(projection.memos.at(-1).summary, 'memo 9999')
+})
+
+test('memo verifier truncation is explicit even when unsupported verdicts are in the omitted tail', () => {
+  const verdicts = Array.from({ length: RESEARCH_MEMO_LIMITS.verificationVerdicts }, (_, index) => ({
+    verdict: 'supported', statement: `supported ${index}`,
+  }))
+  verdicts.push({ verdict: 'unsupported', statement: 'hidden unsupported tail' })
+  const memo = normalizeResearchMemo({ verification: { method: 'llm', verdicts } })
+  assert.equal(memo.verification.totalVerdicts, verdicts.length)
+  assert.equal(memo.verification.verdicts.length, RESEARCH_MEMO_LIMITS.verificationVerdicts)
+  assert.equal(memo.verification.unsupported, 0)
+  assert.equal(memo.verification.omittedVerdicts, 1)
 })
 
 test('memo collection enforces per-memo and aggregate text budgets newest-first', () => {
@@ -121,6 +136,14 @@ test('report normalization preserves legacy string lists as one bounded item', (
   assert.equal(oversized.what_worked.length, REPORT_LIMITS.listItems)
   assert.ok(oversized.what_worked.every(value => value.length <= REPORT_LIMITS.listItemChars))
   assert.equal(normalizeRunReport('legacy prose'), null)
+
+  const caveatPriority = normalizeRunReport({
+    what_worked: Array.from({ length: REPORT_LIMITS.listItems }, () => 'w'.repeat(REPORT_LIMITS.listItemChars)),
+    learnings: Array.from({ length: REPORT_LIMITS.listItems }, () => 'l'.repeat(REPORT_LIMITS.listItemChars)),
+    caveats: ['critical advisory caveat'],
+  })
+  assert.deepEqual(caveatPriority.caveats, ['critical advisory caveat'],
+    'ordinary positive narrative must not exhaust the shared budget before caveats')
 })
 
 test('Markdown export also consumes the normalized legacy report shape', () => {
@@ -196,6 +219,15 @@ test('MemoCard and Report SSR stay bounded for 10k-entry and malformed payloads'
     assert.doesNotMatch(memoMarkup, /href="javascript:/)
     assert.ok((memoMarkup.match(/<li/g) || []).length <= RESEARCH_MEMO_LIMITS.findings + RESEARCH_MEMO_LIMITS.sources)
     assert.ok(memoMarkup.length < 100_000)
+
+    const truncatedMarkup = renderToStaticMarkup(React.createElement(MemoCard, {
+      idx: 0, open: true, onToggle() {},
+      memo: { verification: { method: 'llm', verdicts: Array.from({ length: 65 }, (_, index) => ({
+        verdict: index === 64 ? 'unsupported' : 'supported', statement: `claim ${index}`,
+      })) } },
+    }))
+    assert.match(truncatedMarkup, /verification incomplete/)
+    assert.match(truncatedMarkup, /Showing 64 of 65 verifier verdicts/)
 
     const state = {
       run_id: 'run', task_id: 'task', goal: 'bounded report', direction: 'min', phase: 'running',

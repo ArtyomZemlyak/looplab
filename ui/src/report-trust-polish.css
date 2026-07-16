@@ -61,6 +61,7 @@
 .agent-report-caveats-title .muted { font-size: 11px; }
 .agent-report-caveats .bul { margin-block: 6px 0; }
 .memo-verification-title { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.memo-verification-incomplete { color: var(--trust-warn-ink); overflow-wrap: anywhere; }
 .memo-verification-list .bad { color: var(--trust-alarm-ink); }
 .memo-verification-list .ok { color: var(--trust-ok-ink); }
 

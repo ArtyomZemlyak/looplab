@@ -5,16 +5,22 @@ import { safeExternalHref } from './urlSafety.js'
 import { normalizeResearchMemo } from './researchMemoModel.js'
 
 function MemoVerification({ verification }) {
-  if (!verification?.verdicts?.length) return null
+  const verdicts = verification?.verdicts || []
+  const omitted = verification?.omittedVerdicts || 0
+  if (!verdicts.length && !omitted) return null
   return <>
     <div className="section-h memo-verification-title">Verification
       {verification.unsupported > 0 && <span className="chip warn"
         title="claims whose cited evidence does not support them">
         {verification.unsupported} unsupported
       </span>}
+      {omitted > 0 && <span className="chip warn">verification incomplete</span>}
       <span className="muted"> ({verification.method})</span>
     </div>
-    <ul className="bul memo-verification-list">{verification.verdicts.map((item, index) => (
+    {omitted > 0 && <p className="memo-verification-incomplete" role="note">
+      Showing {verdicts.length} of {verification.totalVerdicts} verifier verdicts; omitted verdicts make this check incomplete.
+    </p>}
+    <ul className="bul memo-verification-list">{verdicts.map((item, index) => (
       <li key={index} className={item.verdict === 'supported' ? 'ok'
         : (item.verdict === 'unclear' || item.verdict === 'cited') ? '' : 'bad'}>
         <span className="pill">{item.verdict}</span> {item.statement || '(statement unavailable)'}
