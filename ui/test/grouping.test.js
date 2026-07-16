@@ -7,7 +7,7 @@ import {
   computeGroups, nodeGroupMap, autoCollapseSet, isMergeEntryEdge, themeFilteredGroupAggregate,
 } from '../src/grouping.js'
 
-const NODE_W = 188, NODE_H = 78
+const NODE_W = 188, NODE_H = 84
 
 // Build a nodes object from a compact spec. operator defaults to merge when >1 parent.
 function mk(spec) {

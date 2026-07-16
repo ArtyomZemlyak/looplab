@@ -16,7 +16,7 @@ import {
 } from './grouping.js'
 import { DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag } from './dagViewport.js'
 
-const NODE_W = 188, NODE_H = 78
+const NODE_W = 188, NODE_H = 84
 
 // fitView runs only at initialization. A semantic collapse can turn a 131-card forest into five
 // operator aggregates while retaining the old transform; a bounded regroup also moves every card.
@@ -84,18 +84,18 @@ function agentBadge(rep) {
 
 // Champion lightning (Reactor/Energy "full" only): jagged arcs crackling around the best node's card.
 // Always rendered for the best node; CSS hides it unless [data-fx="full"]. There's exactly ONE champion,
-// so the extra SVG is negligible. Coords are in the card's 188×78 space; bolts spill outside via overflow.
+// so the extra SVG is negligible. Coords are in the card's 188×84 space; bolts spill outside via overflow.
 const BOLTS = [
   'M22 4 L12 -10 L24 -18 L8 -34',          // top-left strike
   'M166 4 L180 -10 L166 -20 L184 -34',     // top-right strike
   'M4 28 L-14 24 L-4 40 L-20 50',          // left arc
   'M184 30 L202 26 L190 42 L208 52',       // right arc
   'M76 1 L84 -16 L98 -7 L106 -24 L114 -9', // top-centre crown
-  'M70 78 L62 92 L80 88 L70 104',          // bottom discharge
+  'M70 84 L62 98 L80 94 L70 110',          // bottom discharge
 ]
 function Bolts() {
   return (
-    <svg className="ll-bolts" viewBox="0 0 188 78" preserveAspectRatio="none" aria-hidden="true">
+    <svg className="ll-bolts" viewBox="0 0 188 84" preserveAspectRatio="none" aria-hidden="true">
       {BOLTS.map((d, i) => (
         <path key={i} d={d} className={i % 3 === 1 ? 'b-accent' : ''} style={{ animationDelay: `${(i * 0.17).toFixed(2)}s` }} />
       ))}
@@ -155,6 +155,9 @@ function ExpNode({ data }) {
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,
     node.idea?.theme ? `theme ${node.idea.theme}` : null,
+    node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
+    node.research_origin ? 'proposed from deep research directions' : null,
+    node.status === 'failed' ? `failure reason ${node.error_reason || 'not reported'}` : null,
     'Select to inspect',
   ].filter(Boolean).join(', ')
   // Zoom LOD: below the threshold the full card is sub-pixel mush AND expensive (4 text rows + a Spark
@@ -187,6 +190,15 @@ function ExpNode({ data }) {
         {/* operator = icon only (the word is in the title + legend); kept monochrome so colour stays status */}
         <span className="op" title={node.operator}><OpIcon name={op.icon} /></span>
         <span className="spacer" style={{ flex: 1 }} />
+        {node.origin?.run_id ? <a className="origin-chip compact" href={`#/run/${encodeURIComponent(node.origin.run_id)}`}
+          onClick={(e) => e.stopPropagation()}
+          aria-label={`Open source run ${node.origin.run_id}, experiment ${node.origin.node_id}${node.research_origin ? ', informed by research' : ''}`}
+          title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
+            + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
+            + (node.research_origin ? ' · informed by deep research' : '')}>⤴</a>
+          : node.research_origin ? <span className="origin-chip rsch compact" role="img"
+          aria-label="Proposed from deep research directions"
+          title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /></span> : null}
         {sweep && <span className="badge sweep" title={`intra-node sweep · ${sw.count} trials — open the node's Trials tab`}>⊞ {sw.count}</span>}
         {agentBadge(node.agent_report)}
       </div>
@@ -197,30 +209,21 @@ function ExpNode({ data }) {
         {/* confirmed = a compact tick, not a restated 'robust …' line; the full ±std lives in the Inspector */}
         {confirmed && <span className="conf-chip" title={`robust ${fmt(node.confirmed_mean, 3)} ±${fmt(node.confirmed_std, 2)} over ${node.confirmed_seeds} seeds`}>✓{node.confirmed_seeds}×</span>}
       </div>
-      {isMerge
-        ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
-            return <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
-        : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
-      {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
-      {node.origin?.run_id && <a className="origin-chip" href={`#/run/${encodeURIComponent(node.origin.run_id)}`}
-        onClick={(e) => e.stopPropagation()}
-        title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
-          + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
-          + ' — click to open that run'}>⤴ from {node.origin.run_id} #{node.origin.node_id}</a>}
-      {/* deep-research provenance: this experiment was proposed right after a research memo (its
-          directions were the active steering) — the 💡 marks where research landed in the tree */}
-      {node.research_origin && <span className="origin-chip rsch"
-        title={`proposed just after deep research (${node.research_origin.trigger || 'auto'}) at node ${node.research_origin.at_node} — its directions were steering`}><OpIcon name="bulb" size={11} /> from research</span>}
-      {/* one optional sub-line, reserved for the ONE thing shown nowhere else: why it failed / infeasible */}
-      {sweep
-        ? <div className="sub sweep-foot">
+      {/* A fixed-height graph node gets exactly one context row. Failure/constraint truth wins over
+          sweep detail, then merge/change copy. Provenance stays independently reachable in the header. */}
+      {node.status === 'failed'
+        ? <div className="sub"><span className="badge reason">{node.error_reason || 'failed'}</span></div>
+        : node.feasible === false
+          ? <div className="sub"><span className="badge reason">infeasible</span></div>
+          : sweep ? <div className="sub sweep-foot">
             <Spark series={sw.series} width={104} height={16} />
             <span className="spacer" style={{ flex: 1 }} />
             {sw.failed ? <span className="dot fail" title={`${sw.failed} failed trials`}>●{sw.failed}</span> : null}
           </div>
-        : node.status === 'failed'
-          ? <div className="sub"><span className="badge reason">{node.error_reason || 'failed'}</span></div>
-          : node.feasible === false ? <div className="sub"><span className="badge reason">infeasible</span></div> : null}
+          : isMerge
+            ? (() => { const ml = '⊕ ' + mergeThemes.join(' + ')
+                return <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
+            : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </div>
     {onOpenActions && <NodeActionTrigger nodeId={node.id} expanded={actionsOpen} onOpen={onOpenActions} />}
