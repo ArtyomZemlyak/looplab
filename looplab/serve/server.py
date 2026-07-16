@@ -531,9 +531,14 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                            and parts[4] == "comments"))
+        # CODEX AGENT: ConceptFrames are generation/sequence-bound live projections. Apply this in
+        # middleware, not only in the handler, so unknown lenses/runs, auth denials and validation errors
+        # cannot be cached as if they described a later generation.
+        is_concepts = (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
+                       and parts[4] == "concepts")
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
         if (is_command or is_start_status or is_log_page or is_report_refresh or is_scope_report
-                or is_job or is_comments or is_attention):
+                or is_job or is_comments or is_concepts or is_attention):
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
             vary.update({"X-LoopLab-Token", "Authorization"})

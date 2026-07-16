@@ -25,13 +25,38 @@ def _demo_run(root):
     return rd
 
 
+def _assert_frame_parity(data):
+    """The UI must be able to consume one internally coherent, self-contained frame."""
+    included = data["completeness"]["included"]
+    ref_count = sum(len(refs) for refs in data["experiment_refs"].values())
+    assert included["memberships"] == included["experiment_refs"] == ref_count
+    assert set(data["touch"]) == set(data["metrics"]["rows"]) == set(data["experiment_refs"])
+    integrity = data["completeness"]["source_integrity"]
+    assert data["authority"]["source_authoritative"] is (
+        integrity["complete"] and integrity["generation_identified"])
+
+
 def test_concepts_endpoint_is_a_lens(tmp_path):
     _demo_run(tmp_path)
     client = TestClient(make_app(tmp_path))
     r = client.get("/api/runs/demo/concepts")
     assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
     data = r.json()
+    assert data["schema"] == 1 and data["status"] == "complete"
+    assert data["generation"] and len(data["generation"]) == 64
+    assert data["captured_seq"] == data["max_seq"] == 4
+    assert data["requested_seq"] is None and data["historical"] is False
+    assert data["authoritative"] is True and data["authority"] == {
+        "authoritative": True,
+        "source_authoritative": True,
+        "complete": True,
+        "scope": "captured_recoverable_event_prefix",
+        "semantic_claims_verified": False,
+    }
+    assert data["complete"] is True and data["completeness"]["complete"] is True
     assert data["lens"] == "is_a"
+    assert data["requested_lens"] == data["effective_lens"] == "is_a"
     assert [item["name"] for item in data["lenses"]][0] == "is_a"  # the lens pack ships, is_a default
     nodes = data["tree"]["nodes"]
     # the is_a tree materializes the full path chain from the authored deep tags
@@ -44,12 +69,21 @@ def test_concepts_endpoint_is_a_lens(tmp_path):
     assert rows["loss/contrastive/dcl"]["best"] == 0.9
     assert rows["architecture/moe"]["best"] == 0.9
     assert data["touch"]["loss/contrastive/dcl"] == 1
+    ref = data["experiment_refs"]["loss/contrastive/dcl"]
+    assert ref == [{
+        "node_id": 0, "node_generation": 0, "metric": 0.9,
+        "metric_kind": "robust_metric", "status": "evaluated", "feasible": True,
+        "is_best": True, "membership_provenance": "researcher-authored",
+    }]
+    assert data["provenance"]["membership_counts"] == {"researcher-authored": 3}
+    _assert_frame_parity(data)
 
 
 def test_concepts_endpoint_unknown_run_is_handled(tmp_path):
     client = TestClient(make_app(tmp_path))
     r = client.get("/api/runs/nope/concepts")
-    assert r.status_code in (200, 404)                           # resolved-empty or not-found, never 500
+    assert r.status_code == 404
+    assert r.headers["cache-control"] == "no-store"
 
 
 def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
@@ -93,6 +127,8 @@ def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_p
     assert data["lens"] == "is_a"
     assert data["requested_lens"] == "uses"
     assert data["edges_present"] is False
+    assert data["effective_lens"] == "is_a"
+    assert data["lens_contract"]["fallback"] == "no_matching_edges"
 
 
 class _LensClient:
@@ -130,10 +166,16 @@ def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by what uses what"})
     assert r.status_code == 200
+    assert r.headers["cache-control"] == "no-store"
     data = r.json()
     assert data["ok"] is True
     assert data["spec"]["rels"] == ["uses"] and data["spec"]["provenance"] == "agent"
     assert data["lens"] == "usage"
+    assert data["schema"] == 1 and data["generation"] and data["captured_seq"] == data["max_seq"]
+    assert data["requested_lens_spec"] == {
+        "name": "usage", "rels": ["uses"], "kind": "edge",
+        "registration": "ephemeral-validated",
+    }
     # the minted uses-lens nests agents/orchestrator under llm/gpt and reports metrics per concept
     assert data["tree"]["nodes"]["agents/orchestrator"]["parent"] == "llm/gpt"
     assert data["metrics"]["rows"]["llm/gpt"]["best"] == 0.9
@@ -183,15 +225,15 @@ def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
     assert log.read_text().count("\n") == before   # no events appended by the projection
 
 
-def test_concepts_get_tolerates_malformed_rels(tmp_path):
-    # Empty / whitespace / unknown-relation `rels` must degrade gracefully (never 500): empty -> is_a,
-    # an unknown relation -> a valid (flat) projection over the tagged concepts.
+def test_concepts_get_rejects_malformed_rels_without_500(tmp_path):
+    # CODEX AGENT: an invalid derived spec must never silently widen to a different projection. Reject
+    # empty/mixed/unknown relation sets deterministically and keep even error responses non-cacheable.
     _edge_run(tmp_path)
     client = TestClient(make_app(tmp_path))
-    assert client.get("/api/runs/demo/concepts?lens=x&rels=").status_code == 200
-    assert client.get("/api/runs/demo/concepts?lens=x&rels=%20%2C%20").status_code == 200   # " , "
-    r = client.get("/api/runs/demo/concepts?lens=x&rels=teleports_to")
-    assert r.status_code == 200 and isinstance(r.json()["tree"]["nodes"], dict)
+    for query in ("rels=", "rels=%20%2C%20", "rels=teleports_to"):
+        response = client.get(f"/api/runs/demo/concepts?lens=x&{query}")
+        assert response.status_code == 400
+        assert response.headers["cache-control"] == "no-store"
 
 
 def test_concepts_endpoint_bare_concept_gets_a_metrics_row(tmp_path):
@@ -248,8 +290,170 @@ def test_concepts_get_replays_a_derived_lens_via_rels(tmp_path):
     # relation subset, so the derived lens refetches as the run grows like any default lens.
     _edge_run(tmp_path)
     client = TestClient(make_app(tmp_path))
-    data = client.get("/api/runs/demo/concepts?lens=usage&rels=uses").json()
-    assert data["lens"] == "usage"
+    response = client.get("/api/runs/demo/concepts", params={"lens": "Usage View", "rels": "uses,uses"})
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    data = response.json()
+    assert data["lens"] == data["requested_lens"] == data["effective_lens"] == "usage-view"
+    assert data["requested_lens_spec"] == {
+        "name": "usage-view", "rels": ["uses"], "kind": "edge",
+        "registration": "ephemeral-validated",
+    }
+    assert data["lens_contract"] == {
+        "requested": "usage-view", "effective": "usage-view",
+        "registration": "ephemeral-validated", "fallback": None,
+    }
     assert data["tree"]["nodes"]["agents/orchestrator"]["parent"] == "llm/gpt"
     # metrics are lens-independent (per-concept), so they still populate under the replayed lens
     assert data["metrics"]["rows"]["llm/gpt"]["best"] == 0.9
+
+
+def test_concept_frame_historical_identity_comes_from_the_exact_prefix(tmp_path):
+    _demo_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    current = client.get("/api/runs/demo/concepts").json()
+    historical = client.get("/api/runs/demo/concepts?seq=2").json()
+    assert historical["generation"] == current["generation"]
+    assert historical["requested_seq"] == historical["captured_seq"] == 2
+    assert historical["max_seq"] == 4 and historical["historical"] is True
+    assert "loss/contrastive/mnr" not in historical["tree"]["nodes"]
+    assert set(historical["experiment_refs"]) == {
+        "architecture/moe", "loss/contrastive/dcl",
+    }
+    _assert_frame_parity(historical)
+
+    before_start = client.get("/api/runs/demo/concepts?seq=-1").json()
+    assert before_start["generation"] is None and before_start["captured_seq"] == -1
+    assert before_start["max_seq"] == 4 and before_start["historical"] is True
+    assert before_start["status"] == "partial" and before_start["complete"] is False
+    assert before_start["authoritative"] is False
+    assert before_start["authority"]["source_authoritative"] is False
+    assert before_start["completeness"]["reasons"] == ["generation_unavailable"]
+    assert before_start["tree"]["nodes"] == {} and before_start["experiment_refs"] == {}
+    _assert_frame_parity(before_start)
+
+
+def test_concept_frame_preserves_unknown_feasibility_as_null(tmp_path):
+    # CODEX AGENT: legacy/recovery projections can carry tri-state feasibility. Never coerce unknown
+    # to False in the transport: that would turn missing evidence into an infeasibility claim.
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+    from looplab.serve.concept_frame import build_frame
+
+    rd = _demo_run(tmp_path)
+    events = EventStore(rd / "events.jsonl").read_all()
+    state = fold(events[:2])
+    object.__setattr__(state.nodes[0], "feasible", None)
+    frame = build_frame(
+        state, run_id="demo", requested_lens="is_a", lens_pack=default_lenses(),
+        generation="test-generation", requested_seq=1, captured_seq=1, max_seq=4,
+        source_divergence=None)
+    assert frame["experiment_refs"]["loss/contrastive/dcl"][0]["feasible"] is None
+    _assert_frame_parity(frame)
+
+
+def test_concept_frame_empty_is_authoritative_not_unavailable(tmp_path):
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    response = TestClient(make_app(tmp_path)).get("/api/runs/demo/concepts")
+    data = response.json()
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert data["status"] == "complete" and data["authoritative"] is True
+    assert data["tree"]["nodes"] == {} and data["experiment_refs"] == {}
+    _assert_frame_parity(data)
+
+
+@pytest.mark.parametrize(("lens", "rels"), [
+    ("teleports", None),
+    ("usage", ""),
+    ("usage", "uses,"),
+    ("usage", "uses,teleports_to"),
+    ("uses", "uses"),                         # shipped identity cannot be overridden by query rels
+    ("x" * 65, "uses"),
+])
+def test_concept_frame_rejects_unregistered_or_malformed_lens_specs(tmp_path, lens, rels):
+    _edge_run(tmp_path)
+    params = {"lens": lens}
+    if rels is not None:
+        params["rels"] = rels
+    response = TestClient(make_app(tmp_path)).get("/api/runs/demo/concepts", params=params)
+    assert response.status_code == 400
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_registered_typed_lens_falls_back_when_only_other_relations_exist(tmp_path):
+    _edge_run(tmp_path)  # contains one uses edge, but no part_of edge
+    data = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/concepts?lens=part_of").json()
+    assert data["edges_present"] is True and data["lens_edges_present"] is False
+    assert data["requested_lens"] == "part_of" and data["effective_lens"] == "is_a"
+    assert data["lens_contract"]["fallback"] == "no_matching_edges"
+
+
+def test_concept_frame_caps_memberships_before_expanding_experiment_refs(tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+
+    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)
+    _demo_run(tmp_path)
+    data = TestClient(make_app(tmp_path)).get("/api/runs/demo/concepts").json()
+    assert data["status"] == "partial" and data["complete"] is False
+    assert data["authoritative"] is False
+    assert data["authority"]["source_authoritative"] is True
+    assert data["authority"]["complete"] is False
+    assert data["completeness"]["truncated"] is True
+    assert "membership_cap" in data["completeness"]["reasons"]
+    assert data["completeness"]["included"]["experiment_refs"] == 1
+    assert sum(map(len, data["experiment_refs"].values())) == 1
+    _assert_frame_parity(data)
+
+
+def test_concept_frame_tree_cap_combines_concept_paths_and_edge_endpoints(tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+
+    monkeypatch.setattr(frame_module, "MAX_TREE_NODES", 2)
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    store.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                                   "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                            "concepts": ["a/x"]}})
+    store.append("concept_edge", {"edges": [{"src": "a/x", "rel": "uses", "dst": "b/y",
+                                                "confidence": 1.0, "provenance": "asserted"}]})
+    data = TestClient(make_app(tmp_path)).get("/api/runs/demo/concepts?lens=uses").json()
+    assert data["status"] == "partial" and data["authoritative"] is False
+    assert "edge_endpoint_cap" in data["completeness"]["reasons"]
+    assert len(data["tree"]["nodes"]) <= 2
+
+
+def test_concept_frame_marks_corrupt_source_prefix_non_authoritative(tmp_path):
+    rd = _demo_run(tmp_path)
+    with (rd / "events.jsonl").open("ab") as stream:
+        stream.write(b"{not-json}\n")
+    response = TestClient(make_app(tmp_path)).get("/api/runs/demo/concepts")
+    data = response.json()
+    assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
+    assert data["status"] == "partial" and data["authoritative"] is False
+    assert data["authority"]["source_authoritative"] is False
+    assert data["completeness"]["source_integrity"]["complete"] is False
+    assert "event_log_corruption" in data["completeness"]["reasons"]
+    _assert_frame_parity(data)
+
+
+def test_derive_lens_caps_body_prompt_and_refuses_partial_source(tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+
+    _edge_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    too_long = client.post("/api/runs/demo/concepts/lens", json={"prompt": "x" * 801})
+    assert too_long.status_code == 413 and too_long.headers["cache-control"] == "no-store"
+    too_large = client.post("/api/runs/demo/concepts/lens", json={"prompt": "x" * 5_000})
+    assert too_large.status_code == 413 and too_large.headers["cache-control"] == "no-store"
+
+    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)
+    partial = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"})
+    payload = partial.json()
+    assert partial.status_code == 200 and partial.headers["cache-control"] == "no-store"
+    assert payload["ok"] is False and payload["reason"] == "concept_frame_partial"
+    assert payload["status"] == "partial" and payload["authoritative"] is False

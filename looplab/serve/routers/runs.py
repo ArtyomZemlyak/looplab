@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import anyio
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
 from looplab.core.atomicio import atomic_write_text
@@ -28,11 +28,23 @@ from looplab.serve.artifacts import (
     _ART_MAX_BYTES, _LOG_TAIL_MAX, ArtifactPolicyUnavailable,
     _artifact_exposure_policy, _artifact_file_identity, _artifact_roots,
     _list_artifact_files)
+from looplab.serve.concept_frame import (
+    MAX_LENS_BODY_BYTES as _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
+    MAX_LENS_PROMPT_BYTES as _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
+    MAX_LENS_PROMPT_CHARS as _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS,
+    bounded_inputs as _bounded_concept_inputs,
+    bounded_lens_label as _bounded_lens_label,
+    build_frame as _build_concept_frame,
+    folded_concepts as _folded_concepts,  # noqa: F401 - compatibility seam for pure callers/tests
+    lens_request as _concept_lens_request,
+    normalized_custom_lens_name as _normalized_custom_lens_name,
+)
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
 from looplab.serve.protocol import (
     PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD, SSE_DONE, SSE_STATE)
+from looplab.serve.run_commands import run_generation_token
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
 # (run dir, task.snapshot.json mtime_ns, size), so the normalize+validate work runs once per snapshot
@@ -86,45 +98,6 @@ def _operator_stage_names(rd: Path) -> tuple:
         del _OP_STAGE_NAMES[stale]
     _OP_STAGE_NAMES[key] = names
     return names
-
-
-def _folded_concepts(st):
-    """Canonical per-node concept sets, canonical typed edges, and per-concept touch counts — every id
-    collapsed through the recorded consolidation rename so tags, metrics, touch AND edges share ONE
-    vocabulary. The fold never rewrites edge keys, so an edge emitted before a rename keeps its retired
-    raw ids until collapsed here; the collapse keeps the max-confidence survivor per (src, rel, dst)
-    triple (mirrors the fold's commutative conflict rule), iterating sorted for deterministic ties.
-    Pure; shared by the concepts read endpoint and the in-the-moment lens-derivation endpoint."""
-    from looplab.search.concept_graph import concept_touch_counts
-    rename = getattr(st, "concept_consolidation", None) or {}
-    raw_nc = getattr(st, "node_concepts", None) or {}
-    nc = {nid: [rename.get(c, c) for c in (ids or [])] for nid, ids in raw_nc.items()}
-    cids = sorted({c for ids in nc.values() for c in ids})
-    edges: dict = {}
-    for _k, e in sorted((getattr(st, "concept_edges", None) or {}).items()):
-        if not isinstance(e, dict):
-            continue
-        src = rename.get(e.get("src"), e.get("src"))
-        dst = rename.get(e.get("dst"), e.get("dst"))
-        if not src or not dst or src == dst:
-            continue
-        ce = dict(e); ce["src"], ce["dst"] = src, dst
-        key = (src, ce.get("rel"), dst)
-        prev = edges.get(key)
-        if prev is None or _edge_rank(ce) > _edge_rank(prev):
-            edges[key] = ce
-    return nc, cids, edges, concept_touch_counts(nc)
-
-
-# Confidence, then provenance-rank (asserted > evidenced > unknown), then raw provenance — the SAME total
-# order the fold uses in `replay._on_concept_edge`, so the endpoint's post-rename collapse keeps the same
-# survivor per (src, rel, dst) triple the fold would, not merely the max-confidence one.
-_EDGE_PROV_RANK = {"asserted": 2, "evidenced": 1}
-
-
-def _edge_rank(e):
-    prov = str(e.get("provenance") or "")
-    return (float(e.get("confidence") or 0.0), _EDGE_PROV_RANK.get(prov, 0), prov)
 
 
 def build_router(srv) -> APIRouter:
@@ -222,85 +195,136 @@ def build_router(srv) -> APIRouter:
         return _state_payload(_run_dir(run_id), seq)
 
     @router.get("/api/runs/{run_id}/concepts")
-    def get_concepts(run_id: str, lens: str = "is_a", rels: Optional[str] = None,
-                     seq: Optional[int] = None):
-        """Concept-view read-model: the per-LENS hierarchy (project_hierarchy for is_a from paths,
-        project_lens for a typed-edge lens) + per-concept metrics/Δ + the shipped lens pack. PURE over
-        the folded run — recomputed each call (the projection is never cached: caching a materialized
-        tree would smuggle a fixed catalog back in). Raw tags are collapsed through the recorded
-        consolidation rename map so ids are canonical and align with the concept_edges.
+    def get_concepts(run_id: str, response: Response, lens: str = "is_a",
+                     rels: Optional[str] = None, seq: Optional[int] = None):
+        """Return one versioned, bounded, generation-bound ConceptFrame."""
+        from looplab.search.concept_graph import default_lenses
 
-        `rels` (comma-separated relation names) reproduces an in-the-moment DERIVED lens without another
-        LLM call: the lens-derivation endpoint picks the relation subset ONCE, and the client replays it
-        as a pure projection here (so a derived lens refetches as the run grows, like a default lens)."""
-        from looplab.search.concept_graph import (concept_metrics, default_lenses,
-                                                   graph_from_node_concepts,
-                                                   project_hierarchy, project_lens)
         rd = _run_dir(run_id)
-        # REVIEW(2026-07-16): "never cached" conflates the CATALOG concern with derivation cost. The
-        # projection is a pure function of (events identity, lens/rels) and was made deterministically
-        # sorted expressly so HTTP caching works — yet every request re-derives graph_from_node_concepts
-        # + concept_metrics (O(nodes×concepts)) + the edge collapse + the tree, and only `tree` depends
-        # on the lens: flipping through the four lenses recomputes the identical metrics/touch/edges
-        # four times. The live ConceptView refetches on every projection-key change, making this the
-        # one uncached O(events)-adjacent read on the run-view hot path (sibling reads — /state,
-        # summaries, op-stage names — all memo on file identity). Cache the lens-INDEPENDENT core
-        # keyed on events.jsonl identity like _summary_cache (an append invalidates it, so no fixed
-        # catalog is smuggled in), and/or emit an ETag over (generation, max_seq, lens, rels) + 304.
-        st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
-        nc, cids, edges, touch = _folded_concepts(st)
-        graph, tags = graph_from_node_concepts(nc)
-        rel_list = [r.strip() for r in (rels or "").split(",") if r.strip()]
-        if rel_list and rel_list != ["is_a"] and edges:
-            # a client-replayed derived lens: project the exact relation subset (no LLM)
-            tree = project_lens(cids, edges, {"name": lens, "rels": rel_list}, touch=touch)
-        else:
-            tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
-                    else project_lens(cids, edges, lens, touch=touch))
-        # `lens` is the EFFECTIVE lens actually projected (is_a when a typed lens was asked for on a run
-        # with no edges); `requested_lens` echoes the query param so the client can tell a fallback from
-        # an honest is_a request without inferring it from `edges_present`.
-        return {"lens": tree.get("lens", lens), "requested_lens": lens, "lenses": default_lenses(),
-                "tree": tree, "metrics": concept_metrics(st, graph, tags), "touch": touch,
-                "edges_present": bool(edges)}
+        lens_pack = default_lenses()
+        canonical_lens, requested_spec, lens_registration = _concept_lens_request(
+            lens, rels, lens_pack)
+        if seq is not None and seq < -1:
+            raise HTTPException(400, {
+                "code": "concept_seq_invalid",
+                "message": "Historical concept sequence must be -1 or greater.",
+            })
+
+        # CODEX AGENT: one event snapshot owns fold + seq/max_seq + generation. Separate reads can
+        # combine generation A's taxonomy with generation B's identity during same-id replacement.
+        source = EventStore(rd / "events.jsonl")
+        all_events = source.read_all()
+        if not all_events:
+            raise HTTPException(409, {
+                "code": "run_generation_unavailable",
+                "message": "The run has no durable generation identity.",
+                "remediation": "Wait for run_started, then refresh concepts.",
+            })
+        projected_events = (all_events if seq is None
+                            else [event for event in all_events if event.seq <= seq])
+        # A historical prefix before run_started has NO generation. Never borrow the current log's token:
+        # that would identify empty generation-less state as a snapshot of work that did not exist yet.
+        generation = run_generation_token(projected_events)
+        max_seq = max((event.seq for event in all_events), default=-1)
+        captured_seq = max((event.seq for event in projected_events), default=-1)
+        frame = _build_concept_frame(
+            fold(projected_events), run_id=run_id, requested_lens=canonical_lens, lens_pack=lens_pack,
+            generation=generation, requested_seq=seq, captured_seq=captured_seq, max_seq=max_seq,
+            source_divergence=source.divergence, requested_spec=requested_spec,
+            lens_registration=lens_registration)
+        response.headers["Cache-Control"] = "no-store"
+        return frame
 
     @router.post("/api/runs/{run_id}/concepts/lens")
-    async def derive_concept_lens(run_id: str, request: Request):
+    async def derive_concept_lens(run_id: str, request: Request, response: Response):
         """Mint a lens IN THE MOMENT from a natural-language request — the "create a lens" LLM tool the
         Concept view offers. A lens is a pure PROJECTION spec (a relation-subset + optional root): it
         writes NO events and grows NO edges, so this stays replay-clean — we derive the spec, immediately
         project the tree under it, and return both. Soft-fails ({ok:false, reason}) offline / when the
         model declines or picks nothing usable, so the UI falls back to a default lens rather than 500."""
-        from looplab.search.concept_graph import (concept_metrics, derive_lens,
-                                                   graph_from_node_concepts,
-                                                   project_hierarchy, project_lens)
+        from looplab.search.concept_graph import default_lenses, derive_lens
+
+        rd = _run_dir(run_id)
+        raw_body = bytearray()
+        async for chunk in request.stream():
+            if len(raw_body) + len(chunk) > _CONCEPT_FRAME_MAX_LENS_BODY_BYTES:
+                raise HTTPException(413, {
+                    "code": "concept_lens_body_too_large",
+                    "max_bytes": _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
+                })
+            raw_body.extend(chunk)
         try:
-            body = await request.json()
-        except (ValueError, UnicodeDecodeError) as exc:
+            body = json.loads(bytes(raw_body).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError, TypeError) as exc:
             raise HTTPException(400, "request body must be valid JSON") from exc
-        prompt = str((body or {}).get("prompt") or "").strip() if isinstance(body, dict) else ""
+        prompt_value = body.get("prompt") if isinstance(body, dict) else None
+        prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
         if not prompt:
             raise HTTPException(400, "prompt is required")
-        rd = _run_dir(run_id)
-        st = srv.state(rd)
-        nc, cids, edges, touch = _folded_concepts(st)
+        if (len(prompt) > _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS
+                or len(prompt.encode("utf-8")) > _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES):
+            raise HTTPException(413, {
+                "code": "concept_lens_prompt_too_large",
+                "max_chars": _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS,
+                "max_bytes": _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
+            })
+
+        source = EventStore(rd / "events.jsonl")
+        events = source.read_all()
+        generation = run_generation_token(events)
+        if not generation:
+            raise HTTPException(409, {
+                "code": "run_generation_unavailable",
+                "message": "The run has no durable generation identity.",
+            })
+        max_seq = max((event.seq for event in events), default=-1)
+        state = fold(events)
+        lens_pack = default_lenses()
+        base_frame = _build_concept_frame(
+            state, run_id=run_id, requested_lens="is_a", lens_pack=lens_pack,
+            generation=generation, requested_seq=None, captured_seq=max_seq, max_seq=max_seq,
+            source_divergence=source.divergence)
+        response.headers["Cache-Control"] = "no-store"
+        if not base_frame["complete"]:
+            return {**base_frame, "ok": False, "reason": "concept_frame_partial"}
+        inputs = _bounded_concept_inputs(state, lens_pack)
         # The LLM call (client build + one structured turn) runs off the event loop; both offline client
         # construction and any model failure fall through derive_lens' own best-effort None / this guard.
         def _mint():
             client = srv.make_llm_client(srv.llm_settings(rd))
-            return derive_lens(prompt, edges, client, concepts=cids)
+            return derive_lens(prompt, inputs["edges"], client, concepts=inputs["concept_ids"])
         try:
             spec = await anyio.to_thread.run_sync(_mint)
         except Exception:  # noqa: BLE001 — offline / no model -> soft fail, UI keeps its current lens
-            return {"ok": False, "reason": "no_model"}
+            return {**base_frame, "ok": False, "reason": "no_model"}
         if not spec:
-            return {"ok": False, "reason": "declined"}
-        graph, tags = graph_from_node_concepts(nc)
-        tree = (project_hierarchy(cids, lens="is_a") if (spec.get("rels") or []) == ["is_a"]
-                else project_lens(cids, edges, spec, touch=touch))
-        return {"ok": True, "spec": spec, "lens": tree.get("lens", spec.get("name")),
-                "tree": tree, "metrics": concept_metrics(st, graph, tags), "touch": touch,
-                "edges_present": bool(edges)}
+            return {**base_frame, "ok": False, "reason": "declined"}
+
+        relations = list(dict.fromkeys(str(rel) for rel in (spec.get("rels") or [])))
+        name = _normalized_custom_lens_name(spec.get("name"))
+        shipped_names = {item.get("name") for item in lens_pack if isinstance(item, dict)}
+        if not name or name in shipped_names:
+            name = _normalized_custom_lens_name(
+                "derived-" + (name or "-".join(relations) or "lens"))
+        if not name:
+            return {**base_frame, "ok": False, "reason": "invalid_spec"}
+        try:
+            canonical_name, validated_spec, registration = _concept_lens_request(
+                name, ",".join(relations), lens_pack)
+        except HTTPException:
+            return {**base_frame, "ok": False, "reason": "invalid_spec"}
+        validated_spec.update({
+            "label": _bounded_lens_label(spec.get("label"), canonical_name),
+            "provenance": "agent",
+        })
+        if spec.get("root") in set(inputs["concept_ids"]):
+            validated_spec["root"] = spec["root"]
+        frame = _build_concept_frame(
+            state, run_id=run_id, requested_lens=canonical_name, lens_pack=lens_pack,
+            generation=generation, requested_seq=None, captured_seq=max_seq, max_seq=max_seq,
+            source_divergence=source.divergence, requested_spec=validated_spec,
+            lens_registration=registration)
+        return {**frame, "ok": True, "spec": validated_spec}
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
         if expected is None:
