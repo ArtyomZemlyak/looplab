@@ -322,6 +322,14 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts.pop(n.id, None)
         st.node_concept_provenance.pop(n.id, None)
         st.node_concepts_at_vocab.pop(n.id, None)
+    # REVIEW(2026-07-16): the fail-closed discard above is provenance-gated to CLASSIFIER only, so the
+    # SAME malformed re-emission on an AUTHORED node slips through: node carries authored tags from
+    # idea A; a subject-changing re-emit installs idea B whose `concepts` list is EMPTY — the pop is
+    # skipped (provenance is AUTHORED) and the rewrite below is skipped (`n.idea.concepts` falsy), so
+    # node_concepts keeps mapping the node to A's taxonomy while st.nodes holds B. Every read model
+    # (/concepts, coverage, chips) then attributes A's concepts to B — exactly the stale-receipt
+    # scenario the classifier branch discards. The authored path needs the symmetric rule: on a
+    # subject change, pop the stale authored mapping even when the new idea carries no concepts.
     if n.idea.concepts and not classifier_subject_unchanged:
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
@@ -1300,6 +1308,18 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # explicit stale/invalid generations are ignored rather than creating orphan classifier evidence.
     if node is None:
         return
+    # REVIEW(2026-07-16): this legacy gate keys on the LIFECYCLE generation while tag validity is
+    # IDEA-generation-scoped, so it over-drops valid legacy evidence: an eval/implement `node_reset`
+    # (and the holdout-disclosure requeue) bumps `attempt` WITHOUT changing the idea — the M1 rule a
+    # few screens up says exactly that ("tags staleify only when the idea changes") — yet an unstamped
+    # pre-6b3eac4 node_concepts event for such a node is discarded here because attempt != 0.
+    # Reproduced: fold of [node_created(7) -> node_evaluated -> node_reset(eval) -> node_evaluated ->
+    # unstamped node_concepts(7)] yields node_concepts == {}, where the pre-6b3eac4 fold kept the tags.
+    # Old logs re-folded after the upgrade silently lose classifier tags (and their at_vocab receipts),
+    # so /concepts, coverage reuse, and the graded-novelty cache diverge from the pre-upgrade fold of
+    # the IDENTICAL log — violating the additive/reader-defaulted rule for old logs. The legacy branch
+    # should accept unstamped events unless the node's IDEA generation moved (e.g. only drop when a
+    # propose-stage reset bumped the idea), not on any attempt bump.
     if generation is _MISSING:
         if node.attempt != 0:
             return
