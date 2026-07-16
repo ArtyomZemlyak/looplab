@@ -13,6 +13,7 @@ import re
 import stat
 import threading
 import time
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -34,7 +35,9 @@ from looplab.serve.scope_report import (
     MAX_SCOPE_REPORT_RUNS,
 )
 from looplab.serve.scope_sources import (
+    MAX_SCOPE_CONFIG_BYTES,
     MAX_SCOPE_EVENT_BYTES,
+    MAX_SCOPE_TASK_BYTES,
     MAX_SCOPE_TOTAL_EVENT_BYTES,
     FrozenScopeSource,
     ScopeSourceCapacityError,
@@ -78,6 +81,8 @@ _PRIOR_REPORT_MAX_NEXT_DIRECTIONS = 2
 _PRIOR_REPORT_MAX_BYTES = 8 * 1024
 _PRIOR_REPORT_PARSE_MAX_BYTES = 16 * 1024 * 1024
 _SCOPE_REPORT_RECORD_MAX_BYTES = 512 * 1024
+_SCOPE_REVISION_CACHE_MAX = 256
+_SCOPE_REVISION_CACHE_TTL_S = 60.0
 
 
 class _ScopeReportStorageConflict(RuntimeError):
@@ -307,6 +312,61 @@ def _valid_source_revision(revision: object) -> bool:
     return True
 
 
+def _complete_source_revision(revision: object) -> bool:
+    """A v2 revision can prove every model-visible file, not only the event-log stat."""
+    return (
+        _valid_source_revision(revision)
+        and all(isinstance(revision.get(field), str) for field in (
+            "events_digest", "task_snapshot_digest", "config_snapshot_digest",
+        ))
+        and type(revision.get("event_bytes")) is int
+    )
+
+
+def _valid_source_receipt(
+        run_ids: object, sig: object, source_revisions: object,
+        omitted_runs: object, omitted_source_probes: object) -> bool:
+    """Validate both legacy all-readable records and the explicit partial-source receipt."""
+    if not isinstance(run_ids, list) or not isinstance(sig, list):
+        return False
+    if source_revisions is None:
+        return omitted_runs is None and omitted_source_probes is None
+    if (not isinstance(source_revisions, list)
+            or not all(_valid_source_revision(row) for row in source_revisions)):
+        return False
+    revision_ids = [row["run_id"] for row in source_revisions]
+    if omitted_runs is None:
+        # Legacy v2 records represented only fully captured scopes.
+        return revision_ids == run_ids and [row["log_sig"] for row in source_revisions] == sig
+    if (not isinstance(omitted_runs, list)
+            or not all(isinstance(run_id, str) for run_id in omitted_runs)
+            or len(omitted_runs) != len(set(omitted_runs))
+            or len(revision_ids) != len(set(revision_ids))):
+        return False
+    sig_by_id = {row[0]: row for row in sig}
+    if len(sig_by_id) != len(sig) or set(sig_by_id) != set(run_ids):
+        return False
+    captured = set(revision_ids)
+    omitted = set(omitted_runs)
+    probes_valid = (
+        omitted_source_probes is None
+        or (
+            isinstance(omitted_source_probes, dict)
+            and set(omitted_source_probes) == omitted
+            and all(
+                isinstance(digest, str) and _RUN_GENERATION_RE.fullmatch(digest)
+                for digest in omitted_source_probes.values()
+            )
+        )
+    )
+    return (
+        not captured & omitted
+        and captured | omitted == set(run_ids)
+        and all(sig_by_id.get(row["run_id"]) == row["log_sig"] for row in source_revisions)
+        and probes_valid
+    )
+
+
 def _record_payload_matches_scope(rec: object, scope_type: str, scope_id: str) -> bool:
     """Validate the historical report payload and its exact embedded display scope."""
     if not isinstance(rec, dict):
@@ -325,17 +385,12 @@ def _record_payload_matches_scope(rec: object, scope_type: str, scope_id: str) -
         and rec["generated_at"] >= 0
         and isinstance(run_ids, list)
         and all(isinstance(run_id, str) for run_id in run_ids)
+        and len(run_ids) == len(set(run_ids))
         and isinstance(sig, list)
         and all(_valid_scope_sig_row(row) for row in sig)
-        and (
-            source_revisions is None
-            or (
-                isinstance(source_revisions, list)
-                and all(_valid_source_revision(row) for row in source_revisions)
-                and [row["run_id"] for row in source_revisions] == run_ids
-                and [row["log_sig"] for row in source_revisions] == sig
-            )
-        )
+        and _valid_source_receipt(
+            run_ids, sig, source_revisions, rec.get("omitted_runs"),
+            rec.get("omitted_source_probes"))
         and isinstance(rec.get("content"), dict)
     )
 
@@ -721,6 +776,9 @@ def build_router(srv) -> APIRouter:
     _phase = srv.phase
     projects = srv.projects
     _reports_dir = srv.reports_dir
+    revision_cache_lock = threading.Lock()
+    revision_cache: OrderedDict[tuple, tuple[float, dict[str, Any]]] = OrderedDict()
+    omission_cache: OrderedDict[tuple, float] = OrderedDict()
 
     def _scope_label(scope_type: str, scope_id: str) -> str:
         data = projects.load()
@@ -861,12 +919,30 @@ def build_router(srv) -> APIRouter:
         return sig
 
     def _scope_source_sizes(run_ids: list[str]) -> dict[str, int]:
-        """Preflight the exact raw-byte budget even when a later parse marks a run unavailable."""
+        """Preflight every raw-file capacity bound before reserving background or provider work."""
         sizes: dict[str, int] = {}
         total = 0
         for run_id in sorted(set(run_ids)):
             try:
                 size = scope_event_size(srv.root, run_id)
+                run_dir = Path(srv.root).absolute() / run_id
+                for filename, limit in (
+                    ("task.snapshot.json", MAX_SCOPE_TASK_BYTES),
+                    ("config.snapshot.json", MAX_SCOPE_CONFIG_BYTES),
+                ):
+                    try:
+                        status = (run_dir / filename).lstat()
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise ScopeSourceError(
+                            f"{filename} could not be inspected") from exc
+                    if not stat.S_ISREG(status.st_mode) or _is_link_or_reparse(status):
+                        raise ScopeSourceError(
+                            f"{filename} is not a trusted regular file")
+                    if int(status.st_size) > limit:
+                        raise ScopeSourceCapacityError(
+                            f"{filename} exceeds its scope-report byte limit")
             except ScopeSourceCapacityError:
                 raise
             except ScopeSourceError:
@@ -876,6 +952,167 @@ def build_router(srv) -> APIRouter:
                 raise ScopeSourceCapacityError("scope event evidence exceeds its byte limit")
             sizes[run_id] = size
         return sizes
+
+    def _source_probe_key(run_id: str, log_sig: list) -> tuple:
+        """Cheap identity for every file represented by a full source revision."""
+        if (not _valid_scope_sig_row(log_sig) or len(log_sig) != 7
+                or log_sig[0] != run_id or not run_id or run_id in {".", ".."}
+                or "\x00" in run_id or "/" in run_id or "\\" in run_id or ":" in run_id
+                or run_id.rstrip(" .") != run_id):
+            raise ScopeSourceError("scope source identity is invalid")
+
+        def observed(status: os.stat_result) -> tuple[int, ...]:
+            ctime_ns = getattr(status, "st_ctime_ns", None)
+            if ctime_ns is None:
+                ctime_ns = int(status.st_ctime * 1_000_000_000)
+            return (*_stat_identity(status), int(ctime_ns))
+
+        def directory_identity(status: os.stat_result) -> tuple[int, ...]:
+            # Child artifact creation changes directory timestamps but not report evidence. Bind the
+            # container itself and let the three exact file observations own model-visible changes.
+            return (
+                int(status.st_dev), int(status.st_ino), int(status.st_mode),
+                int(getattr(status, "st_file_attributes", 0) or 0),
+            )
+
+        def optional_file(path: Path) -> tuple:
+            try:
+                status = path.lstat()
+            except FileNotFoundError:
+                return ("missing",)
+            if not stat.S_ISREG(status.st_mode) or _is_link_or_reparse(status):
+                raise ScopeSourceError("scope snapshot is not a trusted regular file")
+            return ("present", *observed(status))
+
+        try:
+            run_dir = Path(srv.root).absolute() / run_id
+            run_status = run_dir.lstat()
+            if not stat.S_ISDIR(run_status.st_mode) or _is_link_or_reparse(run_status):
+                raise ScopeSourceError("scope run is not a trusted directory")
+            return (
+                tuple(log_sig), directory_identity(run_status),
+                optional_file(run_dir / "events.jsonl"),
+                optional_file(run_dir / "task.snapshot.json"),
+                optional_file(run_dir / "config.snapshot.json"),
+            )
+        except ScopeSourceError:
+            raise
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise ScopeSourceError("scope source identity is unavailable") from exc
+
+    def _source_probe_receipt(run_id: str, log_sig: list) -> tuple[str, tuple | None]:
+        """Return a stable persisted digest even when the source itself is currently unprobeable."""
+        try:
+            key = _source_probe_key(run_id, log_sig)
+            payload: object = ["observed", key]
+        except ScopeSourceError:
+            key = None
+            payload = ["unavailable", run_id, log_sig]
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest(), key
+
+    def _remember_revision(probe_key: tuple, revision: dict[str, Any]) -> None:
+        with revision_cache_lock:
+            omission_cache.pop(probe_key, None)
+            revision_cache[probe_key] = (time.monotonic(), {
+                **revision, "log_sig": list(revision["log_sig"]),
+            })
+            revision_cache.move_to_end(probe_key)
+            while len(revision_cache) > _SCOPE_REVISION_CACHE_MAX:
+                revision_cache.popitem(last=False)
+
+    def _cached_revision(probe_key: tuple) -> dict[str, Any] | None:
+        now = time.monotonic()
+        with revision_cache_lock:
+            cached = revision_cache.get(probe_key)
+            if cached is None:
+                return None
+            captured_at, revision = cached
+            if now - captured_at > _SCOPE_REVISION_CACHE_TTL_S:
+                revision_cache.pop(probe_key, None)
+                return None
+            revision_cache.move_to_end(probe_key)
+            return revision
+
+    def _remember_omission(probe_key: tuple) -> None:
+        with revision_cache_lock:
+            omission_cache[probe_key] = time.monotonic()
+            omission_cache.move_to_end(probe_key)
+            while len(omission_cache) > _SCOPE_REVISION_CACHE_MAX:
+                omission_cache.popitem(last=False)
+
+    def _cached_omission(probe_key: tuple) -> bool:
+        now = time.monotonic()
+        with revision_cache_lock:
+            captured_at = omission_cache.get(probe_key)
+            if captured_at is None:
+                return False
+            if now - captured_at > _SCOPE_REVISION_CACHE_TTL_S:
+                omission_cache.pop(probe_key, None)
+                return False
+            omission_cache.move_to_end(probe_key)
+            return True
+
+    def _revision_is_current(
+            run_id: str, log_sig: list, expected: dict[str, Any],
+            remaining_bytes: int) -> tuple[bool, int]:
+        """Validate a persisted revision without reparsing an unchanged log on every GET."""
+        if not _complete_source_revision(expected):
+            return False, 0
+        expected_bytes = expected["event_bytes"]
+        if expected_bytes > remaining_bytes:
+            return False, 0
+        before = _source_probe_key(run_id, log_sig)
+        cached = _cached_revision(before)
+        if cached is not None:
+            return cached == expected, expected_bytes
+        if _cached_omission(before):
+            return False, expected_bytes
+        try:
+            source = capture_scope_source(
+                srv.root, run_id, event_budget_bytes=max(1, remaining_bytes))
+        except ScopeSourceError:
+            # Negative-cache an unchanged corrupt/inaccessible snapshot. It is already stale, and
+            # reparsing the same bounded-but-large event log on every GET cannot improve that fact.
+            _remember_omission(before)
+            return False, expected_bytes
+        after = _source_probe_key(run_id, source.revision["log_sig"])
+        if before != after or source.revision["log_sig"] != log_sig:
+            return False, source.event_bytes
+        # CODEX AGENT: ordinary rewrites invalidate dev/ino/ctime/size/mtime immediately. The bounded
+        # TTL retains a periodic full-byte check for exotic filesystems that can preserve all of those
+        # fields, while stable GETs reuse one parsed revision instead of rebuilding every Event object.
+        _remember_revision(after, source.revision)
+        return source.revision == expected, source.event_bytes
+
+    def _omission_is_current(
+            run_id: str, log_sig: list, expected_probe: str,
+            remaining_bytes: int) -> tuple[bool, int]:
+        """Keep an omitted source explicit, and notice when it becomes model-visible evidence."""
+        event_bytes = int(log_sig[5]) if _valid_scope_sig_row(log_sig) and len(log_sig) == 7 else 0
+        if event_bytes > remaining_bytes:
+            return False, 0
+        observed_probe, probe_key = _source_probe_receipt(run_id, log_sig)
+        if observed_probe != expected_probe:
+            return False, event_bytes
+        if probe_key is not None and _cached_revision(probe_key) is not None:
+            return False, event_bytes
+        if probe_key is None or _cached_omission(probe_key):
+            return True, event_bytes
+        try:
+            capture_scope_source(
+                srv.root, run_id, event_budget_bytes=max(1, remaining_bytes))
+        except ScopeSourceError:
+            after_probe, after_key = _source_probe_receipt(run_id, log_sig)
+            if after_probe != expected_probe:
+                return False, event_bytes
+            if after_key is not None:
+                _remember_omission(after_key)
+            return True, event_bytes
+        # CODEX AGENT: a formerly omitted run is new evidence even when a permissions repair or
+        # same-stat content repair preserved its cheap probe. Never call the old report current.
+        return False, event_bytes
 
     # CODEX AGENT: scope ids are opaque persisted identities, so the route must preserve legal
     # task/project ids containing ``/`` instead of truncating or rejecting them at the HTTP boundary.
@@ -895,32 +1132,43 @@ def build_router(srv) -> APIRouter:
                     "label": _scope_label(scope_type, scope_id)}
         added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
         rec, legacy_authority = _public_scope_record(rec)
-        stale = legacy_authority or _scope_sig(cur_ids) != rec.get("sig")
+        current_sig = _scope_sig(cur_ids)
+        stale = legacy_authority or current_sig != rec.get("sig")
         source_revisions = rec.get("source_revisions")
-        # REVIEW(2026-07-16): this loop runs on EVERY GET after the cheap stat-based _scope_sig above
-        # already matched — and capture_scope_source reads the run's ENTIRE events.jsonl (up to 32 MB/
-        # run, 128 MB/scope), sha256-hashes it, and Pydantic-parses every event line, per run, per
-        # request, with no cache (the client also sends cache:'no-store'). Opening the report dialog
-        # for a 30-run project re-reads ~100+ MB and builds hundreds of thousands of Event objects
-        # per click just to conclude "not stale" — information the already-matched per-run log_sig
-        # (dev/ino/ctime/size/mtime identity) essentially proves. The full capture only adds pre-v2
-        # detection (a field-presence check, zero I/O) and the small task/config snapshot digests
-        # (re-hashable from two capped files); keep the full byte-level revalidation for exotic
-        # same-stat rewrites behind a probe mismatch, not on the per-request hot path. The generate
-        # job compounds this with up to FOUR full sweeps per generation (initial + 3 _inputs_unchanged
-        # calls) — cache per-run revisions keyed by log_sig within the job.
-        if not stale and isinstance(source_revisions, list):
+        omitted_runs = rec.get("omitted_runs")
+        omitted_source_probes = rec.get("omitted_source_probes")
+        expected_context = rec.get("context_digest")
+        if (not isinstance(expected_context, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_context) is None
+                or _scope_context_digest(scope_type, scope_id, cur_ids) != expected_context):
+            stale = True
+        if not stale and not isinstance(source_revisions, list):
+            # Pre-v2 records did not bind task/config snapshots or the full event prefix.
+            stale = True
+        elif not stale:
             try:
                 remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
-                current_revisions = []
+                sig_by_id = {row[0]: row for row in current_sig}
+                revision_by_id = {row["run_id"]: row for row in source_revisions}
+                omitted = set(omitted_runs or ())
+                if (not isinstance(omitted_source_probes, dict)
+                        or set(omitted_source_probes) != omitted):
+                    stale = True
                 for run_id in rec.get("run_ids", []):
-                    source = capture_scope_source(
-                        srv.root, run_id, event_budget_bytes=remaining)
-                    current_revisions.append(source.revision)
-                    remaining -= source.event_bytes
-                # A pre-v2 revision lacks task/config/full-prefix digests. Treat it as stale rather
-                # than claiming that a newly model-visible input stayed unchanged.
-                stale = current_revisions != source_revisions
+                    if stale:
+                        break
+                    if run_id in revision_by_id:
+                        matches, consumed = _revision_is_current(
+                            run_id, sig_by_id[run_id], revision_by_id[run_id], remaining)
+                    elif run_id in omitted:
+                        matches, consumed = _omission_is_current(
+                            run_id, sig_by_id[run_id], omitted_source_probes[run_id], remaining)
+                    else:
+                        matches, consumed = False, 0
+                    remaining -= consumed
+                    if not matches:
+                        stale = True
+                        break
             except ScopeSourceError:
                 stale = True
         return {**rec, "exists": True, "stale": stale,
@@ -957,6 +1205,21 @@ def build_router(srv) -> APIRouter:
         requested_scope_sig = _scope_sig(requested_scope_ids)
         requested_context_digest = _scope_context_digest(
             scope_type, scope_id, requested_scope_ids)
+        requested_probe_receipts = {
+            run_id: _source_probe_receipt(run_id, row)[0]
+            for run_id, row in ((row[0], row) for row in requested_scope_sig)
+        }
+        generation_identity = "scope-report:" + hashlib.sha256(json.dumps(
+            {
+                "scope": _scope_identity(scope_type, scope_id),
+                "run_ids": requested_scope_ids,
+                "sig": requested_scope_sig,
+                "source_sizes": requested_source_sizes,
+                "context_digest": requested_context_digest,
+                "source_probes": requested_probe_receipts,
+            },
+            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
         try:
             with _scope_store_lock(_reports_dir):
                 _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
@@ -979,26 +1242,39 @@ def build_router(srv) -> APIRouter:
             if frozen_source_sizes != requested_source_sizes:
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             frozen_scope_sig = requested_scope_sig
+            frozen_sig_by_id = {row[0]: row for row in frozen_scope_sig}
             frozen_context_digest = requested_context_digest
             labels = projects.load().get("labels", {})
             briefs = []
             frozen_runs: dict[str, FrozenScopeSource] = {}
+            frozen_probe_keys: dict[str, tuple] = {}
+            frozen_probe_receipts: dict[str, str] = {}
             consumed_event_bytes = 0
             for rid in frozen_scope_ids:
                 expected_bytes = frozen_source_sizes.get(rid, 0)
+                before_probe, before_key = _source_probe_receipt(rid, frozen_sig_by_id[rid])
+                frozen_probe_receipts[rid] = before_probe
                 try:
                     source = capture_scope_source(
                         srv.root, rid,
                         event_budget_bytes=max(
                             1, MAX_SCOPE_TOTAL_EVENT_BYTES - consumed_event_bytes),
                     )
-                    if source.event_bytes != expected_bytes:
+                    after_probe, after_key = _source_probe_receipt(
+                        rid, source.revision["log_sig"])
+                    if (source.event_bytes != expected_bytes or before_probe != after_probe
+                            or before_key is None or after_key is None
+                            or source.revision["log_sig"] != frozen_sig_by_id[rid]):
                         return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
                     briefs.append(_run_brief(rid, labels, source))
                     frozen_runs[rid] = source
+                    frozen_probe_keys[rid] = after_key
+                    _remember_revision(after_key, source.revision)
                 except ScopeSourceCapacityError:
                     return {"ok": False, **_SCOPE_SOURCE_TOO_LARGE}
                 except ScopeSourceError:
+                    if before_key is not None:
+                        _remember_omission(before_key)
                     continue
                 finally:
                     consumed_event_bytes += expected_bytes
@@ -1012,10 +1288,12 @@ def build_router(srv) -> APIRouter:
             }
             brief_ids = [brief["run_id"] for brief in briefs]
             source_revisions = [frozen_runs[rid].revision for rid in brief_ids]
+            omitted = sorted(set(frozen_scope_ids) - set(brief_ids))
 
             def _inputs_unchanged() -> bool:
                 current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
-                if current_ids != frozen_scope_ids or _scope_sig(current_ids) != frozen_scope_sig:
+                current_sig = _scope_sig(current_ids)
+                if current_ids != frozen_scope_ids or current_sig != frozen_scope_sig:
                     return False
                 if (_scope_context_digest(scope_type, scope_id, current_ids)
                         != frozen_context_digest):
@@ -1024,20 +1302,35 @@ def build_router(srv) -> APIRouter:
                     current_sizes = _scope_source_sizes(current_ids)
                     if current_sizes != frozen_source_sizes:
                         return False
+                    current_sig_by_id = {row[0]: row for row in current_sig}
+                    for rid in frozen_scope_ids:
+                        current_probe, _current_key = _source_probe_receipt(
+                            rid, current_sig_by_id[rid])
+                        if current_probe != frozen_probe_receipts[rid]:
+                                return False
+                    # A cheap identity can stay unchanged when transient access is repaired. Re-open
+                    # every omitted source at each paid/publication fence; newly capturable evidence
+                    # invalidates this incomplete snapshot before it can spend or publish.
                     remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
                     for rid in frozen_scope_ids:
                         if rid in frozen_runs:
-                            source = capture_scope_source(
+                            remaining -= frozen_source_sizes.get(rid, 0)
+                            continue
+                        try:
+                            capture_scope_source(
                                 srv.root, rid, event_budget_bytes=max(1, remaining))
-                            if source.revision != frozen_runs[rid].revision:
-                                return False
-                        remaining -= current_sizes.get(rid, 0)
+                        except ScopeSourceError:
+                            pass
+                        else:
+                            return False
+                        remaining -= frozen_source_sizes.get(rid, 0)
                     return True
                 except ScopeSourceError:
                     return False
 
-            # CODEX AGENT: revalidate every model-visible byte before client construction. A
-            # click-time/member/source race must consume zero provider calls, not only reject write.
+            # CODEX AGENT: the capture already bound every model-visible byte. Re-check its complete
+            # cheap identity before client construction/publication so ordinary races consume no paid
+            # call, without reparsing the same event log three more times inside one generation job.
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             from looplab.serve.scope_report import generate_scope_report as _gen
@@ -1058,27 +1351,24 @@ def build_router(srv) -> APIRouter:
                 content = _gen(scope, briefs, None)
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
-            # REVIEW(2026-07-16): the persisted `sig` covers only the runs that CONTRIBUTED briefs —
-            # the capture loop above `continue`s on ScopeSourceError, dropping an uncapturable run
-            # from brief_ids/source_revisions — while GET's staleness compare is `_scope_sig(cur_ids)`
-            # over ALL current scope runs, which always emits a row per run (a fallback row when the
-            # probe fails). A scope containing one PERMANENTLY uncapturable run (e.g. a corrupt
-            # events.jsonl that passes the lstat preflight but fails _parse_events) therefore persists
-            # a record whose sig can NEVER match: stale=true forever, the UI quarantine hides the
-            # just-paid-for content, and "Regenerate" repeats the LLM spend with the identical
-            # outcome. The record must persist the same vocabulary GET compares against — include
-            # fallback rows for skipped runs (plus an `omitted_runs` receipt), or GET must compare
-            # over rec["run_ids"] instead of cur_ids and surface added/removed runs separately.
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
-                   "generated_at": int(time.time() * 1000), "run_ids": brief_ids,
-                   "sig": [row["log_sig"] for row in source_revisions],
+                   "generated_at": int(time.time() * 1000), "run_ids": frozen_scope_ids,
+                   # CODEX AGENT: sig and run_ids use the complete scope vocabulary even when one
+                   # source is unreadable. omitted_runs says exactly which members supplied no brief.
+                   "sig": frozen_scope_sig,
                    "source_revisions": source_revisions,
+                   "omitted_runs": omitted,
+                   "omitted_source_probes": {
+                       rid: frozen_probe_receipts[rid] for rid in omitted},
+                   "context_digest": frozen_context_digest,
                    "model": s.llm_model, "content": content}
             try:
                 with _scope_store_lock(_reports_dir):
                     # Narrow the optimistic-check window at the actual publication boundary.
                     if not _inputs_unchanged():
                         return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+                    for rid in frozen_runs:
+                        _remember_revision(frozen_probe_keys[rid], frozen_runs[rid].revision)
                     # Revalidate the lexical store and re-derive the destination immediately before
                     # publication. A directory/file swapped during the slow model call is refused.
                     _validated_reports_dir(_reports_dir, create=True)
@@ -1089,10 +1379,16 @@ def build_router(srv) -> APIRouter:
                     _read_scope_record(dst, scope_type, scope_id)
             except (OSError, _ScopeReportStorageConflict):
                 return {"ok": False, **_SCOPE_STORAGE_ERROR}
-            omitted = sorted(set(frozen_scope_ids) - set(brief_ids))
             return {"ok": True, **rec, "authoritative": True,
-                    "stale": bool(omitted), "added": omitted}
+                    "stale": False, "added": []}
 
-        return await srv.jobs.run_as_job(_compute)
+        # CODEX AGENT: synthesis is paid. Coalesce the exact action while it is running or its result
+        # is unobserved; consume the terminal process receipt after inline/poll delivery so a later
+        # explicit Regenerate remains a genuinely new action over the same source snapshot.
+        reservation = srv.jobs.reserve(generation_identity, consume_on_poll=True)
+        if reservation.get("status") != "running":
+            return reservation
+        return await srv.jobs.run_as_job(
+            _compute, reserved_job_id=reservation["job_id"], consume_inline_result=True)
 
     return router

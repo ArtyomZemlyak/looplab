@@ -8,7 +8,8 @@ import { JSDOM } from 'jsdom'
 import { createServer } from 'vite'
 
 import {
-  scopeObservationRows, scopeReportAuthority, scopeReportKey, SCOPE_CONTENT_SCHEMA,
+  scopeObservationRows, scopeReportAuthority, scopeReportGenerationError, scopeReportKey,
+  SCOPE_CONTENT_SCHEMA,
   SCOPE_NARRATIVE_AUTHORITY, SCOPE_VERDICT_AUTHORITY,
 } from '../src/scopeReportModel.js'
 
@@ -29,22 +30,33 @@ const record = overrides => ({
 
 test('scope report authority requires exact current protocol markers', () => {
   assert.deepEqual(scopeReportAuthority(record()), {
-    current: true, verdict: true, narrative: true,
+    authoritative: true, freshness: 'fresh', fresh: true, inspectable: true,
+    verdict: true, narrative: true,
   })
-  for (const stale of [undefined, null, 0, '', true]) {
-    assert.equal(scopeReportAuthority(record({ stale })).current, false)
+  assert.deepEqual(scopeReportAuthority(record({ stale: true })), {
+    authoritative: true, freshness: 'stale', fresh: false, inspectable: true,
+    verdict: false, narrative: true,
+  })
+  for (const stale of [undefined, null, 0, '']) {
+    const authority = scopeReportAuthority(record({ stale }))
+    assert.equal(authority.authoritative, true)
+    assert.equal(authority.freshness, 'unknown')
+    assert.equal(authority.fresh, false)
+    assert.equal(authority.inspectable, false)
+    assert.equal(authority.verdict, false)
+    assert.equal(authority.narrative, false)
   }
   for (const authoritative of [undefined, null, 1, 'true', false]) {
-    assert.equal(scopeReportAuthority(record({ authoritative })).current, false)
+    assert.equal(scopeReportAuthority(record({ authoritative })).authoritative, false)
   }
-  assert.equal(scopeReportAuthority(record({ exists: false })).current, false)
+  assert.equal(scopeReportAuthority(record({ exists: false })).authoritative, false)
   assert.equal(scopeReportAuthority(record({
     content: {
       schema: SCOPE_CONTENT_SCHEMA - 1,
       verdict_authority: SCOPE_VERDICT_AUTHORITY,
       narrative_authority: SCOPE_NARRATIVE_AUTHORITY,
     },
-  })).current, false)
+  })).authoritative, false)
 })
 
 test('verdict and narrative authority are independent and version pinned', () => {
@@ -52,13 +64,35 @@ test('verdict and narrative authority are independent and version pinned', () =>
     content: { schema: SCOPE_CONTENT_SCHEMA,
       verdict_authority: 'server-derived-v2', narrative_authority: SCOPE_NARRATIVE_AUTHORITY },
   }))
-  assert.deepEqual(legacyVerdict, { current: true, verdict: false, narrative: true })
+  assert.deepEqual(legacyVerdict, {
+    authoritative: true, freshness: 'fresh', fresh: true, inspectable: true,
+    verdict: false, narrative: true,
+  })
 
   const legacyNarrative = scopeReportAuthority(record({
     content: { schema: SCOPE_CONTENT_SCHEMA,
       verdict_authority: SCOPE_VERDICT_AUTHORITY, narrative_authority: 'legacy-quarantined' },
   }))
-  assert.deepEqual(legacyNarrative, { current: true, verdict: true, narrative: false })
+  assert.deepEqual(legacyNarrative, {
+    authoritative: true, freshness: 'fresh', fresh: true, inspectable: true,
+    verdict: true, narrative: false,
+  })
+})
+
+test('scope generation failures retain actionable bounded-remediation copy', () => {
+  assert.equal(
+    scopeReportGenerationError({ code: 'scope_report_inputs_changed' }),
+    'Scope runs changed during generation. Retry from the current scope snapshot.',
+  )
+  for (const error of [
+    { status: 413 },
+    { code: 'scope_report_too_large' },
+    { code: 'scope_report_source_too_large' },
+  ]) {
+    assert.match(scopeReportGenerationError(error), /narrower child scope.*compact oversized/i)
+  }
+  assert.equal(scopeReportGenerationError({ status: 400 }), 'No runs in this scope yet.')
+  assert.equal(scopeReportGenerationError({ message: 'secret provider detail' }), 'Generation failed.')
 })
 
 test('scope identity is collision-safe for separator-bearing opaque ids', () => {
@@ -81,20 +115,20 @@ test('schema 5 cohorts remain observations-only even with current top-level mark
 
 test('ScopeReport fences late requests and quarantines outcome-bearing legacy content', () => {
   assert.match(source, /requestEpoch\.current !== epoch \|\| keyRef\.current !== key/)
-  assert.match(source, /requestEpoch\.current === epoch && keyRef\.current === key/)
   assert.match(source, /getScopeReport\(scope\.type, scope\.id, \{ signal: controller\.signal \}\)/)
   assert.match(source, /authority\.verdict && verdict/)
   assert.match(source, /authority\.narrative &&/)
-  assert.match(source, /groups = authority\.current \? list/)
-  assert.match(source, /observations = authority\.current \? list/)
+  assert.match(source, /groups = authority\.inspectable \? list/)
+  assert.match(source, /observations = authority\.inspectable \? list/)
   assert.match(source, /Model-advisory narrative · not a selection decision/)
-  assert.match(source, /content is quarantined because its authority or freshness is not current/)
+  assert.match(source, /content is quarantined because its authority is unavailable/)
+  assert.match(source, /stale historical snapshot[\s\S]*outcome claims are withheld/)
   assert.match(source, /scopeObservationRows\(group\)/)
   assert.match(source, /Cohort withheld — unverified observation contract/)
   assert.doesNotMatch(source, /Winner:/)
   assert.match(source, /incomplete_runs[\s\S]*run incomplete/)
   assert.match(source, /typeof value\?\.exists === 'boolean'[\s\S]*!Array\.isArray\(value\.content\)/)
-  assert.match(source, /error\?\.status === 400/)
+  assert.match(source, /scopeReportGenerationError\(error\)/)
   assert.doesNotMatch(source, /\/400\/\.test\(error\.message\)|'Generation failed: ' \+ error\.message/)
 })
 
@@ -158,20 +192,28 @@ test('ScopeReport renders only current authority and ignores an old generation a
     assert.match(document.body.textContent, /content is quarantined/i)
     assert.doesNotMatch(document.body.textContent, /VERDICT SECRET|HEADLINE SECRET|WORKED SECRET/)
 
+    await render({ type: 'task', id: 'scope-stale', label: 'scope-stale' })
+    const stale = payload('STALE')
+    stale.stale = true
+    await reply(requests[1], stale)
+    assert.match(document.body.textContent, /stale historical snapshot/i)
+    assert.match(document.body.textContent, /Model-advisory narrative.*HEADLINE STALE.*WORKED STALE/s)
+    assert.doesNotMatch(document.body.textContent, /VERDICT STALE/)
+
     await render({ type: 'task', id: 'scope-a', label: 'scope-a' })
-    await reply(requests[1], payload('A'))
+    await reply(requests[2], payload('A'))
     assert.match(document.body.textContent, /VERDICT A.*Model-advisory narrative.*HEADLINE A/s)
     await act(async () => {
       const regenerate = [...document.querySelectorAll('button')].find(button => /Regenerate/.test(button.textContent))
       regenerate.click(); regenerate.click()
       await Promise.resolve()
     })
-    assert.match(requests[2].url, /\/scope-a\/generate$/)
-    assert.equal(requests.length, 3, 'one scope generation click burst starts one paid request')
+    assert.match(requests[3].url, /\/scope-a\/generate$/)
+    assert.equal(requests.length, 4, 'one scope generation click burst starts one paid request')
 
     await render({ type: 'task', id: 'scope-b', label: 'scope-b' })
-    await reply(requests[3], payload('B'))
-    await reply(requests[2], payload('LATE A'))
+    await reply(requests[4], payload('B'))
+    await reply(requests[3], payload('LATE A'))
     assert.match(document.body.textContent, /VERDICT B.*HEADLINE B/s)
     assert.doesNotMatch(document.body.textContent, /LATE A|VERDICT A|HEADLINE A/)
   } finally {

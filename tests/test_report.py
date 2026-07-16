@@ -2223,6 +2223,70 @@ def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     assert got["stale"] is False and got["current_run_count"] == 2
 
 
+def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+    from looplab.serve.scope_sources import ScopeSourceCorruptError
+
+    task_id = "partial-source-scope"
+    _seed_scope_run(tmp_path, "readable", task_id)
+    _seed_scope_run(tmp_path, "uncapturable", task_id)
+    real_capture = reports.capture_scope_source
+
+    def partial_capture(root, run_id, **kwargs):
+        if run_id == "uncapturable":
+            raise ScopeSourceCorruptError("test-only unavailable tail")
+        return real_capture(root, run_id, **kwargs)
+
+    monkeypatch.setattr(reports, "capture_scope_source", partial_capture)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    generated = client.post(url + "/generate").json()
+    stored = client.get(url).json()
+
+    for record in (generated, stored):
+        assert record["run_ids"] == ["readable", "uncapturable"]
+        assert record["omitted_runs"] == ["uncapturable"]
+        assert record["stale"] is False
+        assert record["added"] == []
+    assert [row[0] for row in generated["sig"]] == ["readable", "uncapturable"]
+    assert [row["run_id"] for row in generated["source_revisions"]] == ["readable"]
+    assert stored["content"]["coverage"]["source_runs"] == 2
+    assert stored["content"]["coverage"]["unavailable_runs"] == 1
+
+
+def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "cached-source-revision"
+    _seed_scope_run(tmp_path, "cached-run", task_id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert client.post(url + "/generate").json()["ok"] is True
+
+    real_capture = reports.capture_scope_source
+    captures = 0
+
+    def counted_capture(*args, **kwargs):
+        nonlocal captures
+        captures += 1
+        return real_capture(*args, **kwargs)
+
+    monkeypatch.setattr(reports, "capture_scope_source", counted_capture)
+    assert client.get(url).json()["stale"] is False
+    assert client.get(url).json()["stale"] is False
+    assert captures == 0, "stable GETs must reuse the generation's full revision"
+
+    (tmp_path / "cached-run" / "task.snapshot.json").write_text(
+        json.dumps({"id": task_id, "goal": "changed model-visible task"}), encoding="utf-8")
+    assert client.get(url).json()["stale"] is True
+    assert captures == 1, "a cheap snapshot-identity miss must trigger exact revalidation"
+
+
 def _seed_scope_run(root: Path, run_id: str, task_id: str) -> None:
     """Minimal run used by scope-storage tests; no engine/provider work is needed."""
     from looplab.events.eventstore import EventStore

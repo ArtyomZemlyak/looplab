@@ -1516,6 +1516,7 @@ export const gpuStat = () => get('/api/gpu')
 
 // ---- settings + run launch ----
 export const getSettings = () => get('/api/settings')
+export const getSettingsSchema = (options = {}) => get('/api/settings/schema/1', options)
 export const saveSettings = (settings) => send('/api/settings', 'PUT', { settings })
 // Store (or clear, value='') a secret credential. Goes to the dedicated owner-only secret store,
 // NOT ui_settings.json — the value is never echoed back (the GET reports it only as masked "***").
@@ -1607,7 +1608,7 @@ export async function jobAwait(resp, {
       error.submissionMayHaveSucceeded = true
       if (!isTransientCommandReadError(error)) throw error
       if (++transientErrors >= maxTransientErrors) {
-        return { ok: false, code: 'job_contact_lost', ambiguous: true,
+        return { ok: false, code: 'job_contact_lost', ambiguous: true, job_id: resp.job_id,
           error: 'job contact lost' }
       }
       await commandSleep(intervalMs, signal)
@@ -1615,15 +1616,16 @@ export async function jobAwait(resp, {
     }
     if (!j || typeof j !== 'object' || Array.isArray(j)
         || !['running', 'done', 'unknown'].includes(j.status)) {
-      return { ok: false, code: 'job_protocol_error', ambiguous: true,
+      return { ok: false, code: 'job_protocol_error', ambiguous: true, job_id: resp.job_id,
         error: 'invalid job status' }
     }
     if (j.status === 'done') return j
     if (j.status === 'unknown') return { ok: false, code: 'job_unknown', ambiguous: true,
+      job_id: resp.job_id,
       error: 'job receipt expired' }
     await commandSleep(intervalMs, signal)
   }
-  return { ok: false, code: 'job_timeout', ambiguous: true,
+  return { ok: false, code: 'job_timeout', ambiguous: true, job_id: resp.job_id,
     error: 'job timed out' }
 }
 // Cross-run synthesis can read many runs + drive an agent, so it runs as a background job; await it to
@@ -1634,6 +1636,9 @@ export async function genScopeReport(type, id) {
   if (r && r.ok === false) {
     const error = new Error(r.error || r.message || r.code || 'scope report generation failed')
     error.code = r.code
+    error.ambiguous = r.ambiguous === true
+    error.jobId = typeof r.job_id === 'string' ? r.job_id : null
+    error.submissionMayHaveSucceeded = r.ambiguous === true
     throw error
   }
   return r

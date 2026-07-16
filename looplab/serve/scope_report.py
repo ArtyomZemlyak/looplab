@@ -752,7 +752,9 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                 from looplab.core.parse import parse_structured
                 r = parse_structured(client, messages, _AggNarrative, parser)
                 raw = r.model_dump() if hasattr(r, "model_dump") else None
-                return _sanitize_content(raw, briefs, coverage) if raw is not None else None
+                box["forced"] = (
+                    _sanitize_content(raw, briefs, coverage) if raw is not None else None)
+                return box["forced"]
             except Exception:  # noqa: BLE001 - no synthesis either -> deterministic below
                 return None
 
@@ -772,16 +774,13 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                                  finalize=_fin, fallback=_force)
         # Prefer a SUBSTANTIVE agent report; a blank/all-default emit (or empty forced synthesis) drops
         # through to the honest metrics rollup rather than persisting an empty report.
-        # REVIEW(2026-07-16): DOUBLE-SANITIZE — both candidates here were ALREADY produced by
-        # _sanitize_content (_fin stores _sanitize_content(raw) in box['r']; `result` is _fin's return),
-        # and _sanitize_content unconditionally prepends its structural + auto caveats before appending
-        # the source's caveat list. Sanitizing again therefore persists every structural/auto caveat
-        # TWICE ([structural, *auto] + [structural, *auto, *model]) in every successful agent-authored
-        # report, and the duplicates consume the 32-item caveat cap that should carry the model's real
-        # caveats. Either return the candidate as-is here (it is already sanitized), or make
-        # _sanitize_content idempotent (skip prepending caveats it already finds at the head).
         for cand in (result, box.get("r")):
             if _has_content(cand):
+                # CODEX AGENT: trust only the exact objects produced by our finalize/fallback closures.
+                # Production exits avoid a second sanitize (and duplicate structural caveats), while
+                # alternate/test loop implementations returning a raw dict still cross the boundary.
+                if cand is box.get("r") or cand is box.get("forced"):
+                    return cand
                 return _sanitize_content(cand, briefs, coverage)
         return _deterministic(label, briefs, coverage)
     except Exception:  # noqa: BLE001 - any model/loop failure -> deterministic, still useful

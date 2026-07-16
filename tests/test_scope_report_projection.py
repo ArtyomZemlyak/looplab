@@ -118,6 +118,28 @@ def test_scope_projection_redacts_bounds_and_discards_model_numeric_authority(mo
     assert len(json.dumps(content, ensure_ascii=False)) <= scope_report.MAX_SCOPE_REPORT_CONTENT_CHARS
 
 
+def test_successful_agent_content_crosses_the_sanitizer_once(monkeypatch):
+    def fake_loop(_client, _tools, _messages, _emit_spec, **kwargs):
+        return kwargs["finalize"]({
+            "headline": "bounded synthesis",
+            "caveats": ["model-specific caveat"],
+        })
+
+    monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", fake_loop)
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "one", "direction": "min", "best_metric": 1.0}],
+        object(),
+    )
+
+    structural = (
+        "Narrative sections are model-authored advisory synthesis, not comparison outcomes.")
+    assert content["caveats"].count(structural) == 1
+    assert content["caveats"].count("model-specific caveat") == 1
+    assert sum("lack a valid comparison measurement" in row
+               for row in content["caveats"]) == 1
+
+
 def test_scope_projection_only_ranks_within_exact_contract_and_caps_runs():
     common = _contract()
     different = _contract(split="holdout")
