@@ -77,6 +77,26 @@ def test_cli_prints_overview(tmp_path):
     assert "hard-neg" in res.stdout and "r1=0.88" in res.stdout
 
 
+def test_cli_honors_recorded_merge_and_split(tmp_path):
+    # live-test regression: the cross-run-concepts inspector MUST reflect recorded operator/steward
+    # governance (merge/purge/split), consistent with cross-run-digest / atlas / agent tools — it used to
+    # show the STALE raw graph.
+    from looplab.engine.concept_registry import record_concept_alias, record_concept_split
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    store.add(_cap("r1", ["data/hn", "loss/hard-margin"], {}))
+    store.add(_cap("r2", ["data/hard-negative-mining"], {}))   # dup spelling of data/hn
+    store.add(_cap("r3", ["junk-xyz"], {}))
+    record_concept_alias(str(tmp_path), from_concept="data/hn", to_concept="data/hard-negative-mining")  # merge
+    record_concept_alias(str(tmp_path), from_concept="junk-xyz", to_concept="")                          # purge
+    res = runner.invoke(app, ["cross-run-concepts", str(tmp_path), "--json"])
+    assert res.exit_code == 0
+    import json
+    concepts = {c["concept"]: c for c in json.loads(res.stdout)["concepts"]}
+    assert "data/hard-negative-mining" in concepts and concepts["data/hard-negative-mining"]["n_runs"] == 2
+    assert "data/hn" not in concepts          # merged away
+    assert "junk-xyz" not in concepts         # purged
+
+
 def test_cli_json_mode(tmp_path):
     store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
     store.add(_cap("r1", ["hard-neg"], {"hard-neg": 0.88}))
