@@ -35,9 +35,13 @@ const sourceRevision = (key, value) => {
     const revision = count(envelope.revision, -1)
     return revision >= 0 ? String(revision) : ''
   }
+  // Reduce, don't spread: `envelope.entries` is the RAW server response (not yet passed through
+  // take()), so `Math.max(...revisions)` on a pathologically large / mis-limited / corrupted ledger
+  // would throw RangeError ("Maximum call stack size exceeded") INSIDE the setResource updater and
+  // crash the whole Atlas route — the opposite of this module's "enforce hard render caps" contract.
   const revisions = list(envelope.entries)
     .map(entry => count(record(entry).revision, -1)).filter(value => value >= 0)
-  return revisions.length ? String(Math.max(...revisions)) : ''
+  return revisions.length ? String(revisions.reduce((m, v) => (v > m ? v : m), -Infinity)) : ''
 }
 
 // Four Atlas endpoints refresh independently. Preserve source-local provenance so a successful claims

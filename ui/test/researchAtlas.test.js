@@ -88,6 +88,16 @@ test('Atlas projection applies hard caps before React receives portfolio collect
   assert.equal(view.hiddenCuration, 7)
 })
 
+test('Atlas source-revision reduces without an unbounded spread on a huge ledger', () => {
+  // sourceRevision (via reconcileAtlasSourceStatuses) reads the RAW, un-take()'d `entries` array; a
+  // pathologically large / mis-limited curation ledger must not throw RangeError via Math.max(...spread)
+  // and crash the Atlas route — it must degrade and still fingerprint the max revision.
+  const huge = { conceptCuration: { entries: Array.from({ length: 200000 }, (_, i) => ({ revision: i })) } }
+  const statuses = reconcileAtlasSourceStatuses({}, huge, 'now')
+  assert.equal(statuses.conceptCuration.state, 'current')
+  assert.equal(statuses.conceptCuration.revision, String(199999))   // max revision, computed without crashing
+})
+
 test('concept and claim steward logs merge deterministically by time, revision, then kind', () => {
   const merged = mergeCurationLogs({ n: 3, entries: [
     { run_id: 'concept-new', at: '2026-07-16T01:00:00Z', revision: 1, outcome: 'proposed',
