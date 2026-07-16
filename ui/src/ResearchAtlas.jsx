@@ -15,6 +15,12 @@ const SOURCES = [
   { key: 'claimCuration', read: signal => getCrossRunClaimCurationLog(20, { signal }) },
 ]
 const SOURCE_TIMEOUT_MS = 15_000
+const SOURCE_READINESS = [
+  ['atlas', 'Concept + evidence'],
+  ['claims', 'Claim records'],
+  ['conceptCuration', 'Concept steward log'],
+  ['claimCuration', 'Claim steward log'],
+]
 
 const metricText = value => value == null ? '—' : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 6 })
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
@@ -35,10 +41,11 @@ const curationOutcomeLabel = entry => {
 
 function SourceWatermark({ sourceKey, label, source, retry, busy, pending, children }) {
   const state = source.state
+  const displayState = pending ? 'loading' : state
   const loadedAt = source.loadedAt
-  return <p className={`atlas-source-note atlas-source-${state}`}>
-    <strong>{label}</strong> · <span>{state === 'retained-stale' ? 'stale'
-      : pending ? 'loading' : state === 'failed' ? 'unavailable' : 'current'}</span>
+  return <p className={`atlas-source-note atlas-source-${displayState}`}>
+    <strong>{label}</strong> · <span>{pending ? 'loading'
+      : state === 'retained-stale' ? 'stale' : state === 'failed' ? 'unavailable' : 'current'}</span>
     {loadedAt && <> · loaded <time dateTime={loadedAt}>{loadedAt}</time></>}
     {' · '}revision {source.revision || 'not reported'} · {children}
     {state !== 'current' && <> · <button type="button" className="btn sm" disabled={busy}
@@ -46,6 +53,52 @@ function SourceWatermark({ sourceKey, label, source, retry, busy, pending, child
         ? `Retry ${label} unavailable while refresh is active` : `Retry ${label}`}>
       {busy ? 'Refreshing…' : 'Retry'}</button></>}
   </p>
+}
+
+export function AtlasEmptyState({ sourceStates, pending = [], retry, busy, onBack }) {
+  const pendingSources = new Set(pending)
+  const allCurrent = pending.length === 0
+    && Object.values(sourceStates).every(source => source.state === 'current')
+  return <section className="atlas-empty" aria-labelledby="atlas-empty-title" role="status">
+    <div className="atlas-empty-copy">
+      <p className="atlas-eyebrow">Source readiness</p>
+      <h2 id="atlas-empty-title">{allCurrent
+        ? 'No cross-run evidence'
+        : 'No current Atlas records'}</h2>
+      <p>{allCurrent
+        ? 'All sources responded with no shared-memory evidence. This does not mean the project has no runs.'
+        : 'Sources settle independently. Retry an unavailable or stale source below.'}</p>
+      <p className="atlas-empty-guidance">Only finalized runs contributing concepts or claims appear here.</p>
+      <div className="atlas-empty-actions">
+        <button type="button" className="btn primary" onClick={onBack}>Back to runs</button>
+        <a className="btn" href="#/settings">Memory settings</a>
+      </div>
+    </div>
+    <ul className="atlas-source-readiness" aria-label="Atlas source readiness">
+      {SOURCE_READINESS.map(([key, label]) => {
+        const state = sourceStates[key]?.state || 'failed'
+        const loading = pendingSources.has(key)
+        const status = loading ? 'Loading' : state === 'current' ? 'Empty'
+          : state === 'retained-stale' ? 'Stale' : 'Unavailable'
+        const retryable = !loading && state !== 'current'
+        return <li key={key}
+        className={`atlas-empty-source atlas-empty-source-${loading ? 'loading' : state}`}>
+        <span className="atlas-readiness-dot" aria-hidden="true" />
+        <div>
+          <div className="atlas-empty-source-head">
+            <strong>{label}</strong>
+            <span className="atlas-readiness-state">{status}</span>
+          </div>
+        </div>
+        {retryable && <button type="button" className="btn sm" disabled={busy}
+          onClick={() => retry(key)} aria-label={busy
+            ? `Retry ${label} unavailable while refresh is active`
+            : `Retry ${label}`}>
+          {busy ? 'Refreshing…' : 'Retry'}
+        </button>}
+      </li>})}
+    </ul>
+  </section>
 }
 
 export function ClaimCard({ claim, compact = false }) {
@@ -195,7 +248,6 @@ export default function ResearchAtlas({ onBack }) {
   const atlasLoaded = sourceStates.atlas.state !== 'failed'
   const claimsLoaded = sourceStates.claims.state !== 'failed'
   const states = Object.values(sourceStates)
-  const allCurrent = states.every(source => source.state === 'current')
   const curationCurrent = sourceStates.conceptCuration.state === 'current'
     && sourceStates.claimCuration.state === 'current'
   const hasRetainedStale = states.some(source => source.state === 'retained-stale')
@@ -243,9 +295,10 @@ export default function ResearchAtlas({ onBack }) {
             <span>{countLabel(view.invalidRows.total, 'record')}; server totals may still include them.</span>
           </div>}
 
-          <section className="atlas-summary" aria-label="Portfolio summary">
+          <section className="atlas-summary" aria-label="Portfolio summary"
+            aria-describedby="atlas-evidence-runs-note">
             {[
-              ['Runs', view.totals.runs, atlasLoaded],
+              ['Evidence runs', view.totals.runs, atlasLoaded],
               ['Concepts', view.totals.concepts, atlasLoaded],
               ['Claims', view.totals.claims, claimsLoaded],
               ['Mixed evidence', view.totals.contested, atlasLoaded],
@@ -253,17 +306,14 @@ export default function ResearchAtlas({ onBack }) {
               <span>{label}</span><strong>{loaded ? value : 'not loaded'}</strong>
             </div>)}
           </section>
+          <p className="atlas-summary-note" id="atlas-evidence-runs-note">
+            Evidence runs are referenced by this bounded shared-memory projection, not the total run count.
+          </p>
 
-          {view.empty && allCurrent && <div className="notice resource-empty atlas-empty" role="status">
-            <div><b>{view.invalidRows.total > 0 || resource.errors.length > 0
-              ? 'No valid records are available.'
-              : 'No cross-run memory yet.'}</b><br />
-              {view.invalidRows.total > 0 || resource.errors.length > 0
-                ? 'Retry missing sources or repair shared-memory records.'
-                : 'Configure Memory dir and finalize Part IV runs.'}</div>
-          </div>}
+          {view.empty && <AtlasEmptyState sourceStates={sourceStates} pending={resource.pending}
+            retry={retry} busy={busy} onBack={onBack} />}
 
-          {(!view.empty || !allCurrent) && <div className="atlas-grid">
+          {!view.empty && <div className="atlas-grid">
             <section className="atlas-panel atlas-coverage" aria-labelledby="atlas-coverage-title">
               <div className="atlas-panel-head">
                 <div><p className="atlas-eyebrow">Concept observations</p><h2 id="atlas-coverage-title">Concepts seen across runs</h2></div>
