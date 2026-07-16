@@ -547,7 +547,8 @@ are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge 
 **[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
 This shipped lesson/case memory should not be confused with the complete **portfolio research index**.
-An opt-in experimental Part-IV slice now ships: rebuildable run passports/facts, per-run concept capsules,
+An experimental Part-IV slice now ships enabled by default in product `Settings` (the bare-library
+`EngineOptions` defaults remain off): rebuildable run passports/facts, per-run concept capsules,
 versioned concept-key alias/split overlays, v2 D8 claims, task facets, bounded retrieval, and backend
 Atlas/claims projections. Its bound agent tools use role and compatible direction; lessons/capsules accept
 exact task or a strict related-goal fingerprint, while v2 D8 is exact-task-only because it stores no goal

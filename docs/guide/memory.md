@@ -35,7 +35,8 @@ diagnostic spans, chat, command records and cross-run stores retain separate doc
 ## Current cross-run boundary and the Research Atlas target
 
 The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.
-LoopLab now also has an **opt-in experimental Part-IV slice**: rebuildable run passports/facts, per-run
+LoopLab also ships an **experimental Part-IV slice enabled by default in product `Settings`** (the
+bare-library `EngineOptions` defaults remain off): rebuildable run passports/facts, per-run
 concept capsules with alias/split overlays, v2 persisted D8 claims, task-facet overlays, bounded hybrid
 cross-run retrieval, and backend Atlas/claims projections. Bound pull tools apply role and compatible direction;
 lessons/capsules accept exact task or a strict related-goal fingerprint, while v2 D8 (which stores no goal
