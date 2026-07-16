@@ -3,7 +3,7 @@ import { useMediaQuery, useRunState } from './hooks.js'
 import { useTimeline } from './useTimeline.js'
 import { useRunRouteState } from './useRunRouteState.js'
 import { reviewInspectorTabs, reviewPanelAllowed, runRouteStateHasTarget } from './runRouteState.js'
-import { get, fmt, fmtInt, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
+import { get, fmt, fmtInt, fmtElapsedSeconds, phaseLabel, workingId, isSweep, CONTROL, commandFeedback,
   storageGet, storageSet } from './util.js'
 import { computeGroups, autoCollapseSet } from './grouping.js'
 import EnergyToggle from './EnergyToggle.jsx'
@@ -439,7 +439,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       showToast('Choose two different experiments to merge')
       return
     }
-    // # CODEX AGENT: Confirmation owns this exact run generation and both attempt identities; a
+    // Confirmation owns this exact run generation and both attempt identities; a
     // later render may invalidate the chooser but must never silently rebind the operator's intent.
     const intent = captureMergeIntent({
       runId, runGeneration: generation, nodes: live?.nodes, sourceId, targetId,
@@ -974,7 +974,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
-          <span className="k">eval</span> {Math.round(evalSec)}s{maxEval ? ` / ${maxEval}` : ''}</button>}
+          <span className="k">eval</span> {fmtElapsedSeconds(evalSec)}{maxEval != null ? ` / ${fmtElapsedSeconds(maxEval)}` : ''}</button>}
         {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>

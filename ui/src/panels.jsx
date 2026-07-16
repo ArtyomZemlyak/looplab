@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, CONTROL, gpuStat, saveRunConfig, operatorMeta,
+import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, gpuStat, saveRunConfig, operatorMeta,
   commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
@@ -45,7 +45,7 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
         <Stat n={nodes.length} l="nodes" />
         <Stat n={evaluated} l="evaluated" />
         <Stat n={failed} l="failed" />
-        <Stat n={Math.round(evalSec) + 's' + (maxEval ? ' / ' + maxEval : '')} l="eval time" />
+        <Stat n={fmtElapsedSeconds(evalSec) + (maxEval != null ? ' / ' + fmtElapsedSeconds(maxEval) : '')} l="eval time" />
         {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
         {state.paused ? <Stat n="paused" l="status" /> : null}
       </div>
@@ -543,7 +543,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     if (!mutation) return
     const submittedRunId = runId
     try {
-      // # CODEX AGENT: This is one durable command/postcondition. Never restore a client-side
+      // This is one durable command/postcondition. Never restore a client-side
       // pause-then-resume saga here: unmounting between commands would strand the accepted intent.
       const record = await CONTROL.restart(submittedRunId)
       if (mutation.generation !== loadGenerationRef.current) return

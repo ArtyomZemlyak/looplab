@@ -15,6 +15,16 @@ export function fmtInt(v) {
   return Number(v).toLocaleString()
 }
 
+// Compact elapsed-time label for run summaries. Whole-second rounding keeps the existing
+// at-a-glance display for ordinary evaluations, while a positive sub-second evaluation must not
+// look like no work happened. Invalid and negative durations are not meaningful measurements.
+export function fmtElapsedSeconds(v) {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) return '—'
+  if (v === 0) return '0s'
+  if (v < 1) return '<1s'
+  return `${Math.round(v)}s`
+}
+
 // Dynamic font size for a node card's one-line caption ("what this node did"). The chip is a fixed
 // width (~168px) and single line, so a long param-diff / change-summary used to hit the hard ellipsis
 // almost immediately. Instead of clipping, shrink the font as the text grows so MORE of the caption
