@@ -2223,6 +2223,43 @@ def _seed_scope_run(root: Path, run_id: str, task_id: str) -> None:
     })
 
 
+def test_scope_report_routes_preserve_encoded_slashes_and_disable_caching(
+        tmp_path, monkeypatch):
+    from urllib.parse import quote
+
+    task_id = "benchmark/family/v1"
+    _seed_scope_run(tmp_path, "slash-scope-run", task_id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    encoded_id = quote(task_id, safe="")
+    url = f"/api/scope-report/task/{encoded_id}"
+    raw_path_url = f"/api/scope-report/task/{task_id}"
+
+    generated = client.post(url + "/generate")
+    current = client.get(raw_path_url)
+    missing = client.get("/api/scope-report/task/missing%2Fscope")
+    invalid = client.post("/api/scope-report/bogus/invalid%2Fscope/generate")
+
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    protected_client = TestClient(make_app(tmp_path))
+    unauthorized = protected_client.get(url)
+    authorized = protected_client.get(url, headers={"X-LoopLab-Token": "owner-secret"})
+
+    assert generated.status_code == 200
+    assert generated.json()["ok"] is True
+    assert generated.json()["scope_identity"] == {"type": "task", "id": task_id}
+    assert generated.json()["run_ids"] == ["slash-scope-run"]
+    assert current.status_code == 200
+    assert current.json()["scope_identity"] == {"type": "task", "id": task_id}
+    assert current.json()["run_ids"] == ["slash-scope-run"]
+    assert missing.status_code == 200 and missing.json()["exists"] is False
+    assert invalid.status_code == 400
+    assert unauthorized.status_code == 401
+    assert authorized.status_code == 200
+    for response in (generated, current, missing, invalid, unauthorized, authorized):
+        assert response.headers["Cache-Control"] == "no-store"
+
+
 @pytest.mark.parametrize("mutation", ["append", "replace"])
 def test_scope_report_run_change_during_synthesis_preserves_last_good(
         tmp_path, monkeypatch, mutation):

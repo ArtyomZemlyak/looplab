@@ -877,7 +877,9 @@ def build_router(srv) -> APIRouter:
             sizes[run_id] = size
         return sizes
 
-    @router.get("/api/scope-report/{scope_type}/{scope_id}")
+    # CODEX AGENT: scope ids are opaque persisted identities, so the route must preserve legal
+    # task/project ids containing ``/`` instead of truncating or rejecting them at the HTTP boundary.
+    @router.get("/api/scope-report/{scope_type}/{scope_id:path}")
     def get_scope_report(scope_type: str, scope_id: str):
         if scope_type not in _SCOPE_TYPES:
             raise HTTPException(400, "bad scope type")
@@ -912,7 +914,7 @@ def build_router(srv) -> APIRouter:
         return {**rec, "exists": True, "stale": stale,
                 "current_run_count": len(cur_ids), "added": added}
 
-    @router.post("/api/scope-report/{scope_type}/{scope_id}/generate")
+    @router.post("/api/scope-report/{scope_type}/{scope_id:path}/generate")
     async def generate_scope_report_ep(scope_type: str, scope_id: str):
         """Generate (or regenerate) the cross-run report for a scope. On-demand only — the agent reads
         a bounded/redacted projection of at most ``MAX_SCOPE_REPORT_RUNS`` runs and may request a

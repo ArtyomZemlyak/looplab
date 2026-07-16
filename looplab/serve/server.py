@@ -523,12 +523,16 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                        and parts[4] == "log-page")
         is_report_refresh = (len(parts) == 5 and parts[1] == "api" and parts[2] == "runs"
                              and parts[4] == "report_refresh")
+        # CODEX AGENT: scope reports are live, membership-bound observations. A cached GET or paid
+        # generation result can claim authority for a scope snapshot that no longer exists.
+        is_scope_report = (route_path == "/api/scope-report"
+                           or route_path.startswith("/api/scope-report/"))
         is_job = len(parts) == 4 and parts[1] == "api" and parts[2] == "jobs"
         is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
                            and parts[4] == "comments"))
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
-        if (is_command or is_start_status or is_log_page or is_report_refresh
+        if (is_command or is_start_status or is_log_page or is_report_refresh or is_scope_report
                 or is_job or is_comments or is_attention):
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
