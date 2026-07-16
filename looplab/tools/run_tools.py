@@ -136,7 +136,10 @@ class RunTools:
             outcome = f"FAILED({n.error_reason or 'error'})"
         else:
             outcome = f"metric={digest.fmt_num(digest.node_metric(n))}"
-        theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
+        # Derived theme (legacy idea.theme, else the first concept's coarse axis) — the SAME vocabulary
+        # list_themes/list_experiments advertise, so a concept-authored run isn't shown blank here.
+        node_theme = digest.node_theme(n)
+        theme = f" {{{node_theme}}}" if node_theme else ""
         return f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
 
     def _list(self, st: RunState, args: dict) -> str:
@@ -148,7 +151,9 @@ class RunTools:
         else:
             nodes = digest.top_nodes(st, len(st.nodes), worst=(sort == "worst"))
         if theme:
-            nodes = [n for n in nodes if getattr(n.idea, "theme", None) == theme]
+            # Filter on the DERIVED theme (digest.node_theme) — the same vocabulary list_themes advertises;
+            # a raw idea.theme filter matched nothing on concept-authored runs (themes come from concepts).
+            nodes = [n for n in nodes if digest.node_theme(n) == theme]
         nodes = nodes[:limit]
         if not nodes:
             return "(no matching experiments)"

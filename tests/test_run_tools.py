@@ -157,6 +157,29 @@ def test_run_tools_read_and_rank():
     assert "no experiment" in rt.execute("read_experiment", {"node_id": 99}).lower()
 
 
+def test_list_experiments_theme_filter_matches_derived_concept_axis():
+    # On a concept-authored run (no legacy idea.theme), list_themes advertises the DERIVED theme (the
+    # first concept's coarse axis), so the list_experiments theme filter must use the same vocabulary —
+    # a raw idea.theme filter matched nothing and the agent could never drill a theme it was shown.
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft",
+                idea=Idea(operator="draft", params={}, concepts=["loss/contrastive"]),
+                metric=0.9, status=NodeStatus.evaluated),
+        1: Node(id=1, operator="improve",
+                idea=Idea(operator="improve", params={}, concepts=["loss/triplet"]),
+                metric=0.7, status=NodeStatus.evaluated),
+        2: Node(id=2, operator="draft",
+                idea=Idea(operator="draft", params={}, concepts=["data/synth"]),
+                metric=0.5, status=NodeStatus.evaluated),
+    }
+    rt = RunTools(); rt.bind_state(st)
+    assert "loss" in rt.execute("list_themes", {})            # derived axis advertised
+    listed = rt.execute("list_experiments", {"theme": "loss"})
+    assert "#0" in listed and "#1" in listed and "#2" not in listed   # filter uses the derived axis
+    assert "no matching" not in listed.lower()
+
+
 def test_run_tools_unbound_is_safe():
     assert "unavailable" in RunTools().execute("list_themes", {}).lower()
 
