@@ -13,6 +13,10 @@ import { canonicalId } from './conceptId.js'
 // hidden; selecting it highlights the whole `path` subtree (which includes the bare-`path` nodes), and
 // the UI can render it distinctly ("· here").
 export function chipsAtPath(nodeConcepts = {}, rename = {}, path = '') {
+  // Canonicalize the drilled path too (not just the node tags): a consolidation rename landing after the
+  // user drilled would otherwise strand the breadcrumb on a retired id, matching no canonicalized node
+  // tag, and the level flips to "No concepts at this level".
+  path = path ? canonicalId(path, rename) : ''
   const prefix = path ? path + '/' : ''
   const depth = path ? path.split('/').length : 0
   const counts = new Map()                            // childId -> Set(nodeId)
@@ -59,19 +63,16 @@ export function breadcrumb(path = '') {
 // unambiguous. Empty selection matches everything (no dimming).
 export function conceptMatches(nodeConceptIds, selected, rename = {}) {
   if (!selected || !selected.length) return true
-  // REVIEW(2026-07-16): only the NODE side is canonicalized — `selected` ids (and the drilled `path`
-  // in chipsAtPath) are compared verbatim. A consolidation rename landing AFTER selection strands the
-  // filter: on the next SSE tick every node tag canonicalizes to the NEW id, nothing matches the
-  // stale selected id, matchingNodeIds returns an empty Set — the whole DAG dims while the selected
-  // pill shows a retired id, and a drilled breadcrumb flips to "No concepts at this level". Selected
-  // ids and the breadcrumb path must be passed through canonicalId(s, rename) too (preserving the
-  // `=` exact-marker), so a live rename retargets the filter instead of emptying it.
+  // Canonicalize BOTH sides: the node tags AND each selected id (preserving the `=` exact marker). A
+  // consolidation rename landing after selection would otherwise strand the filter — every node tag
+  // canonicalizes to the NEW id while `selected` still holds the retired one, so nothing matches and the
+  // whole graph dims. Passing the selection through the rename retargets it to the surviving concept.
   for (const raw of (nodeConceptIds || [])) {
     const c = canonicalId(raw, rename)
     if (!c) continue
     for (const s of selected) {
       const exact = s[0] === '='
-      const id = exact ? s.slice(1) : s
+      const id = canonicalId(exact ? s.slice(1) : s, rename)
       if (exact ? c === id : (c === id || c.startsWith(id + '/'))) return true
     }
   }

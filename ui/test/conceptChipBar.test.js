@@ -122,3 +122,59 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     }
   }
 })
+
+test('concepts vanishing while selected clears the highlight instead of stranding the graph dimmed', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true,
+    requestAnimationFrame: cb => setTimeout(cb, 0), cancelAnimationFrame: h => clearTimeout(h),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const calls = []
+  let root, vite
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
+    ])
+    root = createRoot(document.getElementById('root'))
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: STATE, onHighlight: v => calls.push(v),
+    })))
+    // select a concept -> non-null highlight, bar visible
+    const arch = [...document.querySelectorAll('.cb-chip')].find(
+      c => c.querySelector('.cb-name')?.textContent === 'architecture')
+    await act(async () => {
+      arch.querySelector('.cb-chip-main').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    assert.ok(calls.at(-1) instanceof Set)
+
+    // a live tick empties node_concepts (all tagged nodes reset): the bar hides, but the highlight must
+    // be cleared to null so the graph is not stranded fully dimmed with no controls.
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: { node_concepts: {} }, onHighlight: v => calls.push(v),
+    })))
+    await act(async () => { await Promise.resolve() })
+    assert.equal(document.querySelector('.concept-bar'), null)   // bar hidden
+    assert.equal(calls.at(-1), null)                             // highlight cleared, not a stuck empty Set
+  } finally {
+    if (root) await act(async () => root.unmount())
+    if (vite) await vite.close()
+    dom.window.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  }
+})
