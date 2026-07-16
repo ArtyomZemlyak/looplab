@@ -131,6 +131,21 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     ? `${line} L ${bestPts[bestPts.length - 1][0]} ${h - pad} L ${bestPts[0][0]} ${h - pad} Z` : ''
   const marks = steps || []
   const pick = onPick || null
+  // Dense trajectories use one nearest-x interaction surface. Per-point 30 px hit circles overlap
+  // after roughly 25 nodes and make the DOM's last point win instead of the visually nearest point.
+  const eventX = e => { const r = e.currentTarget.getBoundingClientRect()
+    return (e.clientX - r.left) / Math.max(1, r.width) * w }
+  const markLabels = new Set()
+  const markPositions = marks.map((s, i) => ({ i, x: X(s.id) })).sort((a, b) => a.x - b.x)
+  let lastLabel = null
+  markPositions.slice(0, -1).forEach(mark => {
+    if (!lastLabel || mark.x - lastLabel.x >= 40) { markLabels.add(mark.i); lastLabel = mark }
+  })
+  const endLabel = markPositions.at(-1)
+  if (endLabel) {
+    if (lastLabel && endLabel.x - lastLabel.x < 40 && markLabels.size > 1) markLabels.delete(lastLabel.i)
+    markLabels.add(endLabel.i)
+  }
   const groupsPresent = [...new Set(evald.map(grpKey).filter(Boolean))]
   const groupMarker = group => {
     const index = Math.max(0, groupsPresent.indexOf(group))
@@ -162,8 +177,8 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     </div>
     <svg width="100%" viewBox={`0 0 ${w} ${h}`} className={pick ? 'pickable' : ''}
          role="img" aria-labelledby={labelledBy}
-         onPointerMove={(e) => { const r = e.currentTarget.getBoundingClientRect()
-           const px = (e.clientX - r.left) / r.width * w; const n = nearest(px); setHoverId(n ? n.id : null) }}
+         onClick={pick ? e => { const n = nearest(eventX(e)); if (n) pick(n.id) } : undefined}
+         onPointerMove={e => { const n = nearest(eventX(e)); setHoverId(n ? n.id : null) }}
          onPointerLeave={() => setHoverId(null)}>
       <defs><linearGradient id="ll-traj-fill" x1="0" y1="0" x2="0" y2="1">
         <stop offset="0%" stopColor="#2ecc71" stopOpacity=".20" /><stop offset="100%" stopColor="#2ecc71" stopOpacity="0" />
@@ -187,21 +202,21 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
         return <PointMark key={n.id} className={'chart-pt' + (pick ? ' pick' : '')}
           x={X(n.id)} y={Y(v)} size={n.id === selected ? 5 : 4} color={c}
           shape={marker.shape} variant={marker.variant}
-          feasibility={status} opacity={dim ? .12 : .88} onClick={pick ? () => pick(n.id) : null}
+          feasibility={status} opacity={dim ? .12 : .88}
           title={`#${n.id} ${n.operator || ''}${n.idea?.theme ? ` (${n.idea.theme})` : ''} → ${fmt(v)} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
       })}
       <path d={line} fill="none" stroke="var(--fg)" strokeWidth="4" opacity=".78" />
       <path d={line} fill="none" stroke="var(--ok)" strokeWidth="2.2" />
       {marks.map((s, i) => {
         const v = s.to, x = X(s.id), y = Y(v)
-        return <g key={i} className={pick ? 'chart-mark pick' : 'chart-mark'}
-          onClick={pick ? () => pick(s.id) : undefined}>
-          {pick && <circle className="chart-hit-area" cx={x} cy={y} r="15" fill="transparent" />}
+        return <g key={i} className={pick ? 'chart-mark pick' : 'chart-mark'}>
           <circle cx={x} cy={y} r="5" fill="none" stroke="var(--fg)" strokeWidth="3.2" opacity=".78" />
           <circle cx={x} cy={y} r="5" fill="none" stroke="var(--ok)" strokeWidth="1.6" />
-          <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--fg)" strokeWidth="2.4" opacity=".78" />
-          <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--ok)" strokeWidth="1" />
-          <text x={x} y={Math.max(11, y - 22)} fill="var(--ok)" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+          {markLabels.has(i) && <>
+            <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--fg)" strokeWidth="2.4" opacity=".78" />
+            <line x1={x} x2={x} y1={y - 6} y2={Math.max(14, y - 20)} stroke="var(--ok)" strokeWidth="1" />
+            <text className="trajectory-step-label" x={x} y={Math.max(11, y - 22)} fill="var(--ok)" fontSize="9.5" textAnchor="middle">#{s.id}</text>
+          </>}
           <title>{`#${s.id} ${s.operator || ''}${s.theme ? ` (${s.theme})` : ''} → ${fmt(v)}${s.delta != null ? ` (Δ ${fmt(s.delta)})` : ' baseline'}`}</title>
         </g>
       })}
@@ -235,12 +250,17 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
 // the baseline is the first best, and each subsequent bar's coloured segment is the gain it added.
 export function ImprovementWaterfall({ steps, direction, width = 760 }) {
   if (!steps || !steps.length) return <Empty>no improvement steps yet</Empty>
-  const vals = steps.map(s => s.to)
+  // Bound only the visual layer: the named table and CSV below retain every exact row. Keeping the
+  // baseline plus the latest 99 steps gives long runs a useful endpoint without an unbounded SVG.
+  const shown = steps.length > 100 ? [steps[0], ...steps.slice(-99)] : steps
+  const vals = shown.flatMap(s => [s.from, s.to]).filter(Number.isFinite)
   const lo = Math.min(...vals), hi = Math.max(...vals)
-  const pad = 40, bw = Math.max(18, Math.min(64, (width - 2 * pad) / steps.length - 10))
-  const gap = ((width - 2 * pad) - steps.length * bw) / Math.max(1, steps.length - 1)
+  const pad = 40, plotW = Math.max(width, pad * 2 + shown.length * 32)
+  const slot = (plotW - 2 * pad) / shown.length
+  const bw = Math.max(4, Math.min(64, slot - 8))
   const h = 200, base = h - 26
-  const Y = (v) => 16 + (1 - (v - lo) / Math.max(1e-9, hi - lo)) * (base - 16)
+  const Y = (v) => hi === lo ? (base + 16) / 2
+    : 16 + (1 - (v - lo) / (hi - lo)) * (base - 16)
   const rows = steps.map(step => ({ node: step.id, operator: step.operator || '—',
     from: step.from, to: step.to, delta: step.delta }))
   const columns = [
@@ -249,33 +269,43 @@ export function ImprovementWaterfall({ steps, direction, width = 760 }) {
     { key: 'to', label: 'Metric', numeric: true }, { key: 'delta', label: 'Delta', numeric: true },
   ]
   const baselineOnly = steps.length === 1 && steps[0].from == null
+  const labelEvery = Math.max(1, Math.ceil(48 / slot))
+  const labelled = i => i === 0 || i === shown.length - 1
+    || (i % labelEvery === 0 && i * slot >= 48 && (shown.length - 1 - i) * slot >= 48)
   return (
     <ChartFrame title={baselineOnly ? 'Metric baseline' : 'Improvement waterfall'}
       description={baselineOnly
         ? 'First feasible metric; no improvement is recorded yet.'
         : `Frontier changes for a ${direction === 'min' ? 'minimization' : 'maximization'} objective.`}
       columns={columns} rows={rows} csvName="improvement-waterfall.csv">
-    {({ labelledBy }) => <svg width="100%" viewBox={`0 0 ${width} ${h}`}
-      role="img" aria-labelledby={labelledBy}>
-      <line x1={pad} x2={width - pad} y1={base} y2={base} stroke={GRID} />
-      {steps.map((s, i) => {
-        const x = pad + i * (bw + gap)
+    {({ labelledBy }) => <>
+      {shown.length < steps.length && <div className="muted" role="note">
+        Showing the baseline and latest 99 of {steps.length} steps; View data and CSV include all {steps.length}.
+      </div>}
+      <svg width={plotW} viewBox={`0 0 ${plotW} ${h}`} role="img" aria-labelledby={labelledBy}>
+      <line x1={pad} x2={plotW - pad} y1={base} y2={base} stroke={GRID} />
+      {shown.map((s, i) => {
+        const x = pad + i * slot + (slot - bw) / 2
         const yTo = Y(s.to), yFrom = s.from == null ? base : Y(s.from)
         const top = Math.min(yTo, yFrom), hgt = Math.max(3, Math.abs(yTo - yFrom))
         const improved = s.delta == null || (direction === 'min' ? s.delta < 0 : s.delta > 0)
         return <g key={i}>
-          <rect x={x} y={s.from == null ? yTo : top} width={bw} height={s.from == null ? base - yTo : hgt} rx="3"
+          <rect className="waterfall-bar" x={x} y={s.from == null ? yTo : top} width={bw}
+                height={s.from == null ? Math.max(3, base - yTo) : hgt} rx="3"
                 fill={s.from == null ? '#4aa3ff' : (improved ? '#2ecc71' : '#ef4444')}
                 stroke="var(--fg)" strokeWidth=".75" opacity={s.from == null ? .72 : .9} />
           {/* A shape cue (▲ improved / ▼ regression) redundant with the green/red fill, so the sign of
               each step is legible without colour perception (WCAG 1.4.1 use-of-colour). */}
-          <text x={x + bw / 2} y={Math.max(11, top - 4)} fill="var(--fg-dim)" fontSize="9.5" textAnchor="middle">
-            {s.from == null ? '' : improved ? '▲ ' : '▼ '}#{s.id}</text>
-          <text x={x + bw / 2} y={base + 12} fill={AX} fontSize="9.5" textAnchor="middle">{fmt(s.to)}</text>
+          {labelled(i) && <>
+            <text className="waterfall-step-label" x={x + bw / 2} y={Math.max(11, top - 4)} fill="var(--fg-dim)" fontSize="9.5" textAnchor="middle">
+              {s.from == null ? '' : improved ? '▲ ' : '▼ '}#{s.id}</text>
+            <text x={x + bw / 2} y={base + 12} fill={AX} fontSize="9.5" textAnchor="middle">{fmt(s.to)}</text>
+          </>}
           <title>{`#${s.id} ${s.operator || ''} → ${fmt(s.to)}${s.delta != null ? ` (Δ ${fmt(s.delta)}, ${improved ? 'improved' : 'regressed'})` : ' (baseline)'}`}</title>
         </g>
       })}
-    </svg>}
+      </svg>
+    </>}
     </ChartFrame>
   )
 }

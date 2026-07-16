@@ -118,3 +118,61 @@ test('every analytical chart renders its non-empty data path', async t => {
     await vite.close()
   }
 })
+
+test('dense trajectory and waterfall visuals stay legible while exact data remains available', async () => {
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { Trajectory, ImprovementWaterfall } = await vite.ssrLoadModule('/src/charts.jsx')
+    const nodes = Array.from({ length: 100 }, (_, index) => ({
+      id: index + 1, metric: 100 - index, operator: 'improve', feasible: true,
+    }))
+    const steps = nodes.map((node, index) => ({
+      id: node.id, operator: node.operator, from: index ? 102 - index : null,
+      to: node.metric, delta: index ? -1 : null,
+    }))
+    const trajectory = renderToStaticMarkup(React.createElement(Trajectory, {
+      nodes, steps, direction: 'min', onPick() {},
+    }))
+    assert.doesNotMatch(trajectory, /chart-hit-area/,
+      'nearest-x picking must not leave overlapping per-point hit circles')
+    const trajectoryLabels = [...trajectory.matchAll(/class="trajectory-step-label"[^>]*>([^<]+)<\/text>/g)]
+      .map(match => match[1])
+    assert.ok(trajectoryLabels.length <= 20, 'dense frontier labels must be spatially sampled')
+    assert.equal(trajectoryLabels[0], '#1')
+    assert.equal(trajectoryLabels.at(-1), '#100')
+
+    const waterfall = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps, direction: 'min',
+    }))
+    const bars = [...waterfall.matchAll(/<rect class="waterfall-bar" x="([^"]+)"[^>]*width="([^"]+)"/g)]
+      .map(match => ({ x: Number(match[1]), width: Number(match[2]) }))
+    assert.equal(bars.length, 100, 'a 100-step run must keep every visual bar')
+    bars.slice(1).forEach((bar, index) => assert.ok(bar.x >= bars[index].x + bars[index].width,
+      `waterfall bars ${index + 1} and ${index + 2} overlap`))
+    const waterfallLabels = [...waterfall.matchAll(/class="waterfall-step-label"[^>]*>([^<]+)<\/text>/g)]
+      .map(match => match[1])
+    assert.ok(waterfallLabels.length <= 52, 'dense waterfall labels must be spatially sampled')
+    assert.match(waterfallLabels[0], /#1$/)
+    assert.match(waterfallLabels.at(-1), /#100$/)
+
+    const longSteps = [...steps, ...Array.from({ length: 50 }, (_, index) => ({
+      id: index + 101, operator: 'improve', from: -index, to: -index - 1, delta: -1,
+    }))]
+    const bounded = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: longSteps, direction: 'min',
+    }))
+    assert.equal((bounded.match(/class="waterfall-bar"/g) || []).length, 100)
+    assert.match(bounded, /latest 99 of 150 steps; View data and CSV include all 150/)
+
+    const baseline = renderToStaticMarkup(React.createElement(ImprovementWaterfall, {
+      steps: [{ id: 1, operator: 'draft', from: null, to: 7, delta: null }], direction: 'min',
+    }))
+    const baselineHeight = Number(/class="waterfall-bar"[^>]*height="([^"]+)"/.exec(baseline)?.[1])
+    assert.ok(baselineHeight >= 3, 'a constant-range baseline must remain visible')
+  } finally {
+    await vite.close()
+  }
+})
