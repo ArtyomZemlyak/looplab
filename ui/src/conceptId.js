@@ -10,6 +10,15 @@
 // hasOwnProperty so a raw id that names a prototype property is NOT silently replaced by an inherited
 // value; a falsy mapping falls back to the raw id (matching the old `rename[raw] || raw` intent).
 export function canonicalId(raw, rename = {}) {
+  // REVIEW(2026-07-16): this canonicalizer does NOT mirror the server's _normalize_concept_id
+  // (strip/lowercase/space->hyphen/trim slashes), so the client and server key DIFFERENT
+  // vocabularies for the same run. Server projections normalize (graph_from_node_concepts,
+  // project_hierarchy, concept_touch_counts all lowercase via _normalize_concept_id), but authored
+  // ids fold RAW into node_concepts and the client joins on that raw string: a Researcher-authored
+  // "Regularization/R-Drop" gets a lowercased tree/metrics row while experimentsByConcept keys the
+  // raw-cased id — the Concept view renders the row with metrics but ZERO experiments/badge. Mirror
+  // the server normalization here (trim, casefold, spaces->hyphens, strip slashes) before the rename
+  // lookup, or have the server ship pre-normalized node_concepts in /state so there is one vocabulary.
   const key = String(raw == null ? '' : raw)
   if (rename && Object.prototype.hasOwnProperty.call(rename, key)) {
     const mapped = rename[key]

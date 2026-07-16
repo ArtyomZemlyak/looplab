@@ -237,6 +237,16 @@ def build_router(srv) -> APIRouter:
                                                    graph_from_node_concepts,
                                                    project_hierarchy, project_lens)
         rd = _run_dir(run_id)
+        # REVIEW(2026-07-16): "never cached" conflates the CATALOG concern with derivation cost. The
+        # projection is a pure function of (events identity, lens/rels) and was made deterministically
+        # sorted expressly so HTTP caching works — yet every request re-derives graph_from_node_concepts
+        # + concept_metrics (O(nodes×concepts)) + the edge collapse + the tree, and only `tree` depends
+        # on the lens: flipping through the four lenses recomputes the identical metrics/touch/edges
+        # four times. The live ConceptView refetches on every projection-key change, making this the
+        # one uncached O(events)-adjacent read on the run-view hot path (sibling reads — /state,
+        # summaries, op-stage names — all memo on file identity). Cache the lens-INDEPENDENT core
+        # keyed on events.jsonl identity like _summary_cache (an append invalidates it, so no fixed
+        # catalog is smuggled in), and/or emit an ETag over (generation, max_seq, lens, rels) + 304.
         st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
         nc, cids, edges, touch = _folded_concepts(st)
         graph, tags = graph_from_node_concepts(nc)
