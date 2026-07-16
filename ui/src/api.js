@@ -1562,7 +1562,8 @@ export const getStartStatus = (runId, idempotencyKey) => get(
 // + staleness ({exists, content, generated_at, run_ids, stale, added, current_run_count}); generate
 // (re)synthesizes on demand via an agent with access to every run in the scope.
 const _scopeUrl = (type, id) => `/api/scope-report/${encodeURIComponent(type)}/${encodeURIComponent(id)}`
-export const getScopeReport = (type, id) => get(_scopeUrl(type, id))
+export const getScopeReport = (type, id, options = {}) =>
+  get(_scopeUrl(type, id), { ...options, cache: 'no-store' })
 // Generic background-job poll: the server hands back {status:'running', job_id}
 // for slow work so it can't 504 behind a proxy. Returns the final result dict; tolerates transient
 // poll errors. `resp` that's already a result (fast inline path) is returned unchanged.

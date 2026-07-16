@@ -1481,25 +1481,39 @@ pre.code.event-json { max-height: 220px; }
 .crumbs .crumb-report { flex: none; }
 .crumbs .crumb-report .vt-scope { color: var(--fg-mut); font-weight: 400; }
 .crumbs .crumb-report .vt.report.on .vt-scope { color: rgba(255, 255, 255, .8); }
-.sr-panel { width: min(760px, 95%); max-height: 84vh; display: flex; flex-direction: column; }
+.sr-panel { width: min(760px, 95%); max-width: calc(100vw - 16px); min-width: 0;
+  max-height: 84vh; display: flex; flex-direction: column; }
+.sr-panel .panel-h { min-width: 0; flex-wrap: wrap; }
+.sr-panel .panel-h .ttl { min-width: 0; overflow-wrap: anywhere; }
 .sr-panel .panel-b { overflow: auto; }
+.sr-body, .sr-sec, .sr-group, .sr-narrative { min-width: 0; }
 .sr-empty { padding: 22px 6px; text-align: center; }
 .sr-empty .sr-help { margin-top: 8px; font-size: 12px; color: var(--fg-mut); }
 .sr-meta { display: flex; flex-wrap: wrap; gap: 6px; font-size: 11.5px; color: var(--fg-mut); margin-bottom: 10px; }
 .sr-stale { color: var(--working); }
+.sr-quarantine { margin-bottom: 12px; overflow-wrap: anywhere; }
+.sr-advisory { margin-bottom: 7px; color: var(--fg-mut); font-size: 11px;
+  text-transform: uppercase; letter-spacing: .45px; overflow-wrap: anywhere; }
 .sr-headline { font-size: 16px; font-weight: 650; line-height: 1.35; margin-bottom: 6px; }
 .sr-verdict { font-size: 13px; color: var(--fg-dim); line-height: 1.5; margin-bottom: 12px;
   border-left: 2px solid var(--accent-dim); padding-left: 10px; }
 .sr-sec { margin-bottom: 12px; }
 .sr-h { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--fg-mut); margin-bottom: 5px; }
 .sr-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 3px; }
-.sr-list li { font-size: 12.5px; line-height: 1.45; }
+.sr-list li { font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
 .sr-bests { display: flex; flex-direction: column; gap: 4px; }
 .sr-best { display: flex; align-items: baseline; gap: 8px; padding: 5px 8px; border-radius: 6px;
+  min-width: 0; flex-wrap: wrap; text-align: left; overflow-wrap: anywhere;
   background: var(--bg-2); border: 1px solid var(--line); cursor: pointer; font-size: 12.5px; }
 .sr-best:hover { border-color: var(--accent-dim); background: var(--bg-3); }
 .sr-best .sr-m { font-variant-numeric: tabular-nums; color: var(--best); }
-.sr-best .sr-rid { color: var(--fg-dim); }
+.sr-best .sr-rid { min-width: 0; color: var(--fg-dim); overflow-wrap: anywhere; word-break: break-word; }
+@media (max-width: 520px) {
+  .sr-panel { width: calc(100vw - 12px); max-width: calc(100vw - 12px); max-height: 92vh; }
+  .sr-panel .panel-h .right { display: none; }
+  .sr-panel .panel-h .ttl { flex: 1 1 100%; }
+  .sr-best .sr-m { flex: 0 0 auto; }
+}
 
 /* ═══════════════════════ Energy / Reactor FX (opt-in: data-fx="subtle"|"full") ═══════════════════════
    A "game-y" animated layer on top of any theme. EVERYTHING here is scoped under [data-fx], so when the
