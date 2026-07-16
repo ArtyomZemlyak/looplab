@@ -18,7 +18,7 @@ test('the shared RunList mutation guard is single-flight and exposes only bounde
   const hook = between(text, 'function useMutation', 'const focusSoon')
 
   assert.match(copy, /error\?\.status === 409[\s\S]*error\?\.status === 503/)
-  assert.match(copy, /draft kept/)
+  assert.match(copy, /current input or selection kept/)
   assert.doesNotMatch(copy, /\.message|\.detail|String\(/,
     'provider text must not be reflected into a mutation alert')
   assert.match(hook, /if \(lock\.current\) return false/)
