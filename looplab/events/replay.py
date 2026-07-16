@@ -1326,6 +1326,13 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
             continue
         conf = ed.get("confidence")
         conf = float(conf) if isinstance(conf, (int, float)) else 0.0
+        # REVIEW(2026-07-16): NaN slips through this coercion and silently breaks the COMMUTATIVITY this
+        # handler is built around: every `>` comparison against a NaN tuple-head is False, so whichever
+        # edge arrives FIRST sticks forever — replaying [nan, 5.0] keeps nan while [5.0, nan] keeps 5.0,
+        # violating invariant 5 (order-tolerance). NaN is reachable: stdlib json round-trips `NaN`
+        # literals by default (dumps allow_nan=True / loads parses it), and confidence is agent-supplied.
+        # Guard it here (`if conf != conf: conf = 0.0`) rather than trusting emitters. Same coercion also
+        # accepts bool (isinstance(True, int) -> 1.0) — probably fine, but worth deciding explicitly.
         prov = str(ed.get("provenance") or "")
         key = "\t".join((src, rel, dst))
         cur = st.concept_edges.get(key)
