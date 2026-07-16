@@ -200,23 +200,36 @@ def build_router(srv) -> APIRouter:
         nc = {nid: [rename.get(c, c) for c in (ids or [])] for nid, ids in raw_nc.items()}
         graph, tags = graph_from_node_concepts(nc)
         cids = sorted({c for ids in nc.values() for c in ids})
-        edges = getattr(st, "concept_edges", None) or {}
-        # REVIEW(2026-07-16): the docstring's "ids are canonical and align with the concept_edges"
-        # only holds for tags — `edges` is passed RAW. The fold never rewrites edge keys, so edges
-        # emitted by a cadence BEFORE a consolidation rename keep the old ids forever, and
-        # project_lens adds every edge endpoint to the tree unconditionally (all_ids.add(src/dst)):
-        # after a rename, an edge-lens tree shows BOTH the retired raw id (as an untagged ghost node,
-        # with its stale edges) AND the canonical id the tags/metrics/touch use — the two halves of
-        # the response disagree on the vocabulary. Edge endpoints need the same
-        # `rename.get(x, x)` collapse as `nc` above (dropping self-edges the collapse creates)
-        # before projection. Also worth noting: `?lens=uses` on a run with NO edges silently returns
-        # the is_a tree — `edges_present: false` lets the UI detect it, but the top-level "lens"
-        # field then contradicts the query param the client sent.
+        # Canonicalize edge endpoints through the SAME rename map as the tags. The fold never rewrites
+        # edge keys, so an edge emitted by a cadence BEFORE a consolidation rename keeps its retired raw
+        # ids; project_lens adds every endpoint to the tree unconditionally, so without this collapse an
+        # edge-lens tree would show BOTH the retired raw id (an untagged ghost with stale edges) AND the
+        # canonical id the tags/metrics/touch use — the two halves of the response disagreeing on the
+        # vocabulary. Collapse to the canonical (src, rel, dst) triple, drop self-edges the collapse
+        # creates, and keep the max-confidence survivor per triple (mirrors the fold's commutative
+        # conflict rule); iterate SORTED so equal-confidence ties resolve deterministically.
+        raw_edges = getattr(st, "concept_edges", None) or {}
+        edges: dict = {}
+        for _k, e in sorted(raw_edges.items()):
+            if not isinstance(e, dict):
+                continue
+            src = rename.get(e.get("src"), e.get("src"))
+            dst = rename.get(e.get("dst"), e.get("dst"))
+            if not src or not dst or src == dst:
+                continue
+            ce = dict(e); ce["src"], ce["dst"] = src, dst
+            key = (src, ce.get("rel"), dst)
+            prev = edges.get(key)
+            if prev is None or float(ce.get("confidence") or 0.0) > float(prev.get("confidence") or 0.0):
+                edges[key] = ce
         touch = concept_touch_counts(nc)
         tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
                 else project_lens(cids, edges, lens, touch=touch))
-        return {"lens": tree.get("lens", lens), "lenses": default_lenses(), "tree": tree,
-                "metrics": concept_metrics(st, graph, tags), "touch": touch,
+        # `lens` is the EFFECTIVE lens actually projected (is_a when a typed lens was asked for on a run
+        # with no edges); `requested_lens` echoes the query param so the client can tell a fallback from
+        # an honest is_a request without inferring it from `edges_present`.
+        return {"lens": tree.get("lens", lens), "requested_lens": lens, "lenses": default_lenses(),
+                "tree": tree, "metrics": concept_metrics(st, graph, tags), "touch": touch,
                 "edges_present": bool(edges)}
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:

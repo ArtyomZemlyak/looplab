@@ -50,3 +50,43 @@ def test_concepts_endpoint_unknown_run_is_handled(tmp_path):
     client = TestClient(make_app(tmp_path))
     r = client.get("/api/runs/nope/concepts")
     assert r.status_code in (200, 404)                           # resolved-empty or not-found, never 500
+
+
+def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
+    # An edge emitted with a RAW id that a later consolidation retires must project under the CANONICAL
+    # id — never resurrect the retired id as an untagged ghost node alongside its canonical twin.
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                       "concepts": ["loss/contrastive", "architecture/moe"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    # a "uses" edge authored against the RAW id "loss/contrast" ...
+    s.append("concept_edge", {"edges": [{"src": "architecture/moe", "rel": "uses",
+                                         "dst": "loss/contrast", "confidence": 0.8,
+                                         "provenance": "asserted"}]})
+    # ... which a consolidation later renames to the canonical "loss/contrastive"
+    s.append("concept_consolidation", {"rename": {"loss/contrast": "loss/contrastive"}})
+    client = TestClient(make_app(tmp_path))
+    data = client.get("/api/runs/demo/concepts?lens=uses").json()
+    assert data["lens"] == "uses"
+    assert data["requested_lens"] == "uses"
+    assert data["edges_present"] is True
+    nodes = data["tree"]["nodes"]
+    assert "loss/contrastive" in nodes                           # canonical endpoint present
+    assert "loss/contrast" not in nodes                          # retired raw id NOT a ghost node
+    # the directed uses-edge makes the canonical concept the parent of architecture/moe
+    assert nodes["architecture/moe"]["parent"] == "loss/contrastive"
+
+
+def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_path):
+    # ?lens=uses on a run with no edges honestly reports the EFFECTIVE is_a projection while echoing the
+    # requested lens, so the client can tell a fallback from a genuine is_a request.
+    _demo_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    data = client.get("/api/runs/demo/concepts?lens=uses").json()
+    assert data["lens"] == "is_a"
+    assert data["requested_lens"] == "uses"
+    assert data["edges_present"] is False
