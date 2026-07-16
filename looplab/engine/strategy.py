@@ -25,8 +25,8 @@ from looplab.core.models import RunState
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
-                                  EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
-                                  EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
+                                  EV_CONCEPT_EDGE, EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS,
+                                  EV_NODE_CONCEPTS, EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
@@ -494,6 +494,49 @@ class StrategyCadenceMixin:
                     if nid not in known or known.get(nid) != new_ids:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": mode, "at_vocab": v_now})
+                # PART IV concept-edge substrate: record the typed graph so hierarchy becomes a swappable
+                # projection. is_a = each concept's immediate PATH parent (the full chain) plus any curated
+                # extra parent AXIS the id-prefix alone misses (asserted, conf 1.0); co_occurs = concept
+                # pairs seen together on a node (evidenced, integer weight). Emit-only-if-new vs the folded
+                # edges -> no per-cadence churn; the commutative fold keeps it order-tolerant. Deterministic
+                # (sorted; no LLM) so it also records on the offline heuristic path. Audit-only.
+                try:
+                    from collections import Counter as _Counter
+                    from itertools import combinations as _comb
+                    prior_edges = getattr(state, "concept_edges", None) or {}
+                    fresh_edges: list[dict] = []
+                    _seen_edge: set[str] = set()
+
+                    def _edge(src, rel, dst, prov, conf):
+                        if not (src and dst) or src == dst:
+                            return
+                        k = "\t".join((src, rel, dst))
+                        if k in _seen_edge:
+                            return
+                        cur = prior_edges.get(k)
+                        if cur is None or conf > float(cur.get("confidence", 0.0)):
+                            _seen_edge.add(k)
+                            fresh_edges.append({"src": src, "rel": rel, "dst": dst,
+                                                "provenance": prov, "confidence": conf})
+                    for c in graph.concepts():
+                        if c.id.endswith("/*"):
+                            continue
+                        if "/" in c.id:
+                            _edge(c.id, "is_a", c.id.rsplit("/", 1)[0], "asserted", 1.0)
+                        root = c.id.split("/", 1)[0]
+                        for ax in graph.axes_of(c.id):
+                            if ax and ax != root:                 # a curated MULTI-parent axis paths miss
+                                _edge(c.id, "is_a", ax, "asserted", 1.0)
+                    pair: _Counter = _Counter()
+                    for cids in tags.values():
+                        for a, b in _comb(sorted(cids), 2):
+                            pair[(a, b)] += 1
+                    for (a, b), cnt in sorted(pair.items()):
+                        _edge(a, "co_occurs", b, "evidenced", float(cnt))
+                    if fresh_edges:
+                        self.store.append(EV_CONCEPT_EDGE, {"edges": fresh_edges, "mode": mode})
+                except Exception:  # noqa: BLE001 — the edge substrate is audit-only; never break the cadence
+                    pass
                 # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
                 # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.
                 # Incremental (skip already-tagged) + capped per cadence, so a big board tags over a few
