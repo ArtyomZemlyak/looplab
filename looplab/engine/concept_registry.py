@@ -667,7 +667,8 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                        guard: Optional[Callable[[], None]] = None,
                        expected_revision: Optional[int] = None,
                        governance_memory_dir=None,
-                       expected_governance_revision: Optional[int] = None) -> dict:
+                       expected_governance_revision: Optional[int] = None,
+                       require_durable: bool = False) -> dict:
     """Append one governance record under a required cross-platform interprocess lock.
 
     Lenient JSONL replay can tolerate a torn tail, but it cannot recover an interleaved or lost policy
@@ -679,7 +680,7 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
     # Retain the shipped `guard` spelling while executing both forms inside the required lock.
     validator = validate or guard
 
-    from looplab.core.atomicio import best_effort_fsync
+    from looplab.core.atomicio import best_effort_fsync, strict_fsync
     from looplab.events.eventstore import _interprocess_lock
 
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
@@ -733,5 +734,5 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
-            best_effort_fsync(f.fileno())
+            (strict_fsync if require_durable else best_effort_fsync)(f.fileno())
     return rec

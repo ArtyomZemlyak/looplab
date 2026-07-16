@@ -376,7 +376,7 @@ def build_router(srv) -> APIRouter:
         return make_llm_client(srv.llm_settings())
 
     def _steward_log(name: str, kind: str, action_id: str, *, proposals=None,
-                      receipt=None, error: str = "") -> dict:
+                      receipt=None, error: str = "", begun_revision: int | None = None) -> dict:
         """Durably retain every on-demand steward outcome, including empty/error results."""
         from looplab.engine.concept_registry import _append_governance
         path = Path(_memory_dir()) / name
@@ -389,25 +389,66 @@ def build_router(srv) -> APIRouter:
             "outcome": "error" if error else ("proposed" if has_proposals else "empty"),
             "proposals": proposals or {}, "receipt": receipt,
         }
+        if begun_revision is not None:
+            rec["begun_revision"] = begun_revision
         if error:
             from looplab.trust.redact import redact_secrets
             rec["error"] = redact_secrets(str(error), entropy=True)[:500]
         try:
-            return _append_governance(path, rec)
+            # This is the receipt for an already-paid external call. A best-effort sync would let the
+            # server acknowledge bytes that a restart can lose and strand the same action in ambiguity.
+            return _append_governance(path, rec, require_durable=True)
+        except Exception as exc:
+            _raise_governance_error(exc)
+
+    def _begin_steward(name: str, kind: str, action_id: str) -> dict:
+        """Persist an at-most-once claim before the potentially paid, non-transactional call."""
+        from looplab.engine.concept_registry import _append_governance
+
+        path = Path(_memory_dir()) / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # ``action_id`` remains reserved for the terminal receipt because the shared governance writer
+        # treats it as one immutable idempotency payload. The begin claim uses ``invocation_id`` and is
+        # serialized by ``_steward_guard`` across cache-check, call, and terminal append.
+        rec = {
+            "v": 1, "action": "steward-invocation-begun", "from": kind,
+            "invocation_id": action_id, "by": _actor(), "at": _timestamp(),
+            "outcome": "begun",
+        }
+        try:
+            return _append_governance(path, rec, require_durable=True)
         except Exception as exc:
             _raise_governance_error(exc)
 
     def _cached_steward(name: str, action_id: str) -> dict | None:
         path = Path(_memory_dir()) / name
+        begun = None
         for row in _iter_log(path):
             if (row.get("action") == "steward-invocation"
                     and str(row.get("action_id") or "") == action_id):
                 return row
-        return None
+            if (row.get("action") == "steward-invocation-begun"
+                    and str(row.get("invocation_id") or "") == action_id):
+                begun = row
+        return begun
 
     def _steward_response(record: dict) -> dict:
         invocation = {key: record.get(key) for key in
                       ("action_id", "revision", "outcome", "by", "at")}
+        if not invocation.get("action_id"):
+            invocation["action_id"] = record.get("invocation_id")
+        if record.get("action") == "steward-invocation-begun":
+            # CODEX AGENT: replaying an ambiguous external call can charge twice. Same-key retries
+            # therefore surface the durable begin claim and require an explicit new paid identity.
+            raise HTTPException(409, detail={
+                "code": "steward_invocation_outcome_unknown",
+                "message": (
+                    "the steward invocation may have run, but no durable outcome receipt exists; "
+                    "the same action_id will not invoke it again. Submit a new action_id only after "
+                    "reviewing this ambiguous attempt"
+                ),
+                "invocation": invocation,
+            })
         if record.get("outcome") == "error":
             raise HTTPException(400, detail={
                 "code": "steward_failed", "message": record.get("error") or "steward failed",
@@ -454,15 +495,18 @@ def build_router(srv) -> APIRouter:
                 return _steward_response(_steward_log(
                     "concept_curation_log.jsonl", "concept", action_id,
                     error=_safe_steward_error(exc, phase="client")))
+            begun = _begin_steward("concept_curation_log.jsonl", "concept", action_id)
             from looplab.engine.concept_steward import steward_concepts
             try:
                 output = steward_concepts(_memory_dir(), client, apply=False, by=_actor())
             except Exception as exc:  # noqa: BLE001
                 record = _steward_log("concept_curation_log.jsonl", "concept", action_id,
-                                      error=_safe_steward_error(exc, phase="steward"))
+                                      error=_safe_steward_error(exc, phase="steward"),
+                                      begun_revision=begun.get("revision"))
             else:
                 record = _steward_log("concept_curation_log.jsonl", "concept", action_id,
-                                      proposals=output.get("proposals"), receipt=output.get("receipt"))
+                                      proposals=output.get("proposals"), receipt=output.get("receipt"),
+                                      begun_revision=begun.get("revision"))
         return _steward_response(record)
 
     @router.post("/api/cross-run/claim-steward")
@@ -481,15 +525,18 @@ def build_router(srv) -> APIRouter:
                 return _steward_response(_steward_log(
                     "claim_curation_log.jsonl", "claim", action_id,
                     error=_safe_steward_error(exc, phase="client")))
+            begun = _begin_steward("claim_curation_log.jsonl", "claim", action_id)
             from looplab.engine.claim_steward import steward_claims
             try:
                 output = steward_claims(_memory_dir(), client, apply=False, by=_actor())
             except Exception as exc:  # noqa: BLE001
                 record = _steward_log("claim_curation_log.jsonl", "claim", action_id,
-                                      error=_safe_steward_error(exc, phase="steward"))
+                                      error=_safe_steward_error(exc, phase="steward"),
+                                      begun_revision=begun.get("revision"))
             else:
                 record = _steward_log("claim_curation_log.jsonl", "claim", action_id,
-                                      proposals=output.get("proposals"), receipt=output.get("receipt"))
+                                      proposals=output.get("proposals"), receipt=output.get("receipt"),
+                                      begun_revision=begun.get("revision"))
         return _steward_response(record)
 
     return router

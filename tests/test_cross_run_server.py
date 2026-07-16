@@ -441,6 +441,68 @@ def test_concurrent_steward_retry_pays_for_one_llm_invocation(tmp_path, monkeypa
     assert responses[0].json()["invocation"]["revision"] == responses[1].json()["invocation"]["revision"]
 
 
+def test_steward_paid_call_without_terminal_receipt_is_not_replayed(tmp_path, monkeypatch):
+    import looplab.core.llm as llm_module
+    import looplab.engine.concept_registry as registry_module
+    import looplab.engine.concept_steward as steward_module
+
+    calls: list[int] = []
+
+    def fake_steward(*_args, **_kwargs):
+        calls.append(1)
+        return {"proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None}
+
+    monkeypatch.setattr(llm_module, "make_llm_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(steward_module, "steward_concepts", fake_steward)
+    real_append = registry_module._append_governance
+
+    def lose_terminal_receipt(path, record, **kwargs):
+        if record.get("action") == "steward-invocation":
+            raise RuntimeError("simulated process loss after the provider returned")
+        return real_append(path, record, **kwargs)
+
+    monkeypatch.setattr(registry_module, "_append_governance", lose_terminal_receipt)
+    app = make_app(tmp_path)
+    first = TestClient(app, raise_server_exceptions=False).post(
+        "/api/cross-run/concept-steward", params={"action_id": "paid-ambiguous"},
+    )
+    assert first.status_code == 500 and calls == [1]
+
+    monkeypatch.setattr(registry_module, "_append_governance", real_append)
+    retry = TestClient(app).post(
+        "/api/cross-run/concept-steward", params={"action_id": "paid-ambiguous"},
+    )
+    assert retry.status_code == 409
+    detail = retry.json()["detail"]
+    assert detail["code"] == "steward_invocation_outcome_unknown"
+    assert detail["invocation"]["action_id"] == "paid-ambiguous"
+    assert calls == [1]
+
+
+def test_steward_does_not_start_paid_call_without_durable_begin_claim(tmp_path, monkeypatch):
+    import looplab.core.atomicio as atomicio_module
+    import looplab.core.llm as llm_module
+    import looplab.engine.concept_steward as steward_module
+
+    calls: list[int] = []
+
+    def fake_steward(*_args, **_kwargs):
+        calls.append(1)
+        return {"proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None}
+
+    monkeypatch.setattr(llm_module, "make_llm_client", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(steward_module, "steward_concepts", fake_steward)
+    monkeypatch.setattr(atomicio_module, "strict_fsync",
+                        lambda _fileno: (_ for _ in ()).throw(OSError("sync unavailable")))
+
+    response = TestClient(make_app(tmp_path), raise_server_exceptions=False).post(
+        "/api/cross-run/concept-steward", params={"action_id": "no-durable-claim"},
+    )
+
+    assert response.status_code == 500
+    assert calls == []
+
+
 def test_contested_filter(tmp_path):
     md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
     md.mkdir(parents=True, exist_ok=True)
