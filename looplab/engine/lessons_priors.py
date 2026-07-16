@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from looplab.events.eventstore import read_jsonl_lenient
+from looplab.trust.cross_run import cross_run_text
 
 # Which ROLE a cross-run lesson is for, so the two contexts stay separate (the Researcher gets only
 # R&D / "what technique to try" lessons, the Developer only its own "what code change fixed a crash"
@@ -37,9 +38,10 @@ def _memoized_embed(embed):
     cache: dict[str, object] = {}
 
     def _memo(text):
-        key = text if isinstance(text, str) else str(text)
+        key = cross_run_text(
+            text, max_chars=4_000, single_line=True, entropy=True)
         if key not in cache:
-            cache[key] = embed(text)
+            cache[key] = embed(key)
         return cache[key]
 
     return _memo
@@ -89,15 +91,18 @@ class LessonPriorsMixin:
         notes: list[str] = []
         npath = base / "meta_notes.jsonl"
         for o in read_jsonl_lenient(npath):
+            if not isinstance(o, dict):
+                continue
             if o.get("task_id") == self._e.task.id and o.get("note"):
-                notes.append(str(o["note"]))
+                notes.append(cross_run_text(
+                    o["note"], max_chars=1_200, single_line=True, entropy=True))
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives — parsed once; the role filter and
         # similarity scoring happen per role in `_render_role_prior`.
         parsed: list[tuple[int, dict]] = []
         lpath = base / "lessons.jsonl"
         # keep_bad=True: idx must stay the RAW on-disk line number (stable lesson identity).
         for idx, o in enumerate(read_jsonl_lenient(lpath, keep_bad=True)):
-            if o is None or not o.get("statement"):
+            if not isinstance(o, dict) or not o.get("statement"):
                 continue
             if exclude_run_id and o.get("run_id") == exclude_run_id:
                 continue                     # M6: never echo this run's own lessons back
@@ -118,7 +123,8 @@ class LessonPriorsMixin:
         if notes and role != LESSON_ROLE_DEVELOPER:
             out += "\nPrior-run insights for this task (meta-learned): " + " | ".join(notes[-3:])
         if not parsed:
-            return out
+            return cross_run_text(
+                out, max_chars=8_000, single_line=False, entropy=True)
         # (2) fingerprint-matched lessons (M2/M3), incl. negatives
         from looplab.engine.memory import fingerprint_similarity
         all_lessons: list[tuple[int, dict]] = []
@@ -167,8 +173,11 @@ class LessonPriorsMixin:
             seen.add(key)
             d = o.get("delta")
             dtxt = f" Δ{d:+.3g}" if isinstance(d, (int, float)) else ""
-            stmt = " ".join(str(o["statement"]).split())[:200]   # cap + collapse newlines:
-            picked.append(f"{stmt} [{o.get('outcome', '?')}{dtxt}]")   # store is shared/free-text
+            stmt = cross_run_text(
+                o["statement"], max_chars=200, single_line=True, entropy=True).strip()
+            outcome = cross_run_text(
+                o.get("outcome", "?"), max_chars=40, single_line=True, entropy=True).strip()
+            picked.append(f"{stmt} [{outcome}{dtxt}]")   # store is shared/free-text
             if len(picked) >= 5:
                 break
         if picked:
@@ -180,4 +189,5 @@ class LessonPriorsMixin:
                      if role == LESSON_ROLE_DEVELOPER
                      else "Lessons from related runs (what did/didn't work)")
             out += "\n" + label + ": " + "; ".join(picked)
-        return out
+        return cross_run_text(
+            out, max_chars=8_000, single_line=False, entropy=True)

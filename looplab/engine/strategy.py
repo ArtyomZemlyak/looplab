@@ -29,6 +29,7 @@ from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_
                                   EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
+from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
 
 # HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
 # run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
@@ -149,7 +150,8 @@ class StrategyCadenceMixin:
             parts = [f"{a['n_runs']} returned run(s), {a['n_concepts']} observed concept(s), "
                      f"{a['n_contested']} mixed-evidence claim record(s)"]
             def _safe(value, limit):
-                return "".join(ch for ch in " ".join(str(value or "").split()) if ch.isprintable())[:limit]
+                return cross_run_text(
+                    value, max_chars=limit, single_line=True, entropy=True).strip()
             if a["thin_coverage"]:
                 parts.append("observed in one returned run (not a gap): "
                              + ", ".join(repr(_safe(x, 80)) for x in a["thin_coverage"][:6]))
@@ -157,12 +159,20 @@ class StrategyCadenceMixin:
                 parts.append("mixed-evidence records: "
                              + "; ".join(repr(_safe(c.get("statement"), 120))
                                           for c in a["contradictions"][:2]))
-            note = "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts))
-            corpus = json.dumps({"lessons": lessons, "capsules": caps, "research": research},
+            note = cross_run_text(
+                "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts)),
+                max_chars=8_000, single_line=False, entropy=True)
+            corpus_projection = sanitize_cross_run_projection(
+                {"parts": parts}, max_chars=16_000, max_items=64, max_total_items=256)
+            corpus = json.dumps(corpus_projection,
                                 ensure_ascii=False, sort_keys=True, default=str,
                                 separators=(",", ":")).encode("utf-8")
             self._cross_run_note_receipt = {
-                "v": 1, "scope_task": task_id, "excluded_run": run_id,
+                "v": 1,
+                "scope_task": cross_run_text(
+                    task_id, max_chars=500, single_line=True, entropy=False),
+                "excluded_run": cross_run_text(
+                    run_id, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(caps), "n_research": len(research),
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),

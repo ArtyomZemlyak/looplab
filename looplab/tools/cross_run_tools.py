@@ -20,6 +20,7 @@ import unicodedata
 from pathlib import Path
 
 from looplab.tools._base import fn_spec
+from looplab.trust.cross_run import cross_run_text
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
 })
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
+_MAX_TOOL_RESULT_CHARS = 16_000
 
 
 def _toks(s: str) -> set[str]:
@@ -36,8 +38,8 @@ def _toks(s: str) -> set[str]:
 
 def _safe_text(value, limit: int) -> str:
     """Bound one persisted field for an agent prompt and collapse control/newline injection surfaces."""
-    text = " ".join(str(value or "").split())
-    return "".join(ch for ch in text if ch.isprintable())[:limit]
+    return cross_run_text(
+        value, max_chars=limit, single_line=True, entropy=True).strip()
 
 
 class CrossRunTools:
@@ -160,7 +162,12 @@ class CrossRunTools:
         # ToolProvider contract: execute NEVER raises (a junk arg must read as a tool error, not crash
         # the agent phase — drive_tool_loop does not guard tools.execute).
         try:
-            return self._execute(name, args or {})
+            result = self._execute(name, args or {})
+            # CODEX AGENT: this final boundary covers every current/future tool branch, including a
+            # malformed legacy value that bypasses a field-level formatter. Tool results are persisted
+            # in traces and fed back to the model, so they are never allowed to carry raw credentials.
+            return cross_run_text(
+                result, max_chars=_MAX_TOOL_RESULT_CHARS, single_line=False, entropy=True)
         except Exception as exc:  # noqa: BLE001
             # Storage/parser exceptions can contain credentialed URLs, provider hosts and
             # absolute paths. Tool results become prompt/event material, so they are allow-listed;
@@ -306,4 +313,4 @@ class CrossRunTools:
                          f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))}]")
             return "\n".join(lines)
 
-        return f"(unknown cross-run tool: {name})"
+        return "(unknown cross-run tool)"

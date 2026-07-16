@@ -8,6 +8,7 @@ orchestrator.py and foresight.py) and asserts every hint attr set here is in
 from __future__ import annotations
 
 from looplab.core.models import NodeStatus, RunState
+from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
 
 # PART IV Phase 2b: the streak length at which the capability-expansion directive treats the run as
 # action-space LOCKED-IN. Matches `search/lock_in.py::lock_in_signal`'s default `streak_threshold` (the
@@ -163,12 +164,22 @@ class ProposalCuesMixin:
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                        structured=getattr(self, "_cross_run_structured_claims", False))
-            text = render_context_pack(build_context_pack(claims, concept_overview=overview))
-            corpus = json.dumps({"lessons": lessons, "capsules": capsules, "research": research},
+            pack = build_context_pack(claims, concept_overview=overview)
+            text = render_context_pack(pack)
+            text = cross_run_text(text, max_chars=16_000, single_line=False, entropy=True)
+            # Digest the exact bounded structured pack behind the rendered prompt, not raw legacy stores.
+            # A raw hash is both a credential oracle and an identity for bytes the model never received.
+            corpus_projection = sanitize_cross_run_projection(
+                pack, max_chars=64_000, max_items=64, max_total_items=2_048)
+            corpus = json.dumps(corpus_projection,
                                 ensure_ascii=False, sort_keys=True, default=str,
                                 separators=(",", ":")).encode("utf-8")
             self._cross_run_advisory_receipt = {
-                "v": 1, "scope_task": tid, "excluded_run": rid,
+                "v": 1,
+                "scope_task": cross_run_text(
+                    tid, max_chars=500, single_line=True, entropy=False),
+                "excluded_run": cross_run_text(
+                    rid, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(capsules), "n_research": len(research),
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),

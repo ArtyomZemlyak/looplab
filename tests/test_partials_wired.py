@@ -14,7 +14,6 @@ from looplab.engine.memory import JsonlCaseLibrary
 from looplab.core.models import Idea, Node, NodeStatus
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import GreedyTree
-from looplab.events.replay import fold
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.adapters.toytask import ToyTask
 
@@ -34,7 +33,7 @@ def test_spans_emitted(tmp_path):
     anyio.run(_engine(tmp_path / "run").run)
     spans = (tmp_path / "run" / "spans.jsonl")
     assert spans.exists()
-    recs = [orjson.loads(l) for l in spans.read_bytes().splitlines()]
+    recs = [orjson.loads(line) for line in spans.read_bytes().splitlines()]
     assert any(r["name"] == "evaluate" for r in recs)
     assert all("duration_s" in r for r in recs)
 
@@ -191,3 +190,26 @@ def test_memory_search():
         lib.add({"task_id": "img", "goal": "image segmentation unet", "direction": "min", "metric": 2.0})
         hits = lib.search("polynomial degree selection", k=1)
         assert hits and hits[0]["task_id"] == "poly"
+
+
+def test_case_library_quarantines_malformed_rows_and_bounds_search(tmp_path):
+    path = tmp_path / "cases.jsonl"
+    valid = {"task_id": "good", "goal": "bounded retrieval", "direction": "min",
+             "metric": 1.0, "params": {"depth": 2}}
+    path.write_text(
+        "[]\n"
+        + '{"task_id":"bad-metric","goal":"x","metric":"not-a-number"}\n'
+        + '{"task_id":"bad-params","goal":"x","params":[]}\n'
+        + json.dumps(valid) + "\n",
+        encoding="utf-8",
+    )
+
+    library = JsonlCaseLibrary(path)
+
+    assert library.all() == [valid]
+    assert library.search("bounded", k=10 ** 1000) == [valid]
+    assert library.search("bounded", k="invalid") == []
+    assert library.add({"task_id": "broken", "metric": float("inf")}) is False
+    assert library.add({"task_id": "new", "goal": "safe", "direction": "max",
+                        "metric": 2.0, "params": {}}) is True
+    assert {row["task_id"] for row in JsonlCaseLibrary(path).all()} == {"good", "new"}

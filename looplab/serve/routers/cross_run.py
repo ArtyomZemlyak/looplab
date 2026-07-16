@@ -17,6 +17,14 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
+
+
+def _public_cross_run_row(value):
+    """One schema-preserving, bounded/redacted cross-run row for an HTTP response."""
+    return sanitize_cross_run_projection(
+        value, max_chars=640_000, max_items=256, max_total_items=4_096)
+
 
 class _StrictBody(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -125,7 +133,8 @@ def build_router(srv) -> APIRouter:
                             ConceptGovernanceIdempotencyConflict)):
             raise HTTPException(409, detail={
                 "code": "action_id_reused",
-                "message": str(exc),
+                "message": cross_run_text(
+                    exc, max_chars=500, single_line=True, entropy=True),
             }) from exc
         if isinstance(exc, EventStoreLockError):
             raise HTTPException(503, detail={
@@ -133,7 +142,8 @@ def build_router(srv) -> APIRouter:
                 "message": "governance storage cannot guarantee an exclusive write",
             }) from exc
         if isinstance(exc, ValueError):
-            raise HTTPException(422, str(exc)) from exc
+            raise HTTPException(422, cross_run_text(
+                exc, max_chars=500, single_line=True, entropy=True)) from exc
         raise exc
 
     @router.get("/api/cross-run/atlas")
@@ -147,11 +157,14 @@ def build_router(srv) -> APIRouter:
                                    structured=True)
         payload.update({
             "projection": "live",
-            "scope_task": scope_task,
+            "scope_task": cross_run_text(
+                scope_task, max_chars=500, single_line=True, entropy=False),
             "page": {"limit": limit},
             "revisions": _revisions(memory_dir),
         })
-        return payload
+        return sanitize_cross_run_projection(
+            payload, max_chars=128_000_000, max_items=256,
+            max_total_items=500_000)
 
     @router.get("/api/cross-run/claims")
     def claims(contested: bool = False,
@@ -166,14 +179,15 @@ def build_router(srv) -> APIRouter:
         if contested:
             rows = [row for row in rows if row.get("epistemic") == "mixed"]
         total = len(rows)
-        page = rows[offset:offset + limit]
+        page = [_public_cross_run_row(row) for row in rows[offset:offset + limit]]
         return {
             "claims": page,
             "n": total,
             "returned": len(page),
             "offset": offset,
             "limit": limit,
-            "scope_task": scope_task,
+            "scope_task": cross_run_text(
+                scope_task, max_chars=500, single_line=True, entropy=False),
             "revision": claim_governance_revision(memory_dir),
         }
 
@@ -234,7 +248,8 @@ def build_router(srv) -> APIRouter:
             )
         except Exception as exc:  # converted to stable HTTP semantics below
             _raise_governance_error(exc)
-        return {"ok": True, "decision": rec, "revision": rec["revision"]}
+        return {"ok": True, "decision": _public_cross_run_row(rec),
+                "revision": rec["revision"]}
 
     @router.post("/api/cross-run/concept-merge")
     def concept_merge(body: _ConceptMerge):
@@ -251,7 +266,7 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return {
-            "ok": True, "alias": rec, "revision": rec["revision"],
+            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
             "governance_revision": rec["governance_revision"],
         }
 
@@ -270,7 +285,7 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return {
-            "ok": True, "alias": rec, "revision": rec["revision"],
+            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
             "governance_revision": rec["governance_revision"],
         }
 
@@ -289,7 +304,7 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return {
-            "ok": True, "alias": rec, "revision": rec["revision"],
+            "ok": True, "alias": _public_cross_run_row(rec), "revision": rec["revision"],
             "governance_revision": rec["governance_revision"],
         }
 
@@ -309,7 +324,7 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return {
-            "ok": True, "split": rec, "revision": rec["revision"],
+            "ok": True, "split": _public_cross_run_row(rec), "revision": rec["revision"],
             "governance_revision": rec["governance_revision"],
         }
 
@@ -328,7 +343,7 @@ def build_router(srv) -> APIRouter:
         except Exception as exc:
             _raise_governance_error(exc)
         return {
-            "ok": True, "split": rec, "revision": rec["revision"],
+            "ok": True, "split": _public_cross_run_row(rec), "revision": rec["revision"],
             "governance_revision": rec["governance_revision"],
         }
 
@@ -352,7 +367,7 @@ def build_router(srv) -> APIRouter:
         latest: deque[dict] = deque(maxlen=limit)
         count = 0
         for row in _iter_log(path):
-            latest.append(row)
+            latest.append(_public_cross_run_row(row))
             count += 1
         return {"entries": list(reversed(latest)), "n": count, "limit": limit}
 
@@ -387,13 +402,16 @@ def build_router(srv) -> APIRouter:
             "v": 1, "action": "steward-invocation", "from": kind,
             "action_id": action_id, "by": _actor(), "at": _timestamp(),
             "outcome": "error" if error else ("proposed" if has_proposals else "empty"),
-            "proposals": proposals or {}, "receipt": receipt,
+            "proposals": sanitize_cross_run_projection(
+                proposals or {}, max_chars=64_000, max_items=128, max_total_items=2_048),
+            "receipt": sanitize_cross_run_projection(
+                receipt, max_chars=32_000, max_items=128, max_total_items=1_024),
         }
         if begun_revision is not None:
             rec["begun_revision"] = begun_revision
         if error:
-            from looplab.trust.redact import redact_secrets
-            rec["error"] = redact_secrets(str(error), entropy=True)[:500]
+            rec["error"] = cross_run_text(
+                error, max_chars=500, single_line=True, entropy=True)
         try:
             # This is the receipt for an already-paid external call. A best-effort sync would let the
             # server acknowledge bytes that a restart can lose and strand the same action in ambiguity.
@@ -433,10 +451,12 @@ def build_router(srv) -> APIRouter:
         return begun
 
     def _steward_response(record: dict) -> dict:
-        invocation = {key: record.get(key) for key in
-                      ("action_id", "revision", "outcome", "by", "at")}
+        invocation = _public_cross_run_row({key: record.get(key) for key in
+                                            ("action_id", "revision", "outcome", "by", "at")})
         if not invocation.get("action_id"):
-            invocation["action_id"] = record.get("invocation_id")
+            invocation["action_id"] = cross_run_text(
+                record.get("invocation_id"), max_chars=160,
+                single_line=True, entropy=False)
         if record.get("action") == "steward-invocation-begun":
             # CODEX AGENT: replaying an ambiguous external call can charge twice. Same-key retries
             # therefore surface the durable begin claim and require an explicit new paid identity.
@@ -451,11 +471,20 @@ def build_router(srv) -> APIRouter:
             })
         if record.get("outcome") == "error":
             raise HTTPException(400, detail={
-                "code": "steward_failed", "message": record.get("error") or "steward failed",
+                "code": "steward_failed",
+                "message": cross_run_text(
+                    record.get("error") or "steward failed", max_chars=500,
+                    single_line=True, entropy=True),
                 "invocation": invocation,
             })
-        return {"ok": True, "proposals": record.get("proposals") or {},
-                "receipt": record.get("receipt"), "invocation": invocation}
+        return {"ok": True,
+                "proposals": sanitize_cross_run_projection(
+                    record.get("proposals") or {}, max_chars=64_000,
+                    max_items=128, max_total_items=2_048),
+                "receipt": sanitize_cross_run_projection(
+                    record.get("receipt"), max_chars=32_000,
+                    max_items=128, max_total_items=1_024),
+                "invocation": invocation}
 
     def _safe_steward_error(exc: Exception, *, phase: str) -> str:
         # Provider failures can embed endpoints, account ids, or credential fragments. Persist only the

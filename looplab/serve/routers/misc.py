@@ -10,6 +10,7 @@ panel bug), and is included LAST among the /api routers by `make_app`."""
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 from typing import Optional
@@ -17,9 +18,173 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Request
 
 from looplab.core.config import Settings
-from looplab.events.eventstore import read_jsonl_lenient
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
+from looplab.trust.redact import redact_persisted_text
+
+
+_MEMORY_TIER_LIMIT = 200
+_MEMORY_SOURCE_BYTES = 2 * 1024 * 1024
+_MEMORY_SOURCE_ROWS = 1000
+_MEMORY_ROW_BYTES = 128 * 1024
+
+
+def _memory_text(value, maximum: int, *, entropy: bool = True) -> str:
+    if not isinstance(value, (str, int, float, bool)):
+        return ""
+    return " ".join(redact_persisted_text(
+        value, max_chars=maximum, entropy=entropy, single_line=True).split())
+
+
+def _finite_number(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        return value if math.isfinite(value) else None
+    except OverflowError:
+        return None
+
+
+def _bounded_json_value(value, *, depth: int = 0, budget: Optional[list[int]] = None):
+    """Bound one case param tree by depth, fanout and a shared scalar-item budget."""
+    budget = budget if budget is not None else [96]
+    if budget[0] <= 0:
+        return None, True
+    budget[0] -= 1
+    if value is None or isinstance(value, bool):
+        return value, False
+    if isinstance(value, (int, float)):
+        finite = _finite_number(value)
+        return finite, finite is None
+    if isinstance(value, str):
+        safe = _memory_text(value, 500)
+        return safe, len(value) > len(safe)
+    if depth >= 2:
+        return None, True
+    if isinstance(value, dict):
+        out, truncated = {}, len(value) > 32
+        for raw_key in sorted(value, key=str)[:32]:
+            key = _memory_text(raw_key, 80)
+            if not key:
+                truncated = True
+                continue
+            if key in out:
+                truncated = True
+                continue
+            projected, cut = _bounded_json_value(value[raw_key], depth=depth + 1, budget=budget)
+            out[key] = projected
+            truncated = truncated or cut
+        return out, truncated
+    if isinstance(value, (list, tuple)):
+        out, truncated = [], len(value) > 32
+        for item in value[:32]:
+            projected, cut = _bounded_json_value(item, depth=depth + 1, budget=budget)
+            out.append(projected)
+            truncated = truncated or cut
+        return out, truncated
+    return None, True
+
+
+def _project_memory_row(tier: str, row) -> Optional[dict]:
+    if not isinstance(row, dict):
+        return None
+    if tier == "cases":
+        task_id = _memory_text(row.get("task_id"), 500, entropy=False)
+        if not task_id:
+            return None
+        params, params_truncated = _bounded_json_value(row.get("params", {}))
+        out = {"task_id": task_id, "goal": _memory_text(row.get("goal"), 1000),
+               "direction": row.get("direction") if row.get("direction") in ("min", "max") else "min",
+               "metric": _finite_number(row.get("metric")), "params": params}
+        rationale = _memory_text(row.get("rationale"), 1000)
+        if rationale:
+            out["rationale"] = rationale
+        if params_truncated:
+            out["params_truncated"] = True
+        return out
+    if tier == "lessons":
+        statement = _memory_text(row.get("statement"), 1000)
+        if not statement:
+            return None
+        out = {"statement": statement}
+        for key, maximum in (("run_id", 500), ("task_id", 500), ("role", 40),
+                             ("kind", 80), ("outcome", 48), ("claim_stance", 24)):
+            value = _memory_text(row.get(key), maximum, entropy=key not in ("run_id", "task_id"))
+            if value:
+                out[key] = value
+        for key in ("delta", "confidence"):
+            value = _finite_number(row.get(key))
+            if value is not None:
+                out[key] = value
+        evidence_count = row.get("evidence_count")
+        if isinstance(evidence_count, int) and not isinstance(evidence_count, bool):
+            out["evidence_count"] = max(0, evidence_count)
+        return out
+    note = _memory_text(row.get("note") or row.get("statement"), 4000)
+    if not note:
+        return None
+    out = {"note": note}
+    for key, maximum in (("run_id", 500), ("task_id", 500), ("at", 120)):
+        value = _memory_text(row.get(key), maximum, entropy=key not in ("run_id", "task_id", "at"))
+        if value:
+            out[key] = value
+    return out
+
+
+def _read_memory_tier(path: Path, tier: str) -> tuple[list[dict], dict]:
+    receipt = {"limit": _MEMORY_TIER_LIMIT, "returned": 0, "skipped": 0,
+               "source_window_truncated": False, "unavailable": False}
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, 2)
+            end = handle.tell()
+            start = max(0, end - _MEMORY_SOURCE_BYTES)
+            preceding = b"\n"
+            if start:
+                handle.seek(start - 1)
+                preceding = handle.read(1)
+            handle.seek(start)
+            raw = handle.read(end - start)
+    except FileNotFoundError:
+        return [], receipt
+    except OSError:
+        receipt["unavailable"] = True
+        return [], receipt
+
+    receipt["source_window_truncated"] = start > 0
+    if start and preceding != b"\n":
+        boundary = raw.find(b"\n")
+        if boundary < 0:
+            receipt["skipped"] = 1
+            return [], receipt
+        raw = raw[boundary + 1:]
+        receipt["skipped"] += 1
+    encoded = raw.splitlines()
+    if len(encoded) > _MEMORY_SOURCE_ROWS:
+        encoded = encoded[-_MEMORY_SOURCE_ROWS:]
+        receipt["source_window_truncated"] = True
+    projected = []
+    for line in encoded:
+        if not line.strip():
+            continue
+        if len(line) > _MEMORY_ROW_BYTES:
+            receipt["skipped"] += 1
+            continue
+        try:
+            row = json.loads(line)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            receipt["skipped"] += 1
+            continue
+        safe = _project_memory_row(tier, row)
+        if safe is None:
+            receipt["skipped"] += 1
+            continue
+        projected.append(safe)
+    if len(projected) > _MEMORY_TIER_LIMIT:
+        projected = projected[-_MEMORY_TIER_LIMIT:]
+        receipt["source_window_truncated"] = True
+    receipt["returned"] = len(projected)
+    return projected, receipt
 
 
 def build_router(srv) -> APIRouter:
@@ -223,19 +388,18 @@ def build_router(srv) -> APIRouter:
             return out
         md = Path(s.memory_dir)
         out["dir"] = str(md)
-        for f in sorted(md.glob("*.jsonl")) if md.exists() else []:
-            # These are MUTABLE stores (rewritten/compacted in place), so skip-and-continue: one
-            # damaged line must not hide the rest of the Memory panel (iter_jsonl would stop there).
-            # cases.jsonl is stdlib-json-written (NaN literals possible); lessons/notes are orjson —
-            # stdlib json parses BOTH (a superset), so one parser is safe on this read-only panel.
-            rows = read_jsonl_lenient(f, loads=json.loads)
-            nm = f.name.lower()
-            if "lesson" in nm:
-                out["lessons"].extend(rows)
-            elif "note" in nm or "meta" in nm:
-                out["notes"].extend(rows)
-            else:                                    # cases.jsonl (or any other tier) → cases
-                out["cases"].extend(rows)
+        receipts = {}
+        # CODEX AGENT: allow-list only the three UI tiers. Every tier gets an independent bounded
+        # recent source window and result cap; governance/capsule ledgers are not accidental "cases".
+        for tier, filename in (("cases", "cases.jsonl"), ("lessons", "lessons.jsonl"),
+                               ("notes", "meta_notes.jsonl")):
+            out[tier], receipts[tier] = _read_memory_tier(md / filename, tier)
+        out["projection"] = "bounded_recent_tail"
+        out["page"] = {"tiers": receipts,
+                       "truncated": any(row["source_window_truncated"] for row in receipts.values()),
+                       "unavailable": any(row["unavailable"] for row in receipts.values()),
+                       "partial": any(row["source_window_truncated"] or row["skipped"]
+                                      or row["unavailable"] for row in receipts.values())}
         return out
 
     # ------------------------------------------------------------------ authoring (files-as-truth)

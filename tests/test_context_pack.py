@@ -21,6 +21,14 @@ def test_pack_is_bounded_by_max_claims():
     assert len(pack["claims"]) == 3 and pack["n_claims_total"] == 20
 
 
+def test_pack_has_a_hard_cap_even_when_caller_requests_an_unbounded_window():
+    claims = [_claim(f"claim {index}", "supported", 1, 0) for index in range(100)]
+    pack = build_context_pack(claims, max_claims=10 ** 1000)
+
+    assert len(pack["claims"]) == 64
+    assert pack["n_claims_total"] == 100
+
+
 def test_contested_claims_lead():
     claims = [
         _claim("strong support", "supported", 9, 0),

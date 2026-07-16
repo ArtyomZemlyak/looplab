@@ -180,6 +180,28 @@ def test_claims_pagination_is_bounded_and_reports_total(tmp_path):
     assert client.get("/api/cross-run/claims", params={"limit": 201}).status_code == 422
 
 
+def test_cross_run_reads_apply_independent_nested_caps(tmp_path):
+    md = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    md.mkdir(parents=True, exist_ok=True)
+    (md / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps({
+        "statement": "bounded evidence claim", "outcome": "supported", "evidence": [index],
+        "run_id": f"r{index:03}", "task_id": "t",
+    }) for index in range(80)) + b"\n")
+    (md / "concept_capsules.jsonl").write_bytes(b"\n".join(orjson.dumps({
+        "v": 1, "run_id": f"r{index:03}", "task_id": "t", "fingerprint": ["t"],
+        "direction": "max", "concepts": ["shared"], "concept_outcomes": {"shared": index},
+    }) for index in range(70)) + b"\n")
+    client = TestClient(make_app(tmp_path))
+
+    claim = client.get("/api/cross-run/claims", params={"limit": 1}).json()["claims"][0]
+    explored = client.get("/api/cross-run/atlas", params={"limit": 1}).json()["explored"][0]
+
+    assert claim["n_support"] == 80 and len(claim["support"]) == len(claim["runs"]) == 64
+    assert claim["nested_omitted"] == {"support": 16, "runs": 16}
+    assert explored["n_runs"] == 70 and len(explored["runs"]) == 64
+    assert explored["runs_omitted"] == 6
+
+
 def test_invalid_decision_is_400(tmp_path):
     _seed_memory()
     client = TestClient(make_app(tmp_path))

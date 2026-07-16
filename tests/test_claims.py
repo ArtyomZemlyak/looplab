@@ -764,3 +764,48 @@ def test_cli_claims_structured_flag(tmp_path):
         _lesson("mnr loss never helps", "supported", [2], run_id="rB")])
     r = CliRunner().invoke(app, ["claims", str(tmp_path), "--structured"])
     assert r.exit_code == 0 and "mnr loss" in r.stdout
+
+
+def test_claim_projection_caps_nested_evidence_but_keeps_full_counts_and_digest():
+    lessons = [
+        _lesson("bounded claim", "supported", [index], run_id=f"run-{index:03}")
+        for index in range(80)
+    ]
+
+    projected = claim_assessments(lessons, structured=True)[0]
+    complete = claim_assessments(lessons, structured=True, bounded=False)[0]
+
+    assert projected["n_support"] == complete["n_support"] == 80
+    assert len(projected["support"]) == len(projected["runs"]) == 64
+    assert projected["nested_omitted"] == {"support": 16, "runs": 16}
+    assert len(complete["support"]) == len(complete["runs"]) == 80
+    assert projected["evidence_digest"] == complete["evidence_digest"]
+
+
+def test_claim_readers_quarantine_malformed_persisted_rows(tmp_path):
+    from looplab.engine.claims import claims_for_memory
+    import orjson
+
+    lessons = [
+        {"statement": {"nested": "not identity"}, "outcome": "supported", "evidence": [1]},
+        {"statement": "oversized evidence", "outcome": "supported", "evidence": list(range(257))},
+        {"statement": "huge numeric id is ignored", "outcome": "supported",
+         "evidence": ["9" * 10_000], "run_id": "r-huge", "task_id": "t"},
+        _lesson("usable lesson", "supported", [7], run_id="r-good"),
+    ]
+    _write_lessons(tmp_path / "lessons.jsonl", lessons)
+    research = [
+        {"statement": "bad verification", "node_ids": [1], "verification": []},
+        {"statement": "usable research", "node_ids": [8], "run_id": "rr", "task_id": "t",
+         "verification": {"verdict": "supported"}},
+    ]
+    (tmp_path / "research_claims.jsonl").write_bytes(
+        b"[]\n" + b"\n".join(orjson.dumps(row) for row in research) + b"\n")
+
+    rows = claims_for_memory(tmp_path, structured=True)
+    by_statement = {row["statement"]: row for row in rows}
+
+    assert set(by_statement) == {"huge numeric id is ignored", "usable lesson", "usable research"}
+    assert by_statement["huge numeric id is ignored"]["n_support"] == 0
+    assert by_statement["usable lesson"]["support"] == ["r-good:7"]
+    assert by_statement["usable research"]["support"] == ["rr:8"]

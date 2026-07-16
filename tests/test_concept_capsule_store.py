@@ -6,6 +6,8 @@ reject). These tests pin the PURE store in isolation (no engine): fingerprint-ke
 by run_id (a re-run replaces, never duplicates), similarity thresholding, and the union shape
 `grade_novelty` consumes. Wiring into finalize/novelty is a separate step; this is the substrate.
 """
+import json
+
 from looplab.engine.memory import (
     ConceptCapsuleStore, build_concept_capsule, task_fingerprint,
 )
@@ -86,3 +88,38 @@ def test_prior_capsules_ranked_by_similarity_with_run_provenance(tmp_path):
     ranked = s.prior_capsules(fp_now, min_sim=0.1)
     assert [c["run_id"] for _s, c in ranked][0] == "close"     # most-similar first, cite-able by run
     assert all(0.0 <= sim <= 1.0 for sim, _c in ranked)
+
+
+def test_capsule_store_quarantines_structurally_poisoned_rows(tmp_path):
+    path = tmp_path / "c.jsonl"
+    valid = _cap("good", "dense retrieval", ["hard-neg"], metric=0.8)
+    poisoned = [
+        [],
+        {"v": 1, "run_id": "bad-fingerprint", "fingerprint": 1, "concepts": ["x"]},
+        {"v": 1, "run_id": "bad-concept", "fingerprint": ["x"], "concepts": [{}]},
+        {"v": 999, "run_id": "future", "fingerprint": ["x"], "concepts": ["x"]},
+        {"v": 1, "run_id": "bad-metric", "fingerprint": ["x"], "concepts": ["x"],
+         "best_metric": float("inf")},
+    ]
+    path.write_text("".join(json.dumps(row) + "\n" for row in [*poisoned, valid]), encoding="utf-8")
+
+    store = ConceptCapsuleStore(path)
+
+    assert store.all() == [valid]
+    assert store.add("not-an-object") is False
+    assert store.add(_cap("new", "dense retrieval", ["mnr"], metric=0.9)) is True
+    assert {row["run_id"] for row in ConceptCapsuleStore(path).all()} == {"good", "new"}
+
+
+def test_build_capsule_caps_large_generated_collections_deterministically():
+    capsule = build_concept_capsule(
+        run_id="r", fingerprint=[f"f-{index:04}" for index in range(400)], direction="max",
+        concepts=[f"c-{index:04}" for index in range(400)],
+        concept_outcomes={f"c-{index:04}": index for index in range(400)},
+    )
+
+    assert len(capsule["fingerprint"]) == 256
+    assert len(capsule["concepts"]) == 256
+    assert len(capsule["concept_outcomes"]) == 256
+    assert capsule["fingerprint"] == sorted(capsule["fingerprint"])
+    assert set(capsule["concept_outcomes"]) == set(capsule["concepts"])

@@ -6,6 +6,7 @@ top-system differentiator — solved tasks make later similar tasks easier.
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Callable, Optional
@@ -501,8 +502,31 @@ class JsonlCaseLibrary:
         lock on every add() so a concurrent run's cases aren't clobbered by this run's stale in-memory
         copy. One malformed/truncated line is skipped, never making the whole cross-run memory
         permanently unloadable."""
-        # dicts_only=False: the historical reload kept any parsed JSON value, not just objects.
-        self.cases = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=False)
+        rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+        # CODEX AGENT: a syntactically-valid scalar (or a dict with an incompatible metric/params
+        # shape) is still a poisoned case row. Quarantine it here so search and the next locked
+        # upsert cannot crash on ``.get`` or on a cross-type metric comparison.
+        self.cases = [case for case in rows if self._valid_case(case)]
+
+    @staticmethod
+    def _valid_case(case) -> bool:
+        if not isinstance(case, dict):
+            return False
+        task_id = case.get("task_id")
+        if not isinstance(task_id, str) or not task_id or len(task_id) > 500:
+            return False
+        for key, maximum in (("goal", 4000), ("rationale", 8000)):
+            value = case.get(key)
+            if value is not None and (not isinstance(value, str) or len(value) > maximum):
+                return False
+        direction = case.get("direction", "min")
+        if direction not in ("min", "max"):
+            return False
+        metric = case.get("metric")
+        if not _finite_metric(metric):
+            return False
+        params = case.get("params")
+        return params is None or isinstance(params, dict)
 
     def _flush(self) -> None:
         # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
@@ -518,6 +542,8 @@ class JsonlCaseLibrary:
         full-file read-modify-write, so two runs sharing `memory_dir` (the live-share scenario) would
         otherwise clobber each other's cases (the loser's case vanishes). We RE-READ inside the lock so
         this run's possibly-stale in-memory `self.cases` can't overwrite a concurrent run's write."""
+        if not self._valid_case(case):
+            return False
         from looplab.events.eventstore import _interprocess_lock
         with _interprocess_lock(Path(str(self.path) + ".lock")):
             self._reload()
@@ -540,11 +566,17 @@ class JsonlCaseLibrary:
         return True
 
     def search(self, query: str, k: int = 3) -> list[dict]:
+        try:
+            limit = max(0, min(int(k), 64))
+        except (TypeError, ValueError, OverflowError):
+            return []
+        if not isinstance(query, str) or not limit:
+            return []
         q = set(query.lower().split())
         scored = [(len(q & set((c.get("goal", "") + " " + c.get("task_id", "")).lower().split())), c)
                   for c in self.cases]
         scored.sort(key=lambda t: -t[0])
-        return [c for _, c in scored[:k]]
+        return [c for _, c in scored[:limit]]
 
     def all(self) -> list[dict]:
         return list(self.cases)
@@ -554,6 +586,57 @@ class JsonlCaseLibrary:
 # reject incompatible generations instead of silently mis-reading them (a CODEX finding; the full record
 # — evidence node-refs, visibility/retention/purge key, concept UID+taxonomy version — is the CR1a TODO).
 CONCEPT_CAPSULE_VERSION = 1
+
+_MAX_CAPSULE_ID_CHARS = 500
+_MAX_CAPSULE_TOKEN_CHARS = 500
+_MAX_CAPSULE_FINGERPRINT = 256
+_MAX_CAPSULE_CONCEPTS = 256
+_MAX_CAPSULE_OUTCOMES = 256
+_MAX_OVERVIEW_CONCEPTS = 512
+_MAX_OVERVIEW_RUNS_PER_CONCEPT = 64
+_MAX_OVERVIEW_RUN_CARDS = 512
+_MAX_OVERVIEW_CARD_CONCEPTS = 64
+
+
+def _finite_metric(value) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _valid_capsule_record(capsule) -> bool:
+    """Validate one durable capsule without coercing semantic identity.
+
+    Oversized or ill-typed rows are quarantined rather than truncated: truncating a run id or concept
+    slug could alias two distinct durable entities.
+    """
+    if not isinstance(capsule, dict):
+        return False
+    version = capsule.get("v", CONCEPT_CAPSULE_VERSION)
+    run_id = capsule.get("run_id")
+    task_id = capsule.get("task_id", "")
+    fingerprint = capsule.get("fingerprint")
+    concepts = capsule.get("concepts")
+    outcomes = capsule.get("concept_outcomes", {})
+    if (version != CONCEPT_CAPSULE_VERSION
+            or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
+            or not isinstance(task_id, str) or len(task_id) > _MAX_CAPSULE_ID_CHARS
+            or capsule.get("direction", "min") not in ("min", "max")
+            or not _finite_metric(capsule.get("best_metric"))
+            or not isinstance(fingerprint, list) or len(fingerprint) > _MAX_CAPSULE_FINGERPRINT
+            or not isinstance(concepts, list) or len(concepts) > _MAX_CAPSULE_CONCEPTS
+            or not isinstance(outcomes, dict) or len(outcomes) > _MAX_CAPSULE_OUTCOMES):
+        return False
+    if any(not isinstance(value, str) or not value or len(value) > _MAX_CAPSULE_TOKEN_CHARS
+           for value in fingerprint + concepts):
+        return False
+    return all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
+               and _finite_metric(value) for key, value in outcomes.items())
 
 
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
@@ -565,15 +648,32 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     with what result?" and feed `grade_novelty`'s `prior_concepts` (D3 level 3 = surface prior, never
     reject). Carries a schema `v` + `task_id` scope; deliberately small and JSON-flat (memory-store data,
     not a fold event)."""
+    fingerprint_source = fingerprint if isinstance(fingerprint, (list, tuple, set)) else []
+    concepts_source = concepts if isinstance(concepts, (list, tuple, set)) else []
+    bounded_fingerprint = sorted({token for token in fingerprint_source
+                                  if isinstance(token, str) and token
+                                  and len(token) <= _MAX_CAPSULE_TOKEN_CHARS})[:_MAX_CAPSULE_FINGERPRINT]
+    bounded_concepts = sorted({concept for concept in concepts_source
+                               if isinstance(concept, str) and concept
+                               and len(concept) <= _MAX_CAPSULE_TOKEN_CHARS})[:_MAX_CAPSULE_CONCEPTS]
+    raw_outcomes = concept_outcomes if isinstance(concept_outcomes, dict) else {}
+    bounded_outcomes = {
+        key: value for key, value in sorted(raw_outcomes.items(), key=lambda item: str(item[0]))
+        if isinstance(key, str) and key in bounded_concepts and _finite_metric(value)
+    }
+    bounded_outcomes = dict(list(bounded_outcomes.items())[:_MAX_CAPSULE_OUTCOMES])
+    normalized_direction = str(direction or "min")
+    if normalized_direction not in ("min", "max"):
+        normalized_direction = "min"
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "run_id": str(run_id or ""),
         "task_id": str(task_id or ""),
-        "fingerprint": sorted(set(fingerprint or [])),
-        "direction": str(direction or "min"),
-        "concepts": sorted({str(c) for c in (concepts or []) if c}),
-        "best_metric": best_metric,
-        "concept_outcomes": dict(concept_outcomes or {}),
+        "fingerprint": bounded_fingerprint,
+        "direction": normalized_direction,
+        "concepts": bounded_concepts,
+        "best_metric": best_metric if _finite_metric(best_metric) else None,
+        "concept_outcomes": bounded_outcomes,
     }
 
 
@@ -599,12 +699,7 @@ class ConceptCapsuleStore:
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
         # Missing `v` is the pre-version legacy shape and is still readable as v1.  An explicit unknown
         # version must be quarantined: treating v999 as today's schema can silently misinterpret evidence.
-        version = c.get("v", CONCEPT_CAPSULE_VERSION)
-        return (version == CONCEPT_CAPSULE_VERSION
-                and isinstance(c.get("run_id"), str) and c["run_id"]
-                and isinstance(c.get("fingerprint"), list)
-                and isinstance(c.get("concepts"), list)
-                and isinstance(c.get("concept_outcomes", {}), dict))
+        return _valid_capsule_record(c)
 
     def _reload(self) -> None:
         rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
@@ -666,8 +761,18 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     collapse to one concept and purged concepts drop; `splits` (from `load_concept_splits`) re-tags a coarse
     concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
     from looplab.engine.concept_registry import canonicalize_concept, canonicalize_concepts
+
+    # A caller may pass raw decoded rows rather than going through ConceptCapsuleStore. Apply the same
+    # quarantine here, and collapse duplicate run ids deterministically (the last durable row wins, as the
+    # store's upsert contract specifies).
+    by_run = {}
+    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
+        if _valid_capsule_record(capsule):
+            by_run[capsule["run_id"]] = capsule
+    valid_capsules = [by_run[run_id] for run_id in sorted(by_run)]
+
     per_concept: dict[str, dict] = {}
-    for c in capsules:
+    for c in valid_capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
         direction = str(c.get("direction") or "min")
@@ -686,24 +791,39 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
             by_canon.setdefault(key, []).append(concept)
         for key, raws in by_canon.items():
             metric = next((oc.get(r) for r in sorted(raws) if oc.get(r) is not None), None)
-            e = per_concept.setdefault(key, {"concept": key, "runs": []})
-            e["runs"].append({"run_id": rid, "metric": metric, "direction": direction})
+            e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
+            e["_runs"][rid] = {"run_id": rid, "metric": metric, "direction": direction}
     concepts = []
     for e in per_concept.values():
-        e["runs"].sort(key=lambda r: r["run_id"])
-        e["n_runs"] = len({r["run_id"] for r in e["runs"]})
-        concepts.append(e)
+        all_runs = [e["_runs"][run_id] for run_id in sorted(e["_runs"])]
+        row = {"concept": e["concept"], "n_runs": len(all_runs),
+               "runs": all_runs[:_MAX_OVERVIEW_RUNS_PER_CONCEPT]}
+        if len(all_runs) > len(row["runs"]):
+            row["runs_omitted"] = len(all_runs) - len(row["runs"])
+        concepts.append(row)
     concepts.sort(key=lambda e: (-e["n_runs"], e["concept"]))   # most-explored first, then name
     cards = []
-    for c in capsules:
+    for c in valid_capsules:
         canonical = canonicalize_concepts(c.get("concepts") or [], aliases=aliases, splits=splits)
         # The overview must apply normalization even with empty governance maps; otherwise
         # `Hard-Neg` and `hard-neg` are one UID in the registry but two portfolio concepts/cards.
-        cards.append({"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
-                      "best_metric": c.get("best_metric"),
-                      "direction": str(c.get("direction") or "min"), "concepts": canonical})
+        card = {"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
+                "best_metric": c.get("best_metric"), "direction": str(c.get("direction") or "min"),
+                "concepts": canonical[:_MAX_OVERVIEW_CARD_CONCEPTS]}
+        if len(canonical) > len(card["concepts"]):
+            card["concepts_omitted"] = len(canonical) - len(card["concepts"])
+        cards.append(card)
     cards.sort(key=lambda k: k["run_id"])
-    return {"n_runs": len(capsules), "n_concepts": len(concepts), "concepts": concepts, "runs": cards}
+    # CODEX AGENT: every outward collection has an independent hard cap. Totals and explicit omission
+    # counters describe the full validated snapshot, so a bounded response never masquerades as complete.
+    result = {"n_runs": len(valid_capsules), "n_concepts": len(concepts),
+              "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
+              "runs": cards[:_MAX_OVERVIEW_RUN_CARDS]}
+    if len(concepts) > len(result["concepts"]):
+        result["concepts_omitted"] = len(concepts) - len(result["concepts"])
+    if len(cards) > len(result["runs"]):
+        result["run_cards_omitted"] = len(cards) - len(result["runs"])
+    return result
 
 
 def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,

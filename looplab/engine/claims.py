@@ -22,6 +22,82 @@ from collections.abc import Callable
 from typing import Optional
 
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
+from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
+
+_MAX_SOURCE_STATEMENT = 4000
+_MAX_SOURCE_ID = 500
+_MAX_SOURCE_EVIDENCE = 256
+_MAX_SOURCE_FINGERPRINT = 256
+_MAX_CLAIM_PROJECTION_ITEMS = 64
+_MAX_CONTEXT_CLAIMS = 64
+_MAX_RETRIEVAL_HITS = 64
+_MAX_RETRIEVAL_CORPUS = 4096
+
+
+def _valid_node_source(raw) -> bool:
+    if raw is None:
+        return True
+    values = [raw] if isinstance(raw, int) and not isinstance(raw, bool) else raw
+    if not isinstance(values, (list, tuple)) or len(values) > _MAX_SOURCE_EVIDENCE:
+        return False
+    for value in values:
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            continue
+        # Keep the historical drop-invalid-elements behavior, but never feed an enormous decimal
+        # string into ``int`` (Python raises once its conversion limit is exceeded).
+        if isinstance(value, str) and len(value.strip()) <= 24:
+            continue
+    return True
+
+
+def _valid_claim_source_row(row, *, research: bool) -> bool:
+    """Conservative schema fence for persisted lesson/research evidence rows."""
+    if not isinstance(row, dict):
+        return False
+    statement = row.get("statement")
+    if not isinstance(statement, str) or not statement.strip() or len(statement) > _MAX_SOURCE_STATEMENT:
+        return False
+    for key in ("run_id", "task_id"):
+        value = row.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > _MAX_SOURCE_ID):
+            return False
+    direction = row.get("direction")
+    if direction is not None and direction not in ("", "min", "max"):
+        return False
+    if not _valid_node_source(row.get("node_ids" if research else "evidence")):
+        return False
+    fingerprint = row.get("fingerprint")
+    if (fingerprint is not None
+            and (not isinstance(fingerprint, (list, tuple))
+                 or len(fingerprint) > _MAX_SOURCE_FINGERPRINT
+                 or any(not isinstance(value, str) or len(value) > _MAX_SOURCE_ID
+                        for value in fingerprint))):
+        return False
+    if research:
+        urls = row.get("urls")
+        if urls is not None and (not isinstance(urls, (list, tuple)) or len(urls) > 64):
+            return False
+        verification = row.get("verification")
+        if verification is not None and not isinstance(verification, dict):
+            return False
+    return True
+
+
+def _valid_claim_source_rows(rows, *, research: bool) -> list[dict]:
+    source = rows if isinstance(rows, (list, tuple)) else []
+    return [row for row in source if _valid_claim_source_row(row, research=research)]
+
+
+def _claim_text(value, maximum: int = 4000) -> str:
+    return cross_run_text(value, max_chars=maximum, single_line=True, entropy=True).strip()
+
+
+def _identity_text(value, maximum: int = 500) -> str:
+    # Opaque run/task IDs are often hashes. Preserve their identity while still applying every known
+    # credential pattern and stripping control/newline payloads.
+    return cross_run_text(value, max_chars=maximum, single_line=True, entropy=False).strip()
 
 
 def _node_ids(raw) -> list:
@@ -39,15 +115,19 @@ def _node_ids(raw) -> list:
             continue
         if isinstance(x, int):
             out.append(x)
-        elif isinstance(x, str) and x.strip().lstrip("-").isdigit():
-            out.append(int(x))
+        elif (isinstance(x, str) and len(x.strip()) <= 24
+              and x.strip().lstrip("-").isdigit()):
+            try:
+                out.append(int(x))
+            except (ValueError, OverflowError):
+                continue
     return out
 
 
 def _qualify_refs(run_id, node_ids) -> list[str]:
     """Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse: a bare node id is run-local.
     "?" marks a ref whose run is unknown (e.g. a D8 claim without a run_id)."""
-    r = str(run_id or "?")
+    r = _identity_text(run_id or "?", 500) or "?"
     return [f"{r}:{n}" for n in node_ids]
 
 
@@ -82,8 +162,8 @@ def _research_verification(row: dict) -> tuple[str, str, str]:
     verdict = str(raw.get("verdict") or row.get("verification_verdict") or "unverified").lower()
     if verdict not in _RESEARCH_VERDICTS:
         verdict = "unverified"
-    method = str(raw.get("method") or row.get("verification_method") or "")[:80]
-    note = str(raw.get("note") or row.get("verification_note") or "")[:400]
+    method = _claim_text(raw.get("method") or row.get("verification_method") or "", 80)
+    note = _claim_text(raw.get("note") or row.get("verification_note") or "", 400)
     return verdict, method, note
 
 
@@ -92,12 +172,12 @@ def _metric_identity(row: dict) -> str:
     for key in ("metric_name", "metric_key", "objective_metric", "metric"):
         value = row.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:_MAX_DECISION_METRIC]
+            return _identity_text(value, _MAX_DECISION_METRIC)
     fingerprint = row.get("fingerprint")
     if isinstance(fingerprint, (list, tuple)):
         for token in fingerprint:
             if isinstance(token, str) and token.casefold().startswith("metric:"):
-                return token.split(":", 1)[1][:_MAX_DECISION_METRIC]
+                return _identity_text(token.split(":", 1)[1], _MAX_DECISION_METRIC)
     return ""
 
 
@@ -127,6 +207,57 @@ def claim_evidence_digest(claim: dict) -> str:
     payload = {key: claim.get(key) for key in fields}
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return "cev_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _bounded_claim_projection(row: dict) -> dict:
+    """Cap every nested collection after the full evidence digest/counts have been computed.
+
+    Governance freshness continues to cover the complete evidence set; only the outward read-model is
+    bounded. Explicit omission counts prevent a client from interpreting the visible prefix as complete.
+    """
+    out = dict(row)
+    field_limits = {
+        "support": (700, _MAX_CLAIM_PROJECTION_ITEMS),
+        "oppose": (700, _MAX_CLAIM_PROJECTION_ITEMS),
+        "unverified": (700, _MAX_CLAIM_PROJECTION_ITEMS),
+        "runs": (_MAX_SOURCE_ID, _MAX_CLAIM_PROJECTION_ITEMS),
+        "scopes": (_MAX_SOURCE_ID, _MAX_CLAIM_PROJECTION_ITEMS),
+        "sources": (2000, 32),
+        "verification": (120, 32),
+        "contradicts": (_MAX_SOURCE_STATEMENT, 32),
+        "merged_from": (_MAX_SOURCE_STATEMENT, 32),
+    }
+    omitted = {}
+    for field, (text_limit, item_limit) in field_limits.items():
+        raw = row.get(field)
+        values = raw if isinstance(raw, (list, tuple)) else []
+        projected = [value[:text_limit] for value in values[:item_limit]
+                     if isinstance(value, str) and value]
+        out[field] = projected
+        hidden = len(values) - len(projected)
+        if hidden:
+            omitted[field] = hidden
+    out["n_contradicts"] = len(row.get("contradicts") or []) \
+        if isinstance(row.get("contradicts"), (list, tuple)) else 0
+    decision = row.get("decision")
+    if isinstance(decision, dict):
+        text_fields = {
+            "statement": _MAX_SOURCE_STATEMENT, "scope": _MAX_SOURCE_ID, "metric": 200,
+            "decision": 20, "note": 4000, "by": 120, "at": 120, "action_id": 160,
+            "evidence_digest": 80, "claim_uid": 80, "key": 160,
+        }
+        safe_decision = {key: value[:maximum] for key, maximum in text_fields.items()
+                         if isinstance((value := decision.get(key)), str)}
+        if isinstance(decision.get("revision"), int) and not isinstance(decision.get("revision"), bool):
+            safe_decision["revision"] = max(0, decision["revision"])
+        out["decision"] = safe_decision
+    else:
+        out["decision"] = None
+    if omitted:
+        # CODEX AGENT: per-field omission metadata is part of the projection contract; a hard nested cap
+        # must never silently turn "64 shown of 3,000" into "there are 64".
+        out["nested_omitted"] = omitted
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -166,7 +297,9 @@ def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
         raise ValueError(f"empty {name}")
     if len(text) > maximum:
         raise ValueError(f"{name} exceeds {maximum} characters")
-    return text
+    entropy = name not in {"scope", "metric", "action_id", "at"}
+    return cross_run_text(
+        text, max_chars=maximum, single_line=True, entropy=entropy)
 
 
 def _decision_payload(row: dict) -> tuple:
@@ -175,8 +308,14 @@ def _decision_payload(row: dict) -> tuple:
     Actor and timestamp are receipt metadata: a transport retry may be served after the deployment's
     operator label changes, but it must still return the original durable receipt instead of conflicting.
     """
-    return tuple(str(row.get(k) or "") for k in
-                 ("statement", "scope", "metric", "decision", "note", "evidence_digest"))
+    return (
+        _claim_text(row.get("statement"), _MAX_DECISION_STATEMENT),
+        _identity_text(row.get("scope"), _MAX_DECISION_SCOPE),
+        _identity_text(row.get("metric"), _MAX_DECISION_METRIC),
+        str(row.get("decision") or ""),
+        _claim_text(row.get("note"), _MAX_DECISION_NOTE),
+        _identity_text(row.get("evidence_digest"), _MAX_EVIDENCE_DIGEST),
+    )
 
 
 def _logical_decision_rows(rows) -> list[dict]:
@@ -251,10 +390,12 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
         rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
         logical = _logical_decision_rows(rows)
         if aid:
-            existing = next((r for r in logical if str(r.get("action_id") or "") == aid), None)
+            existing = next((r for r in logical
+                             if _identity_text(r.get("action_id"), _MAX_DECISION_ACTION_ID) == aid), None)
             if existing is not None:
                 if _decision_payload(existing) == _decision_payload(rec):
-                    return existing
+                    return sanitize_cross_run_projection(
+                        existing, max_chars=16_000, max_items=64, max_total_items=256)
                 raise ClaimDecisionIdempotencyConflict(
                     f"action_id {aid!r} was already used for a different claim decision")
         current = len(logical)
@@ -320,13 +461,19 @@ def load_claim_decisions(memory_dir) -> dict:
     out: dict = {}
     rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
     for r in _logical_decision_rows(rows):
-        statement = str(r.get("statement") or "").strip()
-        scope, metric = str(r.get("scope") or ""), str(r.get("metric") or "")
-        k = str(r.get("key") or normalize_statement(statement))
+        statement = _claim_text(r.get("statement"), _MAX_DECISION_STATEMENT)
+        scope = _identity_text(r.get("scope"), _MAX_DECISION_SCOPE)
+        metric = _identity_text(r.get("metric"), _MAX_DECISION_METRIC)
+        k = normalize_statement(statement) if statement else str(r.get("key") or "")
         # A legacy scoped row without its statement cannot be migrated safely. Never fall back to its old UID:
         # that would silently replay a v1 token-set collision under the v2 role-aware contract.
         uid = claim_uid(statement, scope=scope, metric=metric) if statement else ""
-        current = {**r, "claim_uid": uid, "claim_key_version": CLAIM_KEY_VERSION}
+        # Legacy decision rows predate always-on redaction. Keep their governance identity/revision but
+        # never copy a nested note/actor/action payload back into an agent or HTTP projection verbatim.
+        current = sanitize_cross_run_projection(
+            {**r, "statement": statement, "scope": scope, "metric": metric,
+             "claim_uid": uid, "claim_key_version": CLAIM_KEY_VERSION},
+            max_chars=16_000, max_items=64, max_total_items=256)
         keys = ([uid] if uid else [])
         if k and not scope and not metric:
             # Retain a distinct portfolio-wide fallback as well as the legacy lean key. A
@@ -354,7 +501,13 @@ def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
     """Bounded JSON-list normalization; strings are scalar values, never character iterables."""
     if not isinstance(raw, (list, tuple)):
         return []
-    return [x[:item_maximum] for x in raw[:maximum] if isinstance(x, str) and x]
+    out = []
+    for value in raw[:maximum]:
+        if isinstance(value, str):
+            clean = _claim_text(value, item_maximum)
+            if clean:
+                out.append(clean)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -373,7 +526,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient, write_jsonl_atomic
     if not memory_dir:
         return 0
-    rid = str(run_id or "")
+    rid = _identity_text(run_id, 500)
     if not rid:
         return 0
     rows = []
@@ -382,13 +535,13 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
         direction = ""
     source = claims if isinstance(claims, (list, tuple)) else []
     for c in source[:256]:
-        stmt = str((c.get("statement") if isinstance(c, dict) else "") or "").strip()
+        stmt = _claim_text(c.get("statement") if isinstance(c, dict) else "", 4000)
         if not stmt:
             continue
         verdict, method, note = _research_verification(c)
-        rows.append({"v": 2, "run_id": rid, "task_id": str(task_id or "")[:500],
+        rows.append({"v": 2, "run_id": rid, "task_id": _identity_text(task_id, 500),
                      "direction": direction,
-                     "statement": stmt[:4000],
+                     "statement": stmt,
                      "metric": _metric_identity(c),
                      "node_ids": _node_ids(c.get("node_ids"))[:64],
                      "urls": _string_list(c.get("urls"), maximum=32, item_maximum=2000),
@@ -402,8 +555,23 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
     # review flagged: two finalizers reading E then replacing with E+r1 / E+r2 would erase each other.
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
         existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
-        kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
-        write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
+        existing = _valid_claim_source_rows(existing, research=True)
+        kept = [r for r in existing if _identity_text(r.get("run_id"), 500) != rid]
+        safe_kept = []
+        for row in kept:
+            verdict, method, note = _research_verification(row)
+            safe_kept.append({
+                "v": 2,
+                "run_id": _identity_text(row.get("run_id"), 500),
+                "task_id": _identity_text(row.get("task_id"), 500),
+                "direction": row.get("direction") if row.get("direction") in ("min", "max") else "",
+                "statement": _claim_text(row.get("statement"), 4000),
+                "metric": _metric_identity(row),
+                "node_ids": _node_ids(row.get("node_ids"))[:64],
+                "urls": _string_list(row.get("urls"), maximum=32, item_maximum=2000),
+                "verification": {"verdict": verdict, "method": method, "note": note},
+            })
+        write_jsonl_atomic(path, safe_kept + rows, dumps=json.dumps)
     return len(rows)
 
 
@@ -415,7 +583,10 @@ def load_research_claims(memory_dir) -> list[dict]:
     if not memory_dir:
         return []
     path = Path(memory_dir) / "research_claims.jsonl"
-    return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    return [sanitize_cross_run_projection(
+                row, max_chars=32_000, max_items=64, max_total_items=256)
+            for row in _valid_claim_source_rows(rows, research=True)]
 
 
 def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
@@ -434,7 +605,9 @@ def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisio
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    lessons = _valid_claim_source_rows(lessons, research=False)
     research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    research = _valid_claim_source_rows(research, research=True)
     if scope_task:
         wanted = str(scope_task)
         lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
@@ -455,16 +628,20 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     from pathlib import Path
 
     from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
-    from looplab.engine.memory import ConceptCapsuleStore
+    from looplab.engine.memory import ConceptCapsuleStore, _valid_capsule_record
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
+    lessons = _valid_claim_source_rows(lessons, research=False)
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
+    capsules = [row for row in capsule_source if _valid_capsule_record(row)]
     research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    research = _valid_claim_source_rows(research, research=True)
     if scope_task:
         wanted = str(scope_task)
         # Scope is an access boundary across every joined store, not just D8. Filtering only
@@ -556,13 +733,18 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
     Governance overlays by the structured `claim_uid` (scope-precise)."""
     from looplab.engine.claim_key import claim_signature, claim_uid
+    lessons = _valid_claim_source_rows(lessons, research=False)
+    research_claims = _valid_claim_source_rows(research_claims, research=True)
+    decisions = decisions if isinstance(decisions, dict) else {}
     groups: dict[str, dict] = {}
 
     def _grp(statement, scope, metric=""):
-        s = str(statement or "").strip()
+        s = _claim_text(statement)
         if not s:
             return None
-        sig = claim_signature(s, scope=str(scope or ""), metric=str(metric or ""))
+        sig = claim_signature(
+            s, scope=_identity_text(scope, _MAX_DECISION_SCOPE),
+            metric=_identity_text(metric, _MAX_DECISION_METRIC))
         if sig["polarity"] == 0:                     # no subject content -> not a claim
             return None
         g = groups.get(sig["merge_key"])
@@ -580,25 +762,25 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         if g is None:
             continue
         if lz.get("run_id"):
-            g["runs"].add(str(lz["run_id"]))
+            g["runs"].add(_identity_text(lz["run_id"], 500))
         if lz.get("task_id"):
-            g["scopes"].add(str(lz["task_id"]))
+            g["scopes"].add(_identity_text(lz["task_id"], _MAX_DECISION_SCOPE))
         refs = _qualify_refs(lz.get("run_id"), _node_ids(lz.get("evidence")))
         stance = _lesson_claim_stance(lz)
         if stance == "support":
             g["support"].update(refs)
         elif stance == "oppose":
             g["oppose"].update(refs)
-        g["_ev"][str(lz.get("statement") or "").strip()] += len(refs)
+        g["_ev"][_claim_text(lz.get("statement"))] += len(refs)
 
     for rc in research_claims or []:
         g = _grp(rc.get("statement"), rc.get("task_id"), _metric_identity(rc))
         if g is None:
             continue
         if rc.get("run_id"):
-            g["runs"].add(str(rc["run_id"]))         # D8 rows DO register their run/scope now (CODEX)
+            g["runs"].add(_identity_text(rc["run_id"], 500))  # D8 registers run/scope now (CODEX)
         if rc.get("task_id"):
-            g["scopes"].add(str(rc["task_id"]))
+            g["scopes"].add(_identity_text(rc["task_id"], _MAX_DECISION_SCOPE))
         refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
         verdict, method, _note = _research_verification(rc)
         g["verification"].add(f"{method}:{verdict}" if method else verdict)
@@ -608,7 +790,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
             # unsupported/unclear/cited/legacy-unverified evidence is not counter-evidence; it simply has
             # not established the claim.  Keep the refs drillable without promoting them to support.
             g["unverified"].update(refs)
-        g["_ev"][str(rc.get("statement") or "").strip()] += len(refs)
+        g["_ev"][_claim_text(rc.get("statement"))] += len(refs)
         g["sources"].update(_string_list(rc.get("urls"), maximum=32, item_maximum=2000))
 
     # Contradiction map: a contra_key seen with BOTH polarities means two opposite claims about one subject
@@ -617,7 +799,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
     _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
 
     def _decision_for(g: dict, rep: str):
-        overlay = decisions or {}
+        overlay = decisions
         candidates = [g["uid"], claim_uid(rep, scope=g["scope"], metric=g["metric"])]
         if g["metric"]:
             candidates.append(claim_uid(rep, scope=g["scope"], metric=""))
@@ -626,16 +808,16 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         candidates.append(claim_uid(rep, scope="", metric=""))
         seen = set()
         for uid in candidates:
-            if uid and uid not in seen and uid in overlay:
+            if uid and uid not in seen and isinstance(overlay.get(uid), dict):
                 return overlay[uid]
             seen.add(uid)
         legacy_key = normalize_statement(rep)
         legacy = overlay.get(legacy_key)
-        if (legacy and not str(legacy.get("scope") or "")
+        if (isinstance(legacy, dict) and not str(legacy.get("scope") or "")
                 and not str(legacy.get("metric") or "")):
             return legacy
         global_legacy = overlay.get(_global_key(legacy_key))
-        if (global_legacy and not str(global_legacy.get("scope") or "")
+        if (isinstance(global_legacy, dict) and not str(global_legacy.get("scope") or "")
                 and not str(global_legacy.get("metric") or "")):
             return global_legacy
         return None
@@ -645,6 +827,9 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         rep = max(g["_ev"], key=lambda s: (g["_ev"][s], s)) if g["_ev"] else ""
         sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
         decision = _decision_for(g, rep)
+        if decision is not None:
+            decision = sanitize_cross_run_projection(
+                decision, max_chars=16_000, max_items=64, max_total_items=256)
         prepared.append({"group": g, "statement": rep, "support": sup, "oppose": opp,
                          "unverified": unverified, "decision": decision,
                          "maturity": _dec.get((decision or {}).get("decision"), "machine-proposed")})
@@ -700,7 +885,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
 
 def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dict]] = None,
                       decisions: Optional[dict] = None, fuzzy: bool = False,
-                      structured: bool = False) -> list[dict]:
+                      structured: bool = False, bounded: bool = True) -> list[dict]:
     """Project distilled `lessons` (+ optional D8 `research_claims`) into evidence-grounded claim
     assessments. Groups by normalized statement; each claim carries `support`/`oppose` node-id evidence,
     contributing `runs`/`scopes`, and an `epistemic` state. `decisions` (from `load_claim_decisions`)
@@ -712,12 +897,16 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     polarity ("X helps" vs "X never helps") is a CONTRADICTION not a merge, and paraphrase/inflection
     variants collapse by exact structured key (O(n), no transitive over-merge). Mutually exclusive with the
     lean `fuzzy` path (structured wins)."""
+    lessons = _valid_claim_source_rows(lessons, research=False)
+    research_claims = _valid_claim_source_rows(research_claims, research=True)
+    decisions = decisions if isinstance(decisions, dict) else {}
     if structured:
-        return _structured_assessments(lessons, research_claims, decisions)
+        rows = _structured_assessments(lessons, research_claims, decisions)
+        return [_bounded_claim_projection(row) for row in rows] if bounded else rows
     groups: dict[str, dict] = {}
 
     def _group(stmt: str) -> Optional[dict]:
-        s = str(stmt or "").strip()
+        s = _claim_text(stmt)
         if not s:
             return None
         # NOTE (CODEX): identity here is the normalized STATEMENT (the shipped lesson `normalize_statement`
@@ -729,21 +918,15 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
             "unverified": set(), "runs": set(), "scopes": set(), "sources": set(),
             "verification": set()})
 
-    def _qualify(run_id, node_ids) -> list[str]:
-        # Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse (CODEX): a bare node id is
-        # run-local. "?" marks a ref whose run is unknown (e.g. a D8 claim without a run_id).
-        r = str(run_id or "?")
-        return [f"{r}:{n}" for n in node_ids]
-
     for lz in lessons or []:
         g = _group(lz.get("statement"))
         if g is None:
             continue
         if lz.get("run_id"):
-            g["runs"].add(str(lz["run_id"]))
+            g["runs"].add(_identity_text(lz["run_id"], 500))
         if lz.get("task_id"):
-            g["scopes"].add(str(lz["task_id"]))
-        refs = _qualify(lz.get("run_id"), _node_ids(lz.get("evidence")))
+            g["scopes"].add(_identity_text(lz["task_id"], _MAX_DECISION_SCOPE))
+        refs = _qualify_refs(lz.get("run_id"), _node_ids(lz.get("evidence")))
         stance = _lesson_claim_stance(lz)
         if stance == "support":
             g["support"].update(refs)
@@ -756,10 +939,10 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         if g is None:
             continue
         if rc.get("run_id"):
-            g["runs"].add(str(rc["run_id"]))
+            g["runs"].add(_identity_text(rc["run_id"], 500))
         if rc.get("task_id"):
-            g["scopes"].add(str(rc["task_id"]))
-        refs = _qualify(rc.get("run_id"), _node_ids(rc.get("node_ids")))
+            g["scopes"].add(_identity_text(rc["task_id"], _MAX_DECISION_SCOPE))
+        refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
         verdict, method, _note = _research_verification(rc)
         g["verification"].add(f"{method}:{verdict}" if method else verdict)
         if verdict == "supported":
@@ -772,7 +955,7 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
     out = []
     for key, g in groups.items():
         sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
-        overlay = decisions or {}
+        overlay = decisions
         real_scopes = {str(scope) for scope in g["scopes"] if str(scope)}
         # A statement row spanning multiple tasks cannot safely receive any one task's policy.  For a
         # task-bound row, however, the exact scope-only decision outranks the portfolio-wide fallback.
@@ -790,6 +973,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         # therefore govern this row only when all contributing task scopes are that exact scope; unscoped
         # decisions remain the portfolio-wide fallback. The durable loader normally indexes scoped records
         # by structured UID only, but this guard also keeps custom/preloaded overlays fail-closed.
+        if not isinstance(d, dict):
+            d = None
         if d is not None:
             _dscope = str(d.get("scope") or "")
             if _dscope:
@@ -797,6 +982,11 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
                     d = None
         if d is None:
             d = overlay.get(_global_key(key))
+        if not isinstance(d, dict):
+            d = None
+        if d is not None:
+            d = sanitize_cross_run_projection(
+                d, max_chars=16_000, max_items=64, max_total_items=256)
         out.append({
             "statement": g["statement"],
             "epistemic": _epistemic(sup, opp),
@@ -810,7 +1000,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
-    return _fuzzy_merge_claims(out) if fuzzy else out
+    rows = _fuzzy_merge_claims(out) if fuzzy else out
+    return [_bounded_claim_projection(row) for row in rows] if bounded else rows
 
 
 # --------------------------------------------------------------------------- #
@@ -834,7 +1025,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     is a separate, gated step (never wired here). No LLM, no I/O."""
     # NOTE (CODEX): this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
     # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
-    max_claims = max(1, int(max_claims))
+    max_claims = max(1, min(int(max_claims), _MAX_CONTEXT_CLAIMS))
     # Governance precedence is explicit: rejected is absent; pinned is retention-critical; ratified is the
     # next preference; then evidence ordering. A caveat may replace a non-pinned positive, never a pin.
     live = [c for c in (claims or []) if c.get("maturity") != "operator-rejected"]
@@ -869,7 +1060,7 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     def _slim(c: dict) -> dict:
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
         # keep runs/scopes too so a reader can resolve the claim's provenance (CODEX).
-        return {"statement": c["statement"][:300], "epistemic": c["epistemic"],
+        return {"statement": _claim_text(c.get("statement"), 300), "epistemic": c["epistemic"],
                 "maturity": c.get("maturity", "machine-proposed"),
                 "claim_uid": c.get("claim_uid", ""), "scope": c.get("scope", ""),
                 "evidence_digest": c.get("evidence_digest", ""),
@@ -883,7 +1074,9 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
                 # not entries in ``oppose``. Keep their bounded text or a mixed claim renders as 1↑/0↓
                 # with no visible reason for the disagreement.
                 "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
-                "runs": c.get("runs", [])[:6], "scopes": c.get("scopes", [])[:6]}
+                "runs": [_identity_text(value, 500) for value in c.get("runs", [])[:6]],
+                "scopes": [_identity_text(value, _MAX_DECISION_SCOPE)
+                           for value in c.get("scopes", [])[:6]]}
 
     pack = {
         "claims": [_slim(c) for c in picked],
@@ -899,7 +1092,9 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         pack["coverage"] = {
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
-            "top_concepts": [e["concept"] for e in (concept_overview.get("concepts") or [])[:max_claims]],
+            "top_concepts": [_claim_text(e.get("concept"), 500)
+                             for e in (concept_overview.get("concepts") or [])[:max_claims]
+                             if isinstance(e, dict)],
         }
     return pack
 
@@ -1065,18 +1260,21 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "governance_digest": _json_digest(c.get("decision") or {}),
             "evidence_digest": evidence_digest}))
     for e in overview["concepts"]:
-        docs.append(_retrieval_doc("concept", e["concept"], {
-            "n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]],
+        docs.append(_retrieval_doc("concept", _claim_text(e.get("concept"), 500), {
+            "n_runs": e["n_runs"],
+            "runs": [_identity_text(r.get("run_id"), 500) for r in e["runs"][:5]
+                     if isinstance(r, dict)],
             "evidence_digest": _json_digest(e["runs"])}))
 
     n_total = len(docs)
     corpus_digest = _retrieval_corpus_digest(docs)
+    max_corpus = max(1, min(int(max_corpus), _MAX_RETRIEVAL_CORPUS))
     indexed_docs = _preselect_retrieval_docs(docs, str(query or ""), max_corpus)
     truncated = n_total - len(indexed_docs)
     # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
     # classify deterministically from the query text. An unknown value falls back to classification.
     intent = intent if intent in _INTENTS else _classify_intent(query)
-    kk = max(1, int(k))                            # normalize k (0/-1 -> 1) before it reaches the receipt
+    kk = max(1, min(int(k), _MAX_RETRIEVAL_HITS))
     try:
         base_quota = float(contradiction_quota)
     except (TypeError, ValueError):
@@ -1088,7 +1286,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     target = min(math.ceil(kk * q), max(0, kk - 1))
     # A why-recalled receipt: corpus revision (content digest), the degraded vector-channel semantics, the
     # classified intent + quota, and (below) the per-hit rank — enough to explain/reproduce a result.
-    receipt = {"query": str(query or ""), "k": kk, "n_corpus": n_total,
+    receipt = {"query": _claim_text(query, 4000), "k": kk, "n_corpus": n_total,
                "n_indexed": len(indexed_docs), "corpus_digest_version": _RETRIEVAL_CORPUS_VERSION,
                "channels": ["lexical", "bm25", "vector"], "intent": intent,
                "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
@@ -1173,11 +1371,15 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     The legacy ``thin_coverage`` field means only "observed in one returned run". It is not a gap or coverage
     assertion: a true CoverageFrame (§20.6, unknown-vs-zero) needs a frozen scope, eligible denominator and
     health contract, which remain deferred full-CR3a work."""
-    from looplab.engine.memory import portfolio_concept_overview
-    max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
+    from looplab.engine.memory import _valid_capsule_record, portfolio_concept_overview
+    max_items = max(1, min(int(max_items), 100))             # route/CLI-independent hard envelope
+    source_capsules = capsules if isinstance(capsules, (list, tuple)) else []
+    capsules = [capsule for capsule in source_capsules if _valid_capsule_record(capsule)]
     overview = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
+    # Keep the complete internal sets for exact run totals and the governance evidence digest. Only the
+    # outward contradictions/context projections are capped below.
     claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
-                               structured=structured)
+                               structured=structured, bounded=False)
     # A contradiction the operator REJECTED is no longer live, consistent with build_context_pack and
     # cross_run_claims. Pin priority applies inside the embedded context pack; this human-facing contested
     # summary remains evidence-ordered and independently capped.
@@ -1195,22 +1397,23 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
     # union set out to fix (CODEX).
     pack_overview = {**overview, "n_runs": n_runs}
-    return {
+    payload = {
         "n_runs": n_runs, "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
         "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
         "thin_coverage": thin[:max_items],                   # legacy key: observed in one returned run
-        "contradictions": contested[:max_items],             # legacy key: mixed-evidence claim records
+        "contradictions": [_bounded_claim_projection(row) for row in contested[:max_items]],
         "context_pack": build_context_pack(claims, concept_overview=pack_overview, max_claims=max_items),
     }
+    return sanitize_cross_run_projection(
+        payload, max_chars=128_000_000, max_items=128, max_total_items=100_000)
 
 
 def _safe_text(s, limit: int = 120) -> str:
     """Sanitize UNTRUSTED memory text (claim statements / concept slugs — LLM/repo-derived) before it enters
     an agent prompt: strip control chars + collapse newlines/whitespace to a single space, then bound the
     length. Prevents newline/control-char prompt-injection through the cross-run advisory pack (mega-review)."""
-    t = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", str(s or ""))
-    return re.sub(r"\s+", " ", t).strip()[:limit]
+    return _claim_text(s, limit)
 
 
 def render_context_pack(pack: dict) -> str:

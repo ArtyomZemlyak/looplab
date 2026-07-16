@@ -63,6 +63,38 @@ def test_empty_portfolio_is_well_formed():
     assert ov == {"n_runs": 0, "n_concepts": 0, "concepts": [], "runs": []}
 
 
+def test_overview_quarantines_malformed_rows_and_caps_nested_runs_truthfully():
+    caps = [
+        None,
+        {"run_id": "poison", "fingerprint": 7, "concepts": "characters"},
+        *[_cap(f"r{index:03}", ["shared"], {"shared": index / 100}) for index in range(70)],
+    ]
+
+    overview = portfolio_concept_overview(caps)
+    shared = overview["concepts"][0]
+
+    assert overview["n_runs"] == 70 and shared["n_runs"] == 70
+    assert len(shared["runs"]) == 64 and shared["runs_omitted"] == 6
+    assert [row["run_id"] for row in shared["runs"]] == sorted(
+        row["run_id"] for row in shared["runs"])
+
+
+def test_overview_caps_top_level_collections_with_full_totals():
+    caps = [
+        _cap("a", [f"a/{index:03}" for index in range(256)], {}),
+        _cap("b", [f"b/{index:03}" for index in range(256)], {}),
+        _cap("c", [f"c/{index:03}" for index in range(100)], {}),
+    ]
+
+    overview = portfolio_concept_overview(caps)
+
+    assert overview["n_concepts"] == 612
+    assert len(overview["concepts"]) == 512 and overview["concepts_omitted"] == 100
+    assert overview["runs"][0]["n_concepts"] == 256
+    assert len(overview["runs"][0]["concepts"]) == 64
+    assert overview["runs"][0]["concepts_omitted"] == 192
+
+
 # --------------------------------------------------------------------------- #
 # CLI
 # --------------------------------------------------------------------------- #
