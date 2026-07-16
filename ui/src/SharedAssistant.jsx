@@ -4,6 +4,16 @@ import { Turn } from './AssistantChat.jsx'
 
 const SHARED_REQUEST_TIMEOUT_MS = 15_000
 
+// REVIEW(2026-07-16): e8d5249 pasted this `withDeadline` VERBATIM into OwnerAuth.jsx and here (only
+// the message strings differ), and RunList.jsx carries `settleWithin`, a third variant of the same
+// deadline/abort idea from 998f864 — three hand-rolled timeout helpers in one day. Any fix (e.g. to
+// the abort-listener cleanup or timeout semantics) now needs three edits that will drift; extract one
+// shared helper (ui/src/requestDeadline.js, parameterized by timeout + error copy) before a fourth
+// copy appears. Separately: `validSharedMessage` rejects the ENTIRE shared transcript when one
+// activity item has an unrecognized `type` — additive server evolution (a new activity kind) bricks
+// every existing share link with "invalid shared chat response". The repo's own forward-compat rule
+// (invariant 5: unknown event types are ignored) argues for skipping unknown items, not failing the
+// whole session; reserve the hard reject for structurally unsafe shapes (non-string content etc.).
 const withDeadline = (request, controller) => {
   let timer
   let timedOut = false
