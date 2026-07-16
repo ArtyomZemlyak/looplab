@@ -36,60 +36,88 @@ function ResourceNotice({ state, label, retry }) {
   </div>
 }
 
+const mutationMessage = error => error?.status === 409
+  ? 'Conflict; draft kept.'
+  : error?.status === 503
+    ? 'Unavailable; draft kept.'
+    : 'Save failed; draft kept.'
+
+function useMutation() {
+  const lock = useRef(false)
+  const [state, setState] = useState(null)
+  const run = async action => {
+    if (lock.current) return false
+    lock.current = true; setState(true)
+    try { await action(); setState(null); return true }
+    catch (error) { setState(mutationMessage(error)); return false }
+    finally { lock.current = false }
+  }
+  return [state === true, typeof state === 'string' ? state : '', run, setState]
+}
+
+const focusSoon = target => requestAnimationFrame(() => target?.isConnected && target.focus({ preventScroll: true }))
+
 // Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
 // inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
 // the uncontrolled inline-rename <input> lost its text/focus mid-edit. All render state is threaded
 // through `ctx`.
-function TreeNode({ p, depth, ctx }) {
+export function TreeNode({ p, depth, ctx }) {
   const { byParent, expanded, sel, setSel, onDrop, toggle, renaming, finishProjectRename, startProjectRename,
-          count, addProject, removeProject } = ctx
+          projectBusy, projectError, count, addProject, removeProject } = ctx
   const kids = byParent[p.id] || []
   const open = expanded.has(p.id)
+  const commitRename = async (input, value, restoreFocus) => {
+    if (projectBusy || input.dataset.pending) return
+    input.dataset.pending = 'true'
+    const finished = await finishProjectRename(p.id, value, restoreFocus)
+    if (!finished && input.isConnected) delete input.dataset.pending
+  }
   return <div className="ptree-node">
     <div className={'ptree-row' + (sel === p.id ? ' sel' : '')} style={{ paddingLeft: 6 + depth * 14 }}
-         onDragOver={e => { e.preventDefault() }} onDrop={() => onDrop(p.id)}>
+         aria-busy={renaming === p.id && projectBusy}
+         onDragOver={e => { if (!projectBusy) e.preventDefault() }} onDrop={() => { if (!projectBusy) onDrop(p.id) }}>
       {kids.length
-        ? <button type="button" className="ptw" aria-label={`${open ? 'Collapse' : 'Expand'} ${p.name}`}
+        ? <button type="button" className="ptw" disabled={projectBusy} aria-label={`${open ? 'Collapse' : 'Expand'} ${p.name}`}
             aria-expanded={open} onClick={() => toggle(p.id)}>{open ? '▾' : '▸'}</button>
         : <span className="ptw" aria-hidden="true">·</span>}
       {renaming === p.id
-        ? <input className="text ptree-rename" autoFocus defaultValue={p.name}
+        ? <input className="text ptree-rename" autoFocus readOnly={projectBusy} defaultValue={p.name}
                  aria-label={`Rename project ${p.name}`}
-                 onBlur={e => { if (!e.currentTarget.dataset.finished) finishProjectRename(p.id, e.target.value, false) }}
+                 onBlur={e => { if (!e.currentTarget.dataset.pending) commitRename(e.currentTarget, e.currentTarget.value, false) }}
                  onKeyDown={e => {
                    if (e.key === 'Enter') {
-                     e.preventDefault(); e.currentTarget.dataset.finished = 'true'
-                     finishProjectRename(p.id, e.currentTarget.value, true)
+                     e.preventDefault(); commitRename(e.currentTarget, e.currentTarget.value, true)
                    }
                    if (e.key === 'Escape') {
                      // Cancel: a blank name skips the PATCH (the guard in finishProjectRename), so
                      // Escape reverts to the current name without a redundant server write + reload.
-                     e.preventDefault(); e.currentTarget.dataset.finished = 'true'
-                     finishProjectRename(p.id, '', true)
+                     e.preventDefault(); commitRename(e.currentTarget, '', true)
                    }
                  }} />
-        : <button type="button" className="pname project-choice" aria-pressed={sel === p.id}
+        : <button type="button" className="pname project-choice" disabled={projectBusy} aria-pressed={sel === p.id}
             onClick={() => setSel(p.id)}><OpIcon name="folder" className="t-ic" /> {p.name}</button>}
       <span className="pcount">{count(p.id)}</span>
       <span className="pacts">
-        <button className="ic" aria-label={`Add sub-project inside ${p.name}`}
+        <button className="ic" disabled={projectBusy} aria-label={`Add sub-project inside ${p.name}`}
           onClick={event => addProject(p.id, event.currentTarget)}>＋</button>
-        <button className="ic" aria-label={`Rename project ${p.name}`} onClick={event => startProjectRename(p.id, event.currentTarget)}><OpIcon name="pencil" size={12} /></button>
-        <button className="ic" aria-label={`Delete project ${p.name}`} onClick={() => removeProject(p.id)}>✕</button>
+        <button className="ic" disabled={projectBusy} aria-label={`Rename project ${p.name}`} onClick={event => startProjectRename(p.id, event.currentTarget)}><OpIcon name="pencil" size={12} /></button>
+        <button className="ic" disabled={projectBusy} aria-label={`Delete project ${p.name}`} onClick={() => removeProject(p.id)}>✕</button>
       </span>
     </div>
+    {renaming === p.id && projectBusy && <div className="muted" role="status">Saving project name…</div>}
+    {renaming === p.id && projectError && <div className="flag" role="alert">{projectError}</div>}
     {open && <div className="ptree-children">{kids.map(k => <TreeNode key={k.id} p={k} depth={depth + 1} ctx={ctx} />)}</div>}
   </div>
 }
 
 // Small centered popup (replaces window.prompt for project create / run rename).
-function Modal({ title, onClose, children }) {
+function Modal({ title, onClose, children, busy = false }) {
   const dialogRef = useRef(null)
-  useDialogFocus(dialogRef, onClose)
-  return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
-    <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-label={title} tabIndex={-1}>
+  useDialogFocus(dialogRef, busy ? null : onClose)
+  return <div className="overlay" onMouseDown={event => { if (!busy && event.target === event.currentTarget) onClose?.() }}>
+    <div ref={dialogRef} className="modal" role="dialog" aria-modal="true" aria-label={title} aria-busy={busy} tabIndex={-1}>
       <div className="modal-h"><b>{title}</b><span style={{ flex: 1 }} />
-        <button className="btn sm ghost" onClick={onClose} aria-label={`Close ${title}`}>✕</button></div>
+        <button className="btn sm ghost" disabled={busy} onClick={onClose} aria-label={`Close ${title}`}>✕</button></div>
       <div className="modal-b">{children}</div>
     </div>
   </div>
@@ -97,15 +125,17 @@ function Modal({ title, onClose, children }) {
 
 function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false, onSubmit, onClose }) {
   const [v, setV] = useState(initial)
+  const [busy, error, mutate] = useMutation()
   const ok = allowEmpty || !!v.trim()
-  const go = () => { if (ok) onSubmit(v.trim()) }
-  return <Modal title={title} onClose={onClose}>
+  const go = async () => { if (ok && await mutate(() => onSubmit(v.trim()))) onClose() }
+  return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
-    <input className="text" autoFocus aria-label={label || title} placeholder={placeholder} value={v} onChange={e => setV(e.target.value)}
-           onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape') onClose() }} />
+    <input className="text" autoFocus readOnly={busy} aria-label={label || title} placeholder={placeholder} value={v} onChange={e => setV(e.target.value)}
+           onKeyDown={e => { if (e.key === 'Enter') go(); if (e.key === 'Escape' && !busy) onClose() }} />
+    {error && <div className="flag" role="alert">{error}</div>}
     <div className="modal-actions">
-      <button className="btn sm ghost" onClick={onClose}>Cancel</button>
-      <button className="btn sm primary" disabled={!ok} onClick={go}>{confirm}</button>
+      <button className="btn sm ghost" disabled={busy} onClick={onClose}>Cancel</button>
+      <button className="btn sm primary" disabled={!ok || busy} onClick={go}>{busy ? 'Saving…' : confirm}</button>
     </div>
   </Modal>
 }
@@ -113,8 +143,10 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
 function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename, onDelete, onClose }) {
   const menuRef = useRef(null)
+  const [busy, error, mutate] = useMutation()
   useEffect(() => { menuRef.current?.querySelector('[role="menuitem"]')?.focus() }, [])
-  const close = (restore = false) => onClose(restore)
+  const close = (restore = false) => { if (!busy) onClose(restore) }
+  const act = async action => { if (await mutate(action)) onClose(true) }
   const onKeyDown = event => {
     const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
     if (event.key === 'Escape') { event.preventDefault(); close(true); return }
@@ -126,26 +158,29 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
   return <>
     <div className="menu-backdrop" onClick={() => close(true)} onDragStart={() => close(true)} />
     <div ref={menuRef} className="run-menu" role="menu" aria-label={`Actions for ${r.label || r.run_id}`}
-      onClick={e => e.stopPropagation()} onKeyDown={onKeyDown}
+      aria-busy={busy} aria-disabled={busy}
+      onClick={e => e.stopPropagation()} onClickCapture={e => { if (busy) { e.preventDefault(); e.stopPropagation() } }} onKeyDown={onKeyDown}
       onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) close(false) }}>
       <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onOpen(r.run_id) }}>↗ Open</button>
       <button type="button" role="menuitem" tabIndex={-1} className="mi" onClick={() => { close(false); onRename(r) }}><OpIcon name="pencil" size={12} /> Rename</button>
       <div className="mi-sep" />
       <div className="mi-label">Move to project</div>
       <div className="mi-scroll">
-        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => { close(true); onMove(r.run_id, UNASSIGNED) }}>○ — unassigned —</button>
+        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.project_id ? ' on' : '')} onClick={() => act(() => onMove(r.run_id, UNASSIGNED))}>○ — unassigned —</button>
         {projects.map(p => <button type="button" role="menuitem" tabIndex={-1} key={p.id} className={'mi' + (r.project_id === p.id ? ' on' : '')}
-          onClick={() => { close(true); onMove(r.run_id, p.id) }}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
+          onClick={() => act(() => onMove(r.run_id, p.id))}><OpIcon name="folder" className="t-ic" /> {p.name}</button>)}
         {!projects.length && <div className="mi-empty">no projects yet</div>}
       </div>
       <div className="mi-sep" />
       <div className="mi-label">Super-task</div>
       <div className="mi-scroll">
-        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => { close(true); onSetSuper(r.run_id, UNASSIGNED) }}>○ — none —</button>
+        <button type="button" role="menuitem" tabIndex={-1} className={'mi' + (!r.supertask_id ? ' on' : '')} onClick={() => act(() => onSetSuper(r.run_id, UNASSIGNED))}>○ — none —</button>
         {supertasks.map(s => <button type="button" role="menuitem" tabIndex={-1} key={s.id} className={'mi' + (r.supertask_id === s.id ? ' on' : '')}
-          onClick={() => { close(true); onSetSuper(r.run_id, s.id) }}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
+          onClick={() => act(() => onSetSuper(r.run_id, s.id))}><OpIcon name="target" className="t-ic" /> {s.name}</button>)}
         <button type="button" role="menuitem" tabIndex={-1} className="mi accent" onClick={() => { close(false); onManageSupers() }}>＋ New / manage…</button>
       </div>
+      {busy && <div className="muted" role="status">Saving…</div>}
+      {error && <div className="flag" role="alert">{error}</div>}
       <div className="mi-sep" />
       <button type="button" role="menuitem" tabIndex={-1} className="mi danger" onClick={() => { close(false); onDelete(r) }}>✕ Delete run…</button>
     </div>
@@ -157,35 +192,39 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
 function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDelete, onClose }) {
   const [name, setName] = useState('')
   const newTaskRef = useRef(null)
-  const add = () => { const v = name.trim(); if (v) { onCreate(v); setName('') } }
+  const [busy, error, mutate] = useMutation()
+  const add = async () => { const v = name.trim(); if (v && await mutate(() => onCreate(v))) setName('') }
+  const edit = (task, input) => { const v = input.value.trim(); if (v && v !== task.name) mutate(() => onRename(task.id, v)) }
   const remove = async (task, event) => {
     const row = event.currentTarget.closest('.st-row')
     const fallback = row?.nextElementSibling?.querySelector('.st-rename')
       || row?.previousElementSibling?.querySelector('.st-rename') || newTaskRef.current
-    const removed = await onDelete(task)
-    if (removed) requestAnimationFrame(() => fallback?.isConnected
+    let removed
+    const saved = await mutate(async () => { removed = await onDelete(task) })
+    if (saved && removed) requestAnimationFrame(() => fallback?.isConnected
       ? fallback.focus({ preventScroll: true }) : newTaskRef.current?.focus({ preventScroll: true }))
   }
-  return <Modal title="Super-tasks" onClose={onClose}>
+  return <Modal title="Super-tasks" onClose={onClose} busy={busy}>
     <div className="muted" style={{ marginBottom: 8 }}>A super-task groups runs that attack the same global task (across many runs). Assign runs from a run’s ⋮ menu.</div>
     <ResourceNotice state={state} label="Super-tasks" retry={onRetry} />
+    {busy && <div className="muted" role="status">Saving super-task changes…</div>}
+    {error && <div className="flag" role="alert">{error}</div>}
     <div className="st-new">
-      <input ref={newTaskRef} className="text" autoFocus aria-label="New super-task name" placeholder="New super-task name (e.g. nomad2018)" value={name}
+      <input ref={newTaskRef} className="text" autoFocus readOnly={busy} aria-label="New super-task name" placeholder="New super-task name (e.g. nomad2018)" value={name}
              onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add() }} />
-      <button className="btn sm primary" disabled={!name.trim()} onClick={add}>＋ Create</button>
+      <button className="btn sm primary" disabled={busy || !name.trim()} onClick={add}>＋ Create</button>
     </div>
     <div className="st-list">
       {supertasks.map(s => <div key={s.id} className="st-row">
         <span className="st-ic"><OpIcon name="target" className="t-ic" /></span>
-        <input className="text st-rename" defaultValue={s.name} aria-label={`Rename super-task ${s.name}`}
-               onBlur={e => { const v = e.target.value.trim(); if (v && v !== s.name) onRename(s.id, v) }}
+        <input className="text st-rename" readOnly={busy} defaultValue={s.name} aria-label={`Rename super-task ${s.name}`}
+               onBlur={e => edit(s, e.currentTarget)}
                onKeyDown={e => {
                  if (e.key === 'Enter') {
-                   e.preventDefault(); const v = e.currentTarget.value.trim()
-                   if (v && v !== s.name) onRename(s.id, v)
+                   e.preventDefault(); edit(s, e.currentTarget)
                  }
                }} />
-        <button className="ic" aria-label={`Delete super-task ${s.name}`} onClick={event => remove(s, event)}>✕</button>
+        <button className="ic" disabled={busy} aria-label={`Delete super-task ${s.name}`} onClick={event => remove(s, event)}>✕</button>
       </div>)}
       {state === 'ready' && !supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>No super-tasks yet.</div>}
     </div>
@@ -199,6 +238,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [sel, setSel] = useState(ALL)
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
+  const [projectBusy, projectError, saveProjectRename, clearProjectError] = useMutation()
   const projectRenameReturnRef = useRef(null)
   const runsMainRef = useRef(null)
   const projectsAllRef = useRef(null)
@@ -227,8 +267,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const projectsDialogRef = useRef(null)
   const closeRunMenu = (restore = false) => {
     setRunMenu(null)
-    if (restore) requestAnimationFrame(() => runMenuTriggerRef.current?.isConnected
-      && runMenuTriggerRef.current.focus({ preventScroll: true }))
+    if (restore) focusSoon(runMenuTriggerRef.current)
   }
   const restoreRunModalFocus = () => requestAnimationFrame(() => {
     const target = runModalReturnFocusRef.current
@@ -245,7 +284,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
   const closeRunRename = () => { setRunRename(null); restoreRunModalFocus() }
   const closeSuperTasks = () => { setStModal(false); restoreRunModalFocus() }
-  useDialogFocus(projectsDialogRef, () => setProjectsOpen(false), compactNav && projectsOpen)
+  useDialogFocus(projectsDialogRef, projectBusy ? null : () => setProjectsOpen(false), compactNav && projectsOpen)
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
   // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
@@ -255,7 +294,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   useEffect(() => { loadProjects(); loadSupers() }, [])
 
   const stName = useMemo(() => Object.fromEntries(superdata.supertasks.map(s => [s.id, s.name])), [superdata])
-  const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); loadRuns() }
+  const assignToSuper = async (runId, sid) => { await assignSupertask(runId, sid === UNASSIGNED ? null : sid); await loadRuns() }
 
   const { byParent, subtree } = useMemo(() => indexProjects(proj.projects), [proj.projects])
   const projName = useMemo(() => Object.fromEntries(proj.projects.map(p => [p.id, p.name])), [proj.projects])
@@ -314,42 +353,46 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => Promise.all([loadProjects(), loadRuns()])
 
-  const restoreProjectModalFocus = () => requestAnimationFrame(() => {
+  const restoreProjectModalFocus = () => {
     const target = projectModalReturnRef.current
-    if (target?.isConnected) target.focus({ preventScroll: true })
     projectModalReturnRef.current = null
-  })
+    focusSoon(target)
+  }
   const addProject = (parent_id, returnFocus) => {
     projectModalReturnRef.current = returnFocus || document.activeElement
     setProjModal({ parent_id })
   }
   const closeProjectModal = () => { setProjModal(null); restoreProjectModalFocus() }
   const submitProject = async (name) => {
-    const parent_id = projModal?.parent_id; setProjModal(null); restoreProjectModalFocus()
+    const parent_id = projModal?.parent_id
     const p = await createProject(name, parent_id)
     if (parent_id) setExpanded(s => new Set(s).add(parent_id))
     await loadProjects(); setSel(p.id)
   }
   const startProjectRename = (id, returnFocus) => {
+    clearProjectError(null)
     projectRenameReturnRef.current = returnFocus
     setRenaming(id)
   }
   const finishProjectRename = async (id, name, restoreFocus = false) => {
+    const value = name?.trim()
+    if (value && !await saveProjectRename(() => patchProject(id, { name: value }))) return false
+    if (value) await loadProjects()
+    else clearProjectError(null)
     setRenaming(null)
     if (restoreFocus) requestAnimationFrame(() => projectRenameReturnRef.current?.isConnected
       && projectRenameReturnRef.current.focus({ preventScroll: true }))
-    if (name?.trim()) { await patchProject(id, { name: name.trim() }); loadProjects() }
+    return true
   }
   const removeProject = async (id) => {
     if (!confirm(`Delete project "${projName[id]}"? Sub-projects and runs move up to its parent.`)) return
     await deleteProject(id); if (sel === id) setSel(ALL); await refresh()
     requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
   }
-  const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); refresh() }
+  const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }
   const onDrop = async (project_id) => { if (dragRun) { await moveRun(dragRun, project_id); setDragRun(null) } }
   const submitRunRename = async (label) => {
-    const id = runRename.run_id; setRunRename(null); restoreRunModalFocus()
-    await renameRun(id, label); loadRuns()
+    await renameRun(runRename.run_id, label); await loadRuns()
   }
   const removeRun = async (r) => {
     const returnFocus = runMenuTriggerRef.current
@@ -358,15 +401,14 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
       || card?.previousElementSibling?.querySelector('.run-card-main')
     setRunMenu(null)
     if (!confirm(`Delete run "${r.label || r.run_id}" permanently? This removes its files on disk and cannot be undone.`)) {
-      requestAnimationFrame(() => returnFocus?.isConnected && returnFocus.focus({ preventScroll: true })); return
+      focusSoon(returnFocus); return
     }
     try { await deleteRun(r.run_id); await refresh() }
     catch (e) {
-      // A live engine still holds the run → backend 409 (the detail text has no "409" in it, so branch
-      // on the status code _throw now attaches, not a regex on the message). Anything else: surface it.
-      alert(e.status === 409 || /409/.test(e.message)
+      // The request client attaches status; keep every fallback bounded instead of reflecting backend text.
+      alert(e.status === 409
         ? 'This run is still live — pause or stop it before deleting.'
-        : 'Delete failed: ' + e.message)
+        : 'Delete failed.')
     }
     finally { requestAnimationFrame(() => {
       const target = returnFocus?.isConnected ? returnFocus : fallbackFocus?.isConnected ? fallbackFocus : runsMainRef.current
@@ -374,8 +416,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     }) }
   }
   // super-task CRUD (the buckets themselves; per-run assignment is assignToSuper above).
-  const createSuper = async (name) => { await createSupertask(name); loadSupers() }
-  const renameSuper = async (id, name) => { await renameSupertask(id, name); loadSupers() }
+  const createSuper = async (name) => { await createSupertask(name); await loadSupers() }
+  const renameSuper = async (id, name) => { await renameSupertask(id, name); await loadSupers() }
   const removeSuper = async (s) => {
     if (!confirm(`Delete super-task "${s.name}"? Runs in it become unassigned (the runs themselves are kept).`)) return false
     if (stFilter === s.id) setStFilter(ALL)
@@ -386,7 +428,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   // poll; defined inline it remounted the whole subtree every poll, wiping the inline-rename input.
   const chooseProject = (id) => { setSel(id); setProjectsOpen(false) }
   const treeCtx = { byParent, expanded, sel, setSel: chooseProject, onDrop, toggle, renaming,
-                    finishProjectRename, startProjectRename,
+                    finishProjectRename, startProjectRename, projectBusy, projectError,
                     count, addProject, removeProject }
 
   return (
@@ -422,7 +464,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
       </div>
 
       <div className={'runlayout' + (projectsOpen ? ' projects-open' : '')}>
-        {projectsOpen && <button className="project-backdrop" onClick={() => setProjectsOpen(false)}
+        {projectsOpen && <button className="project-backdrop" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
                                  aria-label="Close projects" />}
         <aside ref={projectsDialogRef} className="psidebar" id="projects-drawer" aria-label="Projects"
                role={compactNav && projectsOpen && !projModal ? 'dialog' : undefined}
@@ -432,17 +474,17 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                inert={compactNav && (!projectsOpen || !!projModal) ? '' : undefined}>
           <div className="psidebar-h">
             <b>Projects</b>
-            <button ref={projectsCloseRef} className="btn sm ghost projects-close" onClick={() => setProjectsOpen(false)}
+            <button ref={projectsCloseRef} className="btn sm ghost projects-close" disabled={projectBusy} onClick={() => setProjectsOpen(false)}
                     aria-label="Close projects">×</button>
-            <button className="btn sm" onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
+            <button className="btn sm" disabled={projectBusy} onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
           </div>
           <button ref={projectsAllRef} type="button" className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')}
-               onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
+               disabled={projectBusy} onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
             <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
           </button>
           <button type="button" className={'ptree-row pseudo' + (sel === UNASSIGNED ? ' sel' : '')}
-               onClick={() => chooseProject(UNASSIGNED)} aria-pressed={sel === UNASSIGNED}
-               onDragOver={e => e.preventDefault()} onDrop={() => onDrop(UNASSIGNED)}>
+               disabled={projectBusy} onClick={() => chooseProject(UNASSIGNED)} aria-pressed={sel === UNASSIGNED}
+               onDragOver={e => { if (!projectBusy) e.preventDefault() }} onDrop={() => { if (!projectBusy) onDrop(UNASSIGNED) }}>
             <span className="ptw">○</span><span className="pname">Unassigned</span><span className="pcount">{count(UNASSIGNED)}</span>
           </button>
           <nav className="ptree" aria-label="Project folders">
