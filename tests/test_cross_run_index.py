@@ -71,6 +71,19 @@ def test_run_facts_is_deterministic(tmp_path):
         _canon(run_facts(st, kind="dataset", metric="recall"))
 
 
+def test_run_facts_excludes_researcher_authored_concept_claims(tmp_path):
+    s = EventStore(tmp_path / "authored.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "concepts": ["claimed/breakthrough"]},
+    })
+
+    facts = run_facts(fold(s.read_all()), kind="dataset", metric="recall")
+
+    assert facts["attempts"][0]["concepts"] == []
+
+
 # --------------------------------------------------------------------------- #
 # CR0 gate: rebuild from scratch == itself, order-independent
 # --------------------------------------------------------------------------- #

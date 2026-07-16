@@ -103,6 +103,22 @@ def test_store_concept_capsule_noop_without_tags(tmp_path):
     assert not (mem / "concept_capsules.jsonl").exists()   # nothing tagged -> no capsule
 
 
+def test_store_concept_capsule_ignores_researcher_authored_claims(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "concepts": ["claimed/breakthrough"]},
+    })
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+
+    assert not (mem / "concept_capsules.jsonl").exists()
+
+
 # --------------------------------------------------------------------------- #
 # SURFACE — the novelty gate records a cross_run_prior when a concept was tried in a similar prior run
 # --------------------------------------------------------------------------- #

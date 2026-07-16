@@ -33,7 +33,7 @@ from typing import TYPE_CHECKING
 import orjson
 
 from looplab.core.atomicio import append_jsonl_bytes_locked
-from looplab.core.models import RunState, latest_lesson_node_count
+from looplab.core.models import RunState, classifier_verified_node_concepts, latest_lesson_node_count
 from looplab.engine.lessons_distill import LessonDistillMixin
 # The role constants moved to lessons_priors.py with the prior renderer that filters on them;
 # re-imported so `from looplab.engine.lessons import LESSON_ROLE_*` (tests, cross-run tooling)
@@ -318,7 +318,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             eligible_ids = {node.id for node in promotion_eligible_nodes(final)}
             for nd in final.nodes.values():
                 m = getattr(nd, "robust_metric", None)
-                for c in (node_concepts.get(nd.id) or node_concepts.get(str(nd.id)) or []):
+                # CODEX AGENT: capsules advise future agents; never promote the proposer's own taxonomy
+                # claims into seemingly independent cross-run evidence.
+                for c in classifier_verified_node_concepts(final, nd.id):
                     concepts.add(str(c))
                     if (nd.id in eligible_ids and m is not None
                             and (outcomes.get(c) is None or _better(m, outcomes[c]))):

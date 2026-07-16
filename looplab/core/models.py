@@ -45,6 +45,21 @@ NODE_CONCEPT_PROVENANCE_AUTHORED = "researcher-authored"
 NODE_CONCEPT_PROVENANCE_CLASSIFIER = "classifier"
 
 
+def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
+    """Return concept memberships backed by the independent classifier.
+
+    ``Idea.concepts`` and classifier output intentionally share the public ``node_concepts`` read-model
+    for UI compatibility.  Any consumer that turns those labels into admission or cross-run evidence must
+    cross the provenance sidecar through this helper so missing, malformed, and future producers fail closed.
+    """
+    provenance = getattr(state, "node_concept_provenance", None) or {}
+    # CODEX AGENT: only the exact reviewed producer is evidence; proposer-authored labels remain display-only.
+    if provenance.get(node_id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
+        return []
+    memberships = getattr(state, "node_concepts", None) or {}
+    return list(memberships.get(node_id) or [])
+
+
 def safe_lesson_node_count(value) -> int | None:
     """Total parser for a durable advisory node-count watermark.
 

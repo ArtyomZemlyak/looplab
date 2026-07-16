@@ -23,7 +23,7 @@ import json
 from pathlib import Path
 from typing import Optional
 
-from looplab.core.models import RunState
+from looplab.core.models import RunState, classifier_verified_node_concepts
 
 
 # Schema/mode version for the passport. `fp_mode` records the tokenizer generation in the record, so a
@@ -37,7 +37,8 @@ SCOPE_SCHEMA_VERSION = 1
 # the cache envelope, the facts projector, the passport schema, and the fingerprint/tokenizer mode.
 # A cache written before this contract existed is intentionally cold-started instead of being guessed at.
 INDEX_CACHE_SCHEMA_VERSION = 3
-INDEX_PROJECTOR_VERSION = 1
+# Version 2 excludes proposer-authored concept claims from the portfolio evidence projection.
+INDEX_PROJECTOR_VERSION = 2
 _DIGEST_CHUNK_BYTES = 1024 * 1024
 
 
@@ -109,7 +110,6 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     # The passport derives ONLY from the immutable task (no winner params) — see scope_profile (CODEX).
     scope = scope_profile(task_id=state.task_id, kind=kind, direction=state.direction, goal=state.goal,
                           metric=metric, universal=universal)
-    node_concepts = getattr(state, "node_concepts", None) or {}
     attempts = []
     # NOTE (CODEX): these attempts are folded LATEST-generation facts — a `node_reset` (.1 -> reset -> .9)
     # collapses to one attempt at .9, and concept labels are raw (no concept_uid/taxonomy). Immutable
@@ -118,7 +118,8 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
     for nid in sorted(state.nodes):
         nd = state.nodes[nid]
         idea = getattr(nd, "idea", None)
-        concepts = node_concepts.get(nid) or node_concepts.get(str(nid)) or []
+        # CODEX AGENT: cross-run facts are reusable evidence, so display-only authored claims fail closed.
+        concepts = classifier_verified_node_concepts(state, nid)
         st = getattr(nd, "status", "")
         attempts.append({
             "node_id": nid,
