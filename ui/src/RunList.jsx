@@ -465,6 +465,15 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
     if (removed) requestAnimationFrame(() => projectsAllRef.current?.focus({ preventScroll: true }))
     else focusSoon(returnFocus)
   }
+  // REVIEW(2026-07-16): the SAME move-run mutation now has two different consistency contracts
+  // depending on the gesture. Drag/drop (onDrop below) goes through useListMutation — ambiguity-safe
+  // (never replays), reconciles with a follow-up read, and shows the kind-specific 409 message. This
+  // menu path ("Move to project" in RunMenu, via act→useMutation) is the OLD draft-keeping lock: no
+  // reconcile read after an ambiguous transport failure, and the generic "Save failed; current input
+  // or selection kept." copy, which is written for prompt drafts and is meaningless for a move. The
+  // 998f864 intent ("destructive list actions and drag/drop share one lock") only holds transitively
+  // via navigationBusy button-disabling; route this through mutateList('move-run', ...) too so one
+  // operation has one failure semantics regardless of gesture.
   const moveRun = async (runId, project_id) => { await assignRun(runId, project_id === UNASSIGNED ? null : project_id); await refresh() }
   const onDrop = async (project_id) => {
     const runId = dragRun
