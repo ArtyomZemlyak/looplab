@@ -198,6 +198,22 @@ questions; the Atlas preview is deliberately **not** another force/DAG graph:
 | **Run → Search** | The experiment DAG for one run. `group by` can project nodes into `theme`, `operator`, metric tercile, or parameter `niche` regions; direction chips filter the DAG by the node's `idea.theme`. | A theme is a per-node proposer label. It is not the Part-IV concept ID/taxonomy, and grouping does not show cross-run concept coverage or claim evidence. |
 | **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration paging/health receipt, interactive concept topology or governance workbench. |
 
+The project/task/super-task **Cross-run report** is a separate on-demand narrative over a deterministic
+bounded projection of at most 64 runs (the prompt-size cap can include fewer). The panel reports **narrative
+evidence X/Y runs** from the exact prompt receipt and visibly marks an incomplete projection; it does not
+claim that omitted runs were synthesized. Scope labels stay inside the explicitly untrusted evidence JSON.
+Model input and drill results are redacted and character/item bounded, and node drill never sends source
+code, files, stdout or stderr. Metric values without an explicit schema-1 `comparison_contract` and an
+atomic phase/source/uncertainty measurement receipt are shown as **Unranked metric observations**. The server
+publishes a contract-local numeric winner only for at least two finished runs under the same canonical
+contract, with complete scope/cohort measurements, a unique best point and `uncertainty_protocol: none`.
+A singleton is insufficient; missing measurements, live/finalizing runs and incomplete evidence make the
+outcome indeterminate; exact best values become explicit ties; and a non-`none` uncertainty protocol without
+an evaluated machine-readable outcome is never promoted to a winner. The visible verdict is server-derived,
+not model-authored. Reports stored before that authority boundary are marked stale and show no authoritative
+verdict until regeneration. Old stored `best_runs` remain unverified and their model-authored ids/reasons are
+not rendered.
+
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
 `looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence
