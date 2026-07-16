@@ -121,9 +121,10 @@ test('compact drawers and nested popups expose only the active modal layer', asy
   assert.match(runList, /aria-modal=\{compactNav && projectsOpen && !projModal \? 'true' : undefined\}/)
   assert.match(runList, /aria-hidden=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? 'true' : undefined\}/)
   assert.match(runList, /inert=\{compactNav && \(!projectsOpen \|\| !!projModal\) \? '' : undefined\}/)
-  assert.match(runList, /useDialogFocus\(projectsDialogRef, projectBusy \? null : \(\) => setProjectsOpen\(false\), compactNav && projectsOpen\)/)
-  assert.match(runList, /project-backdrop" disabled=\{projectBusy\}/,
-    'the compact modal layer cannot dismiss an authoritative project save in flight')
+  assert.match(runList, /useDialogFocus\(projectsDialogRef, navigationBusy \? null : \(\) => setProjectsOpen\(false\), compactNav && projectsOpen\)/)
+  assert.match(runList, /project-backdrop" disabled=\{projectBusy\} aria-disabled=\{navigationBusy \|\| undefined\}/)
+  assert.match(runList, /onClick=\{\(\) => \{ if \(!navigationBusy\) setProjectsOpen\(false\) \}\}/,
+    'the compact modal layer cannot dismiss any authoritative list mutation in flight')
   assert.match(dialogFocus, /if \(event\.defaultPrevented\) return/)
 })
 
