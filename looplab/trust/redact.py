@@ -71,6 +71,13 @@ _PATTERNS = [
     # RFC-3986 userinfo occasionally appears in a consulted URL.  It is credential material even
     # without an explicit ``password=`` label, and source URLs are copied into durable memos.
     (re.compile(r"(?i)(?<=://)([^:/\s]+):([^@/\s]+)@"), "***:***@"),
+    # CODEX AGENT: run this before the generic assignment scanner. Without a URL-specific pass,
+    # that scanner consumes ``https://...?token=value`` as one benign ``https:`` assignment and
+    # never revisits the credential-bearing query parameter inside the match.
+    (re.compile(
+        r"(?i)([?&#;](?:api[_-]?key|secret|access[_-]?key|access[_-]?token|token|password|"
+        r"passwd|credential)=)([^&#;\s]+)"
+    ), lambda m: f"{m.group(1)}***"),
     # Match a generic identifier once, then classify it in the callback. This avoids quadratic
     # backtracking on large untrusted fields. Quoted values are consumed through their quote or line
     # boundary so spaces cannot leak; the unquoted form accepts any non-empty value.
@@ -80,7 +87,7 @@ _PATTERNS = [
           r"|'(?:\\.|[^'\\\r\n])*(?:'|(?=\r?\n|\Z)))",
         re.IGNORECASE,
     ), _quoted_keyval_repl),
-    (re.compile(_ASSIGN_PREFIX + r"([^\s'\",;&}\]]+)", re.IGNORECASE), _keyval_repl),
+    (re.compile(_ASSIGN_PREFIX + r"([^\s'\",;#&}\]]+)", re.IGNORECASE), _keyval_repl),
 ]
 
 

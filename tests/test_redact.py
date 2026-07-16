@@ -20,6 +20,14 @@ def test_redacts_key_value_assignment():
     assert "supersecretvalue123" not in out
 
 
+def test_redacts_credentials_inside_url_query_and_fragment():
+    raw = "https://example.test/v1?mode=fast&token=short-secret#api_key=another-secret"
+    out = redact_secrets(raw, entropy=False)
+    assert "mode=fast" in out
+    assert "short-secret" not in out and "another-secret" not in out
+    assert "token=***" in out and "api_key=***" in out
+
+
 def test_high_entropy_token_masked_but_words_kept():
     # a long random base64-ish token is masked; ordinary prose is left alone.
     out = redact_secrets("result ok; blob " + "aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J", min_len=24)
