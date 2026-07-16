@@ -129,6 +129,15 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                         out[safe_key] = "***"
                         remaining[0] = max(0, remaining[0] - 3)
                     else:
+                        # REVIEW(2026-07-16): inconsistent with the line above, which (after 8d1bcda)
+                        # classifies SECRECY on the original `key` precisely because safe_key is a
+                        # rewritten display form — yet the identity EXEMPTION (which disables the
+                        # entropy mask for the child) still classifies on `safe_key`, so an NFKC alias
+                        # spelling of e.g. run_id inherits the mask opt-out. Low direct impact (the
+                        # exact spelling grants the same exemption), but redaction OPT-OUTS should key
+                        # on the original key too — fail closed on unusual spellings — or carry a
+                        # comment stating why display-key classification is acceptable here. As is,
+                        # the two adjacent gates encode opposite answers to the same question.
                         child_identity = safe_key.casefold() in _OPAQUE_IDENTITY_KEYS
                         out[safe_key] = walk(
                             child, depth + 1, entropy=not child_identity, identity=child_identity)
