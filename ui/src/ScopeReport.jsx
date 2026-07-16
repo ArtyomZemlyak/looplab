@@ -5,6 +5,7 @@ import { useDialogFocus } from './useDialogFocus.js'
 const list = value => Array.isArray(value) ? value : []
 const text = value => typeof value === 'string' ? value : ''
 const count = value => Number.isInteger(value) && value >= 0 ? value : null
+const status = value => text(value).slice(0, 64).replaceAll('_', ' ')
 
 function Section({ title, items }) {
   items = list(items).filter(x => typeof x === 'string')
@@ -48,6 +49,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   const c = data?.content
   const groups = list(c?.comparison_groups)
   const observations = list(c?.metric_observations)
+  const authority = data?.authoritative === true
   const evidenceRuns = count(c?.coverage?.prompt_runs) ?? count(c?.coverage?.model_runs)
   const sourceRuns = count(c?.coverage?.source_runs)
   const label = text(data?.label) || text(data?.scope?.label) || text(scope.label) || `${scope.type} ${scope.id}`
@@ -61,16 +63,16 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
       aria-label={`Cross-run report for ${label}`} tabIndex={-1}>
       <div className="panel-h">
         <span className="ttl">Cross-run report · {label}</span>
-        <span className="right" style={{ flex: 1 }} />
+        <span className="right" />
         {data?.exists && <button className="btn sm" disabled={busy} onClick={generate}>{busy ? '… generating' : '↻ Regenerate'}</button>}
         <button className="btn sm ghost" onClick={onClose} aria-label="Close cross-run report">✕</button>
       </div>
       <div className="panel-b">
-        {err && <div className="notice" role="alert" style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>{err}</div>}
+        {err && <div className="notice resource-error" role="alert">{err}</div>}
         {data == null && !err && <div className="notice" role="status">Loading…</div>}
 
         {data && !data.exists && <div className="sr-empty">
-          <div className="muted" style={{ marginBottom: 12 }}>
+          <div className="muted">
             No report yet — <b>{runCount}</b> runs in scope. Generation uses bounded evidence.
           </div>
           <button className="btn primary" disabled={busy || !runCount} onClick={generate}>
@@ -82,7 +84,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             {evidenceRuns != null && sourceRuns != null
               ? <span>· evidence {evidenceRuns}/{sourceRuns} runs{c.coverage.incomplete === true ? ' (incomplete)' : ''}</span>
               : <span>· stored scope has {Array.isArray(data.run_ids) ? data.run_ids.length : '?'} runs</span>}
-            {data.stale && <span> · stale — regenerate</span>}
+            {data.stale && <span className="sr-stale"> · stale snapshot — regenerate</span>}
           </div>
           {headline && <div className="sr-headline">{headline}</div>}
           {verdict && <div className="sr-verdict">{verdict}</div>}
@@ -90,20 +92,27 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             <div className="sr-h">Comparable metric cohorts</div>
             {groups.map((group, i) => {
               const rows = list(group?.measurements)
-              const winner = group?.indeterminate === null && rows.length > 1 ? text(group?.winner?.run_id) : ''
-              const reason = text(group?.indeterminate).slice(0, 64).replaceAll('_', ' ') || 'outcome unavailable'
+              const trusted = authority && group?.contract_authority === 'declared' && rows.every(row => row?.authority === 'declared')
+              const winner = trusted && !data.stale && group?.indeterminate === null && rows.length > 1 && text(group?.winner?.run_id)
+              const reason = !trusted ? 'unverified' : data.stale ? 'stale' : status(group?.indeterminate) || 'unavailable'
               return <div className="sr-group" key={text(group?.contract_id) || i}>
-                <div className="muted">{text(group?.metric_uid) || 'metric'} · {text(group?.direction) || '?'}</div>
+                <div className="muted">{text(group?.metric_uid) || 'metric'} · {text(group?.direction) || '?'} · {trusted ? 'declared' : 'unverified'}</div>
                 <div className="muted" role="status">{winner ? `Winner: ${winner}.` : `No winner — ${reason}.`}</div>
-                <div className="sr-bests">{rows.map((item, j) => <MetricRun key={j} item={item} onOpen={onOpen}
-                  note={winner === text(item?.run_id) ? 'winner' : ''} />)}</div>
+                <div className="sr-bests">{rows.map((item, j) => {
+                  const id = text(item?.run_id)
+                  const note = winner === id ? 'winner'
+                    : list(group?.tied_winners).some(row => text(row?.run_id) === id) ? 'tied best'
+                      : list(group?.incomplete_runs).includes(id) ? 'run incomplete' : ''
+                  return <MetricRun key={j} item={item} onOpen={onOpen} note={note} />
+                })}</div>
               </div>
             })}
           </div>}
           {observations.length > 0 && <div className="sr-sec">
             <div className="sr-h">Unranked metrics</div>
             <div className="sr-bests">{observations.map((item, i) =>
-              <MetricRun key={`${item?.run_id}-${i}`} item={item} onOpen={onOpen} note="unranked" />)}</div>
+              <MetricRun key={`${item?.run_id}-${i}`} item={item} onOpen={onOpen}
+                note={status(item?.comparison_status) || 'unranked'} />)}</div>
           </div>}
           <Section title="What worked" items={c.what_worked} />
           <Section title="What didn’t" items={c.what_didnt} />

@@ -51,8 +51,13 @@ _SCOPE_INPUTS_CHANGED = {
     "remediation": "Retry generation from the current scope snapshot.",
 }
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
-_SERVER_VERDICT_AUTHORITY = "server-derived-v1"
+_SERVER_VERDICT_AUTHORITY = "server-derived-v2"
+_SERVER_CONTENT_SCHEMA = 4
 _SCOPE_STORE_THREAD_LOCK = threading.Lock()
+_PRIOR_REPORT_MAX_FILES = 256
+_PRIOR_REPORT_MAX_RECORDS = 20
+_PRIOR_REPORT_MAX_NEXT_DIRECTIONS = 2
+_PRIOR_REPORT_MAX_BYTES = 8 * 1024
 
 
 class _ScopeReportStorageConflict(RuntimeError):
@@ -318,29 +323,63 @@ def _read_or_migrate_scope_record(
 def _public_scope_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     """Never present a pre-authority model verdict as a server-derived comparison outcome."""
     content = dict(rec.get("content") or {})
-    if content.get("verdict_authority") == _SERVER_VERDICT_AUTHORITY:
-        return rec, False
+    groups = content.get("comparison_groups")
+    current_groups = (
+        isinstance(groups, list)
+        and len(groups) <= MAX_SCOPE_REPORT_RUNS
+        and all(
+            isinstance(group, dict)
+            and group.get("contract_authority") == "declared"
+            and isinstance(group.get("measurements"), list)
+            and all(
+                isinstance(row, dict) and row.get("authority") == "declared"
+                for row in group["measurements"]
+            )
+            for group in groups
+        )
+    )
+    if (content.get("schema") == _SERVER_CONTENT_SCHEMA
+            and content.get("verdict_authority") == _SERVER_VERDICT_AUTHORITY
+            and current_groups):
+        return {**rec, "authoritative": True}, False
     content["verdict"] = "No authoritative verdict is available for this legacy report; regenerate it."
     content["verdict_authority"] = "legacy-unavailable"
     content["requires_regeneration"] = True
     # CODEX AGENT: the old model-authored verdict is deliberately not copied to another public field;
     # renaming it would still let clients accidentally display an invented winner as trusted prose.
-    return {**rec, "content": content}, True
+    return {**rec, "content": content, "authoritative": False}, True
 
 
 def _prior_learnings_index(reports_dir: Path) -> str:
-    """Compact index of stored cross-run reports (scope label + headline + a couple of next-
-    directions) so the genesis boss can bootstrap a new run informed by prior portfolios."""
+    """Return a bounded JSON projection of untrusted prior-report evidence for Genesis."""
     try:
         base = _validated_reports_dir(reports_dir)
     except _ScopeReportStorageConflict:
         return ""
     if not base.exists():
         return ""
+
+    inspected_files = 0
+    discovered_names: list[str] = []
+    try:
+        with os.scandir(base) as entries:
+            # CODEX AGENT: this is a prompt-input authority boundary. Bound directory work before
+            # inspecting names, then revalidate every selected path and redact every copied string.
+            while inspected_files < _PRIOR_REPORT_MAX_FILES:
+                try:
+                    entry = next(entries)
+                except StopIteration:
+                    break
+                inspected_files += 1
+                if entry.name.endswith(".json"):
+                    discovered_names.append(entry.name)
+    except OSError:
+        return ""
+
     records: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
-    for discovered in sorted(base.glob("*.json")):
+    for filename in sorted(discovered_names):
         try:
-            p = _confined_report_path(base, discovered.name)
+            p = _confined_report_path(base, filename)
             rec = _read_json_record(p)
             if rec is None:
                 continue
@@ -370,16 +409,68 @@ def _prior_learnings_index(reports_dir: Path) -> str:
         key = (scope_type, scope_id)
         if key not in records or priority > records[key][0]:
             records[key] = (priority, rec)
-    lines = []
-    for _priority, rec in records.values():
+
+    def _safe_text(value: object, max_chars: int) -> str:
+        clean = redact_persisted_text(
+            value, max_chars=max_chars, entropy=True, single_line=True)
+        return " ".join(clean.split())
+
+    projected = []
+    for (scope_type, scope_id), (_priority, rec) in sorted(records.items()):
         c = rec.get("content") or {}
-        lbl = (rec.get("scope") or {}).get("label") or "scope report"
-        line = f"- {lbl}: {c.get('headline') or ''}"
-        nd = c.get("next_directions") or []
-        if nd:
-            line += " | next: " + "; ".join(str(x) for x in nd[:2])
-        lines.append(line)
-    return "\n".join(lines[:20])
+        raw_directions = c.get("next_directions")
+        directions = raw_directions if isinstance(raw_directions, (list, tuple)) else ()
+        projected.append({
+            "scope": {
+                "type": _safe_text(scope_type, 32),
+                "id": _safe_text(scope_id, 160),
+                "label": _safe_text(
+                    (rec.get("scope") or {}).get("label") or "scope report", 200),
+            },
+            "headline": _safe_text(c.get("headline") or "", 500),
+            "next_directions": [
+                _safe_text(value, 300)
+                for value in directions[:_PRIOR_REPORT_MAX_NEXT_DIRECTIONS]
+            ],
+        })
+
+    if not projected:
+        return ""
+
+    def _encoded(rows: list[dict[str, Any]]) -> str:
+        payload = {
+            "schema": "looplab.untrusted_prior_reports.v1",
+            "trust": "untrusted_model_authored_advisory",
+            "records": rows,
+            "receipt": {
+                "inspected_files": inspected_files,
+                "included_records": len(rows),
+                "eligible_records": len(projected),
+                "omitted_records": len(projected) - len(rows),
+                # Reaching the scan ceiling is conservatively reported as limited without reading a
+                # 257th entry solely to discover whether it exists.
+                "scan_limited": inspected_files >= _PRIOR_REPORT_MAX_FILES,
+                "limits": {
+                    "max_files": _PRIOR_REPORT_MAX_FILES,
+                    "max_records": _PRIOR_REPORT_MAX_RECORDS,
+                    "max_next_directions": _PRIOR_REPORT_MAX_NEXT_DIRECTIONS,
+                    "max_bytes": _PRIOR_REPORT_MAX_BYTES,
+                },
+            },
+        }
+        return json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    included: list[dict[str, Any]] = []
+    for row in projected[:_PRIOR_REPORT_MAX_RECORDS]:
+        candidate = _encoded([*included, row])
+        if len(candidate.encode("utf-8")) > _PRIOR_REPORT_MAX_BYTES:
+            break
+        included.append(row)
+    encoded = _encoded(included)
+    # The fixed envelope is comfortably below 8 KiB, but keep this fail-closed invariant local so a
+    # future metadata addition cannot silently create an unbounded prompt fragment.
+    return encoded if len(encoded.encode("utf-8")) <= _PRIOR_REPORT_MAX_BYTES else ""
 
 
 def build_router(srv) -> APIRouter:
@@ -761,7 +852,8 @@ def build_router(srv) -> APIRouter:
             except (OSError, _ScopeReportStorageConflict):
                 return {"ok": False, **_SCOPE_STORAGE_ERROR}
             omitted = sorted(set(frozen_scope_ids) - set(brief_ids))
-            return {"ok": True, **rec, "stale": bool(omitted), "added": omitted}
+            return {"ok": True, **rec, "authoritative": True,
+                    "stale": bool(omitted), "added": omitted}
 
         return await srv.jobs.run_as_job(_compute)
 

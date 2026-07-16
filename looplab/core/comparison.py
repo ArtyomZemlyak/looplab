@@ -190,6 +190,9 @@ def comparison_measurement(contract_value: object, best: object) -> dict | None:
     # CODEX AGENT: phase, value source, and uncertainty evidence travel together.  Consumers must
     # never reconstruct this receipt from a generic `best_metric`, which would erase phase semantics.
     return {
+        # CODEX AGENT: equality proves equality of adapter-declared semantics, not an independent
+        # fingerprint of the actual dataset/evaluator/budget. Keep that authority explicit downstream.
+        "authority": "declared",
         "value": value,
         "phase": phase,
         "source": source_by_phase[phase],

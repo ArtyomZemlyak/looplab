@@ -29,8 +29,13 @@ DEFAULT_SCOPE_REPORT_TURNS = 6
 MAX_SCOPE_REPORT_TURNS = 12
 DEFAULT_SCOPE_REPORT_TIME_S = 180.0
 MAX_SCOPE_REPORT_TIME_S = 600.0
-_MAX_ID_CHARS = 256
+_MAX_ID_CHARS = 255
 _MAX_LIST_ITEMS = 32
+_WINDOWS_RESERVED_RUN_STEMS = {
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
 
 
 _SCOPE_REPORT_SYSTEM_PROMPT = (
@@ -107,7 +112,9 @@ def _safe_report(value: object) -> dict | None:
 def _safe_comparison_measurement(value: object, contract: dict | None) -> dict | None:
     if contract is None or not isinstance(value, dict):
         return None
-    if set(value) != {"value", "phase", "source", "uncertainty"}:
+    if set(value) != {"authority", "value", "phase", "source", "uncertainty"}:
+        return None
+    if value.get("authority") != "declared":
         return None
     phase = value.get("phase")
     sources = {
@@ -148,6 +155,7 @@ def _safe_comparison_measurement(value: object, contract: dict | None) -> dict |
     # CODEX AGENT: this receipt is copied atomically. Reconstructing it from legacy ``best_metric``
     # would erase its phase/source/uncertainty identity and manufacture comparability.
     return {
+        "authority": "declared",
         "value": metric,
         "phase": phase,
         "source": sources[phase],
@@ -155,16 +163,25 @@ def _safe_comparison_measurement(value: object, contract: dict | None) -> dict |
     }
 
 
+def _safe_run_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value or len(value) > _MAX_ID_CHARS:
+        return None
+    if (value != value.strip() or value.endswith((".", " ")) or ":" in value
+            or "/" in value or "\\" in value or any(ord(ch) < 32 for ch in value)
+            or value.split(".", 1)[0].upper() in _WINDOWS_RESERVED_RUN_STEMS):
+        return None
+    # CODEX AGENT: known credential syntax must still fail closed, but generic entropy redaction is
+    # inappropriate for authoritative opaque identities such as ULIDs and UUIDs.
+    clean = redact_persisted_text(
+        value, max_chars=_MAX_ID_CHARS, entropy=False, single_line=True)
+    return value if clean == value else None
+
+
 def _safe_brief(value: object) -> dict | None:
     if not isinstance(value, dict):
         return None
-    raw_run_id = value.get("run_id")
-    if not isinstance(raw_run_id, str) or not raw_run_id:
-        return None
-    run_id = _text(raw_run_id, _MAX_ID_CHARS, single_line=True)
-    # A redacted/truncated display string is lossy and therefore cannot become a run identity: two
-    # different inputs could collapse to the same button or comparison measurement.
-    if run_id != raw_run_id:
+    run_id = _safe_run_id(value.get("run_id"))
+    if run_id is None:
         return None
     direction = value.get("direction") if value.get("direction") in {"min", "max"} else ""
     nodes = value.get("nodes")
@@ -229,7 +246,7 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             legacy_metric = finite_measurement(brief.get("best_metric"))
             if legacy_metric is not None:
                 observations.append({
-                    "run_id": _text(brief["run_id"], 128, single_line=True),
+                    "run_id": brief["run_id"],
                     "metric": legacy_metric,
                     "direction": brief.get("direction") or None,
                     "comparison_status": "no_valid_comparison_measurement",
@@ -239,7 +256,7 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
         # An opted-in contract with missing or invalid phase evidence is unavailable, not a legacy
         # observation: showing generic best_metric here would mislabel another measurement phase.
         if receipt is None:
-            run_id = _text(brief["run_id"], 128, single_line=True)
+            run_id = brief["run_id"]
             group[2].append(run_id)
             observations.append({
                 "run_id": run_id,
@@ -249,7 +266,8 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             })
             continue
         measurement = {
-            "run_id": _text(brief["run_id"], 128, single_line=True),
+            "run_id": brief["run_id"],
+            "authority": receipt["authority"],
             "metric": receipt["value"],
             "direction": brief.get("direction") or None,
             "phase": receipt["phase"],
@@ -298,6 +316,7 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
                 contract["measurement_phase"], 128, single_line=True),
             "uncertainty_protocol": _text(
                 contract["uncertainty_protocol"], 128, single_line=True),
+            "contract_authority": "declared",
             "measurements": measurements,
             "unavailable_measurements": unavailable,
             "incomplete_runs": incomplete_runs,
@@ -382,6 +401,9 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
                 "No cross-run winner: the comparison population is incomplete "
                 f"({safe_coverage.get('prompt_runs', 0)} of "
                 f"{safe_coverage.get('source_runs', 0)} source runs in bounded evidence).")
+        elif omitted_groups:
+            verdict = (
+                "No cross-run winner is published: bounded public comparison detail was omitted.")
         elif len(groups) != 1:
             verdict = (
                 "No portfolio-wide winner is defined: exact comparison contracts form "
@@ -397,9 +419,10 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
                 reason = str(group.get("indeterminate") or "not_comparable").replace("_", " ")
                 verdict = f"No winner in the exact comparison cohort: {reason}."
         return {
+            "schema": 4,
             "headline": "",
             "verdict": verdict,
-            "verdict_authority": "server-derived-v1",
+            "verdict_authority": "server-derived-v2",
             # CODEX AGENT: numeric authority is derived from frozen measurements and an explicit exact
             # contract. Model-authored run ids, metrics, and rankings are discarded at this boundary.
             "best_runs": [],

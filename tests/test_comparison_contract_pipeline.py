@@ -148,6 +148,7 @@ def test_scope_brief_maps_contract_phase_to_authoritative_evidence(
     assert response.status_code == 200, response.text
     assert response.json()["ok"] is True
     receipt = captured[0]["comparison_measurement"]
+    assert receipt["authority"] == "declared"
     assert receipt["value"] == expected_value
     assert receipt["phase"] == phase
     assert receipt["source"] == expected_source

@@ -204,7 +204,9 @@ evidence X/Y runs** from the exact prompt receipt and visibly marks an incomplet
 claim that omitted runs were synthesized. Scope labels stay inside the explicitly untrusted evidence JSON.
 Model input and drill results are redacted and character/item bounded, and node drill never sends source
 code, files, stdout or stderr. Metric values without an explicit schema-1 `comparison_contract` and an
-atomic phase/source/uncertainty measurement receipt are shown as **Unranked metric observations**. The server
+atomic phase/source/uncertainty measurement receipt are shown as **Unranked metric observations**. Contract
+cohorts are explicitly labelled `declared`: equality reflects adapter-declared semantics, not an independent
+fingerprint proving that the actual data, evaluator and achieved budget were unchanged. The server
 publishes a contract-local numeric winner only for at least two finished runs under the same canonical
 contract, with complete scope/cohort measurements, a unique best point and `uncertainty_protocol: none`.
 A singleton is insufficient; missing measurements, live/finalizing runs and incomplete evidence make the

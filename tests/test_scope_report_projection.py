@@ -30,6 +30,7 @@ def _contract(*, split: str = "validation", direction: str = "min",
 def _measurement(contract: dict, value: float) -> dict:
     phase = contract["measurement_phase"]
     return {
+        "authority": "declared",
         "value": value,
         "phase": phase,
         "source": {
@@ -49,6 +50,22 @@ def test_comparison_contract_is_explicit_exact_and_secret_free():
     assert canonical_comparison_contract({"schema": 1, "direction": "min"}) is None
     assert canonical_comparison_contract({**_contract(), "api_key": "sk-supersecret0123456789"}) is None
     assert canonical_comparison_contract({**_contract(), "direction": "sideways"}) is None
+
+
+def test_opaque_run_ids_survive_exactly_but_secret_or_path_ids_fail_closed():
+    valid = [
+        "01JY7Z5RA9Q6M8N4P2T3V1W0XY",
+        "550e8400-e29b-41d4-a716-446655440000",
+        "r" * 255,
+    ]
+    projected, coverage = scope_report._project_briefs([
+        *({"run_id": run_id, "direction": "min", "best_metric": 1.0} for run_id in valid),
+        {"run_id": "sk-abcdefghijklmnopqrstuv", "best_metric": 0.0},
+        {"run_id": "../escape", "best_metric": 0.0},
+    ])
+
+    assert [row["run_id"] for row in projected] == sorted(valid)
+    assert coverage["invalid_rows"] == 2
 
 
 def test_scope_projection_redacts_bounds_and_discards_model_numeric_authority(monkeypatch):
@@ -263,6 +280,28 @@ def test_final_content_cap_counts_json_escaping_structure_and_auto_caveats():
     assert len(encoded) <= scope_report.MAX_SCOPE_REPORT_CONTENT_CHARS
     assert any("narrative and comparisons are incomplete" in row.lower()
                for row in content["caveats"])
+
+
+def test_omitted_public_comparison_group_cannot_leave_a_winner_verdict():
+    contract = _contract()
+    briefs = [
+        {
+            "run_id": f"run-{index:02d}-" + "x" * 190,
+            "direction": "min",
+            "phase": "finished",
+            "comparison_contract": contract,
+            "comparison_measurement": _measurement(contract, float(index)),
+        }
+        for index in range(scope_report.MAX_SCOPE_REPORT_RUNS)
+    ]
+
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"}, briefs, None)
+
+    assert content["comparison_groups"] == []
+    assert content["coverage"]["omitted_comparison_groups"] == 1
+    assert "No cross-run winner is published" in content["verdict"]
+    assert "Contract-local winner" not in content["verdict"]
 
 
 def test_prompt_receipt_matches_actual_runs_and_restricts_tools(monkeypatch):
