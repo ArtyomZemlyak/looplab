@@ -34,12 +34,25 @@ def test_generate_report_degrades_offline():
 def test_report_generated_folds_latest_wins():
     evs = [
         Event(seq=0, type="run_started", data={"run_id": "r", "task_id": "t", "direction": "min"}),
-        Event(seq=1, type="report_generated", data={"content": {"headline": "first", "at_node": 1}}),
-        Event(seq=2, type="report_generated", data={"content": {"headline": "second", "at_node": 2}}),
+        Event(seq=1, ts=1_700_000_001, type="report_generated", data={
+            "at_node": 1, "trigger": "cadence",
+            "content": {"headline": "first", "at_node": 999, "trigger": "forged"}}),
+        Event(seq=2, ts=1_700_000_002.5, type="report_generated", data={
+            "at_node": 2, "trigger": "manual",
+            "content": {"headline": "second", "at_node": 999, "trigger": "forged",
+                        "published_seq": 999, "published_at": 999}}),
     ]
     st = fold(evs)
     assert st.report["headline"] == "second" and st.report["at_node"] == 2
+    assert st.report["trigger"] == "manual"
+    assert st.report["published_seq"] == 2
+    assert st.report["published_at"] == 1_700_000_002.5
     assert st.report["next_directions"] == []
+
+    invalid = fold([Event(seq=-1, ts=float("inf"), type="report_generated", data={
+        "content": {"headline": "legacy", "at_node": 3, "trigger": "legacy"}})])
+    assert invalid.report["at_node"] == 3 and invalid.report["trigger"] == "legacy"
+    assert invalid.report["published_seq"] is None and invalid.report["published_at"] is None
 
 
 def test_replay_canonicalizes_malformed_and_oversized_advisory_sidecars():

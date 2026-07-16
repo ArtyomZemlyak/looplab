@@ -1280,23 +1280,39 @@ def test_finish_report_is_provisional_until_same_cas_or_legacy_adjacent_finish(t
     started = modern.append("run_started", {
         "run_id": "r", "task_id": "t", "direction": "min"})
     report = modern.append("report_generated", {
-        "trigger": "finish", "content": {"summary": "stale"}})
+        "at_node": 1, "trigger": "finish",
+        "content": {"summary": "stale", "at_node": 999, "trigger": "forged"}})
     modern.append("hint", {"text": "won the race"})
     modern.append("run_finished", {"after_seq": report.seq})
     rejected = fold(modern.read_all())
     assert not rejected.finished and rejected.report is None
     fresh_report = modern.append("report_generated", {
-        "trigger": "finish", "content": {"summary": "fresh"}})
+        "at_node": 2, "trigger": "finish",
+        "content": {"summary": "fresh", "at_node": 999, "trigger": "forged",
+                    "published_seq": 999, "published_at": 999}})
     modern.append("run_finished", {"after_seq": fresh_report.seq})
     accepted = fold(modern.read_all())
     assert accepted.finished and accepted.report["summary"] == "fresh"
+    assert accepted.report["at_node"] == 2 and accepted.report["trigger"] == "finish"
+    assert accepted.report["published_seq"] == fresh_report.seq
+    assert accepted.report["published_at"] == fresh_report.ts
     assert started.seq < report.seq
 
     adjacent = EventStore(tmp_path / "adjacent.jsonl")
-    adjacent.append("report_generated", {
+    legacy_report = adjacent.append("report_generated", {
         "trigger": "finish", "content": {"summary": "legacy"}})
     adjacent.append("run_finished", {})
-    assert fold(adjacent.read_all()).report["summary"] == "legacy"
+    legacy = fold(adjacent.read_all()).report
+    assert legacy["summary"] == "legacy" and legacy["trigger"] == "finish"
+    assert legacy["published_seq"] == legacy_report.seq
+    assert legacy["published_at"] == legacy_report.ts
+
+    spaced = EventStore(tmp_path / "spaced.jsonl")
+    spaced_report = spaced.append("report_generated", {
+        "trigger": "\tfinish ", "content": {"summary": "sanitized outer trigger"}})
+    assert fold(spaced.read_all()).report is None
+    spaced.append("run_finished", {"after_seq": spaced_report.seq})
+    assert fold(spaced.read_all()).report["trigger"] == "finish"
 
     separated = EventStore(tmp_path / "separated.jsonl")
     separated.append("report_generated", {

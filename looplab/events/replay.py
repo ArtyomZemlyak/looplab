@@ -1935,7 +1935,23 @@ def _on_report_generated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> No
     # the cadence and manual-refresh paths both append this; the freshest narrative stands.
     from looplab.core.advisory_payloads import sanitize_report_payload
     content = sanitize_report_payload(d.get("content") or d)
-    if d.get("trigger") == "finish":
+    # The event envelope is the publication authority. Model/provider content must not forge which
+    # node-count/trigger the writer bound, nor the physical receipt that made the narrative durable.
+    # Preserve inner at_node/trigger only for historical events whose outer payload omitted them.
+    if "at_node" in d or "trigger" in d:
+        envelope = sanitize_report_payload({
+            "at_node": d.get("at_node"), "trigger": d.get("trigger"),
+        })
+        if "at_node" in d:
+            content["at_node"] = envelope["at_node"]
+        if "trigger" in d:
+            content["trigger"] = envelope["trigger"]
+    content["published_seq"] = (e.seq if type(e.seq) is int
+                                and 0 <= e.seq <= (1 << 53) - 1 else None)
+    content["published_at"] = (float(e.ts) if type(e.ts) in (int, float)
+                               and math.isfinite(e.ts) and 0 < e.ts <= 253_402_300_799
+                               else None)
+    if "trigger" in d and content["trigger"] == "finish":
         # Publish only if the immediately-adjacent run_finished accepts this report's CAS chain.
         ctx.pending_finish_report = (e.seq, ctx.event_index, content)
         return
