@@ -2067,9 +2067,11 @@ def test_scope_report_module_deterministic_ranks_and_degrades():
     from looplab.serve.scope_report import generate_scope_report
     contract = _comparison_contract()
     briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None,
+               "phase": "finished",
                "comparison_contract": contract,
                "comparison_measurement": _comparison_measurement(contract, 0.06)},
               {"run_id": "b", "direction": "min", "best_metric": 0.05,
+               "phase": "finished",
                "report": {"headline": "h"}, "comparison_contract": contract,
                "comparison_measurement": _comparison_measurement(contract, 0.05)}]
     c = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, briefs, None)
@@ -2101,7 +2103,8 @@ def test_scope_report_tool_failure_cannot_be_echoed_into_persisted_content(monke
         drill=lambda _run_id, _node_id: "unreachable",
     )
 
-    assert content["verdict"] == "(tool request invalid)"
+    assert "tool request invalid" not in str(content)
+    assert "No portfolio-wide winner" in content["verdict"]
     assert "provider.example" not in str(content) and "token=hidden" not in str(content)
 
 
@@ -2126,7 +2129,8 @@ def test_scope_report_rejects_out_of_scope_drill_before_callback(monkeypatch):
     )
 
     assert calls == []
-    assert content["verdict"] == "(no such run in scope)"
+    assert "no such run in scope" not in str(content)
+    assert "No portfolio-wide winner" in content["verdict"]
     assert "PRIVATE OUT-OF-SCOPE EVIDENCE" not in str(content)
 
 
@@ -2140,9 +2144,9 @@ def test_scope_report_never_ranks_incompatible_or_uncontracted_metrics():
 
     shared = _comparison_contract("min")
     comparable = [
-        {**briefs[0], "comparison_contract": shared,
+        {**briefs[0], "phase": "finished", "comparison_contract": shared,
          "comparison_measurement": _comparison_measurement(shared, briefs[0]["best_metric"])},
-        {**briefs[1], "comparison_contract": shared,
+        {**briefs[1], "phase": "finished", "comparison_contract": shared,
          "comparison_measurement": _comparison_measurement(shared, briefs[1]["best_metric"])},
     ]
     assert [row["run_id"] for row in _ranked(comparable)] == ["loss1", "loss2"]
@@ -2158,9 +2162,10 @@ def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
     c = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
         [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None,
+          "phase": "finished",
           "comparison_contract": _comparison_contract(),
           "comparison_measurement": _comparison_measurement(_comparison_contract(), 0.05)}], object())
-    assert "deterministic" in c["verdict"]              # fell back, not a blank report
+    assert "Bounded evidence" in c["headline"]          # fell back, not a blank report
     assert c["comparison_groups"][0]["winner"] is None
     assert c["comparison_groups"][0]["indeterminate"] == "insufficient_population"
 
@@ -2173,11 +2178,11 @@ def test_scope_report_forces_structured_synthesis_when_loop_doesnt_emit(monkeypa
     monkeypatch.setattr("looplab.agents.agent.drive_tool_loop",
                         lambda client, tools, messages, emit_spec, **kw: kw["fallback"](messages))
     monkeypatch.setattr("looplab.core.parse.parse_structured",
-                        lambda *a, **k: scope_report._AggReport(headline="SYNTH", verdict="agent synthesized"))
+                        lambda *a, **k: scope_report._AggNarrative(headline="SYNTH"))
     c = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
         [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None}], object())
-    assert c["headline"] == "SYNTH" and "synthesized" in c["verdict"]   # not the deterministic rollup
+    assert c["headline"] == "SYNTH" and "No portfolio-wide winner" in c["verdict"]
 
 
 def _boom_client(_s):
@@ -2373,6 +2378,7 @@ def test_scope_report_migrates_real_legacy_path_without_regeneration(tmp_path):
     reports_dir.mkdir()
     legacy_path = _legacy_scope_report_path(reports_dir, "task", task_id)
     record = _legacy_scope_record(tmp_path, "legacy-run", task_id, "valuable old report")
+    record["content"]["verdict"] = "invented run wins"
     legacy_path.write_text(json.dumps(record), encoding="utf-8")
 
     assert "valuable old report" in _prior_learnings_index(reports_dir)
@@ -2381,6 +2387,10 @@ def test_scope_report_migrates_real_legacy_path_without_regeneration(tmp_path):
     assert response.status_code == 200
     assert response.json()["exists"] is True
     assert response.json()["content"]["headline"] == "valuable old report"
+    assert "invented run wins" not in response.json()["content"]["verdict"]
+    assert response.json()["content"]["verdict_authority"] == "legacy-unavailable"
+    assert response.json()["content"]["requires_regeneration"] is True
+    assert response.json()["stale"] is True
     canonical = _scope_report_path(reports_dir, "task", task_id)
     assert canonical.exists() and legacy_path.exists()
     assert json.loads(canonical.read_text(encoding="utf-8"))["scope_identity"] == {

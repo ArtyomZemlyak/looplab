@@ -81,6 +81,8 @@ def test_scope_projection_redacts_bounds_and_discards_model_numeric_authority(mo
     assert secret not in prompt and secret not in json.dumps(content)
     assert "UNTRUSTED_RUN_EVIDENCE_JSON" in prompt
     assert content["best_runs"] == [] and content["comparison_groups"] == []
+    assert "follow the prior" not in content["verdict"]
+    assert "No portfolio-wide winner" in content["verdict"]
     assert content["metric_observations"] == [{
         "run_id": "real", "metric": 0.5, "direction": "min",
         "comparison_status": "no_valid_comparison_measurement",
@@ -93,11 +95,11 @@ def test_scope_projection_only_ranks_within_exact_contract_and_caps_runs():
     common = _contract()
     different = _contract(split="holdout")
     briefs = [
-        {"run_id": "a", "direction": "min", "best_metric": 0.4,
+        {"run_id": "a", "direction": "min", "best_metric": 0.4, "phase": "finished",
          "comparison_contract": common, "comparison_measurement": _measurement(common, 0.4)},
-        {"run_id": "b", "direction": "min", "best_metric": 0.2,
+        {"run_id": "b", "direction": "min", "best_metric": 0.2, "phase": "finished",
          "comparison_contract": common, "comparison_measurement": _measurement(common, 0.2)},
-        {"run_id": "c", "direction": "min", "best_metric": 0.1,
+        {"run_id": "c", "direction": "min", "best_metric": 0.1, "phase": "finished",
          "comparison_contract": different, "comparison_measurement": _measurement(different, 0.1)},
         *({"run_id": f"z-{index:03d}", "direction": "min", "best_metric": index}
           for index in range(scope_report.MAX_SCOPE_REPORT_RUNS + 5)),
@@ -109,12 +111,12 @@ def test_scope_projection_only_ranks_within_exact_contract_and_caps_runs():
     groups = {group["contract_id"]: group for group in content["comparison_groups"]}
     common_id = canonical_comparison_contract(common)["contract_id"]
     other_id = canonical_comparison_contract(different)["contract_id"]
-    assert groups[common_id]["winner"]["run_id"] == "b"
+    assert groups[common_id]["winner"] is None
     assert groups[common_id]["tied_winners"] == []
-    assert groups[common_id]["indeterminate"] is None
+    assert groups[common_id]["indeterminate"] == "incomplete_population"
     assert groups[other_id]["winner"] is None
     assert groups[other_id]["tied_winners"] == []
-    assert groups[other_id]["indeterminate"] == "insufficient_population"
+    assert groups[other_id]["indeterminate"] == "incomplete_population"
     assert content["best_runs"] == []
     assert content["coverage"]["model_runs"] == scope_report.MAX_SCOPE_REPORT_RUNS
     assert content["coverage"]["omitted_runs"] == 8
@@ -127,14 +129,14 @@ def test_comparison_outcomes_refuse_exact_ties_and_unevaluated_uncertainty():
     content = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
         [
-            {"run_id": "tie-a", "direction": "min", "best_metric": 0.2,
+            {"run_id": "tie-a", "direction": "min", "best_metric": 0.2, "phase": "finished",
              "comparison_contract": tied, "comparison_measurement": _measurement(tied, 0.2)},
-            {"run_id": "tie-b", "direction": "min", "best_metric": 0.2,
+            {"run_id": "tie-b", "direction": "min", "best_metric": 0.2, "phase": "finished",
              "comparison_contract": tied, "comparison_measurement": _measurement(tied, 0.2)},
-            {"run_id": "uncertain-a", "direction": "min", "best_metric": 0.1,
+            {"run_id": "uncertain-a", "direction": "min", "best_metric": 0.1, "phase": "finished",
              "comparison_contract": uncertain,
              "comparison_measurement": _measurement(uncertain, 0.1)},
-            {"run_id": "uncertain-b", "direction": "min", "best_metric": 0.3,
+            {"run_id": "uncertain-b", "direction": "min", "best_metric": 0.3, "phase": "finished",
              "comparison_contract": uncertain,
              "comparison_measurement": _measurement(uncertain, 0.3)},
         ], None)
@@ -150,6 +152,26 @@ def test_comparison_outcomes_refuse_exact_ties_and_unevaluated_uncertainty():
     assert uncertain_group["indeterminate"] == "uncertainty_not_evaluated"
 
 
+def test_incomplete_scope_never_publishes_a_survivor_as_winner():
+    contract = _contract()
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t", "source_run_count": 3},
+        [
+            {"run_id": "a", "direction": "min", "best_metric": 0.4, "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.4)},
+            {"run_id": "b", "direction": "min", "best_metric": 0.2, "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.2)},
+        ], None)
+
+    group = content["comparison_groups"][0]
+    assert group["winner"] is None
+    assert group["tied_winners"] == []
+    assert group["indeterminate"] == "incomplete_population"
+    assert "population is incomplete" in content["verdict"]
+
+
 def test_contracted_groups_require_atomic_phase_measurement_receipts():
     contract = _contract()
     wrong_phase = {**_measurement(contract, 0.1), "phase": "holdout",
@@ -157,18 +179,68 @@ def test_contracted_groups_require_atomic_phase_measurement_receipts():
     content = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
         [
-            {"run_id": "missing", "direction": "min", "best_metric": -100,
+            {"run_id": "missing", "direction": "min", "best_metric": -100, "phase": "finished",
              "comparison_contract": contract},
-            {"run_id": "wrong-phase", "direction": "min", "best_metric": -200,
+            {"run_id": "wrong-phase", "direction": "min", "best_metric": -200, "phase": "finished",
              "comparison_contract": contract, "comparison_measurement": wrong_phase},
             {"run_id": "legacy", "direction": "min", "best_metric": 0.4},
         ], None)
 
-    assert content["comparison_groups"] == []
+    assert len(content["comparison_groups"]) == 1
+    assert content["comparison_groups"][0]["winner"] is None
+    assert content["comparison_groups"][0]["indeterminate"] == "incomplete_measurements"
+    assert content["comparison_groups"][0]["unavailable_measurements"] == [
+        "missing", "wrong-phase"]
     assert content["metric_observations"] == [{
         "run_id": "legacy", "metric": 0.4, "direction": "min",
         "comparison_status": "no_valid_comparison_measurement",
+    }, {
+        "run_id": "missing", "direction": "min",
+        "contract_id": canonical_comparison_contract(contract)["contract_id"],
+        "comparison_status": "contracted_measurement_unavailable",
+    }, {
+        "run_id": "wrong-phase", "direction": "min",
+        "contract_id": canonical_comparison_contract(contract)["contract_id"],
+        "comparison_status": "contracted_measurement_unavailable",
     }]
+
+
+def test_missing_measurement_in_an_otherwise_valid_cohort_blocks_winner():
+    contract = _contract()
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"}, [
+            {"run_id": "a", "direction": "min", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.4)},
+            {"run_id": "b", "direction": "min", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.2)},
+            {"run_id": "missing", "direction": "min", "phase": "finished",
+             "comparison_contract": contract},
+        ], None)
+
+    group = content["comparison_groups"][0]
+    assert group["winner"] is None
+    assert group["indeterminate"] == "incomplete_measurements"
+    assert group["unavailable_measurements"] == ["missing"]
+
+
+def test_live_run_blocks_an_otherwise_valid_cohort_winner():
+    contract = _contract()
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"}, [
+            {"run_id": "done", "direction": "min", "phase": "finished",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.4)},
+            {"run_id": "live", "direction": "min", "phase": "search",
+             "comparison_contract": contract,
+             "comparison_measurement": _measurement(contract, 0.2)},
+        ], None)
+
+    group = content["comparison_groups"][0]
+    assert group["winner"] is None
+    assert group["indeterminate"] == "incomplete_runs"
+    assert group["incomplete_runs"] == ["live"]
 
 
 def test_final_content_cap_counts_json_escaping_structure_and_auto_caveats():
@@ -278,6 +350,16 @@ def test_invalid_rows_get_a_distinct_caveat_not_a_false_coverage_fraction():
     assert content["coverage"]["prompt_runs"] == 1
     assert any("malformed input row" in row for row in content["caveats"])
     assert all("Only 1 of 1" not in row for row in content["caveats"])
+
+
+def test_pathological_integer_metric_is_quarantined_without_raising():
+    content = scope_report.generate_scope_report(
+        {"type": "task", "id": "t", "label": "task t"},
+        [{"run_id": "huge", "direction": "min", "best_metric": 10**10_000}], None)
+
+    assert content["comparison_groups"] == []
+    assert content["metric_observations"] == []
+    assert len(json.dumps(content, ensure_ascii=False)) <= scope_report.MAX_SCOPE_REPORT_CONTENT_CHARS
 
 
 def test_scope_tool_drill_is_bounded_and_redacted():

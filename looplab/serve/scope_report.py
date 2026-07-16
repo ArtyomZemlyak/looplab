@@ -51,7 +51,7 @@ class _AggReport(BaseModel):
     """Portfolio-level findings across a set of runs (the cross-run analogue of report._ReportOut).
     Every field has a default so an offline/partial generation still renders."""
     headline: str = ""
-    verdict: str = ""                 # which approach / model / config wins across the runs, and why
+    verdict: str = ""                 # server-derived comparison outcome; never model-authored
     # ``best_runs`` remains readable for stored v1 reports, but new numeric authority is computed by
     # the server into exact-contract groups below. Model-authored ids/metrics never survive projection.
     best_runs: list = Field(default_factory=list)
@@ -68,7 +68,6 @@ class _AggNarrative(BaseModel):
     """The only fields the model may author; all numeric identity is server-derived."""
 
     headline: str = ""
-    verdict: str = ""
     what_worked: list = Field(default_factory=list)
     what_didnt: list = Field(default_factory=list)
     learnings: list = Field(default_factory=list)
@@ -220,7 +219,7 @@ def _project_briefs(briefs: object) -> tuple[list[dict], dict]:
 
 
 def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
-    cohorts: dict[str, tuple[dict, list[dict]]] = {}
+    cohorts: dict[str, tuple[dict, list[dict], list[str], list[str]]] = {}
     observations: list[dict] = []
     for brief in briefs:
         contract = canonical_comparison_contract(brief.get("comparison_contract"))
@@ -236,9 +235,18 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
                     "comparison_status": "no_valid_comparison_measurement",
                 })
             continue
+        group = cohorts.setdefault(contract["contract_id"], (contract, [], [], []))
         # An opted-in contract with missing or invalid phase evidence is unavailable, not a legacy
         # observation: showing generic best_metric here would mislabel another measurement phase.
         if receipt is None:
+            run_id = _text(brief["run_id"], 128, single_line=True)
+            group[2].append(run_id)
+            observations.append({
+                "run_id": run_id,
+                "direction": brief.get("direction") or None,
+                "contract_id": contract["contract_id"],
+                "comparison_status": "contracted_measurement_unavailable",
+            })
             continue
         measurement = {
             "run_id": _text(brief["run_id"], 128, single_line=True),
@@ -248,18 +256,23 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             "source": receipt["source"],
             "uncertainty": receipt["uncertainty"],
         }
-        group = cohorts.setdefault(contract["contract_id"], (contract, []))
         group[1].append(measurement)
+        if brief.get("phase") != "finished":
+            group[3].append(measurement["run_id"])
     groups = []
     for contract_id in sorted(cohorts):
-        contract, measurements = cohorts[contract_id]
+        contract, measurements, unavailable, incomplete_runs = cohorts[contract_id]
         measurements.sort(
             key=lambda row: ((-row["metric"] if contract["direction"] == "max"
                               else row["metric"]), row["run_id"]))
         winner = None
         tied_winners: list[dict] = []
         indeterminate = None
-        if len(measurements) < 2:
+        if unavailable:
+            indeterminate = "incomplete_measurements"
+        elif incomplete_runs:
+            indeterminate = "incomplete_runs"
+        elif len(measurements) < 2:
             indeterminate = "insufficient_population"
         else:
             best_value = measurements[0]["metric"]
@@ -286,6 +299,8 @@ def _comparison_projection(briefs: list[dict]) -> tuple[list[dict], list[dict]]:
             "uncertainty_protocol": _text(
                 contract["uncertainty_protocol"], 128, single_line=True),
             "measurements": measurements,
+            "unavailable_measurements": unavailable,
+            "incomplete_runs": incomplete_runs,
             # CODEX AGENT: a sortable point estimate is not automatically a winner. Singleton,
             # exact-tie, and unevaluated-uncertainty cohorts publish explicit non-winner semantics.
             "winner": winner,
@@ -303,6 +318,17 @@ def _serialized_chars(value: object) -> int:
 def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict:
     src = value if isinstance(value, dict) else {}
     groups, observations = _comparison_projection(briefs)
+    incomplete_population = bool(
+        coverage.get("incomplete") or coverage.get("omitted_runs")
+        or coverage.get("invalid_rows") or coverage.get("duplicate_run_rows"))
+    if incomplete_population:
+        for group in groups:
+            # CODEX AGENT: a winner over a surviving subset is not a scope winner. Preserve bounded
+            # measurements for inspection, but fail the outcome closed whenever source coverage is
+            # incomplete or ambiguous.
+            group["winner"] = None
+            group["tied_winners"] = []
+            group["indeterminate"] = "incomplete_population"
     kept_groups: list[dict] = []
     omitted_groups = 0
     for group in groups:
@@ -351,9 +377,29 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
             auto_caveats.append(
                 "Some comparison detail was omitted by the bounded public report projection; the "
                 "coverage receipt records the exact omitted counts.")
+        if incomplete_population:
+            verdict = (
+                "No cross-run winner: the comparison population is incomplete "
+                f"({safe_coverage.get('prompt_runs', 0)} of "
+                f"{safe_coverage.get('source_runs', 0)} source runs in bounded evidence).")
+        elif len(groups) != 1:
+            verdict = (
+                "No portfolio-wide winner is defined: exact comparison contracts form "
+                f"{len(groups)} independent cohort(s).")
+        else:
+            group = groups[0]
+            winner = group.get("winner")
+            if winner:
+                verdict = (
+                    f"Contract-local winner: {winner['run_id']} at {_fmt_metric(winner['metric'])} "
+                    f"{group.get('unit') or ''} ({group['direction']}).").strip()
+            else:
+                reason = str(group.get("indeterminate") or "not_comparable").replace("_", " ")
+                verdict = f"No winner in the exact comparison cohort: {reason}."
         return {
             "headline": "",
-            "verdict": "",
+            "verdict": verdict,
+            "verdict_authority": "server-derived-v1",
             # CODEX AGENT: numeric authority is derived from frozen measurements and an explicit exact
             # contract. Model-authored run ids, metrics, and rankings are discarded at this boundary.
             "best_runs": [],
@@ -417,7 +463,6 @@ def _sanitize_content(value: object, briefs: list[dict], coverage: dict) -> dict
                 out[field] = text[:lo]
 
     fit_text("headline", src.get("headline"), 800, single_line=True)
-    fit_text("verdict", src.get("verdict"), 4_000)
     for field in ("what_worked", "what_didnt", "learnings", "next_directions", "caveats"):
         raw = src.get(field)
         items = raw if isinstance(raw, (list, tuple)) else ()
@@ -463,8 +508,10 @@ def _has_content(d) -> bool:
     instead of persisting/showing an empty report."""
     if not isinstance(d, dict):
         return False
-    return bool((d.get("headline") or "").strip() or (d.get("verdict") or "").strip()
-                or d.get("best_runs") or d.get("what_worked") or d.get("what_didnt")
+    # ``verdict`` and comparison arrays are installed by the server even for an empty model emit.
+    # They therefore cannot prove that the model authored a substantive synthesis.
+    return bool((d.get("headline") or "").strip()
+                or d.get("what_worked") or d.get("what_didnt")
                 or d.get("learnings") or d.get("next_directions"))
 
 
@@ -496,7 +543,8 @@ def _evidence_coverage(coverage: dict, projected_count: int,
         "prompt_omitted_runs": prompt_omitted,
         "omitted_runs": total_omitted,
         "prompt_run_ids_digest": _run_ids_digest(included),
-        "incomplete": bool(total_omitted or coverage.get("invalid_rows")),
+        "incomplete": bool(
+            total_omitted or coverage.get("invalid_rows") or coverage.get("duplicate_run_rows")),
     }
 
 

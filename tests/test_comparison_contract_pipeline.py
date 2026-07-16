@@ -58,6 +58,12 @@ def test_contract_phase_is_strict_and_shared_task_validation_binds_direction():
     assert len(canonical["contract_id"]) == 64
     assert canonical_comparison_contract(_contract("validation")) is None
     assert canonical_comparison_contract({**_contract(), "schema": True}) is None
+    assert canonical_comparison_contract({
+        key: value for key, value in _contract().items() if key != "schema"
+    }) is None
+    assert canonical_comparison_contract({
+        **_contract("confirmed"), "uncertainty_protocol": "none",
+    }) is None
 
     task = validate_task(_toy("holdout"))
     dumped = task.model_dump(mode="json")

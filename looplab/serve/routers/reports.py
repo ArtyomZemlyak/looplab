@@ -51,6 +51,7 @@ _SCOPE_INPUTS_CHANGED = {
     "remediation": "Retry generation from the current scope snapshot.",
 }
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+_SERVER_VERDICT_AUTHORITY = "server-derived-v1"
 _SCOPE_STORE_THREAD_LOCK = threading.Lock()
 
 
@@ -312,6 +313,19 @@ def _read_or_migrate_scope_record(
     atomic_write_text(canonical, json.dumps(migrated, indent=2))
     canonical = _scope_report_path(reports_dir, scope_type, scope_id)
     return _read_scope_record(canonical, scope_type, scope_id)
+
+
+def _public_scope_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    """Never present a pre-authority model verdict as a server-derived comparison outcome."""
+    content = dict(rec.get("content") or {})
+    if content.get("verdict_authority") == _SERVER_VERDICT_AUTHORITY:
+        return rec, False
+    content["verdict"] = "No authoritative verdict is available for this legacy report; regenerate it."
+    content["verdict_authority"] = "legacy-unavailable"
+    content["requires_regeneration"] = True
+    # CODEX AGENT: the old model-authored verdict is deliberately not copied to another public field;
+    # renaming it would still let clients accidentally display an invented winner as trusted prose.
+    return {**rec, "content": content}, True
 
 
 def _prior_learnings_index(reports_dir: Path) -> str:
@@ -598,7 +612,8 @@ def build_router(srv) -> APIRouter:
             return {"exists": False, "run_count": len(cur_ids),
                     "label": _scope_label(scope_type, scope_id)}
         added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
-        stale = _scope_sig(cur_ids) != rec.get("sig")
+        rec, legacy_authority = _public_scope_record(rec)
+        stale = legacy_authority or _scope_sig(cur_ids) != rec.get("sig")
         source_revisions = rec.get("source_revisions")
         if not stale and isinstance(source_revisions, list):
             try:

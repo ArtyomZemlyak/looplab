@@ -56,8 +56,7 @@ class ComparisonContract(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: StrictInt = Field(
-        default=COMPARISON_CONTRACT_SCHEMA, alias="schema", serialization_alias="schema")
+    schema_version: StrictInt = Field(alias="schema", serialization_alias="schema")
     dataset_lineage: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
     split_or_candidate_pool_lineage: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
     evaluator_uid: StrictStr = Field(min_length=1, max_length=_MAX_FIELD_CHARS)
@@ -94,6 +93,16 @@ class ComparisonContract(BaseModel):
         if not clean or clean != value:
             raise ValueError("comparison contract text must be bounded, secret-free, and single-line")
         return value
+
+    @model_validator(mode="after")
+    def _confirmed_phase_declares_uncertainty(self) -> "ComparisonContract":
+        # CODEX AGENT: confirmed_mean is an estimate backed by confirmed_std/seeds.  Calling its
+        # protocol "none" would let downstream code treat a sortable point estimate as a certain
+        # cross-run winner, so the comparability contract is invalid rather than silently weakened.
+        if self.measurement_phase == "confirmed" and self.uncertainty_protocol == "none":
+            raise ValueError(
+                "confirmed measurement_phase requires an explicit uncertainty_protocol")
+        return self
 
     @model_validator(mode="after")
     def _bind_contract_id(self) -> "ComparisonContract":
@@ -133,7 +142,11 @@ def finite_measurement(value: object) -> float | int | None:
     """Keep bools, NaN, infinities, and opaque numeric-like objects out of comparisons."""
     if type(value) not in {int, float}:
         return None
-    if isinstance(value, float) and not math.isfinite(value):
+    try:
+        finite = float(value)
+    except (OverflowError, TypeError, ValueError):
+        return None
+    if not math.isfinite(finite):
         return None
     return value
 
