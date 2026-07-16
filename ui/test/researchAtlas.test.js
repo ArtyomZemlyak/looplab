@@ -2,8 +2,9 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import React from 'react'
+import React, { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { JSDOM } from 'jsdom'
 import { createServer } from 'vite'
 import {
   ATLAS_RENDER_LIMITS,
@@ -322,7 +323,11 @@ test('a source-local retry changes only the attempted Atlas slice', () => {
 test('partial Atlas UI never presents an unavailable source as an empty current fact', async () => {
   const atlas = await source('ResearchAtlas.jsx')
 
-  assert.match(atlas, /requestedSources = request\.key \? SOURCES\.filter[\s\S]*reconcileAtlasSourceStatuses\([\s\S]*attemptedKeys\)/)
+  assert.match(atlas, /const id = \+\+requestId\.current[\s\S]*requestedSources\.forEach[\s\S]*settle\(source/)
+  assert.match(atlas, /!active \|\| id !== requestId\.current/,
+    'late results must be fenced to the mounted request')
+  assert.match(atlas, /setTimeout\([\s\S]*SOURCE_TIMEOUT_MS[\s\S]*controller\.abort/,
+    'each source needs a bounded liveness escape')
   assert.match(atlas, /loaded \? value : 'not loaded'/,
     'summary values from a never-loaded slice need an explicit unavailable state')
   assert.match(atlas, /view\.empty && allCurrent/,
@@ -335,12 +340,170 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
   assert.doesNotMatch(atlas, /errorText|result\.reason\?\.message/,
     'transport failures must use client-owned copy instead of reflecting internal error text')
   assert.match(atlas, /errors\.every\(error => error\.status === 400\)/)
-  assert.match(atlas, /state !== 'current'[\s\S]*retry\(sourceKey\)[\s\S]*aria-label=\{`Retry \$\{label\}`\}/,
+  assert.match(atlas, /state !== 'current'[\s\S]*disabled=\{busy\}[\s\S]*retry\(sourceKey\)/,
     'failed and retained-stale watermarks both need their own retry action')
   for (const key of ['atlas', 'claims']) {
     assert.match(atlas, new RegExp(`sourceKey="${key}"[\\s\\S]*?retry=\\{retry\\}`))
   }
   assert.match(atlas, /\[\['conceptCuration', 'Concept'\], \['claimCuration', 'Claim'\]\][\s\S]*sourceKey=\{sourceKey\}[\s\S]*retry=\{retry\}/)
+})
+
+test('mounted Atlas settles sources progressively and fences timed-out or superseded reads', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const realSetTimeout = globalThis.setTimeout
+  const realClearTimeout = globalThis.clearTimeout
+  const requests = []
+  const sourceTimers = []
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    location: dom.window.location, sessionStorage: dom.window.sessionStorage,
+    HTMLElement: dom.window.HTMLElement, Node: dom.window.Node,
+    requestAnimationFrame: callback => realSetTimeout(callback, 0),
+    cancelAnimationFrame: handle => realClearTimeout(handle),
+    IS_REACT_ACT_ENVIRONMENT: true,
+    fetch: (url, options = {}) => new Promise(resolve => requests.push({
+      url: String(url), options, resolve,
+    })),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const previousTimers = Object.fromEntries(['setTimeout', 'clearTimeout']
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  let root
+  let vite
+  const response = (payload, status = 200) => ({
+    ok: status < 400, status, headers: { get: () => null }, json: async () => payload,
+  })
+  const reply = (request, payload, status = 200) => act(async () => {
+    request.resolve(response(payload, status))
+    await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  })
+  const click = button => act(async () => {
+    button.click()
+    await Promise.resolve(); await Promise.resolve()
+  })
+  const atlasEnvelope = concept => ({
+    explored: [{ concept, n_runs: 1, runs: [] }], thin_coverage: [], contradictions: [],
+  })
+  const claimsEnvelope = statement => ({ claims: [{ ...claim(70), statement }] })
+  const requestFor = (batch, path) => batch.find(item => item.url.includes(path))
+  const sourceNote = label => [...document.querySelectorAll('.atlas-source-note')]
+    .find(node => node.textContent.includes(label))
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const [{ createRoot }, { default: ResearchAtlas }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ResearchAtlas.jsx'),
+    ])
+    globalThis.setTimeout = (callback, delay, ...args) => {
+      if (delay !== 15_000) return realSetTimeout(callback, delay, ...args)
+      const handle = { cleared: false, fire: () => callback(...args) }
+      sourceTimers.push(handle)
+      return handle
+    }
+    globalThis.clearTimeout = handle => {
+      if (handle && typeof handle === 'object' && 'cleared' in handle) handle.cleared = true
+      else realClearTimeout(handle)
+    }
+    root = createRoot(document.getElementById('root'))
+    await act(async () => {
+      root.render(React.createElement(ResearchAtlas, { onBack() {} }))
+      await Promise.resolve()
+    })
+    const initial = requests.slice()
+    assert.equal(initial.length, 4)
+    await reply(requestFor(initial, '/atlas?'), atlasEnvelope('progressive concept'))
+    await reply(requestFor(initial, '/claims?'), claimsEnvelope('progressive claim'))
+    await reply(requestFor(initial, '/curation-log?'), { entries: [] })
+
+    assert.match(document.body.textContent, /progressive concept.*progressive claim/s,
+      'settled slices render while the fourth request remains unresolved')
+    assert.equal(document.querySelector('main').getAttribute('aria-busy'), 'true')
+    assert.match(sourceNote('Claim steward invocation log').textContent, /loading/)
+    let retryButton = sourceNote('Claim steward invocation log').querySelector('button')
+    assert.equal(retryButton.disabled, true)
+    assert.match(retryButton.getAttribute('aria-label'), /unavailable while refresh is active/)
+
+    const hangingTimer = sourceTimers.find(timer => !timer.cleared)
+    await act(async () => { hangingTimer.fire(); await Promise.resolve(); await Promise.resolve() })
+    assert.equal(document.querySelector('main').getAttribute('aria-busy'), 'false')
+    assert.match(sourceNote('Claim steward invocation log').textContent, /unavailable/)
+    assert.equal(sourceNote('Claim steward invocation log').querySelector('button').disabled, false,
+      'a timed-out slice must release its exact retry')
+
+    const refreshStart = requests.length
+    await click(document.querySelector('[aria-label="Refresh all Research Atlas sources"]'))
+    const refreshBatch = requests.slice(refreshStart)
+    assert.equal(refreshBatch.length, 4)
+    await reply(requestFor(refreshBatch, '/atlas?'), { detail: 'offline' }, 503)
+    await reply(requestFor(refreshBatch, '/claims?'), claimsEnvelope('fresh claim'))
+    await reply(requestFor(refreshBatch, '/api/cross-run/curation-log?'), { entries: [] })
+    await reply(requestFor(refreshBatch, '/claim-curation-log?'), { detail: 'offline' }, 503)
+    assert.match(document.body.textContent,
+      /Refresh incomplete; showing stale last-good data; some sources unavailable\./)
+    assert.match(document.body.textContent, /progressive concept/)
+    assert.match(sourceNote('Atlas concept/evidence projection').textContent, /stale/)
+
+    const localStart = requests.length
+    retryButton = sourceNote('Claim steward invocation log').querySelector('button')
+    await click(retryButton)
+    const localBatch = requests.slice(localStart)
+    assert.equal(localBatch.length, 1)
+    assert.match(localBatch[0].url, /\/api\/cross-run\/claim-curation-log\?limit=20$/)
+    retryButton = sourceNote('Claim steward invocation log').querySelector('button')
+    assert.equal(retryButton.disabled, true)
+    assert.match(retryButton.getAttribute('aria-label'), /unavailable while refresh is active/)
+    assert.equal(sourceNote('Atlas concept/evidence projection').querySelector('button').disabled, true,
+      'all retries are disabled while any source request is active')
+    await reply(localBatch[0], { entries: [{ run_id: 'claim-current', outcome: 'empty' }] })
+    assert.match(document.body.textContent, /claim-current/)
+
+    await reply(requestFor(initial, '/claim-curation-log?'), {
+      entries: [{ run_id: 'late-timeout', outcome: 'empty' }],
+    })
+    assert.doesNotMatch(document.body.textContent, /late-timeout/,
+      'a response arriving after its timeout cannot overwrite the successful retry')
+
+    const supersededStart = requests.length
+    await click(sourceNote('Atlas concept/evidence projection').querySelector('button'))
+    const superseded = requests[supersededStart]
+    assert.match(superseded.url, /\/api\/cross-run\/atlas\?limit=24$/)
+    const replacementStart = requests.length
+    await act(async () => {
+      root.render(React.createElement(ResearchAtlas, { key: 'replacement', onBack() {} }))
+      await Promise.resolve(); await Promise.resolve()
+    })
+    assert.equal(superseded.options.signal.aborted, true)
+    const replacement = requests.slice(replacementStart)
+    assert.equal(replacement.length, 4)
+    await reply(requestFor(replacement, '/atlas?'), atlasEnvelope('replacement concept'))
+    await reply(requestFor(replacement, '/claims?'), claimsEnvelope('replacement claim'))
+    await reply(requestFor(replacement, '/api/cross-run/curation-log?'), { entries: [] })
+    await reply(requestFor(replacement, '/claim-curation-log?'), { entries: [] })
+    await reply(superseded, atlasEnvelope('superseded concept'))
+    assert.match(document.body.textContent, /replacement concept/)
+    assert.doesNotMatch(document.body.textContent, /superseded concept/,
+      'an aborted late response from a replaced request cannot commit')
+  } finally {
+    if (root) await act(async () => root.unmount())
+    for (const [key, descriptor] of Object.entries(previousTimers)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+    if (vite) await vite.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+    dom.window.close()
+  }
 })
 
 test('Atlas has a discoverable owner-only route and complete resource states', async () => {
@@ -358,7 +521,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.ok(app.lastIndexOf("route.view === 'research-atlas'") < app.indexOf('<OwnerAuth label={routeLabel}>'),
     'Atlas content must be wrapped by the owner authentication gate')
   assert.match(runList, /aria-label="Open Research Atlas preview"/)
-  assert.match(atlas, /Promise\.allSettled/)
+  assert.match(atlas, /requestedSources\.forEach/)
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run memory yet/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
@@ -368,7 +531,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(atlas, /aria-label="Bounded mixed-evidence claim records"/)
   assert.doesNotMatch(atlas, /aria-label="[^"]*[Cc]ontradictory claims"/)
   assert.match(atlas, /Some portfolio records were ignored\./)
-  assert.match(atlas, /Refresh incomplete; showing stale last-good data\./)
+  assert.match(atlas, /Refresh incomplete; showing stale last-good data/)
   assert.match(css, /\.atlas-source-retained-stale \{[^}]*color: var\(--working-text\)/)
   assert.match(css, /\.atlas-source-failed \{[^}]*color: var\(--fail-text\)/)
   assert.match(atlas, /Concept observations[\s\S]*Concepts seen across runs/)
