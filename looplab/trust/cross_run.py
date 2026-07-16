@@ -9,7 +9,11 @@ from __future__ import annotations
 import math
 from itertools import islice
 
-from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.trust.redact import (
+    is_secret_key_name,
+    redact_persisted_identity,
+    redact_persisted_text,
+)
 
 _OPAQUE_IDENTITY_KEYS = frozenset({
     "action_id", "invocation_id", "claim_uid", "scope", "scope_task", "task_id", "run_id",
@@ -28,6 +32,11 @@ def cross_run_text(value, *, max_chars: int, single_line: bool = True,
     # collapsed. Cross-run fields are prompt/API labels, so enforce the single-line contract after the
     # marker is added as well.
     return " ".join(text.split()) if single_line else text
+
+
+def cross_run_identity_text(value, *, max_chars: int) -> str:
+    """Bound/redact an opaque cross-run identity without changing its Unicode equality key."""
+    return redact_persisted_identity(value, max_chars=max_chars)
 
 
 def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
@@ -52,37 +61,75 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
         remaining[0] = max(0, remaining[0] - len(text))
         return text
 
-    def walk(item, depth: int, *, entropy: bool = True):
+    def safe_identity(item, *, cap: int | None = None) -> str:
+        allowed = min(remaining[0], text_cap if cap is None else max(0, int(cap)))
+        text = cross_run_identity_text(item, max_chars=allowed)
+        remaining[0] = max(0, remaining[0] - len(text))
+        return text
+
+    def walk(item, depth: int, *, entropy: bool = True, identity: bool = False):
         if remaining[0] <= 0:
             return ""
         if item is None or isinstance(item, bool):
             return item
         if isinstance(item, str):
-            return safe_text(item, entropy=entropy)
+            return safe_identity(item) if identity else safe_text(item, entropy=entropy)
         if type(item) is int:
-            return item if -(1 << 63) <= item <= (1 << 63) - 1 else safe_text(item, cap=128)
+            return (item if -(1 << 63) <= item <= (1 << 63) - 1
+                    else safe_identity(item, cap=128) if identity else safe_text(item, cap=128))
         if type(item) is float:
-            return item if math.isfinite(item) else safe_text(item, cap=32)
+            return (item if math.isfinite(item)
+                    else safe_identity(item, cap=32) if identity else safe_text(item, cap=32))
         if depth >= depth_cap:
             return "<depth-limited>"
         if isinstance(item, dict):
             out = {}
             try:
-                for key, child in islice(item.items(), item_cap):
+                candidates = []
+                groups: dict[str, list[tuple[int, object, object, str]]] = {}
+                key_cap = 160
+                candidate_cap = min(item_cap, total_items[0])
+                for index, (key, child) in enumerate(islice(item.items(), candidate_cap)):
+                    safe_key = cross_run_text(
+                        key, max_chars=key_cap, single_line=True, entropy=True)
+                    if not safe_key:
+                        continue
+                    candidate = (index, key, child, safe_key)
+                    candidates.append(candidate)
+                    groups.setdefault(safe_key, []).append(candidate)
+
+                selected: dict[int, tuple[int, object, object, str]] = {}
+                for safe_key, aliases in groups.items():
+                    if len(aliases) == 1:
+                        selected[aliases[0][0]] = aliases[0]
+                        continue
+                    # CODEX AGENT: NFKC is useful for schema/display keys but is not injective.  A
+                    # compatibility-spelled alias must never overwrite an exact governance field such as
+                    # ``decision``. Prefer the unique exact spelling; if none exists, omit the ambiguous
+                    # field entirely instead of making input order authoritative.
+                    exact = [candidate for candidate in aliases
+                             if isinstance(candidate[1], str) and candidate[1] == safe_key]
+                    if len(exact) == 1:
+                        selected[exact[0][0]] = exact[0]
+
+                for index, key, child, safe_key in candidates:
+                    if index not in selected:
+                        continue
                     if total_items[0] <= 0 or remaining[0] <= 0:
                         break
                     total_items[0] -= 1
-                    safe_key = safe_text(key, cap=160)
-                    if not safe_key:
-                        continue
-                    if is_secret_key_name(key):
+                    if len(safe_key) > remaining[0]:
+                        break
+                    remaining[0] -= len(safe_key)
+                    if is_secret_key_name(safe_key):
                         # CODEX AGENT: redact by the original structured key before stringifying the
                         # child.  A nested ``api_key`` must never rely on its value looking secret-like.
                         out[safe_key] = "***"
                         remaining[0] = max(0, remaining[0] - 3)
                     else:
-                        child_entropy = str(key).casefold() not in _OPAQUE_IDENTITY_KEYS
-                        out[safe_key] = walk(child, depth + 1, entropy=child_entropy)
+                        child_identity = safe_key.casefold() in _OPAQUE_IDENTITY_KEYS
+                        out[safe_key] = walk(
+                            child, depth + 1, entropy=not child_identity, identity=child_identity)
                 return out
             except Exception:  # noqa: BLE001 - legacy projections must fail closed, never fail the API
                 return "<mapping unavailable>"
@@ -92,8 +139,8 @@ def sanitize_cross_run_projection(value, *, max_chars: int = 128_000,
                 if total_items[0] <= 0 or remaining[0] <= 0:
                     break
                 total_items[0] -= 1
-                out.append(walk(child, depth + 1, entropy=entropy))
+                out.append(walk(child, depth + 1, entropy=entropy, identity=identity))
             return out
-        return safe_text(item)
+        return safe_identity(item) if identity else safe_text(item)
 
     return walk(value, 0)

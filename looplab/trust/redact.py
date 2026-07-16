@@ -117,6 +117,35 @@ def redact_secrets(text: str, *, entropy: bool = True,
     return text
 
 
+def _persisted_input(value) -> str:
+    """Stringify an untrusted diagnostic without allowing it to perturb its caller."""
+    try:
+        return "" if value is None else str(value)
+    except Exception:  # noqa: BLE001 - diagnostics must not perturb the operation being recorded
+        return "<unavailable>"
+
+
+def _without_controls(text: str, *, keep_newlines: bool) -> str:
+    """Replace terminal/browser control and format codepoints with inert spaces."""
+    return "".join(
+        ch if (ch == "\n" and keep_newlines) or not unicodedata.category(ch).startswith("C")
+        else " "
+        for ch in text
+    )
+
+
+def _bounded_redacted_text(text: str, max_chars: int) -> str:
+    """Bound already-redacted text without making the original secret an oracle."""
+    cap = max(0, int(max_chars))
+    if len(text) <= cap:
+        return text[:cap]
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
+    if len(marker) >= cap:
+        return marker[-cap:] if cap else ""
+    return text[:cap - len(marker)] + marker
+
+
 def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
                           single_line: bool = False) -> str:
     # This always-on sanitizer belongs at durable boundaries, independent of UI settings.
@@ -127,27 +156,32 @@ def redact_persisted_text(value, *, max_chars: int, entropy: bool = True,
     bidi controls must never be retained.  The digest is over the already-redacted canonical text,
     so a truncation marker cannot become an oracle for the original secret.
     """
-    try:
-        text = "" if value is None else str(value)
-    except Exception:  # noqa: BLE001 - diagnostics must not perturb the operation being recorded
-        text = "<unavailable>"
+    text = _persisted_input(value)
     text = unicodedata.normalize("NFKC", text).replace("\r\n", "\n").replace("\r", "\n")
     # Persisted strings may be rendered by terminals and browsers. Keep an ordinary
     # newline only for multi-line prose; replace every other Unicode control/format character before
     # redaction, hashing, or truncation so ANSI/bidi/NUL payloads cannot survive in any representation.
-    text = "".join(
-        ch if (ch == "\n" and not single_line) or not unicodedata.category(ch).startswith("C")
-        else " "
-        for ch in text
-    )
+    text = _without_controls(text, keep_newlines=not single_line)
     text = redact_secrets(text, entropy=entropy)
     if single_line:
         text = " ".join(text.split())
-    cap = max(0, int(max_chars))
-    if len(text) <= cap:
-        return text[:cap]
-    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
-    marker = f"\n[redacted preview: original_chars={len(text)} sha256={digest}]"
-    if len(marker) >= cap:
-        return marker[-cap:] if cap else ""
-    return text[:cap - len(marker)] + marker
+    return _bounded_redacted_text(text, max_chars)
+
+
+def redact_persisted_identity(value, *, max_chars: int) -> str:
+    """Return one bounded/redacted opaque identity without Unicode compatibility folding.
+
+    Run, task and action ids are equality keys, not display prose: NFKC would make distinct values such
+    as ``"Ａ"`` and ``"A"`` alias.  Controls still become spaces and every known credential shape is
+    masked.  If compatibility folding itself reveals a credential spelling that the original codepoints
+    concealed, fail closed by masking the whole identity rather than retaining a confusable secret.
+    """
+    text = _without_controls(_persisted_input(value), keep_newlines=False)
+    normalized = unicodedata.normalize("NFKC", text)
+    if normalized != text and redact_secrets(normalized, entropy=False) != normalized:
+        text = "***"
+    else:
+        text = redact_secrets(text, entropy=False)
+    # Raw newlines were replaced above; only the truncation receipt can introduce one.  Replace that
+    # delimiter without collapsing otherwise-significant whitespace in the opaque identity.
+    return _bounded_redacted_text(text, max_chars).replace("\n", " ")

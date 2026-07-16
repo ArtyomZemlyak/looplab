@@ -22,7 +22,11 @@ from collections.abc import Callable
 from typing import Optional
 
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
-from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
+from looplab.trust.cross_run import (
+    cross_run_identity_text,
+    cross_run_text,
+    sanitize_cross_run_projection,
+)
 
 _MAX_SOURCE_STATEMENT = 4000
 _MAX_SOURCE_ID = 500
@@ -97,7 +101,7 @@ def _claim_text(value, maximum: int = 4000) -> str:
 def _identity_text(value, maximum: int = 500) -> str:
     # Opaque run/task IDs are often hashes. Preserve their identity while still applying every known
     # credential pattern and stripping control/newline payloads.
-    return cross_run_text(value, max_chars=maximum, single_line=True, entropy=False).strip()
+    return cross_run_identity_text(value, max_chars=maximum).strip()
 
 
 def _node_ids(raw) -> list:
@@ -297,9 +301,10 @@ def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
         raise ValueError(f"empty {name}")
     if len(text) > maximum:
         raise ValueError(f"{name} exceeds {maximum} characters")
-    entropy = name not in {"scope", "metric", "action_id", "at"}
+    if name in {"scope", "metric", "action_id", "at", "evidence_digest"}:
+        return cross_run_identity_text(text, max_chars=maximum).strip()
     return cross_run_text(
-        text, max_chars=maximum, single_line=True, entropy=entropy)
+        text, max_chars=maximum, single_line=True, entropy=True)
 
 
 def _decision_payload(row: dict) -> tuple:

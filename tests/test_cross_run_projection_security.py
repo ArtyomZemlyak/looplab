@@ -48,6 +48,43 @@ def test_recursive_projection_masks_nested_keys_strings_and_malformed_objects():
     assert "\n" not in clipped and len(clipped) <= 80
 
 
+@pytest.mark.parametrize("payload", [
+    {"decision": "ratified", "ｄｅｃｉｓｉｏｎ": "rejected"},
+    {"ｄｅｃｉｓｉｏｎ": "rejected", "decision": "ratified"},
+])
+def test_nfkc_key_collision_cannot_override_exact_governance_field(payload):
+    projected = sanitize_cross_run_projection(payload)
+
+    assert projected == {"decision": "ratified"}
+
+
+def test_opaque_run_and_task_ids_keep_unicode_identity_through_claim_projection():
+    from looplab.engine.claims import claim_assessments
+
+    rows = claim_assessments([
+        {**_lesson("dropout improves generalization", run_id="Ａ"), "task_id": "Ａ"},
+        {**_lesson("dropout improves generalization", run_id="A"), "task_id": "A"},
+    ], structured=True)
+
+    assert len(rows) == 2
+    assert {row["scope"] for row in rows} == {"Ａ", "A"}
+    assert {tuple(row["runs"]) for row in rows} == {("Ａ",), ("A",)}
+    assert {ref for row in rows for ref in row["support"]} == {"Ａ:1", "A:1"}
+
+
+def test_opaque_identity_projection_still_masks_secrets_and_controls():
+    projected = sanitize_cross_run_projection({
+        "run_id": "Ａ\x00safe",
+        "task_id": "ｐａｓｓｗｏｒｄ＝tiny-secret",
+        "invocation_id": "Authorization: Bearer tiny-secret",
+    })
+
+    assert projected["run_id"] == "Ａ safe"
+    assert projected["task_id"] == "***"
+    assert projected["invocation_id"] == "Authorization: Bearer ***"
+    assert "tiny-secret" not in json.dumps(projected, ensure_ascii=False)
+
+
 def test_cross_run_tool_redacts_legacy_memory_and_bounds_every_result(tmp_path):
     statement = f"password={_SECRET} improves retrieval"
     run_id = f"https://user:{_SECRET}@provider.invalid/run"
