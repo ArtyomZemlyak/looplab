@@ -15,7 +15,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.core.advisory_payloads import sanitize_report_payload
-from looplab.events.digest import experiments_digest, node_metric
+from looplab.events.digest import experiments_digest, node_metric, node_theme
 from looplab.core.models import NodeStatus, RunState
 
 
@@ -64,7 +64,8 @@ def _report_context(state: RunState) -> str:
         if best.confirmed_mean is not None:
             rob = (f", confirmed {best.confirmed_mean:.4g} ±{(best.confirmed_std or 0.0):.2g} "
                    f"over {best.confirmed_seeds or 0} seed(s)")
-        theme = f", {best.idea.theme}" if best.idea.theme else ""
+        theme_label = node_theme(best)   # derived (legacy theme, else first concept's axis) — not blank on concept runs
+        theme = f", {theme_label}" if theme_label else ""
         lines.append(f"Champion: #{best.id} metric={_g(m)} ({best.operator}{theme}){rob}; "
                      f"params={best.idea.params}")
         feas = sorted(state.feasible_nodes(), key=lambda n: n.id)

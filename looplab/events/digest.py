@@ -178,7 +178,10 @@ def _node_line(n) -> str:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
         outcome = f"metric={fmt_num(node_metric(n))}"
-    theme = f" {{{n.idea.theme}}}" if getattr(n.idea, "theme", None) else ""
+    # Derived theme (legacy idea.theme, else the first concept's coarse axis) so the working-set line is
+    # not blank on concept-authored runs — the same vocabulary theme_rollup/coverage advertise.
+    theme_label = node_theme(n)
+    theme = f" {{{theme_label}}}" if theme_label else ""
     swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""
     # Signal-delivery (§1): surface the crash-triage verdict on a failed node so the "avoid
     # repeating" set carries the agent's judgment of WHY it failed, not just the error kind — the
