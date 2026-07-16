@@ -2454,6 +2454,106 @@ def test_scope_report_rejects_external_report_directory_symlink(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+@pytest.mark.parametrize("layout", ["canonical", "legacy"])
+def test_scope_report_rejects_oversized_record_before_provider(
+        tmp_path, monkeypatch, layout):
+    """A hostile persisted record is bounded before JSON parsing or paid work."""
+    from looplab.serve.routers.reports import (
+        _SCOPE_REPORT_RECORD_MAX_BYTES,
+        _legacy_scope_report_path,
+        _prior_learnings_index,
+        _scope_report_path,
+    )
+
+    task_id = "oversized-record"
+    _seed_scope_run(tmp_path, "owner-run", task_id)
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    report_path = (
+        _scope_report_path(reports_dir, "task", task_id)
+        if layout == "canonical"
+        else _legacy_scope_report_path(reports_dir, "task", task_id)
+    )
+    hostile = b"{" + (b"x" * _SCOPE_REPORT_RECORD_MAX_BYTES)
+    report_path.write_bytes(hostile)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+
+    assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
+    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert provider_calls == 0
+    assert report_path.read_bytes() == hostile
+    assert _prior_learnings_index(reports_dir) == ""
+
+
+@pytest.mark.parametrize("malformed", ["huge_integer", "deep_nesting"])
+def test_scope_report_bounded_json_parse_failures_are_storage_conflicts(
+        tmp_path, monkeypatch, malformed):
+    """Non-JSONDecode parser limits fail closed instead of escaping as HTTP 500."""
+    from looplab.serve.routers.reports import _scope_report_path
+
+    task_id = f"malformed-{malformed}"
+    _seed_scope_run(tmp_path, "owner-run", task_id)
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    report_path = _scope_report_path(reports_dir, "task", task_id)
+    if malformed == "huge_integer":
+        raw = b'{"value":' + (b"9" * 5_000) + b"}"
+    else:
+        raw = (b'{"value":' * 1_100) + b"0" + (b"}" * 1_100)
+    report_path.write_bytes(raw)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+
+    assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
+    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert provider_calls == 0
+    assert report_path.read_bytes() == raw
+
+
+def test_scope_report_oversized_publication_preserves_last_good(
+        tmp_path, monkeypatch):
+    """The encoded record cap is checked before replacing a valid stored report."""
+    from looplab.serve.routers.reports import _SCOPE_REPORT_RECORD_MAX_BYTES
+
+    task_id = "bounded-publication"
+    _seed_scope_run(tmp_path, "owner-run", task_id)
+    client = TestClient(make_app(tmp_path))
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    first = client.post(f"/api/scope-report/task/{task_id}/generate")
+    assert first.status_code == 200 and first.json()["ok"] is True
+    report_path = next((tmp_path / "reports").glob("*.json"))
+    last_good = report_path.read_bytes()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report",
+        lambda *_args, **_kwargs: {
+            "headline": "x" * (_SCOPE_REPORT_RECORD_MAX_BYTES + 1),
+        },
+    )
+    refused = client.post(f"/api/scope-report/task/{task_id}/generate")
+
+    assert refused.status_code == 200
+    assert refused.json()["ok"] is False
+    assert refused.json()["code"] == "scope_report_storage_conflict"
+    assert report_path.read_bytes() == last_good
+
+
 def test_scope_report_revalidates_store_after_slow_generation(tmp_path, monkeypatch):
     """A store swapped during paid synthesis is rejected before external publication."""
     root = tmp_path / "run-root"

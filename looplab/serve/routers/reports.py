@@ -58,6 +58,7 @@ _PRIOR_REPORT_MAX_FILES = 256
 _PRIOR_REPORT_MAX_RECORDS = 20
 _PRIOR_REPORT_MAX_NEXT_DIRECTIONS = 2
 _PRIOR_REPORT_MAX_BYTES = 8 * 1024
+_SCOPE_REPORT_RECORD_MAX_BYTES = 512 * 1024
 
 
 class _ScopeReportStorageConflict(RuntimeError):
@@ -174,6 +175,72 @@ def _legacy_scope_report_path(reports_dir: Path, scope_type: str, scope_id: str)
     return _confined_report_path(reports_dir, safe + ".json")
 
 
+def _stat_identity(entry: os.stat_result) -> tuple[int, ...]:
+    return (
+        int(entry.st_mode), int(entry.st_dev), int(entry.st_ino),
+        int(entry.st_mtime_ns), int(entry.st_size),
+        int(getattr(entry, "st_file_attributes", 0) or 0),
+    )
+
+
+def _read_bounded_report_bytes(path: Path) -> bytes | None:
+    """Read one immutable regular-file snapshot without following a swapped link."""
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _ScopeReportStorageConflict("scope report could not be inspected") from exc
+    if (not stat.S_ISREG(before.st_mode) or _is_link_or_reparse(before)
+            or before.st_size > _SCOPE_REPORT_RECORD_MAX_BYTES):
+        raise _ScopeReportStorageConflict("scope report is not a bounded regular file")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (not stat.S_ISREG(opened.st_mode) or _is_link_or_reparse(opened)
+                    or opened.st_size > _SCOPE_REPORT_RECORD_MAX_BYTES
+                    or _stat_identity(opened) != _stat_identity(before)):
+                raise _ScopeReportStorageConflict("scope report changed before it was read")
+            chunks: list[bytes] = []
+            remaining = _SCOPE_REPORT_RECORD_MAX_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(64 * 1024, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+        finally:
+            os.close(descriptor)
+        after = path.lstat()
+    except _ScopeReportStorageConflict:
+        raise
+    except (FileNotFoundError, OSError) as exc:
+        raise _ScopeReportStorageConflict("scope report could not be read safely") from exc
+    raw = b"".join(chunks)
+    if (not stat.S_ISREG(after.st_mode) or _is_link_or_reparse(after)
+            or len(raw) != opened.st_size
+            or len(raw) > _SCOPE_REPORT_RECORD_MAX_BYTES
+            or _stat_identity(after) != _stat_identity(opened)):
+        raise _ScopeReportStorageConflict("scope report changed or exceeded its byte limit")
+    return raw
+
+
+def _serialize_scope_record(record: dict[str, Any]) -> str:
+    """Serialize only records that can be read back inside the same storage budget."""
+    try:
+        encoded = json.dumps(record, indent=2)
+    except (TypeError, ValueError) as exc:
+        raise _ScopeReportStorageConflict("scope report is not serializable") from exc
+    # CODEX AGENT: this is the persisted-report resource boundary. Check encoded bytes, not Python
+    # characters, before atomic replacement so a model result can never create an unreadable record.
+    if len(encoded.encode("utf-8")) > _SCOPE_REPORT_RECORD_MAX_BYTES:
+        raise _ScopeReportStorageConflict("scope report exceeds its persisted byte limit")
+    return encoded
+
+
 def _valid_scope_sig_row(row: object) -> bool:
     """Accept legacy second-resolution rows for migration and the reset-safe v2 shape."""
     if not isinstance(row, list):
@@ -263,14 +330,15 @@ def _record_matches_scope(rec: object, scope_type: str, scope_id: str) -> bool:
 def _read_json_record(path: Path) -> dict[str, Any] | None:
     """Read one already-confined regular file; missing is distinct from corrupt."""
     try:
-        raw = path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return None
-    except (OSError, UnicodeError) as exc:
+        encoded = _read_bounded_report_bytes(path)
+        if encoded is None:
+            return None
+        raw = encoded.decode("utf-8")
+    except UnicodeError as exc:
         raise _ScopeReportStorageConflict("scope report could not be read") from exc
     try:
         rec = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise _ScopeReportStorageConflict("scope report is not valid JSON") from exc
     if not isinstance(rec, dict):
         raise _ScopeReportStorageConflict("scope report is not a JSON object")
@@ -315,7 +383,7 @@ def _read_or_migrate_scope_record(
     current = _read_scope_record(canonical, scope_type, scope_id)
     if current is not None:
         return current
-    atomic_write_text(canonical, json.dumps(migrated, indent=2))
+    atomic_write_text(canonical, _serialize_scope_record(migrated))
     canonical = _scope_report_path(reports_dir, scope_type, scope_id)
     return _read_scope_record(canonical, scope_type, scope_id)
 
@@ -846,7 +914,7 @@ def build_router(srv) -> APIRouter:
                     _validated_reports_dir(_reports_dir, create=True)
                     _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
                     dst = _scope_report_path(_reports_dir, scope_type, scope_id)
-                    atomic_write_text(dst, json.dumps(rec, indent=2))
+                    atomic_write_text(dst, _serialize_scope_record(rec))
                     dst = _scope_report_path(_reports_dir, scope_type, scope_id)
                     _read_scope_record(dst, scope_type, scope_id)
             except (OSError, _ScopeReportStorageConflict):
