@@ -41,6 +41,15 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const removeSelected = (key) => setSelected(s => s.filter(x => x !== key))
   const clearSelection = () => setSelected([])
 
+  // REVIEW(2026-07-16): this null-render can strand the DAG in a fully-dimmed state with no way out.
+  // Sequence: a selection is active and highlights some nodes; a live tick empties node_concepts
+  // (e.g. the only tagged node is propose-reset). The highlight memo above recomputes to an EMPTY
+  // Set, the [sig] effect pushes it to the Dag (every node dims) — and THEN this line removes the
+  // whole bar, including the selected pills and the "clear" button. onHighlight(null) fires only on
+  // UNMOUNT of the component, not on a null render, so the dim persists with zero visible controls
+  // until the user switches views or a new tag arrives. When hasConcepts flips false with a
+  // non-empty `selected`, the component must first clear the selection/highlight (onHighlight(null))
+  // before hiding itself.
   if (!hasConcepts) return null
   const leaf = (id) => String(id).split('/').pop()
   // Display a selection key: strip the `=` exact marker for the label, keep a hint that it's level-exact.

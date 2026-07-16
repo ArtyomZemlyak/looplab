@@ -59,6 +59,13 @@ export function breadcrumb(path = '') {
 // unambiguous. Empty selection matches everything (no dimming).
 export function conceptMatches(nodeConceptIds, selected, rename = {}) {
   if (!selected || !selected.length) return true
+  // REVIEW(2026-07-16): only the NODE side is canonicalized — `selected` ids (and the drilled `path`
+  // in chipsAtPath) are compared verbatim. A consolidation rename landing AFTER selection strands the
+  // filter: on the next SSE tick every node tag canonicalizes to the NEW id, nothing matches the
+  // stale selected id, matchingNodeIds returns an empty Set — the whole DAG dims while the selected
+  // pill shows a retired id, and a drilled breadcrumb flips to "No concepts at this level". Selected
+  // ids and the breadcrumb path must be passed through canonicalId(s, rename) too (preserving the
+  // `=` exact-marker), so a live rename retargets the filter instead of emptying it.
   for (const raw of (nodeConceptIds || [])) {
     const c = canonicalId(raw, rename)
     if (!c) continue
