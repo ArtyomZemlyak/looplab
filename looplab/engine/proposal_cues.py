@@ -8,7 +8,8 @@ orchestrator.py and foresight.py) and asserts every hint attr set here is in
 from __future__ import annotations
 
 from looplab.core.models import NodeStatus, RunState
-from looplab.trust.cross_run import cross_run_text, sanitize_cross_run_projection
+from looplab.trust.cross_run import (cross_run_text, same_live_direction,
+                                     sanitize_cross_run_projection, valid_live_direction)
 
 # PART IV Phase 2b: the streak length at which the capability-expansion directive treats the run as
 # action-space LOCKED-IN. Matches `search/lock_in.py::lock_in_signal`'s default `streak_threshold` (the
@@ -104,6 +105,12 @@ class ProposalCuesMixin:
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
             self._cross_run_advisory_receipt = {}
             return ""
+        current_direction = getattr(state, "direction", None)
+        # CODEX AGENT: this text enters the Researcher prompt. An invalid current direction cannot
+        # safely interpret any historical outcome, even when a legacy row has the same task id.
+        if not valid_live_direction(current_direction):
+            self._cross_run_advisory_receipt = {}
+            return ""
         try:
             import hashlib
             import json
@@ -118,8 +125,9 @@ class ProposalCuesMixin:
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
             capsules = ConceptCapsuleStore(cp).all() if cp.exists() else []
-            # Freeze one task-scoped view for this prompt.  Exact task id is authoritative; related-task
-            # transfer uses the same fingerprint threshold as lesson priors and never includes this run.
+            # Freeze one task-scoped view for this prompt. Exact task id is authoritative only after
+            # direction provenance matches; related-task transfer uses the same fingerprint threshold as
+            # lesson priors and never includes this run.
             from looplab.engine.memory import fingerprint_similarity
             rid, tid = str(state.run_id or ""), str(state.task_id or "")
             fp_fn = getattr(self, "_task_fingerprint", None)
@@ -131,13 +139,14 @@ class ProposalCuesMixin:
                     return False
                 # Direction is a hard semantic boundary even for an exact task id: support for a
                 # minimisation objective can mean the opposite thing when that id is later reused for
-                # maximisation.  Legacy rows without a direction remain compatible.
-                row_dir = str(row.get("direction") or "")
-                current_dir = str(state.direction or "min")
-                if row_dir in ("min", "max") and row_dir != current_dir:
+                # maximisation. Legacy/garbled rows remain available to audit views, not live prompts.
+                if not same_live_direction(current_direction, row.get("direction")):
                     return False
+                # This method always builds live agent context. With neither a stable task id nor a
+                # bounded task fingerprint there is no defensible scope, so a same-polarity portfolio
+                # row still fails closed. Portfolio-wide inspection belongs to explicit audit tools.
                 if not tid and not fp:
-                    return True                 # compatibility for an explicitly unbound/audit caller
+                    return False
                 if tid and str(row.get("task_id") or "") == tid:
                     return True
                 stored = row.get("fingerprint")
@@ -150,9 +159,8 @@ class ProposalCuesMixin:
             capsules = [r for r in capsules if _scoped(r)]
             research = [r for r in load_research_claims(base)
                         if (not rid or str(r.get("run_id") or "") != rid)
-                        and (not tid or str(r.get("task_id") or "") == tid)
-                        and (str(r.get("direction") or "") not in ("min", "max")
-                             or str(r.get("direction") or "") == str(state.direction or "min"))]
+                        and bool(tid) and str(r.get("task_id") or "") == tid
+                        and same_live_direction(current_direction, r.get("direction"))]
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
             overview = (portfolio_concept_overview(capsules,

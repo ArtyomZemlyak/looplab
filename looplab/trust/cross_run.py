@@ -21,6 +21,24 @@ _OPAQUE_IDENTITY_KEYS = frozenset({
     "retrieval_digest", "render_digest", "input_digest", "support", "oppose", "unverified",
     "runs", "scopes", "at",
 })
+_LIVE_DIRECTIONS = frozenset({"min", "max"})
+
+
+def valid_live_direction(value) -> bool:
+    """Whether ``value`` is an exact supported objective direction for agent-facing reuse."""
+    return isinstance(value, str) and value in _LIVE_DIRECTIONS
+
+
+def same_live_direction(current, persisted) -> bool:
+    """Whether persisted evidence can influence a live run with ``current`` direction.
+
+    Audit projections may deliberately show legacy rows without direction provenance, but an
+    agent-facing prompt/tool must know that the objective polarity is identical before reusing them.
+    """
+    # CODEX AGENT: direction is part of the semantic identity of live guidance. Missing, coerced or
+    # garbled provenance fails closed; an exact task id must never manufacture polarity compatibility.
+    return (valid_live_direction(current) and isinstance(persisted, str)
+            and persisted == current)
 
 
 def cross_run_text(value, *, max_chars: int, single_line: bool = True,
