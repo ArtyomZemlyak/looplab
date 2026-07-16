@@ -289,6 +289,17 @@ class NoveltyGateMixin:
         identity, complete = candidate_identity
         if not complete or not identity:
             return None
+        # REVIEW(2026-07-16): two follow-ups on this scan. (1) EFFICIENCY: prior identities are
+        # recomputed from scratch on EVERY level-4/5 proposal — `_canonical_idea_identity` walks up to
+        # 16K chars through per-char unicodedata calls, × all idea-carrying nodes, and node ideas are
+        # immutable once created; memoize by `hash(self._idea_text(nd.idea))` exactly like `_idea_vec`
+        # already does two methods up (same staleness-safe text-keyed pattern), turning the quadratic
+        # rescan into one pass per new node. (2) SILENT CLIFF: a SINGLE prior whose rationale+hypothesis
+        # exceeds _IDEA_IDENTITY_MAX_SOURCE_CHARS makes this return None on every future proposal —
+        # the level-4/5 short-circuit permanently and invisibly disables itself for the rest of the run
+        # (rationale is model-supplied and unbounded; only the parse-fallback truncates to 500). Fail-
+        # closed is the right direction, but permanent-off deserves a one-time audit event or log line
+        # so a run where this tripped is distinguishable from one where grades simply deferred.
         for nd in state.nodes.values():
             if getattr(nd, "idea", None) is None:
                 continue
