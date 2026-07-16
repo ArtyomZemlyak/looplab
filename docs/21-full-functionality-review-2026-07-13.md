@@ -1274,8 +1274,9 @@ not. The incoming 17 commits contain no `ui/` file, so the browser-observed visu
 ### Final UI/UX concept verdict
 
 The global UI decision remains and is stronger after the second review: do **not** put portfolio concepts into
-the existing Map or the already-dense run lineage. Use one per-run **Research** container with coordinated
-Overview / Lineage / Directions / Crosswalk / Landscape / Intersections / Journey / Focus lenses, and a
+the existing Map or the already-dense run lineage. Use one per-run **Research** container with one summary strip
+plus three coordinated primary Lineage / Directions / Concepts lenses (Crosswalk under Directions;
+Landscape / Intersections / Journey / Focused Map under Concepts), and a
 separate global matrix-first **Research Atlas**. A topology view is secondary, concept-only and bounded to one
 selected concept; its complete typed relationship table carries overflow. Axis selection is explicit
 `exact|descendants(release)`, inspect and re-root are separate actions, and compare changes only concept or
@@ -1588,15 +1589,21 @@ complete history; those stay product gates in doc 17 §22.9.
 ### Frontend, static delivery and UI-truth closures
 
 - **Atlas copy is evidence-shaped.** “Coverage,” “thin coverage,” “contradictions” and “audit/governance” were
-  replaced by **Concept observations**, **Observed in one run**, **Mixed-evidence claim records** and **Steward
-  invocation log / Recent proposals + outcomes**. Claim badges now say support-only/opposition-only/mixed/
-  insufficient evidence; `mixed` is derived only when sanitized support and opposition totals are both non-zero,
-  while operator maturity remains a separate dimension. Four section-local source notes
-  explicitly state the live bounded projection and the missing CoverageFrame, frozen snapshot, proposition
-  verdict or current-governance guarantee.
-- **Atlas resource states remain defensive.** Four independent sources are abortable/no-store; partial refresh
-  advances successful slices and preserves last-good failed slices, total refresh failure marks the retained
-  view stale, and malformed/omitted data is disclosed. This is not cross-source snapshot consistency.
+  replaced by **Concept observations**, **Observed in one run**, **Mixed-evidence claim records** and one merged
+  **Recent proposals + outcomes** panel. The P0 target in doc 18 §35.3 splits its Concept/Claim response states;
+  that split is not shipped. Claim badges now say support-only/opposition-only/mixed/
+  insufficient evidence; `mixed` requires sanitized support plus at least one bounded counter-evidence channel
+  (opposing refs/counts, structured contradictory assertions or schema-governed mixed state), so its opposition
+  total may be zero. Operator maturity remains a separate dimension. Five rendered source watermarks over four
+  fetches state loaded-at and a generic `revision` marker plus missing CoverageFrame, frozen snapshot,
+  proposition verdict or current-governance guarantee; they do not create independent source receipts.
+- **Atlas resource states remain defensive.** Four independently fetched response slices are abortable/no-store;
+  their underlying ledgers overlap. The generic marker means governance-overlay revision for Atlas/Claims and
+  maximum returned-entry revision for curation; neither is a page/response/corpus receipt. Partial refresh
+  advances successful slices and preserves last-good failed slices, while total refresh failure marks the
+  retained view stale. Envelope/protocol failures and server-reported `runs_omitted` are disclosed; row-level
+  malformed/filter/access reasons remain unknown until the P0 resource receipt in doc 18 §35.3. This is not
+  cross-source snapshot consistency.
 - **Current run UI remains legible at scale.** The large-DAG 80/48/24 overview/camera policy, theme-filtered
   collapsed summaries, `matched / total` disclosure, true filtered-zero state, touch-sized Direction chips,
   responsive long IDs and route encoding all survive the independent pass. Settings invalid numeric fields

@@ -4327,7 +4327,10 @@ they did not satisfy the scientific/product gates in §21.20.
 - The owner UI now uses the truthful vocabulary and surface separation in
   [doc 18 §35](18-ui-ux-review-2026-07-11.md). The Atlas preview describes concept observations, mixed evidence
   and steward invocation outcomes instead of claiming complete coverage, verdicts or governance state. It
-  remains four independent live bounded sources, not an atomic corpus snapshot.
+  remains four independently fetched, overlapping live response slices, not four corroborating sources or an
+  atomic corpus snapshot. The UI's generic `revision` marker hides source-dependent semantics: Atlas/Claims
+  values are governance-overlay revisions, while curation shows the maximum returned-entry revision; none is a
+  corpus/data or completeness receipt.
 - Frontend delivery is source/dependency-freshness checked. A normal launch rebuilds a missing, unstamped or
   stale default bundle; a failed requested refresh cannot silently serve the previous bundle. Only an explicit
   `--no-build` opts into that risk. SSE remains uncompressed, ordinary eligible responses may use gzip, HTML
