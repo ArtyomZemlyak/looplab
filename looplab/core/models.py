@@ -99,7 +99,17 @@ class Idea(BaseModel):
     # experiments in one search tree (e.g. "loss-fn", "architecture", "regularization"). Optional
     # and audit-only — never affects search/selection; the UI groups nodes by it. Flows through the
     # event log automatically (idea.model_dump → node_created → Idea(**d["idea"]) in replay.fold).
+    # DEPRECATED by `concepts` (below) — the multi-label concept graph supersedes the single theme
+    # slug; kept only until every theme consumer is migrated off it. No longer authored.
     theme: Optional[str] = None
+    # PART IV concepts: the SET of research concepts this experiment touches, as `axis/slug` ids
+    # (e.g. "loss/contrastive", "architecture/moe", "regularization/r-drop"). The Researcher AUTHORS
+    # these (many-to-many — a node usually touches several; propose a new id when none fits). This is
+    # the grouping substrate that replaces the flat `theme` slug. Audit-only for search/selection.
+    # Folded into RunState.node_concepts at node_created (replay.fold) so concept read-models see them
+    # from the first node — no tagging cadence required; a later cadence may consolidate/enrich them.
+    # Flows through the event log automatically (idea.model_dump → node_created → Idea(**d["idea"])).
+    concepts: list[str] = Field(default_factory=list)
     # Intra-node sweep: instead of a single point in `params`, the Researcher may attach a discrete
     # search GRID here {name: [values...]}. When non-empty, the Developer renders code that runs
     # every grid point in ONE process (shared data load / warm GPU) and reports all results back as
