@@ -59,10 +59,8 @@ export function isValidAtlasSourceEnvelope(key, value) {
   return false
 }
 
-// Four Atlas endpoints refresh independently. Preserve source-local provenance so a successful claims
-// refresh can never make retained concept/log slices look current. `successful` contains only the
-// slices fulfilled by this attempt: omitted last-good slices become retained-stale and never-loaded
-// slices remain explicitly failed.
+// Four Atlas endpoints settle independently. Attempted successes become current; attempted failures
+// retain last-good data as stale (or stay failed when none exists); unattempted slices stay unchanged.
 export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loadedAt,
   attemptedKeys = ATLAS_SOURCE_KEYS) {
   const previous = record(previousValue)
@@ -73,8 +71,6 @@ export function reconcileAtlasSourceStatuses(previousValue, successfulValue, loa
   const failed = { state: 'failed', loadedAt: '', revision: '' }
   for (const key of ATLAS_SOURCE_KEYS) {
     const prior = record(previous[key])
-    // # CODEX AGENT: a source-local retry says nothing about the other ledgers. Their provenance
-    // must survive byte-for-byte instead of being silently promoted to current or demoted to stale.
     if (!attempted.includes(key)) {
       statuses[key] = prior.state ? prior : failed
       continue

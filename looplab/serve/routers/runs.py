@@ -182,6 +182,32 @@ def build_router(srv) -> APIRouter:
     def get_state(run_id: str, seq: Optional[int] = None):
         return _state_payload(_run_dir(run_id), seq)
 
+    @router.get("/api/runs/{run_id}/concepts")
+    def get_concepts(run_id: str, lens: str = "is_a", seq: Optional[int] = None):
+        """Concept-view read-model: the per-LENS hierarchy (project_hierarchy for is_a from paths,
+        project_lens for a typed-edge lens) + per-concept metrics/Δ + the shipped lens pack. PURE over
+        the folded run — recomputed each call (the projection is never cached: caching a materialized
+        tree would smuggle a fixed catalog back in). Raw tags are collapsed through the recorded
+        consolidation rename map so ids are canonical and align with the concept_edges."""
+        from looplab.search.concept_graph import (concept_metrics, concept_touch_counts,
+                                                   default_lenses, graph_from_node_concepts,
+                                                   project_hierarchy, project_lens)
+        rd = _run_dir(run_id)
+        st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
+        rename = getattr(st, "concept_consolidation", None) or {}
+        raw_nc = getattr(st, "node_concepts", None) or {}
+        # canonicalize the per-node concept sets so tree / metrics / touch all key on the same ids
+        nc = {nid: [rename.get(c, c) for c in (ids or [])] for nid, ids in raw_nc.items()}
+        graph, tags = graph_from_node_concepts(nc)
+        cids = sorted({c for ids in nc.values() for c in ids})
+        edges = getattr(st, "concept_edges", None) or {}
+        touch = concept_touch_counts(nc)
+        tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
+                else project_lens(cids, edges, lens, touch=touch))
+        return {"lens": tree.get("lens", lens), "lenses": default_lenses(), "tree": tree,
+                "metrics": concept_metrics(st, graph, tags), "touch": touch,
+                "edges_present": bool(edges)}
+
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
         if expected is None:
             raise HTTPException(400, {
