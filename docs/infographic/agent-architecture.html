@@ -70,7 +70,7 @@ const DY=300;
 // PROPOSE — the read funnel (reads flow UP into propose)
 stack(40,330,DY,[
  {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","causal ‘why the winner won’ (≤700c)"]},
- {id:"f_less",h:108,t:"② Cross-run evidence",tag:"off",c:C.mem,sub:["lessons · concept capsules · v2 claims","direction + exact-task / strict goal for lessons/capsules","v2 D8 exact-task only · no goal fingerprint","facets metadata only · no visibility/order effect","rejected claims never steer prompts"]},
+ {id:"f_less",h:108,t:"② Cross-run evidence",tag:"mixed defaults",c:C.mem,sub:["reflection lessons/meta-notes on with memory","concept/advisory/structured-claim reads opt-in","direction + exact-task / strict goal for lessons/capsules","v2 D8 exact-task only · no goal fingerprint","rejected claims never steer prompts"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
@@ -121,7 +121,7 @@ stack(1760,300,DY,[
 ]);
 // CROSS-CUTTING (right column)
 stack(2100,360,DY,[
- {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge/Literature/Web","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
+ {id:"deepres",h:132,t:"Deep Researcher",tag:"every 3",c:C.dr,sub:["tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","VERIFY claims vs cited evidence","each direction → open hypothesis"]},
  {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: themes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agentic tool-loop (default: agent — reads run·data·siblings·KB·memory)","agent_control allow-list per role"]},
  {id:"concept",h:120,t:"Concept graph (Part IV)",tag:"off",c:C.s,sub:["tagger over task skeleton (heuristic | agentic) — pure/replayable · audit-only, never selection","concept_pivot: 2a coverage snapshot at strat cadence → uncovered-region explore hint","graded_novelty: pre-gate flags L4 same-dir-new-impl / L5 wrongly-abandoned (needs skeleton)","capability_expansion: lock-in forced-jump read off the 2a snapshot (needs concept_pivot)"]},
 ]);

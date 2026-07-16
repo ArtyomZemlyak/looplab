@@ -7,8 +7,8 @@ hide:
 
 Two views of the **whole engine**: a **high-level one-pager** for the mental model, and the
 **full process diagram** — every stage, agent, memory tier and trust gate with the exact numbers,
-cadences and thresholds that ship **enabled by default**. Both are kept in sync with the code (the
-diagram's numbers are verified against `looplab/`).
+cadences, thresholds and their default/opt-in/off status. Both are kept in sync with the code (the
+diagram's numbers and defaults are verified against `looplab/`).
 
 ## The one-pager
 

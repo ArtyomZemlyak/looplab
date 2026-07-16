@@ -15,7 +15,7 @@
 | **Current Part-IV reviewed range** | Current `master`; final reconciliation in §22.9, doc 18 §35 and doc 21 Round 24. Historical core counts remain pinned to the commits named beside them. |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
-| **Current implementation disposition** | §6.3 and §14.2 for the core; §22.8 for Part-IV/V cross-run/UI status |
+| **Current implementation disposition** | §6.3 and §14.2 for the core; §22.9 for Part-IV/V cross-run/UI status |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
@@ -3961,7 +3961,7 @@ underneath — it never forks a second copy of a thing that exists.** Verified m
 
 | CR §21.20 record / mechanism | Shipped Part IV seam (verified) | Verdict |
 |---|---|---|
-| `ExecutionAttempt` / `Measurement` | `events.jsonl` `node_created`/`node_evaluated` + `confirmed_mean/std/seeds`; the engine is the sole event writer | **EXTEND as a projection** — read events, never a second write path (engine invariant #1) |
+| `ExecutionAttempt` / `Measurement` | `events.jsonl` `node_created`/`node_evaluated` + `confirmed_mean/std/seeds`; the engine owns domain-event production, while engine and server control appends share the serialized `EventStore` path | **EXTEND as a projection** — read events, never create a second domain write path (engine invariant #1) |
 | CR "evidence digest" / supersede-on-re-eval | `lessons_reconcile.py` per-node **OUTCOME signature** + change-gate hash + reconcile-on-move; `events/digest.py` | **EXTEND** the proven signature with claim-relevant fields; reuse the change-gate |
 | re-eval / generation identity | **M1** `node_reset`→new generation + tag-invalidation (already shipped) | **REUSE** — M1 already defines "reopened run = new attempt identity"; align, don't redefine |
 | `ScopeProfile` facets | `task_fingerprint` (`memory.py`) seed + `idea.theme` slug (`roles.py`) | **EXTEND** fingerprint → structured facets; the universal-tokenizer fix (Step 0) lands here first |

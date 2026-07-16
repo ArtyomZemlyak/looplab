@@ -1513,7 +1513,7 @@ Atlas and bounded focused concept topology remain gated on the underlying truth/
   cross-run stores retain explicit sidecar authority; one live engine is fenced while server control appends
   use the serialized event-store path.
 - Historical architecture/build/review documents retain their evidence but carry current-authority banners.
-  Doc 17 §22.8 is the release/gate reconciliation; doc 18 §34 is the UI concept and shipped-preview checkpoint;
+  Doc 17 §22.9 is the release/gate reconciliation; doc 18 §34 is the UI concept and shipped-preview checkpoint;
   this Round 23B is the implementation/test chronology. User guides distinguish local CLI overlays from the
   stronger typed HTTP governance contract and distinguish the bounded preview from the full Atlas.
 - Process diagrams no longer claim “every projection is a pure event fold” or “engine sole writer,” and steward
@@ -1590,7 +1590,8 @@ complete history; those stay product gates in doc 17 §22.9.
 - **Atlas copy is evidence-shaped.** “Coverage,” “thin coverage,” “contradictions” and “audit/governance” were
   replaced by **Concept observations**, **Observed in one run**, **Mixed-evidence claim records** and **Steward
   invocation log / Recent proposals + outcomes**. Claim badges now say support-only/opposition-only/mixed/
-  insufficient evidence, while operator maturity remains a separate dimension. Four section-local source notes
+  insufficient evidence; `mixed` is derived only when sanitized support and opposition totals are both non-zero,
+  while operator maturity remains a separate dimension. Four section-local source notes
   explicitly state the live bounded projection and the missing CoverageFrame, frozen snapshot, proposition
   verdict or current-governance guarantee.
 - **Atlas resource states remain defensive.** Four independent sources are abortable/no-store; partial refresh
