@@ -243,6 +243,13 @@ function ExpNode({ data }) {
     {/* View 2: on-node concept tags, drawn only at the full-card zoom (glyph LOD skips them). Absolutely
         positioned just below the fixed-height card so it never perturbs the layout geometry (NODE_H);
         capped at two leaves + an overflow count, the full set is in the card title + the a11y label. */}
+    {/* REVIEW(2026-07-16): the `title` tooltips below are unreachable — .node-concepts is
+        pointer-events:none (styles.css), which suppresses hover on every child, so the "+N" tag's
+        title (the ONLY sighted-mouse path to the full concept list) can never show; aria-hidden
+        removes it from AT too. The comment above claims "the full set is in the card title", but the
+        card's title attribute carries only operator+rationale — the fallback was never wired. Either
+        append the joined conceptTags to the card `title`, or drop pointer-events:none on .nc-tag.more
+        so its tooltip works; as shipped, anything beyond two concepts is invisible from the graph. */}
     {conceptTags.length > 0 && <div className="node-concepts" aria-hidden="true">
       {conceptTags.slice(0, 2).map(c => <span key={c} className="nc-tag" title={c}>{c.split('/').pop()}</span>)}
       {conceptTags.length > 2 &&
