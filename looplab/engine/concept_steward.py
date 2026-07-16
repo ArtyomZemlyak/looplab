@@ -10,7 +10,8 @@ Architectural invariant (why this is a steward, not a fold-time mutation): the L
 Proposals are surfaced for operator review and are never batch-applied by this steward. The operator must
 translate the selected, exact proposal into a typed `concept-merge` / `concept-split` action or an owner HTTP
 governance request. This prevents a second paid LLM run from silently changing the reviewed batch. Proposal
-generation degrades to an empty curation on no client / any failure and never blocks its caller.
+generation is best-effort by default; durable callers opt into explicit failures so an outage is never
+misreported as an empty recommendation.
 """
 from __future__ import annotations
 
@@ -20,12 +21,15 @@ _MAX_PROPOSALS = 12          # a bounded curation per pass — the steward sugge
 _MAX_GRAPH = 200             # cap the concepts shown to the model (most-explored first) — bounded prompt
 
 
-def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call",
-                             max_proposals: int = _MAX_PROPOSALS) -> dict:
+def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call_once",
+                             max_proposals: int = _MAX_PROPOSALS,
+                             raise_on_failure: bool = False) -> dict:
     """Ask an LLM to review the portfolio concept graph (`overview` from `portfolio_concept_overview`) and
     PROPOSE a taxonomy curation. Returns `{"merges", "splits", "purges"}` of VALIDATED proposals (each
     references only concepts present in the overview; self/no-op proposals dropped — cycles are rejected
-    later at record time). Advisory: nothing is written here. Empty curation on no client / any failure."""
+    later at record time). Advisory: nothing is written here. No client/input is a valid empty result.
+    Provider/parser failures degrade to empty unless ``raise_on_failure`` is set; durable callers set it so
+    they can distinguish a genuine empty proposal from a failed paid invocation."""
     empty = {"merges": [], "splits": [], "purges": []}
     raw_concepts = overview.get("concepts") if isinstance(overview, dict) else []
     concepts = [e for e in (raw_concepts or []) if isinstance(e, dict) and e.get("concept")]
@@ -112,7 +116,9 @@ def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call
                     {"concepts": payload}, ensure_ascii=False, separators=(",", ":"))}]
         out = parse_structured(client, msgs, _Curation, parser)
         return _validate_curation(out, known, id_to_concept=id_to_concept, max_proposals=budget)
-    except Exception:  # noqa: BLE001 — agentic curation is best-effort; never block the caller
+    except Exception:  # noqa: BLE001 — interactive callers retain the historical best-effort contract
+        if raise_on_failure:
+            raise
         return empty
 
 
@@ -239,7 +245,8 @@ def apply_concept_curation(memory_dir, curation: dict, *, by: str = "steward", a
 
 def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, splits: Optional[dict] = None,
                      apply: bool = False, by: str = "steward", at: str = "",
-                     max_proposals: int = _MAX_PROPOSALS) -> dict:
+                     max_proposals: int = _MAX_PROPOSALS,
+                     raise_on_failure: bool = False) -> dict:
     """One-call agentic steward over a memory dir: load the concept overview (honoring EXISTING
     aliases/splits so already-curated concepts are not re-proposed), ask the LLM to propose a curation, and
     return it for review. The deprecated ``apply`` argument is retained only for call compatibility and is
@@ -260,5 +267,6 @@ def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, spli
     aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
     splits = load_concept_splits(memory_dir) if splits is None else splits
     overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)
-    proposals = propose_concept_curation(overview, client, max_proposals=max_proposals)
+    proposals = propose_concept_curation(
+        overview, client, max_proposals=max_proposals, raise_on_failure=raise_on_failure)
     return {"proposals": proposals, "receipt": None}

@@ -498,7 +498,8 @@ def build_router(srv) -> APIRouter:
             begun = _begin_steward("concept_curation_log.jsonl", "concept", action_id)
             from looplab.engine.concept_steward import steward_concepts
             try:
-                output = steward_concepts(_memory_dir(), client, apply=False, by=_actor())
+                output = steward_concepts(
+                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True)
             except Exception as exc:  # noqa: BLE001
                 record = _steward_log("concept_curation_log.jsonl", "concept", action_id,
                                       error=_safe_steward_error(exc, phase="steward"),
@@ -528,7 +529,8 @@ def build_router(srv) -> APIRouter:
             begun = _begin_steward("claim_curation_log.jsonl", "claim", action_id)
             from looplab.engine.claim_steward import steward_claims
             try:
-                output = steward_claims(_memory_dir(), client, apply=False, by=_actor())
+                output = steward_claims(
+                    _memory_dir(), client, apply=False, by=_actor(), raise_on_failure=True)
             except Exception as exc:  # noqa: BLE001
                 record = _steward_log("claim_curation_log.jsonl", "claim", action_id,
                                       error=_safe_steward_error(exc, phase="steward"),

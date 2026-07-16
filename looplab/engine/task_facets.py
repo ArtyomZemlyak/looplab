@@ -12,7 +12,8 @@ facets are an advisory OVERLAY: surfaced as metadata and reserved for a future r
 deterministic task/direction/fingerprint scope match. They do not currently change retrieval order, and
 agent-proposed labels never grant cross-task visibility.
 
-LLM proposes -> recorded via `record_task_facets`. Degrades to no facets on no client / any failure.
+LLM proposes -> recorded via `record_task_facets`. Interactive use is best-effort; durable callers request
+explicit provider/parser failures so they cannot be confused with a valid empty classification.
 """
 from __future__ import annotations
 
@@ -22,11 +23,13 @@ from pathlib import Path
 FACET_AXES = ("domain", "language", "modality", "interaction", "objective")
 
 
-def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_call") -> dict:
+def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_call_once",
+                        raise_on_failure: bool = False) -> dict:
     """Ask an LLM to classify a task (its `goal` + `kind`) into the FACET_AXES — a short slug per axis
     (e.g. {domain: "information-retrieval", language: "russian", modality: "text", interaction: "pairwise",
     objective: "ranking"}). Returns `{axis: value}` for the axes the model filled (unknown axes dropped,
-    values normalized/truncated). Empty on no client / any failure; never raises."""
+    values normalized/truncated). No client/input is a valid empty result. Provider/parser failures degrade
+    to empty unless ``raise_on_failure`` is set."""
     if client is None or not str(goal or "").strip():
         return {}
     try:
@@ -69,7 +72,9 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
         raw = out.facets.model_dump()
         facets = {ax: normalize_key(raw.get(ax))[:60] for ax in FACET_AXES if normalize_key(raw.get(ax))}
         return facets
-    except Exception:  # noqa: BLE001 — agentic faceting is best-effort; never block the caller
+    except Exception:  # noqa: BLE001 — interactive callers retain the historical best-effort contract
+        if raise_on_failure:
+            raise
         return {}
 
 
@@ -115,10 +120,10 @@ def facet_overlap(a: dict, b: dict) -> int:
 
 
 def steward_task_facets(memory_dir, client, *, task_id: str, goal: str, kind: str = "", apply: bool = False,
-                        by: str = "steward", at: str = "") -> dict:
+                        by: str = "steward", at: str = "", raise_on_failure: bool = False) -> dict:
     """One-call agentic faceting: classify the task and (when `apply`) record its facets. Returns
     `{"facets", "recorded"}`."""
-    facets = propose_task_facets(goal, kind, client)
+    facets = propose_task_facets(goal, kind, client, raise_on_failure=raise_on_failure)
     recorded = None
     if apply and facets and task_id:
         recorded = record_task_facets(memory_dir, task_id=task_id, facets=facets, by=by, at=at)

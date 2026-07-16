@@ -470,7 +470,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if not invoke:
                     return
                 try:
-                    out = steward_concepts(self._e.memory_dir, client, apply=False, by="steward")
+                    out = steward_concepts(
+                        self._e.memory_dir, client, apply=False, by="steward", raise_on_failure=True)
                     proposals = out["proposals"]
                     self._append_curation_once("concept_curation_log.jsonl", final, {
                         "outcome": "empty" if curation_is_empty(proposals) else "proposed",
@@ -521,7 +522,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 if not invoke:
                     return
                 try:
-                    out = steward_claims(self._e.memory_dir, client, apply=False, by="steward")
+                    out = steward_claims(
+                        self._e.memory_dir, client, apply=False, by="steward", raise_on_failure=True)
                     proposals = out["proposals"]
                     self._append_curation_once("claim_curation_log.jsonl", final, {
                         "outcome": "empty" if curation_is_empty(proposals) else "proposed",
@@ -582,7 +584,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                     return
                 try:
                     facets = propose_task_facets(
-                        str(getattr(final, "goal", "") or ""), kind, client)
+                        str(getattr(final, "goal", "") or ""), kind, client, raise_on_failure=True)
                     self._append_curation_once("task_facets_curation_log.jsonl", final, {
                         "outcome": "proposed" if facets else "empty", "auto": False,
                         "auto_requested": auto_requested,

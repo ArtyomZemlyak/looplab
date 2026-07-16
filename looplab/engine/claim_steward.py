@@ -8,8 +8,8 @@ critical one).
 
 Same invariant as the concept steward: the LLM only PROPOSES. The operator reviews the exact proposal and
 records selected decisions through typed `claim-decide` or owner HTTP governance; this steward never applies
-an LLM batch. Finalize never applies it. Proposal generation degrades to no proposals on no client / any
-failure and never blocks the caller.
+an LLM batch. Finalize never applies it. Proposal generation is best-effort by default; durable callers opt
+into explicit failures so an outage is never recorded as an empty recommendation.
 """
 from __future__ import annotations
 
@@ -17,13 +17,14 @@ _MAX_PROPOSALS = 10
 _MAX_CLAIMS = 60             # bounded prompt — the most-evidenced / contested claims first
 
 
-def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_call",
-                           max_proposals: int = _MAX_PROPOSALS) -> dict:
+def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_call_once",
+                           max_proposals: int = _MAX_PROPOSALS,
+                           raise_on_failure: bool = False) -> dict:
     """Ask an LLM to review evidence-grounded `claims` (from `claim_assessments`) and PROPOSE operator
     decisions. Returns `{"decisions": [{statement, decision, scope, why}]}` of VALIDATED proposals (each
     references an existing claim + a valid decision; the machine already-decided claims are excluded from
-    review so the steward doesn't churn them). Advisory: nothing is written here. Empty on no client / any
-    failure."""
+    review so the steward doesn't churn them). Advisory: nothing is written here. No client/input is a valid
+    empty result. Provider/parser failures degrade to empty unless ``raise_on_failure`` is set."""
     empty: dict = {"decisions": []}
     # Only review claims the operator has NOT already decided (machine-proposed) — don't re-litigate a human
     # verdict. Contested/most-evidenced first (claims are already sorted that way).
@@ -106,7 +107,9 @@ def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_ca
                     {"claims": payload}, ensure_ascii=False, separators=(",", ":"))}]
         out = parse_structured(client, msgs, _Curation, parser)
         return _validate(out, known, id_to_claim=id_to_claim, max_proposals=budget)
-    except Exception:  # noqa: BLE001 — agentic curation is best-effort; never block the caller
+    except Exception:  # noqa: BLE001 — interactive callers retain the historical best-effort contract
+        if raise_on_failure:
+            raise
         return empty
 
 
@@ -218,7 +221,8 @@ def apply_claim_curation(memory_dir, curation: dict, *, by: str = "steward", at:
 
 
 def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by: str = "steward",
-                   at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS) -> dict:
+                   at: str = "", structured: bool = True, max_proposals: int = _MAX_PROPOSALS,
+                   raise_on_failure: bool = False) -> dict:
     """One-call agentic claim steward over a memory dir: load the claim assessments (structured key by
     default, so decisions are scope-precise) and ask the LLM to propose decisions for review. The deprecated
     ``apply`` argument is retained only for call compatibility and is rejected before memory reads or LLM work.
@@ -231,7 +235,10 @@ def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by:
     from looplab.engine.claims import claims_for_memory
     try:
         claims = claims_for_memory(memory_dir, lessons=lessons, structured=structured)
-    except Exception:  # noqa: BLE001 — a damaged advisory store must not fail finalize/inspection
+    except Exception:  # noqa: BLE001 — interactive inspection remains best-effort
+        if raise_on_failure:
+            raise
         claims = []
-    proposals = propose_claim_curation(claims, client, max_proposals=max_proposals)
+    proposals = propose_claim_curation(
+        claims, client, max_proposals=max_proposals, raise_on_failure=raise_on_failure)
     return {"proposals": proposals, "receipt": None}

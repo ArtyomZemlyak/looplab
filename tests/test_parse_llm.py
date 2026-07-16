@@ -44,6 +44,17 @@ def test_auto_fallback_tool_to_baml():
     assert idea.operator == "improve" and idea.params == {"y": 2.0}
 
 
+def test_tool_call_once_never_uses_text_fallback():
+    """A durable paid invocation owns one provider path; parser repair cannot spend a second call."""
+    c = FakeClient(
+        tool=[{}],
+        text=['{"operator": "improve", "params": {"would": "hide a second call"}}'],
+    )
+    with pytest.raises(ParseError):
+        parse_structured(c, [{"role": "user", "content": "go"}], Idea, "tool_call_once")
+    assert len(c.text) == 1
+
+
 def test_all_parsers_fail_raises():
     c = FakeClient(tool=[{}], text=["no json here at all"])
     with pytest.raises(ParseError):

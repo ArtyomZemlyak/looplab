@@ -187,6 +187,9 @@ def _coerce_to_model(obj: dict, model: Type[T]) -> dict:
 
 _ORDER = {
     "tool_call": ["tool_call", "baml"],
+    # CODEX AGENT: Paid durable jobs must not hide a second provider call behind parser fallback. Their caller has
+    # already claimed one invocation and must be able to record an unambiguous failure for that invocation.
+    "tool_call_once": ["tool_call"],
     "baml": ["baml"],
     # "outlines" is an alias for the text (baml) path until constrained decoding lands here —
     # `parse_structured` treats any non-"tool_call" entry as the text+JSON-extraction path. For

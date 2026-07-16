@@ -103,6 +103,28 @@ def test_finalize_steward_requires_durable_claim_before_provider(
     assert calls == []
 
 
+@pytest.mark.parametrize("method_name,target,log_name,_result", _CASES)
+def test_finalize_steward_records_provider_failure_as_error_not_empty(
+        tmp_path, monkeypatch, method_name, target, log_name, _result):
+    calls: list[int] = []
+
+    def failed_provider(*_args, **kwargs):
+        calls.append(1)
+        assert kwargs.get("raise_on_failure") is True
+        raise RuntimeError("provider detail must not enter durable memory")
+
+    monkeypatch.setattr(target, failed_provider)
+    getattr(_memory(tmp_path), method_name)(
+        RunState(run_id="run-provider-error", task_id="task", goal="goal"))
+
+    assert calls == [1]
+    rows = [json.loads(line) for line in (tmp_path / log_name).read_text().splitlines()]
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "error"
+    assert rows[0]["error_type"] == "RuntimeError"
+    assert "provider detail" not in json.dumps(rows[0])
+
+
 def test_concurrent_finalize_stewards_are_single_flight(tmp_path, monkeypatch):
     entered, release = Event(), Event()
     counter_lock = Lock()
