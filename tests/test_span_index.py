@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,7 +19,15 @@ import pytest
 
 from looplab.events import span_index
 from looplab.events.span_index import get_index, invalidate
-from looplab.events.traceview import build_trace_view, build_conversation, load_spans, _tree, _cap_span_io
+from looplab.events.traceview import (
+    _MAX_PARENT_HOPS,
+    _cap_span_io,
+    _iter_parent_spans,
+    _tree,
+    build_conversation,
+    build_trace_view,
+    load_spans,
+)
 
 ST = SimpleNamespace(run_id="demo", task_id="t", total_eval_seconds=7.5)
 
@@ -181,6 +191,55 @@ def test_malformed_complete_span_is_quarantined_without_hiding_following_rows(tm
     assert _canon(reference) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
     assert (idx.full_span("dirty") or {})["attributes"]["usage"]["prompt"] == 0
     assert (idx.full_span("tail") or {}).get("span_id") == "tail"
+
+
+def test_conversation_parent_cycles_degrade_without_hanging():
+    script = r'''
+import json
+from types import SimpleNamespace
+from looplab.events.traceview import build_conversation
+
+state = SimpleNamespace(run_id="demo", task_id="t")
+cases = {
+    "self": [
+        {"name": "self", "kind": "generation", "trace_id": "self-trace", "span_id": "self",
+         "parent_id": "self", "start": 1, "attributes": {"node_id": 0, "input": []}},
+    ],
+    "two": [
+        {"name": "gen", "kind": "generation", "trace_id": "two-trace", "span_id": "a",
+         "parent_id": "b", "start": 1, "attributes": {"node_id": 0, "input": []}},
+        {"name": "tool", "kind": "tool", "trace_id": "two-trace", "span_id": "b",
+         "parent_id": "a", "start": 2, "attributes": {"node_id": 0}},
+    ],
+}
+out = {}
+for name, spans in cases.items():
+    projection = build_conversation(state, spans, 0)
+    out[name] = [[turn["type"] for turn in stage["turns"]]
+                 for stage in projection["stages"]]
+print(json.dumps(out, sort_keys=True))
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=True,
+    )
+    assert json.loads(completed.stdout) == {
+        "self": [["request", "generation"]],
+        "two": [["request", "generation", "tool"]],
+    }
+
+
+def test_parent_walk_has_a_hard_depth_limit():
+    by_id = {
+        str(i): {"span_id": str(i), "parent_id": str(i + 1)}
+        for i in range(_MAX_PARENT_HOPS + 10)
+    }
+    start = {"span_id": "start", "parent_id": "0"}
+    assert len(list(_iter_parent_spans(start, by_id))) == _MAX_PARENT_HOPS
 
 
 # --------------------------------------------------------------------------- incremental + persist

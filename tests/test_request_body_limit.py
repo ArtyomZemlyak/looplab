@@ -45,3 +45,57 @@ def test_chunked_body_without_content_length_is_counted():
     assert called is False
     assert sent[0]["status"] == 413
     assert b"too large" in sent[1]["body"]
+
+
+def test_non_stripping_root_path_api_body_is_still_counted():
+    called = False
+    sent = []
+
+    async def downstream(scope, receive, send):
+        nonlocal called
+        called = True
+
+    async def receive():
+        return {"type": "http.request", "body": b"abcdef", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    prefix = "/user/alice/proxy/8000"
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "root_path": prefix,
+        "path": f"{prefix}/api/settings",
+        "headers": [],
+    }
+    anyio.run(_APIRequestBodyLimitMiddleware(downstream, max_bytes=5), scope, receive, send)
+    assert called is False
+    assert sent[0]["status"] == 413
+    assert b"too large" in sent[1]["body"]
+
+
+def test_non_stripping_root_path_non_api_body_is_not_buffered():
+    received = []
+    sent = []
+
+    async def downstream(scope, receive, send):
+        received.append(await receive())
+
+    async def receive():
+        return {"type": "http.request", "body": b"abcdef", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    prefix = "/user/alice/proxy/8000"
+    scope = {
+        "type": "http",
+        "method": "POST",
+        "root_path": prefix,
+        "path": f"{prefix}/assets/app.js",
+        "headers": [],
+    }
+    anyio.run(_APIRequestBodyLimitMiddleware(downstream, max_bytes=5), scope, receive, send)
+    assert received == [{"type": "http.request", "body": b"abcdef", "more_body": False}]
+    assert sent == []

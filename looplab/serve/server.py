@@ -92,6 +92,15 @@ def _is_live_sse_path(path: str) -> bool:
                 and parts[-1] == "message_stream"))
 
 
+def _scope_route_path(scope) -> str:
+    """Return the route-local path for stripping and non-stripping ASGI ``root_path`` setups."""
+    path = str(scope.get("path") or "")
+    root_path = str(scope.get("root_path") or "").rstrip("/")
+    if root_path and (path == root_path or path.startswith(root_path + "/")):
+        return path[len(root_path):] or "/"
+    return path
+
+
 class _SSESafeGZipMiddleware:
     """Use Starlette gzip while guaranteeing known live streams never enter its responder.
 
@@ -138,7 +147,7 @@ class _APIRequestBodyLimitMiddleware:
         await send({"type": "http.response.body", "body": body})
 
     async def __call__(self, scope, receive, send):
-        if scope.get("type") != "http" or not str(scope.get("path") or "").startswith("/api/"):
+        if scope.get("type") != "http" or not _scope_route_path(scope).startswith("/api/"):
             await self.app(scope, receive, send)
             return
 

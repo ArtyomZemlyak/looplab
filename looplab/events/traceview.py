@@ -22,6 +22,7 @@ _MAX_NODE_ID_CHARS = 128
 _MAX_TRACE_TOKENS = (1 << 63) - 1
 _MAX_TRACE_SECONDS = 1e15
 _MAX_TRACE_FLOAT = sys.float_info.max
+_MAX_PARENT_HOPS = 1024
 
 
 def _normalized_id(value) -> Optional[str]:
@@ -280,6 +281,27 @@ def _as_text(v) -> str:
         return str(v)
 
 
+def _iter_parent_spans(span: dict, by_id: dict, *, stop_id=None):
+    """Yield a bounded, cycle-safe parent chain, excluding ``stop_id`` when supplied."""
+    current_id = span.get("span_id")
+    seen = {current_id} if isinstance(current_id, (str, int)) else set()
+    parent_id = span.get("parent_id")
+    for _ in range(_MAX_PARENT_HOPS):
+        if parent_id is None or parent_id == stop_id:
+            return
+        try:
+            if parent_id in seen:
+                return
+            seen.add(parent_id)
+            parent = by_id.get(parent_id)
+        except TypeError:
+            return
+        if not isinstance(parent, dict):
+            return
+        yield parent
+        parent_id = parent.get("parent_id")
+
+
 def _seg_label(gen_span: dict, by_id: dict) -> Optional[str]:
     """The sub-loop a generation belongs to (propose / implement / repair / grade), to label its request
     boundary with its phase. Prefer the `phase` stamped on the span itself (tracing._phase_ctx) — correct
@@ -288,11 +310,9 @@ def _seg_label(gen_span: dict, by_id: dict) -> Optional[str]:
     ph = (gen_span.get("attributes") or {}).get("phase")
     if ph:
         return ph
-    cur = by_id.get(gen_span.get("parent_id"))
-    while cur is not None:
+    for cur in _iter_parent_spans(gen_span, by_id):
         if cur.get("kind") in (None, "operation"):
             return cur.get("name")
-        cur = by_id.get(cur.get("parent_id"))
     return None
 
 
@@ -500,13 +520,12 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
                                                   "start": s.get("start", 0.0)}
             if s.get("kind") == "operation" and a.get("stage"):
                 return s
-            cur, top_op, ph_op = by_sid.get(s.get("parent_id")), None, None
-            while cur is not None and cur.get("span_id") != root_sid:
+            top_op, ph_op = None, None
+            for cur in _iter_parent_spans(s, by_sid, stop_id=root_sid):
                 if cur.get("kind") == "operation":
                     top_op = cur
                     if ph_op is None and ph and cur.get("name") == ph:
                         ph_op = cur       # nearest ancestor op matching the stamp: the real sub-loop
-                cur = by_sid.get(cur.get("parent_id"))
             if ph_op is not None:
                 return ph_op
             if ph:
