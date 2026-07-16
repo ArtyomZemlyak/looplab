@@ -111,8 +111,9 @@ class ToolUsingResearcher:
                "readers end a truncated reply with a resume marker — if a reply ends with a truncation "
                "marker, request the NEXT range instead of re-reading from the start. When you understand "
                "the change you want and can name its params, STOP and emit (operator, params, rationale, "
-               "and a short reusable `theme` slug grouping related experiments, e.g. \"loss-fn\"); you "
-               "refine on the NEXT node.\n"
+               "and `concepts` — the SET of `axis/slug` concept ids this experiment touches, e.g. "
+               "\"loss/contrastive\", \"architecture/moe\"; include every one that applies, reuse existing "
+               "ids, propose a new `axis/slug` only when none fits); you refine on the NEXT node.\n"
                + _OPERATOR_NOTE + "\n"
                + _IDEA_SPACE_TOOL)
 

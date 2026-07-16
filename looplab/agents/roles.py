@@ -28,10 +28,12 @@ def _attention_points() -> str:
         return ""
 
 _RESEARCHER_CORE = ("You are an ML researcher proposing the next experiment as "
-                    "parameters to try. Also set `theme`: a short, reusable lower-case slug "
-                    "(e.g. \"loss-fn\", \"architecture\", \"regularization\", \"learning-rate\") "
-                    "that groups this experiment with related ones — reuse the SAME slug across "
-                    "experiments that explore the same idea. ")
+                    "parameters to try. Also set `concepts`: the SET of research concepts this "
+                    "experiment touches, as `axis/slug` ids (e.g. \"loss/contrastive\", "
+                    "\"architecture/moe\", \"regularization/r-drop\", \"hyperparameter/learning-rate\"). "
+                    "An experiment usually touches SEVERAL at once, so include EVERY one that applies. "
+                    "Reuse an id from earlier experiments where it fits; propose a new `axis/slug` id "
+                    "only when none fits. Key on the underlying method/family, not the surface name. ")
 # P6/P21 (docs/PROMPT_REVIEW.md): the intra-node sweep OFFER, shared VERBATIM by both researchers
 # (`LLMResearcher` here and agent.py's `ToolUsingResearcher`) via `_researcher_capability_suffix`,
 # and GATED on capability: only the in-house `LLMDeveloper` honors `idea.space` —
@@ -413,7 +415,7 @@ class LLMResearcher:
                                                      hyp_order=getattr(self, "_hyp_order", None))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
-                                        "\nPropose the next Idea (operator, params, rationale"
+                                        "\nPropose the next Idea (operator, params, rationale, concepts"
                                         + (", hypothesis" if self.track_hypotheses else "") +
                                         # P6: don't re-offer the sweep in the user turn when the
                                         # active Developer can't run one (system prompt gates too).

@@ -296,6 +296,7 @@
       "holdout_metric": null,
       "id": 0,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -343,6 +344,7 @@
       "holdout_metric": null,
       "id": 1,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -390,6 +392,7 @@
       "holdout_metric": null,
       "id": 2,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -440,6 +443,7 @@
       "holdout_metric": null,
       "id": 3,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -492,6 +496,7 @@
       "holdout_metric": null,
       "id": 4,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -541,6 +546,7 @@
       "holdout_metric": null,
       "id": 5,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -593,6 +599,7 @@
       "holdout_metric": null,
       "id": 6,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -646,6 +653,7 @@
       "holdout_metric": null,
       "id": 7,
       "idea": {
+        "concepts": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,

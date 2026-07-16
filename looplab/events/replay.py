@@ -304,6 +304,13 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     except Exception:
         return   # (was `continue` in the loop arm: skip just this event)
     st.nodes[n.id] = n
+    # Researcher-AUTHORED concepts populate the per-node concept set deterministically at creation —
+    # no LLM, no tagging cadence — so concept read-models see them from the first node. A later
+    # tagging cadence (a `node_concepts` event) may override with a consolidated/enriched set
+    # (last-write-wins in the fold). Guarded on non-empty so a `node_reset` re-emit that carries no
+    # concepts never clobbers a cadence-set value. Rides on the Idea in the event log → replay-safe.
+    if n.idea.concepts:
+        st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
     if current is None:
         # A holdout score is a disclosed final-exam signal. If a genuinely NEW candidate lands
         # afterwards (an inject/fork/policy action won the finish CAS race), the search has become
