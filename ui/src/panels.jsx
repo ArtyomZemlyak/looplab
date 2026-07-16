@@ -45,7 +45,7 @@ export function OverviewPanel({ state, maxEval, onClose, onOpenPanel }) {
         <Stat n={nodes.length} l="nodes" />
         <Stat n={evaluated} l="evaluated" />
         <Stat n={failed} l="failed" />
-        <Stat n={fmt(evalSec, 1) + 's' + (maxEval ? ' / ' + maxEval : '')} l="eval time" />
+        <Stat n={Math.round(evalSec) + 's' + (maxEval ? ' / ' + maxEval : '')} l="eval time" />
         {cost && <Stat n={fmtInt(cost.total_tokens)} l="tokens" />}
         {state.paused ? <Stat n="paused" l="status" /> : null}
       </div>

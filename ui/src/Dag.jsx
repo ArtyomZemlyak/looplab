@@ -252,10 +252,12 @@ function GroupSuper({ data }) {
       </div>
       <div className="metric">{metricText}</div>
       <Spark series={series} />
+      {/* Distinct SHAPE per status (✓ evaluated / ✗ failed / ○ pending), not colour alone, so the
+          breakdown is legible without colour perception (WCAG 1.4.1). Titles carry the full text. */}
       <div className="grp-dots">
-        {status.evaluated ? <span className="dot ok" title={`${status.evaluated} evaluated`}>●{status.evaluated}</span> : null}
-        {status.failed ? <span className="dot fail" title={`${status.failed} failed`}>●{status.failed}</span> : null}
-        {status.pending ? <span className="dot pend" title={`${status.pending} pending`}>●{status.pending}</span> : null}
+        {status.evaluated ? <span className="dot ok" title={`${status.evaluated} evaluated`}>✓{status.evaluated}</span> : null}
+        {status.failed ? <span className="dot fail" title={`${status.failed} failed`}>✗{status.failed}</span> : null}
+        {status.pending ? <span className="dot pend" title={`${status.pending} pending`}>○{status.pending}</span> : null}
       </div>
       <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
     </SuperShell>

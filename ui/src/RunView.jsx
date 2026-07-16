@@ -974,7 +974,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         {evalSec > 0 && <button type="button" className="chip run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Overview' : 'eval time — open Overview for the budget bar'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>
-          <span className="k">eval</span> {fmt(evalSec, 1)}s{maxEval ? ` / ${maxEval}` : ''}</button>}
+          <span className="k">eval</span> {Math.round(evalSec)}s{maxEval ? ` / ${maxEval}` : ''}</button>}
         {cost && <button type="button" className="chip run-metric-chip" disabled={historyActive}
           title={historyActive ? 'Historical mode — return live to open Overview' : 'tokens — open Overview'}
           onClick={event => { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }}>

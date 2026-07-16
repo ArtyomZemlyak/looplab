@@ -211,6 +211,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run memory yet/, /Degraded view; some sources have not loaded\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
+  // Keep the implicit list role: role="region" would erase list semantics for assistive technology.
   assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
   assert.doesNotMatch(atlas, /<ul[^>]*role="region"/)
   assert.match(atlas, /aria-label="Bounded mixed-evidence claim records"/)
