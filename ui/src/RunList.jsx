@@ -17,6 +17,25 @@ import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 
+function useResource(read, initial) {
+  const [data, setData] = useState(initial)
+  const [state, setState] = useState('loading')
+  const load = () => read()
+    .then(value => { setData(value); setState('ready') })
+    .catch(() => setState(current => ['ready', 'stale'].includes(current) ? 'stale' : 'error'))
+  return [data, state, load]
+}
+
+function ResourceNotice({ state, label, retry }) {
+  if (state === 'ready') return null
+  if (state === 'loading') return <div className="notice" role="status">{label} loading…</div>
+  const stale = state === 'stale'
+  return <div className={'notice ' + (stale ? 'resource-warning' : 'resource-error')}
+    role={stale ? 'status' : 'alert'}>
+    {label}: {stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'} <button className="btn sm" onClick={retry}>Retry</button>
+  </div>
+}
+
 // Module-scope so its identity is stable across re-renders (the runs list polls every 2.5s). Defined
 // inside RunList it got a fresh identity each render, so React remounted the whole project subtree and
 // the uncontrolled inline-rename <input> lost its text/focus mid-edit. All render state is threaded
@@ -135,7 +154,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
 
 // Manage super-tasks in one popup: create, rename (inline), delete. Assignment happens per-run via
 // the ⋮ menu / drag; this is just the CRUD over the buckets themselves.
-function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
+function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDelete, onClose }) {
   const [name, setName] = useState('')
   const newTaskRef = useRef(null)
   const add = () => { const v = name.trim(); if (v) { onCreate(v); setName('') } }
@@ -149,6 +168,7 @@ function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
   }
   return <Modal title="Super-tasks" onClose={onClose}>
     <div className="muted" style={{ marginBottom: 8 }}>A super-task groups runs that attack the same global task (across many runs). Assign runs from a run’s ⋮ menu.</div>
+    <ResourceNotice state={state} label="Super-tasks" retry={onRetry} />
     <div className="st-new">
       <input ref={newTaskRef} className="text" autoFocus aria-label="New super-task name" placeholder="New super-task name (e.g. nomad2018)" value={name}
              onChange={e => setName(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') add() }} />
@@ -167,17 +187,15 @@ function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
                }} />
         <button className="ic" aria-label={`Delete super-task ${s.name}`} onClick={event => remove(s, event)}>✕</button>
       </div>)}
-      {!supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>No super-tasks yet.</div>}
+      {state === 'ready' && !supertasks.length && <div className="muted" style={{ padding: '8px 2px', fontSize: 12 }}>No super-tasks yet.</div>}
     </div>
   </Modal>
 }
 
 export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const compactNav = useMediaQuery('(max-width: 900px)')
-  const [runs, setRuns] = useState(null)
-  const [runsError, setRunsError] = useState(null)
-  const [proj, setProj] = useState({ projects: [], assignments: {} })
-  const [projectsError, setProjectsError] = useState(null)
+  const [runs, runsState, loadRuns] = useResource(() => get('/api/runs'), null)
+  const [proj, projectsState, loadProjects] = useResource(listProjects, { projects: [], assignments: {} })
   const [sel, setSel] = useState(ALL)
   const [expanded, setExpanded] = useState(() => new Set())
   const [renaming, setRenaming] = useState(null)   // project id being renamed (inline)
@@ -200,7 +218,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const [taskFilter, setTaskFilter] = useState(ALL)
   const [statusFilter, setStatusFilter] = useState('all')   // effective status vocabulary from runIndex
   const [stFilter, setStFilter] = useState(ALL)             // super-task filter (ALL | UNASSIGNED | id)
-  const [superdata, setSuperdata] = useState({ supertasks: [], assignments: {} })
+  const [superdata, superState, loadSupers] = useResource(listSupertasks, { supertasks: [], assignments: {} })
   const [stModal, setStModal] = useState(false)             // manage-super-tasks popup open?
   const [showReport, setShowReport] = useState(false)       // cross-run scope-report panel open?
   const [projectsOpen, setProjectsOpen] = useState(false)   // compact-screen Projects drawer
@@ -231,13 +249,6 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   // Run creation is no longer a modal here — it happens INSIDE the assistant (the bottom command bar's
   // "/new" asks the assistant to propose a run, which renders as an inline launch card in the chat).
 
-  const loadRuns = () => get('/api/runs')
-    .then(data => { setRuns(data); setRunsError(null) })
-    .catch(e => setRunsError(e?.message || 'Could not load runs.'))
-  const loadProjects = () => listProjects()
-    .then(data => { setProj(data); setProjectsError(null) })
-    .catch(e => setProjectsError(e?.message || 'Could not load projects.'))
-  const loadSupers = () => listSupertasks().then(setSuperdata).catch(() => {})
   // Poll the runs list every 2.5s, but skip the request while the tab is hidden (no point refreshing a
   // list nobody's looking at) — and refresh once immediately when it becomes visible again.
   usePoll(loadRuns, 2500, [], { pauseHidden: true })
@@ -425,7 +436,6 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                     aria-label="Close projects">×</button>
             <button className="btn sm" onClick={event => addProject(null, event.currentTarget)}>＋ New</button>
           </div>
-          {projectsError && <div className="notice compact-error" role="alert">Projects unavailable. <button className="btn sm" onClick={loadProjects}>Retry</button></div>}
           <button ref={projectsAllRef} type="button" className={'ptree-row pseudo' + (sel === ALL ? ' sel' : '')}
                onClick={() => chooseProject(ALL)} aria-pressed={sel === ALL}>
             <span className="ptw">▦</span><span className="pname">All runs</span><span className="pcount">{count(ALL)}</span>
@@ -437,7 +447,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
           </button>
           <nav className="ptree" aria-label="Project folders">
             {(byParent[null] || []).map(p => <TreeNode key={p.id} p={p} depth={0} ctx={treeCtx} />)}
-            {!proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
+            {projectsState === 'ready' && !proj.projects.length && <div className="muted" style={{ padding: 10, fontSize: 12 }}>No projects yet. Create one to organize runs.</div>}
           </nav>
         </aside>
 
@@ -497,16 +507,15 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
               {sortKey === 'metric' ? (sortDir === 'asc' ? 'best' : 'worst') : (sortDir === 'asc' ? '↑' : '↓')}
             </button>
           </div>}
-          {runs == null && !runsError && <div className="notice" role="status">Loading runs…</div>}
-          {runs == null && runsError && <div className="notice resource-error" role="alert"><b>Could not load runs.</b><span>{runsError}</span><button className="btn sm primary" onClick={loadRuns}>Retry</button></div>}
-          {runs != null && runsError && <div className="notice resource-warning" role="status">Could not refresh runs; showing the last loaded data. <button className="btn sm" onClick={loadRuns}>Retry</button></div>}
+          <ResourceNotice state={runsState} label="Runs" retry={loadRuns} />
+          <ResourceNotice state={projectsState} label="Projects" retry={loadProjects} />
+          {!stModal && <ResourceNotice state={superState} label="Super-tasks" retry={loadSupers} />}
           {runs && !runsOf(sel).length && <div className="notice resource-empty">No runs here.
             {sel === ALL
               ? <button className="btn sm primary" onClick={() => window.dispatchEvent(new CustomEvent('ll:new-run'))}>Start a new run</button>
               : <span>Drag a run onto this project, or use its <b>Move</b> menu.</span>}</div>}
           {runs && !!runsOf(sel).length && !visible.length && <div className="notice">No runs match the filter.</div>}
-          {view === 'map' && projectsError && <div className="notice resource-error" role="alert"><b>Map unavailable.</b><span>Project metadata is required to place runs correctly.</span><button className="btn sm primary" onClick={loadProjects}>Retry</button></div>}
-          {view === 'map' && !projectsError && runs && visible.length > 0 && <div className="map-stage">
+          {view === 'map' && ['ready', 'stale'].includes(projectsState) && runs && visible.length > 0 && <div className="map-stage">
             <LazyBoundary label="run map" resetKey={`map:${sel}`}>
               <MapView onOpen={onOpen} runs={visible} projects={proj.projects}
                 collapsed={mapCollapsed} onToggle={toggleMapCluster}
@@ -571,7 +580,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
         onSubmit={submitRunRename} onClose={closeRunRename} />}
 
-      {stModal && <SuperTaskModal supertasks={superdata.supertasks}
+      {stModal && <SuperTaskModal supertasks={superdata.supertasks} state={superState} onRetry={loadSupers}
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
         onClose={closeSuperTasks} />}
 
