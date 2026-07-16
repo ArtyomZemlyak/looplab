@@ -615,7 +615,7 @@ test('RunView refreshes comment feeds only from comments_revision, never global 
   assert.match(inspector, /detailResource\.scope === detailScope/)
   assert.match(inspector, /const detail = detailCurrent \? detailResource\.data : null/,
     'a node, attempt, or generation switch must hide stale full detail before passive effects')
-  assert.match(inspector, /if \(on && detailMatchesAttempt\(d\)\)/,
+  assert.match(inspector, /if \(on && valid && detailMatchesAttempt\(d\)\)/,
     'a reset racing the full-detail response must not relabel another attempt as current')
   assert.match(runView, /const preserveComment = id === current\.nodeId && nextTab === 'Comments'/)
   assert.match(runView, /nodeGeneration: preserveComment \? current\.nodeGeneration : null/,

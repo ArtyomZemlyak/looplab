@@ -115,7 +115,12 @@ export function timelineRequestFailed(state, direction, error) {
     ...state,
     status: state.rows.length ? 'ready' : 'error',
     loading: { ...state.loading, [direction]: false },
-    errors: { ...state.errors, [direction]: String(error?.message || error || 'Timeline request failed') },
+    errors: { ...state.errors, [direction]: error?.status === 401 || error?.status === 403
+      ? 'Owner access is required to load timeline events.'
+      : direction === 'older' ? 'Older timeline events could not be loaded.'
+        : direction === 'newer' ? 'New timeline events could not be loaded.'
+          : direction === 'around' ? 'Replay timeline events could not be loaded.'
+            : 'Timeline events could not be loaded.' },
     windowAtTail: direction === 'tail' || direction === 'newer' ? false : state.windowAtTail,
   }
 }

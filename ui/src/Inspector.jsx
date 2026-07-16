@@ -51,7 +51,7 @@ function ResetBtn({ runId, id, generation, onToast }) {
         executing: `Reset #${id} from ${stage} requested — waiting for the engine`, failure: `Reset #${id} failed`,
       })
       onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Reset #${id} failed: ${error.message || error}`) }
+    } catch { onToast?.(`Reset #${id} could not be submitted. Try again.`) }
     finally { setBusy(false) }
   }
   useEffect(() => {
@@ -111,9 +111,17 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // during normal live repairs until the next poll reconciled.
   const detailMatchesAttempt = value => !Number.isSafeInteger(nodeAttempt)
     || (Number.isSafeInteger(value?.attempt) && value.attempt >= nodeAttempt)
+  const detailMatchesNode = value => value != null && typeof value === 'object' && !Array.isArray(value)
+    && String(value.id) === String(nodeId) && typeof value.status === 'string'
   const [detailStatus, setDetailStatus] = useState('idle')
   const [detailError, setDetailError] = useState('')
   const [detailNonce, setDetailNonce] = useState(0)
+  const detailSurfaceRef = useRef(null)
+  const detailFocusScopeRef = useRef(null)
+  const retryDetail = () => {
+    detailFocusScopeRef.current = detailScope
+    setDetailNonce(value => value + 1)
+  }
   useEffect(() => {
     setDetailResource({ scope: detailScope, data: null })
     setDetailError('')
@@ -126,17 +134,33 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
       : ''
     get(runNodeApiPath(runId, nodeId, at))
       .then(d => {
-        if (on && detailMatchesAttempt(d)) {
+        const valid = detailMatchesNode(d)
+        if (on && valid && detailMatchesAttempt(d)) {
           setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready')
         } else if (on) {
           setDetailStatus('error')
-          setDetailError('The experiment attempt changed while details were loading.')
+          setDetailError(valid
+            ? 'The experiment attempt changed while details were loading.'
+            : 'Full node details returned an invalid response.')
         }
       })
       .catch(() => { if (on) { setDetailStatus('error'); setDetailError('Full node details could not be loaded.') } })
     return () => { on = false }
   }, [runId, nodeId, nodeAttempt, state?.nodes?.[nodeId]?.status, readOnly, historySeq,
     expectedGeneration, readOnlyReason, evidenceAvailable, detailScope, detailNonce])
+  useEffect(() => {
+    if (detailFocusScopeRef.current == null) return
+    if (detailFocusScopeRef.current !== detailScope) {
+      detailFocusScopeRef.current = null
+      return
+    }
+    if (detailStatus !== 'ready' && detailStatus !== 'error' && detailStatus !== 'restricted') return
+    detailFocusScopeRef.current = null
+    const frame = requestAnimationFrame(() => {
+      if (document.activeElement === document.body) detailSurfaceRef.current?.focus({ preventScroll: true })
+    })
+    return () => cancelAnimationFrame(frame)
+  }, [detailScope, detailStatus])
   // Live-refresh the node detail (it carries n.trace spans + the agent report) while the run is ACTIVELY
   // working this node — so the Trace tab fills in WITHOUT the user toggling tabs. Two windows, both
   // engine-alive & not-finished (stops at terminal / engine death):
@@ -159,7 +183,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
     // the newly-selected node's detail — otherwise node A's Code/Trace/Metrics render (stuck) under B.
     get(runNodeApiPath(runId, nodeId)).then(d => {
-      if (alive() && detailMatchesAttempt(d)) {
+      if (alive() && detailMatchesNode(d) && detailMatchesAttempt(d)) {
         setDetailResource({ scope: detailScope, data: d }); setDetailStatus('ready'); setDetailError('')
       }
     }).catch(() => {})
@@ -167,10 +191,23 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   { enabled: !readOnly && nodeWorking, immediate: false })
 
   if (nodeId == null) return <div className="insp-empty">Select a node to inspect its idea, code, metrics, trust, and agent trace.</div>
-  const n = detail || (state.nodes[nodeId])
-  if (!n) return <div className="insp-empty">…</div>
+  const n = detail || state?.nodes?.[nodeId]
   const visibleDetailStatus = detailCurrent ? detailStatus
     : readOnlyReason === 'review' && !evidenceAvailable ? 'restricted' : 'loading'
+  if (!n) {
+    if (visibleDetailStatus === 'error') return <div ref={detailSurfaceRef}
+      className="notice resource-error" role="alert" tabIndex={-1}>
+      <span>{detailError || 'Full node details could not be loaded.'}</span>
+      <button type="button" className="btn sm" onClick={retryDetail}>Retry</button>
+    </div>
+    if (visibleDetailStatus === 'restricted') return <div ref={detailSurfaceRef}
+      className="insp-empty" role="status" tabIndex={-1}>
+      Experiment #{nodeId} is not included in this summary-only review.
+    </div>
+    return <div ref={detailSurfaceRef} className="insp-empty" role="status" tabIndex={-1}>
+      Loading experiment #{nodeId} details…
+    </div>
+  }
   // Metric-drift is run-level state (state.drifts), each entry tagged with its node_id — the
   // per-node detail payload has no `drifts` key, so filter the run state down to this node.
   const nodeDrifts = (state?.drifts || []).filter(d => d.node_id === n.id)
@@ -203,10 +240,10 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
           className={'tab' + (t === activeTab ? ' active' : '') + (t === 'Trust' && (n.violations?.length || nodeDrifts.length) ? ' alarm' : '')}
           onClick={() => setTab(t)} onKeyDown={event => onTabKeyDown(event, index)}>{t}</button>)}
       </div>
-      <div className="insp-body" id={panelId(activeTab)} role="tabpanel"
+      <div ref={detailSurfaceRef} className="insp-body" id={panelId(activeTab)} role="tabpanel"
         aria-labelledby={tabId(activeTab)} tabIndex={0}>
         {visibleDetailStatus === 'loading' && <div className="notice" role="status">Loading full node details…</div>}
-        {visibleDetailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button className="btn sm" onClick={() => setDetailNonce(n => n + 1)}>Retry</button></div>}
+        {visibleDetailStatus === 'error' && <div className="notice resource-error" role="alert"><span>{detailError} The summary below may be incomplete.</span><button type="button" className="btn sm" onClick={retryDetail}>Retry</button></div>}
         {readOnly
           ? <div className="insp-hint history-inline">{readOnlyReason === 'review'
               ? evidenceAvailable
@@ -295,7 +332,7 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
         executing: `Re-run of #${id} from '${name}' requested — waiting for the engine`, failure: 'Re-run failed',
       })
       onToast?.(feedback.message)
-    } catch (error) { onToast?.(`Re-run failed: ${error.message || error}`) }
+    } catch { onToast?.('Re-run could not be submitted. Try again.') }
     finally { setPendingStage(null) }
   }
   return <div className="eval-pipeline">
@@ -867,8 +904,8 @@ function Trace({ n, runId, live, working, onReload }) {
       onReload?.()                  // refresh the parent-owned span tree and rollup as well
       setClearing('')
     } catch (e) {
-      // 409 while the engine is live is the common case — surface the server's reason inline.
-      setClearing(/live/i.test(e.message) ? 'stop the run first' : ('clear failed: ' + e.message))
+      // 409 while the engine is live is the common case. Keep server free text out of the UI.
+      setClearing(e?.status === 409 ? 'stop the run first' : 'clear failed — try again')
       setTimeout(() => setClearing(''), 4000)
     }
   }

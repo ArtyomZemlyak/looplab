@@ -158,7 +158,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [workspaceTabStop, setWorkspaceTabStop] = useState(view)
   useEffect(() => {
     setWorkspaceTabStop(view)
-  }, [view])
+  }, [view, historyActive, reviewMode])
   const onWorkspaceToolbarKeyDown = event => {
     const controls = [...(workspaceToolbarRef.current
       ?.querySelectorAll('[data-workspace-control]:not(:disabled)') || [])]
@@ -1007,7 +1007,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="muted" title={state.goal}>
           <b>{state.label || state.run_id || runId} · {displayedPhase} · gen {gen}</b>{state.goal || state.task_id}
         </span>
-        <span className={'live ' + (reviewMode ? 'off' : liveStatus)}><span className="led" />{reviewMode ? 'read-only' : liveLabel}{historyActive && ' · history'}</span>
+        <span className={'live ' + (reviewMode ? 'off' : liveStatus)}
+          role={reviewMode ? undefined : 'status'} aria-live={reviewMode ? undefined : 'polite'}
+          aria-atomic={reviewMode ? undefined : true}>
+          <span className="led" aria-hidden="true" />
+          {!reviewMode && <span className="sr-only">Current run status: </span>}
+          {reviewMode ? 'read-only' : liveLabel}
+          {historyActive && <span aria-hidden="true"> · history</span>}
+        </span>
         <span className="spacer" />
         {/* round-8: keep only COMPACT at-a-glance metrics here (eval, tokens) + alerts; the fuller
             set (strategy + rationale, hints, dedup) moved to the Overview tab so this header stays a
@@ -1160,7 +1167,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 observedSeq={historyActive ? history.resolvedSeq : seq}
                 expectedGeneration={routeState.generation}
                 readOnlyReason={reviewMode ? 'review' : 'history'} evidenceAvailable={!reviewMode || reviewEvidence}
-                onOpenPanel={readOnlyMode ? null : (p) => setPanel(p)}
+                onOpenPanel={p => { if (panelAllowed(p)) setPanel(p) }}
+                canOpenPanel={panelAllowed}
                 onPickNode={(id) => {
                   route.update(current => ({ ...current, view: 'dag', nodeId: id,
                     nodeGeneration: null, commentId: null }))

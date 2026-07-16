@@ -61,7 +61,7 @@ test('Inspector and Dock preserve projection truth through every trace surface',
     'node trace must pass its projection metadata to the shared renderer')
   assert.match(dock, /const unavailable = traceUnavailable\(current\.projection\)[\s\S]*?<TraceUnavailable label="Trace unavailable; retrying automatically\." \/>/,
     'live tail transport/unavailable state must not look like an empty waiting feed')
-  assert.match(dock, /3000, \[runId, active, open\], \{ enabled: active && open \}/,
+  assert.match(dock, /3000, \[runId, generation, active, open\], \{ enabled: active && open \}/,
     'the open live tail must automatically recover from a transient unavailable state')
   assert.match(dock, /!current\.loaded[\s\S]*?loading trace…[\s\S]*?partial && tail\.length === 0[\s\S]*?no observations were included[\s\S]*?waiting for the next agent step/,
     'an empty partial live tail must not look like a complete waiting feed')

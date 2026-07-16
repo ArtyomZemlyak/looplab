@@ -51,6 +51,9 @@ test('generation-scoped event counts flow from run state into exact timeline lag
   assert.match(timeline, /timelineBehindLive\([\s\S]*?latestLiveEventCountRef\.current\)/)
   assert.match(timeline, /const observed = lagging && merged\.windowAtTail \? \{ \.\.\.merged, windowAtTail: false \} : merged/)
   assert.match(timeline, /commit\(observed\)[\s\S]*?return observed/)
+  assert.match(timeline, /const identityCurrent = runRef\.current === runId[\s\S]*?state\.generation === expectedGeneration/,
+    'a run or generation replacement must hide the previous rows during the reset render')
+  assert.match(timeline, /const visibleState = identityCurrent \? state : \{[\s\S]*?generationChanged: true/)
 })
 
 test('Dock uses around paging, local-only drag preview, native event controls, and retained expansion state', async () => {
@@ -73,6 +76,8 @@ test('expanded node trace polls only its exact live lifecycle and refreshes once
   assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
   assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce\]/)
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)
+  assert.match(dock, /const scope = `\$\{runId\}:\$\{generation \|\| 'pending'\}`[\s\S]*?tailState\.scope === scope/,
+    'live trace rows must disappear immediately when the run generation changes')
 })
 
 test('virtual timeline is bounded, variable-height, generation-scoped, and politely announces unread events', async () => {

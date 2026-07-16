@@ -205,19 +205,20 @@ function collectThinking(trace, nid) {
 // most recent LLM thoughts + tool calls (with args), so you can see WHAT the agent is doing, not just
 // a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Both this feed and
 // per-observation detail are bounded/redacted projections with explicit omission receipts.
-function LiveTrace({ runId, active }) {
-  const [tailState, setTailState] = useState({ runId, items: [], projection: {}, loaded: false })
+function LiveTrace({ runId, generation, active }) {
+  const scope = `${runId}:${generation || 'pending'}`
+  const [tailState, setTailState] = useState({ scope, items: [], projection: {}, loaded: false })
   const [open, setOpen] = useState(false)
   const bodyRef = useRef(null)
   usePoll((alive) => get(runApiPath(runId, '/trace/tail?limit=40'))
     .then(r => { if (alive()) setTailState({
-      runId, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {}, loaded: true,
+      scope, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {}, loaded: true,
     }) })
     .catch(() => { if (alive()) setTailState({
-      runId, items: [], projection: { unavailable: true }, loaded: true,
+      scope, items: [], projection: { unavailable: true }, loaded: true,
     }) }),
-    3000, [runId, active, open], { enabled: active && open })
-  const current = tailState.runId === runId ? tailState : { items: [], projection: {}, loaded: false }
+    3000, [runId, generation, active, open], { enabled: active && open })
+  const current = tailState.scope === scope ? tailState : { items: [], projection: {}, loaded: false }
   const tail = current.items
   const unavailable = traceUnavailable(current.projection)
   const partial = tracePartial(current.projection)
@@ -427,6 +428,21 @@ function GenericDetail({ e }) {
     <React.Fragment key={i}><div className="section-h">{k}</div><div className="v">{v}</div></React.Fragment>)}</div>
 }
 
+export function eventNarration(event) {
+  const omittedBytes = event?._log_page?.truncated ? Number(event._log_page.raw_bytes || 0) : 0
+  if (event?._log_page?.truncated === true) {
+    return `${event.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
+  }
+  try {
+    const render = NARR[event?.type]
+    const value = render ? render(event?.data ?? {}) : JSON.stringify(event?.data ?? {}).slice(0, 80)
+    if (!value || /\bundefined\b/.test(String(value))) throw new TypeError('incomplete event narration')
+    return String(value || event?.type || 'event')
+  } catch {
+    return `${event?.type || 'event'} — details could not be summarized`
+  }
+}
+
 // The trace of ONE sub-operation (strategy_consult / hypothesis_merge …), fetched lazily by the
 // event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
 // whole node. Rendered with the same span-tree component as a node's trace.
@@ -522,9 +538,7 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const hasOmittedDetail = e?._log_page?.truncated === true
   const expandable = hasReason || hasTrace || !!opTraceId || hasGeneric || hasOmittedDetail
   const { group, glyph } = kindOf(e.type)
-  const narr = hasOmittedDetail
-    ? `${e.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
-    : (NARR[e.type] || ((d) => JSON.stringify(d).slice(0, 80)))(e.data)
+  const narr = eventNarration(e)
   const detailsId = `timeline-event-${e.seq}-details`
   return (
     <div className={'feed-msg k-' + group}>
@@ -741,8 +755,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   }
   const toggleKind = (g) => setKinds(s => { const n = new Set(s); n.has(g) ? n.delete(g) : n.add(g); return n })
   const searchableLog = useMemo(() => log.map(event => {
-    let narration = ''
-    try { narration = (NARR[event.type] || (() => ''))(event.data) } catch { /* malformed source stays inspectable */ }
+    const narration = eventNarration(event)
     // Unknown/forward-compatible event types are rendered from their projected JSON fallback. Include the
     // same bounded source in search so text the user can plainly see is not reported as "0 matching".
     // Keep the projection capped: Event Explorer owns deeper projected payload inspection, and Timeline
@@ -1061,7 +1074,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   }
   const onReplay = async () => {
     if (!window.confirm('Reset this run? Wipes all events & nodes and restarts from scratch.')) return
-    try { await resetRun(runId); onToast?.('replaying from scratch') } catch (e) { onToast?.('reset failed: ' + e.message) }
+    try { await resetRun(runId); onToast?.('replaying from scratch') } catch { onToast?.('Reset could not be submitted. Try again.') }
   }
   // Publish only from the committed layout and bind the callable to this exact run generation. A
   // functional identity cleanup prevents an old StrictMode/unmount cleanup from erasing a newer
@@ -1184,7 +1197,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
           if (!pipeline) return null
           return <div className="agent-status dock-agent-status">
             <div className="as-line"><span className="as-dot" /><span className="as-seg">{pipeline}</span></div>
-            <LiveTrace runId={runId} active={atLiveView} />
+            <LiveTrace runId={runId} generation={timeline.generation} active={atLiveView} />
           </div>
         })()}
         <div className="dock-foot">
@@ -1212,7 +1225,11 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
                       {' · '}{String(transportPending.record.id).slice(0, 12)}…</span> : null}
               </span>
               {transportPending.statusUnavailable && <>
-                {transportPending.lastError && <span className="transport-detail">{transportPending.lastError}</span>}
+                <span className="transport-detail">{transportPending.observationKind === 'access'
+                  ? 'Verify owner access, then check this same command.'
+                  : transportPending.observationKind === 'protocol'
+                    ? 'The saved command response could not be verified.'
+                    : 'Reconnect, then check this same command before submitting another intent.'}</span>
                 <button className="btn sm" onClick={onCheckTransport}
                   aria-label={`Check status of the preserved ${transportPending.action} command`}>
                   Check same command</button>

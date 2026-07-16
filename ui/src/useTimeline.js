@@ -233,8 +233,15 @@ export function useTimeline(runId, {
     ? (lastAnchorRef.current == null ? Promise.resolve(null) : loadAround(lastAnchorRef.current))
     : loadRef.current?.(direction), [loadAround])
 
+  // Effects reset the controller after a run/generation identity change. Hide the previous identity
+  // during that render too, so another run's rows never flash before the reset effect commits.
+  const identityCurrent = runRef.current === runId
+    && (!expectedGeneration || !state.generation || state.generation === expectedGeneration)
+  const visibleState = identityCurrent ? state : {
+    ...fresh(), status: enabled && runId ? 'loading' : 'idle', generationChanged: true,
+  }
   return {
-    ...state,
+    ...visibleState,
     loadOlder, loadNewer, loadAround, ensureSeq, jumpToLive, setFollowingTail, retry,
   }
 }

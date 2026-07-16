@@ -62,11 +62,15 @@ test('run view modes are truthful toggles and merge has one explicit confirmatio
   assert.match(runView, /className="view-toggle" role="toolbar"/)
   assert.match(runView, /aria-label="Run workspace controls" aria-orientation="horizontal"/)
   assert.match(runView, /onKeyDown=\{onWorkspaceToolbarKeyDown\} onFocus=\{onWorkspaceToolbarFocus\}/)
+  assert.match(runView, /setWorkspaceTabStop\(view\)[\s\S]*?\}, \[view, historyActive, reviewMode\]\)/,
+    'history/review transitions must move the sole tab stop off a newly disabled control')
   assert.equal((runView.match(/data-workspace-control=/g) || []).length, 4)
   assert.match(runView, /nextRovingIndex\(event\.key, controls\.indexOf\(current\), controls\.length\)/)
   assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
   assert.match(runView, /aria-pressed=\{view === 'report'\}/)
   assert.match(runView, /aria-pressed=\{panel === 'overview'\} aria-expanded=\{panel === 'overview'\}/)
+  assert.match(runView, /onOpenPanel=\{p => \{ if \(panelAllowed\(p\)\) setPanel\(p\) \}\}[\s\S]*?canOpenPanel=\{panelAllowed\}/,
+    'Report caveat links must expose and recheck the same owner/history/review panel policy')
   assert.match(runView, /<form className="merge-destination-bar"/)
   assert.match(runView, /<label htmlFor="merge-destination-select">/)
   assert.match(runView, /<select ref=\{mergeSelectRef\} id="merge-destination-select"[\s\S]*?autoFocus>/)
@@ -150,12 +154,18 @@ test('route changes update title and move focus to a named main landmark', async
 
 test('compact Assistant blocks background pointers and traps focus in the side drawer', async () => {
   const [assistant, css] = await Promise.all([source('AssistantBar.jsx'), source('styles.css')])
-  assert.match(assistant, /useMediaQuery\('\(max-width: 1279px\)'\)/)
+  assert.match(assistant, /ASSISTANT_OVERLAY_MAX_PX = 1439/)
+  assert.match(assistant, /useMediaQuery\(`\(max-width: \$\{ASSISTANT_OVERLAY_MAX_PX\}px\)`\)/)
+  assert.match(assistant, /assistantMaxWidth = compact => Math\.max\(320, window\.innerWidth - \(compact \? 120 : 880\)\)/)
   assert.match(assistant, /useDialogFocus\(sideDialogRef, collapseToBar, view === 'side' && compactAssistant && !hidden\)/)
   assert.match(assistant, /className="asst-side-backdrop" aria-hidden="true"[\s\S]*?onPointerDown=\{collapseToBar\}/)
   assert.match(assistant, /role=\{compactAssistant \? 'dialog' : undefined\} aria-modal=\{compactAssistant \? 'true' : undefined\}/)
   assert.match(assistant, /if \(next === 'side'\) requestAnimationFrame\(\(\) => inputRef\.current\?\.focus/)
-  assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 57;/)
+  assert.match(css, /\.asst-side-backdrop \{ position: fixed; inset: 0; z-index: 190;/)
+  assert.match(css, /\.asst-side-panel \{[^}]*z-index: 191;/)
+  assert.match(css, /\.overlay \{[^}]*z-index: 190;/,
+    'modal layers must block the fixed Attention trigger below z-index 180')
+  assert.match(css, /@media \(max-width: 1439px\)[\s\S]*?body\.asst-side-open \.app-shell-main \{ margin-right: 0; \}/)
 })
 
 test('temporary create and delete workflows retain a connected focus destination', async () => {
@@ -296,7 +306,7 @@ test('live node-detail and per-node building-trace polls gate their setState on 
   // Inspector node-detail poll: callback receives (alive), rejects a STALER attempt (accepts fresher),
   // and only then writes. (R7: `>= nodeAttempt`, not exact — the detail endpoint often leads the poll.)
   assert.match(inspector, /const detailMatchesAttempt = value => !Number\.isSafeInteger\(nodeAttempt\)[\s\S]*?value\.attempt >= nodeAttempt/)
-  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?get\(runNodeApiPath\(runId, nodeId\)\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesAttempt\(d\)\)/)
+  assert.match(inspector, /usePoll\(\(alive\) => \{[\s\S]*?get\(runNodeApiPath\(runId, nodeId\)\)\.then\(d => \{\s*if \(alive\(\) && detailMatchesNode\(d\) && detailMatchesAttempt\(d\)\)/)
   // Dock building-trace poll: the O(node) callback receives alive, and every state write is gated.
   // The error flag is cleared only on SUCCESS (inside the alive() guard), never eagerly per tick, so a
   // persistent failure does not flicker the error/Retry banner every 4s.
@@ -326,4 +336,12 @@ test('R7: Inspector accepts a fresher node-detail payload (no spurious attempt-c
   const inspector = await source('Inspector.jsx')
   // detailMatchesAttempt must accept attempt >= summary (fresher after inline repair), not exact-only.
   assert.match(inspector, /Number\.isSafeInteger\(value\?\.attempt\) && value\.attempt >= nodeAttempt/)
+})
+
+test('owner lifecycle is announced without duplicating the review banner', async () => {
+  const runView = await source('RunView.jsx')
+  assert.match(runView, /className=\{'live ' \+ \(reviewMode \? 'off' : liveStatus\)\}[\s\S]*?role=\{reviewMode \? undefined : 'status'\}[\s\S]*?aria-live=\{reviewMode \? undefined : 'polite'\}[\s\S]*?aria-atomic=\{reviewMode \? undefined : true\}/)
+  assert.match(runView, /<span className="led" aria-hidden="true" \/>[\s\S]*?!reviewMode && <span className="sr-only">Current run status: <\/span>/)
+  assert.match(runView, /historyActive && <span aria-hidden="true"> · history<\/span>/)
+  assert.match(runView, /className="review-banner" role="status"/)
 })

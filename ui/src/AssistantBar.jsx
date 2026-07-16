@@ -146,8 +146,10 @@ const TEXT_EXT = /\.(txt|md|markdown|csv|tsv|json|jsonl|ya?ml|toml|ini|cfg|conf|
 const FILE_CHAR_CAP = 20000
 const MAX_FILE_BYTES = 2 * 1024 * 1024   // never readAsText a giant log/csv into the tab (OOM)
 const SECRET_RE = /(^|\/)\.env(\.|$)|\.pem$|\.key$|(^|\/)(id_rsa|id_ed25519)$|secret|credential/i
-const clampAssistantWidth = value => {
-  const max = Math.max(320, window.innerWidth - 120)
+const ASSISTANT_OVERLAY_MAX_PX = 1439
+const assistantMaxWidth = compact => Math.max(320, window.innerWidth - (compact ? 120 : 880))
+const clampAssistantWidth = (value, compact = window.innerWidth <= ASSISTANT_OVERLAY_MAX_PX) => {
+  const max = assistantMaxWidth(compact)
   return Math.min(Math.max(Number(value) || 440, 320), max)
 }
 const readFileText = (file) => new Promise((resolve) => {
@@ -158,7 +160,7 @@ const readFileText = (file) => new Promise((resolve) => {
 })
 
 export default function AssistantBar({ runId, hidden = false }) {
-  const compactAssistant = useMediaQuery('(max-width: 1279px)')
+  const compactAssistant = useMediaQuery(`(max-width: ${ASSISTANT_OVERLAY_MAX_PX}px)`)
   const [runAccess, setRunAccessState] = useState(() => getRunAccess(runId))
   const historical = !!runId && runAccess.readOnly
   const staleDiagnostic = historical && runAccess.mode === 'stale-link'
@@ -320,7 +322,7 @@ export default function AssistantBar({ runId, hidden = false }) {
 
   // ── resizable side panel (drag its left edge) ──
   const resizeCleanupRef = useRef(null)
-  const maxSideWidth = () => Math.max(320, window.innerWidth - 120)
+  const maxSideWidth = () => assistantMaxWidth(compactAssistant)
   const startResize = (e) => {
     if (e.button != null && e.button !== 0) return
     e.preventDefault()
@@ -348,10 +350,11 @@ export default function AssistantBar({ runId, hidden = false }) {
   }
   useEffect(() => () => resizeCleanupRef.current?.(), [])
   useEffect(() => {
-    const clamp = () => setSideW(width => clampAssistantWidth(width))
+    const clamp = () => setSideW(width => clampAssistantWidth(width, compactAssistant))
+    clamp()
     window.addEventListener('resize', clamp)
     return () => window.removeEventListener('resize', clamp)
-  }, [])
+  }, [compactAssistant])
 
   // ── sessions (full view) ──
   const openSession = async (id, { recover = false, observeOnly = false } = {}) => {

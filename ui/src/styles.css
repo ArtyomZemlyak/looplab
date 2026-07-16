@@ -717,7 +717,7 @@ pre.code { background: var(--bg); border: 1px solid var(--line); border-radius: 
 
 /* ---------- panels / overlays ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(6,8,12,.55); display: flex;
-  justify-content: center; align-items: flex-start; padding: 36px; z-index: 50; }
+  justify-content: center; align-items: flex-start; padding: 36px; z-index: 190; }
 .panel { background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 12px;
   box-shadow: var(--shadow); width: min(880px, 92%); max-height: 86%; overflow: auto; }
 .panel-h { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid var(--line);
@@ -1111,7 +1111,7 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
   padding: 2px 8px; border-radius: 999px; background: var(--bg-3); border: 1px solid var(--line-2); }
 .verdict-pill.ok { color: var(--ok); border-color: var(--ok); }
 .verdict-pill.fail { color: var(--fail); border-color: var(--fail); }
-.verdict-headline { font-size: 16px; font-weight: 650; line-height: 1.4; }
+.verdict-headline { margin: 0; font-size: 16px; font-weight: 650; line-height: 1.4; }
 .verdict-text { margin-top: 6px; color: var(--fg-mut); font-size: 13px; }
 .caveat-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
 .caveat-chip { font-size: 11px; padding: 3px 9px; border-radius: 999px; cursor: pointer;
@@ -2000,9 +2000,9 @@ pre.code.event-json { max-height: 220px; }
 .chip .chip-x:hover { color: var(--fail); }
 
 /* Right side panel: full-height, RESIZABLE (drag left edge), composer lives inside it. */
-.asst-side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 58; display: flex; flex-direction: column;
+.asst-side-panel { position: fixed; top: 0; right: 0; bottom: 0; z-index: 191; display: flex; flex-direction: column;
   background: var(--bg-1); border-left: 1px solid var(--line); box-shadow: -8px 0 24px rgba(0,0,0,.35); }
-.asst-side-backdrop { position: fixed; inset: 0; z-index: 57;
+.asst-side-backdrop { position: fixed; inset: 0; z-index: 190;
   background: color-mix(in srgb, var(--bg) 46%, transparent); }
 .asst-resize { position: absolute; left: -3px; top: 0; bottom: 0; width: 8px; cursor: col-resize;
   touch-action: none; z-index: 3; }
@@ -2135,7 +2135,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   max-width: calc(100% - 24px); box-shadow: var(--shadow); border-left-color: var(--line-2);
 }
 
-@media (max-width: 1279px) {
+@media (max-width: 1439px) {
   /* Below wide desktop, docking a 440px Assistant alongside a 420px Inspector starves the DAG. */
   body.asst-side-open .app-shell-main { margin-right: 0; }
   .asst-side-panel { width: min(var(--asst-side-w, 440px), 92vw) !important; }
