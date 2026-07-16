@@ -28,11 +28,20 @@ from looplab.core.comparison import (
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.events.replay import fold
-from looplab.serve.run_commands import run_generation_token
 from looplab.serve.scope_report import (
     DEFAULT_SCOPE_REPORT_TIME_S,
     DEFAULT_SCOPE_REPORT_TURNS,
     MAX_SCOPE_REPORT_RUNS,
+)
+from looplab.serve.scope_sources import (
+    MAX_SCOPE_EVENT_BYTES,
+    MAX_SCOPE_TOTAL_EVENT_BYTES,
+    FrozenScopeSource,
+    ScopeSourceCapacityError,
+    ScopeSourceError,
+    capture_scope_source,
+    probe_scope_log_sig,
+    scope_event_size,
 )
 from looplab.trust.redact import redact_persisted_text
 
@@ -49,6 +58,15 @@ _SCOPE_INPUTS_CHANGED = {
     "error_kind": "conflict",
     "error": "Scope runs changed while the report was being generated. The previous report was kept.",
     "remediation": "Retry generation from the current scope snapshot.",
+}
+_SCOPE_SOURCE_TOO_LARGE = {
+    "code": "scope_report_source_too_large",
+    "error_kind": "capacity",
+    "message": "The scope's event evidence exceeds the bounded cross-run report limit.",
+    "error": "Scope event evidence is too large for one bounded report snapshot.",
+    "max_run_bytes": MAX_SCOPE_EVENT_BYTES,
+    "max_scope_bytes": MAX_SCOPE_TOTAL_EVENT_BYTES,
+    "remediation": "Generate a narrower scope report or compact oversized run history.",
 }
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SERVER_VERDICT_AUTHORITY = "server-derived-v2"
@@ -283,6 +301,9 @@ def _valid_source_revision(revision: object) -> bool:
         if value is not None and (
                 not isinstance(value, str) or _RUN_GENERATION_RE.fullmatch(value) is None):
             return False
+    event_bytes = revision.get("event_bytes")
+    if event_bytes is not None and (type(event_bytes) is not int or event_bytes < 0):
+        return False
     return True
 
 
@@ -559,7 +580,7 @@ def _prior_learnings_index(reports_dir: Path) -> str:
 
 def build_router(srv) -> APIRouter:
     router = APIRouter()
-    _run_dir, _phase = srv.run_dir, srv.phase
+    _phase = srv.phase
     projects = srv.projects
     _reports_dir = srv.reports_dir
 
@@ -586,29 +607,6 @@ def build_router(srv) -> APIRouter:
             return [s["run_id"] for s in summaries if s.get("project_id") in scopeset]
         return []
 
-    def _log_sig(run_id: str, rd: Path, generation: str | None = None) -> list:
-        """Cheap reset-safe log identity used by GET staleness checks."""
-        try:
-            resolved_generation = generation if generation is not None else srv.commands.run_generation(rd)
-            stt = (rd / "events.jsonl").stat()
-            return [
-                run_id, resolved_generation,
-                int(stt.st_dev), int(stt.st_ino), int(stt.st_ctime_ns),
-                int(stt.st_size), int(stt.st_mtime_ns),
-            ]
-        except (OSError, RuntimeError):
-            return [run_id, "", 0, 0, 0, 0, 0]
-
-    def _file_digest(path: Path) -> str:
-        digest = hashlib.sha256()
-        try:
-            with path.open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    digest.update(chunk)
-        except FileNotFoundError:
-            return hashlib.sha256(b"<missing>").hexdigest()
-        return digest.hexdigest()
-
     def _scope_context_digest(scope_type: str, scope_id: str, run_ids: list[str]) -> str:
         project_data = projects.load()
         labels = project_data.get("labels", {}) if isinstance(project_data, dict) else {}
@@ -624,64 +622,17 @@ def build_router(srv) -> APIRouter:
             context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
         ).encode("utf-8")).hexdigest()
 
-    def _capture_source(run_id: str, rd: Path | None = None) -> tuple[Path, list, dict]:
-        """Read one exact event prefix and bind it to generation, tail, and file identity."""
-        rd = rd if rd is not None else _run_dir(run_id)
-        events = srv.events(rd)
-        generation = run_generation_token(events)
-        if not events or _RUN_GENERATION_RE.fullmatch(generation) is None:
-            raise ValueError("run has no durable generation")
-        tail_payload = json.dumps(
-            events[-1].model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
-            separators=(",", ":"), default=str,
-        ).encode("utf-8")
-        log_sig = _log_sig(run_id, rd, generation)
-        if log_sig[1] != generation:
-            raise OSError("event log disappeared while freezing scope evidence")
-        events_hash = hashlib.sha256()
-        for event in events:
-            events_hash.update(json.dumps(
-                event.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
-                separators=(",", ":"), default=str,
-            ).encode("utf-8"))
-            events_hash.update(b"\n")
-        revision = {
-            "run_id": run_id,
-            "generation": generation,
-            "tail_seq": int(events[-1].seq),
-            "event_count": len(events),
-            "tail_digest": hashlib.sha256(tail_payload).hexdigest(),
-            "log_sig": log_sig,
-            "events_digest": events_hash.hexdigest(),
-            "task_snapshot_digest": _file_digest(rd / "task.snapshot.json"),
-            "config_snapshot_digest": _file_digest(rd / "config.snapshot.json"),
-        }
-        return rd, events, revision
-
-    def _run_brief(run_id: str, labels: dict, rd: Path, events: list) -> dict:
+    def _run_brief(run_id: str, labels: dict, source: FrozenScopeSource) -> dict:
+        events = source.events
         st = fold(events)
         finalize_incomplete = (
             incomplete_finalize_scope(events) is not None or st.finalization_pending())
         best = st.best()
-        cfg = {}
-        snap = rd / "config.snapshot.json"
-        if snap.exists():
-            try:
-                cfg = json.loads(snap.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                cfg = {}
+        cfg = source.config_doc
         task_contract = None
-        task_snap = rd / "task.snapshot.json"
-        try:
-            # Task snapshots are operator-authored and can be arbitrarily large. Comparison metadata
-            # is useful only when the whole bounded JSON document is readable and explicitly valid.
-            if task_snap.stat().st_size <= 1_000_000:
-                task_doc = json.loads(task_snap.read_text(encoding="utf-8"))
-                if isinstance(task_doc, dict):
-                    task_contract = canonical_comparison_contract(
-                        task_doc.get("comparison_contract"))
-        except (OSError, UnicodeError, json.JSONDecodeError):
-            task_contract = None
+        if source.task_doc is not None:
+            task_contract = canonical_comparison_contract(
+                source.task_doc.get("comparison_contract"))
         if task_contract is not None and task_contract["direction"] != st.direction:
             task_contract = None
         measurement = comparison_measurement(task_contract, best)
@@ -708,10 +659,9 @@ def build_router(srv) -> APIRouter:
         if frozen is None:
             return "(drill unavailable)"
         try:
-            _rd, events, revision = _capture_source(run_id, frozen["run_dir"])
-            if revision != frozen["revision"]:
+            if probe_scope_log_sig(srv.root, run_id) != frozen.revision["log_sig"]:
                 return "(drill unavailable: frozen run changed)"
-            st = fold(events)
+            st = fold(frozen.events)
             node = st.nodes.get(node_id)
             if node is None:
                 return "(drill unavailable: no such node)"
@@ -767,10 +717,27 @@ def build_router(srv) -> APIRouter:
         sig: list = []
         for rid in sorted(set(run_ids)):
             try:
-                sig.append(_log_sig(rid, _run_dir(rid)))
-            except Exception:  # noqa: BLE001 - a vanished run is a stable stale marker
+                sig.append(probe_scope_log_sig(srv.root, rid))
+            except ScopeSourceError:
                 sig.append([rid, "", 0, 0, 0, 0, 0])
         return sig
+
+    def _scope_source_sizes(run_ids: list[str]) -> dict[str, int]:
+        """Preflight the exact raw-byte budget even when a later parse marks a run unavailable."""
+        sizes: dict[str, int] = {}
+        total = 0
+        for run_id in sorted(set(run_ids)):
+            try:
+                size = scope_event_size(srv.root, run_id)
+            except ScopeSourceCapacityError:
+                raise
+            except ScopeSourceError:
+                size = 0
+            total += size
+            if total > MAX_SCOPE_TOTAL_EVENT_BYTES:
+                raise ScopeSourceCapacityError("scope event evidence exceeds its byte limit")
+            sizes[run_id] = size
+        return sizes
 
     @router.get("/api/scope-report/{scope_type}/{scope_id}")
     def get_scope_report(scope_type: str, scope_id: str):
@@ -792,12 +759,17 @@ def build_router(srv) -> APIRouter:
         source_revisions = rec.get("source_revisions")
         if not stale and isinstance(source_revisions, list):
             try:
-                current_revisions = [
-                    _capture_source(run_id)[2] for run_id in rec.get("run_ids", [])]
+                remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
+                current_revisions = []
+                for run_id in rec.get("run_ids", []):
+                    source = capture_scope_source(
+                        srv.root, run_id, event_budget_bytes=remaining)
+                    current_revisions.append(source.revision)
+                    remaining -= source.event_bytes
                 # A pre-v2 revision lacks task/config/full-prefix digests. Treat it as stale rather
                 # than claiming that a newly model-visible input stayed unchanged.
                 stale = current_revisions != source_revisions
-            except Exception:  # noqa: BLE001 - uncertain input identity is stale, never current
+            except ScopeSourceError:
                 stale = True
         return {**rec, "exists": True, "stale": stale,
                 "current_run_count": len(cur_ids), "added": added}
@@ -826,6 +798,14 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Generate reports for narrower child scopes.",
             })
         try:
+            requested_source_sizes = _scope_source_sizes(run_ids)
+        except ScopeSourceCapacityError as exc:
+            raise HTTPException(413, _SCOPE_SOURCE_TOO_LARGE) from exc
+        requested_scope_ids = list(run_ids)
+        requested_scope_sig = _scope_sig(requested_scope_ids)
+        requested_context_digest = _scope_context_digest(
+            scope_type, scope_id, requested_scope_ids)
+        try:
             with _scope_store_lock(_reports_dir):
                 _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
         except _ScopeReportStorageConflict as exc:
@@ -833,31 +813,43 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
 
         def _compute() -> dict:
-            frozen_scope_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
-            if not frozen_scope_ids:
+            frozen_scope_ids = requested_scope_ids
+            current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
+            if (current_ids != frozen_scope_ids
+                    or _scope_sig(current_ids) != requested_scope_sig
+                    or _scope_context_digest(scope_type, scope_id, current_ids)
+                    != requested_context_digest):
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
-            if len(frozen_scope_ids) > MAX_SCOPE_REPORT_RUNS:
-                return {
-                    "ok": False,
-                    "code": "scope_report_too_large",
-                    "error_kind": "capacity",
-                    "error": "The scope grew beyond the bounded report input limit.",
-                    "run_count": len(frozen_scope_ids),
-                    "max_runs": MAX_SCOPE_REPORT_RUNS,
-                }
-            frozen_scope_sig = _scope_sig(frozen_scope_ids)
-            frozen_context_digest = _scope_context_digest(
-                scope_type, scope_id, frozen_scope_ids)
+            try:
+                frozen_source_sizes = _scope_source_sizes(frozen_scope_ids)
+            except ScopeSourceCapacityError:
+                return {"ok": False, **_SCOPE_SOURCE_TOO_LARGE}
+            if frozen_source_sizes != requested_source_sizes:
+                return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+            frozen_scope_sig = requested_scope_sig
+            frozen_context_digest = requested_context_digest
             labels = projects.load().get("labels", {})
             briefs = []
-            frozen_runs: dict[str, dict] = {}
+            frozen_runs: dict[str, FrozenScopeSource] = {}
+            consumed_event_bytes = 0
             for rid in frozen_scope_ids:
+                expected_bytes = frozen_source_sizes.get(rid, 0)
                 try:
-                    rd, events, revision = _capture_source(rid)
-                    briefs.append(_run_brief(rid, labels, rd, events))
-                    frozen_runs[rid] = {"run_dir": rd, "revision": revision}
-                except Exception:  # noqa: BLE001 - a half-written run shouldn't block the report
+                    source = capture_scope_source(
+                        srv.root, rid,
+                        event_budget_bytes=max(
+                            1, MAX_SCOPE_TOTAL_EVENT_BYTES - consumed_event_bytes),
+                    )
+                    if source.event_bytes != expected_bytes:
+                        return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+                    briefs.append(_run_brief(rid, labels, source))
+                    frozen_runs[rid] = source
+                except ScopeSourceCapacityError:
+                    return {"ok": False, **_SCOPE_SOURCE_TOO_LARGE}
+                except ScopeSourceError:
                     continue
+                finally:
+                    consumed_event_bytes += expected_bytes
             scope = {
                 "type": scope_type,
                 "id": scope_id,
@@ -866,6 +858,36 @@ def build_router(srv) -> APIRouter:
                 # contribute a brief. The model sees only frozen briefs; the receipt counts the omission.
                 "source_run_count": len(frozen_scope_ids),
             }
+            brief_ids = [brief["run_id"] for brief in briefs]
+            source_revisions = [frozen_runs[rid].revision for rid in brief_ids]
+
+            def _inputs_unchanged() -> bool:
+                current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
+                if current_ids != frozen_scope_ids or _scope_sig(current_ids) != frozen_scope_sig:
+                    return False
+                if (_scope_context_digest(scope_type, scope_id, current_ids)
+                        != frozen_context_digest):
+                    return False
+                try:
+                    current_sizes = _scope_source_sizes(current_ids)
+                    if current_sizes != frozen_source_sizes:
+                        return False
+                    remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
+                    for rid in frozen_scope_ids:
+                        if rid in frozen_runs:
+                            source = capture_scope_source(
+                                srv.root, rid, event_budget_bytes=max(1, remaining))
+                            if source.revision != frozen_runs[rid].revision:
+                                return False
+                        remaining -= current_sizes.get(rid, 0)
+                    return True
+                except ScopeSourceError:
+                    return False
+
+            # CODEX AGENT: revalidate every model-visible byte before client construction. A
+            # click-time/member/source race must consume zero provider calls, not only reject write.
+            if not _inputs_unchanged():
+                return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             from looplab.serve.scope_report import generate_scope_report as _gen
             s = srv.llm_settings(None)
             try:
@@ -882,28 +904,6 @@ def build_router(srv) -> APIRouter:
                                               or DEFAULT_SCOPE_REPORT_TIME_S))
             except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
                 content = _gen(scope, briefs, None)
-            # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped
-            # above (corrupt log) wasn't read, so it must not count toward "over N runs" or the sig.
-            brief_ids = [b["run_id"] for b in briefs]
-            source_revisions = [frozen_runs[rid]["revision"] for rid in brief_ids]
-
-            def _inputs_unchanged() -> bool:
-                try:
-                    current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
-                    if current_ids != frozen_scope_ids or _scope_sig(current_ids) != frozen_scope_sig:
-                        return False
-                    if (_scope_context_digest(scope_type, scope_id, current_ids)
-                            != frozen_context_digest):
-                        return False
-                    for rid in brief_ids:
-                        _rd, _events, revision = _capture_source(
-                            rid, frozen_runs[rid]["run_dir"])
-                        if revision != frozen_runs[rid]["revision"]:
-                            return False
-                    return True
-                except Exception:  # noqa: BLE001 - uncertainty must preserve the last-good report
-                    return False
-
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
@@ -914,17 +914,8 @@ def build_router(srv) -> APIRouter:
             try:
                 with _scope_store_lock(_reports_dir):
                     # Narrow the optimistic-check window at the actual publication boundary.
-                    if (sorted(set(_scope_run_ids(scope_type, scope_id))) != frozen_scope_ids
-                            or _scope_sig(frozen_scope_ids) != frozen_scope_sig):
+                    if not _inputs_unchanged():
                         return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
-                    if (_scope_context_digest(scope_type, scope_id, frozen_scope_ids)
-                            != frozen_context_digest):
-                        return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
-                    for rid in brief_ids:
-                        _rd, _events, revision = _capture_source(
-                            rid, frozen_runs[rid]["run_dir"])
-                        if revision != frozen_runs[rid]["revision"]:
-                            return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
                     # Revalidate the lexical store and re-derive the destination immediately before
                     # publication. A directory/file swapped during the slow model call is refused.
                     _validated_reports_dir(_reports_dir, create=True)

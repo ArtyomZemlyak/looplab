@@ -2321,6 +2321,45 @@ def test_scope_report_staleness_detects_same_size_same_mtime_replacement(
     assert result["exists"] is True and result["stale"] is True
 
 
+def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monkeypatch):
+    """Queued work must not bill when evidence changes after its initial capture."""
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.routers import reports
+
+    task_id = "pre-provider-cas"
+    _seed_scope_run(tmp_path, "owned-run", task_id)
+    event_path = tmp_path / "owned-run" / "events.jsonl"
+    original_capture = reports.capture_scope_source
+    captures = 0
+    provider_calls = 0
+
+    def capture_then_mutate(*args, **kwargs):
+        nonlocal captures
+        source = original_capture(*args, **kwargs)
+        captures += 1
+        if captures == 1:
+            EventStore(event_path).append("annotation", {"text": "changed after freeze"})
+        return source
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr(reports, "capture_scope_source", capture_then_mutate)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    response = TestClient(make_app(tmp_path)).post(
+        f"/api/scope-report/task/{task_id}/generate"
+    )
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "scope_report_inputs_changed"
+    assert response.json()["stale"] is True
+    assert captures == 1
+    assert provider_calls == 0
+    assert not list((tmp_path / "reports").glob("*.json"))
+
+
 def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monkeypatch):
     """Two ids with the same readable filename prefix own different files and different content."""
     from urllib.parse import quote
@@ -2491,6 +2530,32 @@ def test_scope_report_rejects_oversized_record_before_provider(
     assert provider_calls == 0
     assert report_path.read_bytes() == hostile
     assert _prior_learnings_index(reports_dir) == ""
+
+
+def test_scope_report_rejects_oversized_source_before_provider(tmp_path, monkeypatch):
+    """Raw evidence capacity is enforced before client construction or job billing."""
+    from looplab.serve import scope_sources
+
+    task_id = "oversized-source"
+    _seed_scope_run(tmp_path, "owner-run", task_id)
+    event_size = (tmp_path / "owner-run" / "events.jsonl").stat().st_size
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr(scope_sources, "MAX_SCOPE_EVENT_BYTES", event_size - 1)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    response = TestClient(make_app(tmp_path)).post(
+        f"/api/scope-report/task/{task_id}/generate"
+    )
+
+    assert response.status_code == 413
+    assert response.json()["detail"]["code"] == "scope_report_source_too_large"
+    assert provider_calls == 0
+    assert not (tmp_path / "reports").exists()
 
 
 @pytest.mark.parametrize("malformed", ["huge_integer", "deep_nesting"])
