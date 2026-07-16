@@ -12,6 +12,7 @@ import json
 
 from looplab.agents.deep_research import _SYSTEM, DeepResearcher, state_brief
 from looplab.core.models import RunState
+from looplab.trust.source_identity import canonical_source_ref
 
 
 class _FakeTools:
@@ -84,10 +85,15 @@ def test_tool_then_stall_then_nudge_then_emit_message_parity():
 
     assert memo.summary == "s" and memo.reasoning == "r"
     assert memo.findings == ["f1"] and memo.recommended_directions == ["d1"]
-    assert memo.claims == [{"statement": "c", "node_ids": [1], "urls": ["http://x"]}]
+    claim_ref = canonical_source_ref("http://x")
+    source_ref = canonical_source_ref("http://a")
+    assert memo.claims == [{"statement": "c", "node_ids": [1],
+                            "urls": [claim_ref.display_url],
+                            "url_identities": [claim_ref.identity]}]
     assert memo.trigger == "cadence" and memo.at_node == 0
     # sources ledger: same (title, url, snippet) shape with the same [:200] snippet truncation
-    assert memo.sources == [{"title": "search(ridge)", "url": "http://a",
+    assert memo.sources == [{"title": "search(ridge)", "url": source_ref.display_url,
+                             "url_identity": source_ref.identity,
                              "snippet": "R" * 200}]
     assert tools.calls == [("search", {"query": "ridge", "url": "http://a"})]
     # only the wired tools + emit are offered — no self-plan tool injected into this stage
@@ -122,7 +128,8 @@ def test_malformed_tool_args_degrade_to_empty_dict():
     ])
     memo = DeepResearcher(client, tools).research(RunState(goal="g"))
     assert tools.calls == [("search", {})]
-    assert memo.sources == [{"title": "search()", "url": "", "snippet": "ok"}]
+    assert memo.sources == [{"title": "search()", "url": "", "url_identity": "",
+                             "snippet": "ok"}]
     assert memo.summary == "done"
 
 
@@ -135,7 +142,8 @@ def test_turn_budget_exhaustion_forces_memo_fallback():
         forced={"summary": "forced memo", "findings": ["from history"]})
     memo = DeepResearcher(client, tools, max_turns=1).research(RunState(goal="g"))
     assert memo.summary == "forced memo" and memo.findings == ["from history"]
-    assert memo.sources == [{"title": "search(q)", "url": "", "snippet": "partial evidence"}]
+    assert memo.sources == [{"title": "search(q)", "url": "", "url_identity": "",
+                             "snippet": "partial evidence"}]
     forced_msgs = client.forced_calls[-1]
     assert forced_msgs[-1]["role"] == "user"
     assert "Out of turn/time budget" in forced_msgs[-1]["content"]
@@ -168,7 +176,8 @@ def test_no_tools_hallucinated_call_gets_no_tools_observation():
     ])
     memo = DeepResearcher(client, tools=None).research(RunState(goal="g"))
     assert memo.summary == "s"
-    assert memo.sources == [{"title": "search(q)", "url": "", "snippet": "(no tools)"}]
+    assert memo.sources == [{"title": "search(q)", "url": "", "url_identity": "",
+                             "snippet": "(no tools)"}]
     assert client.specs_seen[0] == ["emit"]
     tool_msgs = [m for m in client.turns[1] if m["role"] == "tool"]
     assert tool_msgs and tool_msgs[0]["content"] == "(no tools)"

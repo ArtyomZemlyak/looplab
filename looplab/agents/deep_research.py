@@ -23,6 +23,7 @@ from looplab.core.llm import BudgetExceeded
 from looplab.core.models import NodeStatus, ResearchMemo, RunState
 from looplab.core.prompts import PromptStore, render
 from looplab.trust.redact import redact_persisted_text
+from looplab.trust.source_identity import canonical_source_ref
 
 
 _MAX_SOURCES = MAX_RESEARCH_SOURCES
@@ -147,10 +148,12 @@ class DeepResearcher:
             # Record which sources were consulted (the query/url + a snippet) for the memo.
             if len(sources) >= _MAX_SOURCES:
                 return
+            source_url, source_identity = _arg_source(args)
             sources.append({
                 "title": redact_persisted_text(
                     f"{name}({_arg_label(args)})", max_chars=400, single_line=True),
-                "url": _arg_url(args),
+                "url": source_url,
+                "url_identity": source_identity,
                 # Preserve the historical first-200 source excerpt after sanitizing the loop's
                 # already-bounded observation; the durable writer applies the same guard again.
                 "snippet": redact_persisted_text(result, max_chars=4_000)[:200],
@@ -230,8 +233,15 @@ def _arg_label(args: dict) -> str:
 
 
 def _arg_url(args: dict) -> str:
-    return redact_persisted_text(
-        (args or {}).get("url") or "", max_chars=1_600, single_line=True)
+    return _arg_source(args)[0]
+
+
+def _arg_source(args: dict) -> tuple[str, str]:
+    raw = (args or {}).get("url") or ""
+    ref = canonical_source_ref(raw)
+    if ref is not None:
+        return ref.display_url, ref.identity
+    return redact_persisted_text(raw, max_chars=1_600, single_line=True), ""
 
 
 def make_deep_researcher(settings, *, client=None, task=None) -> Optional[DeepResearcher]:

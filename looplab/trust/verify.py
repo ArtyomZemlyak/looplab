@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from looplab.core.fitness import is_usable_metric
 from looplab.core.models import NodeStatus, RunState
 from looplab.trust.redact import redact_persisted_text
+from looplab.trust.source_identity import canonical_source_ref
 
 
 _MAX_CLAIMS = 64
@@ -38,18 +39,46 @@ def _clean(value, maximum: int, *, single_line: bool = False) -> str:
         value, max_chars=maximum, entropy=True, single_line=single_line)
 
 
+def _source_ref(value: object) -> Optional[tuple[str, str]]:
+    """Back-compatible tuple facade used by focused verifier tests."""
+    ref = canonical_source_ref(value)
+    return tuple(ref) if ref is not None else None
+
+
+def _row_source_ref(row: dict) -> Optional[tuple[str, str]]:
+    ref = canonical_source_ref(row.get("url", ""), persisted_identity=row.get("url_identity"))
+    return tuple(ref) if ref is not None else None
+
+
+def _claim_source_refs(claim: dict) -> list[tuple[str, str]]:
+    raw_urls = claim.get("urls") if isinstance(claim, dict) else ()
+    raw_ids = claim.get("url_identities") if isinstance(claim, dict) else ()
+    urls = raw_urls if isinstance(raw_urls, (list, tuple)) else ()
+    identities = raw_ids if isinstance(raw_ids, (list, tuple)) else ()
+    refs = []
+    for index, value in enumerate(urls[:_MAX_URL_REFS]):
+        persisted = identities[index] if index < len(identities) else None
+        ref = canonical_source_ref(value, persisted_identity=persisted)
+        if ref is not None:
+            refs.append(tuple(ref))
+    return refs
+
+
 def _source_map(sources) -> dict[str, dict[str, str]]:
-    """Return the bounded exact URL set the researcher actually consulted."""
+    """Return the bounded canonical URL identities the researcher actually consulted."""
     out: dict[str, dict[str, str]] = {}
     rows = sources if isinstance(sources, (list, tuple)) else ()
     for source in rows[:_MAX_SOURCES]:
         if not isinstance(source, dict):
             continue
-        url = _clean(source.get("url", ""), 1_600, single_line=True)
-        if not url or url in out:
+        ref = _row_source_ref(source)
+        if ref is None:
             continue
-        out[url] = {
-            "url": url,
+        identity, display_url = ref
+        if identity in out:
+            continue
+        out[identity] = {
+            "url": display_url,
             "title": _clean(source.get("title", ""), 400, single_line=True),
             "snippet": _clean(source.get("snippet", ""), 200),
         }
@@ -85,13 +114,12 @@ def _evidence_text(claim: dict, state: RunState,
         nodes.append(row)
 
     matched_sources: list[dict[str, str]] = []
+    matched_identities: set[str] = set()
     source_lookup = sources or {}
-    raw_urls = claim.get("urls") if isinstance(claim, dict) else ()
-    for value in (raw_urls if isinstance(raw_urls, (list, tuple)) else ())[:_MAX_URL_REFS]:
-        if not isinstance(value, str):
-            continue
-        source = source_lookup.get(_clean(value, 1_600, single_line=True))
-        if source is not None:
+    for identity, _display_url in _claim_source_refs(claim):
+        source = source_lookup.get(identity)
+        if source is not None and identity not in matched_identities:
+            matched_identities.add(identity)
             matched_sources.append(source)
     return json.dumps(
         {"experiments": nodes, "consulted_sources": matched_sources},
@@ -100,22 +128,10 @@ def _evidence_text(claim: dict, state: RunState,
     )
 
 
-def check_claims(claims: list[dict], state: RunState, sources=None) -> list[dict]:
-    """Deterministic verification layer (pure, offline). Verdicts:
-      - `unsupported` — no evidence cited at all, or every cited node id is unknown;
-      - `cited`       — evidence exists (node ids resolve and/or a URL exactly matches a
-                        consulted memo source); whether it
-                        SEMANTICALLY supports the claim is the LLM rubric layer's (or a human's)
-                        call, not this deterministic pass's.
-    Returns [{statement, verdict, note}] aligned with `claims`.
-
-    NOTE: this layer deliberately does NOT try to match numbers quoted in the statement against
-    node metrics — a research claim legitimately quotes non-metric decimals (arXiv ids like
-    2506.12928, percentages like 37.9, dataset sizes, p-values), and a regex can't tell those from
-    a metric, so a numeric "confabulation" heuristic here produces false 'fabricated' labels on
-    well-supported claims. Numeric correctness is left to the semantic (LLM) verifier."""
+def _check_claims(claims: list[dict], state: RunState,
+                  consulted: dict[str, dict[str, str]]) -> list[dict]:
+    """Implementation shared by the public raw-source path and ``verify_memo``'s frozen map."""
     out: list[dict] = []
-    consulted = _source_map(sources)
     for c in (claims or [])[:_MAX_CLAIMS]:
         c = c if isinstance(c, dict) else {}
         stmt = _clean(c.get("statement", ""), 1_600)
@@ -123,11 +139,11 @@ def check_claims(claims: list[dict], state: RunState, sources=None) -> list[dict
         raw_urls = c.get("urls")
         nids = [i for i in (raw_nids if isinstance(raw_nids, (list, tuple)) else ())
                 if type(i) is int][:_MAX_NODE_REFS]
-        urls = [_clean(u, 1_600, single_line=True)
-                for u in (raw_urls if isinstance(raw_urls, (list, tuple)) else ())[:_MAX_URL_REFS]
+        urls = [u for u in (raw_urls if isinstance(raw_urls, (list, tuple)) else ())[:_MAX_URL_REFS]
                 if isinstance(u, str) and u]
+        identities = [ref[0] for ref in _claim_source_refs(c)]
         known = [i for i in nids if i in state.nodes]
-        matched = [u for u in urls if u in consulted]
+        matched = [identity for identity in identities if identity in consulted]
         if not nids and not urls:
             out.append({"statement": stmt, "verdict": "unsupported",
                         "note": "no evidence cited"})
@@ -144,6 +160,24 @@ def check_claims(claims: list[dict], state: RunState, sources=None) -> list[dict
             continue
         out.append({"statement": stmt, "verdict": "cited", "note": ""})
     return out
+
+
+def check_claims(claims: list[dict], state: RunState, sources=None) -> list[dict]:
+    """Deterministic verification layer (pure, offline). Verdicts:
+      - `unsupported` — no evidence cited at all, or every cited node id is unknown;
+      - `cited`       — evidence exists (node ids resolve and/or a URL exactly matches a
+                        consulted memo source); whether it
+                        SEMANTICALLY supports the claim is the LLM rubric layer's (or a human's)
+                        call, not this deterministic pass's.
+    Returns [{statement, verdict, note}] aligned with `claims`.
+
+    NOTE: this layer deliberately does NOT try to match numbers quoted in the statement against
+    node metrics — a research claim legitimately quotes non-metric decimals (arXiv ids like
+    2506.12928, percentages like 37.9, dataset sizes, p-values), and a regex can't tell those from
+    a metric, so a numeric "confabulation" heuristic here produces false 'fabricated' labels on
+    well-supported claims. Numeric correctness is left to the semantic (LLM) verifier."""
+    consulted = _source_map(sources)
+    return _check_claims(claims, state, consulted)
 
 
 class _VerdictOut(BaseModel):
@@ -190,7 +224,9 @@ def verify_memo(memo: dict, state: RunState, client=None,
     if not claims:
         return None
     sources = _source_map((memo or {}).get("sources"))
-    verdicts = check_claims(claims, state, list(sources.values()))
+    # Reuse the frozen identity map. Rebuilding it from safe display URLs would reintroduce the
+    # exact redaction collision this verifier is meant to prevent.
+    verdicts = _check_claims(claims, state, sources)
     method = "deterministic"
     todo = [(i, c) for i, (c, v) in enumerate(zip(claims, verdicts))
             if v["verdict"] == "cited"]

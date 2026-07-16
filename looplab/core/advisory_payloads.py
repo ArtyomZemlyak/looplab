@@ -10,6 +10,7 @@ import itertools
 import math
 
 from looplab.trust.redact import is_secret_key_name, redact_persisted_text
+from looplab.trust.source_identity import canonical_source_ref
 
 
 MAX_RESEARCH_SOURCES = 64
@@ -33,6 +34,23 @@ def _text(value, cap: int, budget: list[int], *, single_line: bool = False) -> s
 
 def _items(value, maximum: int):
     return itertools.islice(value, maximum) if isinstance(value, (list, tuple)) else ()
+
+
+def _source_url(value, persisted_identity, budget: list[int]) -> tuple[str, str]:
+    """Project one URL as safe display text plus its stable opaque evidence identity."""
+    ref = canonical_source_ref(value, persisted_identity=persisted_identity)
+    if ref is None:
+        # Backward compatibility for non-HTTP legacy labels: they remain visible but cannot become
+        # verifier evidence merely by colliding with an HTTP source identity.
+        return _text(value, 1_600, budget, single_line=True), ""
+    if budget[0] <= len(ref.identity):
+        return "", ""
+    budget[0] -= len(ref.identity)
+    display = _text(ref.display_url, 1_600, budget, single_line=True)
+    if not display:
+        budget[0] += len(ref.identity)
+        return "", ""
+    return display, ref.identity
 
 
 def _tree(value, budget: list[int], items: list[int], depth: int = 0):
@@ -156,19 +174,33 @@ def sanitize_research_memo_payload(payload) -> dict:
     for claim in _items(src.get("claims"), 64):
         if not isinstance(claim, dict):
             continue
+        statement = _text(claim.get("statement", ""), 1_600, budget)
+        raw_urls = list(_items(claim.get("urls"), 16))
+        raw_identities = list(_items(claim.get("url_identities"), 16))
+        urls = []
+        url_identities = []
+        for index, value in enumerate(raw_urls):
+            persisted = raw_identities[index] if index < len(raw_identities) else None
+            display, identity = _source_url(value, persisted, budget)
+            urls.append(display)
+            url_identities.append(identity)
         out["claims"].append({
-            "statement": _text(claim.get("statement", ""), 1_600, budget),
+            "statement": statement,
             "node_ids": [n for n in _items(claim.get("node_ids"), 64)
                          if type(n) is int and 0 <= n <= (1 << 63) - 1],
-            "urls": [_text(v, 1_600, budget, single_line=True)
-                     for v in _items(claim.get("urls"), 16)],
+            "urls": urls,
+            "url_identities": url_identities,
         })
     for source in _items(src.get("sources"), MAX_RESEARCH_SOURCES):
         if not isinstance(source, dict):
             continue
+        title = _text(source.get("title", ""), 400, budget, single_line=True)
+        display_url, url_identity = _source_url(
+            source.get("url", ""), source.get("url_identity"), budget)
         out["sources"].append({
-            "title": _text(source.get("title", ""), 400, budget, single_line=True),
-            "url": _text(source.get("url", ""), 1_600, budget, single_line=True),
+            "title": title,
+            "url": display_url,
+            "url_identity": url_identity,
             "snippet": _text(source.get("snippet", ""), 200, budget),
         })
     out["reasoning"] = _text(src.get("reasoning", ""), 12_000, budget)
