@@ -524,6 +524,14 @@ class StrategyCadenceMixin:
                         if "/" in c.id:
                             _edge(c.id, "is_a", c.id.rsplit("/", 1)[0], "asserted", 1.0)
                         root = c.id.split("/", 1)[0]
+                        # REVIEW(2026-07-16): `axes_of` FLATTENS every cross-link parent to its top-level
+                        # root (seg0), but `parents_of` holds the actual curated parent — a skeleton
+                        # declaring Concept("x/y", axes=("loss/contrastive",)) (a depth the ensure() API
+                        # explicitly supports) is recorded here as `x/y is_a loss`, silently losing the
+                        # intermediate level. The typed-edge substrate then represents LESS structure than
+                        # the ConceptGraph it mirrors, which defeats "hierarchy becomes a swappable
+                        # projection" — emit `parents_of(c.id)` (minus the id-prefix parent already
+                        # emitted above) instead of the rolled-up axes.
                         for ax in graph.axes_of(c.id):
                             if ax and ax != root:                 # a curated MULTI-parent axis paths miss
                                 _edge(c.id, "is_a", ax, "asserted", 1.0)
@@ -531,6 +539,15 @@ class StrategyCadenceMixin:
                     for cids in tags.values():
                         for a, b in _comb(sorted(cids), 2):
                             pair[(a, b)] += 1
+                    # REVIEW(2026-07-16): co_occurs weights can only ever RATCHET UP: the fold is
+                    # max-confidence-wins and this guard emits only on conf > folded, so when a re-tag
+                    # (B1 staleness refresh) or a consolidation rename SHRINKS a pair's true count — or
+                    # removes the pair entirely — the substrate keeps the stale higher weight forever
+                    # (ghost edges with inflated confidence, no tombstone/decay path exists). Phase 3a's
+                    # co_occurs lens picks primary parents by that confidence, so stale maxima bias the
+                    # projected tree long after the vocabulary moved on. The substrate needs a way to
+                    # represent evidence going DOWN — e.g. a generation/at_vocab field on the edge event
+                    # with latest-generation-wins-then-max folding — before any lens is user-facing.
                     for (a, b), cnt in sorted(pair.items()):
                         _edge(a, "co_occurs", b, "evidenced", float(cnt))
                     if fresh_edges:
