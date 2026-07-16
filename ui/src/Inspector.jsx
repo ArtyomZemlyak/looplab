@@ -213,7 +213,7 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
                 ? 'Read-only review with redacted source evidence. Live traces and actions stay hidden.'
                 : 'Summary-only review. Source, live traces, and actions are not included.'
               : `Snapshot seq ${historySeq} · read-only. Live traces, metrics sidecars and actions are hidden.`}</div>
-          : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) live in the chat. Use the Comments tab for durable review notes, or attach <button className="ctx-chip ctx-chip-action" title="attach this experiment to the assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
+          : <div className="insp-hint muted">Run actions (confirm · ablate · fork · promote) stay in chat. Use Comments for review, or attach <button className="ctx-chip ctx-chip-action" title="attach this node to assistant context" onClick={() => window.dispatchEvent(new CustomEvent('ll:attach-node', { detail: { id: n.id } }))}>＋ #{n.id}</button> as context.<ResetBtn runId={runId} id={n.id} generation={n.attempt} onToast={onToast} /></div>}
 
         {activeTab === 'Overview' && <Overview n={n} state={state} runId={readOnly ? null : runId} onToast={onToast} />}
         {activeTab === 'Comments' && <CommentsThread runId={runId} nodeId={n.id}
@@ -363,45 +363,47 @@ function traceBounds(spans) {
 // reads as the node's life story rather than instrumentation. `tone` colours the waterfall bar so
 // phases are distinguishable at a glance. (Span names come from orchestrator.py.)
 // icon = an OpIcon glyph name (monochrome, inherits the stage tone via currentColor — no color emoji).
+// Compact tuple schema: [icon, visible role, description, tone]. This metadata ships with every
+// Inspector visit, so positional values avoid repeating four object keys for every trace operation.
 const STAGE = {
-  onboard:      { icon: 'flag', role: 'Onboarding', desc: 'task setup & eval spec', tone: '#8a7bb0' },
-  create_node:  { icon: 'trending', role: 'Author node', desc: 'propose an idea, then build the solution', tone: '#6f8bb0' },
-  propose:      { icon: 'search', role: 'Researcher · propose', desc: 'propose the next idea', tone: '#6fa3b0' },
+  onboard:      ['flag', 'Onboarding', 'task setup & eval spec', '#8a7bb0'],
+  create_node:  ['trending', 'Author node', 'propose an idea, then build the solution', '#6f8bb0'],
+  propose:      ['search', 'Researcher · propose', 'propose the next idea', '#6fa3b0'],
   // the Developer's own sub-phases (repo tasks): STAGES declares the eval pipeline, PLAN decomposes
   // the change into atomic steps — both read-only, before the write-capable implement session(s).
-  stages:       { icon: 'sliders', role: 'Developer · stages', desc: 'declare the eval pipeline (prep → train → …)', tone: '#5f9e8f' },
-  plan:         { icon: 'doc', role: 'Developer · plan', desc: 'decompose into atomic steps', tone: '#7fae8f' },
-  'handoff-summary': { icon: 'doc', role: 'Handoff summary', desc: 'distill this phase for the next (fewer re-reads downstream)', tone: '#8fa8b8' },
-  implement:    { icon: 'gear', role: 'Developer · implement', desc: 'write / edit the solution code', tone: '#6fae97' },
-  repair:       { icon: 'bug', role: 'Developer · repair', desc: 'fix a failed parent', tone: '#b0936f' },
-  inline_repair: { icon: 'bug', role: 'Developer · inline repair', desc: 'quick in-eval fix attempts', tone: '#b08a6f' },
-  seed_workspace: { icon: 'gear', role: 'Workspace', desc: 'materialize node files into the eval workdir', tone: '#8b96a5' },
-  evaluate:     { icon: 'target', role: 'Evaluate', desc: 'run the solution & score it', tone: '#a87da8' },
-  triage:       { icon: 'bug', role: 'Triage', desc: 'a failed node — decide repair / abandon / reject-idea', tone: '#b07a7a' },
+  stages:       ['sliders', 'Developer · stages', 'declare the eval pipeline (prep → train → …)', '#5f9e8f'],
+  plan:         ['doc', 'Developer · plan', 'decompose into atomic steps', '#7fae8f'],
+  'handoff-summary': ['doc', 'Handoff summary', 'distill this phase for the next (fewer re-reads downstream)', '#8fa8b8'],
+  implement:    ['gear', 'Developer · implement', 'write / edit the solution code', '#6fae97'],
+  repair:       ['bug', 'Developer · repair', 'fix a failed parent', '#b0936f'],
+  inline_repair: ['bug', 'Developer · inline repair', 'quick in-eval fix attempts', '#b08a6f'],
+  seed_workspace: ['gear', 'Workspace', 'materialize node files into the eval workdir', '#8b96a5'],
+  evaluate:     ['target', 'Evaluate', 'run the solution & score it', '#a87da8'],
+  triage:       ['bug', 'Triage', 'a failed node — decide repair / abandon / reject-idea', '#b07a7a'],
   // declared eval-pipeline stages (looplab_stages.json): each runs as its own block in the node story
-  train:        { icon: 'replay', role: 'Train', desc: 'declared pipeline stage: train a fresh model', tone: '#4e8f5d' },
-  data_prep:    { icon: 'sliders', role: 'Data prep', desc: 'declared pipeline stage: prepare data/features', tone: '#7a9e5f' },
-  score:        { icon: 'target', role: 'Evaluate · score', desc: "operator's protected scoring stage", tone: '#a87da8' },
-  confirm_seed: { icon: 'replay', role: 'Confirmation', desc: 'multi-seed robustness check', tone: '#9aa06f' },
-  ablate:       { icon: 'sliders', role: 'Ablation', desc: 'sensitivity probe', tone: '#6f8bb0' },
+  train:        ['replay', 'Train', 'declared pipeline stage: train a fresh model', '#4e8f5d'],
+  data_prep:    ['sliders', 'Data prep', 'declared pipeline stage: prepare data/features', '#7a9e5f'],
+  score:        ['target', 'Evaluate · score', "operator's protected scoring stage", '#a87da8'],
+  confirm_seed: ['replay', 'Confirmation', 'multi-seed robustness check', '#9aa06f'],
+  ablate:       ['sliders', 'Ablation', 'sensitivity probe', '#6f8bb0'],
   // sub-operation traces the engine wraps in their own named span — give each a distinct hue so the
   // conversation reads as coloured bands (foresight vs strategy vs research vs merge) at a glance.
   // Two DISTINCT Researcher ranking steps — kept apart so the first doesn't read as a duplicate of
   // the second: `hyp_prioritize` runs BEFORE propose (pick which open hypothesis to pursue),
   // `foresight_rank` runs AFTER propose (predict the chosen proposal's payoff, best-of-N pick).
-  hyp_prioritize: { icon: 'bulb', role: 'Researcher · prioritize', desc: 'rank the open-hypothesis board', tone: '#c2a24e' },
-  foresight_rank: { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff of the chosen idea', tone: '#c2a24e' },
-  foresight:      { icon: 'bulb', role: 'Researcher · foresight', desc: 'predict payoff of the chosen idea', tone: '#c2a24e' },
-  strategy_consult: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
-  strategy_decision: { icon: 'trending', role: 'Strategist', desc: 'pick policy / operators / fidelity', tone: '#b0729e' },
-  hypothesis_merge: { icon: 'confluence', role: 'Hypothesis merge', desc: 'fold paraphrase hypotheses', tone: '#5fa0a8' },
-  deep_research:  { icon: 'search', role: 'Deep research', desc: 'read the literature first', tone: '#6fb0a3' },
-  lessons:        { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
-  lessons_distill: { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
-  lessons_refresh: { icon: 'doc', role: 'Lessons', desc: 'reflect / distil cross-run lessons', tone: '#9a8fb0' },
-  novelty:        { icon: 'gitbranch', role: 'Novelty gate', desc: 'dedup near-duplicate proposals', tone: '#a89a6f' },
+  hyp_prioritize: ['bulb', 'Researcher · prioritize', 'rank the open-hypothesis board', '#c2a24e'],
+  foresight_rank: ['bulb', 'Researcher · foresight', 'predict payoff of the chosen idea', '#c2a24e'],
+  foresight:      ['bulb', 'Researcher · foresight', 'predict payoff of the chosen idea', '#c2a24e'],
+  strategy_consult: ['trending', 'Strategist', 'pick policy / operators / fidelity', '#b0729e'],
+  strategy_decision: ['trending', 'Strategist', 'pick policy / operators / fidelity', '#b0729e'],
+  hypothesis_merge: ['confluence', 'Hypothesis merge', 'fold paraphrase hypotheses', '#5fa0a8'],
+  deep_research:  ['search', 'Deep research', 'read the literature first', '#6fb0a3'],
+  lessons:        ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
+  lessons_distill: ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
+  lessons_refresh: ['doc', 'Lessons', 'reflect / distil cross-run lessons', '#9a8fb0'],
+  novelty:        ['gitbranch', 'Novelty gate', 'dedup near-duplicate proposals', '#a89a6f'],
 }
-const stageMeta = (name) => STAGE[name] || { icon: 'dot', role: name, desc: '', tone: 'var(--accent)' }
+const stageMeta = (name) => STAGE[name] || ['dot', name, '', 'var(--accent)']
 
 // Compact info helpers so each trace row carries the data that DIFFERENTIATES it (langfuse/Phoenix
 // convention: model · input→output tokens · a content preview), instead of a bare op name repeated.
@@ -510,7 +512,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   const err = s.status === 'ERROR'
   const off = (typeof s.start === 'number') ? Math.max(0, (s.start - t0) / total * 100) : 0
   const wid = Math.max(1.5, (s.duration_s || 0) / total * 100)
-  const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name).tone
+  const barTone = err ? 'var(--fail)' : kind === 'generation' ? 'var(--accent)' : kind === 'tool' ? 'var(--working)' : stageMeta(s.name)[3]
   const bar = <span className="span-bar"><span className="span-fill" style={{ marginLeft: Math.min(98, off) + '%', width: wid + '%', background: barTone }} /></span>
   const kids = <SpanList items={s.children} depth={depth + 1} t0={t0} total={total} runId={runId} parentOp={s.name} />
   const rowIndent = { paddingLeft: depth * 14 }
@@ -578,7 +580,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
   // OPERATION span (a phase of work): bounded attributes and events.
   const attrs = Object.entries(s.attributes || {}).filter(([k]) => k !== 'node_id')
   const events = s.events || []
-  const m = stageMeta(s.name)
+  const [icon, role, desc] = stageMeta(s.name)
   const detail = attrs.length || events.length
   const OperationHeader = detail ? 'button' : 'div'
   return <>
@@ -587,7 +589,7 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
          style={rowIndent} onClick={detail ? () => setOpen(o => !o) : undefined}
          title={detail ? 'click for step detail' : ''}>
       <span className="span-tw">{detail ? (open ? '▾' : '▸') : '·'}</span>
-      <span className="span-name" title={m.desc}><OpIcon name={m.icon} className="t-ic" /> {m.role !== s.name ? m.role : s.name}</span>
+      <span className="span-name" title={desc}><OpIcon name={icon} className="t-ic" /> {role !== s.name ? role : s.name}</span>
       {bar}
       <span className="t">{fmt(s.duration_s, 3)}s</span>
       {err && <span className="badge reason">ERROR</span>}
@@ -607,12 +609,12 @@ function SpanRow({ s, depth, t0, total, runId, parentOp = null }) {
 // A top-level lifecycle stage (one root span = one phase of work on this node), with its sub-steps.
 // The header rolls up the stage's model-call count + token cost so the expensive phases stand out.
 function StageBlock({ s, t0, total, runId }) {
-  const m = stageMeta(s.name)
+  const [icon, role, desc] = stageMeta(s.name)
   const roll = spanRollup(s)
   return <div className={'stage' + (s.status === 'ERROR' ? ' err' : '')}>
-    <div className="stage-h" title={m.desc}>
-      <span className="stage-ic"><OpIcon name={m.icon} /></span>
-      <b>{m.role}</b>
+    <div className="stage-h" title={desc}>
+      <span className="stage-ic"><OpIcon name={icon} /></span>
+      <b>{role}</b>
       {roll.calls > 0 && <span className="stage-roll" title={`${roll.tok} billed tokens`}>{roll.calls} call{roll.calls > 1 ? 's' : ''}{roll.ctx ? ` · ${ktok(roll.ctx)} ctx` : ''}{roll.out ? ` · ${ktok(roll.out)} out` : ''}</span>}
       <span className="spacer" />
       <span className="t">{fmt(s.duration_s, 3)}s</span>
@@ -632,7 +634,7 @@ export function NodeTrace({ spans, runId, projection = {}, onRetry }) {
   if (traceUnavailable(projection)) return <TraceUnavailable onRetry={onRetry} />
   if (!roots.length && tracePartial(projection))
     return <div className="notice compact" role="status">Trace projection is partial; no observations were included.</div>
-  if (!roots.length) return <div className="muted trace-small">No LLM/execution spans captured for this node yet.</div>
+  if (!roots.length) return <div className="muted trace-small">No execution spans captured yet.</div>
   const { t0, total } = traceBounds(roots)
   return <div className="trace">
     {tracePartial(projection) && <div className="notice compact" role="status">Trace projection is partial.</div>}
@@ -745,7 +747,7 @@ function StageLog({ text, live }) {
 }
 
 function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
-  const m = stageMeta(st.label)
+  const [icon, role, desc, tone] = stageMeta(st.label)
   const [open, setOpen] = useState(defaultOpen)
   const [allTurns, setAllTurns] = useState(false)
   const roll = st.rollup || {}
@@ -755,12 +757,12 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
   // Colour-band the stage by its tone: a left rail + a tinted header, so foresight/strategy/researcher/
   // developer/eval read as distinct bands. Click the header to collapse the whole band.
   return <div className={'stage stage-dynamic' + (err ? ' err' : '')}
-              style={{ '--stage-tone': err ? 'var(--fail)' : m.tone }}>
+              style={{ '--stage-tone': err ? 'var(--fail)' : tone }}>
     <button type="button" className="stage-h disclosure-button" aria-expanded={open}
-         title={m.desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}>
+         title={desc + ' — click to collapse'} onClick={() => setOpen(o => !o)}>
       <span className="stage-caret">{open ? '▾' : '▸'}</span>
-      <span className="stage-ic"><OpIcon name={m.icon} /></span>
-      <b className="stage-role">{m.role}</b>
+      <span className="stage-ic"><OpIcon name={icon} /></span>
+      <b className="stage-role">{role}</b>
       {(roll.generations || roll.tools) ? <span className="stage-roll"
           title={tk.total ? `context window peaked at ${tk.context || 0} tokens; the model generated ${tk.completion || 0}. Billed ${tk.total} total — a tool loop RE-SENDS the growing context every turn, so billed ≫ context.` : undefined}>
         {roll.generations || 0} turn{roll.generations === 1 ? '' : 's'}
@@ -855,7 +857,7 @@ function Trace({ n, runId, live, working, onReload }) {
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
       : '🏋️ training / evaluating…'
   const status = statusLabel && <div className="trace-live-status" role="status"><span className="tls-dot" />{statusLabel}
-    <span className="muted trace-live-note">live — updates on its own</span></div>
+    <span className="muted trace-live-note">live · auto-updates</span></div>
   const scrollTo = (where) => { const c = bodyRef.current?.closest('.insp-body'); if (c) c.scrollTop = where === 'top' ? 0 : c.scrollHeight }
   const doClear = async () => {
     setClearing('busy')
@@ -908,7 +910,7 @@ function Trace({ n, runId, live, working, onReload }) {
       return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} /></div>
     if (partial)
       return <div className="trace" ref={bodyRef}>{head}<div className="notice compact" role="status">Trace projection is partial; no observations were included.</div></div>
-    return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
+    return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans yet. Offline nodes may have none; active nodes update here as they run.</div></div>
   }
   if (unavailable)
     return <div className="trace" ref={bodyRef}>{head}<TraceUnavailable onRetry={onReload} />
@@ -926,8 +928,8 @@ function Trace({ n, runId, live, working, onReload }) {
     {head}
     {partial && <div className="notice compact" role="status">Trace projection is partial.</div>}
     <div className="muted trace-rollup-intro">
-      Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
-      Expand any observation to read its bounded, redacted input/output projection.
+      Node #{n.id} lifecycle · offset = start, bar = duration. Expand an observation for bounded,
+      redacted I/O.
       {(roll.generations || roll.tools) ? <span className="trace-totals"
           title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
         {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}
@@ -968,20 +970,39 @@ function Code({ n }) {
 // Live online metric curves (loss, recall@k, lr, grad norms, …) read from the node's TensorBoard
 // events via the metrics adapters. Polls while the node is still running so the curves fill in as
 // training progresses; keyed on n.status so a repair-retrain (pending→failed→pending) re-arms the poll.
-function MetricCurves({ runId, nodeId, status }) {
-  const [metrics, setMetrics] = useState({})
+export function MetricCurves({ runId, nodeId, status }) {
   const done = ['evaluated', 'failed', 'confirmed'].includes(status)
-  useEffect(() => {
-    if (nodeId == null) return
-    setMetrics({})    // node changed → drop the previous node's curves before the first fetch resolves
-  }, [runId, nodeId, done])
+  const [resource, setResource] = useState(null)
+  const [retryNonce, setRetryNonce] = useState(0)
+  const requestRef = useRef(0)
   // A terminal node's metrics are immutable — fetch ONCE (ms=null: immediate, no interval) instead of
   // polling every 15s forever. A running node still polls at 3s; a status change (via the `done` dep)
   // re-arms the effect, so a repair-retrain (pending→failed→pending) resumes live polling.
-  usePoll((alive) => get(runNodeApiPath(runId, nodeId, '/metrics'))
-    .then(d => alive() && setMetrics((d && d.metrics) || {})).catch(() => {}),
-    done ? null : 3000, [runId, nodeId, done], { enabled: nodeId != null })
-  return <MetricLines series={metrics} />
+  usePoll((alive) => {
+    const request = ++requestRef.current
+    get(runNodeApiPath(runId, nodeId, '/metrics')).then(d => {
+      if (!d?.metrics || Array.isArray(d.metrics)) throw 0
+      if (alive() && request === requestRef.current) setResource(d.metrics)
+    }).catch(() => {
+      if (alive() && request === requestRef.current) setResource(r => r
+        ? Array.isArray(r) ? r : [r] : false)
+    })
+  }, done ? null : 3000, [runId, nodeId, done, retryNonce], { enabled: nodeId != null })
+  const retry = () => {
+    if (resource === false) setResource(null)
+    setRetryNonce(n => n + 1)
+  }
+  if (resource === null) return <div className="notice compact" role="status">Loading metric curves…</div>
+  const failed = resource === false, stale = Array.isArray(resource)
+  return <>
+    {(failed || stale) && <div
+      className={`notice ${failed ? 'resource-error' : 'resource-warning'} compact`}
+      role={failed ? 'alert' : 'status'}>
+      {failed ? 'Metric curves unavailable.' : 'Last loaded metric curves; refresh failed.'}
+      {' '}<button className="btn sm" onClick={retry}>Retry</button>
+    </div>}
+    {!failed && <MetricLines series={stale ? resource[0] : resource} />}
+  </>
 }
 
 function Metrics({ n, detail, state, runId }) {
@@ -1012,8 +1033,8 @@ function Metrics({ n, detail, state, runId }) {
         <tbody>{vals.map(x => <tr key={x.s}><td>{x.s}</td><td>{fmt(x.v)}</td></tr>)}</tbody></table></DataTable>
     </>}
     <div className="section-h metric-curves-heading">Metric curves
-      <span className="muted metric-curves-note">· live, every logged scalar — collapsible by group</span></div>
-    <MetricCurves runId={runId} nodeId={n.id} status={n.status} />
+      <span className="muted metric-curves-note">· live logged scalars · grouped</span></div>
+    <MetricCurves key={`${runId}:${n.id}`} runId={runId} nodeId={n.id} status={n.status} />
   </>
 }
 
