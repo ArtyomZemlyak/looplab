@@ -4,6 +4,7 @@ traces, provenance, artifacts, config and cost. Handler bodies are verbatim move
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Optional
@@ -24,7 +25,9 @@ from looplab.events.types import EV_TRUST_GATE_CHANGED
 # Researcher's working-set digest and this UI endpoint share one definition.
 from looplab.events.digest import theme_rollup as _theme_rollup
 from looplab.serve.artifacts import (
-    _ART_MAX_BYTES, _LOG_TAIL_MAX, _artifact_roots, _list_artifact_files)
+    _ART_MAX_BYTES, _LOG_TAIL_MAX, ArtifactPolicyUnavailable,
+    _artifact_exposure_policy, _artifact_file_identity, _artifact_roots,
+    _list_artifact_files)
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
@@ -509,10 +512,18 @@ def build_router(srv) -> APIRouter:
         _CHUNK = 262144
         _MAX_TAIL = 8 * 1024 * 1024
         source_truncated = False
+        p = rd / "spans.jsonl"
         try:
-            import os
-            p = rd / "spans.jsonl"
             sz = os.path.getsize(p)
+        except FileNotFoundError:
+            # Absence established by the initial lookup is a truthful complete-empty source.
+            return {"schema": TRACE_PROJECTION_SCHEMA, "tail": [],
+                    "projection": {"schema": TRACE_PROJECTION_SCHEMA,
+                                   "truncated": False, "source_truncated": False,
+                                   "visible_spans": 0, "omitted_spans": 0}}
+        except OSError:
+            return _trace_unavailable(tail=[])
+        try:
             with open(p, "rb") as f:
                 start = sz
                 blob = b""
@@ -561,9 +572,9 @@ def build_router(srv) -> APIRouter:
                         it["arg"] = _cap_str(str(arg), 160)
                     it["output"] = _cap_str(str(a.get("output") or ""), 200)
                 recent.append(it)
-        except FileNotFoundError:
-            pass  # tracing disabled / no observations yet: a truthful, complete empty source
         except OSError:
+            # The source existed at the initial lookup but became unreadable/vanished before or
+            # during the snapshot read. Its cardinality is unavailable, not exact zero.
             return _trace_unavailable(tail=[])
         shown = recent[-limit:]
         omitted = max(0, len(recent) - len(shown))
@@ -630,9 +641,14 @@ def build_router(srv) -> APIRouter:
         into the actual repo (not under runs/) are reachable too. Each file carries size + mtime + a
         cheap is_text guess; /artifact serves the content."""
         rd = _run_dir(run_id)
+        try:
+            exposed = _artifact_exposure_policy(rd)
+        except ArtifactPolicyUnavailable:
+            # A 503 is deliberate: a failed security proof is unavailable, not a truthful empty list.
+            raise HTTPException(503, "artifact inventory unavailable") from None
         out = []
         for r in _artifact_roots(rd):
-            files, truncated = _list_artifact_files(r["base"])
+            files, truncated = _list_artifact_files(r["base"], exposed=exposed)
             out.append({"id": r["id"], "label": r["label"], "path": str(r["base"]),
                         "is_run_dir": r["id"] == "run", "truncated": truncated,
                         "n_files": len(files), "files": files})
@@ -648,14 +664,51 @@ def build_router(srv) -> APIRouter:
         base = next((r["base"] for r in _artifact_roots(rd) if r["id"] == root), None)
         if base is None:
             raise HTTPException(404, "no such artifact root")
-        target = (base / path).resolve()
+        candidate = base / path
+        try:
+            target = candidate.resolve(strict=True)
+            target_stat = target.stat()
+        except (OSError, RuntimeError, ValueError):
+            raise HTTPException(404, "no such artifact") from None
         if target != base and base not in target.parents:     # path-traversal guard
             raise HTTPException(404, "no such artifact")
-        if not target.is_file():
+        try:
+            exposed = _artifact_exposure_policy(rd)
+        except ArtifactPolicyUnavailable:
+            raise HTTPException(503, "artifact access unavailable") from None
+        expected_identity = _artifact_file_identity(target_stat)
+        if expected_identity is None:
+            raise HTTPException(503, "artifact access unavailable")
+        if not exposed(candidate, path, target_stat):
             raise HTTPException(404, "no such artifact")
-        size = target.stat().st_size
-        with open(target, "rb") as f:
-            head = f.read(_ART_MAX_BYTES + 1)
+        try:
+            with open(target, "rb") as f:
+                opened_stat = os.fstat(f.fileno())
+                opened_identity = _artifact_file_identity(opened_stat)
+                if opened_identity is None:
+                    raise HTTPException(503, "artifact access unavailable")
+                if opened_identity != expected_identity:
+                    raise HTTPException(404, "no such artifact")
+                current_target = candidate.resolve(strict=True)
+                if current_target != base and base not in current_target.parents:
+                    raise HTTPException(404, "no such artifact")
+                current_identity = _artifact_file_identity(current_target.stat())
+                if current_identity is None:
+                    raise HTTPException(503, "artifact access unavailable")
+                if current_identity != opened_identity:
+                    raise HTTPException(404, "no such artifact")
+                # Authorize the opened descriptor as well as the path; writable artifact roots can
+                # otherwise swap a safe pathname to a protected trace hardlink before open. Refresh
+                # protected identities too in case the run-root source was replaced during the race.
+                opened_exposed = _artifact_exposure_policy(rd)
+                if not opened_exposed(current_target, path, opened_stat):
+                    raise HTTPException(404, "no such artifact")
+                size = opened_stat.st_size
+                head = f.read(_ART_MAX_BYTES + 1)
+        except ArtifactPolicyUnavailable:
+            raise HTTPException(503, "artifact access unavailable") from None
+        except (OSError, RuntimeError, ValueError):
+            raise HTTPException(404, "no such artifact") from None
         body = head[:_ART_MAX_BYTES]
         if b"\x00" in body:                                    # a NUL anywhere in the read → binary
             return {"root": root, "path": path, "size": size, "is_text": False,

@@ -64,8 +64,8 @@ same versioned allowlist projector before data enters the persisted index or bro
   are capped; response span/stage/turn counts are capped independently;
 - persisted text is redacted before it is returned, nested secret-named fields are masked, and a
   secret-shaped required identity is quarantined instead of rewritten into a different topology;
-- malformed complete rows are quarantined individually; a torn/invalid JSON tail remains a durability
-  boundary rather than being guessed past;
+- complete JSON-object rows with an invalid span shape are quarantined individually; an invalid-JSON,
+  non-object, or torn forward row remains a durability boundary rather than being guessed past;
 - every successful response carries a route-appropriate `projection` receipt, and each truncated span
   carries its own `_projection` counters. The receipt fields are intentionally not uniform because a
   one-span seek, a bounded file tail and a run tree know different source totals.
@@ -80,15 +80,22 @@ called rather than assume that every response has `total_spans` and `visible_spa
 | `spans/{span_id}` | the selected span's `_projection` counters plus `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when known |
 | `trace/tail` | the bounded tail's visible/omitted counts and `source_truncated`; it does not pretend to know a whole-run total |
 
+`trace/tail` is a separate best-effort EOF window for live activity: it may skip malformed rows inside
+that bounded window, and its receipt therefore describes only the inspected tail rather than forward-log
+durability or whole-run cardinality.
+
 A read failure is different from a successful empty projection. It returns the route's empty collection
 shape with top-level `schema: 2` and `projection: {schema: 2, unavailable: true, truncated: true}`; unknown
 counts are omitted rather than fabricated as zero. Collection readers treat an absent `spans.jsonl` as a
 known complete-empty source and may report exact zeroes; a lookup for a particular absent span remains
 unavailable.
 
-The full recorded span body remains only in `spans.jsonl`; neither `spans.index.jsonl` nor a trace API
-is a raw-download surface. The Inspector and live Dock distinguish unavailable, partial and honestly empty
-projections instead of silently presenting a failed or capped read as complete.
+Raw full diagnostics remain confined to the run-root `spans.jsonl` family; neither the trace API nor the
+generic Artifact browser exposes trace sources, derived views, archives, or atomic temporaries. The
+Inspector and live Dock distinguish unavailable, partial and honestly empty projections instead of
+silently presenting a failed or capped read as complete. If the server cannot prove that an artifact is
+independent of those protected files (including aliases and reserved directories), artifact access is
+unavailable rather than a successful empty inventory.
 
 Events = *what was decided* (coarse, authoritative for replay). Spans = *how execution unfolded* (fine,
 timing/status/errors). They are complementary records of the same activity; limited correlation fields
@@ -132,5 +139,6 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
 - Default run dir now also has `spans.jsonl` and `trace.json`; `tree.html` renders the per-node
   span tree, failure reason, eval time, and infeasibility.
 - `pip install LoopLab[otel]` + `OTEL_EXPORTER_OTLP_ENDPOINT` → live traces in any collector.
-- The React Inspector consumes only the bounded trace projection (+ the SQLite read model), with no
-  engine coupling and with explicit partial/unavailable states.
+- The React Inspector consumes only bounded HTTP projections derived from events/spans, with no
+  engine coupling and with explicit partial/unavailable states. `readmodel.sqlite`, `trace.json`, and
+  `tree.html` remain rebuildable derived artifacts rather than an Inspector data dependency.

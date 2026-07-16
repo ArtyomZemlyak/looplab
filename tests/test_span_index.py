@@ -370,6 +370,53 @@ def test_missing_spans_returns_none(tmp_path):
     assert get_index(tmp_path / "nope.jsonl") is None
 
 
+def test_unreadable_source_raises_on_cached_and_cold_lookup(run, monkeypatch):
+    """A stable stat plus denied open is unavailable, never a complete-looking cached prefix."""
+    import builtins
+
+    _rd, sp, _spans = run
+    assert get_index(sp).span_count() > 0                    # warm the in-process cache first
+    real_open = builtins.open
+
+    def denied(file, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if isinstance(file, (str, os.PathLike)) and Path(file) == sp and "r" in str(mode):
+            raise PermissionError("simulated trace ACL loss")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", denied)
+    with pytest.raises(PermissionError):
+        get_index(sp)                                      # cached index still probes the source
+    invalidate(sp)
+    with pytest.raises(PermissionError):
+        get_index(sp)                                      # cold rebuild cannot publish empty truth
+
+
+def test_exact_reader_handles_fragmented_reads_and_rejects_early_eof():
+    import io
+
+    payload = b"abcdefghijklmnopqrstuvwxyz"
+
+    class Fragmented(io.BytesIO):
+        def read(self, size=-1):
+            return super().read(max(1, size // 3) if size > 1 else size)
+
+    assert span_index._read_exact(
+        Fragmented(payload), len(payload), label="test source") == payload
+
+    class EarlyEof(io.BytesIO):
+        def __init__(self, value):
+            super().__init__(value)
+            self.calls = 0
+
+        def read(self, size=-1):
+            self.calls += 1
+            return super().read(max(1, size // 2)) if self.calls == 1 else b""
+
+    with pytest.raises(OSError, match="short read of test source"):
+        span_index._read_exact(EarlyEof(payload), len(payload), label="test source")
+
+
 def test_concurrent_topup_and_reads_are_safe(run):
     """Thread safety: the serve threadpool calls the READ methods lock-free while another request's
     get_index() tops up the SAME cached index (appending to node_tids/by_tid/light). Without the

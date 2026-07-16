@@ -291,6 +291,62 @@ def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_p
     assert {"count", "visible_count", "omitted_count"}.isdisjoint(failed[4])
 
 
+@pytest.mark.parametrize("failure", [PermissionError, FileNotFoundError])
+def test_real_source_open_failure_is_unavailable_on_every_trace_route(
+        tmp_path, monkeypatch, failure):
+    """Exercise real cache/index/tail seams when stat succeeds but the following open fails."""
+    import builtins
+    import os
+    from pathlib import Path
+
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    source = run_dir / "spans.jsonl"
+    source.write_text(json.dumps(_span(0, trace_id="trace")) + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    # Warm both cache layers. Permission loss or disappearance must be detected even when neither
+    # the derived run view nor the SpanIndex would otherwise need to read source bytes again.
+    assert client.get("/api/runs/demo/trace").json()["projection"].get("unavailable") is not True
+    assert client.get("/api/runs/demo/nodes/0/trace").json()["projection"].get("unavailable") is not True
+    real_open = builtins.open
+
+    def denied(file, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if (isinstance(file, (str, os.PathLike)) and Path(file) == source
+                and "r" in str(mode)):
+            raise failure("simulated trace source read failure")
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "open", denied)
+    failed = [
+        client.get("/api/runs/demo/trace").json(),
+        client.get("/api/runs/demo/nodes/0/trace").json(),
+        client.get("/api/runs/demo/nodes/0/conversation").json(),
+        client.get("/api/runs/demo/spans/s0").json(),
+        client.get("/api/runs/demo/trace/by_trace/trace").json(),
+        client.get("/api/runs/demo/trace/tail").json(),
+    ]
+    for body in failed:
+        assert body["schema"] == TRACE_PROJECTION_SCHEMA
+        assert body["projection"] == {
+            "schema": TRACE_PROJECTION_SCHEMA,
+            "unavailable": True,
+            "truncated": True,
+        }
+        assert "total_spans" not in body["projection"]
+    assert failed[0]["summary"] == {}
+    assert {"count", "visible_count", "omitted_count"}.isdisjoint(failed[4])
+
+
 def test_span_scan_fallback_does_not_invent_trace_cardinality(tmp_path, monkeypatch):
     pytest.importorskip("fastapi")
     from fastapi.testclient import TestClient

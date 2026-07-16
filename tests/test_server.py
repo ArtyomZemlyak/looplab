@@ -82,6 +82,187 @@ def test_artifacts_list_and_view(tmp_path):
                       params={"root": "nope", "path": "x"}).status_code == 404
 
 
+def test_trace_internals_cannot_escape_through_artifact_aliases(tmp_path, monkeypatch):
+    """Raw/derived trace families stay behind projections across every declared artifact root."""
+    import builtins
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    protected = [
+        "spans.jsonl", "spans.index.jsonl", "trace.json", "tree.html",
+        "spans.jsonl.reset-1", "trace.json.backup", "SPANS.INDEX.JSONL.OLD",
+        ".spans.jsonl.atomic.tmp", ".tree.html.atomic.tmp",
+    ]
+    for name in protected:
+        (rd / name).write_text(f"private:{name}\n", encoding="utf-8")
+    protected_dir = rd / "tree.html.archive"
+    protected_dir.mkdir()
+    (protected_dir / "secret.txt").write_text("nested private trace\n", encoding="utf-8")
+    (rd / "out.txt").write_text("safe run output\n", encoding="utf-8")
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    # Same basenames are legitimate when they are independent files outside the canonical run dir.
+    (repo / "spans.jsonl").write_bytes(b"external spans\n")
+    (repo / "trace.json").write_bytes(b"external trace\n")
+    allowed = repo / "allowed.txt"
+    allowed.write_text("allowed\n", encoding="utf-8")
+
+    hardlink = repo / "raw-hardlink.txt"
+    hardlink_supported = True
+    try:
+        os.link(rd / "spans.jsonl", hardlink)
+    except OSError:
+        hardlink_supported = False
+    symlink = repo / "raw-symlink.txt"
+    symlink_supported = True
+    try:
+        symlink.symlink_to(rd / "spans.jsonl")
+    except OSError:
+        symlink_supported = False
+
+    (rd / "task.snapshot.json").write_text(json.dumps({
+        "kind": "repo",
+        "editable_path": str(repo),
+        "references": [{"name": "parent", "path": str(tmp_path)}],
+    }), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    roots = {r["id"]: r for r in client.get("/api/runs/demo/artifacts").json()["roots"]}
+    assert {"run", "editable:.", "reference:parent"} <= roots.keys()
+    run_files = {item["path"] for item in roots["run"]["files"]}
+    parent_files = {item["path"] for item in roots["reference:parent"]["files"]}
+    repo_files = {item["path"] for item in roots["editable:."]["files"]}
+
+    assert "out.txt" in run_files
+    assert "tree.html.archive/secret.txt" not in run_files
+    assert "demo/tree.html.archive/secret.txt" not in parent_files
+    for root, path in (("run", "tree.html.archive/secret.txt"),
+                       ("reference:parent", "demo/tree.html.archive/secret.txt")):
+        assert client.get("/api/runs/demo/artifact",
+                          params={"root": root, "path": path}).status_code == 404
+    for name in protected:
+        assert name not in run_files
+        assert f"demo/{name}" not in parent_files
+        assert client.get("/api/runs/demo/artifact",
+                          params={"root": "run", "path": name}).status_code == 404
+        assert client.get("/api/runs/demo/artifact", params={
+            "root": "reference:parent", "path": f"demo/{name}"}).status_code == 404
+
+    assert {"spans.jsonl", "trace.json", "allowed.txt"} <= repo_files
+    external = client.get("/api/runs/demo/artifact",
+                          params={"root": "editable:.", "path": "spans.jsonl"})
+    assert external.status_code == 200 and external.json()["content"] == "external spans\n"
+
+    for ambiguous in ("spans.jsonl::$DATA", "spans.jsonl ", "spans.jsonl.", "SpAnS.JsOnL"):
+        assert client.get("/api/runs/demo/artifact",
+                          params={"root": "run", "path": ambiguous}).status_code == 404
+
+    if hardlink_supported:
+        assert "raw-hardlink.txt" not in repo_files
+        assert client.get("/api/runs/demo/artifact", params={
+            "root": "editable:.", "path": "raw-hardlink.txt"}).status_code == 404
+    if symlink_supported:
+        assert "raw-symlink.txt" not in repo_files
+        assert client.get("/api/runs/demo/artifact", params={
+            "root": "editable:.", "path": "raw-symlink.txt"}).status_code == 404
+
+    # Simulate a writable-root swap after the pathname check: the opened descriptor points at the
+    # protected source. The post-open fstat authorization must still reject it before reading bytes.
+    real_open = builtins.open
+
+    def swapped(file, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if isinstance(file, (str, os.PathLike)) and Path(file) == allowed and "rb" in str(mode):
+            return real_open(rd / "spans.jsonl", *args, **kwargs)
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", swapped)
+        assert client.get("/api/runs/demo/artifact", params={
+            "root": "editable:.", "path": "allowed.txt"}).status_code == 404
+
+
+def test_hidden_trace_files_do_not_consume_artifact_listing_cap(tmp_path, monkeypatch):
+    from looplab.serve import artifacts as artifact_module
+
+    rd = tmp_path / "run"
+    rd.mkdir()
+    for name in (".spans.jsonl.atomic.tmp", "spans.jsonl", "z1.txt", "z2.txt", "z3.txt"):
+        (rd / name).write_text(name, encoding="utf-8")
+    monkeypatch.setattr(artifact_module, "_ART_MAX_FILES", 2)
+    files, truncated = artifact_module._list_artifact_files(
+        rd, exposed=artifact_module._artifact_exposure_policy(rd))
+    assert [item["path"] for item in files] == ["z1.txt", "z2.txt"]
+    assert truncated is True
+
+
+def test_unprovable_artifact_policy_is_unavailable_not_empty(tmp_path, monkeypatch):
+    """Failure to inspect a reserved trace entry must not masquerade as an empty inventory."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    protected = rd / "spans.jsonl"
+    protected.write_text("private trace\n", encoding="utf-8")
+    safe = rd / "out.txt"
+    safe.write_text("safe\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    real_stat = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == protected:
+            raise PermissionError("simulated protected-entry ACL loss")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    listing = client.get("/api/runs/demo/artifacts")
+    content = client.get("/api/runs/demo/artifact",
+                         params={"root": "run", "path": "out.txt"})
+    assert listing.status_code == 503
+    assert content.status_code == 503
+    assert "safe" not in listing.text
+    assert "safe" not in content.text
+
+
+def test_artifact_opened_object_must_match_authorized_path(tmp_path, monkeypatch):
+    """A path/open race must not substitute an arbitrary file outside every declared root."""
+    import builtins
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    allowed = repo / "allowed.txt"
+    allowed.write_bytes(b"allowed\n")
+    outside = tmp_path / "outside-secret.txt"              # sibling: neither run nor repo root
+    outside.write_bytes(b"must-not-leak\n")
+    (rd / "task.snapshot.json").write_text(json.dumps({
+        "kind": "repo", "editable_path": str(repo),
+    }), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+    params = {"root": "editable:.", "path": "allowed.txt"}
+    assert client.get("/api/runs/demo/artifact", params=params).status_code == 200
+
+    real_open = builtins.open
+
+    def swapped(file, *args, **kwargs):
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if isinstance(file, (str, os.PathLike)) and Path(file) == allowed and "rb" in str(mode):
+            return real_open(outside, *args, **kwargs)
+        return real_open(file, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(builtins, "open", swapped)
+        response = client.get("/api/runs/demo/artifact", params=params)
+    assert response.status_code == 404
+    assert "must-not-leak" not in response.text
+
+
 def test_artifacts_token_gated(tmp_path, monkeypatch):
     """The artifact routes serve raw file CONTENT, so when LOOPLAB_UI_TOKEN is set they're gated — and
     under P1-3 deny-default so is every other /api/ read (only the zero-model /api/health stays open)."""

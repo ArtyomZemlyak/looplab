@@ -6,6 +6,7 @@ import json
 import os
 import stat
 from pathlib import Path
+from typing import Callable, Optional
 
 # ----------------------------------------------------------------- artifacts (run files + repo paths)
 # Surface the files a run produced. Two kinds of root: the run directory itself (events/snapshots, the
@@ -27,6 +28,121 @@ _ART_BIN_EXT = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svgz
 _ART_MAX_FILES = 1500          # per root — keep listings bounded even for a big repo / data dir
 _ART_MAX_BYTES = 2_000_000     # 2 MB cap for an inline text view (the tail is dropped, `truncated` set)
 _LOG_TAIL_MAX = 5_000_000      # hard cap on the client-controlled `tail` byte count for node_logs
+
+
+_TRACE_INTERNAL_BASES = ("spans.jsonl", "spans.index.jsonl", "trace.json", "tree.html")
+ArtifactExposure = Callable[[Path, Optional[str], Optional[os.stat_result]], bool]
+
+
+class ArtifactPolicyUnavailable(OSError):
+    """The server cannot prove that generic artifact access excludes trace internals."""
+
+
+def _artifact_file_identity(stt: os.stat_result) -> Optional[tuple[int, int]]:
+    """Return a usable same-file identity; zero inode means this filesystem cannot prove it."""
+    ino = int(getattr(stt, "st_ino", 0) or 0)
+    if not ino:
+        return None
+    return (int(getattr(stt, "st_dev", 0) or 0), ino)
+
+
+def _trace_internal_name(name: str) -> bool:
+    """Match run-root trace sources, derived views, archives, and atomic-write temporaries."""
+    if not isinstance(name, str):
+        return False
+    normalized = name.rstrip(" .").casefold()
+    return any(
+        normalized == base
+        or normalized.startswith(f"{base}.")
+        or (normalized.startswith(f".{base}.") and normalized.endswith(".tmp"))
+        for base in _TRACE_INTERNAL_BASES
+    )
+
+
+def _unambiguous_artifact_path(relative_path: Optional[str]) -> bool:
+    """Reject Windows aliases/ADS before a generic artifact path reaches content reads."""
+    if relative_path is None:
+        return True
+    if not isinstance(relative_path, str) or "\x00" in relative_path:
+        return False
+    # Treat both slash forms as separators on every host. A deployment moved between POSIX and
+    # Windows must not acquire a second, less strict interpretation of the same URL.
+    for component in relative_path.replace("\\", "/").split("/"):
+        if ":" in component or component.endswith((" ", ".")):
+            return False
+    return True
+
+
+def _artifact_exposure_policy(run_dir: Path) -> ArtifactExposure:
+    """Build a per-request fail-closed boundary for generic artifact discovery/content.
+
+    Artifact roots may overlap the run directory, so authorization follows the canonical target and
+    file identity rather than the caller's root id or requested basename. Identity comparison catches
+    hardlinks and platform aliases; canonical comparison catches symlinks. A separately generated file
+    with the same basename outside the run remains a normal artifact.
+    """
+    # Generic artifact routes must never become an alternate raw-trace API. Bind this decision to
+    # canonical paths and file identities so symlink/hardlink aliases fail closed too.
+    try:
+        run = Path(run_dir).resolve(strict=True)
+        entries = list(run.iterdir())
+    except (OSError, RuntimeError, ValueError):
+        raise ArtifactPolicyUnavailable("artifact exposure policy unavailable") from None
+
+    protected_paths: set[Path] = set()
+    protected_ids: set[tuple[int, int]] = set()
+    for entry in entries:
+        if not _trace_internal_name(entry.name):
+            continue
+        try:
+            target = entry.resolve(strict=True)
+            stt = target.stat()
+        except FileNotFoundError:
+            # A protected entry disappeared between enumeration and identity capture. Its aliases
+            # may still exist, so the hardlink proof is incomplete for this request: fail closed.
+            raise ArtifactPolicyUnavailable("artifact exposure policy changed") from None
+        except (OSError, RuntimeError, ValueError):
+            raise ArtifactPolicyUnavailable("artifact exposure policy unavailable") from None
+        protected_paths.add(target)
+        if stat.S_ISREG(stt.st_mode):
+            identity = _artifact_file_identity(stt)
+            if identity is None:
+                raise ArtifactPolicyUnavailable(
+                    "artifact filesystem identity unavailable")
+            protected_ids.add(identity)
+
+    def exposed(
+        candidate: Path,
+        request_path: Optional[str] = None,
+        stat_result: Optional[os.stat_result] = None,
+    ) -> bool:
+        if not _unambiguous_artifact_path(request_path):
+            return False
+        try:
+            candidate_path = Path(candidate)
+            lexical_parent = candidate_path.parent.resolve(strict=True)
+            if lexical_parent == run and _trace_internal_name(candidate_path.name):
+                return False
+            target = candidate_path.resolve(strict=True)
+            stt = stat_result if stat_result is not None else target.stat()
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+        # Reserve direct run-root family names even when a new atomic temp appeared after the policy
+        # snapshot. Existing canonical paths and file identities close symlink/hardlink aliases.
+        if target.parent == run and _trace_internal_name(target.name):
+            return False
+        # A protected trace-family directory reserves its whole subtree, not only the directory
+        # entry itself. Otherwise `trace.json.backup/secret.txt` becomes a raw-trace side channel.
+        if any(target == protected or protected in target.parents
+               for protected in protected_paths):
+            return False
+        identity = _artifact_file_identity(stt)
+        if identity is not None and identity in protected_ids:
+            return False
+        return stat.S_ISREG(stt.st_mode)
+
+    return exposed
 
 
 def _art_expand(p: str) -> str:
@@ -81,7 +197,8 @@ def _artifact_roots(rd: Path) -> list[dict]:
             continue
         if r["id"] in seen or b in seen or not b.is_dir():   # de-dup by id AND by resolved path
             continue
-        seen.add(r["id"]); seen.add(b)
+        seen.add(r["id"])
+        seen.add(b)
         out.append({**r, "base": b})
     return out
 
@@ -92,7 +209,11 @@ def _artifact_is_text(p: Path) -> bool:
     return p.suffix.lower() not in _ART_BIN_EXT
 
 
-def _list_artifact_files(base: Path) -> tuple[list[dict], bool]:
+def _list_artifact_files(
+    base: Path,
+    *,
+    exposed: Optional[ArtifactExposure] = None,
+) -> tuple[list[dict], bool]:
     """Walk `base`, pruning heavy/noise dirs, capped at _ART_MAX_FILES. Returns (files, truncated). The
     walk is sorted (dirs + files) so a truncated listing is deterministic across calls/platforms rather
     than whatever arbitrary subset os.scandir happened to yield first."""
@@ -107,7 +228,12 @@ def _list_artifact_files(base: Path) -> tuple[list[dict], bool]:
                 continue
             if not stat.S_ISREG(stt.st_mode):    # regular files only — skip fifos/sockets/dir symlinks
                 continue
-            out.append({"path": fp.relative_to(base).as_posix(), "size": stt.st_size,
+            relative = fp.relative_to(base).as_posix()
+            # Filter before the listing cap: hidden trace internals must not displace legitimate files
+            # from a deterministic 1500-entry response. Direct content re-checks the same policy.
+            if exposed is not None and not exposed(fp, relative, stt):
+                continue
+            out.append({"path": relative, "size": stt.st_size,
                         "mtime": stt.st_mtime, "is_text": _artifact_is_text(fp)})
             if len(out) >= _ART_MAX_FILES:
                 out.sort(key=lambda f: f["path"])

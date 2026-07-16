@@ -261,17 +261,26 @@ class AppState:
         # The first durable event is the run-generation identity.  Reading only that first JSONL line
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
         generation = run_generation_token(iter_jsonl(events_path))
-        sig = (_sig(sp, unavailable_raises=True), _sig(events_path), generation)
+        span_sig = _sig(sp, unavailable_raises=True)
+        # A derived response cache is never authority after source readability changes. A stat-only
+        # cache hit must not turn a permission loss into exact cached truth. Probe the
+        # source before returning the derived view, just as get_index does for its own warm cache.
+        # Missing tracing remains a known-empty source; disappearance after successful stat is an
+        # availability race and therefore propagates to the route's unavailable envelope.
+        if span_sig is not None:
+            with open(sp, "rb"):
+                pass
+        sig = (span_sig, _sig(events_path), generation)
         with self._trace_view_lock:
             hit = self._trace_view_cache.get(key)
         if hit is not None and hit[0] == sig:
             return hit[1]
-        try:
-            sp.stat()
-            source_missing = False
-        except FileNotFoundError:
-            source_missing = True
+        source_missing = span_sig is None
         idx = None if source_missing else get_index(sp)
+        if not source_missing and idx is None:
+            # The source vanished after its successful signature/readability probe. Do not collapse
+            # that race into the known-empty state reserved for initial absence.
+            raise OSError("trace source disappeared during projection read")
         total = idx.span_count() if idx is not None else (0 if source_missing else None)
         spans = (idx.light_spans(TRACE_VIEW_SPAN_CAP) if idx is not None
                  else ([] if source_missing else load_spans(sp)))

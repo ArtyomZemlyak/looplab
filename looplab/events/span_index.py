@@ -53,6 +53,26 @@ _CACHE: "OrderedDict[str, SpanIndex]" = OrderedDict()
 _LOCK = threading.Lock()
 
 
+def _read_exact(stream, size: int, *, label: str) -> bytes:
+    """Read exactly the snapshotted byte count or fail without publishing a partial index.
+
+    Regular files normally satisfy ``read(size)`` in one call, but remote/FUSE file objects may
+    legally return a short chunk before EOF. Keep reading in that case; a zero-length chunk before
+    ``size`` is reached means the stat/read snapshot is no longer available and must propagate to
+    the projection boundary as an I/O failure.
+    """
+    remaining = max(0, int(size))
+    chunks: list[bytes] = []
+    while remaining:
+        chunk = stream.read(remaining)
+        if not chunk:
+            got = size - remaining
+            raise OSError(f"short read of {label}: expected {size} bytes, got {got}")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
 def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int]], int]:
     """Parse complete JSONL lines from `buf` (a slice of spans.jsonl starting at file offset `base`),
     applying `iter_jsonl`'s durability rules (stop at the first torn/corrupt line). Yields
@@ -137,11 +157,12 @@ class SpanIndex:
             self._append(light, off, length)
 
     def _rebuild(self, size: int) -> None:
-        try:
-            with open(self.path, "rb") as f:
-                buf = f.read(size)
-        except OSError:
-            buf = b""
+        # CODEX AGENT: unavailable trace bytes must propagate as unavailable; publishing an empty
+        # index here would turn an ACL/read failure into false evidence that the run had no spans.
+        # A readable empty source and an unreadable source are different facts. Let I/O failures
+        # reach the HTTP projection boundary instead of publishing a complete-looking empty index.
+        with open(self.path, "rb") as f:
+            buf = _read_exact(f, size, label="trace source")
         records, consumed = _scan_light(buf, 0)      # parse OUTSIDE the lock (the slow part)
         with self._rlock:                            # publish the new maps atomically vs a lock-free read
             self.light.clear()
@@ -156,12 +177,10 @@ class SpanIndex:
         """Parse only the bytes appended since `self.covers` (spans.jsonl is append-only)."""
         if size <= self.covers:
             return
-        try:
-            with open(self.path, "rb") as f:
-                f.seek(self.covers)
-                buf = f.read(size - self.covers)
-        except OSError:
-            return
+        with open(self.path, "rb") as f:
+            f.seek(self.covers)
+            expected = size - self.covers
+            buf = _read_exact(f, expected, label="trace tail")
         records, consumed = _scan_light(buf, self.covers)   # parse OUTSIDE the lock
         with self._rlock:                                   # append is atomic vs a lock-free read
             self._extend(records)
@@ -188,33 +207,30 @@ class SpanIndex:
         is a snapshot taken under `_rlock` by the caller; `self.meta` is append-only, so reading
         `meta[r]` here (outside the lock) is safe — a concurrent append never moves an existing row."""
         out: list[dict] = []
-        try:
-            with open(self.path, "rb") as f:
-                for r in sorted(rows):                 # sorted → mostly-sequential reads
-                    off, length = self.meta[r]
-                    f.seek(off)
-                    data = f.read(length)
-                    try:
-                        obj = orjson.loads(data)
-                    except orjson.JSONDecodeError:
-                        continue                       # offset drift on a span — skip it, don't crash
-                    if not isinstance(obj, dict):
-                        continue
-                    # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
-                    # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
-                    # would otherwise be returned as if it were this row's span. Cross-check the read
-                    # span_id against the one this row indexes: on a provable mismatch skip it, so the
-                    # accelerator returns None/less — never WRONG data — as its docstring promises.
-                    normalized = _normalize_span(obj)
-                    if normalized is None:
-                        continue
-                    expected = self.light[r].get("span_id")
-                    got_id = normalized.get("span_id")
-                    if expected is not None and got_id is not None and got_id != expected:
-                        continue
-                    out.append(normalized)
-        except OSError:
-            return out
+        with open(self.path, "rb") as f:
+            for r in sorted(rows):                 # sorted → mostly-sequential reads
+                off, length = self.meta[r]
+                f.seek(off)
+                data = _read_exact(f, length, label="indexed trace span")
+                try:
+                    obj = orjson.loads(data)
+                except orjson.JSONDecodeError:
+                    continue                       # offset drift on a span — skip it, don't crash
+                if not isinstance(obj, dict):
+                    continue
+                # An offset that drifted onto a DIFFERENT but still-valid span line (bit-rot on a
+                # network mount, or a same-size in-place rewrite the single-span spotcheck missed)
+                # would otherwise be returned as if it were this row's span. Cross-check the read
+                # span_id against the one this row indexes: on a provable mismatch skip it, so the
+                # accelerator returns None/less — never WRONG data — as its docstring promises.
+                normalized = _normalize_span(obj)
+                if normalized is None:
+                    continue
+                expected = self.light[r].get("span_id")
+                got_id = normalized.get("span_id")
+                if expected is not None and got_id is not None and got_id != expected:
+                    continue
+                out.append(normalized)
         return out
 
     def full_span(self, sid: str) -> Optional[dict]:
@@ -382,8 +398,14 @@ def get_index(spans_path: str | os.PathLike) -> Optional[SpanIndex]:
     with _LOCK:
         try:
             stt = p.stat()
-        except OSError:
+        except FileNotFoundError:
             return None  # no spans.jsonl (tracing off / pre-tracing run) — caller degrades
+        # CODEX AGENT: cached indexes are accelerators, not authority once the source is unreadable.
+        # `stat()` may succeed while opening the source is denied. Probe on every lookup, including
+        # cache hits, so a permission loss cannot turn a previously indexed source into exact zero.
+        # A disappearance *after* the successful stat is an availability race, not known-empty truth.
+        with open(p, "rb"):
+            pass
         size, mtime_ns = stt.st_size, stt.st_mtime_ns
         identity = (stt.st_dev, stt.st_ino)
         key = str(p)
