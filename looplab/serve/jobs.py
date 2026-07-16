@@ -67,6 +67,18 @@ class JobRegistry:
             j = self._jobs.get(job_id)
             return dict(j) if j else None
 
+    def poll(self, job_id: str):
+        """Read a public poll receipt, retiring an explicitly consumable terminal atomically."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            receipt = dict(job)
+            # One-shot polling is safe only when the endpoint owns durable replay.
+            if job.get("status") == JOB_DONE and job.get("consume_on_poll"):
+                self._remove_locked(job_id)
+            return receipt
+
     def _completed_result(self, job_id: str, *, consume: bool):
         """Atomically observe a terminal result and optionally retire its private receipt.
 
@@ -100,8 +112,14 @@ class JobRegistry:
     def inline_wait(self) -> float:
         return self._inline_wait
 
-    def reserve(self, idempotency_key: str | None = None) -> dict:
-        """Atomically reserve/rejoin a bounded job identity without starting its worker."""
+    def reserve(self, idempotency_key: str | None = None, *,
+                consume_on_poll: bool = False) -> dict:
+        """Atomically reserve/rejoin a bounded job identity without starting its worker.
+
+        ``consume_on_poll`` is fixed by the first reservation and is only for endpoints whose
+        durable ledger can replay a terminal response after the process-local receipt is retired.
+        A rejoin never changes the policy attached to the exact existing receipt.
+        """
         with self._lock:
             job_id = (self._idempotent_jobs.get(idempotency_key)
                       if idempotency_key is not None else None)
@@ -119,7 +137,9 @@ class JobRegistry:
                 }
             job_id = secrets.token_hex(8)
             self._jobs[job_id] = {
-                "status": JOB_RUNNING, "result": None, "ts": now, "worker_started": False}
+                "status": JOB_RUNNING, "result": None, "ts": now, "worker_started": False,
+                "consume_on_poll": bool(consume_on_poll),
+            }
             if idempotency_key is not None:
                 self._idempotent_jobs[idempotency_key] = job_id
                 self._job_identities[job_id] = idempotency_key
@@ -225,7 +245,7 @@ def build_router(srv) -> APIRouter:
         """Poll a generic background job (see _run_as_job): `running` until done, then the result dict
         with status='done'; `unknown` if its volatile process receipt expired or was evicted. The
         caller must use its endpoint-specific durable identity to reconcile unknown outcomes."""
-        j = srv.jobs.get(job_id)
+        j = srv.jobs.poll(job_id)
         if not j:
             return {"status": JOB_UNKNOWN}
         if j.get("status") != JOB_DONE:

@@ -46,6 +46,39 @@ def test_strict_fsync_fails_closed_when_sync_is_unsupported(tmp_path, monkeypatc
             strict_fsync(handle.fileno())
 
 
+def test_durable_append_line_written_then_fsync_error_does_not_reuse_seq(tmp_path, monkeypatch):
+    """A failed durability receipt stops paid work, but cannot make a written seq reusable."""
+    import looplab.events.eventstore as eventstore_module
+    from looplab.events.eventstore import EventStore, iter_jsonl
+
+    path = tmp_path / "events.jsonl"
+    store = EventStore(path)
+    store.append("run_started", {"run_id": "r"})
+    assert [event.seq for event in store.read_all()] == [0]  # warm a non-empty cache
+    calls = 0
+
+    def fail_once(_fileno):
+        nonlocal calls
+        calls += 1
+        # append() writes and flushes the complete line before asking for the durability receipt.
+        assert path.read_bytes().endswith(b"\n")
+        if calls == 1:
+            raise OSError("sync receipt unavailable")
+
+    monkeypatch.setattr(eventstore_module, "strict_fsync", fail_once)
+    with pytest.raises(OSError, match="sync receipt unavailable"):
+        store.append("paid_work_claimed", {"attempt": 1}, require_durable=True)
+
+    assert store._seq == 1
+    assert store._cache == []
+    assert store._cache_bytes == 0
+    assert [event.seq for event in store.read_all()] == [0, 1]
+
+    retry = store.append("paid_work_claimed", {"attempt": 2}, require_durable=True)
+    assert retry.seq == 2
+    assert [row["seq"] for row in iter_jsonl(path)] == [0, 1, 2]
+
+
 def test_fsync_timeout_env_parse_tolerates_garbage(monkeypatch):
     """LOOPLAB_FSYNC_TIMEOUT is read at import; atomicio is imported transitively everywhere, so a
     garbage override (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash the app at

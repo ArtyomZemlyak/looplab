@@ -956,7 +956,8 @@ def build_router(srv) -> APIRouter:
                 # Configuration is needed only for brand-new paid work. Durable terminal replay,
                 # restart uncertainty, and live same-key rejoin must survive later config damage.
                 settings = _llm_settings(rd)
-                reservation = srv.jobs.reserve(job_identity)
+                # The event ledger, not this bounded process receipt, owns replay.
+                reservation = srv.jobs.reserve(job_identity, consume_on_poll=True)
                 if reservation.get("status") != "running":
                     return {**reservation, "generation": generation}
                 compute = lambda: _run_report_refresh_worker(  # noqa: E731 - bound claim closure

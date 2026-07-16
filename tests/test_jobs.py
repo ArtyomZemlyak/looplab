@@ -211,3 +211,32 @@ def test_inline_non_idempotent_jobs_release_capacity_but_idempotent_result_rejoi
     assert first == replay == {"ok": True, "value": "kept"}
     assert calls == ["paid"]
     assert registry.has_identity("durable-report") is True
+
+
+def test_terminal_poll_consumes_only_receipts_with_durable_replay_policy():
+    registry = JobRegistry()
+
+    def wait_for_terminal(job_id: str):
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            receipt = registry.poll(job_id)
+            if receipt and receipt.get("status") == "done":
+                return receipt
+            time.sleep(0.01)
+        raise AssertionError("job did not finish")
+
+    durable = registry.reserve("durable-ledger-owner", consume_on_poll=True)
+    registry.start_reserved(durable["job_id"], lambda: {"ok": True, "value": "durable"})
+    durable_terminal = wait_for_terminal(durable["job_id"])
+
+    assert durable_terminal["result"] == {"ok": True, "value": "durable"}
+    assert registry.poll(durable["job_id"]) is None
+    assert registry.rejoin("durable-ledger-owner") is None
+
+    generic = registry.reserve("generic-memory-owner")
+    registry.start_reserved(generic["job_id"], lambda: {"ok": True, "value": "generic"})
+    generic_terminal = wait_for_terminal(generic["job_id"])
+
+    assert generic_terminal["result"] == {"ok": True, "value": "generic"}
+    assert registry.poll(generic["job_id"])["result"] == generic_terminal["result"]
+    assert registry.rejoin("generic-memory-owner") == generic

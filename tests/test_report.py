@@ -4,6 +4,7 @@ manual `/report_refresh` endpoint generates inline (soft-failing when no model i
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import anyio
@@ -384,6 +385,43 @@ def test_fast_report_refreshes_do_not_exhaust_shared_job_capacity(tmp_path, monk
             client, generation=generation, key=f"fast-refresh-{index}").json()
         assert result["ok"] is True
 
+    assert app.state.looplab.jobs._jobs == {}
+
+
+def test_slow_report_terminal_polls_release_shared_job_capacity(tmp_path, monkeypatch):
+    """More than one registry-full of polled reports completes via durable one-shot receipts."""
+    import time
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    _build_run(tmp_path, "demo", writer=None)
+    calls = []
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr(
+        "looplab.serve.report.generate_report",
+        lambda state, _client, **_kwargs: (
+            calls.append(state.run_id)
+            or {"headline": "polled durable", "at_node": len(state.nodes)}
+        ),
+    )
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/state").json()["generation"]
+
+    for index in range(65):
+        queued = _refresh_report(
+            client, generation=generation, key=f"slow-refresh-{index}").json()
+        assert queued.get("status") == "running", queued
+        terminal = None
+        for _ in range(500):
+            terminal = client.get(f"/api/jobs/{queued['job_id']}").json()
+            if terminal.get("status") == "done":
+                break
+            time.sleep(0.01)
+        assert terminal and terminal.get("ok") is True, terminal
+        assert terminal["generation"] == generation
+        assert client.get(f"/api/jobs/{queued['job_id']}").json() == {"status": "unknown"}
+
+    assert calls == ["demo"] * 65
     assert app.state.looplab.jobs._jobs == {}
 
 
@@ -2016,6 +2054,84 @@ def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     assert "runs" in g["content"]["headline"]
     got = client.get(f"/api/scope-report/task/{task_id}").json()
     assert got["exists"] is True and got["stale"] is False and got["current_run_count"] == 2
+
+
+def _seed_scope_run(root: Path, run_id: str, task_id: str) -> None:
+    """Minimal run used by scope-storage tests; no engine/provider work is needed."""
+    from looplab.events.eventstore import EventStore
+
+    rd = root / run_id
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append("run_started", {
+        "run_id": run_id, "task_id": task_id, "goal": f"goal {task_id}", "direction": "min",
+    })
+
+
+def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monkeypatch):
+    """Two ids with the same readable filename prefix own different files and different content."""
+    from urllib.parse import quote
+
+    from looplab.serve.routers.reports import _scope_report_path
+
+    first_id, second_id = "a:b", "a*b"  # both sanitized to ``a_b`` by the legacy implementation
+    reports_dir = tmp_path / "reports"
+    first_path = _scope_report_path(reports_dir, "task", first_id)
+    second_path = _scope_report_path(reports_dir, "task", second_id)
+    traversal_path = _scope_report_path(reports_dir, "task", "../../outside\\report?")
+    assert first_path != second_path
+    assert first_path.parent == second_path.parent == traversal_path.parent == reports_dir.resolve()
+    assert len(first_path.stem.rsplit("-", 1)[-1]) == 64  # full SHA-256 owns uniqueness
+
+    _seed_scope_run(tmp_path, "colon-run", first_id)
+    _seed_scope_run(tmp_path, "star-run", second_id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    first_url = f"/api/scope-report/task/{quote(first_id, safe='')}"
+    second_url = f"/api/scope-report/task/{quote(second_id, safe='')}"
+
+    first = client.post(first_url + "/generate").json()
+    second = client.post(second_url + "/generate").json()
+    assert first["ok"] is True and first["run_ids"] == ["colon-run"]
+    assert second["ok"] is True and second["run_ids"] == ["star-run"]
+    assert first["scope_identity"] == {"type": "task", "id": first_id}
+    assert second["scope_identity"] == {"type": "task", "id": second_id}
+    assert len(list(reports_dir.glob("*.json"))) == 2
+    assert client.get(first_url).json()["run_ids"] == ["colon-run"]
+    assert client.get(second_url).json()["run_ids"] == ["star-run"]
+
+
+@pytest.mark.parametrize("tamper", ["missing", "mismatch"])
+def test_scope_report_refuses_legacy_or_substituted_storage(
+        tmp_path, monkeypatch, tamper):
+    """A file without the exact original identity is neither disclosed nor overwritten."""
+    from looplab.serve.routers.reports import _prior_learnings_index
+
+    task_id = "storage-owner"
+    _seed_scope_run(tmp_path, "owner-run", task_id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    generated = client.post(url + "/generate")
+    assert generated.status_code == 200 and generated.json()["ok"] is True
+
+    report_path = next((tmp_path / "reports").glob("*.json"))
+    record = json.loads(report_path.read_text(encoding="utf-8"))
+    if tamper == "missing":
+        record.pop("scope_identity")  # legacy records did not persist an immutable identity
+    else:
+        record["scope_identity"] = {"type": "task", "id": "different-owner"}
+    record["content"]["headline"] = "PRIVATE OTHER-SCOPE CONTENT"
+    report_path.write_text(json.dumps(record), encoding="utf-8")
+
+    refused_read = client.get(url)
+    assert refused_read.status_code == 409
+    assert "PRIVATE OTHER-SCOPE CONTENT" not in refused_read.text
+    assert _prior_learnings_index(tmp_path / "reports") == ""
+
+    refused_write = client.post(url + "/generate")
+    assert refused_write.status_code == 409
+    assert refused_write.json()["detail"]["code"] == "scope_report_storage_conflict"
+    assert "PRIVATE OTHER-SCOPE CONTENT" in report_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("protocol", ["finish_seq", "scoped"])

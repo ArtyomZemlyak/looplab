@@ -416,6 +416,22 @@ class EventStore:
         except OSError:
             pass  # best-effort healing; a read still tolerates the torn tail
 
+    def _mark_uncertain_append(self, seq: int) -> None:
+        """Fence a seq whose bytes were accepted but whose sync was unconfirmed.
+
+        A failed strict fsync does not roll back the preceding write+flush: the complete line is
+        normally already visible even though the caller must fail closed before paid work. Reserve
+        that possibly-written seq and discard the incremental view so the next read reparses disk
+        truth instead of letting this long-lived store reuse the seq.
+        """
+        with self._read_lock:
+            self._seq = max(self._seq, seq)
+            self._cache = []
+            self._cache_bytes = 0
+            self._cache_mtime_ns = None
+            self._cache_identity = None
+            self._divergence = None
+
     def append(self, type: str, data: dict[str, Any], *,
                trace_id: "str | None" = _UNSET_TRACE, span_id: "str | None" = _UNSET_TRACE,
                expected_last_seq: "int | None" = None, require_lock: bool = False,
@@ -427,8 +443,9 @@ class EventStore:
         newline so this record can't glue onto a partial write), then derive the next seq
         from max(in-memory, on-disk tail) so a concurrent writer can't mint a duplicate.
         The record is written as one line + flush + best-effort fsync — fsync failures
-        (FUSE/S3) never abort the engine, because reads tolerate a torn final line.
-        `_seq` advances only AFTER the durable write succeeds.
+        (FUSE/S3) never abort the engine, because reads tolerate a torn final line. Once a write is
+        accepted its seq stays reserved; a required sync failure still raises, invalidates the read
+        cache, and prevents the caller from treating the record as a durable paid-work claim.
 
         `expected_last_seq` (P1-12 explicit-seq CAS): when given, the append lands ONLY if the log
         tail is still exactly that seq at the moment we hold the lock — else raise
@@ -468,13 +485,22 @@ class EventStore:
             e = Event(seq=seq, ts=time.time(), type=type, data=data,
                       trace_id=trace_id, span_id=span_id)
             line = orjson.dumps(e.model_dump(mode="json"))
-            with open(self.path, "ab") as f:    # advance _seq only AFTER a durable write succeeds
-                f.write(line + b"\n")
-                f.flush()
-                if require_durable:
-                    strict_fsync(f.fileno())
-                else:
-                    best_effort_fsync(f.fileno())  # read tolerates a torn final line
+            accepted = False
+            try:
+                with open(self.path, "ab") as f:
+                    f.write(line + b"\n")
+                    # From here onward the record may reach disk even if flush, sync, or close
+                    # reports failure. Reserve its seq on every exceptional exit.
+                    accepted = True
+                    f.flush()
+                    if require_durable:
+                        strict_fsync(f.fileno())
+                    else:
+                        best_effort_fsync(f.fileno())  # read tolerates a torn final line
+            except BaseException:
+                if accepted:
+                    self._mark_uncertain_append(seq)
+                raise
             self._seq = seq
             # Keep cache bytes + file identity synchronized with our own successful write. Without
             # this top-up, a store that appended but had not yet read the new record could retain

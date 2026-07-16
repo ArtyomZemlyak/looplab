@@ -15,8 +15,10 @@ Protocols named here:
   ``{"status": JOB_RUNNING, "job_id": ...}`` when the work outlasts its inline wait; clients poll
   ``GET /api/jobs/{id}`` (or ``/api/genesis/{id}``) which answers ``{"status": JOB_RUNNING, ...}``
   until done, then the full result dict with ``status=JOB_DONE``, or ``{"status": JOB_UNKNOWN}``
-  once the process receipt expired/was evicted. Recovery is endpoint-specific: a paid report may
-  only reconcile with the same generation and Idempotency-Key, never a fresh identity. The inline-wait
+  once the process receipt expired/was evicted. Generic terminal receipts remain replayable for the
+  ten-minute polling window. A paid report has its own durable event receipt, so its first terminal
+  poll atomically retires the volatile job receipt; a lost response or later poll must reconcile by
+  replaying the same generation and Idempotency-Key, never a fresh identity. The inline-wait
   convention: a fast result is returned directly (NO ``status`` key), so clients must treat
   "status == running + job_id" as the only poll trigger (tui `_await_job`, util.js `jobAwait`).
 
