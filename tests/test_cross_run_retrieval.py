@@ -202,3 +202,20 @@ def test_tool_and_cli(tmp_path):
     assert "hard negative" in out.lower() and "claim" in out
     res = CliRunner().invoke(app, ["cross-run-search", str(tmp_path), "hard negatives"])
     assert res.exit_code == 0 and "cross-run search" in res.stdout and "hard negative" in res.stdout.lower()
+
+
+def test_pinned_claim_retained_in_retrieval_under_quota(tmp_path):
+    # concept-conformance regression (§22.4/§21.20.5): the 'pinned is retained' governance projection applies
+    # to cross_run_retrieve too — a relevant operator-pinned claim survives the contradiction-quota swap (the
+    # swap victim filter now excludes operator-pinned, mirroring build_context_pack).
+    from looplab.engine.claims import cross_run_retrieve, record_claim_decision
+    lessons = [_lesson("hard negative mining improves recall", "supported", (1,), "r0")]
+    lessons += [_lesson(f"hard negative mining variant {i}", "supported", (i + 2,), f"r{i}") for i in range(2)]
+    lessons += [_lesson("hard negative mining reranker", "supported", (7,), "rA"),
+                _lesson("hard negative mining reranker", "tested", (8,), "rB")]   # contested -> caveat
+    _seed(tmp_path, lessons=lessons)
+    record_claim_decision(str(tmp_path), statement="hard negative mining improves recall", decision="pinned")
+    r = cross_run_retrieve(str(tmp_path), "hard negative mining recall", k=4, intent="failed")  # high quota
+    assert r["receipt"]["caveat_target"] >= 1
+    assert any(h.get("maturity") == "operator-pinned" for h in r["results"])       # pin retained under quota
+    assert any(h.get("epistemic") == "mixed" for h in r["results"])                # ...and caveats surfaced
