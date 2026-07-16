@@ -33,6 +33,7 @@ test('experimentsByConcept preserves hostile concept ids without prototype colli
   assert.deepEqual(out.constructor, [0])
   assert.deepEqual(out.toString, [1])
   assert.equal(Object.prototype.polluted, undefined)
+  assert.deepEqual(experimentsByConcept({ 0: ['constructor'] }, {}).constructor, [0])
 })
 
 test('experimentsByConcept fails closed on malformed records and rename targets', () => {
@@ -43,7 +44,8 @@ test('experimentsByConcept fails closed on malformed records and rename targets'
     9007199254740992: ['unsafe-number'],
   }
   const out = experimentsByConcept(nc, { valid: null })
-  assert.deepEqual(Object.keys(out), [])
+  assert.deepEqual(Object.keys(out), ['valid'])
+  assert.deepEqual(out.valid, [1])
   assert.deepEqual(Object.keys(experimentsByConcept([], {})), [])
 })
 

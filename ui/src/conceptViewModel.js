@@ -47,7 +47,7 @@ function finishRows(rows, reasons, unavailable = false) {
 export function experimentsByConcept(nodeConcepts = {}, rename = {}) {
   const out = conceptMap()
   if (!isRecord(nodeConcepts)) return out
-  const renameMap = isRecord(rename) ? rename : null
+  const renameMap = isRecord(rename) ? rename : {}
   const acc = new Map()
   for (const [nid, ids] of Object.entries(nodeConcepts)) {
     if (!/^(0|[1-9]\d*)$/.test(nid) || !Array.isArray(ids)) continue
@@ -55,11 +55,9 @@ export function experimentsByConcept(nodeConcepts = {}, rename = {}) {
     if (!Number.isSafeInteger(id)) continue
     for (const raw of ids) {
       if (!isConceptId(raw)) continue
-      if (renameMap && Object.hasOwn(renameMap, raw) && !isConceptId(renameMap[raw])) continue
       const conceptId = canonicalId(raw, renameMap)
       if (!isConceptId(conceptId)) continue
-      // # CODEX AGENT: concept ids are untrusted map keys; only own-property reads plus Map/null-
-      // prototype writes may carry them across this boundary (including "__proto__"/"constructor").
+      // Keep untrusted concept ids in Map/null-prototype storage so prototype names remain data.
       let nodeIds = acc.get(conceptId)
       if (!nodeIds) {
         nodeIds = new Set()
@@ -163,8 +161,7 @@ export function visibleConceptRows(tree, expanded = new Set()) {
       continue
     }
 
-    // # CODEX AGENT: projections are untrusted read models; iteration, path-cycle checks and hard
-    // budgets must fence rendering so one malformed/deep graph cannot take down the whole UI.
+    // Iterate within hard depth/reference budgets so a malformed projection cannot block rendering.
     const nextPath = { id, parent: path }
     for (let i = children.length - 1; i >= 0; i -= 1) {
       stack.push({ id: children[i], depth: depth + 1, path: nextPath })
