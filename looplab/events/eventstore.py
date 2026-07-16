@@ -354,6 +354,25 @@ class EventStore:
         """The complete-record corruption currently detected, or None (see the error class)."""
         return self._divergence
 
+    @contextmanager
+    def paid_effect_guard(self, *, required: bool = True) -> Iterator[None]:
+        """Serialize a paid effect's claim, dispatch, and terminal observation.
+
+        This lock is intentionally separate from the append lock file: callers must be able to
+        append the durable claim and provider receipt while holding it.  ``required=True`` makes an
+        unsupported advisory-lock filesystem fail closed instead of silently allowing two buyers.
+        Free reconciliation may pass ``required=False``: it waits for a live buyer where locking is
+        supported, while safely degrading when a required buyer could not have started there.
+        """
+        # CODEX AGENT: a durable marker alone prevents crash replay, but it does not stop two live
+        # processes that both observed the marker as absent.  Hold this required interprocess guard
+        # across the complete paid-attempt window; EventStore.append uses its own distinct lock.
+        with _interprocess_lock(
+            Path(str(self.path) + ".paid-effects.lock"),
+            required=required,
+        ):
+            yield
+
     def _scan_last_seq(self) -> int:
         last = -1
         for e in self.read_all():

@@ -279,13 +279,27 @@ def _mark_finalize_step(engine: "Engine", scope: str, step: str, **data) -> None
     engine.store.append(EV_FINALIZE_STEP, {"scope": scope, "step": step, **data})
 
 
-def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) -> bool:
-    """Resolve one planned paid finish report without an ambiguous provider retry.
+def _claim_paid_finalize_step(engine: "Engine", scope: str, step: str) -> None:
+    """Persist the at-most-once boundary before dispatching a paid/external effect."""
+    # CODEX AGENT: both guarantees are mandatory here.  The surrounding paid_effect_guard closes
+    # the live/live race, while strict fsync closes the crash window.  A sync failure may leave a
+    # visible ambiguous marker, but it must propagate before the provider is called.
+    engine.store.append(
+        EV_FINALIZE_STEP,
+        {"scope": scope, "step": step},
+        require_lock=True,
+        require_durable=True,
+    )
 
-    The successful ``report`` marker is deliberately deferred until ``run_finished`` is durable so
-    the upstream replay contract can keep ``report_generated`` immediately adjacent to its finish.
-    """
-    events = list(events)
+
+def _resolve_existing_finish_report_attempt(
+    engine: "Engine",
+    events,
+    scope: str,
+    *,
+    close_ambiguous: bool,
+) -> bool | None:
+    """Return a terminal answer for an existing plan/attempt, or None when dispatch is still needed."""
     if not _finish_report_planned(events, scope):
         return True
     if _scope_has_step(events, scope, "report"):
@@ -293,6 +307,8 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
     if scoped_finish_report(events, scope) is not None:
         return True
     if _scope_has_step(events, scope, "report_begun"):
+        if not close_ambiguous:
+            return None  # it may belong to the live process currently holding paid_effect_guard
         _mark_finalize_step(
             engine,
             scope,
@@ -300,23 +316,136 @@ def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) ->
             outcome="prior_attempt_incomplete_not_replayed",
         )
         return True
-    if getattr(engine, "report_writer", None) is None:
-        return False
+    return None
 
-    _mark_finalize_step(engine, scope, "report_begun")
-    begun = _finalize_begun(events, scope)
-    if state is None:
-        anchor = begun.seq if begun is not None else -1
-        state = fold([event for event in events if event.seq is None or event.seq < anchor])
-    engine._write_report(state, trigger="finish", finalize_scope=scope)
-    if scoped_finish_report(engine.store.read_all(), scope) is None:
-        _mark_finalize_step(
+
+def ensure_finish_report(engine: "Engine", events, scope: str, *, state=None) -> bool:
+    """Resolve one planned paid finish report without an ambiguous provider retry.
+
+    The successful ``report`` marker is deliberately deferred until ``run_finished`` is durable so
+    the upstream replay contract can keep ``report_generated`` immediately adjacent to its finish.
+    """
+    # ``events`` remains part of the compatibility signature, but every decision uses a fresh read.
+    # CODEX AGENT: a missing writer is a free/no-provider recovery path.  It must observe an existing
+    # terminal or ambiguous attempt without requiring paid-work locking/fsync on lock-less filesystems.
+    del events
+    current = engine.store.read_all()
+    writer_available = getattr(engine, "report_writer", None) is not None
+    resolved = _resolve_existing_finish_report_attempt(
+        engine,
+        current,
+        scope,
+        close_ambiguous=False,
+    )
+    if resolved is not None:
+        return resolved
+    if not writer_available:
+        if not _scope_has_step(current, scope, "report_begun"):
+            return False
+        # A differently configured process may currently own this attempt.  An optional guard waits
+        # for it on a normal filesystem; where locks are unsupported, a required paid dispatcher
+        # could not have entered, so closing the durable ambiguity remains safe and available.
+        with engine.store.paid_effect_guard(required=False):
+            current = engine.store.read_all()
+            resolved = _resolve_existing_finish_report_attempt(
+                engine,
+                current,
+                scope,
+                close_ambiguous=True,
+            )
+            return resolved if resolved is not None else False
+
+    # Repeat the decision while holding the paid-effect guard.  Otherwise a second
+    # EventStore/process can pass the preflight using a stale absence observation.
+    with engine.store.paid_effect_guard():
+        current = engine.store.read_all()
+        resolved = _resolve_existing_finish_report_attempt(
             engine,
+            current,
             scope,
-            "report",
-            outcome="attempt_returned_without_durable_report",
+            close_ambiguous=True,
         )
+        if resolved is not None:
+            return resolved
+
+        begun = _finalize_begun(current, scope)
+        if state is None:
+            anchor = begun.seq if begun is not None else -1
+            state = fold([event for event in current if event.seq is None or event.seq < anchor])
+        _claim_paid_finalize_step(engine, scope, "report_begun")
+        engine._write_report(state, trigger="finish", finalize_scope=scope)
+        if scoped_finish_report(engine.store.read_all(), scope) is None:
+            _mark_finalize_step(
+                engine,
+                scope,
+                "report",
+                outcome="attempt_returned_without_durable_report",
+            )
+        return True
+
+
+def _reflection_can_write(engine: "Engine") -> bool:
+    """Whether Engine configuration can make run-end reflection perform external/shared work.
+
+    Minimal test/compatibility engines historically expose neither flag, so absence remains enabled;
+    an actual Engine exposes both and ``write_reflection_note`` uses this same truthiness gate.
+    """
+    # An instance-level writer is an explicit integration/test seam and may perform work regardless
+    # of the stock LessonMemory flags.  Treat it as external rather than silently skipping it.
+    if callable(getattr(engine, "__dict__", {}).get("_write_reflection_note")):
+        return True
+    if hasattr(engine, "_reflection_priors") and not bool(engine._reflection_priors):
+        return False
+    if hasattr(engine, "memory_dir") and not bool(engine.memory_dir):
+        return False
     return True
+
+
+def ensure_finalize_reflection(engine: "Engine", scope: str, finish_seq: int) -> None:
+    """Run one reflection attempt, or close an already-ambiguous attempt without replay."""
+    del finish_seq  # scope is the legacy-compatible durable identity for reflection markers
+    events = engine.store.read_all()
+    if _scope_has_step(events, scope, "reflection"):
+        return
+    if not _reflection_can_write(engine):
+        with engine.store.paid_effect_guard(required=False):
+            events = engine.store.read_all()
+            if _scope_has_step(events, scope, "reflection"):
+                return
+            if _scope_has_step(events, scope, "reflection_begun"):
+                _mark_finalize_step(
+                    engine,
+                    scope,
+                    "reflection",
+                    outcome="prior_attempt_incomplete_not_replayed",
+                )
+                return
+            # CODEX AGENT: the real reflection implementation immediately returns for these configs.
+            # Keep free finalization compatible with filesystems that cannot provide strict locking;
+            # ordinary legacy-shaped markers are sufficient because no paid/shared write can happen.
+            _mark_finalize_step(engine, scope, "reflection_begun", outcome="disabled")
+            _mark_finalize_step(engine, scope, "reflection", outcome="disabled")
+            return
+
+    with engine.store.paid_effect_guard():
+        events = engine.store.read_all()
+        if _scope_has_step(events, scope, "reflection"):
+            return
+        if _scope_has_step(events, scope, "reflection_begun"):
+            _mark_finalize_step(
+                engine,
+                scope,
+                "reflection",
+                outcome="prior_attempt_incomplete_not_replayed",
+            )
+            return
+
+        # Freeze the exact pre-claim state.  Diagnostics appended while the provider is running must
+        # not silently change the reflection input selected by this finalization boundary.
+        final = fold(events)
+        _claim_paid_finalize_step(engine, scope, "reflection_begun")
+        engine._write_reflection_note(final)
+        _mark_finalize_step(engine, scope, "reflection")
 
 
 def mark_finish_report_complete(engine: "Engine", scope: str) -> None:
@@ -530,21 +659,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             except Exception:  # noqa: BLE001 — agentic curation must never affect the run's finalization
                 pass
 
-        events = engine.store.read_all()
-        if not _finalize_step_done(events, scope, finish_seq, "reflection"):
-            if _finalize_step_done(events, scope, finish_seq, "reflection_begun"):
-                _mark_finalize_step(
-                    engine,
-                    scope,
-                    "reflection",
-                    outcome="prior_attempt_incomplete_not_replayed",
-                )
-            else:
-                _mark_finalize_step(engine, scope, "reflection_begun")
-                # This can write several shared files and spend LLM tokens. Let a failure propagate
-                # like a process crash; the begun marker makes the next entry at-most-once.
-                engine._write_reflection_note(fold(engine.store.read_all()))
-                _mark_finalize_step(engine, scope, "reflection")
+        ensure_finalize_reflection(engine, scope, finish_seq)
 
         events = engine.store.read_all()
         if not _finalize_step_done(events, scope, finish_seq, "llm_cost", EV_LLM_COST):
