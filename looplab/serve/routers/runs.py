@@ -88,6 +88,34 @@ def _operator_stage_names(rd: Path) -> tuple:
     return names
 
 
+def _folded_concepts(st):
+    """Canonical per-node concept sets, canonical typed edges, and per-concept touch counts — every id
+    collapsed through the recorded consolidation rename so tags, metrics, touch AND edges share ONE
+    vocabulary. The fold never rewrites edge keys, so an edge emitted before a rename keeps its retired
+    raw ids until collapsed here; the collapse keeps the max-confidence survivor per (src, rel, dst)
+    triple (mirrors the fold's commutative conflict rule), iterating sorted for deterministic ties.
+    Pure; shared by the concepts read endpoint and the in-the-moment lens-derivation endpoint."""
+    from looplab.search.concept_graph import concept_touch_counts
+    rename = getattr(st, "concept_consolidation", None) or {}
+    raw_nc = getattr(st, "node_concepts", None) or {}
+    nc = {nid: [rename.get(c, c) for c in (ids or [])] for nid, ids in raw_nc.items()}
+    cids = sorted({c for ids in nc.values() for c in ids})
+    edges: dict = {}
+    for _k, e in sorted((getattr(st, "concept_edges", None) or {}).items()):
+        if not isinstance(e, dict):
+            continue
+        src = rename.get(e.get("src"), e.get("src"))
+        dst = rename.get(e.get("dst"), e.get("dst"))
+        if not src or not dst or src == dst:
+            continue
+        ce = dict(e); ce["src"], ce["dst"] = src, dst
+        key = (src, ce.get("rel"), dst)
+        prev = edges.get(key)
+        if prev is None or float(ce.get("confidence") or 0.0) > float(prev.get("confidence") or 0.0):
+            edges[key] = ce
+    return nc, cids, edges, concept_touch_counts(nc)
+
+
 def build_router(srv) -> APIRouter:
     router = APIRouter()
     log_pages = EventLogPager()
@@ -183,52 +211,73 @@ def build_router(srv) -> APIRouter:
         return _state_payload(_run_dir(run_id), seq)
 
     @router.get("/api/runs/{run_id}/concepts")
-    def get_concepts(run_id: str, lens: str = "is_a", seq: Optional[int] = None):
+    def get_concepts(run_id: str, lens: str = "is_a", rels: Optional[str] = None,
+                     seq: Optional[int] = None):
         """Concept-view read-model: the per-LENS hierarchy (project_hierarchy for is_a from paths,
         project_lens for a typed-edge lens) + per-concept metrics/Δ + the shipped lens pack. PURE over
         the folded run — recomputed each call (the projection is never cached: caching a materialized
         tree would smuggle a fixed catalog back in). Raw tags are collapsed through the recorded
-        consolidation rename map so ids are canonical and align with the concept_edges."""
-        from looplab.search.concept_graph import (concept_metrics, concept_touch_counts,
-                                                   default_lenses, graph_from_node_concepts,
+        consolidation rename map so ids are canonical and align with the concept_edges.
+
+        `rels` (comma-separated relation names) reproduces an in-the-moment DERIVED lens without another
+        LLM call: the lens-derivation endpoint picks the relation subset ONCE, and the client replays it
+        as a pure projection here (so a derived lens refetches as the run grows, like a default lens)."""
+        from looplab.search.concept_graph import (concept_metrics, default_lenses,
+                                                   graph_from_node_concepts,
                                                    project_hierarchy, project_lens)
         rd = _run_dir(run_id)
         st = fold(srv.events(rd, seq)) if seq is not None else srv.state(rd)
-        rename = getattr(st, "concept_consolidation", None) or {}
-        raw_nc = getattr(st, "node_concepts", None) or {}
-        # canonicalize the per-node concept sets so tree / metrics / touch all key on the same ids
-        nc = {nid: [rename.get(c, c) for c in (ids or [])] for nid, ids in raw_nc.items()}
+        nc, cids, edges, touch = _folded_concepts(st)
         graph, tags = graph_from_node_concepts(nc)
-        cids = sorted({c for ids in nc.values() for c in ids})
-        # Canonicalize edge endpoints through the SAME rename map as the tags. The fold never rewrites
-        # edge keys, so an edge emitted by a cadence BEFORE a consolidation rename keeps its retired raw
-        # ids; project_lens adds every endpoint to the tree unconditionally, so without this collapse an
-        # edge-lens tree would show BOTH the retired raw id (an untagged ghost with stale edges) AND the
-        # canonical id the tags/metrics/touch use — the two halves of the response disagreeing on the
-        # vocabulary. Collapse to the canonical (src, rel, dst) triple, drop self-edges the collapse
-        # creates, and keep the max-confidence survivor per triple (mirrors the fold's commutative
-        # conflict rule); iterate SORTED so equal-confidence ties resolve deterministically.
-        raw_edges = getattr(st, "concept_edges", None) or {}
-        edges: dict = {}
-        for _k, e in sorted(raw_edges.items()):
-            if not isinstance(e, dict):
-                continue
-            src = rename.get(e.get("src"), e.get("src"))
-            dst = rename.get(e.get("dst"), e.get("dst"))
-            if not src or not dst or src == dst:
-                continue
-            ce = dict(e); ce["src"], ce["dst"] = src, dst
-            key = (src, ce.get("rel"), dst)
-            prev = edges.get(key)
-            if prev is None or float(ce.get("confidence") or 0.0) > float(prev.get("confidence") or 0.0):
-                edges[key] = ce
-        touch = concept_touch_counts(nc)
-        tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
-                else project_lens(cids, edges, lens, touch=touch))
+        rel_list = [r.strip() for r in (rels or "").split(",") if r.strip()]
+        if rel_list and rel_list != ["is_a"] and edges:
+            # a client-replayed derived lens: project the exact relation subset (no LLM)
+            tree = project_lens(cids, edges, {"name": lens, "rels": rel_list}, touch=touch)
+        else:
+            tree = (project_hierarchy(cids, lens="is_a") if (lens == "is_a" or not edges)
+                    else project_lens(cids, edges, lens, touch=touch))
         # `lens` is the EFFECTIVE lens actually projected (is_a when a typed lens was asked for on a run
         # with no edges); `requested_lens` echoes the query param so the client can tell a fallback from
         # an honest is_a request without inferring it from `edges_present`.
         return {"lens": tree.get("lens", lens), "requested_lens": lens, "lenses": default_lenses(),
+                "tree": tree, "metrics": concept_metrics(st, graph, tags), "touch": touch,
+                "edges_present": bool(edges)}
+
+    @router.post("/api/runs/{run_id}/concepts/lens")
+    async def derive_concept_lens(run_id: str, request: Request):
+        """Mint a lens IN THE MOMENT from a natural-language request — the "create a lens" LLM tool the
+        Concept view offers. A lens is a pure PROJECTION spec (a relation-subset + optional root): it
+        writes NO events and grows NO edges, so this stays replay-clean — we derive the spec, immediately
+        project the tree under it, and return both. Soft-fails ({ok:false, reason}) offline / when the
+        model declines or picks nothing usable, so the UI falls back to a default lens rather than 500."""
+        from looplab.search.concept_graph import (concept_metrics, derive_lens,
+                                                   graph_from_node_concepts,
+                                                   project_hierarchy, project_lens)
+        try:
+            body = await request.json()
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise HTTPException(400, "request body must be valid JSON") from exc
+        prompt = str((body or {}).get("prompt") or "").strip() if isinstance(body, dict) else ""
+        if not prompt:
+            raise HTTPException(400, "prompt is required")
+        rd = _run_dir(run_id)
+        st = srv.state(rd)
+        nc, cids, edges, touch = _folded_concepts(st)
+        # The LLM call (client build + one structured turn) runs off the event loop; both offline client
+        # construction and any model failure fall through derive_lens' own best-effort None / this guard.
+        def _mint():
+            client = srv.make_llm_client(srv.llm_settings(rd))
+            return derive_lens(prompt, edges, client, concepts=cids)
+        try:
+            spec = await anyio.to_thread.run_sync(_mint)
+        except Exception:  # noqa: BLE001 — offline / no model -> soft fail, UI keeps its current lens
+            return {"ok": False, "reason": "no_model"}
+        if not spec:
+            return {"ok": False, "reason": "declined"}
+        graph, tags = graph_from_node_concepts(nc)
+        tree = (project_hierarchy(cids, lens="is_a") if (spec.get("rels") or []) == ["is_a"]
+                else project_lens(cids, edges, spec, touch=touch))
+        return {"ok": True, "spec": spec, "lens": tree.get("lens", spec.get("name")),
                 "tree": tree, "metrics": concept_metrics(st, graph, tags), "touch": touch,
                 "edges_present": bool(edges)}
 

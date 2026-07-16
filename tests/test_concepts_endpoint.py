@@ -90,3 +90,89 @@ def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_p
     assert data["lens"] == "is_a"
     assert data["requested_lens"] == "uses"
     assert data["edges_present"] is False
+
+
+class _LensClient:
+    """Fake LLM returning a fixed structured lens emit (tool_call parser)."""
+    def __init__(self, out):
+        self.out = out
+
+    def complete_tool(self, messages, json_schema):
+        return self.out
+
+    def complete_text(self, messages):
+        return "x"
+
+
+def _edge_run(root):
+    rd = root / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    s = EventStore(rd / "events.jsonl")
+    s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                       "concepts": ["agents/orchestrator", "llm/gpt"]}})
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
+    s.append("concept_edge", {"edges": [{"src": "agents/orchestrator", "rel": "uses",
+                                         "dst": "llm/gpt", "confidence": 1.0,
+                                         "provenance": "asserted"}]})
+    return rd
+
+
+def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
+    _edge_run(tmp_path)
+    import looplab.serve.server as server_mod
+    monkeypatch.setattr(server_mod, "make_llm_client",
+                        lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
+    client = TestClient(make_app(tmp_path))
+    r = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by what uses what"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["spec"]["rels"] == ["uses"] and data["spec"]["provenance"] == "agent"
+    assert data["lens"] == "usage"
+    # the minted uses-lens nests agents/orchestrator under llm/gpt and reports metrics per concept
+    assert data["tree"]["nodes"]["agents/orchestrator"]["parent"] == "llm/gpt"
+    assert data["metrics"]["rows"]["llm/gpt"]["best"] == 0.9
+
+
+def test_derive_lens_endpoint_soft_fails_when_model_declines(tmp_path, monkeypatch):
+    _edge_run(tmp_path)
+    import looplab.serve.server as server_mod
+    # the model picks a relation not present in the graph -> derive_lens returns None -> soft fail
+    monkeypatch.setattr(server_mod, "make_llm_client",
+                        lambda *a, **k: _LensClient({"rels": ["teleports_to"]}))
+    client = TestClient(make_app(tmp_path))
+    data = client.post("/api/runs/demo/concepts/lens", json={"prompt": "nonsense"}).json()
+    assert data["ok"] is False and data["reason"] == "declined"
+
+
+def test_derive_lens_endpoint_soft_fails_offline(tmp_path, monkeypatch):
+    _edge_run(tmp_path)
+    import looplab.serve.server as server_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("no model configured")
+    monkeypatch.setattr(server_mod, "make_llm_client", _boom)
+    client = TestClient(make_app(tmp_path))
+    data = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"}).json()
+    assert data["ok"] is False and data["reason"] == "no_model"
+
+
+def test_derive_lens_endpoint_requires_a_prompt(tmp_path):
+    _edge_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    assert client.post("/api/runs/demo/concepts/lens", json={"prompt": "  "}).status_code == 400
+    assert client.post("/api/runs/demo/concepts/lens", json={}).status_code == 400
+
+
+def test_concepts_get_replays_a_derived_lens_via_rels(tmp_path):
+    # A derived lens is reproducible without another LLM call: GET with &rels=<subset> projects the exact
+    # relation subset, so the derived lens refetches as the run grows like any default lens.
+    _edge_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    data = client.get("/api/runs/demo/concepts?lens=usage&rels=uses").json()
+    assert data["lens"] == "usage"
+    assert data["tree"]["nodes"]["agents/orchestrator"]["parent"] == "llm/gpt"
+    # metrics are lens-independent (per-concept), so they still populate under the replayed lens
+    assert data["metrics"]["rows"]["llm/gpt"]["best"] == 0.9
