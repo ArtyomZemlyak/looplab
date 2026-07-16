@@ -6,6 +6,16 @@ export const SCOPE_NARRATIVE_AUTHORITY = 'model-advisory'
 // numeric, and legacy values must all fail closed before outcome-bearing report content is rendered.
 export function scopeReportAuthority(value) {
   const content = value?.content
+  // REVIEW(2026-07-16): `stale === false` here conflates FRESHNESS with AUTHORITY, and the effect is
+  // that a paid report over any LIVE scope is unreadable: the server recomputes stale on every GET
+  // (any event appended by a still-running scope run flips it), mid-run regeneration is structurally
+  // impossible (_inputs_unchanged discards even a finished synthesis on any input change), and
+  // ScopeReport.jsx gates ALL content — advisory narrative AND winner-free observation rows — on
+  // authority.current, replacing them with "quarantined … Regenerate to inspect it". The pre-4225226
+  // UI rendered stale content WITH a stale badge and only suppressed the winner. Staleness should
+  // stay a per-section demotion (badge + withhold outcome claims), not a blanket content kill:
+  // split `current` into `authoritative` (exists/authoritative/schema) and `fresh` (stale===false),
+  // and let the narrative/observations render under `authoritative && !fresh` with the stale notice.
   const current = value?.exists === true
     && value?.authoritative === true
     && value?.stale === false

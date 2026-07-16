@@ -92,6 +92,13 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
       }
     }
     catch (error) {
+      // REVIEW(2026-07-16): only `status === 400` gets a specific message, but genScopeReport throws
+      // Errors carrying `code` (not status) for ok:false job outcomes — so the server's actionable
+      // remediation is discarded: code:'scope_report_inputs_changed' ("Scope runs changed … retry
+      // from the current snapshot") and the 413 scope_report_too_large family ("generate reports for
+      // narrower child scopes") both collapse to a bare "Generation failed." after a PAID synthesis
+      // was discarded. Map error.code (and status 413) to their remediation copy so the operator
+      // knows whether retrying is useful, wasteful, or needs a narrower scope.
       if (requestEpoch.current === epoch && keyRef.current === key) {
         setView(previous => ({ ...previous, busy: false,
           err: error?.status === 400 ? 'No runs in this scope yet.' : 'Generation failed.' }))
