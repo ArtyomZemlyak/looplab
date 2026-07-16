@@ -52,7 +52,7 @@ This buys two properties:
   explicitly begun reflection work is recovered at-most-once rather than blindly repeated.
 
 The SQLite read-model and HTML/JSON tree projections are rebuildable from events plus whatever trace
-sidecar still exists. Trace spans themselves are original diagnostic telemetry, not regenerable from
+sidecar still exists. Trace spans themselves are recorded diagnostic telemetry, not regenerable from
 the event log, and are never read by `replay.fold`.
 
 ### Run directory
@@ -69,18 +69,19 @@ runs/<name>/
 ├── tree.html             # static lineage view (regenerable)
 ├── trace.json            # derived event/trace projection for the UI
 ├── chat.jsonl            # run-scoped operator/boss transcript sidecar
-├── spans.jsonl           # original diagnostic telemetry; never read by replay
-└── spans.index.jsonl     # derived LIGHT span index for the UI trace views (regenerable cache;
-                          #   ~25× smaller than spans.jsonl — see below)
+├── spans.jsonl           # recorded diagnostic telemetry; never read by replay
+└── spans.index.jsonl     # derived bounded/redacted span projection + offsets
+                          #   (versioned, regenerable cache; never a raw trace surface)
 ```
 
 The **light span index** (`spans.index.jsonl`) is a derived cache the UI's trace views read instead
-of parsing the whole (up to multi-GB) `spans.jsonl` on every click: it holds each span's structural
-fields (ids, kind, timing, token usage) minus the heavy prompt/output/reasoning, plus the byte offset
-of the full span in `spans.jsonl`. The run-level timeline reads only this ~25×-smaller file; a
+of parsing the whole (up to multi-GB) `spans.jsonl` on every click: it holds the same versioned,
+allowlisted, bounded/redacted span projection used by the HTTP API, plus the byte offset
+of the full recorded span in `spans.jsonl`. The run-level timeline reads only this much smaller file; a
 per-span/per-node detail view seeks straight to the needed byte range. It is maintained incrementally
 and is *strictly an accelerator* — if it is missing, stale, or corrupt the views transparently rebuild
-it from `spans.jsonl` (the sole source of truth), so results are always identical, never lost.
+it from `spans.jsonl` (the sole source of truth), so the safe indexed and fallback projections agree.
+The raw recorded span dictionary is never copied into the persisted index or returned by a trace route.
 
 The agent tool-loop re-sends the whole growing conversation to the LLM every turn, which once made
 each generation's recorded input a near-duplicate of the last. That input is now **delta-encoded** at
@@ -88,6 +89,15 @@ write time — a generation that only appended to the prior turn stores just the
 back-reference — so `spans.jsonl` itself is ~6× smaller before the index even applies; the trace views
 reconstruct the stored canonicalized/redacted diagnostic representation on demand. It is not byte-exact
 provider I/O, and older JSONL is not rewritten by this encoding.
+
+All browser-facing trace routes apply another explicit response budget (span/detail/conversation caps) and
+return route-specific `projection` metadata. Individual spans carry `_projection` counters when fields, text,
+messages, tool calls, events or nested items were omitted. A run tree, an operation tree, a single-span seek
+and a bounded live tail expose different count fields; clients must not assume a uniform `total_spans` field.
+Unknown fields never cross the allowlist; secret-named values are masked and secret-shaped identities are
+quarantined. A failed read is marked `unavailable` without invented zero counts. The Inspector distinguishes
+that state from a partial projection and an honestly empty trace. For collection routes, an absent span
+sidecar is the latter (known zero observations); a request for one particular absent span is unavailable.
 
 Because the task and config are snapshotted, a run can be resumed from its directory alone.
 

@@ -13,7 +13,7 @@ import { nodeFeasibilityStatus } from './trustSemantics.js'
 import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import CommentsThread from './CommentsThread.jsx'
-import { traceDetailState, tracePartial, unavailableTraceDetail } from './traceProjection.js'
+import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -360,7 +360,7 @@ function traceBounds(spans) {
   return { t0: lo, total: Math.max(1e-9, hi - lo) }
 }
 
-// Friendly identity for each span kind — turns raw span names into "who did what" so the trace
+// Friendly identity for each span kind — turns recorded span names into "who did what" so the trace
 // reads as the node's life story rather than instrumentation. `tone` colours the waterfall bar so
 // phases are distinguishable at a glance. (Span names come from orchestrator.py.)
 // icon = an OpIcon glyph name (monochrome, inherits the stage tone via currentColor — no color emoji).
@@ -471,8 +471,8 @@ function GenBody({ c }) {
 //    sequence is (chat → tool → tool → chat → …), so a tool belongs to the last chat, making "which
 //    chat called this tool" obvious without re-parenting the trace.
 //  • CAP how many are rendered at once (a heavily-repaired node can have 800+ spans — rendering them
-//    all freezes the browser / black screen). Show the first SPAN_CAP, then a "show N more" button;
-//    the rest (and every span's full I/O) are always one click away — nothing is lost.
+//    all freezes the browser / black screen). Show the first SPAN_CAP, then a "show N more" button.
+//    This local reveal remains subject to the server's bounded/redacted projection and omission receipt.
 const SPAN_CAP = 60
 function SpanList({ items, depth, t0, total, runId, parentOp = null }) {
   const [all, setAll] = useState(false)
@@ -617,11 +617,17 @@ function StageBlock({ s, t0, total, runId }) {
 
 // Reusable langfuse-style trace for ONE node's span forest — the lifecycle stages on a shared
 // timeline. Exported so the chat feed can show the same waterfall inline (Dock.jsx) as the Inspector.
-export function NodeTrace({ spans, runId }) {
+export function NodeTrace({ spans, runId, projection = {} }) {
   const roots = spans || []
+  if (traceUnavailable(projection)) return <div className="notice compact">Trace unavailable.</div>
+  if (!roots.length && tracePartial(projection))
+    return <div className="notice compact">Trace projection is partial; no observations were included.</div>
   if (!roots.length) return <div className="muted" style={{ fontSize: 12 }}>No LLM/execution spans captured for this node yet.</div>
   const { t0, total } = traceBounds(roots)
-  return <div className="trace">{roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}</div>
+  return <div className="trace">
+    {tracePartial(projection) && <div className="notice compact">Trace projection is partial.</div>}
+    {roots.map((s, i) => <StageBlock key={`${runId}:${s.span_id || i}`} s={s} t0={t0} total={total} runId={runId} />)}
+  </div>
 }
 
 // The coding-agent's own validation report (was its own tab) — folded into the lifecycle as the
@@ -644,10 +650,9 @@ function AgentReport({ r }) {
 }
 
 // ── linear conversation view ─────────────────────────────────────────────────────────────────────
-// The raw span tree re-shows the WHOLE re-sent message list on every generation (a tool-loop re-sends
-// the growing history each turn → the system+user prompt and every prior turn duplicate N times). The
-// conversation view reconstructs the loop as a readable thread: the request once per sub-loop, then
-// each generation's DELTA (reasoning + text + tool calls) interleaved with the tool executions.
+// The span-tree projection can re-show the retained re-sent message list on every generation (a
+// tool-loop re-sends growing history each turn). The conversation projection reconstructs the loop as
+// a readable thread: the request once per sub-loop, then each retained generation delta + tool calls.
 function ConvRequest({ t }) {
   const [open, setOpen] = useState(false)   // system prompt is big — collapsed by default
   const roles = (t.messages || []).map(m => m.role).join(' + ')
@@ -758,10 +763,9 @@ function ConvStage({ st, defaultOpen = true, log = '', live = false }) {
       {!open && nTurns ? <span className="muted" style={{ marginLeft: 6, fontSize: 10 }}>· {nTurns} step{nTurns === 1 ? '' : 's'} hidden</span> : null}
     </button>
     {open && <div className="conv-turns">
-      {/* Cap the mounted turns like the raw span view (SPAN_CAP): a heavily-repaired / tool-looping stage
+      {/* Cap the mounted turns like the span-tree view (SPAN_CAP): a heavily-repaired / tool-looping stage
           can carry hundreds of turns, and ConvGen eagerly renders each turn's Markdown — mounting them all
-          froze the browser (the exact black-screen the raw view's cap was built to avoid). Show the first
-          SPAN_CAP, then reveal the rest one click away; nothing is lost. */}
+          froze the browser. Show the first SPAN_CAP, then reveal the rest of this server projection. */}
       {(allTurns ? (st.turns || []) : (st.turns || []).slice(0, SPAN_CAP)).map((t, j) =>
         t.type === 'request' ? <ConvRequest key={j} t={t} />
           : t.type === 'tool' ? <ConvTool key={j} t={t} /> : <ConvGen key={j} t={t} />)}
@@ -780,7 +784,8 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
     setLogs({})     // …likewise the logs, else B's stage bands briefly render A's log text
   }, [runId, n.id, working, reloadNonce])
   usePoll((alive) => {
-    nodeConversation(runId, n.id).then(d => alive() && setConv(d || { stages: [] })).catch(() => alive() && setConv({ stages: [] }))
+    nodeConversation(runId, n.id).then(d => alive() && setConv(d || { stages: [] }))
+      .catch(() => alive() && setConv({ stages: [], projection: { unavailable: true } }))
     // Stage/eval logs ride ALONGSIDE the trace now (moved out of the old Training tab): each stage
     // band renders its own live log inside it, so opening "Train" shows the training output in place.
     get(runNodeApiPath(runId, n.id, '/logs')).then(d => alive() && setLogs(d || {})).catch(() => {})
@@ -788,7 +793,9 @@ function Conversation({ n, runId, working, allOpen = true, reloadNonce = 0 }) {
   [runId, n.id, working, reloadNonce])   // reloadNonce bumps after a "clear trace" so the band list refreshes
   if (conv === null) return <div className="muted" style={{ fontSize: 12 }}>loading…</div>
   const stages = conv.stages || []
+  const unavailable = traceUnavailable(conv.projection)
   const partial = tracePartial(conv.projection)
+  if (unavailable) return <div className="notice compact">Trace unavailable.</div>
   if (!stages.length) return <div className={partial ? 'notice compact' : 'muted'}>{partial
     ? 'Trace projection is partial.' : 'No conversation captured for this node yet.'}</div>
   // The live log for a stage band: a multi-stage eval logs per stage (stages[label]); a single-command
@@ -821,12 +828,13 @@ function RunSetupLog({ text }) {
 }
 
 function Trace({ n, runId, live, working }) {
-  const [view, setView] = useState('conversation')   // linear reading by default; raw tree on demand
+  const [view, setView] = useState('conversation')   // linear reading by default; span tree on demand
   const [allOpen, setAllOpen] = useState(false)       // bands COLLAPSED by default (expand one to read it)
   const [nonce, setNonce] = useState(0)               // bumped after "clear trace" to reload the bands
   const [clearing, setClearing] = useState('')        // '' | 'confirm' | 'busy' | error message
   const bodyRef = useRef(null)
   const spans = n.trace?.nodes || []
+  const unavailable = traceUnavailable(n.trace?.projection)
   const partial = tracePartial(n.trace?.projection)
   const agent = n.agent_report
   // Live status: what the node is doing RIGHT NOW. Two live states: an LLM authoring the code
@@ -877,7 +885,7 @@ function Trace({ n, runId, live, working }) {
     <div className="conv-toggle">
       <button aria-pressed={view === 'conversation'} className={'seg' + (view === 'conversation' ? ' on' : '')} onClick={() => setView('conversation')}
         title="Linear, de-duplicated reading: request once, then each turn's reasoning + tools">conversation</button>
-      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>raw spans</button>
+      <button aria-pressed={view === 'raw'} className={'seg' + (view === 'raw' ? ' on' : '')} onClick={() => setView('raw')}>span tree</button>
       {view === 'conversation' && <button className="seg" aria-pressed={allOpen} style={{ fontSize: 10 }} title="collapse or expand every stage"
         onClick={() => setAllOpen(o => !o)}>{allOpen ? '⊟ collapse all' : '⊞ expand all'}</button>}
       <span style={{ flex: 1 }} />{clearBtn}{nav}
@@ -890,10 +898,20 @@ function Trace({ n, runId, live, working }) {
     // placeholder: steps now appear as each generation/tool completes, not all at once at the end.
     if (working)
       return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} /></div>
+    if (unavailable)
+      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace unavailable.</div></div>
+    if (partial)
+      return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace projection is partial; no observations were included.</div></div>
     return <div className="trace" ref={bodyRef}>{head}<div className="muted">No execution spans for this node yet — toy/offline nodes have minimal spans, and a node still in progress fills its trace as it runs.</div></div>
   }
   if (view === 'conversation')
     return <div className="trace" ref={bodyRef}>{head}<Conversation n={n} runId={runId} working={working} allOpen={allOpen} reloadNonce={nonce} />
+      {agent && <AgentReport r={agent} />}</div>
+  if (unavailable)
+    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace unavailable.</div>
+      {agent && <AgentReport r={agent} />}</div>
+  if (!spans.length && partial)
+    return <div className="trace" ref={bodyRef}>{head}<div className="notice compact">Trace projection is partial; no observations were included.</div>
       {agent && <AgentReport r={agent} />}</div>
   const { t0, total } = traceBounds(spans)
   // create_node already nests propose→implement; if an agent wrote the node, the report belongs
@@ -906,7 +924,7 @@ function Trace({ n, runId, live, working }) {
     {partial && <div className="notice compact">Trace projection is partial.</div>}
     <div className="muted" style={{ marginBottom: 10 }}>
       Lifecycle of node #{n.id} — each part on a shared timeline (offset = when it ran, bar = how long).
-      Expand any observation to read its input &amp; output.
+      Expand any observation to read its bounded, redacted input/output projection.
       {(roll.generations || roll.tools) ? <span className="trace-totals"
           title={rtok.total ? `context window peaked at ${rtok.context || 0} tokens; the model generated ${rtok.completion || 0}. Billed ${rtok.total} total — each turn RE-SENDS the growing context, so billed ≫ context.` : undefined}>
         {' · '}{roll.generations || 0} generation{roll.generations === 1 ? '' : 's'}

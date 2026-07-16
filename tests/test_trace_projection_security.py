@@ -215,3 +215,102 @@ def test_trace_routes_bound_large_trace_and_redact_secret_url_path(tmp_path):
     tail = client.get("/api/runs/demo/trace/tail", params={"limit": 5}).json()
     assert SECRET not in json.dumps(tail)
     assert tail["projection"]["visible_spans"] <= 5
+
+
+def test_trace_route_read_failures_are_not_reported_as_complete_empty_data(tmp_path, monkeypatch):
+    """I/O failure has unknown cardinality; it must differ from a successful empty sidecar read."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    (run_dir / "spans.jsonl").write_bytes(b"")
+    client = TestClient(make_app(tmp_path))
+
+    # A readable empty source may truthfully carry exact zero counters.
+    empty = client.get("/api/runs/demo/trace/tail").json()
+    assert empty["schema"] == TRACE_PROJECTION_SCHEMA
+    assert empty["tail"] == []
+    assert empty["projection"]["visible_spans"] == 0
+    assert empty["projection"]["omitted_spans"] == 0
+    assert empty["projection"]["truncated"] is False
+    assert empty["projection"].get("unavailable") is not True
+
+    (run_dir / "spans.jsonl").unlink()
+    missing = client.get("/api/runs/demo/trace/tail").json()
+    assert missing["tail"] == []
+    assert missing["projection"]["visible_spans"] == 0
+    assert missing["projection"]["omitted_spans"] == 0
+    assert missing["projection"]["truncated"] is False
+    assert missing["projection"].get("unavailable") is not True
+    (run_dir / "spans.jsonl").write_bytes(b"")
+
+    import os
+    from looplab.events import span_index
+
+    def unreadable_index(_path):
+        raise OSError("simulated unreadable trace source")
+
+    real_getsize = os.path.getsize
+
+    def unreadable_tail(path):
+        if str(path).endswith("spans.jsonl"):
+            raise OSError("simulated unreadable trace tail")
+        return real_getsize(path)
+
+    monkeypatch.setattr(span_index, "get_index", unreadable_index)
+    monkeypatch.setattr(os.path, "getsize", unreadable_tail)
+
+    failed = [
+        client.get("/api/runs/demo/trace").json(),
+        client.get("/api/runs/demo/nodes/0/trace").json(),
+        client.get("/api/runs/demo/nodes/0/conversation").json(),
+        client.get("/api/runs/demo/spans/missing").json(),
+        client.get("/api/runs/demo/trace/by_trace/example").json(),
+        client.get("/api/runs/demo/trace/tail").json(),
+    ]
+    count_fields = {
+        "total_spans", "visible_spans", "omitted_spans", "truncated_spans",
+        "trace_total_spans", "trace_visible_spans", "omitted_trace_spans",
+    }
+    for body in failed:
+        assert body["schema"] == TRACE_PROJECTION_SCHEMA
+        assert body["projection"] == {
+            "schema": TRACE_PROJECTION_SCHEMA,
+            "unavailable": True,
+            "truncated": True,
+        }
+        assert count_fields.isdisjoint(body["projection"])
+
+    assert failed[0]["summary"] == {}
+    assert {"count", "visible_count", "omitted_count"}.isdisjoint(failed[4])
+
+
+def test_span_scan_fallback_does_not_invent_trace_cardinality(tmp_path, monkeypatch):
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    from looplab.events import span_index
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    run_dir = tmp_path / "demo"
+    run_dir.mkdir()
+    EventStore(run_dir / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "task", "goal": "g", "direction": "min"})
+    spans = [_span(index, trace_id="shared") for index in range(3)]
+    (run_dir / "spans.jsonl").write_text(
+        "".join(json.dumps(span) + "\n" for span in spans), encoding="utf-8")
+    monkeypatch.setattr(span_index, "get_index", lambda _path: None)
+
+    body = TestClient(make_app(tmp_path)).get("/api/runs/demo/spans/s0").json()
+    projection = body["projection"]
+    assert body["schema"] == TRACE_PROJECTION_SCHEMA
+    assert projection["trace_cardinality_unavailable"] is True
+    assert projection["truncated"] is True
+    assert {"trace_total_spans", "trace_visible_spans", "omitted_trace_spans"}.isdisjoint(projection)

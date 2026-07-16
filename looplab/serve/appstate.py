@@ -235,12 +235,13 @@ class AppState:
         """The run-level LIGHT trace view (`build_trace_view(light=True)`), read via the incremental
         span index (`events.span_index`) instead of parsing the whole spans.jsonl, and cached by
         (spans.jsonl, events.jsonl) file identity so an unchanged run is served instantly on refetch.
-        Degrades to a full `load_spans` read if the index is unavailable (missing/foreign spans file)."""
+        A missing sidecar is a known empty trace; an unreadable sidecar raises so the HTTP projection
+        can distinguish unavailable telemetry from a successful empty read."""
         from looplab.events.span_index import get_index
         from looplab.events.traceview import TRACE_VIEW_SPAN_CAP, build_trace_view, load_spans
         sp = rd / "spans.jsonl"
 
-        def _sig(p: Path):
+        def _sig(p: Path, *, unavailable_raises: bool = False):
             try:
                 stt = p.stat()
                 # Reset/clear_trace replace files atomically.  A replacement can deliberately retain
@@ -249,21 +250,31 @@ class AppState:
                 # and creation/change time as well as the content metadata.
                 return (stt.st_dev, stt.st_ino, stt.st_ctime_ns,
                         stt.st_size, stt.st_mtime_ns)
+            except FileNotFoundError:
+                return None
             except OSError:
+                if unavailable_raises:
+                    raise
                 return None
         key = str(rd)
         events_path = rd / "events.jsonl"
         # The first durable event is the run-generation identity.  Reading only that first JSONL line
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
         generation = run_generation_token(iter_jsonl(events_path))
-        sig = (_sig(sp), _sig(events_path), generation)
+        sig = (_sig(sp, unavailable_raises=True), _sig(events_path), generation)
         with self._trace_view_lock:
             hit = self._trace_view_cache.get(key)
         if hit is not None and hit[0] == sig:
             return hit[1]
-        idx = get_index(sp)
-        total = idx.span_count() if idx is not None else None
-        spans = idx.light_spans(TRACE_VIEW_SPAN_CAP) if idx is not None else load_spans(sp)
+        try:
+            sp.stat()
+            source_missing = False
+        except FileNotFoundError:
+            source_missing = True
+        idx = None if source_missing else get_index(sp)
+        total = idx.span_count() if idx is not None else (0 if source_missing else None)
+        spans = (idx.light_spans(TRACE_VIEW_SPAN_CAP) if idx is not None
+                 else ([] if source_missing else load_spans(sp)))
         view = build_trace_view(
             self.trace_scalars(rd), spans, light=True, total_spans=total,
             span_cap=TRACE_VIEW_SPAN_CAP)
@@ -287,10 +298,9 @@ class AppState:
     def node_trace_view(self, rd: Path, nid) -> dict:
         """The LIGHT trace view built over ONLY one node's spans (via `light_spans_for_node`, in-memory)
         — so expanding a node's trace is O(node), not O(whole run) indexed down. `build_trace_view` over
-        just that node's traces yields the SAME `nodes[nid]`/`rollups[nid]` as the whole-run view (a
-        span's effective node is N iff it lives in one of N's traces), so nothing is lost; only the
-        run-level `summary` narrows to the node (unused by the node-detail UI). Degrades to the whole-run
-        `trace_view` when the index is unavailable (missing/foreign spans), so the node tree still renders."""
+        just that node's traces preserves its bounded tree/rollup projection without scanning unrelated
+        nodes; its summary is correspondingly node-scoped. If the index cannot be used, `trace_view`
+        supplies the bounded run projection, while unreadable telemetry still propagates as unavailable."""
         from looplab.events.span_index import get_index
         from looplab.events.traceview import TRACE_NODE_SPAN_CAP, build_trace_view
         idx = get_index(rd / "spans.jsonl")

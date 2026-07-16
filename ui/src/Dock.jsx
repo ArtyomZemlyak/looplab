@@ -13,6 +13,7 @@ import { runLifecycle } from './runIndex.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
+import { tracePartial, traceUnavailable } from './traceProjection.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -164,8 +165,8 @@ function kindOf(type) {
 // markers (`finalize_step` {scope, step}) and its exact-finish ack (`finalization_finished` {finish_seq})
 // are DUPLICATES of the real wrap-up effects that already narrate cleanly (diversity archive, distilled
 // lessons, run reflection, run finalized); and `llm_usage` is a per-LLM-call cost delta (one row per
-// call — the aggregate `llm_cost` "LLM: N tokens, $X" is the human-facing total). These render as raw
-// {…} blobs / high-frequency noise, so they stay in the event log but out of the readable feed.
+// call — the aggregate `llm_cost` "LLM: N tokens, $X" is the human-facing total). These render as
+// opaque projected JSON / high-frequency noise, so they stay in the event log but out of the feed.
 const FEED_HIDDEN = new Set(['finalize_step', 'finalization_finished', 'llm_usage'])
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
@@ -182,8 +183,8 @@ const OP_TRACE_TYPES = new Set(['strategy_decision', 'hypothesis_merged', 'resea
   'report_generated', 'hypothesis_ranked', 'foresight_selected', 'lessons_distilled', 'lessons_refreshed'])
 const CLOSED_EXPANSION = Object.freeze({ open: false, touched: false })
 
-// Pull the model's raw <think> chain-of-thought for a node out of the trace view (spans.jsonl) — so
-// the feed can surface "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
+// Pull retained, bounded thinking text for a node out of the trace projection so the feed can surface
+// "what was the Researcher thinking" inline. Returns [{op, text}] for the node.
 function collectThinking(trace, nid) {
   if (nid == null) return []
   // `trace` here is the PER-NODE trace (/nodes/{nid}/trace), whose `nodes` is already this node's tree
@@ -202,15 +203,22 @@ function collectThinking(trace, nid) {
 // event (no backend signal needed). Drives the animated status strip at the foot of the feed.
 // Live agent trace: a collapsed disclosure under the "Thinking…/Planning…" status that streams the
 // most recent LLM thoughts + tool calls (with args), so you can see WHAT the agent is doing, not just
-// a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Server-side the feed
-// is bounded (tail of spans.jsonl); full I/O of any observation is at /spans/{sid}.
+// a coarse label. Polls /trace/tail only while OPEN + live (cheap when collapsed). Both this feed and
+// per-observation detail are bounded/redacted projections with explicit omission receipts.
 function LiveTrace({ runId, active }) {
-  const [tail, setTail] = useState([])
+  const [tailState, setTailState] = useState({ runId, items: [], projection: {} })
   const [open, setOpen] = useState(false)
   const bodyRef = useRef(null)
   usePoll((alive) => get(runApiPath(runId, '/trace/tail?limit=40'))
-    .then(r => { if (alive()) setTail(r.tail || []) }).catch(() => {}),
+    .then(r => { if (alive()) setTailState({
+      runId, items: Array.isArray(r?.tail) ? r.tail : [], projection: r?.projection || {},
+    }) })
+    .catch(() => { if (alive()) setTailState({ runId, items: [], projection: { unavailable: true } }) }),
     3000, [runId, active, open], { enabled: active && open })
+  const current = tailState.runId === runId ? tailState : { items: [], projection: {} }
+  const tail = current.items
+  const unavailable = traceUnavailable(current.projection)
+  const partial = tracePartial(current.projection)
   useEffect(() => { if (open && bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [tail, open])
   return (
     <div className={'live-trace' + (open ? ' open' : '')}>
@@ -220,9 +228,14 @@ function LiveTrace({ runId, active }) {
         <span className="lt-caret">{open ? '▾' : '▸'}</span>trace
       </button>
       {open && <div className="lt-body" ref={bodyRef}>
-        {tail.length === 0
+        {unavailable
+          ? <div className="notice compact">Trace unavailable.</div>
+          : partial && tail.length === 0
+          ? <div className="notice compact">Trace projection is partial; no observations were included.</div>
+          : tail.length === 0
           ? <div className="muted lt-empty">waiting for the next agent step…</div>
-          : tail.map((it, i) => it.kind === 'generation'
+          : <>{partial && <div className="notice compact">Trace projection is partial.</div>}
+            {tail.map((it, i) => it.kind === 'generation'
             ? <div key={it.span_id || i} className="lt-row lt-gen">
                 <span className="lt-ic">🧠</span>
                 <span className="lt-txt">{it.text || <span className="muted">({it.model})</span>}</span>
@@ -231,7 +244,7 @@ function LiveTrace({ runId, active }) {
                 <span className="lt-ic">🔧</span>
                 <span className="lt-tool-name">{it.tool}</span>
                 {it.arg && <span className="lt-arg">{it.arg}</span>}
-              </div>)}
+              </div>)}</>}
       </div>}
     </div>
   )
@@ -387,9 +400,9 @@ function reasoningDetail(e, trace) {
   return null
 }
 
-// The full, UNtruncated text behind a feed row whose one-line narration clamped it (node_failed's
-// triage, node_repaired's rationale, the report headline, a hint, …) — so every message is fully
-// readable on expand even when it has no dedicated reasoning card. Returns [] when there's nothing.
+// The available projected text behind a feed row whose one-line narration clamped it (node_failed's
+// triage, node_repaired's rationale, the report headline, a hint, …). The page-level omission receipt
+// remains authoritative when a source event exceeded the response cap. Returns [] when absent.
 function genericRows(e) {
   const d = e.data || {}
   const rows = []
@@ -415,17 +428,19 @@ function GenericDetail({ e }) {
 // event's own trace_id — so a strategy_decision row shows only the strategist's reasoning, not the
 // whole node. Rendered with the same span-tree component as a node's trace.
 function OpTrace({ runId, traceId }) {
-  const [spans, setSpans] = useState(null)
+  const [trace, setTrace] = useState(null)
   useEffect(() => {
     let on = true
-    setSpans(null)
+    setTrace(null)
     get(runApiPath(runId, `/trace/by_trace/${encodeURIComponent(traceId)}`))
-      .then(d => on && setSpans(d?.spans || [])).catch(() => on && setSpans([]))
+      .then(d => on && setTrace({
+        spans: Array.isArray(d?.spans) ? d.spans : [], projection: d?.projection || {},
+      }))
+      .catch(() => on && setTrace({ spans: [], projection: { unavailable: true } }))
     return () => { on = false }
   }, [runId, traceId])
-  if (spans === null) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>loading trace…</div>
-  if (!spans.length) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>no trace captured for this step</div>
-  return <NodeTrace spans={spans} runId={runId} />
+  if (trace === null) return <div className="muted" style={{ fontSize: 12, padding: '4px 2px' }}>loading trace…</div>
+  return <NodeTrace spans={trace.spans} projection={trace.projection} runId={runId} />
 }
 
 // One feed row, chat-message styled: an icon/color by kind, the narration, an expandable "why" card.
@@ -456,10 +471,9 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   const traceNid = TRACE_OWNER_TYPES.has(e.type)
     ? (e.data?.node_id ?? (e.type === 'setup_started' ? -1 : null))
     : null
-  // LAZY: fetch only THIS node's trace (/nodes/{nid}/trace — reads just the node's spans via the index,
-  // O(node)), and only when the row is expanded. Replaces the old whole-run /trace fetch+4s poll that
-  // shipped (and re-rendered) the entire 4000-node timeline on every node boundary just to back a few
-  // inline "thinking" cards. Full per-observation I/O is still fetched on demand via /spans/{sid}.
+  // LAZY: fetch only THIS node's bounded/redacted trace projection (/nodes/{nid}/trace — reads just
+  // the node's spans via the index, O(node)), and only when the row is expanded. Per-observation
+  // bounded/redacted detail is fetched on demand via /spans/{sid}.
   const [nodeTrace, setNodeTrace] = useState(null)
   const [nodeTraceError, setNodeTraceError] = useState(false)
   const [nodeTraceNonce, setNodeTraceNonce] = useState(0)
@@ -490,8 +504,8 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
   // merged) carries a trace_id — expand to ONLY that operation's trace (lazily fetched by trace_id),
   // never the node's whole Researcher+Developer trace. Old events (no trace_id) fall through to detail.
   const opTraceId = (!readOnly && OP_TRACE_TYPES.has(e.type) && e.trace_id) ? e.trace_id : null
-  // no-truncation: a row whose one-line narration clamped text (or used the raw JSON fallback) is
-  // expandable to its FULL content even without a dedicated reasoning card.
+  // A row whose one-line narration clamped text (or used the projected JSON fallback) remains
+  // expandable to the detail retained in this bounded event page.
   const isRawFallback = !hasReason && !NARR[e.type]
   const hasGeneric = !hasReason && (genericRows(e).length > 0 || isRawFallback)
   const omittedBytes = e?._log_page?.truncated ? Number(e._log_page.raw_bytes || 0) : 0
@@ -528,9 +542,8 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
             <span>Could not load node trace.</span><button type="button" className="btn sm"
               onClick={() => setNodeTraceNonce(value => value + 1)}>Retry</button>
           </div>}
-          {hasTrace && nodeTrace != null && (nodeSpans.length
-            ? <NodeTrace spans={nodeSpans} runId={runId} />
-            : <div className="muted">no trace captured for this node</div>)}
+          {hasTrace && nodeTrace != null && <NodeTrace spans={nodeSpans}
+            projection={nodeTrace.projection} runId={runId} />}
           {opTraceId && <OpTrace runId={runId} traceId={opTraceId} />}
         </div>}
       </div>
@@ -672,7 +685,7 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // The live frontier: the highest-id node still pending while the run runs — its proposal card stays
   // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
   // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
-  // without this guard its node_created row would auto-expand and dump the full span trace forever.
+  // without this guard its node_created row would auto-expand the retained span projection forever.
   const liveBuilding = useMemo(() => {
     if (readOnly || !atLiveView || timeline.generation !== expectedGeneration || !live?.building) return null
     const nodeId = Number(live.building.node_id)
@@ -720,9 +733,9 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   const searchableLog = useMemo(() => log.map(event => {
     let narration = ''
     try { narration = (NARR[event.type] || (() => ''))(event.data) } catch { /* malformed source stays inspectable */ }
-    // Unknown/forward-compatible event types are rendered from their raw data fallback. Include the
+    // Unknown/forward-compatible event types are rendered from their projected JSON fallback. Include the
     // same bounded source in search so text the user can plainly see is not reported as "0 matching".
-    // Keep the projection capped: the raw Explorer owns deeper payload inspection, and the Timeline
+    // Keep the projection capped: Event Explorer owns deeper projected payload inspection, and Timeline
     // may retain 5,000 rows.
     let rawPreview = ''
     try { rawPreview = JSON.stringify(event.data ?? {}).slice(0, 500) } catch { /* cyclic/malformed data */ }

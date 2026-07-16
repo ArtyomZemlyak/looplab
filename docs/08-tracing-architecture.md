@@ -31,9 +31,10 @@ prefix of this one), it stores only the appended tail plus a back-ref — `input
 `input_carry` (carried-prefix count) + `input_from` (prior span_id); a context reset / new sub-loop
 (propose→implement→repair, whose history diverged, not merely grew) stores a full self-contained base
 (`input_carry == 0`, `input_from = None`). This shrinks `spans.jsonl` ~6×
-at the source (one append-only file, no separate blob store). The trace views reconstruct the full
-verbatim prompt when a single observation / one operation's trace is expanded
-(`traceview.hydrate_inputs`), so nothing is lost; `build_conversation` needs no reconstruction (it
+at the source (one append-only file, no separate blob store). Within the safe projection pipeline, the
+trace reader reconstructs the complete **retained diagnostic input** when its chain is present
+(`traceview.hydrate_inputs`) and marks an incomplete chain `input_partial`. This is not a promise of
+byte-exact provider I/O. `build_conversation` needs no reconstruction (it
 treats `input_carry == 0` as the sub-loop request boundary and shows that base's full initial context
 once, then each generation's delta). Old logs (no `input_carry`)
 are read unchanged. Correctness never depends on the write-time chain surviving thread/task hops — a
@@ -42,15 +43,52 @@ stale chain just resets to a full base (less compression, never wrong).
 **Light span index** (`events/span_index.py`): even delta-encoded, `spans.jsonl` still carries heavy
 generation I/O (prompt/output/reasoning), so a long run's file is large and parsing it whole made the
 UI's first trace click stall ~15 s. The index keeps a
-~25×-smaller light projection of every span (structure/timing/token-usage minus the heavy I/O) plus
+~25×-smaller, versioned and bounded/redacted projection of every span plus
 the byte `(offset,length)` of the full span in `spans.jsonl` — so the timeline reads only the tiny
 index and per-node/-span detail views seek to exact offsets. Built incrementally (parse only the
 appended tail; mirrors `EventStore`'s incremental read), persisted atomically, and STRICTLY an
-accelerator: any identity/size/corruption mismatch rebuilds from `spans.jsonl`, so every read is
-byte-identical to the un-indexed path — never wrong, worst case as slow as before. (Index/payload
+accelerator: any identity/size/corruption mismatch rebuilds from `spans.jsonl`, producing the same safe
+projection as the un-indexed path — never a second source of truth, worst case as slow as before. (Index/payload
 separation + byte-offset seeks is the Grafana-Tempo / Jaeger / Perfetto pattern; JSONL + orjson is
 kept over SQLite/Arrow deliberately — no locking, atomic-rename-safe on the FUSE/NFS/S3 mounts the
 rest of the store already guards for.)
+
+### Browser projection boundary
+
+`spans.jsonl` is diagnostic files-as-truth, but it is not a trusted HTTP payload. Custom exporters,
+old runs and hand-edited files can contain unknown objects, credentials or pathological sizes. Every
+trace, node-detail, tail, operation and conversation reader therefore passes span material through the
+same versioned allowlist projector before data enters the persisted index or browser:
+
+- span/attribute/event fields, collection sizes, nesting depth, text and the shared per-span text budget
+  are capped; response span/stage/turn counts are capped independently;
+- persisted text is redacted before it is returned, nested secret-named fields are masked, and a
+  secret-shaped required identity is quarantined instead of rewritten into a different topology;
+- malformed complete rows are quarantined individually; a torn/invalid JSON tail remains a durability
+  boundary rather than being guessed past;
+- every successful response carries a route-appropriate `projection` receipt, and each truncated span
+  carries its own `_projection` counters. The receipt fields are intentionally not uniform because a
+  one-span seek, a bounded file tail and a run tree know different source totals.
+
+The HTTP envelopes use projection schema 2, but consumers must interpret the receipt for the route they
+called rather than assume that every response has `total_spans` and `visible_spans`:
+
+| Route family | Success receipt |
+|---|---|
+| run/node trace and node conversation | known total/visible/omitted span counts plus truncated-span or stage/turn omission counters |
+| `trace/by_trace/{trace_id}` | operation `count`, `visible_count`, `omitted_count` plus the corresponding span projection receipt |
+| `spans/{span_id}` | the selected span's `_projection` counters plus `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when known |
+| `trace/tail` | the bounded tail's visible/omitted counts and `source_truncated`; it does not pretend to know a whole-run total |
+
+A read failure is different from a successful empty projection. It returns the route's empty collection
+shape with top-level `schema: 2` and `projection: {schema: 2, unavailable: true, truncated: true}`; unknown
+counts are omitted rather than fabricated as zero. Collection readers treat an absent `spans.jsonl` as a
+known complete-empty source and may report exact zeroes; a lookup for a particular absent span remains
+unavailable.
+
+The full recorded span body remains only in `spans.jsonl`; neither `spans.index.jsonl` nor a trace API
+is a raw-download surface. The Inspector and live Dock distinguish unavailable, partial and honestly empty
+projections instead of silently presenting a failed or capped read as complete.
 
 Events = *what was decided* (coarse, authoritative for replay). Spans = *how execution unfolded* (fine,
 timing/status/errors). They are complementary records of the same activity; limited correlation fields
@@ -94,4 +132,5 @@ Nested spans with status (OK/ERROR + recorded exception) and attributes:
 - Default run dir now also has `spans.jsonl` and `trace.json`; `tree.html` renders the per-node
   span tree, failure reason, eval time, and infeasibility.
 - `pip install LoopLab[otel]` + `OTEL_EXPORTER_OTLP_ENDPOINT` → live traces in any collector.
-- A future React UI consumes `trace.json` (+ the SQLite read model) with no engine coupling.
+- The React Inspector consumes only the bounded trace projection (+ the SQLite read model), with no
+  engine coupling and with explicit partial/unavailable states.

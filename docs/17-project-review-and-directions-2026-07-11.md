@@ -2013,7 +2013,8 @@ discipline**: the append-only `events.jsonl` is the replay authority for `RunSta
 with the active span's `(trace_id, span_id)` (`eventstore.py:407-412`, `current_ids()`), which joins the
 research DAG to the per-operation `spans.jsonl` trace (`core/tracing.py`). From that join the UI reconstructs
 each of the four provenance components Claude Science bundles: the **message history** (`traceview.py`
-`build_conversation:299` + `hydrate_inputs:233` rebuild the de-duplicated, delta-decoded verbatim LLM input per
+rebuilds the de-duplicated, delta-decoded recorded diagnostic input and then applies the bounded/redacted
+public projection per
 node — surfaced at `serve/routers/runs.py` `node_conversation:442`/`node_trace:332`), the **code** (`node.code`
 + the parent-diff in `node_detail:212`), the **environment** (`orchestrator._env_fingerprint:1723` pins
 python/platform/key-lib versions and `_dirty_inputs:1748` enumerates uncommitted repo bytes as a bounded diff
@@ -2185,7 +2186,8 @@ flowchart LR
 - **Claude Science affirms the R2 provenance workstream; it ports no mechanism.** LoopLab already *practices*
   the discipline the product ships: `eventstore.append` stamps every domain event with `(trace_id, span_id)`
   (`eventstore.py:407-412`) joining to `spans.jsonl`; `traceview.build_conversation` reconstructs the
-  verbatim message history; `node.code` + the `run_started` env/workspace fingerprints
+  recorded diagnostic message history behind a bounded/redacted projection; `node.code` + the `run_started`
+  env/workspace fingerprints
   (`orchestrator.py:803,1723`; the content-addressed setup manifest rides `setup_finished`, `:872`) carry
   code+environment; the 78fbfc3 freshness gate (`command_eval.py:93`)
   enforces "this output was produced by THIS eval." But it is a **read-time join across three stores**, not
@@ -4301,6 +4303,27 @@ they did not satisfy the scientific/product gates in §21.20.
 - On-demand claim/concept stewards remain proposal-only. Deprecated `apply` compatibility inputs fail before
   memory reads, model construction, paid inference or writes; selected proposals require a separate explicit
   typed operator action.
+- Finalize steward billing is keyed to semantic work rather than the triggering run. Concept and claim passes
+  freeze and digest the exact bounded model-visible envelope under a versioned `input_schema`; task facets are
+  once per exact `task_id`. Model/parser remain provenance only, and prompt-semantic changes must bump the input
+  schema. A durable begun claim precedes provider I/O; unavailable clients do not consume the semantic key,
+  while a paid ambiguity is never replayed. Legacy v1 evidence suppresses only the exact run whose unknowable
+  input it covered and is not promoted into a cross-run v2 receipt. Run-end order is case/research/concept
+  capsule → reflection → concept steward → claim steward → facets → `llm_cost` → completion,
+  so claims see the current reflection and the terminal cost includes steward inference.
+- The curation JSONL files are intentionally mixed ledgers: legacy finalize v1 rows are exact-run evidence;
+  owner-HTTP on-demand v1 rows use `action_id`; diagnostic finalize v2 rows are source-keyed and have no input
+  digest; semantic finalize v2 rows carry the digest/schema/provenance contract (or, for facets, an exact-task
+  identity). The Atlas preview currently renders bounded recent concept/claim proposal counts and a small
+  outcome allowlist (other outcomes collapse to generic proposal copy); it neither reads task-facet rows nor
+  exposes those identity/provenance fields.
+- Trace HTTP/index data is now a versioned bounded/redacted allowlist projection with per-span and per-response
+  omission metadata. Response receipts are route-specific: run/node/conversation, operation, selected-span and
+  live-tail readers do not claim the same source counts. Unknown or secret-bearing fields stay in the diagnostic
+  source, malformed identities are quarantined, and unavailable reads omit unknown totals instead of reporting
+  false zeroes. The Inspector distinguishes unavailable, partial and honestly empty results. Full recorded span
+  dictionaries remain only in `spans.jsonl`; neither the persisted light index nor an API route is a raw trace
+  surface.
 - The owner UI now uses the truthful vocabulary and surface separation in
   [doc 18 §35](18-ui-ux-review-2026-07-11.md). The Atlas preview describes concept observations, mixed evidence
   and steward invocation outcomes instead of claiming complete coverage, verdicts or governance state. It

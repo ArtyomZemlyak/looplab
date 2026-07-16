@@ -71,6 +71,50 @@ prior outcomes and their conditions; it does not automatically reject an adjacen
 schema, retrieval/context contract, UI, lifecycle corners, alternatives and CR0–CR3 rollout are in
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 
+### Finalize steward identity and ordering
+
+Finalize stewards are proposal producers, not governance writers. Their paid-work identity is semantic and
+independent of whichever run happened to trigger finalize:
+
+- concept and claim curation freeze the exact bounded model-visible payload, include a versioned
+  `input_schema`, and use its canonical SHA-256 `input_digest` as the `curation_key` identity;
+- task faceting is exactly once per exact `task_id`; its model-input digest is provenance, not the identity;
+- model name and effective parser are provenance only. Changing either does not authorize another paid pass
+  over unchanged input. A semantic prompt/envelope change must bump `input_schema`;
+- `unavailable` does not consume a semantic key, while `empty`, `proposed`, `error`, an ambiguous paid attempt
+  and `already-governed` are terminal for that key. The durable begun claim is written before provider I/O;
+- a legacy v1 exact-run receipt or begun claim suppresses replay for that exact run only. Because its model
+  input cannot be reconstructed, it is never promoted into a portfolio-wide v2 semantic receipt;
+- on-demand owner-HTTP steward requests use an explicit `action_id`; they are a separate manual invocation
+  path and remain proposal-only.
+
+The three curation files are mixed-version invocation ledgers, not uniform lists of semantic receipts
+(concept and claim additionally contain the on-demand HTTP rows):
+
+| Row family | Identity and interpretation |
+|---|---|
+| legacy finalize v1 | exact `run_id`/`task_id` compatibility evidence with no reconstructable model-input digest; it suppresses only that run |
+| on-demand HTTP v1 | `steward-invocation-begun` uses `invocation_id` and its terminal row uses the requested `action_id`; this is manual request idempotency, not finalize semantic identity |
+| finalize diagnostic v2 | a source-keyed `*:diagnostic:v2:*` row records a failure before an exact model-input digest/key can be established; `input_digest` is empty, so this audit row is not a semantic portfolio receipt |
+| finalize semantic v2 | concept/claim `curation_key` is the exact input digest; facets use the exact-task key and retain the input digest as provenance |
+
+Finalize v2 rows carry `curation_key`, exact `source_key`, `run_id`, `task_id`, `finish_seq`,
+`input_digest`, `input_schema`, redacted `model`, effective `parser`, `outcome` and a bounded proposal payload.
+The source tuple is trigger provenance, not a fallback paid-work identity. Readers must branch on `v`,
+`action` and key shape; in particular, they must not treat v1 rows or diagnostic v2 rows as portfolio-wide
+semantic receipts.
+
+The Research Atlas preview currently reads only bounded tails of the concept and claim ledgers. It displays
+proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse to generic proposal copy.
+It neither fetches the task-facets ledger nor exposes the semantic key, input digest/schema, source key, model
+or parser, so the UI is not an identity or billing audit surface.
+
+The run-end dependency order is: case/research claims/concept capsule → reflection → concept steward →
+claim steward → task facets → final `llm_cost` → completion. Thus the claim steward sees the current
+run-end reflection, and all steward inference is included in the final cost delta. The same frozen snapshot
+that produced the digest is passed to the proposal call, preventing a memory reread from changing paid input
+after the durable claim.
+
 ## Methodologies (how memory moves)
 
 | Methodology | What it does | Touches |

@@ -46,6 +46,20 @@ _TOOL_CALLS_CAP = 16
 _CONVERSATION_STAGE_CAP = 64
 _CONVERSATION_TURN_CAP = 256
 
+
+def unavailable_projection(*, light: bool | None = None) -> dict:
+    """Projection receipt for a source that could not be read at all."""
+    # CODEX AGENT: unavailable cardinality is unknown. Never turn an I/O failure into plausible zero
+    # counts (or ``truncated=False``), because clients would present missing telemetry as complete.
+    projection = {
+        "schema": TRACE_PROJECTION_SCHEMA,
+        "unavailable": True,
+        "truncated": True,
+    }
+    if light is not None:
+        projection["light"] = bool(light)
+    return projection
+
 _SPAN_FIELDS = {
     "name", "kind", "trace_id", "span_id", "parent_id", "run_id", "status",
     "start", "end", "duration_s", "attributes", "events", "_projection",
@@ -491,6 +505,14 @@ def _response_projection(*, total_spans: int, visible_spans: int, light: bool = 
 def load_spans(path: str | os.PathLike) -> list[dict]:
     """Read spans.jsonl, quarantining complete valid-JSON rows with an invalid span shape."""
     from looplab.events.eventstore import iter_jsonl
+    try:
+        # `iter_jsonl` intentionally treats a missing append-only log as empty, but Path.exists() also
+        # suppresses permission/stat errors. Preflight the trace source so those errors reach the route's
+        # explicit unavailable envelope instead of masquerading as a successful empty projection.
+        with open(path, "rb"):
+            pass
+    except FileNotFoundError:
+        return []
     return _normalize_spans(iter_jsonl(path))
 
 
@@ -553,10 +575,9 @@ def _rollup(spans: list[dict]) -> dict:
 
 
 # Trace-view I/O caps. A real repo-developer generation carries a 100KB+ prompt, and a long run
-# accumulates hundreds of them — the raw trace of one such run was ~52 MB, which crashes the browser
-# (observed: a black screen). The full text stays in spans.jsonl; the VIEW truncates each generation's
-# input/output/reasoning and keeps only the tail of a long message list, so the payload stays bounded
-# and the UI renders. Tune via these constants.
+# accumulates hundreds of them — the recorded trace of one such run was ~52 MB, which crashes the
+# browser (observed: a black screen). The browser VIEW applies an additional bounded/redacted
+# projection to the already capture-filtered record, including a head/tail message selection.
 _IO_CAP = 2000          # max chars per single message/output/reasoning string
 _MSGS_CAP = 10          # max messages kept in a generation's `input` (head + tail)
 
@@ -600,8 +621,8 @@ _STRIP_IO_KEYS = ("input", "output", "thinking", "input_carry", "input_from",
 
 def _strip_span_io(s: dict) -> dict:
     """Drop the heavy I/O entirely — the run-level trace (Dock timeline) needs only structure, timing,
-    model + token usage, not the prompts/outputs. Keeps the whole-run payload tiny; the per-node
-    endpoint serves the (capped) full I/O for the Inspector. Also drops the delta bookkeeping
+    model + token usage, not the prompts/outputs. Keeps the whole-run payload tiny; detail endpoints
+    serve a bounded/redacted diagnostic projection for the Inspector. Also drops the delta bookkeeping
     (`input_carry`/`input_from`): with no `input` they carry no meaning, and leaving them would let a
     stray `hydrate_inputs` on a light span reconstruct to `[]` (its `input` is gone)."""
     a = s.get("attributes")
@@ -611,7 +632,7 @@ def _strip_span_io(s: dict) -> dict:
 
 
 # ── linear conversation projection ───────────────────────────────────────────────────────────────
-# The raw span tree shows every generation with the FULL message list it was sent — but the agent
+# The recorded span tree can retain a message-list projection for every generation — but the agent
 # tool-loop re-sends the whole conversation on every turn, so successive generations duplicate the
 # system+user prompt and every prior turn (a 206-generation node re-sends the history 206×). The
 # conversation projection reconstructs the loop as a linear, de-duplicated thread: the system+user
@@ -681,8 +702,8 @@ def _thread_turns(spans_sorted: list[dict], by_id: dict) -> list[dict]:
             n = len(inp)
             # A `request` marks a sub-loop start. Delta-encoded logs (tracing.generation) say so
             # explicitly: a base generation stores `input_carry == 0` (it carried NOTHING from a prior
-            # generation), so its `input` IS the full initial context and the request is shown from it
-            # verbatim; a non-base generation carries a real prefix (carry > 0) and its stored `input` is
+            # generation), so its `input` is the retained initial-context projection and the request is
+            # shown from it; a non-base generation carries a real prefix (carry > 0) and its stored `input` is
             # only the delta — (correctly) not a boundary. Keying on `input_carry == 0` (not
             # `input_from is None`) matches `hydrate_inputs`, which likewise treats carry=0 as
             # self-contained, so a degenerate carry=0-with-back-ref span is still read as a base.
@@ -745,7 +766,8 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
     never leaves its trace.
     If an ANCESTOR span is absent (a torn/offset-skipped line — `span_index._read_full` drops one) the
     chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
-    stamped `input_partial=True` so a reader never presents a short input as the verbatim prompt."""
+    stamped `input_partial=True` so a reader never presents a short input as a complete retained
+    prompt projection."""
     spans = _normalize_spans(spans)
     by_sid = {s.get("span_id"): s for s in spans if s.get("span_id")}
     memo: dict = {}

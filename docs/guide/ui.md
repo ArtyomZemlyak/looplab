@@ -165,6 +165,14 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
   recoverable timing/token/attribute values degrade to bounded defaults. A torn or invalid-JSON tail remains
   a durability boundary rather than being guessed past, and pathological parent chains are traversed iteratively.
+  Every trace/detail/tail/conversation response is an allowlisted, redacted and count/byte/depth-bounded
+  projection with route-specific omission metadata. Run/node/conversation views, operation trees, single-span
+  details and the live tail do not expose the same counters. On a read failure the server preserves the route's
+  empty collection shape but marks `projection.unavailable=true` and omits unknown totals; exact zero counts
+  mean a successful empty read. Collection routes treat a missing span sidecar as known empty; a lookup for an
+  absent individual span is unavailable. The Inspector and live Dock render unavailable, partial and honestly
+  empty states separately. Full recorded span dictionaries remain only in `spans.jsonl` and are not downloadable
+  through these routes.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
   launch snapshot for the next restart (not the global UI defaults). Five holdout/verifier fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
@@ -197,6 +205,13 @@ limitations. The owner React route does not turn those bounded whole-store summa
 Part-IV Research Space/Atlas contract, and no interactive concept graph is shipped. Do not interpret the
 home Map, run theme grouping, or Atlas preview as the canonical concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
+
+Those two curation endpoints can contain legacy finalize v1 rows, action-ID-keyed on-demand HTTP v1 rows,
+source-keyed diagnostic v2 rows without an input digest, and semantic finalize v2 rows. The preview normalizes
+only recent concept/claim proposal counts and a small outcome allowlist; unrecognized/legacy outcomes collapse
+to generic proposal copy. It does not fetch the task-facets ledger or display `curation_key`, `input_digest`,
+`input_schema`, `source_key`, model or parser provenance. Use the ledger itself, not the preview, to audit
+paid-work identity.
 
 The preview intentionally exposes **no mutation controls**. Separately, authenticated owner API clients can
 use typed claim/concept governance POSTs: they require the revision the operator observed plus an idempotent

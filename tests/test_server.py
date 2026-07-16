@@ -1038,9 +1038,11 @@ def test_trace_tail_survives_a_huge_recent_span_line(tmp_path):
     rd = tmp_path / "demo"
     big = "Z" * 400_000                                    # one generation span > the 256KB window
     spans = [
-        {"span_id": "s1", "kind": "generation", "start": 1.0, "duration_s": 0.5, "status": "ok",
+        {"trace_id": "tail", "span_id": "s1", "kind": "generation", "start": 1.0,
+         "duration_s": 0.5, "status": "ok",
          "attributes": {"model": "m", "output": "early small gen"}},
-        {"span_id": "s2", "kind": "generation", "start": 2.0, "duration_s": 9.0, "status": "ok",
+        {"trace_id": "tail", "span_id": "s2", "kind": "generation", "start": 2.0,
+         "duration_s": 9.0, "status": "ok",
          "attributes": {"model": "m", "output": big}},
     ]
     (rd / "spans.jsonl").write_text("\n".join(json.dumps(s) for s in spans) + "\n", encoding="utf-8")

@@ -18,6 +18,7 @@ from looplab.core.config import (
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
 from looplab.events.replay import fold
+from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
 from looplab.events.types import EV_TRUST_GATE_CHANGED
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
@@ -88,6 +89,11 @@ def build_router(srv) -> APIRouter:
     router = APIRouter()
     log_pages = EventLogPager()
     _run_dir, _phase = srv.run_dir, srv.phase
+
+    def _trace_unavailable(**shape) -> dict:
+        """Keep every trace read-failure envelope on one truthful, versioned contract."""
+        return {"schema": TRACE_PROJECTION_SCHEMA, **shape,
+                "projection": unavailable_projection()}
     _state_payload = srv.state_payload
 
     # ------------------------------------------------------------------ runs list
@@ -393,9 +399,9 @@ def build_router(srv) -> APIRouter:
 
     def _node_trace(rd: Path, nid: int) -> dict:
         try:
-            # light=True: the tree carries structure + tokens + timing but NOT the prompts/outputs —
-            # the UI fetches a single observation's full I/O lazily via /spans/{sid} when expanded
-            # (Langfuse-style), so a heavily-repaired node's trace stays small and nothing is lost.
+            # light=True: the tree carries structure + tokens + timing but NOT prompts/outputs. The UI
+            # fetches a bounded/redacted observation projection lazily via /spans/{sid} when expanded,
+            # so a heavily-repaired node's trace stays small and its omission receipt remains explicit.
             # `srv.node_trace_view` builds over ONLY this node's spans via the light span INDEX (in-
             # memory, O(node) — not the whole-run tree), so a 1 GB, 4000-node run's node trace is ~ms.
             tv = srv.node_trace_view(rd, nid)
@@ -405,8 +411,7 @@ def build_router(srv) -> APIRouter:
                     "summary": tv.get("summary", {}),
                     "projection": tv.get("projection", {})}
         except Exception:  # noqa: BLE001
-            return {"nodes": [], "rollup": {}, "summary": {},
-                    "projection": {"truncated": True, "unavailable": True}}
+            return _trace_unavailable(nodes=[], rollup={}, summary={})
 
     @router.get("/api/runs/{run_id}/nodes/{nid}/trace")
     def node_trace(run_id: str, nid: int):
@@ -425,10 +430,10 @@ def build_router(srv) -> APIRouter:
             # span past the indexed tail, a foreign/torn file) so nothing is ever unreachable.
             from looplab.events.span_index import get_index
             from looplab.events.traceview import (
-                TRACE_DETAIL_SPAN_CAP, TRACE_PROJECTION_SCHEMA, _cap_span_io, _cap_str,
-                _normalize_span)
+                TRACE_DETAIL_SPAN_CAP, _cap_span_io, _cap_str, _normalize_span)
             idx = get_index(rd / "spans.jsonl")
             s = idx.full_span(sid) if idx is not None else None
+            indexed_span = s is not None
             if s is None:
                 for cand in iter_jsonl(rd / "spans.jsonl"):
                     if isinstance(cand, dict) and cand.get("span_id") == sid:
@@ -437,11 +442,13 @@ def build_router(srv) -> APIRouter:
             if s is not None:
                 a = s.get("attributes") or {}
                 trace_spans = []
-                trace_total = idx.trace_span_count(s.get("trace_id")) if idx is not None else 1
+                trace_total = (idx.trace_span_count(s.get("trace_id"))
+                               if idx is not None and indexed_span else None)
                 # Delta-encoded generation: reconstruct its input from a bounded trace window, then
                 # project it through the per-message/per-span caps below.
                 # (tracing stores only the per-turn delta to keep spans.jsonl ~6x smaller) — so the
-                # expanded observation shows exactly the prompt the LLM received. No-op for tools/old logs.
+                # expanded observation shows the retained diagnostic input projection. No-op for
+                # tools/old logs; capture-time filtering and response caps still apply.
                 if s.get("kind") == "generation" and "input_carry" in a:
                     from looplab.events.traceview import hydrate_inputs
                     tid = s.get("trace_id")
@@ -456,12 +463,19 @@ def build_router(srv) -> APIRouter:
                 s = _cap_span_io(s)
                 projection = dict(s.get("_projection") or {})
                 visible = len(trace_spans) if trace_spans else 1
-                projection.update({
-                    "trace_total_spans": trace_total,
-                    "trace_visible_spans": visible,
-                    "omitted_trace_spans": max(0, trace_total - visible),
-                    "truncated": projection.get("truncated") is True or trace_total > visible,
-                })
+                if trace_total is None:
+                    projection.update({
+                        "trace_cardinality_unavailable": True,
+                        "truncated": True,
+                    })
+                else:
+                    trace_total = max(visible, trace_total)
+                    projection.update({
+                        "trace_total_spans": trace_total,
+                        "trace_visible_spans": visible,
+                        "omitted_trace_spans": max(0, trace_total - visible),
+                        "truncated": projection.get("truncated") is True or trace_total > visible,
+                    })
                 return {"schema": TRACE_PROJECTION_SCHEMA, "span_id": s.get("span_id"),
                         "name": s.get("name"), "kind": s.get("kind"),
                         "attributes": s.get("attributes") or {}, "events": s.get("events") or [],
@@ -473,8 +487,7 @@ def build_router(srv) -> APIRouter:
             safe_sid = _cap_str(sid, 256)
         except Exception:  # noqa: BLE001
             safe_sid = ""
-        return {"span_id": safe_sid, "attributes": {}, "events": [],
-                "projection": {"truncated": False, "unavailable": True}}
+        return _trace_unavailable(span_id=safe_sid, attributes={}, events=[])
 
     @router.get("/api/runs/{run_id}/trace/tail")
     def trace_tail(run_id: str, limit: int = 30):
@@ -482,7 +495,7 @@ def build_router(srv) -> APIRouter:
         output) + tool (name + args) observations, newest last. Powers the Dock's live-trace disclosure
         so a user can watch the agent reason/act during a coarse 'Thinking…'/'Planning…' status instead
         of only seeing the label. Reads just the TAIL of spans.jsonl (bounded regardless of run length);
-        text is capped here, the full I/O is at /spans/{sid}."""
+        text is capped here; /spans/{sid} exposes a larger bounded/redacted detail projection."""
         rd = _run_dir(run_id)
         limit = max(1, min(int(limit or 30), 100))
         # Read BACKWARD from EOF until we have `limit` complete lines (or hit a hard ceiling), instead of
@@ -492,7 +505,7 @@ def build_router(srv) -> APIRouter:
         # multi-MB spans.jsonl is never re-parsed in full every poll.
         recent: list[dict] = []
         from looplab.events.traceview import (
-            TRACE_PROJECTION_SCHEMA, _cap_str, _finite_number, _normalize_span)
+            _cap_str, _finite_number, _normalize_span)
         _CHUNK = 262144
         _MAX_TAIL = 8 * 1024 * 1024
         source_truncated = False
@@ -548,8 +561,10 @@ def build_router(srv) -> APIRouter:
                         it["arg"] = _cap_str(str(arg), 160)
                     it["output"] = _cap_str(str(a.get("output") or ""), 200)
                 recent.append(it)
+        except FileNotFoundError:
+            pass  # tracing disabled / no observations yet: a truthful, complete empty source
         except OSError:
-            pass
+            return _trace_unavailable(tail=[])
         shown = recent[-limit:]
         omitted = max(0, len(recent) - len(shown))
         return {"schema": TRACE_PROJECTION_SCHEMA, "tail": shown,
@@ -562,9 +577,8 @@ def build_router(srv) -> APIRouter:
     def node_conversation(run_id: str, nid: int):
         """The node's trace as a LINEAR, de-duplicated conversation: the system+user request shown
         once per sub-loop, then each generation's delta (reasoning + text + tool calls) interleaved
-        with the tool executions — so the agent's train of thought reads without the raw tree's
-        per-turn re-send of the whole message history. Caps I/O for the browser (full text in the
-        raw span tree / spans.jsonl)."""
+        with the tool executions — so the agent's activity reads without the recorded tree's per-turn
+        re-send of the whole message history. All text remains bounded/redacted for the browser."""
         rd = _run_dir(run_id)
         try:
             from looplab.events.traceview import (
@@ -578,8 +592,7 @@ def build_router(srv) -> APIRouter:
                      if idx is not None else load_spans(rd / "spans.jsonl"))
             return build_conversation(srv.trace_scalars(rd), spans, nid, total_spans=total)
         except Exception:  # noqa: BLE001
-            return {"run_id": run_id, "node_id": str(nid), "stages": [],
-                    "projection": {"truncated": True, "unavailable": True}}
+            return _trace_unavailable(run_id=run_id, node_id=str(nid), stages=[])
 
     @router.get("/api/runs/{run_id}/log")
     def event_log(run_id: str, since: int = -1):
@@ -656,15 +669,13 @@ def build_router(srv) -> APIRouter:
         rd = _run_dir(run_id)
         try:
             # light=True: strip prompt/output text — the run-level timeline needs only structure +
-            # timing + token usage; a heavy run's full I/O is ~50 MB and crashes the browser. Served
+            # timing + token usage; a heavy run's recorded I/O can be ~50 MB and crash the browser. Served
             # via the light span index + a file-identity cache (`srv.trace_view`): reads ~20 MB of
             # structure, not the whole (up to 1 GB) spans.jsonl, so the first click is ~1 s not ~15 s.
             return srv.trace_view(rd)
         except Exception:  # noqa: BLE001 — a malformed/foreign spans.jsonl must degrade, not 500
-            return {"run_id": run_id, "task_id": "", "nodes": {}, "unscoped": [],
-                    "summary": {"spans": 0, "visible_spans": 0, "omitted_spans": 0,
-                                "errors": 0, "total_eval_seconds": 0},
-                    "projection": {"truncated": True, "unavailable": True}}
+            return _trace_unavailable(
+                run_id=run_id, task_id="", nodes={}, rollups={}, unscoped=[], summary={})
 
     @router.get("/api/runs/{run_id}/trace/by_trace/{trace_id}")
     def trace_by_trace(run_id: str, trace_id: str):
@@ -675,9 +686,8 @@ def build_router(srv) -> APIRouter:
         Researcher+Developer trace."""
         rd = _run_dir(run_id)
         from looplab.events.traceview import (
-            TRACE_DETAIL_SPAN_CAP, TRACE_PROJECTION_SCHEMA, _bounded_tail, _cap_span_io,
-            _normalized_id, _projection_counter, _response_projection, _tree, hydrate_inputs,
-            load_spans)
+            TRACE_DETAIL_SPAN_CAP, _bounded_tail, _cap_span_io, _normalized_id,
+            _projection_counter, _response_projection, _tree, hydrate_inputs, load_spans)
         try:
             # Read only this trace's spans (by byte offset via the index), not the whole spans.jsonl.
             from looplab.events.span_index import get_index
@@ -692,8 +702,8 @@ def build_router(srv) -> APIRouter:
                 raw, total = _bounded_tail(
                     (s for s in load_spans(rd / "spans.jsonl")
                      if s.get("trace_id") == safe_tid), TRACE_DETAIL_SPAN_CAP)
-            # Reconstruct delta-encoded generation inputs to the full verbatim prompt before capping,
-            # so this per-op tree shows the real input (no-op on old logs / non-delta spans).
+            # Reconstruct the retained delta-encoded input before applying browser caps, so the per-op
+            # tree does not mistake a delta for a complete diagnostic projection.
             spans = [_cap_span_io(s) for s in hydrate_inputs(raw)]
             total = max(len(spans), _projection_counter(total) if total is not None else len(raw))
             projection = _response_projection(
@@ -704,8 +714,7 @@ def build_router(srv) -> APIRouter:
                     "count": total, "visible_count": len(spans),
                     "omitted_count": projection["omitted_spans"], "projection": projection}
         except Exception:  # noqa: BLE001 — malformed spans must degrade, not 500
-            return {"spans": [], "count": 0, "visible_count": 0, "omitted_count": 0,
-                    "projection": {"truncated": True, "unavailable": True}}
+            return _trace_unavailable(spans=[])
 
     @router.get("/api/runs/{run_id}/prov")
     def prov(run_id: str):
