@@ -24,6 +24,14 @@ export function experimentsByConcept(nodeConcepts = {}, rename = {}) {
   for (const [nid, ids] of Object.entries(nodeConcepts || {})) {
     const id = Number(nid)
     for (const raw of (ids || [])) {
+      // REVIEW(2026-07-16): concept ids are LLM-authored free strings, and both lookups here go
+      // through the object prototype chain: `rename[raw]` on raw="constructor" returns
+      // Object's constructor function (truthy) and silently becomes the concept key, and
+      // `acc[c] ||= new Set()` on c="__proto__" reads Object.prototype (truthy), skips the
+      // assignment, then calls `.add()` on it -> TypeError, crashing the whole Concept view over
+      // one weird tag. Plain-object-as-map with agent-supplied keys needs either `Map` for `acc`
+      // or Object.create(null) + hasOwnProperty guards for both maps (JSON.parse data is safe as
+      // own-props, but `acc` is BUILT here via `||=` assignment which does hit the setter).
       const c = rename[raw] || raw
       if (!c) continue
       ;(acc[c] ||= new Set()).add(id)
@@ -52,6 +60,12 @@ export function fmtCell(v) {
 export function visibleConceptRows(tree, expanded = new Set()) {
   const rows = []
   const nodes = (tree && tree.nodes) || {}
+  // REVIEW(2026-07-16): unbounded recursion with no visited-set — this trusts the server projection
+  // to be acyclic. project_lens/project_hierarchy do guarantee that today, but this walk also runs
+  // on anything a future lens/endpoint change ships, and one bad payload (a child that names its
+  // ancestor, e.g. after a hand-edited log or a projector regression) turns into a stack overflow
+  // that takes the whole view down with it. A `seen` set (skip an id already on the path) is one
+  // line and makes the renderer immune to the data it can't control.
   const walk = (id, depth) => {
     const n = nodes[id]
     if (!n) return
