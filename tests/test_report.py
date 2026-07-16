@@ -698,10 +698,11 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
     def fail_terminal_sync(_fd):
         nonlocal syncs
         syncs += 1
-        if syncs == 2:  # durable START succeeds; the success terminal cannot be confirmed
+        if syncs in {2, 3}:  # terminal append and first replay cannot confirm persistence
             raise OSError("terminal fsync unavailable")
 
     monkeypatch.setattr(eventstore_module, "strict_fsync", fail_terminal_sync)
+    monkeypatch.setattr("looplab.serve.routers.boss.strict_fsync", fail_terminal_sync)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr("looplab.serve.report.generate_report", lambda state, _client, **_kwargs: (
         calls.append(state.run_id) or {"headline": "paid terminal", "at_node": len(state.nodes)}))
@@ -714,6 +715,10 @@ def test_report_refresh_success_requires_durable_terminal_before_success(
     assert uncertain["code"] == "report_refresh_uncertain"
     assert uncertain["ambiguous"] is True
     assert "same request identity" in uncertain["error"]
+    still_uncertain = _refresh_report(
+        TestClient(make_app(tmp_path)), generation=generation,
+        key="terminal-durability").json()
+    assert still_uncertain["code"] == "report_refresh_uncertain"
     reconciled = _refresh_report(
         TestClient(make_app(tmp_path)), generation=generation,
         key="terminal-durability").json()

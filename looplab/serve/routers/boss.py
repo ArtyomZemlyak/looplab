@@ -23,7 +23,7 @@ except ModuleNotFoundError as e:  # allow importing pure action models/mappers w
         raise
     APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
-from looplab.core.atomicio import best_effort_fsync
+from looplab.core.atomicio import best_effort_fsync, strict_fsync
 from looplab.engine.costs import (
     bind_run_client_cost, reconcile_cost_accountants, reconcile_usage_outbox)
 from looplab.events.eventstore import EventStore, iter_jsonl
@@ -261,7 +261,7 @@ def _report_refresh_ledger(events, generation: str) -> tuple[dict[str, object], 
         if event.type == EV_REPORT_REFRESH_STARTED:
             starts.add(identity)
         elif event.type in {EV_REPORT_GENERATED, EV_REPORT_REFRESH_FAILED}:
-            terminals.setdefault(identity, event)  # first durable terminal is authoritative
+            terminals.setdefault(identity, event)  # first visible terminal; replay confirms sync
     return terminals, starts - set(terminals)
 
 
@@ -299,6 +299,21 @@ def _report_refresh_terminal(event, generation: str) -> dict:
         "error": "Report generation failed. Retry with a new request identity.",
         "generation": generation,
     }
+
+
+def _confirm_report_refresh_terminal(path) -> bool:
+    """Upgrade a visible terminal to a durable replay receipt before returning it.
+
+    A strict append can write a complete line and then fail to confirm its fsync. Such a line is
+    intentionally visible for same-key reconciliation, but it is not authoritative until a later
+    sync succeeds. Windows requires a writable descriptor for ``fsync``/``_commit``.
+    """
+    try:
+        with open(path, "r+b") as handle:
+            strict_fsync(handle.fileno())
+        return True
+    except Exception:  # noqa: BLE001 - replay remains fail-closed on every storage capability gap
+        return False
 
 
 def _record_report_refresh_failure(srv, run_dir, generation: str, identity: str,
@@ -942,6 +957,18 @@ def build_router(srv) -> APIRouter:
             terminals, unresolved = _report_refresh_ledger(store.read_all(), generation)
             terminal = terminals.get(job_identity)
             if terminal is not None:
+                if not _confirm_report_refresh_terminal(store.path):
+                    return {
+                        "ok": False,
+                        "code": "report_refresh_uncertain",
+                        "error_kind": "uncertain",
+                        "error": (
+                            "The saved report terminal is visible but its durable receipt is still "
+                            "unconfirmed. Resume with this same request identity later."
+                        ),
+                        "generation": generation,
+                        "ambiguous": True,
+                    }
                 return _report_refresh_terminal(terminal, generation)
             if unresolved:
                 if job_identity not in unresolved:
