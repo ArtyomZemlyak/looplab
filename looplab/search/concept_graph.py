@@ -1064,6 +1064,14 @@ def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_cal
         spec = {"name": name, "label": (out.label or name).strip()[:60], "rels": rels,
                 "kind": "path" if rels == ["is_a"] else "edge", "provenance": "agent"}
         root = _normalize_concept_id(out.root)
+        # REVIEW(2026-07-16): asymmetric validation — hallucinated RELS are filtered against `avail`
+        # (and the whole mint degrades to None), but a hallucinated ROOT is carried verbatim: the
+        # prompt tells the model to pick the root "from the vocabulary", yet `vocab` (already computed
+        # above) is never consulted here. A root not in the graph should be dropped (keep the lens,
+        # drop the focus) the same way bad rels are. Worse, NOTHING consumes `spec["root"]` today —
+        # project_lens/project_hierarchy ignore the key entirely — so "focus on X" requests mint a
+        # spec that promises focus in its label but projects the whole graph. Either wire root
+        # filtering into project_lens in the same change, or don't emit the field yet.
         if root:
             spec["root"] = root
         return spec
