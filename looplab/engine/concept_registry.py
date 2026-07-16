@@ -680,7 +680,7 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
     # Retain the shipped `guard` spelling while executing both forms inside the required lock.
     validator = validate or guard
 
-    from looplab.core.atomicio import best_effort_fsync, strict_fsync
+    from looplab.core.atomicio import best_effort_fsync, strict_fsync, strict_fsync_parent
     from looplab.events.eventstore import _interprocess_lock
 
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
@@ -713,6 +713,7 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                     expected_governance_revision, governance_revision
                 )
         current = _ledger_revision(path)
+        created = not path.exists()
         _validate_expected_revision(expected_revision)
         if expected_revision is not None and expected_revision != current:
             raise ConceptGovernanceConflict(path, expected_revision, current)
@@ -735,4 +736,6 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
             f.write(line)
             f.flush()
             (strict_fsync if require_durable else best_effort_fsync)(f.fileno())
+        if require_durable and created:
+            strict_fsync_parent(path)
     return rec

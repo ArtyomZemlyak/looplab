@@ -22,6 +22,10 @@ Layering: this module must not import the orchestrator (TYPE_CHECKING only) and 
 serve — it touches only engine.memory, events, core and stdlib/orjson."""
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -43,6 +47,30 @@ from looplab.events.types import EV_LESSONS_DISTILLED, EV_LESSONS_REFRESHED
 
 if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestrator
     from looplab.engine.orchestrator import Engine
+
+
+_CURATION_CLAIM_DIR = ".curation_invocations"
+_CURATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
+_CURATION_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+@contextmanager
+def _curation_thread_lock(key: str):
+    """Serialize one run/kind locally without retaining an unbounded lock registry."""
+    with _CURATION_THREAD_LOCKS_GUARD:
+        lock, users = _CURATION_THREAD_LOCKS.get(key, (threading.Lock(), 0))
+        _CURATION_THREAD_LOCKS[key] = (lock, users + 1)
+    try:
+        with lock:
+            yield
+    finally:
+        with _CURATION_THREAD_LOCKS_GUARD:
+            current = _CURATION_THREAD_LOCKS.get(key)
+            if current is not None and current[0] is lock:
+                if current[1] <= 1:
+                    _CURATION_THREAD_LOCKS.pop(key, None)
+                else:
+                    _CURATION_THREAD_LOCKS[key] = (lock, current[1] - 1)
 
 
 class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
@@ -302,7 +330,6 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
     def _already_curated(self, log_name: str, final: RunState) -> bool:
         """True when this run already produced a steward log entry — so a finalize RE-ENTRY (crash+resume)
         does NOT re-run the LLM and append a duplicate proposal batch to the operator queue (mega-review)."""
-        import json
         from looplab.events.eventstore import read_jsonl_lenient
         p = Path(self._e.memory_dir) / log_name
         if not p.exists():
@@ -311,11 +338,84 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return any(str(r.get("run_id") or "") == rid
                    for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True))
 
-    def _append_curation_once(self, log_name: str, final: RunState, rec: dict) -> bool:
+    @staticmethod
+    def _curation_run_id(final: RunState) -> str:
+        rid = str(final.run_id or final.task_id or "")
+        if not rid:
+            raise ValueError("finalize curation requires a stable run_id or task_id")
+        return rid
+
+    def _curation_claim_path(self, log_name: str, final: RunState) -> Path:
+        rid = self._curation_run_id(final)
+        digest = hashlib.sha256(f"{log_name}\0{rid}".encode("utf-8")).hexdigest()
+        return Path(self._e.memory_dir) / _CURATION_CLAIM_DIR / f"{digest}.json"
+
+    def _write_curation_claim(self, path: Path, log_name: str, kind: str,
+                              final: RunState) -> None:
+        """Create and strictly sync the one-way claim that gates a paid finalize invocation."""
+        from looplab.core.atomicio import strict_fsync, strict_fsync_parent
+
+        claim_dir = path.parent
+        created_dir = not claim_dir.exists()
+        claim_dir.mkdir(parents=True, exist_ok=True)
+        if created_dir:
+            strict_fsync_parent(claim_dir)
+        finish_seq = getattr(final, "finalized_finish_seq", None)
+        if not isinstance(finish_seq, int) or isinstance(finish_seq, bool):
+            finish_seq = getattr(final, "last_finish_seq", None)
+        payload = {
+            "v": 1,
+            "action": "finalize-steward-begun",
+            "kind": kind,
+            "log": log_name,
+            "run_id": self._curation_run_id(final),
+            "task_id": str(final.task_id or ""),
+            "finish_seq": (finish_seq if isinstance(finish_seq, int)
+                           and not isinstance(finish_seq, bool) else None),
+        }
+        encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":")) + "\n").encode("utf-8")
+        # Exclusive create is a second line of defence behind the run-scoped invocation lock. Any
+        # extant file, including a torn claim from a failed sync, is conservatively non-replayable.
+        with path.open("xb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            strict_fsync(handle.fileno())
+        strict_fsync_parent(path)
+
+    @contextmanager
+    def _paid_curation_attempt(self, log_name: str, kind: str, final: RunState,
+                               incomplete: dict):
+        """Yield once only after a durable claim; resolve a prior ambiguous claim without replay."""
+        from looplab.core.atomicio import strict_fsync_parent
+        from looplab.events.eventstore import _interprocess_lock
+
+        claim_path = self._curation_claim_path(log_name, final)
+        created_dir = not claim_path.parent.exists()
+        claim_path.parent.mkdir(parents=True, exist_ok=True)
+        if created_dir:
+            strict_fsync_parent(claim_path.parent)
+        key = str(claim_path.absolute())
+        with _curation_thread_lock(key):
+            with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
+                if self._already_curated(log_name, final):
+                    yield False
+                    return
+                if claim_path.exists():
+                    # CODEX AGENT: a provider may have accepted the prior call. Replaying would risk
+                    # double billing; publish an explicit terminal ambiguity instead.
+                    self._append_curation_once(
+                        log_name, final, incomplete, require_durable=True)
+                    yield False
+                    return
+                self._write_curation_claim(claim_path, log_name, kind, final)
+                yield True
+
+    def _append_curation_once(self, log_name: str, final: RunState, rec: dict, *,
+                              require_durable: bool = False) -> bool:
         """Append one finalize steward outcome exactly once per run under the governance lock."""
         from looplab.engine.concept_registry import _append_governance
         from looplab.events.eventstore import read_jsonl_lenient
-        import json
 
         class _AlreadyLogged(RuntimeError):
             pass
@@ -331,7 +431,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
         payload = {"v": 1, "run_id": rid, "task_id": str(final.task_id or ""), **rec}
         try:
-            _append_governance(path, payload, validate=_validate_locked)
+            _append_governance(
+                path, payload, validate=_validate_locked, require_durable=require_durable)
             return True
         except _AlreadyLogged:
             return False
@@ -358,17 +459,36 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             from looplab.engine.concept_steward import curation_is_empty, steward_concepts
             # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot mutate
             # taxonomy before a durable receipt; only an explicit operator command may apply.
-            out = steward_concepts(self._e.memory_dir, client, apply=False, by="steward")
-            proposals = out["proposals"]
-            self._append_curation_once("concept_curation_log.jsonl", final, {
-                "outcome": "empty" if curation_is_empty(proposals) else "proposed",
-                "auto": False, "auto_requested": auto_requested, "proposals": proposals, "receipt": None})
+            incomplete = {
+                "outcome": "prior_attempt_incomplete_not_replayed",
+                "ambiguity": "provider_outcome_unknown",
+                "auto": False, "auto_requested": auto_requested,
+                "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None,
+            }
+            with self._paid_curation_attempt(
+                    "concept_curation_log.jsonl", "concept", final, incomplete) as invoke:
+                if not invoke:
+                    return
+                try:
+                    out = steward_concepts(self._e.memory_dir, client, apply=False, by="steward")
+                    proposals = out["proposals"]
+                    self._append_curation_once("concept_curation_log.jsonl", final, {
+                        "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                        "auto": False, "auto_requested": auto_requested,
+                        "proposals": proposals, "receipt": None}, require_durable=True)
+                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
+                    self._append_curation_once("concept_curation_log.jsonl", final, {
+                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                        "auto_requested": auto_requested,
+                        "proposals": {"merges": [], "splits": [], "purges": []},
+                        "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
                 self._append_curation_once("concept_curation_log.jsonl", final, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                     "auto_requested": auto_requested,
-                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None},
+                    require_durable=True)
             except Exception:  # noqa: BLE001 — logging remains best-effort relative to run finalization
                 pass
 
@@ -390,16 +510,34 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                     "proposals": {"decisions": []}, "receipt": None})
                 return
             from looplab.engine.claim_steward import curation_is_empty, steward_claims
-            out = steward_claims(self._e.memory_dir, client, apply=False, by="steward")
-            proposals = out["proposals"]
-            self._append_curation_once("claim_curation_log.jsonl", final, {
-                "outcome": "empty" if curation_is_empty(proposals) else "proposed",
-                "auto": False, "auto_requested": auto_requested, "proposals": proposals, "receipt": None})
+            incomplete = {
+                "outcome": "prior_attempt_incomplete_not_replayed",
+                "ambiguity": "provider_outcome_unknown",
+                "auto": False, "auto_requested": auto_requested,
+                "proposals": {"decisions": []}, "receipt": None,
+            }
+            with self._paid_curation_attempt(
+                    "claim_curation_log.jsonl", "claim", final, incomplete) as invoke:
+                if not invoke:
+                    return
+                try:
+                    out = steward_claims(self._e.memory_dir, client, apply=False, by="steward")
+                    proposals = out["proposals"]
+                    self._append_curation_once("claim_curation_log.jsonl", final, {
+                        "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                        "auto": False, "auto_requested": auto_requested,
+                        "proposals": proposals, "receipt": None}, require_durable=True)
+                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
+                    self._append_curation_once("claim_curation_log.jsonl", final, {
+                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                        "auto_requested": auto_requested, "proposals": {"decisions": []},
+                        "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
                 self._append_curation_once("claim_curation_log.jsonl", final, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
-                    "auto_requested": auto_requested, "proposals": {"decisions": []}, "receipt": None})
+                    "auto_requested": auto_requested, "proposals": {"decisions": []}, "receipt": None},
+                    require_durable=True)
             except Exception:  # noqa: BLE001
                 pass
 
@@ -432,17 +570,37 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                     "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
                 return
             kind = str(getattr(getattr(self._e, "task", None), "kind", "") or "")
-            facets = propose_task_facets(str(getattr(final, "goal", "") or ""), kind, client)
-            self._append_curation_once("task_facets_curation_log.jsonl", final, {
-                "outcome": "proposed" if facets else "empty", "auto": False,
-                "auto_requested": auto_requested,
-                "proposals": {"task_id": tid, "facets": facets}, "receipt": None})
+            incomplete = {
+                "outcome": "prior_attempt_incomplete_not_replayed",
+                "ambiguity": "provider_outcome_unknown",
+                "auto": False, "auto_requested": auto_requested,
+                "proposals": {"task_id": tid, "facets": {}}, "receipt": None,
+            }
+            with self._paid_curation_attempt(
+                    "task_facets_curation_log.jsonl", "facets", final, incomplete) as invoke:
+                if not invoke:
+                    return
+                try:
+                    facets = propose_task_facets(
+                        str(getattr(final, "goal", "") or ""), kind, client)
+                    self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                        "outcome": "proposed" if facets else "empty", "auto": False,
+                        "auto_requested": auto_requested,
+                        "proposals": {"task_id": tid, "facets": facets}, "receipt": None},
+                        require_durable=True)
+                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
+                    self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                        "auto_requested": auto_requested,
+                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None},
+                        require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic faceting must never fail a run
             try:
                 self._append_curation_once("task_facets_curation_log.jsonl", final, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                     "auto_requested": auto_requested,
-                    "proposals": {"task_id": str(final.task_id or ""), "facets": {}}, "receipt": None})
+                    "proposals": {"task_id": str(final.task_id or ""), "facets": {}}, "receipt": None},
+                    require_durable=True)
             except Exception:  # noqa: BLE001
                 pass
 

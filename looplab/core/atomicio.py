@@ -63,6 +63,23 @@ def strict_fsync(fileno: int) -> None:
         raise OSError("durable fsync failed") from failure[0]
 
 
+def strict_fsync_parent(path: str | os.PathLike) -> None:
+    """Durably publish a newly-created file/directory entry on POSIX.
+
+    ``fsync(file)`` confirms file contents but not necessarily the parent directory entry that makes
+    a first-created paid-work claim discoverable after power loss. Windows does not support opening a
+    directory through ``os.open``; its file-handle flush remains the strongest portable guarantee here.
+    """
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(Path(path).parent, flags)
+    try:
+        strict_fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def best_effort_fsync(fileno: int) -> None:
     """fsync that DEGRADES where it isn't supported OR where it BLOCKS. On an object-store FUSE mount
     (geesefs/s3fs/goofys — common on JupyterHub data volumes) fsync can raise OSError (EINVAL/ENOTSUP/
