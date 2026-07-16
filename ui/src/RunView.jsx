@@ -955,6 +955,14 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           : <span className="pill">read-only review</span>}
         <div className="view-toggle" role="group" aria-label="Run workspace views">
           <button type="button" aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+          {/* REVIEW(2026-07-16): this tab is enabled in REVIEW mode (historyActive is impossible
+              there — runRouteState strips `sequence` when reviewMode), but ConceptView's fetch goes
+              through api.js reviewReadPath, which rewrites it to /api/review/concepts — a route
+              serve/routers/reviews.py never registered (it exposes only state/comments/config/cost/
+              nodes). The server hard-404s, and ConceptView renders "Concepts are unavailable …
+              retry when the server is reachable" with a Retry that can never succeed — a permanent
+              404 dressed as a transient outage for every reviewer. Either register a read-only
+              /api/review/concepts passthrough in reviews.py or disable this tab when reviewMode. */}
           <button type="button" aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')} disabled={historyActive}
             onClick={() => setView('concepts')} title="concept tree — group experiments by concept, any lens">Concepts</button>
           <button type="button" aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
