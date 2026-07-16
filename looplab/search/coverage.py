@@ -31,6 +31,10 @@ def _node_theme(node):
     """A node's theme exactly as the canonical `theme_rollup` reads it (idea.theme, untitled -> None
     skipped). Kept identical so the coverage themes the Strategist sees match the digest's theme map
     and the /runs API — one theme vocabulary across every surface."""
+    # REVIEW(2026-07-16): dead on new runs since Phase 0 (bd816a5) — the Researcher no longer authors
+    # `idea.theme`, so this yields None for every fresh node and the recent-window narrowing signal
+    # (`recent_dominant_frac`) is permanently 0. Needs the same concepts fallback as
+    # events/digest.py::theme_rollup (see the REVIEW note there) so both surfaces keep one vocabulary.
     return getattr(getattr(node, "idea", None), "theme", None) or None
 
 

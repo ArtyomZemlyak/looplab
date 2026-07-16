@@ -68,6 +68,18 @@ def theme_rollup(state: RunState) -> dict:
     """Per-theme rollup: {theme: {count, best_metric}}. A node's theme is its `idea.theme`
     (Researcher-assigned); nodes without one are skipped. `best_metric` is the better value per the
     run's direction. Audit-only — never read by replay.fold."""
+    # REVIEW(2026-07-16): Phase 0 (bd816a5) stopped AUTHORING `idea.theme` (Researcher now emits
+    # `concepts`) but this reader was not migrated — the migration order is inverted (writer off
+    # before readers moved). On every NEW run all nodes are untitled, so this returns {} and,
+    # transitively: (1) the digest's "Themes:" chips vanish from the Researcher's state brief;
+    # (2) coverage_signal (search/coverage.py) reports themes=0 / theme_entropy=0 /
+    # dominant_theme_frac=0 forever, so the RuleStrategist's narrowing detector
+    # (agents/strategist.py:164 `>= 0.75 / >= 0.6`) can never fire and the LLM Strategist is shown
+    # zeroed breadth numbers; (3) the explore-hint's "concentrates on '<theme>'" detail
+    # (engine/proposal_cues.py:~205) is always empty. Until the theme readers are torn out, this
+    # rollup should FALL BACK to concepts (e.g. treat each `axis/slug` id — or its axis — as a
+    # theme when idea.theme is empty), and coverage.py::_node_theme must mirror the same fallback
+    # to keep the "one theme vocabulary across every surface" promise it documents.
     better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
     out: dict[str, dict] = {}
     for n in state.nodes.values():
