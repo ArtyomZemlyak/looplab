@@ -642,3 +642,32 @@ def test_consolidation_preserves_aliases_for_heuristic_tagging():
     a = g2.get("loss/a")
     assert set(a.aliases) == {"alpha-loss", "beta-loss"}         # own + merged-away synonym's aliases
     assert "loss/a" in tag_text("using a beta-loss run", g2)     # heuristic still tags on consolidated graph
+
+
+def test_arbitrary_depth_hierarchy_and_crosslinks():
+    """Multi-level concept ids (`loss/contrastive/dcl/dclx`) materialize the whole ancestor chain, each
+    level linked to its immediate prefix, with working up/down traversal — while top-level `axes()` and
+    coverage roll-up stay depth-independent and cross-axis DAG membership is preserved (§21.6 unbounded)."""
+    from looplab.search.concept_graph import ConceptGraph
+
+    g = ConceptGraph(task_type="dense-retrieval")
+    g.ensure("loss/contrastive/dcl/dclx")
+
+    # every intermediate level exists, linked to its immediate prefix
+    for level in ("loss", "loss/contrastive", "loss/contrastive/dcl", "loss/contrastive/dcl/dclx"):
+        assert level in g
+    assert g.parents_of("loss/contrastive/dcl/dclx") == ("loss/contrastive/dcl",)
+    assert g.ancestors_of("loss/contrastive/dcl/dclx") == ["loss/contrastive/dcl", "loss/contrastive", "loss"]
+    assert g.children_of("loss/contrastive") == ["loss/contrastive/dcl"]
+    assert "loss/contrastive/dcl/dclx" in g.descendants_of("loss")
+    assert g.depth_of("loss/contrastive/dcl/dclx") == 3 and g.depth_of("loss") == 0
+
+    # depth-independent roll-up: any-depth concept still rolls up to its top-level axis
+    assert g.axes() == ["loss"]
+    assert g.axes_of("loss/contrastive/dcl/dclx") == ("loss",)
+
+    # cross-axis DAG membership (a concept under TWO roots) still works and is reflected in axes()
+    g.ensure("loss/margin-mse", axes=("loss", "distillation"))
+    assert g.parents_of("loss/margin-mse") == ("loss", "distillation")
+    assert g.axes_of("loss/margin-mse") == ("distillation", "loss")
+    assert "distillation" in g.axes()

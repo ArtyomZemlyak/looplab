@@ -66,9 +66,12 @@ class Concept:
     key: bool = False                       # part of a known/target winning region (alarm labelling)
 
     def __post_init__(self):
-        # A concept with no explicit axis is its own axis root (defensive; skeletons always set axes).
+        # A concept with no explicit axis inherits its IMMEDIATE id-prefix as parent, so an arbitrarily
+        # deep id (`loss/contrast/dcl/dclx`) sits one level under `loss/contrast/dcl`. A top-level id is
+        # its own root. Skeletons always set axes explicitly (incl. cross-axis DAG membership).
         if not self.axes:
-            object.__setattr__(self, "axes", (self.id.split("/", 1)[0],))
+            parent = self.id.rsplit("/", 1)[0] if "/" in self.id else self.id
+            object.__setattr__(self, "axes", (parent,))
         if not self.label:
             object.__setattr__(self, "label", self.id)
 
@@ -92,12 +95,23 @@ class ConceptGraph:
         return self._concepts.setdefault(concept.id, concept)
 
     def ensure(self, concept_id: str, *, axes: tuple[str, ...] = (), key: bool = False) -> Concept:
-        """Get-or-create a concept id (used by the LLM tagger when it proposes a new concept). A
-        grown concept inherits its axis from the id prefix unless one is given; `key` never upgrades an
-        existing entry (only the skeleton declares winning regions)."""
+        """Get-or-create a concept id (used by the LLM tagger when it proposes a new concept). A grown
+        concept inherits its IMMEDIATE-prefix parent from the id unless one is given; `key` never upgrades
+        an existing entry (only the skeleton declares winning regions).
+
+        ARBITRARY DEPTH: a multi-level id materializes its whole ANCESTOR CHAIN as concepts, each linked to
+        its immediate prefix — `ensure("loss/contrast/dcl/dclx")` also creates `loss/contrast/dcl`,
+        `loss/contrast` and `loss`, so the DAG carries every intermediate level (§21.6 "give leaves parents",
+        now unbounded). Cross-axis membership is still expressible by passing extra `axes`."""
         existing = self._concepts.get(concept_id)
         if existing is not None:
             return existing
+        if "/" in concept_id:
+            parent = concept_id.rsplit("/", 1)[0]
+            if parent not in self._concepts:
+                self.ensure(parent)             # recurse up to the root, materializing each level
+            if not axes:
+                axes = (parent,)
         return self.add(Concept(id=concept_id, axes=axes, key=key))
 
     # -- read helpers ---------------------------------------------------------
@@ -112,15 +126,62 @@ class ConceptGraph:
         return [self._concepts[k] for k in sorted(self._concepts)]
 
     def axes(self) -> list[str]:
-        """All distinct parent axes in the graph, sorted — the top level of the DAG."""
+        """All distinct TOP-LEVEL roots (the `seg0` of every concept id / parent), sorted — the top of the
+        DAG. Independent of hierarchy depth: `loss/contrast/dcl/dclx` still rolls up to the `loss` axis, so
+        coverage grouping is unchanged whether the graph is flat or deep."""
         out: set[str] = set()
         for c in self._concepts.values():
-            out.update(c.axes)
+            out.add(c.id.split("/", 1)[0])
+            out.update(a.split("/", 1)[0] for a in c.axes)
         return sorted(out)
 
     def axes_of(self, concept_id: str) -> tuple[str, ...]:
+        """The TOP-LEVEL root axis(es) a concept rolls up to (seg0 of the id and of any cross-link parent).
+        Used by coverage to group any-depth concept to its top axis."""
         c = self._concepts.get(concept_id)
-        return c.axes if c is not None else (str(concept_id).split("/", 1)[0],)
+        if c is None:
+            return (str(concept_id).split("/", 1)[0],)
+        roots = {c.id.split("/", 1)[0]} | {a.split("/", 1)[0] for a in c.axes}
+        return tuple(sorted(roots))
+
+    # -- hierarchy (arbitrary-depth DAG) traversal ----------------------------
+    def parents_of(self, concept_id: str) -> tuple[str, ...]:
+        """Immediate parent concept ids (the DAG edges: id-prefix parent + any explicit cross-links)."""
+        c = self._concepts.get(concept_id)
+        return c.axes if c is not None else ()
+
+    def children_of(self, concept_id: str) -> list[str]:
+        """Immediate children — concepts that name `concept_id` among their parents."""
+        return sorted(c.id for c in self._concepts.values() if concept_id in c.axes)
+
+    def ancestors_of(self, concept_id: str) -> list[str]:
+        """All ancestors up every parent path to the roots (deduped, deterministic BFS order)."""
+        seen: list[str] = []
+        frontier = list(self.parents_of(concept_id))
+        while frontier:
+            p = frontier.pop(0)
+            if p in seen or p == concept_id:
+                continue
+            seen.append(p)
+            frontier.extend(self.parents_of(p))
+        return seen
+
+    def descendants_of(self, concept_id: str) -> list[str]:
+        """All descendants down every child path (deduped, deterministic BFS order)."""
+        seen: list[str] = []
+        frontier = self.children_of(concept_id)
+        while frontier:
+            ch = frontier.pop(0)
+            if ch in seen or ch == concept_id:
+                continue
+            seen.append(ch)
+            frontier.extend(self.children_of(ch))
+        return seen
+
+    def depth_of(self, concept_id: str) -> int:
+        """Longest root->concept path length (0 for a top-level root). Reflects the id nesting."""
+        parents = [p for p in self.parents_of(concept_id) if p != concept_id]
+        return 0 if not parents else 1 + max(self.depth_of(p) for p in parents)
 
     def key_concepts(self) -> list[str]:
         return [c.id for c in self.concepts() if c.key]
@@ -436,7 +497,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             if cid in graph:
                 got.add(cid)
             elif grow and "/" in cid:
-                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                graph.ensure(cid)
                 got.add(cid)
         return frozenset(got)
     # The prompt is TASK-AGNOSTIC: the domain vocabulary comes ONLY from the graph (KNOWN AXES / KNOWN
@@ -454,9 +515,13 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
             "map. Assign the SET of concepts that apply — an experiment usually touches SEVERAL at once "
             "(e.g. a change to the loss AND a regularizer), so tag EVERY concept that applies, not just the "
             "most obvious one. Prefer concepts from the KNOWN VOCABULARY below; only when none fits, propose "
-            "a new id of the form `axis/short-slug` using one of the known AXES. Key on the underlying "
-            "METHOD (its lineage/family), not the surface name — variants of one method that differ only by "
-            "a modifier are the same concept. Call `emit` once with `concept_ids` (the list of ids)."
+            "a new id starting from one of the known AXES. Ids are HIERARCHICAL paths and may be as DEEP as "
+            "the method's lineage warrants: `axis/family`, or `axis/family/method`, or "
+            "`axis/family/method/variant` (e.g. `loss/contrastive/dcl` or `loss/contrastive/dcl/dclx`) — the "
+            "ancestor levels are created automatically, so name the FULL lineage when a method is a "
+            "specialization of a broader one. Key on the underlying METHOD (its family), not the surface "
+            "name — variants that differ only by a modifier can share a parent and differ at the leaf. Call "
+            "`emit` once with `concept_ids` (the list of ids)."
             f"\n\nKNOWN AXES: {', '.join(axes) or '(none — propose axis/slug ids)'}\n\nKNOWN VOCABULARY:\n"
             + ("\n".join(f"- {c.id}: {c.label}" for c in graph.concepts() if not c.id.endswith("/*"))
                or "(empty — this is a new task type; propose concept ids from scratch as `axis/slug`)")
@@ -508,10 +573,11 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 continue
             if cid in graph:
                 got.add(cid)
-            # A grown concept is single-axis by construction (the LLM proposes `axis/slug`, so its one
-            # parent IS the id prefix); multi-parent DAG membership is for the CURATED skeleton concepts.
+            # A grown concept's parent is its IMMEDIATE id-prefix; `ensure` materializes the whole ancestor
+            # chain so an arbitrarily deep `axis/family/method/variant` id nests correctly. Extra cross-axis
+            # DAG membership remains a CURATED-skeleton affordance.
             elif grow and "/" in cid:
-                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                graph.ensure(cid)
                 got.add(cid)
         tags[nid] = frozenset(got) if got else heuristic.get(nid, frozenset())
 
@@ -549,7 +615,7 @@ def graph_from_node_concepts(node_concepts, seed_graph: Optional["ConceptGraph"]
             if not cid:
                 continue
             if cid not in graph and "/" in cid:
-                graph.ensure(cid, axes=(cid.split("/", 1)[0],))
+                graph.ensure(cid)
             if cid in graph:
                 got.add(cid)
         try:
@@ -825,10 +891,10 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
         # prefix, NOT a union of source+canonical parents. This keeps id/axis CONSISTENT — a global
         # axis-rename is ambiguous when one source axis maps to several targets (`aug/crop→data/crop`,
         # `aug/flip→vision/flip`) and would leave a concept whose id prefix disagrees with its stored axes.
-        # A renamed concept is a GROWN one (single-axis by construction: the LLM proposes `axis/slug`), so
-        # there are no curated multi-parent DAG parents to lose; a non-renamed concept keeps its own axes
-        # verbatim (so a seeded multi-parent axis never vanishes because a DIFFERENT concept was merged).
-        axes = (cid.split("/", 1)[0],) if c.id in rename else c.axes
+        # A renamed concept is a GROWN one (its parent is the id's IMMEDIATE prefix — one level up, at any
+        # depth), so there are no curated multi-parent DAG parents to lose; a non-renamed concept keeps its
+        # own axes verbatim (so a seeded multi-parent axis never vanishes because a DIFFERENT concept merged).
+        axes = ((cid.rsplit("/", 1)[0],) if "/" in cid else (cid,)) if c.id in rename else c.axes
         existing = new.get(cid)
         merged_axes = tuple(dict.fromkeys((existing.axes if existing else ()) + tuple(axes)))
         merged_key = bool(c.key or (existing.key if existing else False))
