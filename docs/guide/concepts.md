@@ -500,6 +500,40 @@ untrusted tier.
 What an agent may change at runtime is governed by `agent_control` (a per-setting allow-list of
 roles) — see [Configuration → Strategist & meta-control](configuration.md#strategist-meta-control).
 
+## The concept graph & concept views
+
+Every experiment carries a **set** of research concepts — multi-label `axis/slug` path ids like
+`loss/contrastive/dcl` — instead of a single free-text grouping slug. The Researcher **authors** a
+node's concepts on the `Idea` (`concepts: list[str]`); they fold into `RunState.node_concepts` at
+`node_created` (deterministic, offline — no tagging cadence required), and the strategist cadence may
+later consolidate/enrich them. This is the grouping substrate; concepts are audit-only and never touch
+search or selection.
+
+**Hierarchy is a projection, not a stored tree.** Because concepts form a graph, "what is a top-level
+axis" is a *perspective*. A **typed concept-edge log** (`EV_CONCEPT_EDGE` → `RunState.concept_edges`,
+folded commutatively — max-confidence-wins per `(src, rel, dst)` triple) is the only durable substrate;
+the cadence records `is_a` edges (path parents + curated multi-parent) and evidenced `co_occurs` edges
+(concept pairs on a node). A hierarchy is then **computed** by a pure read-model:
+
+- `project_hierarchy(ids, lens="is_a")` — nests by the concept **path** (the default lens; an empty
+  edge set falls back to this, byte-identically to the old axis-prefix tree).
+- `project_lens(ids, edges, lens, touch=…)` — nests by a typed relation: directed `uses`/`part_of`,
+  or symmetric `co_occurs` oriented by touch (most-used concept = hub). One primary parent per concept
+  + `cross_parents` for the memberships it drops; deterministic, cycle-safe.
+- `derive_lens(prompt, edges, client)` — an agent that **mints a lens in the moment** from a
+  natural-language request (a pure projection spec of relation types + optional root; writes no events,
+  so it stays replay-clean).
+- `concept_metrics(state, graph, tags)` — per-concept `{touched, evaluated, best, mean, delta_best,
+  delta_mean, first_touch}`; a multi-membership node's metric counts **fully in every concept it
+  carries** (never divided), and `delta_*` is signed vs the run's median baseline. See
+  `looplab/search/concept_graph.py`.
+
+These are surfaced at `GET /api/runs/{id}/concepts?lens=…` (per-lens tree + metrics + the lens pack)
+and drive two run-view surfaces: the **Concepts** view (a concept tree/table — concepts as folders at
+any depth, experiments nested under the exact concept they touched, a configurable metric table with
+Δ-from-baseline coloring, and a lens switcher) and, on the **Search** graph, concept chips that
+highlight the matching nodes. Concept tagging ships **on by default** (`concept_pivot`).
+
 ## Cross-run memory
 
 Cross-run memory is **on by default** — `memory_dir` / `knowledge_dir` default to
