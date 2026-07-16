@@ -157,12 +157,18 @@ def _tree(spans: list[dict], *, _normalized: bool = False) -> list[dict]:
     for s in by_id.values():
         parent = by_id.get(s.get("parent_id"))
         (parent["children"] if parent else roots).append(s)
-    # deterministic order: by start time
-    def _sort(nodes):
-        nodes.sort(key=lambda n: n.get("start", 0.0))
-        for n in nodes:
-            _sort(n["children"])
-    _sort(roots)
+    # deterministic order: by start time. Iterative (explicit stack), NOT recursive: a pathologically
+    # deep parent_id chain in a crafted/corrupt spans.jsonl would otherwise blow Python's recursion limit
+    # and crash the view — the exact "tolerate corrupt spans" contract the projections harden for (and why
+    # hydrate_inputs is already iterative). Each `children` list is sorted independently, so order is
+    # identical to the recursive version.
+    stack = [roots]
+    while stack:
+        level = stack.pop()
+        level.sort(key=lambda n: n.get("start", 0.0))
+        for n in level:
+            if n["children"]:
+                stack.append(n["children"])
     return roots
 
 

@@ -322,3 +322,14 @@ def test_old_full_input_logs_still_work(tmp_path):
     convo = build_conversation(st, load_spans(rd / "spans.jsonl"), 0)
     reqs = [t for t in convo["stages"][0]["turns"] if t["type"] == "request"]
     assert len(reqs) == 1                                 # legacy len-drop heuristic still de-duplicates
+
+
+def test_trace_tree_tolerates_a_deep_span_chain_without_recursionerror():
+    # A crafted/corrupt spans.jsonl with a pathologically deep parent_id chain must not blow Python's
+    # recursion limit when the tree is sorted — the "trace view never crashes on corrupt spans" contract
+    # the projections harden for (the sibling hydrate_inputs is already iterative for the analogous case).
+    from looplab.events.traceview import _tree
+    spans = [{"span_id": f"s{i}", "parent_id": (f"s{i - 1}" if i else None), "start": float(i),
+              "kind": "operation", "name": "op"} for i in range(6000)]
+    roots = _tree(spans, _normalized=True)          # must not raise RecursionError
+    assert len(roots) == 1 and roots[0]["span_id"] == "s0"
