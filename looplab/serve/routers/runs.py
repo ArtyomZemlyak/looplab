@@ -697,7 +697,7 @@ def build_router(srv) -> APIRouter:
                     raise HTTPException(503, "artifact access unavailable")
                 if current_identity != opened_identity:
                     raise HTTPException(404, "no such artifact")
-                # Authorize the opened descriptor as well as the path; writable artifact roots can
+                # CODEX AGENT: authorize the opened descriptor as well as the path; writable roots can
                 # otherwise swap a safe pathname to a protected trace hardlink before open. Refresh
                 # protected identities too in case the run-root source was replaced during the race.
                 opened_exposed = _artifact_exposure_policy(rd)

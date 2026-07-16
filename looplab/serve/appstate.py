@@ -262,7 +262,8 @@ class AppState:
         # is cheap and adds a semantic reset fence even on filesystems with weak/reused inode metadata.
         generation = run_generation_token(iter_jsonl(events_path))
         span_sig = _sig(sp, unavailable_raises=True)
-        # A derived response cache is never authority after source readability changes. A stat-only
+        # CODEX AGENT: a derived response cache is never authority after source readability changes.
+        # A stat-only
         # cache hit must not turn a permission loss into exact cached truth. Probe the
         # source before returning the derived view, just as get_index does for its own warm cache.
         # Missing tracing remains a known-empty source; disappearance after successful stat is an
