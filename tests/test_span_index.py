@@ -133,6 +133,22 @@ def test_by_trace_identical(run):
     assert _canon(ref) == _canon(got)
 
 
+def test_unindexed_anchor_keeps_the_append_only_trace_prefix(run):
+    """A live tail span found outside an older index can still hydrate from the indexed ancestors."""
+    rd, sp, spans = run
+    idx = get_index(sp)
+    late = _gen(0, "tr0", "late-tail", "root0", 9)
+    with open(sp, "ab") as f:
+        f.write(orjson.dumps(late) + b"\n")
+
+    assert idx.full_span("late-tail") is None  # prove the held snapshot has not topped itself up
+    got = idx.full_spans_for_trace("tr0", anchor_sid="late-tail")
+    expected_ids = [span["span_id"] for span in spans if span["trace_id"] == "tr0"]
+    # CODEX AGENT: the endpoint appends `late` after this prefix, then hydrate_inputs can resolve its
+    # delta chain. Returning [] here would expose only the raw tail and falsely mark the input partial.
+    assert [span["span_id"] for span in got] == expected_ids
+
+
 def test_malformed_complete_span_is_quarantined_without_hiding_following_rows(tmp_path):
     """A schema-bad JSON object is one lost observation, never a poison pill for the trace tail."""
     rd = tmp_path / "demo"

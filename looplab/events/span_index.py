@@ -247,16 +247,11 @@ class SpanIndex:
             rows = list(self.by_tid.get(tid, ()))
             if anchor_sid is not None:
                 anchor = self.by_sid.get(anchor_sid)
-                # REVIEW(2026-07-16): when anchor_sid is NOT in the index (the routine live case: a
-                # just-appended span past the indexed tail, found by the caller's scan fallback), this
-                # predicate is False for EVERY row and the whole trace collapses to [] — the exact
-                # opposite of the caller's stated intent (runs.py span_io: "include it so its own delta
-                # joins the chain and reconstruction resolves"). hydrate_inputs then can't walk the
-                # input_from chain and the endpoint returns a raw per-turn delta stamped input_partial.
-                # spans.jsonl is append-only and the index covers a prefix, so a missing anchor is
-                # provably PAST all indexed rows — the correct filter is
-                # `rows if anchor is None else [row for row in rows if row <= anchor]`.
-                rows = [row for row in rows if anchor is not None and row <= anchor]
+                # CODEX AGENT: a caller may find a just-appended span by scanning past this index's
+                # snapshot. In an append-only log that missing anchor follows every indexed row, so
+                # keep the whole indexed prefix; emptying it would destroy the input_from ancestry.
+                if anchor is not None:
+                    rows = [row for row in rows if row <= anchor]
             if limit is not None:
                 cap = max(0, int(limit))
                 rows = rows[-cap:] if cap else []
