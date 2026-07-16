@@ -1325,14 +1325,18 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if not (src and rel and dst):
             continue
         conf = ed.get("confidence")
-        conf = float(conf) if isinstance(conf, (int, float)) else 0.0
-        # REVIEW(2026-07-16): NaN slips through this coercion and silently breaks the COMMUTATIVITY this
-        # handler is built around: every `>` comparison against a NaN tuple-head is False, so whichever
-        # edge arrives FIRST sticks forever — replaying [nan, 5.0] keeps nan while [5.0, nan] keeps 5.0,
-        # violating invariant 5 (order-tolerance). NaN is reachable: stdlib json round-trips `NaN`
-        # literals by default (dumps allow_nan=True / loads parses it), and confidence is agent-supplied.
-        # Guard it here (`if conf != conf: conf = 0.0`) rather than trusting emitters. Same coercion also
-        # accepts bool (isinstance(True, int) -> 1.0) — probably fine, but worth deciding explicitly.
+        # REVIEW(2026-07-16): the tuple order below can only rank a REAL finite/±inf float. Two agent-
+        # supplied values must be neutralized to keep the fold commutative (invariant 5 order-tolerance):
+        #   * NaN — every `>` comparison against a NaN tuple-head is False, so whichever edge arrived
+        #     FIRST would stick forever ([nan, 5.0] keeps nan while [5.0, nan] keeps 5.0). NaN is reachable
+        #     because stdlib json round-trips `NaN` literals by default (dumps allow_nan / loads parses).
+        #   * bool — isinstance(True, int) is True, so a stray `confidence: true` would coerce to 1.0 and
+        #     could WIN over a legitimate edge; treat it as 0.0 (lowest) so a mis-typed flag never ranks.
+        # Both map to 0.0, keeping the order total and the accumulate order-independent. (`x != x` is the
+        # portable NaN test — no math import.)
+        conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
+        if conf != conf:
+            conf = 0.0
         prov = str(ed.get("provenance") or "")
         key = "\t".join((src, rel, dst))
         cur = st.concept_edges.get(key)

@@ -878,16 +878,13 @@ def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
             all_ids.add("/".join(parts[:k]))
     children: dict[Optional[str], list[str]] = {}
     nodes: dict[str, dict] = {}
-    # REVIEW(2026-07-16): iterating the raw SET here makes the `nodes` dict's insertion order depend on
-    # string-hash order, which is randomized per process (PYTHONHASHSEED) — so json.dumps of this
-    # projection is NOT byte-stable across processes, contradicting the "Deterministic (id-sorted)"
-    # docstring claim. The sibling read-models sort before building their row dicts
-    # (`concept_metrics` -> `for cid in sorted(touched)`, `concept_coverage` ->
-    # `dict(sorted(first_touch.items()))`); this one should iterate `sorted(all_ids)` for the same
-    # reason. test_deterministic() compares dicts by == (order-insensitive), so it cannot catch this —
-    # it should assert `list(a["nodes"]) == sorted(a["nodes"])` too. Matters because this feeds View 1
-    # over HTTP where byte-identical responses enable caching/etag and diff-based tests.
-    for cid in all_ids:
+    # REVIEW(2026-07-16): iterate the SORTED ids, not the raw set. A raw-set iteration makes the `nodes`
+    # dict's insertion order follow string-hash order (randomized per process via PYTHONHASHSEED), so
+    # json.dumps of this projection is NOT byte-stable across processes — contradicting the "Deterministic
+    # (id-sorted)" docstring and breaking the HTTP caching/etag and diff-based tests that feed View 1.
+    # Sorting here matches the sibling read-models (`concept_metrics` -> `for cid in sorted(touched)`,
+    # `concept_coverage` -> `dict(sorted(first_touch.items()))`).
+    for cid in sorted(all_ids):
         parts = cid.split("/")
         parent = "/".join(parts[:-1]) if len(parts) > 1 else None
         nodes[cid] = {"parent": parent, "depth": len(parts) - 1,

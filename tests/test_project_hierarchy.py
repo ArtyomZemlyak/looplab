@@ -38,3 +38,8 @@ def test_deterministic():
     b = project_hierarchy(["a/x/z", "a/x", "b/y"])              # input order must not matter
     assert a == b
     assert a["roots"] == ["a", "b"]
+    # Regression: the `nodes` dict must be id-SORTED, not raw-set (hash) order. `==` above is
+    # order-insensitive and cannot catch it; without an explicit sort the projection's json.dumps is
+    # not byte-stable across processes (PYTHONHASHSEED), breaking the HTTP etag/caching + diff tests
+    # that consume View 1. Assert the concrete insertion order both times.
+    assert list(a["nodes"]) == sorted(a["nodes"]) == list(b["nodes"])
