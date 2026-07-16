@@ -139,7 +139,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const selectedId = routeState.nodeId
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
-  const requestedView = routeState.view
+  const requestedRouteView = routeState.view
   const themeFilter = routeState.directionFilter
   const routeFenceBlocked = generationMismatch || generationPending
   const historyActive = viewSeq != null
@@ -150,7 +150,29 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // URL effect would start DAG chunks and the owner log-page request for a surface never displayed.
   const autoReport = !historyActive && liveTerminalReady && !landedRef.current
     && !deepLinkLandingRef.current && !runRouteStateHasTarget(routeState, { reviewMode })
+  // # CODEX AGENT: review capabilities do not expose concept frames. Owner history does, through an
+  // exact seq; redirect only the unsupported review route instead of hiding owner history.
+  const requestedView = reviewMode && requestedRouteView === 'concepts' ? 'dag' : requestedRouteView
   const view = autoReport ? 'report' : requestedView
+  const workspaceToolbarRef = useRef(null)
+  const [workspaceTabStop, setWorkspaceTabStop] = useState(view)
+  useEffect(() => {
+    setWorkspaceTabStop(view)
+  }, [view])
+  const onWorkspaceToolbarKeyDown = event => {
+    const controls = [...(workspaceToolbarRef.current
+      ?.querySelectorAll('[data-workspace-control]:not(:disabled)') || [])]
+    const current = event.target.closest?.('[data-workspace-control]')
+    const next = nextRovingIndex(event.key, controls.indexOf(current), controls.length)
+    if (next == null) return
+    event.preventDefault()
+    setWorkspaceTabStop(controls[next].dataset.workspaceControl)
+    controls[next].focus({ preventScroll: true })
+  }
+  const onWorkspaceToolbarFocus = event => {
+    const key = event.target.closest?.('[data-workspace-control]')?.dataset.workspaceControl
+    if (key) setWorkspaceTabStop(key)
+  }
   const [timelineActivation, setTimelineActivation] = useState({
     runId: null, active: false, focusPending: false,
   })
@@ -953,17 +975,22 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
         {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
           : <span className="pill">read-only review</span>}
-        <div className="view-toggle" role="group" aria-label="Run workspace views">
-          <button type="button" aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
-          {/* Disabled in REVIEW mode too: ConceptView's fetch goes through api.js reviewReadPath, which
-              rewrites it to /api/review/concepts — a route the isolated reviewer namespace (reviews.py)
-              does not register, so a reviewer would get a permanent 404 dressed as a transient outage
-              (and the lens-creation POST spends tokens, which a read-only review must not). */}
-          <button type="button" aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')} disabled={historyActive || reviewMode}
-            onClick={() => setView('concepts')} title="concept tree — group experiments by concept, any lens">Concepts</button>
-          <button type="button" aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
+        <div ref={workspaceToolbarRef} className="view-toggle" role="toolbar"
+          aria-label="Run workspace controls" aria-orientation="horizontal"
+          onKeyDown={onWorkspaceToolbarKeyDown} onFocus={onWorkspaceToolbarFocus}>
+          <button type="button" data-workspace-control="dag" tabIndex={workspaceTabStop === 'dag' ? 0 : -1}
+            aria-pressed={view === 'dag'} className={'vt' + (view === 'dag' ? ' on' : '')} onClick={() => setView('dag')}>Search</button>
+          <button type="button" data-workspace-control="concepts" tabIndex={workspaceTabStop === 'concepts' ? 0 : -1}
+            aria-pressed={view === 'concepts'} className={'vt' + (view === 'concepts' ? ' on' : '')}
+            disabled={reviewMode} onClick={() => setView('concepts')}
+            title={reviewMode ? 'Concept frames are not included in review capabilities'
+              : 'concept tree — group experiments by concept, any lens'}>Concepts</button>
+          <button type="button" data-workspace-control="report" tabIndex={workspaceTabStop === 'report' ? 0 : -1}
+            aria-pressed={view === 'report'} className={'vt report' + (view === 'report' ? ' on' : '')} onClick={() => setView('report')}
             title="conclusion-first run report"><OpIcon name="doc" size={12} /> Report</button>
-          <button type="button" aria-pressed={panel === 'overview'} className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
+          <button type="button" data-workspace-control="overview" tabIndex={workspaceTabStop === 'overview' ? 0 : -1}
+            aria-pressed={panel === 'overview'} aria-expanded={panel === 'overview'}
+            className={'vt' + (panel === 'overview' ? ' on' : '')} disabled={historyActive}
             onClick={event => {
               if (panel === 'overview') closePanel()
               else { panelReturnFocusRef.current = event.currentTarget; setPanel('overview') }
@@ -1143,14 +1170,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 }} />
             </LazyBoundary>
           </div></div>
-        : view === 'concepts' && !historyActive && !reviewMode
-        // Fenced against history AND review mode. History: the Concepts view fetches the LIVE, non-seq
-        // /concepts projection, so it would blend a live tree/metrics with historical rows (and its
-        // lens POST spends tokens read-only). Review: reviewReadPath rewrites the fetch to the isolated
-        // /api/review namespace, which does not register /concepts — a deep link would hard-404. Both
-        // fall through to the graph, which reads the folded `state` directly.
-        ? <div className="main"><LazyBoundary label="concept tree" resetKey={`${runId}:${generation || 'pending'}`}>
-            <ConceptView runId={runId} state={state} onPickNode={(id) => {
+        : view === 'concepts'
+        ? <div className="main"><LazyBoundary label="concept tree"
+            resetKey={`${runId}:${generation || 'pending'}:${historyActive ? viewSeq : 'live'}`}>
+            <ConceptView runId={runId} generation={generation}
+              sequence={historyActive ? viewSeq : null} state={state} onPickNode={(id) => {
               route.update(current => ({ ...current, view: 'dag', nodeId: id,
                 nodeGeneration: null, commentId: null }))
               setSelectedGroup(null)

@@ -2379,6 +2379,7 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-resource-note { display: flex; min-height: 40px; padding: 7px 18px; flex: none; align-items: center; gap: 9px; border-bottom: 1px solid var(--line); background: var(--bg-2); color: var(--fg-dim); font-size: 12px; }
 .cv-resource-note.stale { justify-content: space-between; color: var(--fail-text); }
 .cv-resource-note.partial { color: var(--warn-text); }
+.cv-resource-note.epistemic { color: var(--fg-mut); font-style: italic; }
 .cv-inline-spinner { width: 14px; height: 14px; flex: none; }
 .cv-table-wrap { flex: 1; min-height: 0; overflow: auto; }
 .cv-table { width: 100%; min-width: 720px; border-collapse: collapse; font-size: 13px; }
@@ -2401,6 +2402,27 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-erow { height: 38px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 58%, transparent); }
 .cv-exp-button { display: inline-flex; min-height: 30px; padding: 0 8px; align-items: center; cursor: pointer; border: 0; border-radius: 6px; background: transparent; color: inherit; }
 .cv-exp-button:hover, .cv-exp-button:focus-visible { background: var(--bg-3); outline: 2px solid transparent; }
+.cv-exp-button:disabled { cursor: not-allowed; opacity: .58; }
 .cv-exp { color: var(--fg-dim); font-family: ui-monospace, Menlo, Consolas, monospace; }
 .cv-best { margin-left: 6px; color: var(--best); }
 .cv-expmetric { color: var(--fg-mut); font-style: italic; }
+@media (max-width: 900px) {
+  .cv-bar { grid-template-columns: minmax(0, 1fr) auto; }
+  .cv-heading { grid-column: 1 / -1; }
+  .cv-tree-actions { flex-wrap: wrap; justify-content: flex-end; }
+  .cv-cols { overflow-x: auto; }
+  .cv-col, .cv-cols > span { flex: none; }
+}
+@media (max-width: 600px) {
+  .cv-state-layout { padding: 20px; }
+  .cv-state-card { width: 100%; min-height: 0; padding: 28px 20px; }
+  .cv-empty-flow { flex-wrap: wrap; justify-content: center; }
+  .cv-bar { display: flex; padding: 12px; align-items: stretch; flex-direction: column; }
+  .cv-lensctl { justify-content: space-between; }
+  .cv-lensctl .text { min-width: 0; max-width: 70%; }
+  .cv-tree-actions { justify-content: flex-start; }
+  .cv-cols { padding-top: 10px; }
+  .cv-baseline { margin-left: 8px; }
+  .cv-resource-note { padding-inline: 12px; flex-wrap: wrap; }
+  .cv-resource-note.stale .btn { margin-left: auto; }
+}

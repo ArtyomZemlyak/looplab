@@ -59,9 +59,14 @@ test('compact Inspector dialog has an explicit close or collapse accessible name
 
 test('run view modes are truthful toggles and merge has one explicit confirmation boundary', async () => {
   const [runView, dag] = await Promise.all([source('RunView.jsx'), source('Dag.jsx')])
-  assert.match(runView, /className="view-toggle" role="group" aria-label="Run workspace views"/)
+  assert.match(runView, /className="view-toggle" role="toolbar"/)
+  assert.match(runView, /aria-label="Run workspace controls" aria-orientation="horizontal"/)
+  assert.match(runView, /onKeyDown=\{onWorkspaceToolbarKeyDown\} onFocus=\{onWorkspaceToolbarFocus\}/)
+  assert.equal((runView.match(/data-workspace-control=/g) || []).length, 4)
+  assert.match(runView, /nextRovingIndex\(event\.key, controls\.indexOf\(current\), controls\.length\)/)
   assert.match(runView, /aria-pressed=\{view === 'dag'\}/)
   assert.match(runView, /aria-pressed=\{view === 'report'\}/)
+  assert.match(runView, /aria-pressed=\{panel === 'overview'\} aria-expanded=\{panel === 'overview'\}/)
   assert.match(runView, /<form className="merge-destination-bar"/)
   assert.match(runView, /<label htmlFor="merge-destination-select">/)
   assert.match(runView, /<select ref=\{mergeSelectRef\} id="merge-destination-select"[\s\S]*?autoFocus>/)
