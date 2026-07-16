@@ -34,7 +34,11 @@ def test_every_consumer_probe_is_registered():
     # Telemetry attrs (last_hyp_priority/last_foresight*) have their own explicit-property
     # discipline in surrogate.py — they are read via _emit_role_telemetry's registry, not here.
     telemetry = {"last_hyp_priority", "last_foresight", "last_foresight_pick"}
-    unknown = {n: fs for n, fs in _scan(_CONSUMER).items() if n not in _ALL | telemetry}
+    # RunState domain fields probed defensively with getattr(final, …, default) (e.g. `last_finish_seq`,
+    # read at finalize for old/partial states) — NOT the duck-typed role-output seam. The `last_` prefix
+    # heuristic over-matches them; they carry the RunState model contract, not the roles.py registry.
+    run_state_fields = {"last_finish_seq"}
+    unknown = {n: fs for n, fs in _scan(_CONSUMER).items() if n not in _ALL | telemetry | run_state_fields}
     assert not unknown, (
         f"getattr probe(s) for unregistered role output attr(s): {unknown} — a typo'd read "
         "silently returns the default forever. Register in agents/roles.py or fix the probe.")
