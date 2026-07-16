@@ -114,17 +114,10 @@ EV_CONCEPT_CONSOLIDATION = "concept_consolidation"
 # from node_concepts). Additive + reader-defaulted (empty edge set -> project_hierarchy falls back to the
 # is_a-from-path tree, byte-identical to today). Folds COMMUTATIVELY into RunState.concept_edges
 # (max-confidence-wins keyed on the triple -> order-tolerant). See looplab/search/concept_graph.py.
-# REVIEW(2026-07-16): the whole themes->concepts series (Phase 0 bd816a5 .. Phase 4a 65b7c70:
-# authored Idea.concepts + deprecated theme, this event type, the strategist edge emission, the
-# lens projectors, GET /api/runs/{id}/concepts, the View 1 model) shipped with ZERO docs/diagram
-# updates — CLAUDE.md's own rule says docs + the process infographic move "in the SAME change" and
-# that stale docs ARE a bug. Concretely now wrong/missing: docs/guide/ui.md:197-198 still documents
-# theme grouping/filtering as live (dead on new runs since Phase 0); docs/guide/concepts.md:484
-# still describes the theme-entropy coverage signal (zeroed — see the REVIEW note in
-# events/digest.py); no guide page mentions authored concepts, concept_edge, lenses, or the new
-# /concepts endpoint; docs/infographic/agent-architecture.html has no concept-substrate block for
-# the new cadence->edges->projection flow. The docs debt spans the series, needs one catch-up
-# change before the next phase lands.
+# The themes->concepts series is now documented in the same layer it ships: docs/guide/concepts.md
+# covers authored concepts / concept_edge / lenses / the GET /concepts endpoint / the two views,
+# docs/infographic/agent-architecture.html carries the concept-substrate block, and docs/guide/ui.md
+# marks the legacy theme grouping/filter as the empty-on-concept-runs bridge it now is.
 EV_CONCEPT_EDGE = "concept_edge"
 EV_LLM_COST = "llm_cost"
 EV_LLM_USAGE = "llm_usage"  # durable sanitized provider-call delta; folded cumulatively
