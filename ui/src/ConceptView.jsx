@@ -22,6 +22,14 @@ export default function ConceptView({ runId, state, onPickNode }) {
   const rename = state?.concept_consolidation || {}
   // Refetch the projection when the lens changes or the run grows (a cheap tag-count signal keeps the
   // view live under SSE without re-fetching on every unrelated state tick).
+  // REVIEW(2026-07-16): the total-tag-COUNT signal is lossy in exactly the cases the concept cadence
+  // produces: (1) a B1 staleness re-tag REPLACES a node's ids with the same number of new ids
+  // (count unchanged -> no refetch, tree/metrics stay stale); (2) a consolidation rename changes ids
+  // without touching counts (same); (3) node_evaluated ticks change metrics the endpoint would report
+  // while counts stay flat, so Δ/best columns lag until the next tagging burst. The signal also
+  // ignores `concept_edges`, so a fresh Phase 2c edge emission never refreshes an edge-lens view.
+  // A cheap content signal (e.g. state.seq / events length, or a join of node_concepts ids +
+  // rename size + edge count) refetches correctly for the same effort — count alone under-triggers.
   const ncSize = useMemo(
     () => Object.values(nodeConcepts).reduce((a, v) => a + (v ? v.length : 0), 0), [nodeConcepts])
 
