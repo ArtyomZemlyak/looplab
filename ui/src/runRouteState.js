@@ -103,7 +103,7 @@ function normalizeKinds(value, issues) {
 export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
   const state = emptyRunRouteState()
   if (GENERATION_RE.test(String(input.generation || ''))) state.generation = String(input.generation)
-  if (input.view === 'report') state.view = 'report'
+  if (input.view === 'report' || input.view === 'concepts') state.view = input.view
   if (Number.isSafeInteger(input.nodeId) && input.nodeId >= 0) state.nodeId = input.nodeId
   const nodeGeneration = state.nodeId != null && Number.isSafeInteger(input.nodeGeneration)
     && input.nodeGeneration >= 0 ? input.nodeGeneration : null
