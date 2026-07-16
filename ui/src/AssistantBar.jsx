@@ -1391,7 +1391,9 @@ export default function AssistantBar({ runId, hidden = false }) {
         .filter(c => c.name.startsWith(slashMatch[1].toLowerCase()))
         .filter((c, i, a) => a.findIndex(x => x.name === c.name) === i).slice(0, 6)
     : []
-  const showSuggestions = view === 'bar' && !historical && !suggestionsDismissed && suggestions.length > 0
+  // /command hints show in EVERY view (bar, side, full) — not just the docked bar (users compose in the
+  // side + full composers too and need the same command discovery).
+  const showSuggestions = !historical && !suggestionsDismissed && suggestions.length > 0
   const activeSuggestionIndex = showSuggestions ? Math.min(suggestionIndex, suggestions.length - 1) : -1
   const chooseSuggestion = (index = activeSuggestionIndex) => {
     const choice = suggestions[index]
@@ -1497,6 +1499,23 @@ export default function AssistantBar({ runId, hidden = false }) {
     <span className="asst-modehint muted">{activeMode.hint}</span>
   </div>
 
+  // The /command hint listbox — one definition reused by the docked bar AND the side/full composers, so
+  // command discovery is identical everywhere. Only one view renders at a time, so the shared id is unique.
+  const suggestionPop = showSuggestions ? <div className="cmdbar-pop" id="assistant-command-listbox"
+      role="listbox" aria-label="Assistant commands">
+    {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
+      className="cmdbar-pop-item" role="option" tabIndex={-1} aria-selected={index === activeSuggestionIndex}
+      onMouseMove={() => setSuggestionIndex(index)}
+      onMouseDown={(e) => { e.preventDefault(); chooseSuggestion(index) }}>
+      <b>/{c.name}</b><span className="muted"> {c.desc}</span></button>)}
+  </div> : null
+  // Combobox ARIA shared by every composer input so the hint list is announced consistently.
+  const comboAria = {
+    role: 'combobox', 'aria-autocomplete': 'list', 'aria-expanded': showSuggestions,
+    'aria-controls': 'assistant-command-listbox',
+    'aria-activedescendant': activeSuggestionIndex >= 0 ? `assistant-command-option-${activeSuggestionIndex}` : undefined,
+  }
+
   // A full composer (textarea + attach + send/stop + mode row below) — reused by side + full views.
   const composer = (placeholder) => <div className="chat-in asst-in">
     {historical && <div className="assistant-history-lock">{staleDiagnostic
@@ -1517,9 +1536,10 @@ export default function AssistantBar({ runId, hidden = false }) {
     </div>}
     {fileChips}
     <div className="asst-inrow">
+      {suggestionPop}
       {attachBtn('asst-attach')}
       <textarea className="text" ref={inputRef} value={input}
-        aria-label="Assistant message"
+        aria-label="Assistant message" {...comboAria}
         disabled={historical || commandBusy} onChange={e => { setInput(e.target.value); setSuggestionsDismissed(false); setSuggestionIndex(0) }} onKeyDown={onKey}
         placeholder={historical ? readOnlyShort : placeholder} />
       {busy
@@ -1545,13 +1565,7 @@ export default function AssistantBar({ runId, hidden = false }) {
           {files.map(f => <span key={f.name} className="chip xs file"><OpIcon name="doc" size={10} /> {f.name}
             <button className="chip-x" aria-label={`Remove ${f.name}`} onClick={() => removeFile(f.name)}>✕</button></span>)}
         </div>}
-        {showSuggestions && <div className="cmdbar-pop" id="assistant-command-listbox" role="listbox" aria-label="Assistant commands">
-          {suggestions.map((c, index) => <button key={c.name} id={`assistant-command-option-${index}`}
-            className="cmdbar-pop-item" role="option" tabIndex={-1} aria-selected={index === activeSuggestionIndex}
-            onMouseMove={() => setSuggestionIndex(index)}
-            onMouseDown={(e) => { e.preventDefault(); chooseSuggestion(index) }}>
-            <b>/{c.name}</b><span className="muted"> {c.desc}</span></button>)}
-        </div>}
+        {suggestionPop}
         <input className="cmdbar-in" ref={inputRef} value={input}
           aria-label="Assistant command or question"
           role="combobox" aria-autocomplete="list" aria-expanded={showSuggestions}

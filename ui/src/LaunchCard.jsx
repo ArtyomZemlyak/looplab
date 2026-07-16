@@ -72,6 +72,9 @@ export default function LaunchCard({
   const [warnings, setWarnings] = useState([])
   const [preview, setPreview] = useState(null)
   const [storageBlocked, setStorageBlocked] = useState(false)
+  // Keep the proposal SIMPLE by default: the editable run settings are collapsed so a user can just Start.
+  // "Configure settings" reveals them; they also auto-reveal whenever there is an error to fix.
+  const [configOpen, setConfigOpen] = useState(false)
   const reactId = useId().replace(/:/g, '')
   const titleId = `launch-${reactId}-title`
   const errorId = `launch-${reactId}-errors`
@@ -325,6 +328,9 @@ export default function LaunchCard({
   const errorEntries = Object.entries(errors)
   const taskInvalid = errorEntries.some(([path]) => path === 'task' || path.startsWith('task.'))
   const settingsInvalid = errorEntries.some(([path]) => path === 'settings' || path.startsWith('settings.'))
+  // Reveal the editable config on explicit request OR whenever there is an error to fix (so a collapsed
+  // field is never the reason an error can't be seen/focused).
+  const showConfig = configOpen || errorEntries.length > 0
   return <form className="asst-launch" aria-labelledby={titleId} aria-busy={operationBusy ? 'true' : 'false'}
     onSubmit={event => { event.preventDefault(); validate() }}>
     <div className="asst-launch-h" id={titleId}>
@@ -336,6 +342,18 @@ export default function LaunchCard({
 
     {draft.rationale && <p className="asst-launch-rationale">{draft.rationale}</p>}
 
+    {/* Compact, always-visible run summary + a toggle. Collapsed by default so the common path is just
+        "Start"; the editable settings below open on demand (or automatically when there's an error). */}
+    {!showConfig && <dl className="asst-launch-summary" aria-label="Run summary">
+      {taskRows.map((row, index) => <div key={`${row.label}-${index}`} className={row.invalid ? 'invalid' : ''}>
+        <dt>{row.label}</dt><dd>{row.value}</dd>
+      </div>)}
+    </dl>}
+    <button type="button" className="btn xs ghost asst-launch-configtoggle" aria-expanded={showConfig}
+      disabled={locked} onClick={() => setConfigOpen(open => !open)}>
+      {showConfig ? '▾ Hide settings' : '⚙ Configure settings'}</button>
+
+    {showConfig && <>
     <section className="asst-launch-section" aria-labelledby={`${titleId}-identity`}>
       <h4 id={`${titleId}-identity`}>Run identity</h4>
       <label htmlFor={`launch-${reactId}-run_id`}>Run name</label>
@@ -419,6 +437,7 @@ export default function LaunchCard({
       <p>Operator checklist only — these notes are not commands and are not executed automatically.</p>
       <ol aria-label="Setup notes">{draft.setup_steps.map((step, index) => <li key={index}>{step}</li>)}</ol>
     </section>}
+    </>}
 
     {errorEntries.length > 0 && <div ref={errorRef} id={errorId} className="asst-launch-errors"
       role="alert" tabIndex={-1}>

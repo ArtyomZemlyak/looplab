@@ -1,7 +1,9 @@
 .attention-trigger {
   position: fixed;
   right: 16px;
-  bottom: calc(62px + env(safe-area-inset-bottom, 0px));
+  /* Top-right, just below the ~42px topbar — moved off the BOTTOM-right where it overlapped the docked
+     assistant bar / run action buttons. The panel it opens is a full-screen overlay, so it is unaffected. */
+  top: calc(52px + env(safe-area-inset-top, 0px));
   z-index: 180;
   display: inline-grid;
   place-items: center;
@@ -354,7 +356,7 @@
 @media (max-width: 600px) {
   .attention-trigger {
     right: 12px;
-    bottom: calc(58px + env(safe-area-inset-bottom, 0px));
+    top: calc(50px + env(safe-area-inset-top, 0px));
   }
   .attention-drawer { width: 100vw; border-left: 0; }
   .attention-header { padding-left: 12px; }
