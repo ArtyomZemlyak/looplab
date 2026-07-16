@@ -366,6 +366,15 @@ def run(
         task = validate_task(task_dict)
     except (ValueError, KeyError, TypeError) as e:
         raise typer.BadParameter(f"invalid task: {e}")
+    # CODEX AGENT: the task adapters own comparison-contract validation and identity.  Persist their
+    # canonical value (including contract_id), never the pre-validation authoring dict, so CLI and
+    # Web/TUI/API launches produce the same scientific provenance in task.snapshot.json.
+    comparison_contract = getattr(task, "comparison_contract", None)
+    if comparison_contract is not None:
+        task_dict["comparison_contract"] = comparison_contract.model_dump(
+            mode="json", by_alias=True, exclude_none=True)
+    else:
+        task_dict.pop("comparison_contract", None)
     # Path sanity-check (esp. for Genesis-authored tasks): warn loudly when an input path doesn't
     # exist, so a mistyped/invented data/repo path is caught HERE — not as a cryptic mid-run
     # 'No such file or directory'. A warning (not a hard stop): a repo's setup step may create some

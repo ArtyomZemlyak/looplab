@@ -11,6 +11,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
@@ -113,6 +114,7 @@ class ClassificationTask(BaseModel):
     id: str = "blob_classification"
     goal: str = "tune a logistic-regression learner to maximize K-fold CV accuracy"
     direction: str = "max"
+    comparison_contract: ComparisonContract | None = None
     n: int = 80
     sep: float = 1.5
     seed: int = 0

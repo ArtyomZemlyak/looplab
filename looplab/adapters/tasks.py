@@ -57,6 +57,9 @@ class TaskAdapter(Protocol):
     - `make_onboarder(settings)` — RepoTask Phase 3 onboarding proposer; consumed by `cli.py`.
     - `params` (attribute) — CLI-override param space; read by `make_roles` (this module,
       the param-search guard) and `runtime/command_eval.py` (params_style="cli_overrides").
+    - `comparison_contract` (attribute) — optional typed scientific comparability identity;
+      persisted by launch surfaces and consumed only by cross-run reporting. Third-party adapters
+      that do not opt in remain valid TaskAdapter implementations and produce unranked observations.
     """
     id: str
     goal: str
@@ -74,6 +77,7 @@ class TaskAdapter(Protocol):
 TASK_OPTIONAL_HOOKS: tuple[str, ...] = (
     "llm_roles", "assets", "columns", "leakage_inputs", "host_grader", "data_samples",
     "repo_spec", "agent_brief", "eval_spec", "make_onboarder", "params",
+    "comparison_contract",
     # RepoTask-specific field probed by the repo Developer's onboarding flow
     # (adapters/repo_developer.py) — registered so a one-sided rename goes red like any hook.
     "onboard_command")
@@ -309,6 +313,14 @@ def validate_task(data: dict) -> TaskAdapter:
     if cls is None:
         raise ValueError(f"unknown task kind: {kind!r} (known: {sorted(_KINDS)})")
     adapter = cls.model_validate(data)
+    contract = getattr(adapter, "comparison_contract", None)
+    if contract is not None and contract.direction != adapter.direction:
+        # CODEX AGENT: direction is part of both execution and comparison semantics.  A mismatch
+        # cannot be resolved later without silently reversing a ranking, so every launch surface
+        # rejects it at the shared task-validation boundary.
+        raise ValueError(
+            "comparison_contract.direction must match the task direction "
+            f"({contract.direction!r} != {adapter.direction!r})")
     # The engine's startup invariant (orchestrator.__init__), pulled UP to submit time so /api/start
     # rejects a bad repo spec with a 400 (and the assistant re-proposes) instead of spawning a detached
     # engine that dies before writing any events — the "click Start, then GET events → 404" trap. Kept
@@ -342,7 +354,7 @@ def _agent_model(backend: str, model: str) -> str:
 # Re-export: the factory moved to its dependency-true home (core/llm.py — it only ever needed
 # core symbols). Kept importable here because dozens of call sites + tests spell
 # `from looplab.adapters.tasks import make_llm_client`.
-from looplab.core.llm import make_llm_client  # noqa: F401
+from looplab.core.llm import make_llm_client  # noqa: E402,F401
 
 
 def _memora_cache_path(settings):

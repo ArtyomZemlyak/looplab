@@ -18,6 +18,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
@@ -238,6 +239,7 @@ class RepoTask(BaseModel):
     id: str = "repo_task"
     goal: str = ""
     direction: str = "max"                    # "min" | "max"
+    comparison_contract: ComparisonContract | None = None
     seed: int = 0
 
     editable_path: str = ""                   # the repo the agent may modify (mounts at root)
@@ -292,7 +294,8 @@ class RepoTask(BaseModel):
         is inherently tied to a local path, so resuming on a DIFFERENT machine/user whose home differs
         already needs editable_path re-pointed — the absolute snapshot just makes that explicit instead
         of silently re-resolving `~` to a different repo.)"""
-        exp = lambda p: os.path.expanduser(os.path.expandvars(p)) if isinstance(p, str) and p else p
+        def exp(p):
+            return os.path.expanduser(os.path.expandvars(p)) if isinstance(p, str) and p else p
         self.editable_path = exp(self.editable_path)
         for e in self.editables:
             e.path = exp(e.path)

@@ -15,6 +15,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
@@ -146,6 +147,7 @@ class RegressionTask(BaseModel):
     id: str = "poly_regression"
     goal: str = "select polynomial degree + ridge lambda minimizing K-fold CV MSE"
     direction: str = "min"
+    comparison_contract: ComparisonContract | None = None
     n: int = 40
     true_degree: int = 2
     noise: float = 1.0
@@ -195,6 +197,7 @@ class CodeRegressionTask(BaseModel):
     id: str = "code_poly_regression"
     goal: str = "write code that fits a polynomial+ridge model minimizing K-fold CV MSE"
     direction: str = "min"
+    comparison_contract: ComparisonContract | None = None
     n: int = 40
     true_degree: int = 2
     noise: float = 1.0

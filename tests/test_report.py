@@ -2037,14 +2037,44 @@ def test_genesis_async_job_path(tmp_path, monkeypatch):
 
 
 # ---- cross-run aggregate (scope) reports: project / task / super-task, one generator ----
+def _comparison_contract(direction="min", *, split="validation"):
+    return {
+        "schema": 1,
+        "dataset_lineage": "dataset:v1",
+        "split_or_candidate_pool_lineage": split,
+        "evaluator_uid": "eval",
+        "evaluator_version": "1",
+        "population": "all",
+        "filter": "none",
+        "metric_uid": "objective",
+        "unit": "score",
+        "direction": direction,
+        "aggregation": "mean",
+        "cutoff": "none",
+        "measurement_phase": "search",
+        "uncertainty_protocol": "none",
+        "constraints_digest": "none",
+    }
+
+
+def _comparison_measurement(contract, value):
+    return {"value": value, "phase": "search", "source": "best.metric",
+            "uncertainty": {"protocol": contract["uncertainty_protocol"]}}
+
+
 def test_scope_report_module_deterministic_ranks_and_degrades():
-    """The generator with no client returns an honest metrics rollup, ranks by the dominant direction,
-    and always carries every key so the UI renders unconditionally."""
+    """The offline rollup ranks only one exact explicit comparison cohort."""
     from looplab.serve.scope_report import generate_scope_report
-    briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None},
-              {"run_id": "b", "direction": "min", "best_metric": 0.05, "report": {"headline": "h"}}]
+    contract = _comparison_contract()
+    briefs = [{"run_id": "a", "direction": "min", "best_metric": 0.06, "report": None,
+               "comparison_contract": contract,
+               "comparison_measurement": _comparison_measurement(contract, 0.06)},
+              {"run_id": "b", "direction": "min", "best_metric": 0.05,
+               "report": {"headline": "h"}, "comparison_contract": contract,
+               "comparison_measurement": _comparison_measurement(contract, 0.05)}]
     c = generate_scope_report({"type": "task", "id": "t", "label": "task t"}, briefs, None)
-    assert c["best_runs"][0]["run_id"] == "b"            # lower-better → 0.05 ranks first
+    assert c["best_runs"] == []
+    assert c["comparison_groups"][0]["winner"]["run_id"] == "b"
     for k in ("headline", "verdict", "best_runs", "what_worked", "what_didnt",
               "learnings", "next_directions", "caveats"):
         assert k in c
@@ -2096,20 +2126,26 @@ def test_scope_report_rejects_out_of_scope_drill_before_callback(monkeypatch):
     )
 
     assert calls == []
-    assert content["verdict"] == "(no such run in scope: 'outside-secret-run')"
+    assert content["verdict"] == "(no such run in scope)"
     assert "PRIVATE OUT-OF-SCOPE EVIDENCE" not in str(content)
 
 
-def test_scope_report_ranks_each_run_by_its_own_direction():
-    """A mixed-direction scope (project/super-task spanning tasks) must NOT rank a max-objective run
-    backwards under a single set-wide direction."""
+def test_scope_report_never_ranks_incompatible_or_uncontracted_metrics():
+    """Direction is not a comparison contract: accuracy, RMSE and loss have no shared rank."""
     from looplab.serve.scope_report import _ranked
     briefs = [{"run_id": "loss1", "direction": "min", "best_metric": 0.10},
               {"run_id": "loss2", "direction": "min", "best_metric": 0.50},
-              {"run_id": "acc", "direction": "max", "best_metric": 0.95}]   # high accuracy = genuinely best
-    order = [b["run_id"] for b in _ranked(briefs)]
-    assert order[0] == "acc"                             # max-run with 0.95 leads, not buried last
-    assert order.index("loss1") < order.index("loss2")  # min-runs still ascending among themselves
+              {"run_id": "acc", "direction": "max", "best_metric": 0.95}]
+    assert _ranked(briefs) == []
+
+    shared = _comparison_contract("min")
+    comparable = [
+        {**briefs[0], "comparison_contract": shared,
+         "comparison_measurement": _comparison_measurement(shared, briefs[0]["best_metric"])},
+        {**briefs[1], "comparison_contract": shared,
+         "comparison_measurement": _comparison_measurement(shared, briefs[1]["best_metric"])},
+    ]
+    assert [row["run_id"] for row in _ranked(comparable)] == ["loss1", "loss2"]
 
 
 def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
@@ -2121,9 +2157,12 @@ def test_scope_report_blank_emit_falls_back_to_deterministic(monkeypatch):
                         lambda client, tools, messages, emit_spec, **kw: kw["finalize"]({}))
     c = scope_report.generate_scope_report(
         {"type": "task", "id": "t", "label": "task t"},
-        [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None}], object())
+        [{"run_id": "a", "direction": "min", "best_metric": 0.05, "report": None,
+          "comparison_contract": _comparison_contract(),
+          "comparison_measurement": _comparison_measurement(_comparison_contract(), 0.05)}], object())
     assert "deterministic" in c["verdict"]              # fell back, not a blank report
-    assert c["best_runs"][0]["run_id"] == "a"
+    assert c["comparison_groups"][0]["winner"] is None
+    assert c["comparison_groups"][0]["indeterminate"] == "insufficient_population"
 
 
 def test_scope_report_forces_structured_synthesis_when_loop_doesnt_emit(monkeypatch):

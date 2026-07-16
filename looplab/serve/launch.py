@@ -19,6 +19,7 @@ from pydantic import ValidationError
 
 from looplab.adapters import tasks as task_adapters
 from looplab.core.appconfig import load_document
+from looplab.core.comparison import canonical_comparison_contract
 from looplab.core.config import Settings
 from looplab.serve.appstate import _RESERVED_RUN_IDS
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
@@ -399,8 +400,21 @@ def preflight_start(srv, body: Any) -> LaunchPreflight:
         _reject(422, "invalid_task", f"task is invalid: {exc}", "task")
     # Some embedders/tests inject a validator returning the canonical dict directly; the production
     # registry returns a Pydantic TaskAdapter. Supporting both keeps the helper dependency-injectable.
+    # CODEX AGENT: this typed adapter dump is the one task document shared by browser, TUI, and
+    # direct API launches.  In particular it preserves the validated comparison_contract and its
+    # canonical contract_id into task.input.json -> task.snapshot.json; never merge the raw body back.
     canonical_task = (dict(adapter) if isinstance(adapter, dict)
                       else adapter.model_dump(mode="json"))
+    raw_contract = (canonical_task.get("comparison_contract") if isinstance(adapter, dict)
+                    else getattr(adapter, "comparison_contract", None))
+    canonical_contract = canonical_comparison_contract(raw_contract)
+    if raw_contract is not None and canonical_contract is None:
+        _reject(422, "invalid_task", "task comparison_contract is invalid",
+                "task.comparison_contract")
+    if canonical_contract is None:
+        canonical_task.pop("comparison_contract", None)
+    else:
+        canonical_task["comparison_contract"] = canonical_contract
     referenced_paths = _validated_path_fingerprints(canonical_task)
 
     launch_settings = _validate_settings_keys(body.get("settings") or {}, "launch")

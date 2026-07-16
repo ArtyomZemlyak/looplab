@@ -9,6 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher, ToyObjectiveDeveloper, ToyResearcher
 
@@ -18,6 +19,7 @@ class ToyTask(BaseModel):
     id: str = "toy_quadratic"
     goal: str = "minimize (x-3)^2 + (y+1)^2"
     direction: str = "min"
+    comparison_contract: ComparisonContract | None = None
     bounds: dict[str, tuple[float, float]] = Field(
         default_factory=lambda: {"x": (-10.0, 10.0), "y": (-10.0, 10.0)}
     )

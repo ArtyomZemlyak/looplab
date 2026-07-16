@@ -38,6 +38,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
@@ -182,6 +183,7 @@ class MLEBenchTask(BaseModel):
     goal: str = ("train a classifier on train.json and maximize held-out accuracy on "
                  "test.json, scored by the private grader")
     direction: str = "max"          # accuracy: higher is better
+    comparison_contract: ComparisonContract | None = None
     seed: int = 0
     n_train: int = 80
     n_test: int = 40

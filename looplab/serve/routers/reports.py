@@ -1,7 +1,8 @@
 """Cross-run aggregate report routes. On-demand portfolio reports over a SET of runs (a project
 folder, a task, or a super-task) — ONE generator, three scope axes. Persisted under
 <run-root>/reports/ with a run-set fingerprint so the UI can flag staleness; an agent reads every
-run in the set (per-run reports + drill) and synthesizes. Bodies are verbatim moves from
+accepted run through a bounded/redacted brief and bounded drill projection, then synthesizes.
+Bodies are verbatim moves from
 `serve/server.py::make_app` (BACKLOG §4)."""
 from __future__ import annotations
 
@@ -19,10 +20,21 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.comparison import (
+    canonical_comparison_contract,
+    comparison_measurement,
+    finite_measurement,
+)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 from looplab.events.replay import fold
 from looplab.serve.run_commands import run_generation_token
+from looplab.serve.scope_report import (
+    DEFAULT_SCOPE_REPORT_TIME_S,
+    DEFAULT_SCOPE_REPORT_TURNS,
+    MAX_SCOPE_REPORT_RUNS,
+)
+from looplab.trust.redact import redact_persisted_text
 
 
 _SCOPE_TYPES = frozenset({"project", "task", "supertask"})
@@ -178,7 +190,7 @@ def _valid_source_revision(revision: object) -> bool:
     generation = revision.get("generation")
     digest = revision.get("tail_digest")
     log_sig = revision.get("log_sig")
-    return (
+    base_valid = (
         isinstance(revision.get("run_id"), str)
         and isinstance(generation, str)
         and _RUN_GENERATION_RE.fullmatch(generation) is not None
@@ -190,6 +202,14 @@ def _valid_source_revision(revision: object) -> bool:
         and log_sig[0] == revision["run_id"]
         and log_sig[1] == generation
     )
+    if not base_valid:
+        return False
+    for field in ("events_digest", "task_snapshot_digest", "config_snapshot_digest"):
+        value = revision.get(field)
+        if value is not None and (
+                not isinstance(value, str) or _RUN_GENERATION_RE.fullmatch(value) is None):
+            return False
+    return True
 
 
 def _record_payload_matches_scope(rec: object, scope_type: str, scope_id: str) -> bool:
@@ -390,6 +410,31 @@ def build_router(srv) -> APIRouter:
         except (OSError, RuntimeError):
             return [run_id, "", 0, 0, 0, 0, 0]
 
+    def _file_digest(path: Path) -> str:
+        digest = hashlib.sha256()
+        try:
+            with path.open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+        except FileNotFoundError:
+            return hashlib.sha256(b"<missing>").hexdigest()
+        return digest.hexdigest()
+
+    def _scope_context_digest(scope_type: str, scope_id: str, run_ids: list[str]) -> str:
+        project_data = projects.load()
+        labels = project_data.get("labels", {}) if isinstance(project_data, dict) else {}
+        context = {
+            "scope": _scope_identity(scope_type, scope_id),
+            "label": _scope_label(scope_type, scope_id),
+            "run_labels": {rid: labels.get(rid) for rid in sorted(set(run_ids))},
+            # Project rename/reparent and super-task assignment can change report meaning even when
+            # the resulting membership happens to contain the same run ids.
+            "projects_revision": project_data,
+        }
+        return hashlib.sha256(json.dumps(
+            context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
+        ).encode("utf-8")).hexdigest()
+
     def _capture_source(run_id: str, rd: Path | None = None) -> tuple[Path, list, dict]:
         """Read one exact event prefix and bind it to generation, tail, and file identity."""
         rd = rd if rd is not None else _run_dir(run_id)
@@ -404,6 +449,13 @@ def build_router(srv) -> APIRouter:
         log_sig = _log_sig(run_id, rd, generation)
         if log_sig[1] != generation:
             raise OSError("event log disappeared while freezing scope evidence")
+        events_hash = hashlib.sha256()
+        for event in events:
+            events_hash.update(json.dumps(
+                event.model_dump(mode="json"), ensure_ascii=False, sort_keys=True,
+                separators=(",", ":"), default=str,
+            ).encode("utf-8"))
+            events_hash.update(b"\n")
         revision = {
             "run_id": run_id,
             "generation": generation,
@@ -411,6 +463,9 @@ def build_router(srv) -> APIRouter:
             "event_count": len(events),
             "tail_digest": hashlib.sha256(tail_payload).hexdigest(),
             "log_sig": log_sig,
+            "events_digest": events_hash.hexdigest(),
+            "task_snapshot_digest": _file_digest(rd / "task.snapshot.json"),
+            "config_snapshot_digest": _file_digest(rd / "config.snapshot.json"),
         }
         return rd, events, revision
 
@@ -426,28 +481,92 @@ def build_router(srv) -> APIRouter:
                 cfg = json.loads(snap.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 cfg = {}
+        task_contract = None
+        task_snap = rd / "task.snapshot.json"
+        try:
+            # Task snapshots are operator-authored and can be arbitrarily large. Comparison metadata
+            # is useful only when the whole bounded JSON document is readable and explicitly valid.
+            if task_snap.stat().st_size <= 1_000_000:
+                task_doc = json.loads(task_snap.read_text(encoding="utf-8"))
+                if isinstance(task_doc, dict):
+                    task_contract = canonical_comparison_contract(
+                        task_doc.get("comparison_contract"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            task_contract = None
+        if task_contract is not None and task_contract["direction"] != st.direction:
+            task_contract = None
+        measurement = comparison_measurement(task_contract, best)
+        # An explicit phase contract never falls back to the generic search metric.  Legacy runs
+        # without a contract retain an unranked observation, while opted-in runs with missing/non-
+        # finite phase evidence publish no measurement at all.
+        best_metric = (measurement["value"] if measurement is not None else
+                       finite_measurement(best.metric) if task_contract is None and best else None)
         return {"run_id": run_id, "label": labels.get(run_id), "task_id": st.task_id,
                 "goal": st.goal, "direction": st.direction,
                 "model": cfg.get("llm_model"), "policy": cfg.get("policy"),
-                "best_metric": (best.metric if best else None),
+                "best_metric": best_metric,
                 "phase": _phase(st, finalize_incomplete=finalize_incomplete),
                 "nodes": len(st.nodes),
-                "report": st.report if isinstance(st.report, dict) else None}
+                "report": st.report if isinstance(st.report, dict) else None,
+                "comparison_contract": task_contract,
+                # CODEX AGENT: this single bounded receipt is the only cross-run numeric evidence.
+                # Scope projection must copy it atomically; phase/source/uncertainty are inseparable.
+                "comparison_measurement": measurement}
 
     def _scope_drill(frozen_runs: dict, run_id: str, node_id: int) -> str:
-        """Read only an exact contributed prefix; model-provided ids never resolve paths."""
+        """Project one frozen node without code, files, stdout/stderr, or raw tool output."""
         frozen = frozen_runs.get(run_id)
         if frozen is None:
             return "(drill unavailable)"
         try:
-            from looplab.tools.run_tools import RunTools
             _rd, events, revision = _capture_source(run_id, frozen["run_dir"])
             if revision != frozen["revision"]:
                 return "(drill unavailable: frozen run changed)"
             st = fold(events)
-            rt = RunTools()
-            rt.bind_state(st, None)
-            return rt.execute("read_experiment", {"node_id": node_id})
+            node = st.nodes.get(node_id)
+            if node is None:
+                return "(drill unavailable: no such node)"
+
+            def _safe_text(value: object, cap: int) -> str:
+                return redact_persisted_text(
+                    value, max_chars=cap, entropy=True, single_line=True)
+
+            idea = node.idea
+            params = {
+                _safe_text(key, 96): metric
+                for key, metric in list((idea.params or {}).items())[:32]
+                if _safe_text(key, 96) and finite_measurement(metric) is not None
+            }
+            trials = []
+            for trial in list(node.trials or ())[:8]:
+                trials.append({
+                    "params": {
+                        _safe_text(key, 96): metric
+                        for key, metric in list((trial.params or {}).items())[:16]
+                        if _safe_text(key, 96) and finite_measurement(metric) is not None
+                    },
+                    "metric": finite_measurement(trial.metric),
+                    "seconds": finite_measurement(trial.seconds),
+                })
+            status = getattr(node.status, "value", node.status)
+            projection = {
+                "schema": 1,
+                "run_id": _safe_text(run_id, 256),
+                "node_id": node.id,
+                "status": _safe_text(status, 64),
+                "operator": _safe_text(node.operator, 128),
+                "rationale": _safe_text(idea.rationale, 1_000),
+                "params": params,
+                "metric": finite_measurement(node.metric),
+                "confirmed_mean": finite_measurement(node.confirmed_mean),
+                "confirmed_std": finite_measurement(node.confirmed_std),
+                "holdout_metric": finite_measurement(node.holdout_metric),
+                "feasible": bool(node.feasible),
+                "trials": trials,
+                "trials_total": len(node.trials or ()),
+                "trials_omitted": max(0, len(node.trials or ()) - len(trials)),
+            }
+            return json.dumps(projection, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         except Exception:  # noqa: BLE001 - deep access is best-effort
             # This string becomes model input and may be echoed into the persisted/public report.
             # Run/tool exceptions can contain paths or provider metadata, so keep the diagnostic
@@ -480,14 +599,24 @@ def build_router(srv) -> APIRouter:
                     "label": _scope_label(scope_type, scope_id)}
         added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
         stale = _scope_sig(cur_ids) != rec.get("sig")
+        source_revisions = rec.get("source_revisions")
+        if not stale and isinstance(source_revisions, list):
+            try:
+                current_revisions = [
+                    _capture_source(run_id)[2] for run_id in rec.get("run_ids", [])]
+                # A pre-v2 revision lacks task/config/full-prefix digests. Treat it as stale rather
+                # than claiming that a newly model-visible input stayed unchanged.
+                stale = current_revisions != source_revisions
+            except Exception:  # noqa: BLE001 - uncertain input identity is stale, never current
+                stale = True
         return {**rec, "exists": True, "stale": stale,
                 "current_run_count": len(cur_ids), "added": added}
 
     @router.post("/api/scope-report/{scope_type}/{scope_id}/generate")
     async def generate_scope_report_ep(scope_type: str, scope_id: str):
         """Generate (or regenerate) the cross-run report for a scope. On-demand only — the agent reads
-        every run in the set (their per-run reports, configs, metrics) and synthesizes, drilling into
-        any run when needed. Degrades to a metrics rollup offline. Runs as a BACKGROUND JOB: reading +
+        a bounded/redacted projection of at most ``MAX_SCOPE_REPORT_RUNS`` runs and may request a
+        bounded node drill. Degrades to a metrics rollup offline. Runs as a BACKGROUND JOB: reading +
         synthesizing over many runs can outlast a UI proxy's gateway timeout, so a slow synthesis hands
         back a job_id the UI polls (a fast/offline one still returns inline within the wait — no 504)."""
         if scope_type not in _SCOPE_TYPES:
@@ -495,6 +624,17 @@ def build_router(srv) -> APIRouter:
         run_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
         if not run_ids:
             raise HTTPException(400, "no runs in this scope")
+        if len(run_ids) > MAX_SCOPE_REPORT_RUNS:
+            raise HTTPException(413, {
+                "code": "scope_report_too_large",
+                "message": (
+                    f"This scope has {len(run_ids)} runs; paid synthesis is limited to "
+                    f"{MAX_SCOPE_REPORT_RUNS} model-visible runs."
+                ),
+                "run_count": len(run_ids),
+                "max_runs": MAX_SCOPE_REPORT_RUNS,
+                "remediation": "Generate reports for narrower child scopes.",
+            })
         try:
             with _scope_store_lock(_reports_dir):
                 _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
@@ -506,7 +646,18 @@ def build_router(srv) -> APIRouter:
             frozen_scope_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
             if not frozen_scope_ids:
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+            if len(frozen_scope_ids) > MAX_SCOPE_REPORT_RUNS:
+                return {
+                    "ok": False,
+                    "code": "scope_report_too_large",
+                    "error_kind": "capacity",
+                    "error": "The scope grew beyond the bounded report input limit.",
+                    "run_count": len(frozen_scope_ids),
+                    "max_runs": MAX_SCOPE_REPORT_RUNS,
+                }
             frozen_scope_sig = _scope_sig(frozen_scope_ids)
+            frozen_context_digest = _scope_context_digest(
+                scope_type, scope_id, frozen_scope_ids)
             labels = projects.load().get("labels", {})
             briefs = []
             frozen_runs: dict[str, dict] = {}
@@ -517,19 +668,28 @@ def build_router(srv) -> APIRouter:
                     frozen_runs[rid] = {"run_dir": rd, "revision": revision}
                 except Exception:  # noqa: BLE001 - a half-written run shouldn't block the report
                     continue
-            scope = {"type": scope_type, "id": scope_id, "label": _scope_label(scope_type, scope_id)}
+            scope = {
+                "type": scope_type,
+                "id": scope_id,
+                "label": _scope_label(scope_type, scope_id),
+                # CODEX AGENT: preserve honest scope coverage even when a corrupt/unreadable run cannot
+                # contribute a brief. The model sees only frozen briefs; the receipt counts the omission.
+                "source_run_count": len(frozen_scope_ids),
+            }
             from looplab.serve.scope_report import generate_scope_report as _gen
             s = srv.llm_settings(None)
             try:
                 client = srv.make_llm_client(s)
-                # Config-driven agent loop limits (default UNLIMITED) from jovial-kalam — a slow
-                # reasoning model can't be cut off before it emits; combined with the background-job
-                # wrapper below so a long synthesis returns {status:running} rather than 504ing.
+                # Paid cross-run synthesis is an interactive bounded operation. Global agent settings
+                # may be unlimited for autonomous engine work; this endpoint supplies finite defaults,
+                # and generate_scope_report independently enforces hard maxima.
                 drill = lambda run_id, node_id: _scope_drill(  # noqa: E731
                     frozen_runs, run_id, node_id)
                 content = _gen(scope, briefs, client, parser=s.llm_parser, drill=drill,
-                               max_turns=getattr(s, "agent_max_turns", 0),
-                               time_budget_s=getattr(s, "agent_time_budget_s", 0.0))
+                               max_turns=(getattr(s, "agent_max_turns", 0)
+                                          or DEFAULT_SCOPE_REPORT_TURNS),
+                               time_budget_s=(getattr(s, "agent_time_budget_s", 0.0)
+                                              or DEFAULT_SCOPE_REPORT_TIME_S))
             except Exception:  # noqa: BLE001 - offline -> deterministic rollup still persists
                 content = _gen(scope, briefs, None)
             # Record coverage + staleness over the runs that ACTUALLY contributed a brief — a run skipped
@@ -541,6 +701,9 @@ def build_router(srv) -> APIRouter:
                 try:
                     current_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
                     if current_ids != frozen_scope_ids or _scope_sig(current_ids) != frozen_scope_sig:
+                        return False
+                    if (_scope_context_digest(scope_type, scope_id, current_ids)
+                            != frozen_context_digest):
                         return False
                     for rid in brief_ids:
                         _rd, _events, revision = _capture_source(
@@ -564,6 +727,14 @@ def build_router(srv) -> APIRouter:
                     if (sorted(set(_scope_run_ids(scope_type, scope_id))) != frozen_scope_ids
                             or _scope_sig(frozen_scope_ids) != frozen_scope_sig):
                         return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+                    if (_scope_context_digest(scope_type, scope_id, frozen_scope_ids)
+                            != frozen_context_digest):
+                        return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
+                    for rid in brief_ids:
+                        _rd, _events, revision = _capture_source(
+                            rid, frozen_runs[rid]["run_dir"])
+                        if revision != frozen_runs[rid]["revision"]:
+                            return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
                     # Revalidate the lexical store and re-derive the destination immediately before
                     # publication. A directory/file swapped during the slow model call is refused.
                     _validated_reports_dir(_reports_dir, create=True)

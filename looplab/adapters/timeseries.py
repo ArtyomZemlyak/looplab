@@ -15,6 +15,7 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMResearcher
@@ -103,6 +104,7 @@ class TimeSeriesTask(BaseModel):
     id: str = "seasonal_forecast"
     goal: str = "choose a forecaster's smoothing weight + seasonal period to minimize backtest MASE"
     direction: str = "min"
+    comparison_contract: ComparisonContract | None = None
     n: int = 120
     period: int = 7
     trend: float = 0.05

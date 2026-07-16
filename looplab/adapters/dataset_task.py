@@ -30,6 +30,7 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
@@ -155,6 +156,7 @@ class DatasetTask(BaseModel):
     id: str = "dataset_task"
     goal: str = ""
     direction: str = "max"                      # default: a higher-is-better metric
+    comparison_contract: ComparisonContract | None = None
     seed: int = 0
     data_path: str = ""                         # abs path to the data (file or dir) the agent reads
     data: dict[str, str] = Field(default_factory=dict)   # optional extra named paths (name -> path)

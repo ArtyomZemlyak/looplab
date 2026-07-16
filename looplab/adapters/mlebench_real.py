@@ -27,6 +27,7 @@ from typing import Optional
 
 from pydantic import BaseModel, model_validator
 
+from looplab.core.comparison import ComparisonContract
 from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import LLMClient
 from looplab.agents.roles import LLMDeveloper, LLMResearcher
@@ -78,6 +79,7 @@ class MLEBenchRealTask(BaseModel):
     data_dir: Optional[str] = None     # override the mle-bench data dir (else its default)
     goal: str = ""                     # defaults from the competition description
     direction: str = "auto"            # resolved from the grader/leaderboard
+    comparison_contract: ComparisonContract | None = None
     submission: str = "submission.csv"
     grade_timeout: float = 300.0
     # Offline baseline hyperparameter bounds (NB smoothing / ridge lambda), tuned by the Researcher.
