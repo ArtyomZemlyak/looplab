@@ -926,6 +926,14 @@ _SYMMETRIC_RELS = frozenset({"co_occurs", "related_to"})
 
 
 def _lens_rels(lens) -> Optional[set]:
+    # REVIEW(2026-07-16): returning None for the STRING "is_a" makes project_lens apply NO rel filter
+    # at all — `project_lens(ids, edges, "is_a")` silently builds a tree from EVERY stored relation
+    # (is_a + uses + co_occurs mixed, co_occurs edges even flipping to touch-orientation), which is
+    # never a meaningful hierarchy. The dict form from default_lenses() ({"rels": ["is_a"]}) filters
+    # correctly, so the two spellings of the same lens disagree. If the intent is "is_a is the
+    # path-kind lens, use project_hierarchy for it", project_lens should either map the string to
+    # {"is_a"} (edge-asserted is_a edges DO exist since Phase 2c) or reject it loudly — not degrade
+    # into an unfiltered mixed-rel projection.
     if isinstance(lens, str):
         return None if lens == "is_a" else {lens}
     rels = lens.get("rels") if isinstance(lens, dict) else None
@@ -997,6 +1005,11 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
         for ch in sorted(children.get(cid, [])):
             dq.append((ch, d + 1))
     nodes = {}
+    # REVIEW(2026-07-16): same defect as project_hierarchy above — iterating the raw `all_ids` SET makes
+    # the `nodes` dict's key order string-hash-dependent (randomized per process), so serialized output
+    # is not byte-stable despite the "DETERMINISTIC" docstring; iterate `sorted(all_ids)`. Also: a
+    # derive_lens spec may carry a `root` field, but project_lens never reads it — a minted
+    # "focus on <root>" lens silently projects the WHOLE graph (see the REVIEW note on derive_lens).
     for cid in all_ids:
         prim = parent_of.get(cid)
         cross = sorted({p for _, p in cand.get(cid, []) if p != prim and p in all_ids})
