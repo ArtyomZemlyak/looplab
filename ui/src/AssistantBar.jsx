@@ -1467,10 +1467,10 @@ export default function AssistantBar({ runId, hidden = false }) {
         onLaunchDraft={(key, draft) => setLaunchDrafts(current => retainLaunchDraft(current, key, draft))}
         onLaunchStarted={key => {
           setLaunchDrafts(current => removeLaunchDraft(current, key))
-          // Starting a run means the user wants to ACT on it — lift the read-only 'plan' default to 'Ask'
-          // so they can immediately drive the run from chat (still confirming each change). A mode the user
-          // explicitly picked (ask/auto-edit/auto) is preserved; full 'auto' stays an explicit opt-in.
-          setMode(current => current === 'plan' ? 'default' : current)
+          // Starting a run means the user wants to ACT on it — lift the read-only 'plan' default straight to
+          // full 'Auto' (the assistant drives the run without asking) so the common path is frictionless.
+          // A mode the user EXPLICITLY chose (ask / auto-edit / auto) is preserved rather than overridden.
+          setMode(current => current === 'plan' ? 'auto' : current)
         }} />
     </React.Fragment>)}
     {!historical && pending.length > 0 && <div className="asst-perm-region" role="region"
