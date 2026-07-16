@@ -1065,7 +1065,6 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .report-view { max-width: 1000px; margin: 0 auto; padding: 18px 22px 60px; }
 .report-toolbar { position: sticky; top: 0; z-index: 3; background: var(--bg); padding: 8px 0;
   border-bottom: 1px solid var(--line); margin-bottom: 12px; }
-.report-fresh { font-size: 11px; }
 .report-title { font-size: 19px; margin: 4px 0 2px; }
 .report-sub { font-size: 12px; margin-bottom: 14px; }
 

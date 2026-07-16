@@ -78,6 +78,46 @@ export function normalizeRunReport(value) {
   }
   const atNode = field(value, 'at_node')
   result.at_node = Number.isSafeInteger(atNode) && atNode >= 0 ? atNode : null
-  result.trigger = boundedAdvisoryText(field(value, 'trigger'), TRIGGER_CHARS, budget, true)
+  // Replay owns this publication metadata. Advisory prose exhausting its shared text budget must
+  // never erase the authoritative trigger from the provenance strip or exports.
+  result.trigger = boundedAdvisoryText(field(value, 'trigger'), TRIGGER_CHARS,
+    { remaining: TRIGGER_CHARS }, true)
+  const publishedSeq = field(value, 'published_seq')
+  result.published_seq = Number.isSafeInteger(publishedSeq) && publishedSeq >= 0 ? publishedSeq : null
+  const publishedAt = field(value, 'published_at')
+  result.published_at = typeof publishedAt === 'number' && Number.isFinite(publishedAt)
+    && publishedAt > 0 && publishedAt <= 253_402_300_799 ? publishedAt : null
   return result
+}
+
+// at_node is a bounded node-count watermark, not a full state-revision watermark. Equal counts prove
+// node coverage only: confirmations, trust checks, resets, and other events may still have changed.
+export function reportNarrativeCoverage(report, currentNodeCount) {
+  const total = Number.isSafeInteger(currentNodeCount) && currentNodeCount >= 0
+    ? currentNodeCount : null
+  const atNode = report && Number.isSafeInteger(report.at_node) && report.at_node >= 0
+    ? report.at_node : null
+  const base = { status: report ? 'unknown' : 'absent', atNode, currentNodeCount: total, staleBy: null }
+  if (!report || atNode == null || total == null) return base
+  if (atNode < total) return { ...base, status: 'stale', staleBy: total - atNode }
+  if (atNode > total) return { ...base, status: 'inconsistent' }
+  // Equal counts prove only that every currently visible node was in scope. They do not prove
+  // freshness for confirmations, trust checks, resets, or any other same-count event.
+  return { ...base, status: 'node_count_matched' }
+}
+
+export function reportCoverageText(coverage) {
+  if (!coverage || coverage.status === 'absent') return 'No agent narrative is published.'
+  if (coverage.status === 'stale') {
+    return `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · stale by ${coverage.staleBy} node${coverage.staleBy === 1 ? '' : 's'}.`
+  }
+  if (coverage.status === 'inconsistent') {
+    return `Claims ${coverage.atNode} nodes, but this view has ${coverage.currentNodeCount} · inconsistent provenance.`
+  }
+  if (coverage.status === 'node_count_matched') {
+    return `Covers ${coverage.atNode} of ${coverage.currentNodeCount} nodes · node coverage complete, not full state freshness.`
+  }
+  return coverage.currentNodeCount == null
+    ? 'Node coverage unknown.'
+    : `Node coverage unknown for ${coverage.currentNodeCount} current nodes.`
 }

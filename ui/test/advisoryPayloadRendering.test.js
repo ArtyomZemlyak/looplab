@@ -167,10 +167,12 @@ test('report normalization preserves legacy string lists as one bounded item', (
   const caveatPriority = normalizeRunReport({
     what_worked: Array.from({ length: REPORT_LIMITS.listItems }, () => 'w'.repeat(REPORT_LIMITS.listItemChars)),
     learnings: Array.from({ length: REPORT_LIMITS.listItems }, () => 'l'.repeat(REPORT_LIMITS.listItemChars)),
-    caveats: ['critical advisory caveat'],
+    caveats: ['critical advisory caveat'], trigger: 'manual',
   })
   assert.deepEqual(caveatPriority.caveats, ['critical advisory caveat'],
     'ordinary positive narrative must not exhaust the shared budget before caveats')
+  assert.equal(caveatPriority.trigger, 'manual',
+    'saturated advisory prose must not erase replay-owned publication metadata')
 })
 
 test('Markdown export also consumes the normalized legacy report shape', () => {
@@ -184,7 +186,8 @@ test('Markdown export also consumes the normalized legacy report shape', () => {
   const markdown = toMarkdown(state, null)
   assert.match(markdown, /- one legacy lesson/)
   assert.match(markdown, /- one next step/)
-  assert.match(markdown, /Agent-authored caveats \(narrative only; not deterministic trust checks\)/)
+  assert.match(markdown, /Agent narrative \(advisory\)/)
+  assert.match(markdown, /Agent caveats/)
   assert.match(markdown, /- agent caveat must remain advisory/)
   assert.ok(markdown.length < 20_000)
 })
@@ -273,7 +276,7 @@ test('MemoCard and Report SSR stay bounded for 10k-entry and malformed payloads'
     }))
     assert.match(reportMarkup, /legacy narrative/)
     assert.match(reportMarkup, /legacy string list/)
-    assert.match(reportMarkup, /Agent-authored caveats/)
+    assert.match(reportMarkup, /Agent caveats/)
     assert.match(reportMarkup, /agent caveat must not change deterministic trust/)
     assert.match(reportMarkup, /not fully verified/)
     assert.match(reportMarkup, /Showing the latest 32 of 10000 research memos/)

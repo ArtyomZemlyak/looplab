@@ -4,7 +4,7 @@
 // the report never credits a result the engine itself rejected.
 
 import { fmt, isSweep, operatorMeta } from './util.js'
-import { normalizeRunReport } from './reportModel.js'
+import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
 const isEvaluated = (n) => n.status === 'evaluated' && metricOf(n) != null
@@ -302,24 +302,71 @@ export function verdict(state, a) {
   return { outcome, robustness, trust, best, baseline, gain, gainPct, direction: dir, caveats, headline }
 }
 
-// A portable Markdown report (download / paste into a PR) built from the same analysis.
-export function toMarkdown(state, best) {
+const reportContext = context => ({
+  generation: /^[0-9a-f]{64}$/.test(context?.generation || '') ? context.generation : null,
+  snapshotSeq: Number.isSafeInteger(context?.snapshotSeq) && context.snapshotSeq >= 0
+    ? context.snapshotSeq : null,
+})
+
+const coverageRecord = coverage => ({
+  status: coverage.status, at_node: coverage.atNode,
+  current_node_count: coverage.currentNodeCount, stale_by: coverage.staleBy,
+  basis: 'node_count', full_state_freshness: 'unknown',
+})
+
+export function buildModelCard(state, _best = null, context = {}) {
   const a = analyze(state)
   const v = verdict(state, a)
   const rep = normalizeRunReport(state.report)
+  const nodeCount = Object.keys(state.nodes || {}).length
+  const coverage = reportNarrativeCoverage(rep, nodeCount)
+  const ctx = reportContext(context)
+  // The folded event state is the authority. Keep the legacy argument position for callers, but
+  // never let a caller-supplied object contradict the deterministic verdict in the same export.
+  const champion = v.best || null
+  return {
+    schema_id: 'looplab.model-card', schema_version: 2,
+    task: state.task_id, goal: state.goal, direction: state.direction, run_id: state.run_id,
+    champion: champion ? { node_id: champion.id, operator: champion.operator,
+      metric: champion.confirmed_mean ?? champion.metric, confirmed: champion.confirmed_mean != null,
+      params: champion.idea?.params || {}, lineage: champion.parent_ids || [] } : null,
+    verdict: v.headline, verdict_source: 'deterministic',
+    agent_report_caveats: rep?.caveats || [],
+    deterministic_trust: { status: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
+    counts: { nodes: nodeCount, evaluated: a.nEval },
+    deterministic_verdict: { headline: v.headline, outcome: v.outcome,
+      robustness: v.robustness, trust: v.trust, caveats: v.caveats.map(caveat => caveat.text) },
+    agent_narrative: rep ? {
+      advisory: true, headline: rep.headline, verdict: rep.verdict, summary: rep.summary,
+      champion_summary: rep.champion_summary, what_worked: rep.what_worked,
+      learnings: rep.learnings, what_didnt: rep.what_didnt,
+      next_directions: rep.next_directions, caveats: rep.caveats,
+      coverage: coverageRecord(coverage),
+      provenance: { published_event_seq: rep.published_seq, published_at: rep.published_at,
+        published_at_unit: 'unix_seconds', trigger: rep.trigger || null,
+        node_count_at_publication: rep.at_node },
+    } : null,
+    provenance: { authority: 'events.jsonl', run_generation: ctx.generation,
+      snapshot_seq: ctx.snapshotSeq },
+  }
+}
+
+// A portable Markdown report (download / paste into a PR) built from the same analysis.
+export function toMarkdown(state, _best, context = {}) {
+  const a = analyze(state)
+  const v = verdict(state, a)
+  const rep = normalizeRunReport(state.report)
+  const nodeCount = Object.keys(state.nodes || {}).length
+  const coverage = reportNarrativeCoverage(rep, nodeCount)
+  const ctx = reportContext(context)
+  const champion = v.best || null
   const L = []
   L.push(`# LoopLab run report — ${state.goal || state.task_id}`)
   L.push('')
-  // Conclusion-first: the verdict (agent headline when present, else the deterministic one) leads.
+  // Conclusion-first and authority-first: provider prose can explain, never replace, this verdict.
   L.push(`## Verdict`)
   L.push('')
-  L.push(`**${rep?.headline || v.headline}**`)
-  if (rep?.verdict) { L.push(''); L.push(rep.verdict) }
-  if (rep?.caveats?.length) {
-    L.push('')
-    L.push('**Agent-authored caveats (narrative only; not deterministic trust checks):**')
-    rep.caveats.forEach(caveat => L.push(`- ${caveat}`))
-  }
+  L.push(`**${v.headline}**`)
   if (v.caveats.length) {
     L.push('')
     L.push('Deterministic trust caveats: ' + v.caveats.map(c => c.text).join('; ') + '.')
@@ -328,12 +375,33 @@ export function toMarkdown(state, best) {
   L.push(`- **Run:** ${state.run_id}`)
   L.push(`- **Direction:** ${state.direction}`)
   L.push(`- **Status:** ${state.phase || (state.finished ? 'finished' : 'running')}${state.stop_reason ? ` (${state.stop_reason})` : ''}`)
-  L.push(`- **Nodes:** ${Object.keys(state.nodes).length} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
-  if (best) L.push(`- **Best:** node #${best.id} · metric ${fmt(best.confirmed_mean ?? best.metric)}${best.confirmed_mean != null ? ` ±${fmt(best.confirmed_std)} (${best.confirmed_seeds}×)` : ''} · params ${JSON.stringify(best.idea?.params)}`)
+  L.push(`- **Nodes:** ${nodeCount} — ${a.nEval} evaluated, ${Object.values(a.failures || {}).reduce((s, x) => s + x.length, 0)} failed`)
+  if (champion) L.push(`- **Best:** node #${champion.id} · metric ${fmt(champion.confirmed_mean ?? champion.metric)}${champion.confirmed_mean != null ? ` ±${fmt(champion.confirmed_std)} (${champion.confirmed_seeds}×)` : ''} · params ${JSON.stringify(champion.idea?.params)}`)
   if (state.llm_cost) L.push(`- **LLM:** ${state.llm_cost.total_tokens} tokens · $${fmt(state.llm_cost.cost)}`)
-  if (rep?.champion_summary) { L.push(''); L.push('### Champion'); L.push(''); L.push(rep.champion_summary) }
-  if (rep && (rep.learnings || []).length) { L.push(''); L.push('### What we learned'); L.push(''); rep.learnings.forEach(x => L.push(`- ${x}`)) }
-  if (rep && (rep.next_directions || []).length) { L.push(''); L.push('### Next directions'); L.push(''); rep.next_directions.forEach(x => L.push(`- ${x}`)) }
+  if (ctx.generation) L.push(`- **Run generation:** ${ctx.generation}`)
+  if (ctx.snapshotSeq != null) L.push(`- **Snapshot event:** #${ctx.snapshotSeq}`)
+  if (rep) {
+    // Provider prose must remain inside the advisory quote with every platform newline form.
+    const quote = text => String(text || '').split(/\r\n?|\n/).forEach(line => L.push(`> ${line}`))
+    L.push('', '## Agent narrative (advisory)', '')
+    quote('**Advisory only — not the deterministic verdict or trust decision.**')
+    quote(`**Node coverage:** ${reportCoverageText(coverage)}`)
+    const receipt = [rep.published_seq != null ? `event #${rep.published_seq}` : 'event unknown',
+      rep.published_at != null ? new Date(rep.published_at * 1000).toISOString() : 'time unknown',
+      rep.trigger ? `trigger ${rep.trigger}` : 'trigger unknown'].join(' · ')
+    quote(`**Published:** ${receipt}`)
+    if (rep.headline) { L.push('>'); quote(`**Agent headline:** ${rep.headline}`) }
+    if (rep.verdict || rep.summary) { L.push('>'); quote(rep.verdict || rep.summary) }
+    const advisoryLists = [
+      ['Agent caveats', rep.caveats], ['Champion note', rep.champion_summary ? [rep.champion_summary] : []],
+      ['What worked', rep.what_worked], ['Learnings', rep.learnings],
+      ["What didn't work", rep.what_didnt], ['Next directions', rep.next_directions],
+    ]
+    advisoryLists.forEach(([label, items]) => {
+      if (!items?.length) return
+      L.push('>'); quote(`**${label}:**`); items.forEach(item => quote(`- ${item}`))
+    })
+  }
   L.push('')
   L.push(a.steps.length === 1 ? '## Metric baseline' : '## What worked — key improvements')
   if (a.steps.length) {

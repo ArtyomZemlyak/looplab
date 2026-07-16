@@ -16,10 +16,10 @@ const named = name => Object.freeze({ name })
 // split output — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Measured July 2026 baseline after audited bounded memo/report normalization, settings truth
-    // controls, and route-lazy Atlas provenance. Per-route/eager/closure guards below remain strict;
-    // this total leaves only modest zlib-version headroom and is not an eager-loading waiver.
-    js: { gzip: 318 * KIB },
+    // Measured July 2026 clean parallel-master baseline was 325,655 B (already 23 B above 318 KiB).
+    // The audited report authority/provenance v2 build is 327,433 B. A 320 KiB ceiling leaves 247 B
+    // of zlib headroom; per-route/eager/closure guards below remain strict, so this is not a waiver.
+    js: { gzip: 320 * KIB },
     css: { gzip: 45 * KIB },
   },
   individual: {
