@@ -26,6 +26,7 @@ def test_build_capsule_is_flat_and_deduped():
     assert cap["fingerprint"] == ["a", "b"]               # sorted + deduped
     assert cap["concepts"] == ["distillation", "hard-neg"]  # sorted, empty dropped
     assert cap["direction"] == "max" and cap["best_metric"] is None
+    assert cap["v"] == 2 and cap["concept_evidence"] == "classifier"
 
 
 def test_add_persists_and_reloads_across_instances(tmp_path):
@@ -109,6 +110,20 @@ def test_capsule_store_quarantines_structurally_poisoned_rows(tmp_path):
     assert store.add("not-an-object") is False
     assert store.add(_cap("new", "dense retrieval", ["mnr"], metric=0.9)) is True
     assert {row["run_id"] for row in ConceptCapsuleStore(path).all()} == {"good", "new"}
+
+
+def test_capsule_store_quarantines_pre_provenance_legacy_rows(tmp_path):
+    path = tmp_path / "c.jsonl"
+    current = _cap("current", "dense retrieval", ["hard-neg"], metric=0.8)
+    legacy_v1 = {**current, "v": 1, "run_id": "legacy-v1"}
+    legacy_v1.pop("concept_evidence")
+    unversioned = {key: value for key, value in current.items()
+                   if key not in {"v", "concept_evidence"}}
+    unversioned["run_id"] = "legacy-unversioned"
+    path.write_text("".join(json.dumps(row) + "\n"
+                            for row in (legacy_v1, unversioned, current)), encoding="utf-8")
+
+    assert ConceptCapsuleStore(path).all() == [current]
 
 
 def test_build_capsule_caps_large_generated_collections_deterministically():

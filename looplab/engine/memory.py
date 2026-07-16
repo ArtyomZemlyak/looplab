@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text
+from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
 
@@ -585,7 +586,10 @@ class JsonlCaseLibrary:
 # Schema version for the durable capsule record — bump when the shape changes so a reader can migrate/
 # reject incompatible generations instead of silently mis-reading them (a CODEX finding; the full record
 # — evidence node-refs, visibility/retention/purge key, concept UID+taxonomy version — is the CR1a TODO).
-CONCEPT_CAPSULE_VERSION = 1
+# v2 makes the evidence producer explicit. V1 and unversioned rows predate the authored-vs-classifier
+# trust boundary and cannot be upgraded honestly from their payload alone, so readers quarantine them.
+CONCEPT_CAPSULE_VERSION = 2
+_LEGACY_CONCEPT_CAPSULE_VERSION = 1
 
 _MAX_CAPSULE_ID_CHARS = 500
 _MAX_CAPSULE_TOKEN_CHARS = 500
@@ -617,13 +621,16 @@ def _valid_capsule_record(capsule) -> bool:
     """
     if not isinstance(capsule, dict):
         return False
-    version = capsule.get("v", CONCEPT_CAPSULE_VERSION)
+    # CODEX AGENT: missing `v` is legacy, never the current schema. Defaulting it to the current version
+    # would silently bless old proposer-authored labels after a schema bump.
+    version = capsule.get("v", _LEGACY_CONCEPT_CAPSULE_VERSION)
     run_id = capsule.get("run_id")
     task_id = capsule.get("task_id", "")
     fingerprint = capsule.get("fingerprint")
     concepts = capsule.get("concepts")
     outcomes = capsule.get("concept_outcomes", {})
     if (version != CONCEPT_CAPSULE_VERSION
+            or capsule.get("concept_evidence") != NODE_CONCEPT_PROVENANCE_CLASSIFIER
             or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
             or not isinstance(task_id, str) or len(task_id) > _MAX_CAPSULE_ID_CHARS
             or capsule.get("direction", "min") not in ("min", "max")
@@ -667,6 +674,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         normalized_direction = "min"
     return {
         "v": CONCEPT_CAPSULE_VERSION,
+        "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
         "run_id": str(run_id or ""),
         "task_id": str(task_id or ""),
         "fingerprint": bounded_fingerprint,
@@ -697,8 +705,8 @@ class ConceptCapsuleStore:
         string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
         bad row instead of letting it disable the feature: require the list-typed fields to be lists and
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
-        # Missing `v` is the pre-version legacy shape and is still readable as v1.  An explicit unknown
-        # version must be quarantined: treating v999 as today's schema can silently misinterpret evidence.
+        # Missing `v` and v1 predate concept-producer provenance. They cannot be distinguished from
+        # proposer-authored self-labels, so both fail closed alongside explicit unknown versions.
         return _valid_capsule_record(c)
 
     def _reload(self) -> None:

@@ -571,6 +571,7 @@ def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     happens to exercise that branch. The caller holds the memory-wide governance lock; capsule
     replacement is atomic, therefore this observes one coherent old-or-new file snapshot.
     """
+    from looplab.engine.memory import _valid_capsule_record
     from looplab.events.eventstore import read_jsonl_lenient
 
     aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
@@ -579,11 +580,10 @@ def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
     known: set[str] = set()
     for capsule in rows:
-        version = capsule.get("v", 1)
         concepts = capsule.get("concepts")
-        if version != 1 or not isinstance(capsule.get("run_id"), str) or not capsule.get("run_id"):
-            continue
-        if not isinstance(concepts, list):
+        # CODEX AGENT: governance and retrieval must observe the same capsule trust generation. A
+        # hard-coded old version here made every v2 entity vanish from owner CAS validation.
+        if not _valid_capsule_record(capsule) or not isinstance(concepts, list):
             continue
         known.update(canonicalize_concepts(concepts, aliases=aliases, splits=splits))
     for spec in (splits or {}).values():

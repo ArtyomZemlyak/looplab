@@ -27,7 +27,8 @@ def _seed_memory(statement="hard-neg helps"):
     # Owner concept mutations are fenced to the live canonical portfolio projection. Keep a compact
     # vocabulary here so governance tests exercise CAS/action semantics rather than fabricated names.
     (md / "concept_capsules.jsonl").write_bytes(orjson.dumps({
-        "v": 1, "run_id": "concept-seed", "task_id": "t", "fingerprint": ["t"],
+        "v": 2, "concept_evidence": "classifier", "run_id": "concept-seed", "task_id": "t",
+        "fingerprint": ["t"],
         "direction": "max", "concepts": [
             "hn", "hard-neg", "z", "data/aug", "data/hard-neg",
             "x", "y", "coarse", "fine", "a", "b",
@@ -188,7 +189,8 @@ def test_cross_run_reads_apply_independent_nested_caps(tmp_path):
         "run_id": f"r{index:03}", "task_id": "t",
     }) for index in range(80)) + b"\n")
     (md / "concept_capsules.jsonl").write_bytes(b"\n".join(orjson.dumps({
-        "v": 1, "run_id": f"r{index:03}", "task_id": "t", "fingerprint": ["t"],
+        "v": 2, "concept_evidence": "classifier", "run_id": f"r{index:03}",
+        "task_id": "t", "fingerprint": ["t"],
         "direction": "max", "concepts": ["shared"], "concept_outcomes": {"shared": index},
     }) for index in range(70)) + b"\n")
     client = TestClient(make_app(tmp_path))
