@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,13 +50,15 @@ if TYPE_CHECKING:  # engine type hint only — no runtime import of the orchestr
 
 
 _CURATION_CLAIM_DIR = ".curation_invocations"
+_CURATION_CLAIM_MAX_BYTES = 16 * 1024
+_FINALIZE_STEWARD_PARSER = "tool_call_once"
 _CURATION_THREAD_LOCKS: dict[str, tuple[threading.Lock, int]] = {}
 _CURATION_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 @contextmanager
 def _curation_thread_lock(key: str):
-    """Serialize one run/kind locally without retaining an unbounded lock registry."""
+    """Serialize one semantic curation claim locally without retaining an unbounded lock registry."""
     with _CURATION_THREAD_LOCKS_GUARD:
         lock, users = _CURATION_THREAD_LOCKS.get(key, (threading.Lock(), 0))
         _CURATION_THREAD_LOCKS[key] = (lock, users + 1)
@@ -327,55 +329,134 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         from looplab.engine.memory import ConceptCapsuleStore
         ConceptCapsuleStore(Path(self._e.memory_dir) / "concept_capsules.jsonl").add(capsule)
 
-    def _already_curated(self, log_name: str, final: RunState) -> bool:
-        """True when this run already produced a steward log entry — so a finalize RE-ENTRY (crash+resume)
-        does NOT re-run the LLM and append a duplicate proposal batch to the operator queue (mega-review)."""
+    def _already_curated(self, log_name: str, curation_key: str) -> bool:
+        """Whether semantic work has a terminal outcome; unavailable clients do not consume the key."""
         from looplab.events.eventstore import read_jsonl_lenient
+
         p = Path(self._e.memory_dir) / log_name
         if not p.exists():
             return False
-        rid = str(final.run_id or final.task_id)
-        return any(str(r.get("run_id") or "") == rid
-                   for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True))
+        return any(
+            str(r.get("curation_key") or "") == curation_key
+            and str(r.get("outcome") or "") != "unavailable"
+            for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True)
+        )
 
     @staticmethod
-    def _curation_run_id(final: RunState) -> str:
-        rid = str(final.run_id or final.task_id or "")
-        if not rid:
-            raise ValueError("finalize curation requires a stable run_id or task_id")
-        return rid
+    def _curation_finish_seq(final: RunState) -> int | None:
+        finish_seq = getattr(final, "last_finish_seq", None)
+        return (finish_seq if isinstance(finish_seq, int) and not isinstance(finish_seq, bool)
+                and finish_seq >= 0 else None)
 
-    def _curation_claim_path(self, log_name: str, final: RunState) -> Path:
-        rid = self._curation_run_id(final)
+    @classmethod
+    def _curation_source_key(cls, final: RunState) -> str:
+        source = {
+            "v": 1,
+            "run_id": str(final.run_id or ""),
+            "task_id": str(final.task_id or ""),
+            "finish_seq": cls._curation_finish_seq(final),
+        }
+        encoded = json.dumps(
+            source, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return "source:v1:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _portfolio_curation_key(kind: str, input_digest: str) -> str:
+        if kind not in {"concept", "claim"} or len(input_digest) != 64:
+            raise ValueError("invalid portfolio curation identity")
+        # CODEX AGENT: paid portfolio work is identified by the exact frozen model input, never by
+        # whichever run happened to trigger finalize.  This is both cross-run dedup and the TOCTOU fence.
+        return f"{kind}:v2:{input_digest}"
+
+    @staticmethod
+    def _facets_curation_key(task_id: str) -> str:
+        tid = str(task_id or "")
+        if not tid:
+            raise ValueError("task facets require an exact task_id")
+        encoded = json.dumps(
+            {"v": 2, "kind": "facets", "task_id": tid}, ensure_ascii=False,
+            sort_keys=True, separators=(",", ":")).encode("utf-8")
+        return "facets:v2:" + hashlib.sha256(encoded).hexdigest()
+
+    @classmethod
+    def _diagnostic_curation_key(cls, kind: str, final: RunState) -> str:
+        return f"{kind}:diagnostic:v2:{cls._curation_source_key(final).rsplit(':', 1)[-1]}"
+
+    def _curation_provenance(self, *, input_digest: str, input_schema: str,
+                             client) -> dict:
+        from looplab.trust.redact import redact_persisted_text
+
+        model = getattr(client, "model", None) if client is not None else None
+        if not model:
+            model = getattr(getattr(self._e, "settings", None), "llm_model", None)
+        model = redact_persisted_text(
+            model or "unknown", max_chars=200, entropy=True, single_line=True)
+        return {
+            "input_digest": input_digest,
+            "input_schema": input_schema,
+            "model": model or "unknown",
+            "parser": _FINALIZE_STEWARD_PARSER,
+        }
+
+    def _curation_claim_path(self, log_name: str, curation_key: str) -> Path:
+        digest = hashlib.sha256(f"{log_name}\0{curation_key}".encode("utf-8")).hexdigest()
+        return Path(self._e.memory_dir) / _CURATION_CLAIM_DIR / f"{digest}.json"
+
+    def _legacy_curation_claim_path(self, log_name: str, final: RunState) -> Path | None:
+        """The v1 run-keyed claim path, checked only for an exact non-empty run id."""
+        rid = str(final.run_id or "")
+        if not rid:
+            return None
         digest = hashlib.sha256(f"{log_name}\0{rid}".encode("utf-8")).hexdigest()
         return Path(self._e.memory_dir) / _CURATION_CLAIM_DIR / f"{digest}.json"
 
+    def _legacy_curation_terminal(self, log_name: str, final: RunState) -> bool:
+        """Bridge known v1 outcomes without reviving the old polymorphic run/task identity."""
+        from looplab.events.eventstore import read_jsonl_lenient
+
+        rid, tid = str(final.run_id or ""), str(final.task_id or "")
+        path = Path(self._e.memory_dir) / log_name
+        if not rid or not path.exists():
+            return False
+        return any(
+            not row.get("curation_key")
+            and str(row.get("run_id") or "") == rid
+            and str(row.get("task_id") or "") == tid
+            and str(row.get("outcome") or "") != "unavailable"
+            for row in read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
+        )
+
     def _write_curation_claim(self, path: Path, log_name: str, kind: str,
-                              final: RunState) -> None:
+                              final: RunState, curation_key: str,
+                              provenance: dict, incomplete: dict) -> None:
         """Create and strictly sync the one-way claim that gates a paid finalize invocation."""
         from looplab.core.atomicio import strict_fsync, strict_fsync_parent
 
+        auto_requested = incomplete.get("auto_requested")
+        if not isinstance(auto_requested, bool):
+            raise ValueError("paid curation claim requires boolean auto_requested")
         claim_dir = path.parent
         created_dir = not claim_dir.exists()
         claim_dir.mkdir(parents=True, exist_ok=True)
         if created_dir:
             strict_fsync_parent(claim_dir)
-        finish_seq = getattr(final, "finalized_finish_seq", None)
-        if not isinstance(finish_seq, int) or isinstance(finish_seq, bool):
-            finish_seq = getattr(final, "last_finish_seq", None)
         payload = {
-            "v": 1,
+            "v": 2,
             "action": "finalize-steward-begun",
             "kind": kind,
             "log": log_name,
-            "run_id": self._curation_run_id(final),
+            "curation_key": curation_key,
+            "source_key": self._curation_source_key(final),
+            "run_id": str(final.run_id or ""),
             "task_id": str(final.task_id or ""),
-            "finish_seq": (finish_seq if isinstance(finish_seq, int)
-                           and not isinstance(finish_seq, bool) else None),
+            "finish_seq": self._curation_finish_seq(final),
+            "auto": False,
+            "auto_requested": auto_requested,
+            **provenance,
         }
         encoded = (json.dumps(payload, ensure_ascii=False, sort_keys=True,
                               separators=(",", ":")) + "\n").encode("utf-8")
-        # Exclusive create is a second line of defence behind the run-scoped invocation lock. Any
+        # Exclusive create is a second line of defence behind the semantic invocation lock. Any
         # extant file, including a torn claim from a failed sync, is conservatively non-replayable.
         with path.open("xb") as handle:
             handle.write(encoded)
@@ -383,37 +464,183 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             strict_fsync(handle.fileno())
         strict_fsync_parent(path)
 
+    def _read_curation_claim(self, path: Path, log_name: str, kind: str,
+                             curation_key: str) -> tuple[RunState, dict, bool]:
+        """Read an existing v2 paid claim without borrowing identity from the retrying run."""
+
+        def _unique_object(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise ValueError("duplicate curation claim field")
+                obj[key] = value
+            return obj
+
+        def _reject_constant(_value):
+            raise ValueError("non-finite curation claim value")
+
+        with path.open("rb") as handle:
+            raw = handle.read(_CURATION_CLAIM_MAX_BYTES + 1)
+        if not raw or len(raw) > _CURATION_CLAIM_MAX_BYTES:
+            raise ValueError("invalid curation claim size")
+        if raw.count(b"\n") != 1 or not raw.endswith(b"\n"):
+            raise ValueError("curation claim must be one complete record")
+        try:
+            claim = json.loads(
+                raw.decode("utf-8"), object_pairs_hook=_unique_object,
+                parse_constant=_reject_constant)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("invalid curation claim encoding") from exc
+        expected_fields = {
+            "v", "action", "kind", "log", "curation_key", "source_key", "run_id",
+            "task_id", "finish_seq", "auto", "auto_requested", "input_digest",
+            "input_schema", "model", "parser",
+        }
+        if not isinstance(claim, dict) or set(claim) != expected_fields:
+            raise ValueError("invalid curation claim fields")
+        if claim.get("v") != 2 or isinstance(claim.get("v"), bool):
+            raise ValueError("unsupported curation claim version")
+        if claim.get("action") != "finalize-steward-begun":
+            raise ValueError("invalid curation claim action")
+        if claim.get("kind") != kind or claim.get("log") != log_name:
+            raise ValueError("foreign curation claim scope")
+        if claim.get("curation_key") != curation_key:
+            raise ValueError("foreign curation claim identity")
+        if claim.get("auto") is not False or not isinstance(claim.get("auto_requested"), bool):
+            raise ValueError("invalid curation claim invocation mode")
+
+        bounded_strings = {
+            "run_id": 1000,
+            "task_id": 1000,
+            "source_key": 80,
+            "curation_key": 100,
+            "input_digest": 64,
+            "input_schema": 200,
+            "model": 200,
+            "parser": 100,
+        }
+        for field, maximum in bounded_strings.items():
+            value = claim.get(field)
+            if (not isinstance(value, str) or not value or len(value) > maximum
+                    or "\n" in value or "\r" in value):
+                # Run ids may be empty in historical state, but a durable claim still binds the exact
+                # empty value. Handle those two identity fields separately below.
+                if field not in {"run_id", "task_id"} or value != "":
+                    raise ValueError(f"invalid curation claim {field}")
+        finish_seq = claim.get("finish_seq")
+        if (finish_seq is not None
+                and (isinstance(finish_seq, bool) or not isinstance(finish_seq, int)
+                     or finish_seq < 0)):
+            raise ValueError("invalid curation claim finish_seq")
+        digest = claim["input_digest"]
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise ValueError("invalid curation claim input_digest")
+        from looplab.trust.redact import redact_persisted_text
+        for field, maximum in (("input_schema", 200), ("model", 200), ("parser", 100)):
+            value = claim[field]
+            if redact_persisted_text(
+                    value, max_chars=maximum, entropy=True, single_line=True) != value:
+                raise ValueError(f"unsafe curation claim {field}")
+        if kind in {"concept", "claim"}:
+            if self._portfolio_curation_key(kind, digest) != curation_key:
+                raise ValueError("curation claim digest does not match its identity")
+        elif kind == "facets":
+            if self._facets_curation_key(claim["task_id"]) != curation_key:
+                raise ValueError("facets claim task does not match its identity")
+        else:
+            raise ValueError("invalid curation claim kind")
+
+        claim_final = RunState(
+            run_id=claim["run_id"], task_id=claim["task_id"],
+            last_finish_seq=finish_seq if finish_seq is not None else -1)
+        if self._curation_source_key(claim_final) != claim["source_key"]:
+            raise ValueError("curation claim source identity mismatch")
+        provenance = {
+            field: claim[field] for field in ("input_digest", "input_schema", "model", "parser")
+        }
+        return claim_final, provenance, claim["auto_requested"]
+
     @contextmanager
-    def _paid_curation_attempt(self, log_name: str, kind: str, final: RunState,
-                               incomplete: dict):
-        """Yield once only after a durable claim; resolve a prior ambiguous claim without replay."""
+    def _curation_decision_lock(self, log_name: str, final: RunState, curation_key: str):
+        """Serialize every terminal decision for one semantic key, including no-call fast paths."""
         from looplab.core.atomicio import strict_fsync_parent
         from looplab.events.eventstore import _interprocess_lock
 
-        claim_path = self._curation_claim_path(log_name, final)
+        claim_path = self._curation_claim_path(log_name, curation_key)
+        legacy_path = self._legacy_curation_claim_path(log_name, final)
         created_dir = not claim_path.parent.exists()
         claim_path.parent.mkdir(parents=True, exist_ok=True)
         if created_dir:
             strict_fsync_parent(claim_path.parent)
         key = str(claim_path.absolute())
         with _curation_thread_lock(key):
-            with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
-                if self._already_curated(log_name, final):
-                    yield False
-                    return
-                if claim_path.exists():
-                    # CODEX AGENT: a provider may have accepted the prior call. Replaying would risk
-                    # double billing; publish an explicit terminal ambiguity instead.
-                    self._append_curation_once(
-                        log_name, final, incomplete, require_durable=True)
-                    yield False
-                    return
-                self._write_curation_claim(claim_path, log_name, kind, final)
-                yield True
+            legacy_guard = (_interprocess_lock(Path(str(legacy_path) + ".lock"), required=True)
+                            if legacy_path is not None else nullcontext())
+            with legacy_guard:
+                with _interprocess_lock(Path(str(claim_path) + ".lock"), required=True):
+                    yield
 
-    def _append_curation_once(self, log_name: str, final: RunState, rec: dict, *,
+    @contextmanager
+    def _paid_curation_attempt_locked(self, log_name: str, kind: str, final: RunState,
+                                      curation_key: str, provenance: dict, incomplete: dict):
+        """Paid-attempt protocol; the caller must hold ``_curation_decision_lock``."""
+        claim_path = self._curation_claim_path(log_name, curation_key)
+        if self._curation_attempt_already_resolved_locked(
+                log_name, kind, final, curation_key, incomplete):
+            yield False
+            return
+        self._write_curation_claim(
+            claim_path, log_name, kind, final, curation_key, provenance, incomplete)
+        yield True
+
+    def _recover_curation_claim_locked(self, log_name: str, kind: str, curation_key: str,
+                                       incomplete: dict) -> bool:
+        """Close one existing ambiguous paid claim; the semantic decision lock must be held."""
+        claim_path = self._curation_claim_path(log_name, curation_key)
+        if not claim_path.exists():
+            return False
+        # CODEX AGENT: recovery metadata comes exclusively from the durable paid claim. A retrying
+        # run/model may observe the same semantic key, but it never impersonates the lost attempt.
+        claim_final, claim_provenance, claim_auto_requested = self._read_curation_claim(
+            claim_path, log_name, kind, curation_key)
+        recovered_incomplete = {
+            **incomplete,
+            "auto": False,
+            "auto_requested": claim_auto_requested,
+        }
+        self._append_curation_once(
+            log_name, claim_final, curation_key, claim_provenance, recovered_incomplete,
+            require_durable=True)
+        return True
+
+    def _curation_attempt_already_resolved_locked(
+            self, log_name: str, kind: str, final: RunState,
+            curation_key: str, incomplete: dict) -> bool:
+        """Resolve/suppress old work before any new v2 terminal; decision lock must be held."""
+        if self._already_curated(log_name, curation_key):
+            return True
+        if self._legacy_curation_terminal(log_name, final):
+            return True
+        legacy_path = self._legacy_curation_claim_path(log_name, final)
+        if legacy_path is not None and legacy_path.exists():
+            # A v1 provider may have accepted the call, but its receipt did not bind an exact
+            # model-visible snapshot. Suppress only this exact run and never invent a v2 terminal.
+            return True
+        return self._recover_curation_claim_locked(log_name, kind, curation_key, incomplete)
+
+    @contextmanager
+    def _paid_curation_attempt(self, log_name: str, kind: str, final: RunState,
+                               curation_key: str, provenance: dict, incomplete: dict):
+        """Yield once only after a durable claim; resolve a prior ambiguous claim without replay."""
+        with self._curation_decision_lock(log_name, final, curation_key):
+            with self._paid_curation_attempt_locked(
+                    log_name, kind, final, curation_key, provenance, incomplete) as invoke:
+                yield invoke
+
+    def _append_curation_once(self, log_name: str, final: RunState, curation_key: str,
+                              provenance: dict, rec: dict, *,
                               require_durable: bool = False) -> bool:
-        """Append one finalize steward outcome exactly once per run under the governance lock."""
+        """Append one semantic steward outcome; unavailable audits remain non-blocking."""
         from looplab.engine.concept_registry import _append_governance
         from looplab.events.eventstore import read_jsonl_lenient
 
@@ -422,14 +649,36 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
         path = Path(self._e.memory_dir) / log_name
         path.parent.mkdir(parents=True, exist_ok=True)
-        rid = str(final.run_id or final.task_id)
+        source_key = self._curation_source_key(final)
+        outcome = str(rec.get("outcome") or "")
 
         def _validate_locked() -> None:
-            if path.exists() and any(str(r.get("run_id") or "") == rid
-                                     for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True)):
-                raise _AlreadyLogged
+            if not path.exists():
+                return
+            for row in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
+                if str(row.get("curation_key") or "") != curation_key:
+                    continue
+                prior_outcome = str(row.get("outcome") or "")
+                if outcome == "unavailable":
+                    # CODEX AGENT: a late no-client observer is an audit only. Once another process
+                    # commits a terminal result it may never append after or supersede that result.
+                    if prior_outcome != "unavailable":
+                        raise _AlreadyLogged
+                    if prior_outcome == "unavailable" and row.get("source_key") == source_key:
+                        raise _AlreadyLogged
+                elif prior_outcome != "unavailable":
+                    raise _AlreadyLogged
 
-        payload = {"v": 1, "run_id": rid, "task_id": str(final.task_id or ""), **rec}
+        payload = {
+            "v": 2,
+            "curation_key": curation_key,
+            "source_key": source_key,
+            "run_id": str(final.run_id or ""),
+            "task_id": str(final.task_id or ""),
+            "finish_seq": self._curation_finish_seq(final),
+            **provenance,
+            **rec,
+        }
         try:
             _append_governance(
                 path, payload, validate=_validate_locked, require_durable=require_durable)
@@ -446,46 +695,73 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         Portfolio-scoped and fully decoupled from the run's terminal state — best-effort, never raises."""
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        log_name, steward_kind = "concept_curation_log.jsonl", "concept"
         auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
+        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
+        diagnostic_provenance = self._curation_provenance(
+            input_digest="", input_schema="finalize-concept-curation/input-unavailable", client=None)
         try:
-            if self._already_curated("concept_curation_log.jsonl", final):
-                return                          # idempotent on a finalize re-entry: don't re-run the LLM
-            client = self.reflect_client()
-            if client is None:
-                self._append_curation_once("concept_curation_log.jsonl", final, {
-                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
-                return
-            from looplab.engine.concept_steward import curation_is_empty, steward_concepts
-            # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot mutate
-            # taxonomy before a durable receipt; only an explicit operator command may apply.
+            from looplab.engine.concept_steward import (
+                CONCEPT_CURATION_INPUT_SCHEMA,
+                concept_curation_has_input,
+                concept_curation_snapshot,
+                curation_is_empty,
+                propose_concept_curation,
+            )
+
+            overview, input_digest = concept_curation_snapshot(self._e.memory_dir)
+            curation_key = self._portfolio_curation_key(steward_kind, input_digest)
             incomplete = {
                 "outcome": "prior_attempt_incomplete_not_replayed",
                 "ambiguity": "provider_outcome_unknown",
                 "auto": False, "auto_requested": auto_requested,
                 "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None,
             }
+            with self._curation_decision_lock(log_name, final, curation_key):
+                if self._curation_attempt_already_resolved_locked(
+                        log_name, steward_kind, final, curation_key, incomplete):
+                    return
+            if not concept_curation_has_input(overview):
+                provenance = self._curation_provenance(
+                    input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
+                    client=None)
+                self._append_curation_once(log_name, final, curation_key, provenance, {
+                    "outcome": "empty", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+                return
+            client = self.reflect_client()
+            provenance = self._curation_provenance(
+                input_digest=input_digest, input_schema=CONCEPT_CURATION_INPUT_SCHEMA,
+                client=client)
+            if client is None:
+                self._append_curation_once(log_name, final, curation_key, provenance, {
+                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+                return
+            # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot mutate
+            # taxonomy before a durable receipt; only an explicit operator command may apply.
             with self._paid_curation_attempt(
-                    "concept_curation_log.jsonl", "concept", final, incomplete) as invoke:
+                    log_name, steward_kind, final, curation_key, provenance, incomplete) as invoke:
                 if not invoke:
                     return
                 try:
-                    out = steward_concepts(
-                        self._e.memory_dir, client, apply=False, by="steward", raise_on_failure=True)
-                    proposals = out["proposals"]
-                    self._append_curation_once("concept_curation_log.jsonl", final, {
+                    proposals = propose_concept_curation(
+                        overview, client, parser=_FINALIZE_STEWARD_PARSER,
+                        raise_on_failure=True)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
                         "outcome": "empty" if curation_is_empty(proposals) else "proposed",
                         "auto": False, "auto_requested": auto_requested,
                         "proposals": proposals, "receipt": None}, require_durable=True)
                 except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
-                    self._append_curation_once("concept_curation_log.jsonl", final, {
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
                         "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                         "auto_requested": auto_requested,
                         "proposals": {"merges": [], "splits": [], "purges": []},
                         "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
-                self._append_curation_once("concept_curation_log.jsonl", final, {
+                self._append_curation_once(
+                    log_name, final, diagnostic_key, diagnostic_provenance, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                     "auto_requested": auto_requested,
                     "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None},
@@ -500,43 +776,70 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         never applies them. Same gate/decoupling/best-effort contract as the concept steward."""
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        log_name, steward_kind = "claim_curation_log.jsonl", "claim"
         auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
+        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
+        diagnostic_provenance = self._curation_provenance(
+            input_digest="", input_schema="finalize-claim-curation/input-unavailable", client=None)
         try:
-            if self._already_curated("claim_curation_log.jsonl", final):
-                return                          # idempotent on a finalize re-entry: don't re-run the LLM
-            client = self.reflect_client()
-            if client is None:
-                self._append_curation_once("claim_curation_log.jsonl", final, {
-                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"decisions": []}, "receipt": None})
-                return
-            from looplab.engine.claim_steward import curation_is_empty, steward_claims
+            from looplab.engine.claim_steward import (
+                CLAIM_CURATION_INPUT_SCHEMA,
+                claim_curation_has_input,
+                claim_curation_snapshot,
+                curation_is_empty,
+                propose_claim_curation,
+            )
+
+            claims, input_digest = claim_curation_snapshot(self._e.memory_dir, structured=True)
+            curation_key = self._portfolio_curation_key(steward_kind, input_digest)
             incomplete = {
                 "outcome": "prior_attempt_incomplete_not_replayed",
                 "ambiguity": "provider_outcome_unknown",
                 "auto": False, "auto_requested": auto_requested,
                 "proposals": {"decisions": []}, "receipt": None,
             }
+            with self._curation_decision_lock(log_name, final, curation_key):
+                if self._curation_attempt_already_resolved_locked(
+                        log_name, steward_kind, final, curation_key, incomplete):
+                    return
+            if not claim_curation_has_input(claims):
+                provenance = self._curation_provenance(
+                    input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
+                    client=None)
+                self._append_curation_once(log_name, final, curation_key, provenance, {
+                    "outcome": "empty", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"decisions": []}, "receipt": None})
+                return
+            client = self.reflect_client()
+            provenance = self._curation_provenance(
+                input_digest=input_digest, input_schema=CLAIM_CURATION_INPUT_SCHEMA,
+                client=client)
+            if client is None:
+                self._append_curation_once(log_name, final, curation_key, provenance, {
+                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"decisions": []}, "receipt": None})
+                return
             with self._paid_curation_attempt(
-                    "claim_curation_log.jsonl", "claim", final, incomplete) as invoke:
+                    log_name, steward_kind, final, curation_key, provenance, incomplete) as invoke:
                 if not invoke:
                     return
                 try:
-                    out = steward_claims(
-                        self._e.memory_dir, client, apply=False, by="steward", raise_on_failure=True)
-                    proposals = out["proposals"]
-                    self._append_curation_once("claim_curation_log.jsonl", final, {
+                    proposals = propose_claim_curation(
+                        claims, client, parser=_FINALIZE_STEWARD_PARSER,
+                        raise_on_failure=True)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
                         "outcome": "empty" if curation_is_empty(proposals) else "proposed",
                         "auto": False, "auto_requested": auto_requested,
                         "proposals": proposals, "receipt": None}, require_durable=True)
                 except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
-                    self._append_curation_once("claim_curation_log.jsonl", final, {
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
                         "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                         "auto_requested": auto_requested, "proposals": {"decisions": []},
                         "receipt": None}, require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
             try:
-                self._append_curation_once("claim_curation_log.jsonl", final, {
+                self._append_curation_once(
+                    log_name, final, diagnostic_key, diagnostic_provenance, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                     "auto_requested": auto_requested, "proposals": {"decisions": []}, "receipt": None},
                     require_durable=True)
@@ -547,58 +850,94 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         """PART IV §21.20.2 — propose task facets and queue them for operator ratification.
 
         Facets can widen retrieval scope, so agent output is never silently promoted into policy at finalize.
-        Outcomes are written once/run to `task_facets_curation_log.jsonl`, including empty/unavailable ones.
+        Outcomes are written once/task to `task_facets_curation_log.jsonl`, including empty/unavailable ones.
         """
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        log_name, steward_kind = "task_facets_curation_log.jsonl", "facets"
         auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
+        diagnostic_key = self._diagnostic_curation_key(steward_kind, final)
+        diagnostic_provenance = self._curation_provenance(
+            input_digest="", input_schema="finalize-task-facets/input-unavailable", client=None)
         try:
-            if self._already_curated("task_facets_curation_log.jsonl", final):
-                return
             tid = str(getattr(final, "task_id", "") or "")
             if not tid:
                 return
-            from looplab.engine.task_facets import load_task_facets, propose_task_facets
-            current = load_task_facets(self._e.memory_dir).get(tid)
-            if current is not None:
-                self._append_curation_once("task_facets_curation_log.jsonl", final, {
-                    "outcome": "already-governed", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"task_id": tid, "facets": current}, "receipt": None})
-                return
-            client = self.reflect_client()
-            if client is None:
-                self._append_curation_once("task_facets_curation_log.jsonl", final, {
-                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
-                    "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
-                return
+            from looplab.engine.task_facets import (
+                TASK_FACETS_INPUT_SCHEMA,
+                load_task_facets,
+                propose_task_facets,
+                task_facets_input_digest,
+            )
+
+            goal = str(getattr(final, "goal", "") or "")
             kind = str(getattr(getattr(self._e, "task", None), "kind", "") or "")
+            input_digest = task_facets_input_digest(goal, kind)
+            curation_key = self._facets_curation_key(tid)
             incomplete = {
                 "outcome": "prior_attempt_incomplete_not_replayed",
                 "ambiguity": "provider_outcome_unknown",
                 "auto": False, "auto_requested": auto_requested,
                 "proposals": {"task_id": tid, "facets": {}}, "receipt": None,
             }
-            with self._paid_curation_attempt(
-                    "task_facets_curation_log.jsonl", "facets", final, incomplete) as invoke:
-                if not invoke:
+            # CODEX AGENT: facets are once/task, so differently worded runs share this decision lock.
+            # Fast empty/governed decisions must not race a paid attempt and discard its result.
+            with self._curation_decision_lock(log_name, final, curation_key):
+                if self._curation_attempt_already_resolved_locked(
+                        log_name, steward_kind, final, curation_key, incomplete):
                     return
-                try:
-                    facets = propose_task_facets(
-                        str(getattr(final, "goal", "") or ""), kind, client, raise_on_failure=True)
-                    self._append_curation_once("task_facets_curation_log.jsonl", final, {
-                        "outcome": "proposed" if facets else "empty", "auto": False,
+                current = load_task_facets(self._e.memory_dir).get(tid)
+                if current is not None:
+                    provenance = self._curation_provenance(
+                        input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
+                        client=None)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "already-governed", "auto": False,
                         "auto_requested": auto_requested,
-                        "proposals": {"task_id": tid, "facets": facets}, "receipt": None},
-                        require_durable=True)
-                except Exception as exc:  # noqa: BLE001 - close the paid attempt while lock is held
-                    self._append_curation_once("task_facets_curation_log.jsonl", final, {
-                        "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                        "proposals": {"task_id": tid, "facets": current}, "receipt": None})
+                    return
+                if not goal[:4000].strip():
+                    provenance = self._curation_provenance(
+                        input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
+                        client=None)
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "empty", "auto": False, "auto_requested": auto_requested,
+                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
+                    return
+                client = self.reflect_client()
+                provenance = self._curation_provenance(
+                    input_digest=input_digest, input_schema=TASK_FACETS_INPUT_SCHEMA,
+                    client=client)
+                if client is None:
+                    self._append_curation_once(log_name, final, curation_key, provenance, {
+                        "outcome": "unavailable", "auto": False,
                         "auto_requested": auto_requested,
-                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None},
-                        require_durable=True)
+                        "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
+                    return
+                with self._paid_curation_attempt_locked(
+                        log_name, steward_kind, final, curation_key,
+                        provenance, incomplete) as invoke:
+                    if not invoke:
+                        return
+                    try:
+                        facets = propose_task_facets(
+                            goal, kind, client, parser=_FINALIZE_STEWARD_PARSER,
+                            raise_on_failure=True)
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "proposed" if facets else "empty", "auto": False,
+                            "auto_requested": auto_requested,
+                            "proposals": {"task_id": tid, "facets": facets}, "receipt": None},
+                            require_durable=True)
+                    except Exception as exc:  # noqa: BLE001 - close while decision lock is held
+                        self._append_curation_once(log_name, final, curation_key, provenance, {
+                            "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                            "auto_requested": auto_requested,
+                            "proposals": {"task_id": tid, "facets": {}}, "receipt": None},
+                            require_durable=True)
         except Exception as exc:  # noqa: BLE001 — agentic faceting must never fail a run
             try:
-                self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                self._append_curation_once(
+                    log_name, final, diagnostic_key, diagnostic_provenance, {
                     "outcome": "error", "error_type": type(exc).__name__, "auto": False,
                     "auto_requested": auto_requested,
                     "proposals": {"task_id": str(final.task_id or ""), "facets": {}}, "receipt": None},

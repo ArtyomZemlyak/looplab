@@ -109,6 +109,35 @@ def test_finalize_retries_only_missing_steps_for_exact_finish(tmp_path):
     assert eng.case_calls == 1 and eng.research_claim_calls == 1 and eng.reflection_calls == 1
 
 
+def test_finalize_reflects_before_stewards_and_counts_stewards_before_cost(tmp_path, monkeypatch):
+    import looplab.engine.finalize as finalize_module
+
+    run_dir = tmp_path / "ordered-finalize"
+    _terminal_store(run_dir)
+    eng = _EngineStub(run_dir)
+    eng._cross_run_curation = True
+    order: list[str] = []
+
+    eng._write_reflection_note = lambda _state: order.append("reflection")
+    eng._store_concept_curation = lambda _state: order.append("concept")
+
+    def claim(_state):
+        assert order and order[0] == "reflection"
+        order.append("claim")
+
+    eng._store_claim_curation = claim
+    eng._store_task_facets = lambda _state: order.append("facets")
+
+    def cost(*_args, **_kwargs):
+        order.append("llm_cost")
+        return True
+
+    monkeypatch.setattr(finalize_module, "emit_llm_cost", cost)
+    finalize_module.finalize_run(eng, entry_finished=True, start_time=0.0)
+
+    assert order == ["reflection", "concept", "claim", "facets", "llm_cost"]
+
+
 def test_engine_reentry_skips_setup_for_finish_seq_pending(tmp_path, monkeypatch):
     import anyio
     from looplab import cli

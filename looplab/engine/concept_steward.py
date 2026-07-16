@@ -15,10 +15,86 @@ misreported as an empty recommendation.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Optional
 
 _MAX_PROPOSALS = 12          # a bounded curation per pass — the steward suggests the highest-value few
 _MAX_GRAPH = 200             # cap the concepts shown to the model (most-explored first) — bounded prompt
+CONCEPT_CURATION_INPUT_SCHEMA = "finalize-concept-curation/v1"
+
+
+def _proposal_budget(max_proposals: int) -> int:
+    return min(_MAX_PROPOSALS, max(1, int(max_proposals)))
+
+
+def _concept_prompt_payload(overview: dict) -> tuple[list[dict], dict[str, str]]:
+    """Return the exact bounded data envelope shown to the model plus its opaque-id map."""
+    from looplab.engine.concept_registry import concept_uid
+
+    raw_concepts = overview.get("concepts") if isinstance(overview, dict) else []
+    concepts = [e for e in (raw_concepts or []) if isinstance(e, dict) and e.get("concept")]
+    id_to_concept: dict[str, str] = {}
+    payload: list[dict] = []
+    for e in concepts[:_MAX_GRAPH]:
+        label = str(e["concept"])
+        if len(label) > 500:
+            continue
+        cid = concept_uid(label)
+        if not cid or cid in id_to_concept:
+            continue
+        id_to_concept[cid] = label
+        evidence_runs = []
+        for run in (e.get("runs") or [])[:8]:
+            if not isinstance(run, dict):
+                continue
+            evidence_runs.append({"run_id": str(run.get("run_id") or "")[:120],
+                                  "direction": str(run.get("direction") or "")[:8],
+                                  "has_metric": run.get("metric") is not None})
+        n_runs = e.get("n_runs")
+        n_runs = n_runs if isinstance(n_runs, int) and not isinstance(n_runs, bool) else 0
+        payload.append({
+            "id": cid, "label": label, "n_runs": max(0, n_runs), "evidence_runs": evidence_runs,
+        })
+    return payload, id_to_concept
+
+
+def concept_curation_has_input(overview: dict) -> bool:
+    """Whether a finalize pass has any bounded concept record to send to a provider."""
+    payload, _ = _concept_prompt_payload(overview)
+    return bool(payload)
+
+
+def concept_curation_input_digest(overview: dict, *,
+                                   max_proposals: int = _MAX_PROPOSALS) -> str:
+    """Digest the exact bounded model-visible input, not mutable files or an unshown portfolio tail."""
+    payload, _ = _concept_prompt_payload(overview)
+    envelope = {
+        "schema": CONCEPT_CURATION_INPUT_SCHEMA,
+        "max_proposals": _proposal_budget(max_proposals),
+        "concepts": payload,
+    }
+    encoded = json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
+                              splits: Optional[dict] = None,
+                              max_proposals: int = _MAX_PROPOSALS) -> tuple[dict, str]:
+    """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
+    from pathlib import Path
+
+    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+
+    base = Path(memory_dir) if memory_dir else None
+    cp = base / "concept_capsules.jsonl" if base else None
+    caps = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
+    splits = load_concept_splits(memory_dir) if splits is None else splits
+    overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)
+    return overview, concept_curation_input_digest(overview, max_proposals=max_proposals)
 
 
 def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call_once",
@@ -31,17 +107,12 @@ def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call
     Provider/parser failures degrade to empty unless ``raise_on_failure`` is set; durable callers set it so
     they can distinguish a genuine empty proposal from a failed paid invocation."""
     empty = {"merges": [], "splits": [], "purges": []}
-    raw_concepts = overview.get("concepts") if isinstance(overview, dict) else []
-    concepts = [e for e in (raw_concepts or []) if isinstance(e, dict) and e.get("concept")]
-    if client is None or not concepts:
+    if client is None:
         return empty
     try:
-        import json
-
         from pydantic import BaseModel, Field
 
         from looplab.core.parse import parse_structured
-        from looplab.engine.concept_registry import concept_uid
 
         class _Merge(BaseModel):
             from_id: str = ""
@@ -68,32 +139,11 @@ def propose_concept_curation(overview: dict, client, *, parser: str = "tool_call
             splits: list[_Split] = Field(default_factory=list)
             purges: list[str] = Field(default_factory=list)
 
-        id_to_concept: dict[str, str] = {}
-        payload = []
-        for e in concepts[:_MAX_GRAPH]:
-            label = str(e["concept"])
-            if len(label) > 500:
-                continue
-            cid = concept_uid(label)
-            if not cid or cid in id_to_concept:
-                continue
-            id_to_concept[cid] = label
-            evidence_runs = []
-            for run in (e.get("runs") or [])[:8]:
-                if not isinstance(run, dict):
-                    continue
-                evidence_runs.append({"run_id": str(run.get("run_id") or "")[:120],
-                                      "direction": str(run.get("direction") or "")[:8],
-                                      "has_metric": run.get("metric") is not None})
-            n_runs = e.get("n_runs")
-            n_runs = n_runs if isinstance(n_runs, int) and not isinstance(n_runs, bool) else 0
-            payload.append({
-                "id": cid, "label": label, "n_runs": max(0, n_runs), "evidence_runs": evidence_runs,
-            })
+        payload, id_to_concept = _concept_prompt_payload(overview)
         if not payload:
             return empty
         known = set(id_to_concept.values())
-        budget = min(_MAX_PROPOSALS, max(1, int(max_proposals)))
+        budget = _proposal_budget(max_proposals)
         # Persisted taxonomy labels are untrusted evidence. Keep them in a user-role JSON envelope and
         # make mutations reference opaque ids; a label can never become a system instruction.
         system = (
@@ -131,7 +181,7 @@ def _validate_curation(out, known: set, *, id_to_concept: Optional[dict] = None,
     kn = {normalize_key(k) for k in known}
     by_id = {str(k): normalize_key(v) for k, v in (id_to_concept or {}).items()}
     merges, splits, purges = [], [], []
-    budget = min(_MAX_PROPOSALS, max(1, int(max_proposals)))
+    budget = _proposal_budget(max_proposals)
     used_sources: set[str] = set()
 
     def _known(ref_id, legacy) -> str:
@@ -258,15 +308,8 @@ def steward_concepts(memory_dir, client, *, aliases: Optional[dict] = None, spli
             "concept steward is proposal-only; apply=True is disabled. Review the exact proposal, then "
             "apply selected changes with concept-merge/concept-split or owner HTTP governance."
         )
-    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
-    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
-    from pathlib import Path
-    base = Path(memory_dir) if memory_dir else None
-    cp = base / "concept_capsules.jsonl" if base else None
-    caps = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
-    aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
-    splits = load_concept_splits(memory_dir) if splits is None else splits
-    overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)
+    overview, _ = concept_curation_snapshot(
+        memory_dir, aliases=aliases, splits=splits, max_proposals=max_proposals)
     proposals = propose_concept_curation(
         overview, client, max_proposals=max_proposals, raise_on_failure=raise_on_failure)
     return {"proposals": proposals, "receipt": None}

@@ -650,6 +650,10 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
         # fold (the flag-check skips the whole block so the default path does zero steward work). The stewards
         # re-check the same gate internally (defense in depth). NOTE: the reviewed graph includes THIS run only
         # when `cross_run_concepts` is also on (that flag gates the capsule write in the case step above).
+        ensure_finalize_reflection(engine, scope, finish_seq)
+
+        # CODEX AGENT: reflection must precede claim curation so this run's durable lessons are visible;
+        # every steward still precedes llm_cost so its provider usage enters the terminal roll-up.
         if getattr(engine, "_cross_run_curation", False):
             try:
                 final = fold(engine.store.read_all())
@@ -658,8 +662,6 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 engine._store_task_facets(final)       # agentic task faceting (once/task)
             except Exception:  # noqa: BLE001 — agentic curation must never affect the run's finalization
                 pass
-
-        ensure_finalize_reflection(engine, scope, finish_seq)
 
         events = engine.store.read_all()
         if not _finalize_step_done(events, scope, finish_seq, "llm_cost", EV_LLM_COST):
@@ -698,10 +700,9 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             pass
     # UI projection (ADR-17): join the research tree (events) to its execution detail
     # (spans) -> trace.json for the React UI + an inline span tree in the static HTML.
-    # Hydrate the delta-encoded generation inputs first (tracing.generation stores only each turn's
-    # delta on disk) so the archived trace.json holds the FULL verbatim prompts — same as the live
-    # `/trace/by_trace` endpoint (hydrate → then build_trace_view caps). Without this the persisted
-    # projection would disagree with the live one (delta vs full input) for any external reader.
+    # Hydrate delta-encoded generation inputs before projection so archived and live readers derive the
+    # same retained diagnostic conversation. `build_trace_view` then redacts/caps that material and marks
+    # omissions explicitly: trace.json is a bounded, potentially partial projection, never a raw transcript.
     try:
         trace_view = build_trace_view(
             final,

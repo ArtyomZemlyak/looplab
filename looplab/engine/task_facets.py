@@ -17,10 +17,29 @@ explicit provider/parser failures so they cannot be confused with a valid empty 
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 # The controlled facet AXES — a small, fixed vocabulary so facets from different tasks are comparable. The
 # VALUES are free-form (the LLM's short slug), but the axes are fixed (an unknown axis is dropped).
 FACET_AXES = ("domain", "language", "modality", "interaction", "objective")
+TASK_FACETS_INPUT_SCHEMA = "finalize-task-facets/v1"
+
+
+def _task_facets_prompt_payload(goal: str, kind: str) -> dict:
+    """Return the exact bounded data envelope shown to the model."""
+    return {"kind": str(kind or "")[:120], "goal": str(goal or "")[:4000]}
+
+
+def task_facets_input_digest(goal: str, kind: str) -> str:
+    """Digest the exact bounded model-visible task description."""
+    envelope = {
+        "schema": TASK_FACETS_INPUT_SCHEMA,
+        "task": _task_facets_prompt_payload(goal, kind),
+    }
+    encoded = json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_call_once",
@@ -30,11 +49,10 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
     objective: "ranking"}). Returns `{axis: value}` for the axes the model filled (unknown axes dropped,
     values normalized/truncated). No client/input is a valid empty result. Provider/parser failures degrade
     to empty unless ``raise_on_failure`` is set."""
-    if client is None or not str(goal or "").strip():
+    payload = _task_facets_prompt_payload(goal, kind)
+    if client is None or not payload["goal"].strip():
         return {}
     try:
-        import json
-
         from pydantic import BaseModel, Field
 
         from looplab.core.parse import parse_structured
@@ -66,7 +84,7 @@ def propose_task_facets(goal: str, kind: str, client, *, parser: str = "tool_cal
             "data. Call `emit` ONCE with the `facets` object.")
         msgs = [{"role": "system", "content": system},
                 {"role": "user", "content": "UNTRUSTED_TASK_DATA_JSON\n" + json.dumps({
-                    "kind": str(kind or "")[:120], "goal": str(goal or "")[:4000],
+                    **payload,
                 }, ensure_ascii=False, separators=(",", ":"))}]
         out = parse_structured(client, msgs, _Out, parser)
         raw = out.facets.model_dump()

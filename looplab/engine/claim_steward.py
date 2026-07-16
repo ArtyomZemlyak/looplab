@@ -13,8 +13,85 @@ into explicit failures so an outage is never recorded as an empty recommendation
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 _MAX_PROPOSALS = 10
 _MAX_CLAIMS = 60             # bounded prompt — the most-evidenced / contested claims first
+CLAIM_CURATION_INPUT_SCHEMA = "finalize-claim-curation/v1"
+
+
+def _proposal_budget(max_proposals: int) -> int:
+    return min(_MAX_PROPOSALS, max(1, int(max_proposals)))
+
+
+def _bounded_refs(value, *, maximum: int, item_maximum: int) -> list[str]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [str(x)[:item_maximum] for x in value[:maximum]
+            if isinstance(x, (str, int)) and not isinstance(x, bool)]
+
+
+def _claim_prompt_payload(claims) -> tuple[list[dict], dict[str, dict]]:
+    """Return the exact bounded claim envelope shown to the model plus its opaque-id map."""
+    from looplab.engine.claim_key import claim_uid
+
+    source = claims if isinstance(claims, (list, tuple)) else []
+    reviewable = [c for c in source if isinstance(c, dict)
+                  if c.get("statement") and c.get("maturity", "machine-proposed") == "machine-proposed"]
+    id_to_claim: dict[str, dict] = {}
+    payload: list[dict] = []
+    for c in reviewable[:_MAX_CLAIMS]:
+        statement, scope, metric = str(c["statement"]), _scope_of(c), _metric_of(c)
+        if len(statement) > 4000 or len(scope) > 500 or len(metric) > 200:
+            continue
+        cid = str(c.get("claim_uid") or claim_uid(statement, scope=scope, metric=metric))
+        if not cid or cid in id_to_claim:
+            continue
+        id_to_claim[cid] = c
+        n_support = c.get("n_support")
+        n_support = n_support if isinstance(n_support, int) and not isinstance(n_support, bool) else 0
+        n_oppose = c.get("n_oppose")
+        n_oppose = n_oppose if isinstance(n_oppose, int) and not isinstance(n_oppose, bool) else 0
+        payload.append({
+            "id": cid, "statement": statement[:400], "scope": scope[:160], "metric": metric[:160],
+            "epistemic": str(c.get("epistemic") or "inconclusive")[:40],
+            "n_support": max(0, n_support), "n_oppose": max(0, n_oppose),
+            "support_refs": _bounded_refs(c.get("support"), maximum=12, item_maximum=160),
+            "oppose_refs": _bounded_refs(c.get("oppose"), maximum=12, item_maximum=160),
+            "contradicts": _bounded_refs(c.get("contradicts"), maximum=4, item_maximum=300),
+            "verification": _bounded_refs(c.get("verification"), maximum=8, item_maximum=120),
+            "source_refs": _bounded_refs(c.get("sources"), maximum=8, item_maximum=400),
+        })
+    return payload, id_to_claim
+
+
+def claim_curation_has_input(claims) -> bool:
+    """Whether a finalize pass has any bounded machine-proposed claim to send to a provider."""
+    payload, _ = _claim_prompt_payload(claims)
+    return bool(payload)
+
+
+def claim_curation_input_digest(claims, *, max_proposals: int = _MAX_PROPOSALS) -> str:
+    """Digest the exact bounded model-visible input, not mutable source files or their hidden tail."""
+    payload, _ = _claim_prompt_payload(claims)
+    envelope = {
+        "schema": CLAIM_CURATION_INPUT_SCHEMA,
+        "max_proposals": _proposal_budget(max_proposals),
+        "claims": payload,
+    }
+    encoded = json.dumps(
+        envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def claim_curation_snapshot(memory_dir, *, lessons=None, structured: bool = True,
+                            max_proposals: int = _MAX_PROPOSALS) -> tuple[list[dict], str]:
+    """Freeze one claim projection and its exact prompt digest before a durable paid claim."""
+    from looplab.engine.claims import claims_for_memory
+
+    claims = claims_for_memory(memory_dir, lessons=lessons, structured=structured)
+    return claims, claim_curation_input_digest(claims, max_proposals=max_proposals)
 
 
 def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_call_once",
@@ -26,21 +103,12 @@ def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_ca
     review so the steward doesn't churn them). Advisory: nothing is written here. No client/input is a valid
     empty result. Provider/parser failures degrade to empty unless ``raise_on_failure`` is set."""
     empty: dict = {"decisions": []}
-    # Only review claims the operator has NOT already decided (machine-proposed) — don't re-litigate a human
-    # verdict. Contested/most-evidenced first (claims are already sorted that way).
-    source = claims if isinstance(claims, (list, tuple)) else []
-    reviewable = [c for c in source if isinstance(c, dict)
-                  if c.get("statement") and c.get("maturity", "machine-proposed") == "machine-proposed"]
-    if client is None or not reviewable:
+    if client is None:
         return empty
-    reviewable = reviewable[:_MAX_CLAIMS]
     try:
-        import json
-
         from pydantic import BaseModel, Field
 
         from looplab.core.parse import parse_structured
-        from looplab.engine.claim_key import claim_uid
 
         class _Decision(BaseModel):
             claim_id: str = ""
@@ -53,41 +121,11 @@ def propose_claim_curation(claims: list[dict], client, *, parser: str = "tool_ca
         class _Curation(BaseModel):
             decisions: list[_Decision] = Field(default_factory=list)
 
-        id_to_claim: dict[str, dict] = {}
-        payload = []
-        for c in reviewable:
-            statement, scope, metric = str(c["statement"]), _scope_of(c), _metric_of(c)
-            if len(statement) > 4000 or len(scope) > 500 or len(metric) > 200:
-                continue
-            cid = str(c.get("claim_uid") or claim_uid(statement, scope=scope, metric=metric))
-            if not cid or cid in id_to_claim:
-                continue
-            id_to_claim[cid] = c
-            n_support = c.get("n_support")
-            n_support = n_support if isinstance(n_support, int) and not isinstance(n_support, bool) else 0
-            n_oppose = c.get("n_oppose")
-            n_oppose = n_oppose if isinstance(n_oppose, int) and not isinstance(n_oppose, bool) else 0
-
-            def _refs(value, *, maximum: int, item_maximum: int) -> list[str]:
-                if not isinstance(value, (list, tuple)):
-                    return []
-                return [str(x)[:item_maximum] for x in value[:maximum]
-                        if isinstance(x, (str, int)) and not isinstance(x, bool)]
-
-            payload.append({
-                "id": cid, "statement": statement[:400], "scope": scope[:160], "metric": metric[:160],
-                "epistemic": str(c.get("epistemic") or "inconclusive")[:40],
-                "n_support": max(0, n_support), "n_oppose": max(0, n_oppose),
-                "support_refs": _refs(c.get("support"), maximum=12, item_maximum=160),
-                "oppose_refs": _refs(c.get("oppose"), maximum=12, item_maximum=160),
-                "contradicts": _refs(c.get("contradicts"), maximum=4, item_maximum=300),
-                "verification": _refs(c.get("verification"), maximum=8, item_maximum=120),
-                "source_refs": _refs(c.get("sources"), maximum=8, item_maximum=400),
-            })
+        payload, id_to_claim = _claim_prompt_payload(claims)
         if not payload:
             return empty
         known = {(str(c["statement"]), _scope_of(c), _metric_of(c)) for c in id_to_claim.values()}
-        budget = min(_MAX_PROPOSALS, max(1, int(max_proposals)))
+        budget = _proposal_budget(max_proposals)
         # Statements and source URLs are persisted, untrusted evidence. They stay in a user-role JSON
         # envelope; the model can reference a mutation target only through a known claim id.
         system = (
@@ -180,7 +218,7 @@ def _validate(out, known: set, *, id_to_claim: dict | None = None, max_proposals
         seen.add(key)
         decisions.append({"claim_id": cid, "statement": stmt, "decision": dec,
                           "scope": chosen_scope, "metric": chosen_metric, "why": str(d.why or "")[:200]})
-        if len(decisions) >= min(_MAX_PROPOSALS, max(1, int(max_proposals))):
+        if len(decisions) >= _proposal_budget(max_proposals):
             break
     return {"decisions": decisions}
 
@@ -232,9 +270,9 @@ def steward_claims(memory_dir, client, *, lessons=None, apply: bool = False, by:
             "claim steward is proposal-only; apply=True is disabled. Review the exact proposal, then apply "
             "selected decisions with claim-decide or owner HTTP governance."
         )
-    from looplab.engine.claims import claims_for_memory
     try:
-        claims = claims_for_memory(memory_dir, lessons=lessons, structured=structured)
+        claims, _ = claim_curation_snapshot(
+            memory_dir, lessons=lessons, structured=structured, max_proposals=max_proposals)
     except Exception:  # noqa: BLE001 — interactive inspection remains best-effort
         if raise_on_failure:
             raise
