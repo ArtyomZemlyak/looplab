@@ -9,7 +9,8 @@ import { OpIcon } from './icons.jsx'
 import { reportStepIdentity } from './trustSemantics.js'
 import { DataTable, downloadBlob } from './accessibility.jsx'
 import { normalizeResearchMemos } from './researchMemoModel.js'
-import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
+import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
+  reportNarrativeCoverage } from './reportModel.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -58,22 +59,28 @@ export const reportRefreshFailure = (failure, thrown = false) => {
 }
 
 // The authority banner is deterministic. Provider prose is rendered only in AgentNarrative below.
-function VerdictBanner({ v, onOpenPanel }) {
+function VerdictBanner({ v, onOpenPanel, canOpenPanel }) {
   const cls = TRUST_CLASS[v.trust] || 'warn'
+  const canOpen = panel => !!onOpenPanel && canOpenPanel?.(panel) !== false
   return (
-    <div className={'verdict-banner ' + cls}>
+    <section className={'verdict-banner ' + cls} aria-labelledby="report-verdict-heading">
       <div className="verdict-row">
         <span className={'verdict-pill ' + (v.outcome === 'improved' ? 'ok' : v.outcome === 'regressed' ? 'fail' : '')}>{OUTCOME_LABEL[v.outcome] || v.outcome}</span>
         {v.robustness && v.robustness !== 'n/a' && <span className="pill">{v.robustness}</span>}
         <span className="pill verdict-trust-label">{TRUST_LABEL[v.trust] || v.trust}</span>
       </div>
-      <div className="verdict-headline">{v.headline}</div>
+      <h2 id="report-verdict-heading" className="verdict-headline">{v.headline}</h2>
       {v.caveats.length > 0 && <div className="caveat-chips">
-        {v.caveats.map((c, i) => <button key={i} className={'caveat-chip ' + c.severity}
-          disabled={!onOpenPanel} title={onOpenPanel ? `see ${c.panel} →` : 'Unavailable in historical mode'}
-          onClick={() => onOpenPanel?.(c.panel)}><OpIcon name="alert" size={11} /> {c.text}</button>)}
+        {v.caveats.map((c, i) => {
+          const openable = canOpen(c.panel)
+          return <button key={i} className={'caveat-chip ' + c.severity}
+            disabled={!openable} title={openable ? `see ${c.panel} →` : 'Unavailable in this read-only view'}
+            onClick={() => { if (canOpen(c.panel)) onOpenPanel(c.panel) }}>
+            <OpIcon name="alert" size={11} /> {c.text}
+          </button>
+        })}
       </div>}
-    </div>
+    </section>
   )
 }
 
@@ -146,7 +153,7 @@ function List({ items }) {
   return <ul className="bul">{items.map((x, i) => <li key={i}>{x}</li>)}</ul>
 }
 
-export default function ReportView({ state, runId, onOpenPanel, onToast, onPickNode, readOnly = false,
+export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast, onPickNode, readOnly = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
   const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
@@ -180,14 +187,25 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
       setBestCodeResource({ status: 'restricted', data: null, error: null }); return
     }
     let alive = true
+    const controller = typeof AbortController === 'undefined' ? null : new AbortController()
     setBestCodeResource({ status: 'loading', data: null, error: null })
     const at = readOnly && historySeq != null
       ? `?seq=${encodeURIComponent(historySeq)}&expected_generation=${encodeURIComponent(expectedGeneration || '')}`
       : ''
-    get(runNodeApiPath(runId, best.id, at))
-      .then(data => { if (alive) setBestCodeResource({ status: 'ready', data, error: null }) })
+    get(runNodeApiPath(runId, best.id, at), controller ? { signal: controller.signal } : {})
+      .then(data => {
+        if (!alive) return
+        const exact = normalizeReportNodeDetail(data, {
+          nodeId: best.id, historySeq: readOnly && historySeq != null ? historySeq : null,
+          expectedGeneration,
+        })
+        setBestCodeResource(exact
+          ? { status: 'ready', data: exact, error: null }
+          : { status: 'error', data: null,
+              error: 'The node detail response did not match this report.' })
+      })
       .catch(() => { if (alive) setBestCodeResource({ status: 'error', data: null, error: 'The node detail request failed.' }) })
-    return () => { alive = false }
+    return () => { alive = false; controller?.abort() }
   }, [runId, best?.id, readOnly, historySeq, expectedGeneration, readOnlyReason,
     evidenceAvailable, bestCodeNonce])
   const bestCode = bestCodeResource.data
@@ -407,7 +425,7 @@ export default function ReportView({ state, runId, onOpenPanel, onToast, onPickN
         {' · '}{nodeCount} nodes ({a.nEval} evaluated, {failed.length} failed)
         {state.llm_cost && ` · ${fmtInt(state.llm_cost.total_tokens)} tokens · $${fmt(state.llm_cost.cost)}`}</div>
 
-      <VerdictBanner v={v} onOpenPanel={onOpenPanel} />
+      <VerdictBanner v={v} onOpenPanel={onOpenPanel} canOpenPanel={canOpenPanel} />
 
       {!best && <div className="report-empty-state" role="status">
         <h2>{a.nEval ? 'No feasible champion yet' : 'No champion yet'}</h2>

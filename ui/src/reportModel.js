@@ -24,6 +24,18 @@ const SINGLE_LINE_SPACE = /[\t\r\n]+/g
 
 export const isAdvisoryRecord = value => value != null && typeof value === 'object' && !Array.isArray(value)
 export const advisoryArrayLength = value => Array.isArray(value) ? value.length : 0
+
+// A report can download and render source code, so a merely successful node-detail response is not
+// enough: it must prove that it belongs to the champion currently shown. Historical reads also have
+// to echo the exact snapshot fence or live code could be presented as old evidence.
+export function normalizeReportNodeDetail(value, { nodeId, historySeq = null,
+  expectedGeneration = null } = {}) {
+  if (!isAdvisoryRecord(value) || value.id !== nodeId || typeof value.code !== 'string') return null
+  if (historySeq != null && (value.historical_seq !== historySeq
+      || value.historical_generation !== expectedGeneration)) return null
+  return { code: value.code }
+}
+
 const field = (value, key) => isAdvisoryRecord(value) ? value[key] : undefined
 const primitiveText = value => {
   if (typeof value === 'string') return value

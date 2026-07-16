@@ -9,7 +9,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
 import { analyze, buildModelCard, failureBreakdown, toMarkdown, verdict } from '../src/report.js'
-import { normalizeRunReport, reportNarrativeCoverage } from '../src/reportModel.js'
+import { normalizeReportNodeDetail, normalizeRunReport, reportNarrativeCoverage } from '../src/reportModel.js'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
@@ -27,6 +27,25 @@ const state = (direction, first, final = null) => {
     reward_hacks: [], drifts: [], research: [],
   }
 }
+
+test('report solution evidence fails closed on wrong node and historical snapshot identity', () => {
+  const generation = 'a'.repeat(64)
+  assert.deepEqual(normalizeReportNodeDetail({ id: 7, code: 'print(7)' }, { nodeId: 7 }), {
+    code: 'print(7)',
+  })
+  assert.equal(normalizeReportNodeDetail({ id: 8, code: 'wrong' }, { nodeId: 7 }), null)
+  assert.equal(normalizeReportNodeDetail({ id: 7, code: { untrusted: true } }, { nodeId: 7 }), null)
+  assert.deepEqual(normalizeReportNodeDetail({
+    id: 7, code: 'snapshot', historical_seq: 12, historical_generation: generation,
+  }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), { code: 'snapshot' })
+  assert.equal(normalizeReportNodeDetail({
+    id: 7, code: 'live masquerading as history', historical_seq: 13,
+    historical_generation: generation,
+  }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), null)
+  assert.equal(normalizeReportNodeDetail({
+    id: 7, code: 'old generation', historical_seq: 12, historical_generation: 'b'.repeat(64),
+  }, { nodeId: 7, historySeq: 12, expectedGeneration: generation }), null)
+})
 
 test('total improvement is positive for both objective directions and Markdown names a lone baseline truthfully', () => {
   assert.equal(analyze(state('min', 10, 7)).totalGain, 3)
@@ -93,6 +112,9 @@ test('print CSS removes the screen-only code viewport limit', async () => {
   const css = await readFile(new URL('../src/report-trust-polish.css', import.meta.url), 'utf8')
   assert.match(css, /@media print[\s\S]*?\.report-view pre\.code\s*\{[^}]*max-height:\s*none\s*!important;[^}]*overflow:\s*visible\s*!important;/)
   assert.match(css, /@media print[\s\S]*?\.report-view \.report-provenance\s*\{[^}]*break-inside:\s*avoid;/)
+  assert.match(css, /@media print[\s\S]*?\.attention-trigger, \.attention-layer,[\s\S]*?display:\s*none\s*!important;/)
+  assert.match(css, /@media print[\s\S]*?\.report-view\s*\{[\s\S]*?--bg:\s*#fff;[\s\S]*?--fg:\s*#111827;[\s\S]*?--line:\s*#d1d5db;[\s\S]*?color-scheme:\s*light;/,
+    'print/PDF must use a local light palette instead of inheriting the active screen theme')
 })
 
 test('report provenance normalization and node coverage fail closed in every state', () => {
@@ -182,7 +204,12 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
     const dom = new JSDOM(markup)
     try {
       const doc = dom.window.document
-      assert.equal(doc.querySelector('.verdict-headline').textContent, deterministic)
+      const verdictRegion = doc.querySelector('section.verdict-banner[aria-labelledby="report-verdict-heading"]')
+      const verdictHeading = doc.querySelector('h2#report-verdict-heading.verdict-headline')
+      assert.ok(verdictRegion)
+      assert.equal(verdictHeading?.textContent, deterministic)
+      const readOnlyCaveat = verdictRegion.querySelector('.caveat-chip:disabled')
+      if (readOnlyCaveat) assert.equal(readOnlyCaveat.getAttribute('title'), 'Unavailable in this read-only view')
       assert.equal(doc.querySelector('.agent-report-headline').textContent, agentHeadline)
       const narrative = doc.querySelector('.agent-report.stale[role="note"]')
       assert.ok(narrative)
@@ -198,6 +225,36 @@ test('deterministic verdict stays authoritative across UI, Markdown, and model-c
         'publication provenance must remain printable when the action toolbar is hidden')
     } finally {
       dom.window.close()
+    }
+
+    const caveatRun = state('min', 10, 7)
+    caveatRun.leakage = { leak: true }
+    const scopedMarkup = renderToStaticMarkup(React.createElement(ReportView, {
+      state: caveatRun, runId: caveatRun.run_id, readOnly: true,
+      onOpenPanel: () => {}, canOpenPanel: panel => panel === 'data',
+    }))
+    const scopedDom = new JSDOM(scopedMarkup)
+    try {
+      const chips = [...scopedDom.window.document.querySelectorAll('.caveat-chip')]
+      const dataChip = chips.find(chip => chip.textContent.includes('data-leakage'))
+      const trustChip = chips.find(chip => chip.textContent.includes('single-seed'))
+      assert.equal(dataChip?.disabled, false)
+      assert.match(dataChip?.getAttribute('title') || '', /^see data/)
+      assert.equal(trustChip?.disabled, true)
+      assert.equal(trustChip?.getAttribute('title'), 'Unavailable in this read-only view')
+    } finally {
+      scopedDom.window.close()
+    }
+
+    const liveMarkup = renderToStaticMarkup(React.createElement(ReportView, {
+      state: caveatRun, runId: caveatRun.run_id, onOpenPanel: () => {},
+    }))
+    const liveDom = new JSDOM(liveMarkup)
+    try {
+      assert.ok([...liveDom.window.document.querySelectorAll('.caveat-chip')]
+        .every(chip => !chip.disabled), 'a live callback remains backwards compatible without a predicate')
+    } finally {
+      liveDom.window.close()
     }
   } finally {
     await vite.close()

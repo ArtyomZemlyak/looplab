@@ -191,9 +191,21 @@
     background: #fff !important;
   }
   .app > .topbar, .panel-bar, .directions-overview, .why-strip, .dock,
-  .cmdbar-wrap, .asst-side-panel, .asst-view, .toast { display: none !important; }
+  .cmdbar-wrap, .asst-side-panel, .asst-view, .attention-trigger, .attention-layer,
+  .toast { display: none !important; }
   .report-view .report-toolbar { display: none; }
-  .report-view { max-width: none; padding: 0; color: #111; background: #fff; }
+  .report-view {
+    --bg: #fff; --bg-1: #fff; --bg-2: #f3f4f6; --bg-3: #e5e7eb;
+    --fg: #111827; --fg-dim: #374151; --fg-mut: #4b5563;
+    --line: #d1d5db; --line-2: #9ca3af;
+    --accent: #1d4ed8; --accent-text: #1d4ed8;
+    --working: #8a5a00; --working-text: #6b4300;
+    --ok: #166534; --ok-text: #166534;
+    --fail: #991b1b; --fail-text: #991b1b; --alarm: #991b1b; --alarm-text: #991b1b;
+    --best: #6b5000; --best-text: #6b5000;
+    --shadow: none; --shadow-card: none;
+    max-width: none; padding: 0; color: var(--fg); background: var(--bg); color-scheme: light;
+  }
   .report-view .tbl { display: table; overflow: visible; width: 100%; }
   .report-view pre, .report-view code { white-space: pre-wrap; overflow-wrap: anywhere; }
   .report-view pre.code { max-height: none !important; overflow: visible !important; }
