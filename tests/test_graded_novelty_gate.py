@@ -12,9 +12,15 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from looplab.core.config import Settings
 from looplab.core.models import Idea, RunState
-from looplab.engine.novelty import NoveltyGateMixin
+from looplab.engine.novelty import (
+    NoveltyGateMixin,
+    _canonical_idea_identity,
+    _same_canonical_idea_identity,
+)
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -126,16 +132,63 @@ def test_verbatim_text_duplicate_with_empty_params_defers(tmp_path):
     assert fold(store.read_all()).novelty_grades == []                 # NOT recorded as a graded allow
 
 
-def test_structural_variant_with_empty_params_still_allowed(tmp_path):
-    # empty params but a DIFFERENT rationale on the same branch is a genuine new implementation -> the text
-    # guard does NOT fire (texts differ) -> level-4 ALLOW stands (the guard closes the dup hole without
-    # over-restricting real structural variants).
+@pytest.mark.parametrize("duplicate", [
+    "DECOUPLED CONTRASTIVE LOSS WITH R-DROP",                         # case-fold
+    "  decoupled\tcontrastive\nloss   with r-drop  ",                 # whitespace collapse
+    "decoupled, contrastive loss with r—drop!!!",                     # punctuation separators
+    "decoupled contrastive loss with rdrop",                          # punctuation deletion
+    "ｄｅｃｏｕｐｌｅｄ contrastive loss with r-drop",                         # NFKC full-width form
+])
+def test_surface_only_duplicate_cannot_use_level4_bypass(tmp_path, duplicate):
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    idea = Idea(operator="improve", params={}, rationale=duplicate)
+
+    assert _same_canonical_idea_identity(
+        _canonical_idea_identity(duplicate),
+        _canonical_idea_identity("decoupled contrastive loss with r-drop"),
+    )
+    assert eng._graded_novelty_precheck(fold(store.read_all()), idea) is None
+    assert fold(store.read_all()).novelty_grades == []
+
+
+def test_surface_only_duplicate_cannot_use_level5_bypass(tmp_path):
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    duplicate = Idea(
+        operator="improve",
+        params={},
+        rationale="LOSS—SIDE, FALSE NEGATIVE FILTERING THAT BROKE TRAINING!!!",
+    )
+
+    assert eng._graded_novelty_precheck(fold(store.read_all()), duplicate) is None
+    assert fold(store.read_all()).novelty_grades == []
+
+
+def test_oversize_identity_defers_instead_of_trusting_a_truncated_comparison(tmp_path):
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    oversized = Idea(
+        operator="improve",
+        params={},
+        rationale=("decoupled contrastive loss with a distinct adapter " * 400),
+    )
+
+    identity, complete = _canonical_idea_identity(oversized.rationale)
+    assert identity and complete is False
+    assert eng._graded_novelty_precheck(fold(store.read_all()), oversized) is None
+    assert fold(store.read_all()).novelty_grades == []
+
+
+def test_prose_only_structural_variant_still_runs_the_flat_gate(tmp_path):
+    # Different prose is not machine-evaluable proof of a different implementation. With no concrete
+    # param/space delta the graded precheck must defer instead of trusting the proposal's own assertion.
     store = _run(tmp_path)
     eng = _GateEngine(store, graded=True)
     variant = Idea(operator="improve", params={},
                    rationale="decoupled contrastive loss with an added listwise KL distillation term")
-    out = eng._graded_novelty_precheck(fold(store.read_all()), variant)
-    assert out is variant and fold(store.read_all()).novelty_grades[0]["level"] == 4
+    assert eng._graded_novelty_precheck(fold(store.read_all()), variant) is None
+    assert fold(store.read_all()).novelty_grades == []
 
 
 def test_identical_and_near_dup_defer_to_flat_gate(tmp_path):
@@ -244,14 +297,17 @@ print(json.dumps(fold(store.read_all()).novelty_grades[0], sort_keys=True))
 
 
 def test_grade_payload_is_hashseed_independent(tmp_path):
-    import os, subprocess, sys
+    import os
+    import subprocess
+    import sys
     p = str(tmp_path / "events.jsonl")
     _run(tmp_path)                                        # writes the run's events.jsonl at `p`
     def _emit(seed: str) -> str:
         env = {**os.environ, "PYTHONHASHSEED": seed}
         # each subprocess writes graded events into its OWN copy of the log so the payloads compare cleanly
         import shutil
-        cp = str(tmp_path / f"events-{seed}.jsonl"); shutil.copy(p, cp)
+        cp = str(tmp_path / f"events-{seed}.jsonl")
+        shutil.copy(p, cp)
         return subprocess.check_output(
             [sys.executable, "-c", _PAYLOAD_SNIPPET.format(path=cp)], env=env, text=True).strip()
     assert _emit("0") == _emit("987654") != ""

@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, gpuStat, saveRunConfig, operatorMeta,
+import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, saveRunConfig, operatorMeta,
   commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
@@ -25,34 +25,129 @@ export { default as Panel } from './PanelShell.jsx'
 
 const Stat = ({ n, l }) => <div className="stat"><div className="n">{n}</div><div className="l">{l}</div></div>
 
-// Small read-resource state machine shared by the secondary panels below. A request sequence fence
-// prevents an older response from replacing a newer retry/poll, while a failed refresh keeps the
-// last successful payload visibly marked stale instead of turning it into an authoritative empty.
-function usePanelResource(loader, key = '', pollMs = null) {
-  const [value, setValue] = useState({ key, state: 'loading', data: null })
-  const [nonce, setNonce] = useState(0)
-  const sequence = useRef(0)
-  usePoll(alive => {
-    // # CODEX AGENT: a failed refresh is not an authoritative empty response; retain the last-good
-    // payload as visibly stale, and fence late poll/retry responses by their request sequence.
-    const request = ++sequence.current
-    loader().then(data => {
-      if (alive() && request === sequence.current) setValue({ key, state: 'ready', data })
-    }).catch(() => {
-      if (!alive() || request !== sequence.current) return
-      setValue(previous => {
-        const data = previous.key === key ? previous.data : null
-        return { key, state: data == null ? 'error' : 'stale', data }
-      })
-    })
-  }, pollMs, [key, nonce])
-  const resource = value.key === key ? value : { key, state: 'loading', data: null }
-  const retry = () => {
-    setValue(previous => previous.key === key && previous.data == null
-      ? { ...previous, state: 'loading' } : previous)
-    setNonce(n => n + 1)
+const invalidPanelPayload = () => { throw new Error('Invalid panel payload') }
+const isRecord = value => !!value && typeof value === 'object' && !Array.isArray(value)
+const nullableText = value => value === null || typeof value === 'string'
+const nullableNumber = value => value === null || (typeof value === 'number' && Number.isFinite(value))
+
+// HTTP 200 proves transport success, not resource truth. Each panel validates its exact envelope
+// before replacing last-good data or presenting an authoritative empty state.
+const PANEL_REQUEST_TIMEOUT_MS = 15_000
+
+function authoringPayload(value) {
+  if (!isRecord(value) || !nullableText(value.dir) || !Array.isArray(value.files)) invalidPanelPayload()
+  const files = value.files.map(file => {
+    if (!isRecord(file) || !file.name || typeof file.name !== 'string' || typeof file.text !== 'string') invalidPanelPayload()
+    return { name: file.name, text: file.text }
+  })
+  return { dir: value.dir, files }
+}
+
+function memoryPayload(value) {
+  if (!isRecord(value) || !nullableText(value.dir)
+      || !['cases', 'lessons', 'notes'].every(key => Array.isArray(value[key]))) invalidPanelPayload()
+  for (const row of value.cases) {
+    if (!isRecord(row) || !row.task_id || typeof row.task_id !== 'string' || typeof row.goal !== 'string'
+        || !nullableNumber(row.metric) || !Object.hasOwn(row, 'params')) invalidPanelPayload()
   }
-  return [resource, retry]
+  const lessonText = ['role', 'kind', 'outcome', 'task_id']
+  for (const row of value.lessons) {
+    if (!isRecord(row) || !row.statement || typeof row.statement !== 'string'
+        || lessonText.some(key => row[key] != null && typeof row[key] !== 'string')
+        || ['delta', 'confidence'].some(key => row[key] != null && !nullableNumber(row[key]))
+        || (row.evidence_count != null && (!Number.isSafeInteger(row.evidence_count) || row.evidence_count < 0))) invalidPanelPayload()
+  }
+  const notes = value.notes.map(row => {
+    const note = isRecord(row) && (row.note || row.statement)
+    if (typeof note !== 'string' || !note || (row.task_id != null && typeof row.task_id !== 'string')) invalidPanelPayload()
+    return { ...row, note }
+  })
+  return { dir: value.dir, cases: value.cases, lessons: value.lessons, notes }
+}
+
+function runsPayload(value) {
+  if (!Array.isArray(value)) invalidPanelPayload()
+  for (const row of value) {
+    if (!isRecord(row) || !row.run_id || typeof row.run_id !== 'string' || typeof row.task_id !== 'string'
+        || !['min', 'max'].includes(row.direction) || typeof row.finished !== 'boolean'
+        || typeof row.phase !== 'string' || !Number.isSafeInteger(row.nodes) || row.nodes < 0
+        || !nullableNumber(row.best_metric) || !nullableNumber(row.best_confirmed)
+        || !nullableText(row.label)) invalidPanelPayload()
+  }
+  return value
+}
+
+function gpuPayload(value) {
+  if (!isRecord(value) || typeof value.available !== 'boolean'
+      || (value.gpus != null && !Array.isArray(value.gpus))) invalidPanelPayload()
+  const gpus = value.gpus || []
+  for (const gpu of gpus) {
+    if (!isRecord(gpu) || !gpu.name || typeof gpu.name !== 'string'
+        || ['util', 'mem_used', 'mem_total', 'temp', 'power'].some(key => !nullableNumber(gpu[key]))) invalidPanelPayload()
+  }
+  if (value.available && !Array.isArray(value.gpus)) invalidPanelPayload()
+  return { available: value.available, gpus }
+}
+
+function trajectoryNodes(value) {
+  if (!isRecord(value) || !isRecord(value.state) || !isRecord(value.state.nodes)) invalidPanelPayload()
+  const nodes = Object.values(value.state.nodes)
+  for (const node of nodes) {
+    if (!isRecord(node) || !Number.isSafeInteger(node.id) || !nullableNumber(node.metric)
+        || (node.feasible != null && typeof node.feasible !== 'boolean')) invalidPanelPayload()
+  }
+  return nodes
+}
+
+// A poll and a manual retry share one synchronous lock: interval ticks skip an active request, while
+// Retry starts immediately when idle. A failed refresh retains last-good data and marks it stale.
+function usePanelResource(loader, normalize = value => value, key = '', pollMs = null) {
+  const [value, setValue] = useState({ key, state: 'loading', data: null, pending: null })
+  const flight = useRef(null)
+  const startRef = useRef(null)
+  useEffect(() => {
+    let alive = true
+    const owner = {}
+    const start = (intent = 'refresh') => {
+      if (flight.current) return false
+      const controller = new AbortController()
+      const request = { owner, controller, timer: null }
+      flight.current = request
+      setValue(previous => previous.key !== key
+        ? { key, state: 'loading', data: null, pending: null }
+        : ['error', 'stale'].includes(previous.state) ? { ...previous, pending: intent } : previous)
+      const finish = (ok, data = null) => {
+        if (flight.current !== request) return
+        clearTimeout(request.timer)
+        flight.current = null
+        if (!alive) return
+        setValue(previous => {
+          const lastGood = previous.key === key ? previous.data : null
+          return ok ? { key, state: 'ready', data, pending: null }
+            : { key, state: lastGood == null ? 'error' : 'stale', data: lastGood, pending: null }
+        })
+      }
+      request.timer = setTimeout(() => { controller.abort(); finish(false) }, PANEL_REQUEST_TIMEOUT_MS)
+      Promise.resolve().then(() => loader(controller.signal)).then(normalize)
+        .then(data => finish(true, data), () => finish(false))
+      return true
+    }
+    startRef.current = start
+    start('load')
+    const timer = pollMs == null ? null : setInterval(start, pollMs)
+    return () => {
+      alive = false
+      if (timer != null) clearInterval(timer)
+      if (startRef.current === start) startRef.current = null
+      if (flight.current?.owner === owner) {
+        clearTimeout(flight.current.timer)
+        flight.current.controller.abort()
+        flight.current = null
+      }
+    }
+  }, [key, pollMs])
+  const resource = value.key === key ? value : { key, state: 'loading', data: null, pending: null }
+  return [resource, () => startRef.current?.('retry') || false]
 }
 
 function PanelResourceNotice({ resource, label, onRetry }) {
@@ -61,8 +156,11 @@ function PanelResourceNotice({ resource, label, onRetry }) {
   const stale = resource.state === 'stale'
   return <div className={'report-inline-state' + (stale ? '' : ' error')} role={stale ? 'status' : 'alert'}>
     <OpIcon name="alert" size={14} />
-    <span>{label}: {stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'}</span>
-    <button className="btn sm" onClick={onRetry}>Retry</button>
+    <span>{label}: {resource.pending
+      ? `${resource.pending === 'retry' ? 'Retrying' : 'Refreshing'}…${stale ? ' Last loaded data remains visible.' : ''}`
+      : stale ? 'Last loaded data; refresh failed.' : 'Unavailable.'}</span>
+    <button className="btn sm" disabled={!!resource.pending} onClick={onRetry}>
+      {resource.pending === 'retry' ? 'Retrying…' : resource.pending ? 'Refreshing…' : 'Retry'}</button>
   </div>
 }
 
@@ -670,7 +768,7 @@ export function AuthoringPanel({ onClose, onToast }) {
   const [kind, setKind] = useState('prompts')
   const [sel, setSel] = useState(null)
   const [text, setText] = useState('')
-  const [source, retry] = usePanelResource(() => get(`/api/${kind}`), kind)
+  const [source, retry] = usePanelResource(signal => get(`/api/${kind}`, { signal }), authoringPayload, kind)
   const data = source.data || { dir: null, files: [] }
   return (
     <Panel title="Authoring — configure the scientist" sub="hot-reloaded next run" onClose={onClose} wide>
@@ -691,7 +789,7 @@ export function AuthoringPanel({ onClose, onToast }) {
           {sel ? <>
             <textarea className="text" aria-label={`Edit ${sel}`} value={text} onChange={e => setText(e.target.value)} />
             <button className="btn sm primary" style={{ marginTop: 8 }} onClick={async () => { await putText(`/api/${kind}/${sel}`, text); onToast('saved ' + sel) }}>Save</button>
-          </> : <div className="muted">select a file to edit</div>}
+          </> : source.state === 'ready' && <div className="muted">select a file to edit</div>}
         </div>
       </div>
     </Panel>
@@ -711,8 +809,8 @@ function KbNote({ note }) {
 export function MemoryPanel({ onClose }) {
   // Everything the run has LEARNED, in one place: distilled lessons, solved-task cases, meta-notes, and
   // the agentic knowledge-base markdown notes (best configs / recipes the agents save + later retrieve).
-  const [memory, retryMemory] = usePanelResource(() => get('/api/memory'))
-  const [knowledge, retryKnowledge] = usePanelResource(() => get('/api/knowledge'))
+  const [memory, retryMemory] = usePanelResource(signal => get('/api/memory', { signal }), memoryPayload)
+  const [knowledge, retryKnowledge] = usePanelResource(signal => get('/api/knowledge', { signal }), authoringPayload)
   const mem = memory.data || { dir: null, cases: [], lessons: [], notes: [] }
   const kb = knowledge.data || { dir: null, files: [] }   // /api/knowledge → {dir, files:[{name,text}]}
   const [tab, setTab] = useState('lessons')
@@ -780,7 +878,7 @@ export function MemoryPanel({ onClose }) {
 }
 
 export function RegistryPanel({ state, onClose }) {
-  const [resource, retry] = usePanelResource(() => get('/api/runs'))
+  const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
   const champ = state.champion != null ? state.nodes[state.champion] : (state.best_node_id != null ? state.nodes[state.best_node_id] : null)
   return (
@@ -814,16 +912,16 @@ export function RegistryPanel({ state, onClose }) {
 // Live GPU telemetry (nvidia-smi via /api/gpu). Polls while open so an operator can watch
 // utilization / VRAM / power during a real training run without leaving the browser.
 export function GpuPanel({ onClose }) {
-  const [resource, retry] = usePanelResource(gpuStat, '', 2000)
+  const [resource, retry] = usePanelResource(signal => get('/api/gpu', { signal }), gpuPayload, '', 2000)
   const data = resource.data
   const bar = (v, max, hot) => <div className="bar" style={{ height: 8 }}>
     <div className={'fill' + (hot ? ' hot' : '')} style={{ width: Math.min(100, max ? v / max * 100 : 0) + '%' }} /></div>
   return (
     <Panel title="GPU monitor" sub="nvidia-smi · live" onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="GPU telemetry" onRetry={retry} />
-      {resource.state === 'ready' && !data?.available
+      {data && !data.available
         ? <div className="notice">No GPU / nvidia-smi not available on the server host.</div>
-        : resource.state === 'ready' && !data?.gpus?.length
+        : data && !data.gpus.length
           ? <div className="notice">No GPU devices reported.</div>
         : data?.available && (data.gpus || []).map((g, i) => (
             <div key={i} style={{ marginBottom: 16 }}>
@@ -871,15 +969,19 @@ export function HyperImportancePanel({ state, onClose }) {
 
 // F2 · Cross-run sweep aggregation — a lab dashboard overlaying every run of the same task:
 // best-metric comparison + which settings won. Uses the /api/runs summary (no per-run refetch).
-function CrossRunTrajectories({ rows, dir, task }) {
-  const rowKey = rows.map(r => r.run_id).join(',')
-  const [resource, retry] = usePanelResource(() => Promise.all(rows.slice(0, 8).map(r =>
-    get(runApiPath(r.run_id, '/state')).then(p => {
-      const ns = Object.values(p.state?.nodes || {}).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
+export const crossRunTrajectoryKey = (rows, dir, task) => JSON.stringify([
+  task, dir, rows.slice(0, 8).map(row => [row.run_id, row.label ?? null]),
+])
+
+export function CrossRunTrajectories({ rows, dir, task }) {
+  const rowKey = crossRunTrajectoryKey(rows, dir, task)
+  const [resource, retry] = usePanelResource(signal => Promise.all(rows.slice(0, 8).map(r =>
+    get(runApiPath(r.run_id, '/state'), { signal }).then(p => {
+      const ns = trajectoryNodes(p).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
       let best = null; const series = []
       for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
       return { run_id: r.run_id, label: r.label || r.run_id, series }
-    }))), `${task}:${dir}:${rowKey}`)
+    }))), undefined, rowKey)
   return <div style={{ marginBottom: 12 }}>
     <PanelResourceNotice resource={resource} label="Trajectory overlay" onRetry={retry} />
     {resource.data && <MultiTrajectory runs={resource.data} />}
@@ -887,7 +989,7 @@ function CrossRunTrajectories({ rows, dir, task }) {
 }
 
 export function CrossRunPanel({ state, onClose }) {
-  const [resource, retry] = usePanelResource(() => get('/api/runs'))
+  const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
   const [task, setTask] = useState(state.task_id || '')
   const [overlay, setOverlay] = useState(false)   // U4: convergence-trajectory overlay

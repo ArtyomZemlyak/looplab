@@ -14,11 +14,65 @@ Layering: no runtime import of the orchestrator (TYPE_CHECKING only) and never s
 core, events and stdlib (the search/agent/tool deps are lazy, method-local imports)."""
 from __future__ import annotations
 
+import unicodedata
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
 from looplab.core.models import Idea, NodeStatus, RunState
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
+
+
+_IDEA_IDENTITY_MAX_SOURCE_CHARS = 16_384
+_IDEA_IDENTITY_MAX_NORMALIZED_CHARS = 32_768
+_IDEA_IDENTITY_MAX_TOKENS = 2_048
+
+
+def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
+    """Return a bounded, punctuation-insensitive identity and whether it is complete.
+
+    Compatibility normalization and case-folding close cheap surface-form bypasses (for example full-
+    width text or ``strasse``/``Straße``), while Unicode punctuation, symbols, controls and whitespace
+    are separators. The completeness bit lets the admission gate fail closed instead of treating a common
+    truncated prefix as proof that two arbitrarily large proposals differ.
+    """
+    raw = str(text or "")
+    complete = len(raw) <= _IDEA_IDENTITY_MAX_SOURCE_CHARS
+    normalized = unicodedata.normalize(
+        "NFKC", raw[:_IDEA_IDENTITY_MAX_SOURCE_CHARS]
+    ).casefold()
+    if len(normalized) > _IDEA_IDENTITY_MAX_NORMALIZED_CHARS:
+        normalized = normalized[:_IDEA_IDENTITY_MAX_NORMALIZED_CHARS]
+        complete = False
+
+    tokens: list[str] = []
+    token: list[str] = []
+    for char in normalized:
+        category = unicodedata.category(char)
+        if category[0] in {"L", "N"} or (token and category[0] == "M"):
+            token.append(char)
+            continue
+        if token:
+            tokens.append("".join(token))
+            token = []
+            if len(tokens) >= _IDEA_IDENTITY_MAX_TOKENS:
+                complete = False
+                break
+    else:
+        if token:
+            tokens.append("".join(token))
+    return tuple(tokens), complete
+
+
+def _same_canonical_idea_identity(
+    left: tuple[tuple[str, ...], bool],
+    right: tuple[tuple[str, ...], bool],
+) -> bool:
+    """Return whether two complete, non-empty identities are surface variants."""
+    left_tokens, left_complete = left
+    right_tokens, right_complete = right
+    if not left_complete or not right_complete or not left_tokens or not right_tokens:
+        return False
+    return left_tokens == right_tokens or "".join(left_tokens) == "".join(right_tokens)
 
 
 class NoveltyGateMixin:
@@ -224,21 +278,35 @@ class NoveltyGateMixin:
         # Only levels 4/5 are ALLOW-overrides of the flat gate. Level 0 (novel) and 1/2/3 (dedup) defer.
         if grade.level not in (4, 5):
             return None
-        # grade_novelty's own dedup (levels 1/2) is PARAM-based, so a proposal whose params are empty or
-        # key-disjoint from the tried node structurally SKIPS those levels — a VERBATIM text repeat with no
-        # distinguishing params then reaches level 4/5 and would be wrongly short-circuited past the flat
-        # gate. Guard it: when the proposal's idea-TEXT is identical to ANY tried node's (the flat gate's own
-        # notion of identity via `_idea_text`), it is a textual duplicate the param grade couldn't see — DEFER
-        # to the flat gate (which judges text) rather than bypass it. Scan ALL nodes, NOT just `grade.near_node`:
-        # for level 4/5 `near_node` is the first concept-sharing / failed-direction node, generally NOT the
-        # verbatim-matching one, so comparing only to it would let a verbatim repeat of a DIFFERENT node slip
-        # through. Genuine variants (different rationale, or a real param tweak on differing values) are unaffected.
-        def _norm(t: str) -> str:
-            return " ".join((t or "").split()).lower()
-        nt = _norm(self._idea_text(idea))
-        if nt and any(getattr(nd, "idea", None) is not None and nt == _norm(self._idea_text(nd.idea))
-                      for nd in state.nodes.values()):
-            return None                          # verbatim textual duplicate -> defer to the flat gate
+        # grade_novelty's own dedup (levels 1/2) is PARAM-based, so empty/key-disjoint params can skip it
+        # and make a textual repeat reach a level-4/5 ALLOW. Compare against EVERY tried node, not merely
+        # `grade.near_node`: the concept-sharing node selected by the grader need not be the duplicated one.
+        # CODEX AGENT: a graded score is never sufficient evidence of a new implementation. A level-4/5
+        # short-circuit is allowed only when its bounded canonical prose is complete, non-empty, and differs
+        # from every prior proposal after NFKC, Unicode case-folding and punctuation/whitespace separation.
+        # Oversize/empty identities defer to the flat gate because we cannot prove a concrete difference.
+        candidate_identity = _canonical_idea_identity(self._idea_text(idea))
+        identity, complete = candidate_identity
+        if not complete or not identity:
+            return None
+        for nd in state.nodes.values():
+            if getattr(nd, "idea", None) is None:
+                continue
+            prior_canonical = _canonical_idea_identity(self._idea_text(nd.idea))
+            prior_identity, prior_complete = prior_canonical
+            if (not prior_complete
+                    or _same_canonical_idea_identity(candidate_identity, prior_canonical)):
+                return None                      # duplicate/ambiguous identity -> defer to the flat gate
+        near = state.nodes.get(grade.near_node)
+        if near is None or getattr(near, "idea", None) is None:
+            return None
+        candidate_change = (dict(idea.params or {}), dict(idea.space or {}))
+        prior_change = (dict(near.idea.params or {}), dict(near.idea.space or {}))
+        # Different prose is a model assertion, not evidence of a different implementation. Until an
+        # implementation/patch identity exists, only an explicit param or search-space delta can justify
+        # skipping the ordinary semantic/LLM duplicate gate; prose-only variants must still pass it.
+        if not any(candidate_change) or candidate_change == prior_change:
+            return None
         self.store.append(EV_NOVELTY_GRADED, {
             # prospective id = max+1, not len() (gap-safe; audit only) — matches the reject events below.
             "node_id": max(state.nodes, default=-1) + 1, "level": grade.level, "grade": grade.name,
