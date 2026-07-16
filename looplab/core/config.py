@@ -633,6 +633,11 @@ class Settings(BaseSettings):
     # and the telemetry use. Degrades to the self-reported confidence without a client or on any verifier
     # error (the telemetry records which source was used). ON by default in the product Settings (ce4a379),
     # EngineOptions off; a few extra LLM calls per acted-on proposal. See looplab/trust/verifier.py + search/foresight.py.
+    # REVISIT (cost/quality, not yet resolved): a live classification run measured ~10 LLM calls & ~3.8 min/node
+    # on deepseek-v4-flash with the full Part IV/V default bundle; the calibrated verifier is part of that per-node
+    # tax. Kept ON deliberately — it raises decision quality (self-reported foresight confidence has ≈0 Pearson
+    # with realized outcome), and lowering quality to save calls is the wrong trade. TODO: run a frozen quality/cost
+    # A/B (verifier-on vs -off) to quantify the recall@objective gain per extra call before considering a default flip.
     foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
