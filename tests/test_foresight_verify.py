@@ -7,7 +7,9 @@ gate and the telemetry (`confidence_source`) read; with the flag off (or the ver
 self-reported confidence is used unchanged — the byte-identical historical path."""
 from __future__ import annotations
 
-from looplab.core.config import Settings
+import pytest
+
+from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES, Settings
 from looplab.core.models import Idea, Node, NodeStatus, RunState
 from looplab.search.foresight import ForesightPanelResearcher
 from looplab.trust.verifier import foresight_criteria
@@ -132,6 +134,17 @@ def test_verify_samples_are_honored():
     assert client.verify_calls == 2                            # exactly `verify_samples` verifier calls
 
 
+def test_direct_panel_construction_caps_paid_verifier_samples():
+    client = _VerifyClient([1, 0], verdict="yes")
+    panel = ForesightPanelResearcher(
+        _SeqResearcher(_ideas(), client), k=2, verify_score=True,
+        verify_samples=1_000_000,
+    )
+    panel.propose(_state(), None)
+    assert panel.verify_samples == MAX_FORESIGHT_VERIFY_SAMPLES
+    assert client.verify_calls == MAX_FORESIGHT_VERIFY_SAMPLES
+
+
 def test_verifier_confidence_returns_none_without_a_client():
     # direct unit of the defensive client-None branch (propose() short-circuits earlier, so it's the one
     # path not reachable end-to-end): _verifier_confidence must degrade to None, not raise.
@@ -144,3 +157,8 @@ def test_settings_defaults():
     s = Settings()
     # Part IV/V ships ON by default (calibrated foresight verifier); sample count unchanged.
     assert s.foresight_verify is True and s.foresight_verify_samples == 3
+
+
+def test_settings_reject_unbounded_foresight_verifier_samples():
+    with pytest.raises(ValueError):
+        Settings(foresight_verify_samples=MAX_FORESIGHT_VERIFY_SAMPLES + 1)

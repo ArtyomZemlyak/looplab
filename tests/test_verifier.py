@@ -7,8 +7,9 @@ and the `calibrate` harness reports whether the score TRACKS a gold outcome (§1
 including honestly returning `pearson=None` on the degenerate zero-variance case foresight hit."""
 from __future__ import annotations
 
-from looplab.trust.verifier import (LabelledCase, calibrate, lesson_overgeneralization_criteria,
-                                    reexamination_criteria, verify, _pearson, _verdict_to_score)
+from looplab.trust.verifier import (MAX_VERIFIER_SAMPLES, LabelledCase, calibrate,
+                                    lesson_overgeneralization_criteria, reexamination_criteria,
+                                    verify, _pearson, _verdict_to_score)
 
 
 class _FixedClient:
@@ -80,6 +81,18 @@ def test_decomposed_repeated_scoring():
     assert rep.per_criterion["direction_sound"]["mean"] == 0.75
     assert rep.score == round((1.0 + 0.75) / 2, 4)            # weight-averaged
     assert rep.agreement == 1.0                               # every sample agreed
+
+
+def test_direct_verifier_calls_have_a_hard_sample_ceiling():
+    client = _FixedClient(["yes", "yes"])
+    rep = verify(
+        "bounded subject", "bounded evidence", reexamination_criteria(),
+        client=client, samples=1_000_000,
+    )
+    assert client.calls == MAX_VERIFIER_SAMPLES
+    assert rep.n_samples == MAX_VERIFIER_SAMPLES
+    assert rep.requested_samples == 1_000_000
+    assert rep.sample_limit_applied is True
 
 
 def test_repeated_sampling_detects_variance():

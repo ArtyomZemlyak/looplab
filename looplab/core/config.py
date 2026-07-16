@@ -26,6 +26,10 @@ _LL_HOME = Path.home() / ".looplab"
 # researcher = per-experiment proposer (per-node sizing, e.g. eval timeout for a heavy model).
 AGENT_ROLES = ("strategist", "boss", "researcher")
 
+# A foresight score is computed for every acted-on proposal. Keep this lower than the generic
+# verifier's emergency ceiling so a typo cannot multiply paid synchronous calls across a run.
+MAX_FORESIGHT_VERIFY_SAMPLES = 8
+
 # Settings whose semantics are committed by ``run_started`` and restored from the folded event log
 # on every re-entry.  Changing one only in ``config.snapshot.json`` would mix incompatible evidence
 # (a different holdout split) or make the live producer disagree with replay's selection policy.
@@ -632,7 +636,8 @@ class Settings(BaseSettings):
     foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
-    foresight_verify_samples: int = 3
+    foresight_verify_samples: int = Field(
+        default=3, ge=1, le=MAX_FORESIGHT_VERIFY_SAMPLES)
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

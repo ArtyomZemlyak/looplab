@@ -34,6 +34,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 from looplab.agents.roles import forward_hints
+from looplab.core.config import MAX_FORESIGHT_VERIFY_SAMPLES
 from looplab.core.models import NodeStatus
 from looplab.core.parse import parse_structured
 from looplab.core.prompts import render
@@ -316,7 +317,8 @@ class ForesightPanelResearcher:
         # with a CALIBRATED §12-verifier score for the chosen candidate. Opt-in; degrades to the
         # self-reported confidence without a client or on any verifier error.
         self.verify_score = bool(verify_score)
-        self.verify_samples = max(1, int(verify_samples))
+        self.verify_samples = min(
+            MAX_FORESIGHT_VERIFY_SAMPLES, max(1, int(verify_samples)))
         self.client = client if client is not None else getattr(base, "client", None)
         self.bounds = bounds if bounds is not None else getattr(base, "bounds", None)
         # The panel must reflect the base's configured structured-output parser (mirroring the

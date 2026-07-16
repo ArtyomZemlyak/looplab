@@ -51,6 +51,9 @@ _VERDICT_VALUE: dict[str, float] = {
     "strong_no": 0.0, "no": 0.25, "unclear": 0.5, "yes": 0.75, "strong_yes": 1.0,
 }
 _VERDICT_ORDER = ["strong_no", "no", "unclear", "yes", "strong_yes"]
+# CODEX AGENT: every sample is a synchronous provider call. Direct/library callers bypass Settings,
+# so the primitive itself owns a hard emergency ceiling as well as exposing the truncation receipt.
+MAX_VERIFIER_SAMPLES = 32
 # Synonyms a model reaches for — normalized before lookup so a near-miss verdict still scores.
 _VERDICT_SYNONYM = {
     "true": "yes", "false": "no", "supported": "yes", "unsupported": "no",
@@ -123,6 +126,8 @@ class VerdictReport:
     n_samples: int
     method: str
     samples: list[SampleVerdict] = field(default_factory=list)
+    requested_samples: int = 1
+    sample_limit_applied: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -220,9 +225,13 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
 
     Best-effort: a sample that fails to parse is dropped; if NONE parse the report is `method="llm"`
     with `n_samples=0` and `score=None`. Never raises on a model/endpoint failure."""
+    requested_samples = samples if type(samples) is int else 1
+    bounded_samples = min(MAX_VERIFIER_SAMPLES, max(1, requested_samples))
+    limit_applied = bounded_samples != requested_samples
     if client is None or not criteria:
         return VerdictReport(score=None, per_criterion={}, agreement=0.0, n_samples=0,
-                             method="unavailable")
+                             method="unavailable", requested_samples=requested_samples,
+                             sample_limit_applied=limit_applied)
 
     from pydantic import BaseModel, Field
 
@@ -249,7 +258,7 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
     per_scores: dict[str, list[float]] = {c.key: [] for c in criteria}
     per_verdicts: dict[str, list[str]] = {c.key: [] for c in criteria}
     raw_samples: list[SampleVerdict] = []
-    for _ in range(max(1, samples)):
+    for _ in range(bounded_samples):
         out = _one_sample()
         if out is None:
             continue
@@ -291,7 +300,9 @@ def verify(subject: str, evidence: str, criteria: list[Criterion], *, client=Non
     # n_samples = samples that produced >=1 usable verdict (what the field documents). Using the MAX
     # per-criterion count would under-report when different samples graded disjoint criteria.
     return VerdictReport(score=overall, per_criterion=per_criterion, agreement=agreement,
-                         n_samples=len(raw_samples), method="llm", samples=raw_samples)
+                         n_samples=len(raw_samples), method="llm", samples=raw_samples,
+                         requested_samples=requested_samples,
+                         sample_limit_applied=limit_applied)
 
 
 def _nearest_label(val: float) -> str:
