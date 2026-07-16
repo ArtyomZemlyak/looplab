@@ -641,6 +641,14 @@ class Settings(BaseSettings):
     foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
+    # REVIEW(2026-07-16): this schema bound BREAKS previously-valid snapshots. The field used to be
+    # unbounded (foresight.py runtime-clamps with max(1, int(...)) and its own cap), so a run started
+    # with LOOPLAB_FORESIGHT_VERIFY_SAMPLES=10 recorded 10 in config.snapshot.json; now every path
+    # that reconstructs Settings(**snapshot) — `looplab resume`, finalization recovery, serve's
+    # replay relaunch — raises ValidationError and the run becomes un-resumable, contrary to the
+    # snapshots/env-compat rule ("snapshots and env compat depend on the names" — and on old VALUES
+    # staying loadable). Validation bounds on RESUME-critical fields must clamp (field_validator
+    # coercing into range), not reject; reserve hard ge/le for fields never persisted in snapshots.
     foresight_verify_samples: int = Field(
         default=3, ge=1, le=MAX_FORESIGHT_VERIFY_SAMPLES)
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an

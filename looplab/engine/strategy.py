@@ -513,6 +513,17 @@ class StrategyCadenceMixin:
                 # pairs seen together on a node (evidenced, integer weight). Emit-only-if-new vs the folded
                 # edges -> no per-cadence churn; the commutative fold keeps it order-tolerant. Deterministic
                 # (sorted; no LLM) so it also records on the offline heuristic path. Audit-only.
+                # REVIEW(2026-07-16): the "also records on the offline heuristic path" claim above is
+                # FALSE — this whole block sits inside `if client is not None:`, so the heuristic
+                # fallback (which sets `graph, tags = seed, None` further down) never reaches it: an
+                # offline/no-reflect-client run emits NO concept_edge events, concept_edges stays {}
+                # forever, and every typed lens in /concepts silently falls back to is_a with
+                # edges_present=false. Worse, if the block were moved as-is, the heuristic path's
+                # `tags is None` would raise at `tags.values()` and vanish into the blanket
+                # `except: pass` below. Either move the emission after the branch join (guarding
+                # `tags or {}` and deriving heuristic tags first), or fix the comment to state the
+                # substrate is LLM-cadence-only — as written it points a debugger of "why are lenses
+                # empty offline" away from the actual gate.
                 try:
                     from collections import Counter as _Counter
                     from itertools import combinations as _comb
