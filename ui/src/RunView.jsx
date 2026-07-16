@@ -1139,7 +1139,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                 }} />
             </LazyBoundary>
           </div></div>
-        : view === 'concepts'
+        : view === 'concepts' && !historyActive
+        // Fenced against history: the Concepts view (View 1) fetches the LIVE, non-seq-aware /concepts
+        // projection, so rendering it against a historical fold would blend a live tree/metrics with
+        // historical experiment rows (and its lens-creation POST spends tokens in a read-only context).
+        // A historical scrub / deep link falls through to the graph, which reads the folded `state`.
         ? <div className="main"><LazyBoundary label="concept tree" resetKey={`${runId}:${generation || 'pending'}`}>
             <ConceptView runId={runId} state={state} onPickNode={(id) => {
               route.update(current => ({ ...current, view: 'dag', nodeId: id,
