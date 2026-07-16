@@ -93,13 +93,14 @@ test('collapsed group drill-down preserves the active direction projection', asy
 })
 
 test('stale async resources are cancelled and run ids are encoded at every transport boundary', async () => {
-  const [shared, hooks, api, dock, inspector, panels] = await Promise.all([
-    source('SharedAssistant.jsx'), source('hooks.js'), source('api.js'), source('Dock.jsx'),
-    source('Inspector.jsx'), source('panels.jsx'),
+  const [shared, deadline, hooks, api, dock, inspector, panels] = await Promise.all([
+    source('SharedAssistant.jsx'), source('requestDeadline.js'), source('hooks.js'),
+    source('api.js'), source('Dock.jsx'), source('Inspector.jsx'), source('panels.jsx'),
   ])
-  assert.match(shared, /const controller = new AbortController\(\)/)
-  assert.match(shared, /setTimeout\([\s\S]*SHARED_REQUEST_TIMEOUT_MS[\s\S]*controller\.abort/)
-  assert.match(shared, /requestRef\.current\?\.id !== id/)
+  assert.match(deadline, /const controller = new AbortController\(\)/)
+  assert.match(deadline, /setTimeout\([\s\S]*controller\.abort/)
+  assert.match(shared, /deadlineRequest\([\s\S]*SHARED_REQUEST_TIMEOUT_MS/)
+  assert.match(shared, /requestRef\.current !== timed/)
   assert.match(shared, /requestRef\.current\?\.controller\.abort\(\)/)
   assert.doesNotMatch(shared, /sharedLoadError = error =>[\s\S]{0,400}error\?*\.message/)
   assert.match(shared, /shared\/\$\{encodeURIComponent\(sid\)\}/)

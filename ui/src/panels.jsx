@@ -20,6 +20,7 @@ import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
 import { safeExternalHref } from './urlSafety.js'
 import { normalizeResearchMemos } from './researchMemoModel.js'
+import { deadlineRequest } from './requestDeadline.js'
 
 export { default as Panel } from './PanelShell.jsx'
 
@@ -110,15 +111,15 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
     const owner = {}
     const start = (intent = 'refresh') => {
       if (flight.current) return false
-      const controller = new AbortController()
-      const request = { owner, controller, timer: null }
+      const timed = deadlineRequest(signal => Promise.resolve().then(() => loader(signal)).then(normalize),
+        PANEL_REQUEST_TIMEOUT_MS)
+      const request = { owner, controller: timed.controller }
       flight.current = request
       setValue(previous => previous.key !== key
         ? { key, state: 'loading', data: null, pending: null }
         : ['error', 'stale'].includes(previous.state) ? { ...previous, pending: intent } : previous)
       const finish = (ok, data = null) => {
         if (flight.current !== request) return
-        clearTimeout(request.timer)
         flight.current = null
         if (!alive) return
         setValue(previous => {
@@ -127,9 +128,7 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
             : { key, state: lastGood == null ? 'error' : 'stale', data: lastGood, pending: null }
         })
       }
-      request.timer = setTimeout(() => { controller.abort(); finish(false) }, PANEL_REQUEST_TIMEOUT_MS)
-      Promise.resolve().then(() => loader(controller.signal)).then(normalize)
-        .then(data => finish(true, data), () => finish(false))
+      timed.promise.then(data => finish(true, data), () => finish(false))
       return true
     }
     startRef.current = start
@@ -140,7 +139,6 @@ function usePanelResource(loader, normalize = value => value, key = '', pollMs =
       if (timer != null) clearInterval(timer)
       if (startRef.current === start) startRef.current = null
       if (flight.current?.owner === owner) {
-        clearTimeout(flight.current.timer)
         flight.current.controller.abort()
         flight.current = null
       }
