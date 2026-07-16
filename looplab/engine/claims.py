@@ -915,7 +915,13 @@ _INTENT_CUES = {
     "worked":    frozenset("best proven effective recommend recommended success successful reliable robust "
                            "winning champion".split()),
 }
-_CAVEAT = frozenset(("mixed", "refuted"))     # claims that carry counter-evidence — the contradiction pool
+# The CONTRADICTION pool for the retrieval quota — claims that carry actual OPPOSITION (mixed=contested,
+# refuted=negative verdict). This is DELIBERATELY narrower than build_context_pack's `_CAVEAT_STATES`
+# (which also includes `inconclusive`): the context-pack reserves a slot so a clean slate of positives can't
+# hide any NON-positive (§21.20.5 coverage), whereas the retrieval quota reserves slots specifically for
+# COUNTER-EVIDENCE/contradictions — an inconclusive (no-stance) claim is neither. Two distinct mechanisms,
+# not an accidental inconsistency (concept-conformance).
+_CAVEAT = frozenset(("mixed", "refuted"))
 
 
 def _classify_intent(query: str) -> str:
@@ -1134,10 +1140,13 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                  and h["score"] >= top_score * _CAVEAT_SCORE_RATIO]
         need = target - len(have)
         for cav in extra[:need]:
-            # Keep the raw relevance winner. Quotas reserve relevant counter-evidence, not an unrelated
-            # caveat selected solely because it has the desired epistemic label.
-            victim = next((h for h in reversed(picked) if not (h["kind"] == "claim"
-                          and h.get("epistemic") in _CAVEAT) and h["rel_rank"] != 0), None)
+            # Keep the raw relevance winner (rel_rank 0). Quotas reserve relevant counter-evidence, not an
+            # unrelated caveat selected solely for its epistemic label. Also NEVER evict an operator-PINNED
+            # claim — the "pinned is retained" governance projection applies to EVERY consumer, not just the
+            # context pack (concept-conformance: §22.4 / §21.20.5, mirroring build_context_pack).
+            victim = next((h for h in reversed(picked)
+                           if not (h["kind"] == "claim" and h.get("epistemic") in _CAVEAT)
+                           and h["rel_rank"] != 0 and h.get("maturity") != "operator-pinned"), None)
             if victim is None:
                 break
             picked[picked.index(victim)] = cav
