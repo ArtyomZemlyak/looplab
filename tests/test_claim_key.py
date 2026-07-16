@@ -96,8 +96,8 @@ def test_roles_still_pair_same_direction_opposites():
     assert improve["polarity"] == 1 and degrade["polarity"] == -1
 
 
-def test_v2_identity_is_nfkc_normalized_and_metric_qualified():
-    assert CLAIM_KEY_VERSION == 2
+def test_v3_identity_is_nfkc_normalized_and_metric_qualified():
+    assert CLAIM_KEY_VERSION == 3
     normal = claim_signature("FULLWIDTH improves recall", scope="t", metric="recall")
     compat = claim_signature("ＦＵＬＬＷＩＤＴＨ improves recall", scope="t", metric="recall")
     other_metric = claim_signature("FULLWIDTH improves recall", scope="t", metric="precision")
@@ -109,3 +109,19 @@ def test_delimiter_bearing_qualifiers_cannot_alias():
     left = claim_signature("augmentation improves recall", scope="a|b", metric="c")
     right = claim_signature("augmentation improves recall", scope="a", metric="b|c")
     assert left["uid"] != right["uid"] and left["contra_key"] != right["contra_key"]
+
+
+def test_null_effect_does_not_merge_with_negative_effect():
+    # concept-conformance regression (§21.20.5 "hurts != refuted-positive"): a "does NOT improve" (null /
+    # refuted-positive) claim must NOT share identity with a "reduces" (supported negative-effect) claim,
+    # even though both net to polarity -1. The old single-bit polarity merged them and pooled evidence.
+    null = claim_signature("hard negatives do not improve recall")
+    harm = claim_signature("hard negatives reduce recall")
+    helps = claim_signature("hard negatives improve recall")
+    assert null["merge_key"] != harm["merge_key"]              # null-effect never merges into a harm claim
+    assert null["polarity"] == harm["polarity"] == -1          # ...though both net negative
+    assert null["relation_sign"] == 1 and null["negated"]      # relation=helps, but negated
+    assert harm["relation_sign"] == -1 and not harm["negated"]  # relation=hurts, asserted
+    # helps vs harm and helps vs not-helps still surface as contradictions (opposite net polarity, same subj)
+    assert helps["contra_key"] == harm["contra_key"] == null["contra_key"]
+    assert helps["polarity"] == 1

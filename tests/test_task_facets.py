@@ -124,13 +124,34 @@ def test_finalize_facets_are_proposal_only_and_audited(tmp_path):
     assert rec["proposals"]["facets"] == {"domain": "ir", "modality": "text"}
 
 
-def test_cli_task_facets(tmp_path, monkeypatch):
+def test_cli_task_facets_is_proposal_only(tmp_path, monkeypatch):
     from typer.testing import CliRunner
     from looplab.cli import app
     import looplab.cli as cli
     monkeypatch.setattr(cli, "make_llm_client",
                         lambda *a, **k: _Client({"domain": "ir", "modality": "text"}))
-    r = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval",
-                                 "--task-id", "t1", "--apply"])
-    assert r.exit_code == 0 and "domain" in r.stdout and "recorded for task 't1'" in r.stdout
-    assert load_task_facets(str(tmp_path))["t1"]["domain"] == "ir"
+    # proposal-only: classifies + shows, records NOTHING (consistent with concept/claim stewards, §22.4)
+    r = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval"])
+    assert r.exit_code == 0 and "domain" in r.stdout and "proposal" in r.stdout
+    assert not (tmp_path / "task_facets.jsonl").exists()
+    # --apply is deprecated/rejected before any paid call
+    r2 = CliRunner().invoke(app, ["task-facets", str(tmp_path), "dense retrieval", "--apply"])
+    assert r2.exit_code == 2 and "deprecated" in r2.stdout
+
+
+def test_cli_task_facets_set_is_the_operator_write(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    # the deterministic operator write (no LLM) — the ratify half of the split
+    r = CliRunner().invoke(app, ["task-facets-set", str(tmp_path), "t1",
+                                 "--domain", "information-retrieval", "--language", "russian"])
+    assert r.exit_code == 0 and "recorded facets for task 't1'" in r.stdout
+    got = load_task_facets(str(tmp_path))["t1"]
+    assert got["domain"] == "information-retrieval" and got["language"] == "russian"
+    # by='operator' provenance (not 'steward') for a hand write
+    import json
+    row = json.loads((tmp_path / "task_facets.jsonl").read_text().splitlines()[-1])
+    assert row["by"] == "operator"
+    # empty write is a clean error
+    r2 = CliRunner().invoke(app, ["task-facets-set", str(tmp_path), "t2"])
+    assert r2.exit_code == 2

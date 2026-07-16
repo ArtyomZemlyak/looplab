@@ -3894,7 +3894,10 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   and scope-agnostic (its identity gap is now SUPERSEDED by the structured-key follow-up below).
   **FOLLOW-UP LANDED 2026-07-15 (structured claim key):** `engine/claim_key.py` +
   `claim_assessments(structured=)` replace the display-prose identity with a SCOPE+POLARITY-safe structured
-  key — subject-stems + scope(task) + metric + polarity. Opposite-polarity assertions ("X helps" vs "X
+  key — role-aware subject (lhs/rhs around the effect verb) + scope(task) + metric, with the RELATION
+  direction (helps/hurts) and sentential NEGATION kept as SEPARATE identity axes (v3: a null-effect "does not
+  help" never merges into a supported-negative "hurts"; net `polarity` still drives contradiction pairing).
+  Opposite-polarity assertions ("X helps" vs "X
   never helps") no longer merge; they share a `contra_key` and are surfaced as a CONTRADICTION (contested).
   Same words in two tasks are two claims; operator governance is scope-precise (a reject in task A cannot
   reach task B — `record_claim_decision` carries a `claim_uid`+scope, `load_claim_decisions` indexes both).
@@ -4084,9 +4087,11 @@ opinion must never rewrite portfolio truth. Therefore:
 This preserves the important direction — agents have no cross-run mutation tool — but does **not** make reads
 unpoisonable. Stored strings are still untrusted prompt data and several scope paths remain fail-open. The
 earlier rejected-claim active-projection leak is now closed in context, Atlas, tools and retrieval. The typed
-claim endpoint now validates current target existence and `evidence_digest` under the governance lock; concept
-targets still are not existence-validated, and neither family has versioned evidence/taxonomy releases or a
-queryable audit/history workbench. Full safety requires the §22.8 residual gates.
+claim endpoint now validates current target existence and `evidence_digest` under the governance lock; the
+typed concept endpoints likewise validate merge/split source + target existence in the current portfolio
+(`concept_registry.py`), so neither family accepts a governance write against a non-existent concept. What
+remains: neither family has versioned evidence/taxonomy releases or a queryable audit/history workbench. Full
+safety requires the §22.8 residual gates.
 
 #### 22.5 Delivery-per-role, concretely
 
