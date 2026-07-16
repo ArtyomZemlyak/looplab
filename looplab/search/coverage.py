@@ -77,6 +77,12 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
         return {"nodes": 0, "themes": 0, "niches": 0, "operators": 0,
                 "theme_entropy": 0.0, "dominant_theme_frac": 0.0,
                 "recent_dominant_frac": 0.0, "top_themes": []}
+    # REVIEW(2026-07-16): this deliberately-local import (and its "keep `search` import-time free of
+    # digest" rationale) is now contradicted three screens up — eba3cc6 added a MODULE-level
+    # `from looplab.events.digest import node_theme`, so `search.coverage` imports digest at import
+    # time anyway (cycle-safe: digest only imports core). Either both imports go top-level and this
+    # stale load-bearing comment is dropped, or the constraint is real and node_theme's import must
+    # become local too — as written, the comment documents a rule the module no longer follows.
     from looplab.events.digest import theme_rollup     # local: keep `search` import-time free of digest
     rollup = theme_rollup(state)                        # {theme: {count, best_metric}} — canonical
     counts = [v["count"] for v in rollup.values()]
