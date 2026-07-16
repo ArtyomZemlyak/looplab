@@ -20,6 +20,14 @@ const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 function useResource(read, initial) {
   const [data, setData] = useState(initial)
   const [state, setState] = useState('loading')
+  // REVIEW(2026-07-16): no in-flight/out-of-order guard — every OTHER fetch helper in this window
+  // (OwnerAuth, SharedAssistant, ScopeReport, usePanelResource) carries an epoch/sequence token, but
+  // this one lets overlapping reads race: loadRuns fires every 2.5s from usePoll PLUS an immediate
+  // visibilitychange tick, so when the server responds slower than the interval an OLDER /api/runs
+  // response can resolve LAST and overwrite newer data as 'ready'. Concretely: right after removeRun
+  // completes deleteRun+refresh, a poll dispatched BEFORE the delete resolves last and re-inserts the
+  // deleted run's card — it "resurrects" (clickable) until the next tick; same window corrupts
+  // renames and project moves. One sequence ref (apply only the latest load's result) closes it.
   const load = () => read()
     .then(value => { setData(value); setState('ready') })
     .catch(() => setState(current => ['ready', 'stale'].includes(current) ? 'stale' : 'error'))
@@ -45,6 +53,14 @@ const mutationMessage = error => error?.status === 409
 // Prompt-local input and menu selection survive a failed mutation until the operator retries.
 
 function useMutation() {
+  // REVIEW(2026-07-16): unlike its sibling useListMutation (12s settleWithin deadline), this lock
+  // awaits `action()` with NO deadline and no AbortSignal (api.js send() has neither) — and while
+  // busy it hard-blocks every exit path: the Modal/RunMenu suppress Escape/backdrop/close/Tab, and
+  // busy feeds menuBusy -> navigationBusy, which disables run cards, crumbs, the drawer, Settings
+  // and New-run page-wide. A single stalled move/assign/rename fetch (hung proxy, dropped
+  // connection) therefore soft-locks the ENTIRE runs route until a full page reload. Wrap the await
+  // in the shared requestDeadline helper (extracted for exactly this) so a stall degrades to the
+  // bounded inline error instead of a page-wide freeze.
   const lock = useRef(false)
   const [state, setState] = useState(null)
   const run = async action => {

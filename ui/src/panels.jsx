@@ -973,6 +973,12 @@ export const crossRunTrajectoryKey = (rows, dir, task) => JSON.stringify([
 
 export function CrossRunTrajectories({ rows, dir, task }) {
   const rowKey = crossRunTrajectoryKey(rows, dir, task)
+  // REVIEW(2026-07-16): Promise.all with NO per-run catch is all-or-nothing — one rejected fetch
+  // (a run deleted between list polls -> 404) or one run tripping trajectoryNodes' strict validation
+  // rejects the WHOLE batch, and usePanelResource turns that into a panel-wide "Unavailable" instead
+  // of drawing the 7 healthy runs. The pre-rework code degraded each failed run to {series: []}.
+  // The rows list refreshes independently of run lifetimes, so a just-removed run is routine, not
+  // exceptional — add `.catch(() => null)` per run and filter, keeping the overlay partial-tolerant.
   const [resource, retry] = usePanelResource(signal => Promise.all(rows.slice(0, 8).map(r =>
     get(runApiPath(r.run_id, '/state'), { signal }).then(p => {
       const ns = trajectoryNodes(p).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
