@@ -138,19 +138,19 @@ def test_tag_idea_pins_the_concept_set(tmp_path):
 # F2 (§21.4): agentic graded-novelty — reuse cached LLM node tags + LLM-tag the idea
 # --------------------------------------------------------------------------- #
 
-def test_surface_text_includes_authored_concepts():
-    # The Researcher authors idea.concepts; those ids must appear in the tagger's surface text so an idea
-    # whose free text never spells out its concept still tags against its own vocabulary (not empty).
+def test_classifier_surface_excludes_authored_concept_claims():
+    # The Researcher authors idea.concepts; the independent tagger must infer them from descriptive
+    # evidence rather than laundering the producer's own labels into classifier provenance.
     from looplab.search.graded_novelty import _idea_text
     from looplab.search.concept_graph import _node_text, _describe_node
     from types import SimpleNamespace
     idea = Idea(operator="improve", params={}, rationale="tweak the training setup",
                 concepts=["loss/contrastive", "negatives/hard-mining"])
     text = _idea_text(idea)
-    assert "loss/contrastive" in text and "negatives/hard-mining" in text
+    assert "loss/contrastive" not in text and "negatives/hard-mining" not in text
     node = SimpleNamespace(idea=idea, operator="improve")
-    assert "loss/contrastive" in _node_text(node)
-    assert "loss/contrastive" in _describe_node(node)
+    assert "loss/contrastive" not in _node_text(node)
+    assert "loss/contrastive" not in _describe_node(node)
 
 
 def test_graph_from_node_concepts_rebuilds_deterministically():

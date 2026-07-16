@@ -127,14 +127,16 @@ export function layoutWithGroups(nodes, { collapsed = new Set(), nodeGroup = new
   }
 
   // ---- BANDED grid-pack (theme / niche) -----------------------------------------------------------
-  // Depth is a COARSE axis (~10 levels), so we relax it from a hard row into a soft BAND (K depths
-  // each). Inside a band, each group's members fill a FIXED-ROW, column-major grid cell — compact,
+  // Depth is a COARSE axis, so we relax it from a hard row into a soft BAND (K depths each). On a
+  // desktop canvas, a coarser band spends the available width before adding another tall stack whose
+  // lower branches cannot fit above the timeline. Members still fill a fixed-row,
+  // column-major grid cell — compact,
   // non-overlapping, and append-stable (a new member takes the next column slot; placed members never
   // move). Themeless entities (merges carry theme=None) collect in a per-band BRIDGE cell on the right
   // instead of being boxed. Cells order left→right by group similarity (Phase 1b) so like sits by like.
-  const K = 2                 // depths per band
-  const ROWS = 4              // fixed rows per cell → columns grow rightward (short, wide, stable)
-  const PX = 206, PY = 102, GAPCOLS = 0.7, BAND_GAP = 78
+  const K = 4                 // coarser depth bands trade dead side space for readable scale
+  const ROWS = 4              // retain append-stable cell capacity while using fewer vertical bands
+  const PX = 206, PY = 96, GAPCOLS = 0.7, BAND_GAP = 64
   const BRIDGE = Symbol('bridge')   // unique cell key for themeless entities; never collides with a group key
   const bandOf = (e) => Math.floor((depth[e] || 0) / K)
   const keyOfEnt = (e) => e.startsWith('super:') ? e.slice(6) : (nodeGroup.get(Number(e.slice(2))) ?? null)

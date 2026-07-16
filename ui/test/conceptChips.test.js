@@ -71,6 +71,21 @@ test('conceptMatches is prefix-aware OR', () => {
   assert.equal(conceptMatches(['x'], []), true)                               // empty selection = all
 })
 
+test('conceptMatches canonicalizes the selection so a consolidation rename retargets it', () => {
+  // node tags canonicalize to the NEW id; a selection made against the OLD id must still match (else a
+  // live rename would strand the filter and dim the whole graph).
+  const rn = { 'loss/contrast': 'loss/contrastive' }
+  assert.equal(conceptMatches(['loss/contrastive'], ['loss/contrast'], rn), true)
+  assert.equal(conceptMatches(['loss/contrastive/dcl'], ['loss/contrast'], rn), true)   // + descendants
+  assert.equal(conceptMatches(['loss'], ['=loss-old'], { 'loss-old': 'loss' }), true)   // exact marker preserved
+})
+
+test('chipsAtPath canonicalizes the drilled path', () => {
+  const nc = { 0: ['loss/contrastive/dcl'] }
+  const chips = chipsAtPath(nc, { 'loss/contrast': 'loss/contrastive' }, 'loss/contrast')
+  assert.ok(chips.some(c => c.id === 'loss/contrastive/dcl'))   // retired path retargeted to the survivor
+})
+
 test('conceptMatches supports the `=` exact-match marker (the "here" chip)', () => {
   assert.equal(conceptMatches(['loss'], ['=loss']), true)                     // exact tag matches
   assert.equal(conceptMatches(['loss/contrastive/dcl'], ['=loss']), false)    // descendant does NOT match exact

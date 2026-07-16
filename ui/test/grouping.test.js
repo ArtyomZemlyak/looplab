@@ -68,12 +68,12 @@ test('layered mode (operator): every node placed, one region cell per group, no 
 })
 
 test('banded theme: all nodes placed with finite coords + returns per-band cells', () => {
-  const ns = twoThemeGraph()
+  const ns = twoThemeGraph([{ id: 11, parents: [8], theme: 'A', metric: 0.15 }])
   const groups = computeGroups(ns, 'theme')
   const ng = nodeGroupMap(groups)
   const { pos, cells } = layoutWithGroups(ns, { nodeGroup: ng, groupMode: 'theme' })
   for (const id of Object.keys(ns)) assert.ok(pos[`n:${id}`] && finite(pos[`n:${id}`]), `node ${id} placed`)
-  // theme A spans depths 0..3 -> >1 band -> >1 cell for A
+  // Theme A spans depths 0..4, crossing the desktop layout's four-depth band boundary.
   const aCells = cells.filter(c => c.key === 'A')
   assert.ok(aCells.length >= 2, 'theme A produces a cell in more than one band')
   assert.ok(aCells.every(c => typeof c.band === 'number'), 'banded cells carry a band index')

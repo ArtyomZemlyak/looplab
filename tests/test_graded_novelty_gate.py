@@ -135,6 +135,21 @@ def test_researcher_authored_concepts_cannot_certify_agentic_bypass(tmp_path):
     assert fold(s.read_all()).novelty_grades == []
 
 
+def test_candidate_authored_concepts_cannot_certify_heuristic_bypass(tmp_path):
+    """A fresh proposal cannot self-assign the concept that would let it skip the ordinary flat gate."""
+    store = _run(tmp_path)
+    eng = _GateEngine(store, graded=True)
+    candidate = Idea(
+        operator="improve",
+        params={"rank": 8.0},
+        rationale="generic training adjustment with no independently classifiable method",
+        concepts=["loss/decoupled-contrastive"],
+    )
+
+    assert eng._graded_novelty_precheck(fold(store.read_all()), candidate) is None
+    assert fold(store.read_all()).novelty_grades == []
+
+
 def test_unknown_concept_provenance_fails_closed(tmp_path):
     """A legacy/direct state snapshot with memberships but no producer receipt is not classifier evidence."""
     s = _run(tmp_path, task_id="totally-unknown-task")

@@ -15,15 +15,22 @@ import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
   themeFilteredGroupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
 } from './grouping.js'
-import { DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag } from './dagViewport.js'
+import {
+  createDagCanvasRefitScheduler, DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag,
+} from './dagViewport.js'
 
 const NODE_W = 188, NODE_H = 84
+const DAG_FIT_OPTIONS = {
+  padding: { top: '50px', right: '40px', bottom: '42px', left: '40px' },
+  minZoom: 0.28,
+  maxZoom: 1.05,
+}
 
 // fitView runs only at initialization. A semantic collapse can turn a 131-card forest into five
 // operator aggregates while retaining the old transform; a bounded regroup also moves every card.
 // Wait for React Flow to measure the replacement nodes before fitting. Expanding detail deliberately
 // preserves the user's camera.
-function RefitBoundedGraph({ signature, count, mode }) {
+function RefitBoundedGraph({ rootRef, cameraTouchedRef, autoFit, signature, count, mode }) {
   const { fitView } = useReactFlow()
   const nodesInitialized = useNodesInitialized()
   const previousRef = useRef(null)
@@ -38,9 +45,30 @@ function RefitBoundedGraph({ signature, count, mode }) {
   useEffect(() => {
     if (!nodesInitialized || pendingRef.current !== signature) return
     pendingRef.current = null
-    const frame = requestAnimationFrame(() => fitView({ padding: 0.18, minZoom: 0.6, maxZoom: 1 }))
+    const frame = requestAnimationFrame(() => fitView(DAG_FIT_OPTIONS))
     return () => cancelAnimationFrame(frame)
   }, [nodesInitialized, signature, fitView])
+  // Lazy strips and the bottom command bar can settle after React Flow's initial fit. Re-fit the real
+  // canvas box until the operator deliberately pans or zooms; after that, their camera always wins.
+  useEffect(() => {
+    // Attach independently of `useNodesInitialized`: with visible-element virtualization, offscreen
+    // nodes can keep that aggregate false even though React Flow's initial fit already succeeded.
+    if (!autoFit || typeof ResizeObserver === 'undefined') return undefined
+    const root = rootRef.current
+    if (!root) return undefined
+    const refitter = createDagCanvasRefitScheduler({
+      fit: () => fitView(DAG_FIT_OPTIONS),
+      cameraTouched: () => cameraTouchedRef.current,
+      requestFrame: requestAnimationFrame,
+      cancelFrame: cancelAnimationFrame,
+    })
+    const observer = new ResizeObserver(entries => {
+      const box = entries[0]?.contentRect
+      if (box) refitter.resize(box.width, box.height)
+    })
+    observer.observe(root)
+    return () => { refitter.cancel(); observer.disconnect() }
+  }, [autoFit, fitView, rootRef, cameraTouchedRef])
   return null
 }
 
@@ -48,7 +76,7 @@ function RefitBoundedGraph({ signature, count, mode }) {
 // flips a context boolean when zoom crosses a dead-band; every ExpNode reads it via context. So changing
 // zoom never re-runs the layout memo (its deps don't include zoom) — it just swaps full-card ↔ glyph.
 const LodContext = React.createContext(false)
-const LOD_ON = 0.42, LOD_OFF = 0.5   // hysteresis: a dead-band so sitting near the threshold can't flicker
+const LOD_ON = 0.56, LOD_OFF = 0.64   // sub-readable cards become honest overview glyphs
 function LodWatcher({ lod, onChange }) {
   const { zoom } = useViewport()
   useEffect(() => {
@@ -67,7 +95,7 @@ function ZoomFontWatcher() {
   const { zoom } = useViewport()
   const q = Math.round(zoom * 20) / 20
   useEffect(() => {
-    const fs = Math.max(5.5, Math.min(14, 12 / Math.max(0.4, q)))
+    const fs = Math.max(6.5, Math.min(18, 12 / Math.max(0.4, q)))
     document.documentElement.style.setProperty('--ll-label-zfs', fs.toFixed(2) + 'px')
   }, [q])
   return null
@@ -410,6 +438,12 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const [showMap, setShowMap] = useState(() => storageGet('ll.minimap') === '1')
   const [showLegend, setShowLegend] = useState(false)
   const [lod, setLod] = useState(false)   // zoom level-of-detail: full cards ↔ glyphs (set by LodWatcher)
+  const cameraTouchedRef = useRef(false)
+  const claimCamera = event => {
+    if (event.target?.closest?.('.react-flow__pane, .react-flow__controls, .react-flow__minimap')) {
+      cameraTouchedRef.current = true
+    }
+  }
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
   const base = useMemo(() => {
@@ -585,11 +619,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       </filter>
     </defs></svg>}
     <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
-               fitView={autoFit} fitViewOptions={{ padding: 0.12, minZoom: 0.6, maxZoom: 1 }}
+               fitView={autoFit} fitViewOptions={DAG_FIT_OPTIONS}
                defaultViewport={DAG_READABLE_VIEWPORT}
                minZoom={0.05} maxZoom={1.8}
                onlyRenderVisibleElements proOptions={{ hideAttribution: true }}
                nodesDraggable={!!onNodeAction}
+               onPointerDownCapture={claimCamera}
+               onWheelCapture={() => { cameraTouchedRef.current = true }}
                onNodeContextMenu={(e, rf) => {
                  const id = rf?.data?.node?.id
                  if (id == null || !onNodeAction) return
@@ -624,7 +660,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                onPaneClick={() => { closeMenu(false); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
       <LodWatcher lod={lod} onChange={setLod} />
       <ZoomFontWatcher />
-      <RefitBoundedGraph signature={graphSignature} count={interactiveNodeCount} mode={groupMode} />
+      <RefitBoundedGraph rootRef={dagRef} cameraTouchedRef={cameraTouchedRef} autoFit={autoFit}
+        signature={graphSignature} count={interactiveNodeCount} mode={groupMode} />
       <Background color="var(--line)" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
