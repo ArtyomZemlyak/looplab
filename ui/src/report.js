@@ -85,6 +85,17 @@ function rollup(nodes, direction, keyFn) {
 }
 
 export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
+// REVIEW(2026-07-16): the CLIENT-side theme readers were never migrated off `idea.theme`, which
+// Phase 0 (bd816a5) stopped authoring — eba3cc6 added the concepts-axis fallback only SERVER-side
+// (events/digest.py::node_theme). On every new run `idea.theme` is empty for all nodes, so here in
+// the UI: themeEffectiveness returns [], directionProfit returns [] (DirectionsOverview — the
+// directions bar over the DAG — silently renders null forever), mergeSummary's "⊕ combines" line
+// loses its theme labels, and the DAG's theme grouping/filter chips have nothing to key on. Worse,
+// Phase 5b's ConceptChipBar commit (c21c3e9) RELIES on this deadness ("DirectionsOverview ... is
+// null on concept-authored runs ... so no double bar appears in practice") — codifying the
+// regression as a layout assumption. These readers need the same fallback the server got (first
+// concept's axis via a shared helper, e.g. in conceptId.js), and then the double-bar layout needs a
+// real decision instead of an accident.
 export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.idea?.theme || null)
 
 // Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
