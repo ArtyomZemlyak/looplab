@@ -8,21 +8,150 @@ with node_id (see tracing.py), so we group traces by node_id and build a child t
 from __future__ import annotations
 
 import json
+import math
 import os
+import sys
 from collections import defaultdict
 from typing import Optional
 
 from looplab.core.models import RunState
 
 
+_MAX_SPAN_ID_CHARS = 256
+_MAX_NODE_ID_CHARS = 128
+_MAX_TRACE_TOKENS = (1 << 63) - 1
+_MAX_TRACE_SECONDS = 1e15
+_MAX_TRACE_FLOAT = sys.float_info.max
+
+
+def _normalized_id(value) -> Optional[str]:
+    """Return one bounded, hashable span/trace id, or ``None`` when it is unusable.
+
+    Current writers emit compact hex strings. Bounded non-negative integers are accepted for old/custom
+    exporters and canonicalized to strings so parent references still compare consistently. Containers,
+    booleans and enormous strings are invalid rather than becoming dictionary keys in every trace view.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value if value and len(value) <= _MAX_SPAN_ID_CHARS else None
+    if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= _MAX_TRACE_TOKENS:
+        return str(value)
+    return None
+
+
+def _finite_number(value, *, default=0.0, nonnegative: bool = False,
+                   maximum: float = _MAX_TRACE_FLOAT):
+    """Coerce an untrusted JSON scalar without allowing NaN/inf/huge values into sorting or sums."""
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, str) and len(value.strip()) > 64:
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if (not math.isfinite(number) or abs(number) > maximum
+            or (nonnegative and number < 0.0)):
+        return default
+    if isinstance(value, (int, float)):
+        return value
+    return number
+
+
+def _safe_token_count(value) -> int:
+    """Signed-int64, non-negative token projection shared by normalization and roll-ups."""
+    if isinstance(value, bool):
+        return 0
+    if isinstance(value, int):
+        return value if 0 <= value <= _MAX_TRACE_TOKENS else 0
+    if isinstance(value, str) and len(value.strip()) > 32:
+        return 0
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return 0
+    if not math.isfinite(number) or not number.is_integer():
+        return 0
+    result = int(number)
+    return result if 0 <= result <= _MAX_TRACE_TOKENS else 0
+
+
+def _normalize_span(value) -> Optional[dict]:
+    """Validate the light structural contract of one durable span.
+
+    A complete, valid-JSON line with a bad schema is a quarantined observation, not an end-of-log marker.
+    Invalid required ids drop the one line; recoverable fields degrade to safe defaults. The returned
+    dictionaries are shallow copies, so readers never mutate the durable/raw objects they were handed.
+    """
+    if not isinstance(value, dict):
+        return None
+    span_id = _normalized_id(value.get("span_id"))
+    trace_id = _normalized_id(value.get("trace_id"))
+    if span_id is None or trace_id is None:
+        return None
+
+    span = dict(value)
+    span["span_id"] = span_id
+    span["trace_id"] = trace_id
+    span["parent_id"] = _normalized_id(span.get("parent_id"))
+    span["start"] = _finite_number(
+        span.get("start", 0.0), maximum=_MAX_TRACE_SECONDS)
+    if "end" in span:
+        span["end"] = _finite_number(span.get("end"), maximum=_MAX_TRACE_SECONDS)
+    if "duration_s" in span:
+        span["duration_s"] = _finite_number(
+            span.get("duration_s"), nonnegative=True, maximum=_MAX_TRACE_SECONDS)
+
+    raw_attributes = span.get("attributes")
+    attributes = dict(raw_attributes) if isinstance(raw_attributes, dict) else {}
+    node_id = attributes.get("node_id")
+    if not ((isinstance(node_id, int) and not isinstance(node_id, bool)
+             and 0 <= node_id <= _MAX_TRACE_TOKENS)
+            or (isinstance(node_id, str) and node_id
+                and len(node_id) <= _MAX_NODE_ID_CHARS)):
+        attributes.pop("node_id", None)
+    for key in ("phase_span", "input_from"):
+        if key in attributes:
+            normalized = _normalized_id(attributes.get(key))
+            if normalized is None:
+                attributes.pop(key, None)
+            else:
+                attributes[key] = normalized
+    usage = attributes.get("usage")
+    usage = dict(usage) if isinstance(usage, dict) else {}
+    for key in ("prompt", "completion", "total"):
+        if key in usage:
+            usage[key] = _safe_token_count(usage[key])
+    if "usage" in attributes or usage:
+        attributes["usage"] = usage
+    if "cost" in attributes:
+        attributes["cost"] = _finite_number(attributes.get("cost"), nonnegative=True)
+    if "tool_calls" in attributes and not isinstance(attributes.get("tool_calls"), list):
+        attributes["tool_calls"] = []
+    span["attributes"] = attributes
+    return span
+
+
+def _normalize_spans(spans) -> list[dict]:
+    out: list[dict] = []
+    for value in spans or ():
+        normalized = _normalize_span(value)
+        if normalized is not None:
+            out.append(normalized)
+    return out
+
+
 def load_spans(path: str | os.PathLike) -> list[dict]:
-    """Read spans.jsonl (tolerant of a torn final line) via the shared JSONL reader."""
+    """Read spans.jsonl, quarantining complete valid-JSON rows with an invalid span shape."""
     from looplab.events.eventstore import iter_jsonl
-    return list(iter_jsonl(path))
+    return _normalize_spans(iter_jsonl(path))
 
 
-def _tree(spans: list[dict]) -> list[dict]:
+def _tree(spans: list[dict], *, _normalized: bool = False) -> list[dict]:
     """Build the parent->child forest for one trace from a flat span list."""
+    if not _normalized:
+        spans = _normalize_spans(spans)
     by_id = {s["span_id"]: {**s, "children": []} for s in spans}
     roots = []
     for s in by_id.values():
@@ -37,8 +166,9 @@ def _tree(spans: list[dict]) -> list[dict]:
     return roots
 
 
-def _node_id_of(span: dict) -> Optional[int]:
-    return span.get("attributes", {}).get("node_id")
+def _node_id_of(span: dict) -> Optional[int | str]:
+    attributes = span.get("attributes")
+    return attributes.get("node_id") if isinstance(attributes, dict) else None
 
 
 def _rollup(spans: list[dict]) -> dict:
@@ -51,17 +181,17 @@ def _rollup(spans: list[dict]) -> dict:
     peak = 0
     cost = 0.0
     for g in gens:
-        a = g.get("attributes", {})
-        u = a.get("usage") or {}
-        p = int(u.get("prompt") or 0)
-        pt += p                                       # SUM of every call's prompt (billed — a tool loop
+        raw_attributes = g.get("attributes")
+        a = raw_attributes if isinstance(raw_attributes, dict) else {}
+        raw_usage = a.get("usage")
+        u = raw_usage if isinstance(raw_usage, dict) else {}
+        p = _safe_token_count(u.get("prompt"))
+        pt = min(_MAX_TRACE_TOKENS, pt + p)            # SUM of every call's prompt (billed — a tool loop
         peak = max(peak, p)                           # re-sends the growing context, so this is O(turns²))
-        ct += int(u.get("completion") or 0)
-        tt += int(u.get("total") or 0)
-        try:
-            cost += float(a.get("cost") or 0.0)
-        except (TypeError, ValueError):
-            pass
+        ct = min(_MAX_TRACE_TOKENS, ct + _safe_token_count(u.get("completion")))
+        tt = min(_MAX_TRACE_TOKENS, tt + _safe_token_count(u.get("total")))
+        item_cost = _finite_number(a.get("cost"), nonnegative=True)
+        cost = min(_MAX_TRACE_FLOAT, cost + item_cost)
     # `context` = the LARGEST single prompt = how big the LLM's context window actually got (what the
     # user reads as "the context"), distinct from `total`/`prompt` which SUM the same context re-sent
     # every turn (billed cost, not context size). The UI shows context↑ + output↓, billed in the tooltip.
@@ -240,6 +370,7 @@ def hydrate_inputs(spans: list[dict]) -> list[dict]:
     If an ANCESTOR span is absent (a torn/offset-skipped line — `span_index._read_full` drops one) the
     chain can't bottom out at its real base, so the reconstruction is a TRUNCATED prefix; such spans are
     stamped `input_partial=True` so a reader never presents a short input as the verbatim prompt."""
+    spans = _normalize_spans(spans)
     by_sid = {s.get("span_id"): s for s in spans if s.get("span_id")}
     memo: dict = {}
     partial: dict = {}                    # sid -> True when its chain bottomed out at a missing ref/cycle
@@ -320,7 +451,8 @@ def build_conversation(state: RunState, spans: list[dict], node_id) -> dict:
     """Per-node linear conversation (companion to `build_trace_view`). One `stage` per trace tagged
     with this node (create_node / evaluate / …), each a de-duplicated thread of turns. Reader of
     files-as-truth; caps every string for the browser, but never re-sends the growing history."""
-    by_id = {s["span_id"]: s for s in spans if s.get("span_id")}
+    spans = _normalize_spans(spans)
+    by_id = {s["span_id"]: s for s in spans}
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
@@ -415,7 +547,7 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False)
     tree; `rollups` gives per-node token/cost/observation totals aggregated from generations.
     Heavy generation I/O is truncated (see `_cap_span_io`) so the payload stays browser-safe; with
     `light=True` it's dropped entirely (run-level timeline doesn't need prompts/outputs)."""
-    spans = [(_strip_span_io if light else _cap_span_io)(s) for s in spans]
+    spans = [(_strip_span_io if light else _cap_span_io)(s) for s in _normalize_spans(spans)]
     by_trace: dict[str, list[dict]] = defaultdict(list)
     for s in spans:
         by_trace[s.get("trace_id")].append(s)
@@ -428,7 +560,7 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False)
     # id attributes to its root's node. Spans with neither → `unscoped`.
     root_nid: dict[str, Optional[int]] = {}
     for tid, sps in by_trace.items():
-        f = _tree(sps)
+        f = _tree(sps, _normalized=True)
         root_nid[tid] = _node_id_of(f[0]) if f else None
 
     node_spans: dict[str, list[dict]] = defaultdict(list)
@@ -438,8 +570,10 @@ def build_trace_view(state: RunState, spans: list[dict], *, light: bool = False)
         if nid is None:
             nid = root_nid.get(s.get("trace_id"))
         (node_spans[str(nid)] if nid is not None else unscoped_spans).append(s)
-    nodes: dict[str, list[dict]] = {nid: _tree(sps) for nid, sps in node_spans.items()}
-    unscoped = _tree(unscoped_spans)
+    nodes: dict[str, list[dict]] = {
+        nid: _tree(sps, _normalized=True) for nid, sps in node_spans.items()
+    }
+    unscoped = _tree(unscoped_spans, _normalized=True)
 
     errors = [s for s in spans if s.get("status") == "ERROR"]
     run_roll = _rollup(spans)

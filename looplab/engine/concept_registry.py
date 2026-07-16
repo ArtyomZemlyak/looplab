@@ -386,7 +386,8 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
                 raise ValueError(f"split source {src!r} does not exist in the current portfolio")
             rec["concept_snapshot_digest"] = digest
             rec["concept_snapshot_count"] = len(known)
-        targets = [rule["to"] for rule in norm_rules]
+        rule_targets = [rule["to"] for rule in norm_rules]
+        targets = list(rule_targets)
         if dflt:
             targets.append(dflt)
         if len(set(targets)) != len(targets):
@@ -396,7 +397,10 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
             if resolved_target is None:
                 raise ValueError(
                     f"split target {target!r} is purged; use the explicit purge action")
-            if resolved_target == src:
+            # A conditional rule that maps back to its source makes no progress and is invalid. The
+            # default may intentionally keep unmatched observations under the original concept while
+            # matched rows move to provisional children; that is the normal partial-split contract.
+            if resolved_target == src and target in rule_targets:
                 raise ValueError(
                     f"split target {target!r} resolves to its source {src!r} (no progress)"
                 )

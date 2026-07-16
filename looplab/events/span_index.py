@@ -34,11 +34,11 @@ from typing import Optional
 import orjson
 
 from looplab.core.atomicio import atomic_write_bytes
-from looplab.events.traceview import _strip_span_io
+from looplab.events.traceview import _normalize_span, _strip_span_io
 
 # Bump when the persisted record shape changes so an old `spans.index.jsonl` is ignored (rebuilt),
 # never mis-read. The index is a cache — a version skew simply triggers one rebuild.
-_SCHEMA = 3
+_SCHEMA = 4
 _INDEX_NAME = "spans.index.jsonl"
 # Geometric re-persist factor (see `_persist`): re-write the persisted index only when the indexed
 # span bytes have grown by this factor since the last write. Bounds a live run's total index-write
@@ -77,7 +77,9 @@ def _scan_light(buf: bytes, base: int) -> tuple[list[tuple[dict, int, int]], int
                 break  # corrupt tail — stop cleanly (matches iter_jsonl)
             if not isinstance(obj, dict):
                 break  # valid JSON but non-object => corruption, not a span
-            records.append((_strip_span_io(obj), base + i, nl - i))
+            normalized = _normalize_span(obj)
+            if normalized is not None:
+                records.append((_strip_span_io(normalized), base + i, nl - i))
         i = nl + 1
         consumed = i
     # `consumed` is the offset of the last complete-newline boundary within buf (a torn/corrupt tail
@@ -110,7 +112,11 @@ class SpanIndex:
         self._rlock = threading.Lock()
 
     # -- construction --------------------------------------------------------------------------
-    def _append(self, light: dict, off: int, length: int) -> None:
+    def _append(self, light: dict, off: int, length: int) -> bool:
+        normalized = _normalize_span(light)
+        if normalized is None:
+            return False
+        light = normalized
         row = len(self.light)
         self.light.append(light)
         self.meta.append((off, length))
@@ -120,9 +126,11 @@ class SpanIndex:
         tid = light.get("trace_id")
         if tid is not None:
             self.by_tid[tid].append(row)
-            nid = (light.get("attributes") or {}).get("node_id")
+            attributes = light.get("attributes")
+            nid = attributes.get("node_id") if isinstance(attributes, dict) else None
             if nid is not None:
                 self.node_tids[str(nid)].add(tid)
+        return True
 
     def _extend(self, records: list[tuple[dict, int, int]]) -> None:
         for light, off, length in records:
@@ -191,11 +199,14 @@ class SpanIndex:
                     # would otherwise be returned as if it were this row's span. Cross-check the read
                     # span_id against the one this row indexes: on a provable mismatch skip it, so the
                     # accelerator returns None/less — never WRONG data — as its docstring promises.
+                    normalized = _normalize_span(obj)
+                    if normalized is None:
+                        continue
                     expected = self.light[r].get("span_id")
-                    got_id = obj.get("span_id")
+                    got_id = normalized.get("span_id")
                     if expected is not None and got_id is not None and got_id != expected:
                         continue
-                    out.append(obj)
+                    out.append(normalized)
         except OSError:
             return out
         return out
@@ -319,7 +330,8 @@ def _load_persisted(spans_path: Path, identity: tuple, size: int) -> Optional[Sp
                     # `f.read(length)` (a negative length reads the whole file into memory). Treat it
                     # like a torn tail: keep the valid prefix, rebuild the rest from spans.jsonl.
                     break
-                idx._append(rec, off, length)
+                if not idx._append(rec, off, length):
+                    break
                 last_end = off + length + 1  # +1 for the newline that follows the line in spans.jsonl
     except OSError:
         return None

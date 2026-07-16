@@ -120,6 +120,69 @@ def test_by_trace_identical(run):
     assert _canon(ref) == _canon(got)
 
 
+def test_malformed_complete_span_is_quarantined_without_hiding_following_rows(tmp_path):
+    """A schema-bad JSON object is one lost observation, never a poison pill for the trace tail."""
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    root = {
+        "name": "create_node", "kind": "operation", "trace_id": "tr0", "span_id": "root",
+        "parent_id": None, "attributes": {"node_id": 0}, "start": 0.0, "duration_s": 1.0,
+    }
+    bad_attributes = {
+        "name": "tool.bad", "kind": "tool", "trace_id": "tr0", "span_id": "attrs-bad",
+        "parent_id": "root", "attributes": ["not", "a", "mapping"],
+        "start": [], "duration_s": {"not": "numeric"},
+    }
+    invalid_ids = {
+        "name": "invalid", "kind": "generation", "trace_id": "tr0", "span_id": [],
+        "parent_id": "root", "attributes": {"node_id": 0}, "start": 1.0,
+    }
+    bad_numbers = {
+        "name": "llm.bad", "kind": "generation", "trace_id": "tr0", "span_id": "dirty",
+        "parent_id": ["unhashable"], "start": "1e9999", "duration_s": "NaN",
+        "attributes": {
+            "node_id": 0, "phase_span": [], "input_from": {}, "cost": "Infinity",
+            "usage": {"prompt": "9" * 1_000, "completion": "bogus", "total": -1},
+        },
+    }
+    tail = {
+        "name": "llm.good", "kind": "generation", "trace_id": "tr0", "span_id": "tail",
+        "parent_id": "root", "start": 2.0, "duration_s": 0.25,
+        "attributes": {
+            "node_id": 0, "input": [{"role": "user", "content": "continue"}],
+            "output": "ok", "cost": 0.25,
+            "usage": {"prompt": 5, "completion": 2, "total": 7},
+        },
+    }
+    raw_spans = [root, bad_attributes, invalid_ids, bad_numbers, tail]
+    sp = _write_spans(rd, raw_spans)
+
+    loaded = load_spans(sp)
+    assert [span["span_id"] for span in loaded] == ["root", "attrs-bad", "dirty", "tail"]
+    dirty = next(span for span in loaded if span["span_id"] == "dirty")
+    assert dirty["parent_id"] is None and dirty["start"] == dirty["duration_s"] == 0.0
+    assert dirty["attributes"]["usage"] == {"prompt": 0, "completion": 0, "total": 0}
+    assert dirty["attributes"]["cost"] == 0.0
+    assert "phase_span" not in dirty["attributes"] and "input_from" not in dirty["attributes"]
+
+    reference = build_trace_view(ST, loaded, light=True)
+    assert reference["summary"]["spans"] == 4 and reference["summary"]["tools"] == 1
+    assert reference["summary"]["tokens"] == {
+        "prompt": 5, "completion": 2, "total": 7, "context": 5,
+    }
+    assert reference["summary"]["cost"] == 0.25 and "0" in reference["nodes"]
+    assert build_conversation(ST, raw_spans, 0)["stages"]
+    assert _tree(raw_spans)
+
+    idx = get_index(sp)
+    assert [span["span_id"] for span in idx.light_spans()] == [
+        "root", "attrs-bad", "dirty", "tail",
+    ]
+    assert _canon(reference) == _canon(build_trace_view(ST, idx.light_spans(), light=True))
+    assert (idx.full_span("dirty") or {})["attributes"]["usage"]["prompt"] == 0
+    assert (idx.full_span("tail") or {}).get("span_id") == "tail"
+
+
 # --------------------------------------------------------------------------- incremental + persist
 def test_incremental_topup_matches_full_rebuild(run):
     rd, sp, spans = run
