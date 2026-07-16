@@ -732,39 +732,69 @@ def claim_decide_cmd(
 def task_facets_cmd(
     memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where task_facets.jsonl lives)."),
     goal: str = typer.Argument(..., help="The task goal to classify."),
-    task_id: str = typer.Option("", "--task-id", help="Task id to record facets under (needed for --apply)."),
     kind: str = typer.Option("", "--kind", help="Task kind (dataset/repo/...) — a hint for the classifier."),
-    apply: bool = typer.Option(False, "--apply", help="RECORD the facets for --task-id."),
+    apply: bool = typer.Option(False, "--apply", help="DEPRECATED compatibility option; rejected before any "
+                               "paid call — task-facets is PROPOSAL-ONLY."),
     model: Optional[str] = typer.Option(None, help="Override model id."),
 ):
-    """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM classifies a task's goal into facets
+    """PART IV cross-run §21.20.2 — AGENTIC task FACETING: an LLM PROPOSES a task's facets
     (domain/language/modality/interaction/objective) so the system can recognize when two differently-worded
     tasks are the same KIND of problem. An advisory OVERLAY (never touches the deterministic passport
-    fingerprint); currently stored/surfaced as metadata and reserved for future post-scope ranking. It
-    does not grant visibility or change retrieval order. `--apply` records for `--task-id`."""
+    fingerprint). PROPOSAL-ONLY, consistent with concept-steward/claim-steward (§22.4 — the agentic steward
+    only proposes; it never writes cross-run state): review the classification, then record it deterministically
+    with `task-facets-set` (or let the engine record it at finalize under `cross_run_curation`)."""
     from looplab.core.config import Settings
     from looplab.engine.task_facets import steward_task_facets
-    import datetime as _dt
+    if apply:
+        typer.echo("error: --apply is deprecated and disabled; task-facets is proposal-only. Review the "
+                   "classification, then record it with `task-facets-set MEMORY TASK_ID --domain ... "
+                   "--language ...`.")
+        raise typer.Exit(2)
     settings = Settings()
     if model:
-        settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
-        #                              phantom attr and silently kept the default endpoint (--model no-op)
+        settings.llm_model = model
     try:
         client = _make_llm_client(settings)
     except Exception as e:  # noqa: BLE001
         typer.echo(f"task-facets needs a reachable LLM endpoint: {e}")
         raise typer.Exit(1)
-    out = steward_task_facets(str(memory_dir), client, task_id=task_id, goal=goal, kind=kind, apply=apply,
-                              at=_dt.datetime.now().isoformat(timespec="seconds"))
+    out = steward_task_facets(str(memory_dir), client, task_id="", goal=goal, kind=kind, apply=False)
     if not out["facets"]:
         typer.echo("task-facets: none classified")
         return
     for ax, v in out["facets"].items():
         typer.echo(f"  {ax:12} {v}")
-    if apply and out["recorded"]:
-        typer.echo(f"recorded for task '{task_id}'")
-    elif apply and not task_id:
-        typer.echo("(pass --task-id to record)")
+    typer.echo("(proposal — record with `task-facets-set MEMORY TASK_ID --<axis> <value> ...`)")
+
+
+@app.command(name="task-facets-set")
+def task_facets_set_cmd(
+    memory_dir: Path = typer.Argument(..., help="Cross-run memory dir (where task_facets.jsonl lives)."),
+    task_id: str = typer.Argument(..., help="Task id to record facets under."),
+    domain: str = typer.Option("", "--domain"),
+    language: str = typer.Option("", "--language"),
+    modality: str = typer.Option("", "--modality"),
+    interaction: str = typer.Option("", "--interaction"),
+    objective: str = typer.Option("", "--objective"),
+):
+    """PART IV cross-run §21.20.2 / §22.4 — the OPERATOR facet write (deterministic, no LLM): record a task's
+    facets by hand, the ratify half of the propose/ratify split (task-facets PROPOSES, this RECORDS).
+    Append-only, last-write-wins per task_id; empty axes are dropped."""
+    from looplab.engine.task_facets import record_task_facets
+    import datetime as _dt
+    facets = {"domain": domain, "language": language, "modality": modality,
+              "interaction": interaction, "objective": objective}
+    facets = {k: v for k, v in facets.items() if v}
+    if not facets:
+        typer.echo("error: give at least one facet axis (e.g. --domain information-retrieval)")
+        raise typer.Exit(2)
+    try:
+        rec = record_task_facets(str(memory_dir), task_id=task_id, facets=facets, by="operator",
+                                 at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except ValueError as e:
+        typer.echo(f"error: {e}")
+        raise typer.Exit(2)
+    typer.echo(f"recorded facets for task '{task_id}': {rec['facets']}")
 
 
 @app.command(name="claim-steward")

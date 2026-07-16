@@ -27,7 +27,8 @@ looplab cross-run-digest Read-only axis-prefix concept rollup (PART IV Step 7)
 looplab concept-merge   Append a concept alias/purge overlay (PART IV CR1a)
 looplab concept-split   Operator split one coarse concept into finer ones, re-tagged per run (PART IV §21.20.13)
 looplab concept-steward AGENTIC taxonomy curator: proposal-only merge/split/purge review (PART IV §22.4)
-looplab task-facets     AGENTIC task faceting: LLM classifies a goal into domain/language/... facets (PART IV §21.20.2)
+looplab task-facets     AGENTIC task faceting: proposal-only LLM classify (domain/language/...) (PART IV §21.20.2)
+looplab task-facets-set Operator deterministic facet write (the ratify half of task-facets) (PART IV §22.4)
 looplab claims          Lean statement/reference claim projection (PART IV cross-run Step 4)
 looplab claim-decide    Lean operator decision overlay (PART V §22.4)
 looplab claim-steward   AGENTIC claim curator: proposal-only ratify/reject/pin review (PART IV §22.4)
@@ -673,11 +674,14 @@ PART IV §21.20.2 — **AGENTIC task FACETING**: an LLM classifies a task's goal
 differently-worded tasks are the same KIND of problem. An advisory OVERLAY only — it never touches the
 deterministic passport fingerprint (`scope_profile`); facets live in their own append-only `task_facets.jsonl`.
 They are currently stored/surfaced metadata reserved for a future post-scope ranking experiment: they grant no
-visibility and do not change retrieval order. `build_index` stays byte-identical rebuildable. `--apply` records
-the facets for `--task-id` (last write per task wins). Needs a reachable LLM.
+visibility and do not change retrieval order. `build_index` stays byte-identical rebuildable. **PROPOSAL-ONLY**
+(consistent with `concept-steward`/`claim-steward`, §22.4 — the agentic steward only proposes): it classifies +
+prints; `--apply` is deprecated/rejected. Record the reviewed facets deterministically with `task-facets-set`.
+Needs a reachable LLM.
 
 ```bash
-looplab task-facets MEMORY_DIR "GOAL" [--task-id ID] [--kind K] [--apply] [--model M]
+looplab task-facets MEMORY_DIR "GOAL" [--kind K] [--model M]              # propose (LLM), no write
+looplab task-facets-set MEMORY_DIR TASK_ID --domain … --language … …     # operator record (deterministic)
 ```
 
 | Argument / Option | Default | Description |
