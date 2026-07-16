@@ -1,7 +1,8 @@
 """Agentic retrieval over the cross-run DISTILLED memory that used to be injection-only.
 
-`lessons.jsonl` (generalizable good/bad findings with a verdict + how many runs back them) and
-`meta_notes.jsonl` (per-task causal summaries of WHY a run's winner won) were previously only
+`lessons.jsonl` (generalizable good/bad findings with a verdict + how many recorded observations
+agree with it) and `meta_notes.jsonl` (per-task, model-distilled explanatory hypotheses about why a
+run's winner won) were previously only
 *passively injected* into the proposal prompt (fingerprint-matched). This exposes them as TOOLS so the
 Researcher can ACTIVELY pull them when it wants — completing "agentic retrieval for everything": cases
 + knowledge notes are already searchable via `kb_search`, skills via `list_skills`/`use_skill`, sibling
@@ -38,15 +39,17 @@ class MemoryTools:
             fn_spec("search_lessons",
                 "Search the cross-run LESSONS ledger — generalizable findings (what worked AND what "
                 "did NOT) distilled from past runs, each with a verdict (supported/tested/abandoned/"
-                "failed) and how many observations back it. Use it to reuse what reliably helps and to "
+                "failed) and how many recorded observations agree with that current verdict. This is "
+                "corroboration metadata, not independent verification. Use it to reuse what helped and to "
                 "avoid re-treading known dead ends.",
                 {"query": {"type": "string", "description": "What to find lessons about (e.g. 'batch "
                            "size', 'overfitting', 'learning-rate schedule')."},
                  "limit": {"type": "integer", "description": "Max lessons (default 6)."}},
                 ["query"]),
             fn_spec("recall_notes",
-                "Recall META-NOTES — short CAUSAL summaries of WHY past runs' winners won, per task. "
-                "Use it to warm-start: what actually mattered last time on this or a similar task.",
+                "Recall META-NOTES — short model-distilled explanatory hypotheses about WHY past runs' "
+                "winners won, per task. They summarize observed runs; they are not causal proof. Use them "
+                "as warm-start context for what may have mattered last time on this or a similar task.",
                 {"query": {"type": "string", "description": "Task id or keywords to filter "
                            "(blank = most recent)."},
                  "limit": {"type": "integer", "description": "Max notes (default 6)."}},
@@ -86,7 +89,8 @@ class MemoryTools:
                 n = int(o.get("evidence_count") or len(o.get("evidence") or []) or 1)
                 conf = f", conf {o['confidence']:.2f}" if o.get("confidence") is not None else ""
                 lines.append(f"[{o.get('outcome', '?')}] {o.get('statement', '')} "
-                             f"(verified across {n} observation{'s' if n != 1 else ''}{conf})")
+                             f"({n} agreeing recorded observation{'s' if n != 1 else ''}{conf}; "
+                             "not independent verification)")
             return "\n".join(lines)
         if name == "recall_notes":
             rows = self._load("meta_notes.jsonl")

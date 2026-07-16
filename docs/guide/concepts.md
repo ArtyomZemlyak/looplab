@@ -423,8 +423,9 @@ A reported number is only useful if it generalizes. The trust layer is leakage-f
   flagged.
 - **Variance gate** — a candidate must beat the incumbent by more than ~1 standard error to be
   promoted, so noise doesn't crown a lucky run.
-- **Multi-seed confirmation** — at the frontier, re-run the top-k under several seeds
-  (`confirm_top_k`, `confirm_seeds`) and pick the robust best. A seed-lucky leader is demoted.
+- **Optional multi-seed confirmation** — when `confirm_top_k` and `confirm_seeds` enable it, re-run the
+  frontier under several seeds and pick the robust best. It is off by default; without it the selected
+  winner remains explicitly single-evaluation and seed luck has not been ruled out.
 
 The replay model keeps these promotions honest across resets and reopens:
 
@@ -445,13 +446,19 @@ The sandbox tier is chosen by **trust mode**, not your environment (`make_sandbo
 | `untrusted` | `DockerSandbox` (`--network none`) | Executing untrusted code on shared infra (hosted/multi-tenant UI) |
 | `hostile` | `DockerSandbox` (`--network none` + gVisor `--runtime runsc`) | Actively hostile code — a real kernel-level isolation boundary |
 
-Additional, audit-only safety monitors (all off by default, never change selection):
+Additional safety monitors are off by default. Under the default `trust_gate=audit` they only surface signals;
+`gate`/`block` acts only on high-precision signals:
 
 - `redact_output` — mask credentials in stdout/stderr before they're persisted.
 - `reward_hack_detect` — flag suspicious wins (grader/answer-key access, frozen-file writes,
   suspiciously perfect metrics).
 - `code_leakage_detect` — static scan for fit-before-split / fit-on-test.
-- `critic_check` — an execution-free critic of each solution.
+- `critic_check` — an execution-free critic of each solution. Broad critic warnings stay advisory;
+  `critic:hardcoded_metric` is the narrow high-precision exception that can gate.
+
+Heuristic perfect-score, audit-unavailable and suspicious-output warnings remain advisory in every mode.
+High-precision reward-hack/leakage signals (and `critic:hardcoded_metric`) exclude a node from best-selection
+and breeding/confirmation under `gate`; `block` additionally makes it infeasible.
 
 These surface in the UI's Trust panel as audit events. See [Deployment](deployment.md) for the
 untrusted tier.

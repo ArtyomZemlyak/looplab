@@ -82,6 +82,12 @@ first shows **Unlock LoopLab controls**; enter the same value there. The SPA sen
 `X-LoopLab-Token` for the rest of that tab. Neither the owner page nor `/review` contains the token in
 HTML, and it is not written to a persistent browser store.
 
+The live owner run stream is protected by the same deny-by-default owner API boundary. The SPA uses an
+authenticated `fetch`-based SSE client because native `EventSource` cannot attach `X-LoopLab-Token`; reconnects
+send the last complete event ID in `Last-Event-ID`. Do not exempt `/api/runs/{id}/events` at a reverse proxy.
+Read-only review links do not receive that owner stream: their dedicated `/api/review/*` projections stay
+capability-scoped and polling-based. SSE responses are never gzip-buffered.
+
 Inside an owner run, **Copy view** produces a generation-fenced diagnostic fragment such as
 `#/run/<id>?gen=…&node=…&tab=…`. It copies context, not authority: a recipient still needs the owner
 credential to open that URL. The generation remains in an otherwise-default copied view. Historical

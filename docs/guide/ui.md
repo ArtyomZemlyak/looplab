@@ -23,6 +23,11 @@ looplab ui                      # serves http://127.0.0.1:8765 over ./runs
 On launch `looplab ui` checks a SHA-256 freshness stamp over the UI source/configuration and **builds the React
 bundle automatically** when the default bundle is missing, unstamped or stale and Node/npm are on your `PATH`.
 It also reinstalls dependencies when `package.json`/the lockfile no longer match the installed dependency stamp.
+A stable source-root interprocess lock serializes dependency installation and Vite's `emptyOutDir` build across
+concurrent `looplab ui` / `build-ui` processes. A waiter rechecks freshness after acquiring the lock, so it does
+not rebuild output another process just certified. A lock/open/build/stamp failure fails closed for a requested
+refresh. With a lockfile the installer uses `npm ci` first and falls back to `npm install` only after a visible
+failure; adding, removing, or changing either dependency manifest invalidates the dependency stamp.
 A failed requested refresh never silently serves an older bundle: if one existed, the command exits and tells
 you how to repair it. Pass `--no-build` only when you deliberately want to serve that prebuilt/stale output. If
 Node isn't installed and no previous bundle exists, the command prints manual build guidance and still starts
@@ -148,16 +153,22 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   (`events/comment_projection.py`) derives the threaded state — the engine stays the sole writer of
   domain events (distinct from the legacy single `annotation` event).
 - **Trust panel** — surfaces the safety monitors (reward-hack, code-leakage, critic flags); set
-  `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a flagged node ineligible
-  to win, not just logged.
+  `trust_gate` to `gate`/`block` (or pick the `thorough` profile) to make a **high-precision** flag
+  ineligible to win or seed breeding/confirmation. Broad critic/perfect-score warnings remain advisory;
+  `critic:hardcoded_metric` is the narrow high-precision critic exception.
 - **Hypotheses board** — a kanban of what the run is trying to learn (open / testing / supported /
   tested / abandoned). Each experiment states the hypothesis it tests; deep-research directions and
   your own "+ Add" questions land here too, then get tracked to a verdict with links to the evidence
   nodes. Audit-only — it never changes which node wins.
 - **Per-node trace** — when `trace_llm_io` is on, inspect the bounded, canonicalized and heuristically
-  redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O.
+  redacted diagnostic representation recorded for each call. It is not byte-exact provider I/O. Complete
+  object rows with an invalid span shape are quarantined one by one; invalid required IDs are skipped and
+  recoverable timing/token/attribute values degrade to bounded defaults. A torn or invalid-JSON tail remains
+  a durability boundary rather than being guessed past, and pathological parent chains are traversed iteratively.
 - **Per-run settings** — edit a run's settings; `PUT /api/runs/{id}/config` rewrites that run's
-  snapshot (resume reads it, not the global UI defaults).
+  launch snapshot for the next restart (not the global UI defaults). Five holdout/verifier fields are
+  read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
+  `trust_gate` is changed through a durable event as well as the snapshot, so its effective state is replayable.
 - **Settings page** — every engine knob, grouped into tabs (Search, Strategist & operators,
   Resilience, Budgets, LLM, Developer agent, Safety & trust, Knowledge & memory). The **API key**
   field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never

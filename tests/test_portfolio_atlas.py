@@ -79,15 +79,16 @@ def test_cli_atlas_prints_sections(tmp_path):
     store.add(_cap("r1", ["hard-neg", "quantization"], {"hard-neg": 0.88}))
     store.add(_cap("r2", ["hard-neg"], {"hard-neg": 0.90}))
     (tmp_path / "lessons.jsonl").write_bytes(
-        b"\n".join(orjson.dumps(l) for l in [
+        b"\n".join(orjson.dumps(lesson) for lesson in [
             _lesson("mnr helps", "supported", [1], run_id="r1"),
             _lesson("mnr helps", "tested", [2], run_id="r2"),
         ]) + b"\n")
     res = CliRunner().invoke(app, ["atlas", str(tmp_path)])
     assert res.exit_code == 0
     assert "Research Atlas: 2 run(s)" in res.stdout
-    assert "hard-neg" in res.stdout and "Thin (explored once)" in res.stdout and "quantization" in res.stdout
-    assert "Contradictions" in res.stdout and "mnr helps" in res.stdout
+    assert "hard-neg" in res.stdout and "Observed in one returned run" in res.stdout
+    assert "quantization" in res.stdout and "not an untried-gap claim" in res.stdout
+    assert "Mixed-evidence claim records" in res.stdout and "mnr helps" in res.stdout
 
 
 def test_cli_atlas_json(tmp_path):

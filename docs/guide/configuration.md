@@ -11,8 +11,13 @@ be set four ways, in increasing priority:
 4. **CLI flag** — a named flag for the common knobs, **or** `-s/--set key=value` (repeatable) for
    **any** setting by its exact field name.
 
-The resolved, **secret-masked** settings are written to `config.snapshot.json` in every run dir, so
-each run records exactly how it was configured. `resume` reads that snapshot back.
+The resolved, **secret-masked launch settings** are written to `config.snapshot.json` in every run
+dir. `resume` loads that snapshot, but it is not the sole authority for every effective field:
+`holdout_fraction`, `holdout_select`, `select_verifier`, `select_verifier_samples`, and
+`verifier_ci_tie` are committed by `run_started` and restored from the folded event log. A later
+`trust_gate_changed` event likewise owns the effective trust gate. The owner per-run config API
+overlays those folded values and marks the five run-start fields read-only; `looplab inspect`
+deliberately prints the raw on-disk launch snapshot for diagnostics.
 
 ```bash
 # All of these are equivalent ways to raise the node budget for one run:
@@ -273,9 +278,9 @@ Atlas reads expose the resulting shared governance revision; a stale token retur
 | `redact_output` | `LOOPLAB_REDACT_OUTPUT` | `false` | Mask credentials in stdout/stderr before persisting (recommend on for untrusted) |
 | `reward_hack_detect` | `LOOPLAB_REWARD_HACK_DETECT` | `false` | Flag suspicious wins (grader access, frozen-file writes) |
 | `code_leakage_detect` | `LOOPLAB_CODE_LEAKAGE_DETECT` | `false` | Static code-leakage scan (fit-before-split, fit-on-test) |
-| `critic_check` | `LOOPLAB_CRITIC_CHECK` | `false` | Execution-free critic of each solution (always advisory) |
+| `critic_check` | `LOOPLAB_CRITIC_CHECK` | `false` | Execution-free critic of each solution. Broad critic warnings are advisory; the narrowly detected literal-with-no-computed-assignment `critic:hardcoded_metric` signal is classified as high precision and can gate under `trust_gate=gate|block` |
 | `workdir_audit` | `LOOPLAB_WORKDIR_AUDIT` | `true` | Audit each node's workdir for tamper signals (writes to frozen/grader files) feeding the reward-hack monitor |
-| `trust_gate` | `LOOPLAB_TRUST_GATE` | `audit` | What a reward-hack / leakage flag does to the search: `audit` (surface only) · `gate` (a flagged node can't be selected best **and isn't bred/confirmed from**, but stays *feasible* so it still counts for diversity/audit) · `block` (also mark it fully infeasible). Critic stays advisory in every mode |
+| `trust_gate` | `LOOPLAB_TRUST_GATE` | `audit` | What a **high-precision** reward-hack/leakage signal (plus `critic:hardcoded_metric`) does: `audit` surfaces only; `gate` excludes the node from best-selection and breeding/confirmation while keeping it feasible for diversity/audit; `block` also marks it infeasible. Broad critic, perfect-score, audit-unavailable, and suspicious-output heuristics remain advisory |
 | `eval_trust_mode` | `LOOPLAB_EVAL_TRUST_MODE` | `ratify_freeze` | Trust policy for an agent-authored eval spec (onboarding): `ratify_freeze` / `autonomous` / `ratify_freeze_drift` |
 | `require_approval` | `LOOPLAB_REQUIRE_APPROVAL` | `false` | HITL: pause for `approve` before finishing |
 

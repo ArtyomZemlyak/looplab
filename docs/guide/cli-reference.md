@@ -152,8 +152,11 @@ looplab resume RUN_DIR [OPTIONS]
 | `--task-file PATH` | the run's `task.snapshot.json` | The task file the run was started with |
 | `--max-nodes N` | from the snapshot | Override the node budget on resume |
 
-The original run's settings are restored from `config.snapshot.json`, so run-only flags
-(`--require-approval`, trust mode, confirm settings, backend, …) are not silently dropped.
+The original launch settings are restored from `config.snapshot.json`, so run-only flags are not silently
+dropped. Five comparison/selection fields (`holdout_fraction`, `holdout_select`, `select_verifier`,
+`select_verifier_samples`, `verifier_ci_tie`) are then restored from the folded `run_started` record;
+`trust_gate_changed` owns later trust-gate edits. Those event-pinned semantics win over a stale or hand-edited
+snapshot.
 
 ---
 
@@ -200,7 +203,9 @@ looplab repair-log RUN_DIR
 
 ## `inspect`
 
-Print the resolved config snapshot and the run's best result.
+Print the raw on-disk launch config snapshot and the run's current folded best result. This is a diagnostic
+view, not the effective per-run config API: the latter overlays the five `run_started`-pinned fields and the
+event-sourced trust gate.
 
 ```bash
 looplab inspect RUN_DIR
@@ -484,11 +489,13 @@ per-split-ledger `expected_revision` and cross-ledger `expected_governance_revis
 `concept-split-clear`, and exposes the shared revision in receipts. Neither surface is a revisioned
 taxonomy/assignment release. For a given run the FIRST rule
 whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise `--default` (or the
-original slug). Under the shared governance lock, writes reject an empty, purged or aliased source and every
-explicit rule/default target that is purged or resolves back to the source; an empty ruleset without a real
-default is also rejected. Owner HTTP additionally requires the source in the live canonical portfolio
-projection; split children may be new provisional taxonomy entities, while any already-known child must be
-canonical and all targets must be distinct.
+original slug). Under the shared governance lock, writes reject an empty, purged or aliased source. Rule
+targets must be live canonical concepts, differ from the source and from every other target, and a non-empty
+default must differ from every rule target. The default may intentionally equal the source so unmatched
+observations remain under the coarse concept while matched observations move to children; a rules-empty
+identity-only split is still rejected as inert. Owner HTTP additionally requires the source in the live
+canonical portfolio projection; split children may be new provisional taxonomy entities, while any
+already-known child must be canonical.
 
 ```bash
 looplab concept-split MEMORY_DIR FROM_CONCEPT --rule 'TARGET:term1,term2' [--rule ...] [--default TARGET]
@@ -578,8 +585,9 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 ## `claims`
 
 PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` plus persisted D8 `research_claims.jsonl` into a
-**statement-grouped lean claim view** with support/oppose/unverified references and
-`supported`/`refuted`/`mixed`/`inconclusive` labels. New v2 D8 rows preserve `task_id`, direction, run-qualified node
+**statement-grouped lean claim view** with support/oppose/unverified attempt references. The legacy wire labels
+`supported`/`refuted` mean **support-only/opposition-only evidence**, `mixed` means both kinds of reference,
+and `inconclusive` means insufficient evidence; none is by itself a proposition verdict. New v2 D8 rows preserve `task_id`, direction, run-qualified node
 references, source URLs, and the verifier verdict/method/note; legacy rows without that payload remain
 `unverified` and never become positive support merely because they cited a node. New distilled lessons carry an
 explicit `claim_stance` separating literal proposition support from action guidance, so a confirmed negative
@@ -596,7 +604,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `research_claims.jsonl` (or a lessons file) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
-| `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → supported → refuted → inconclusive; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly |
+| `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly |
 | `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
 | `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |
@@ -695,9 +703,11 @@ looplab task-facets MEMORY_DIR "GOAL" [--task-id ID] [--kind K] [--apply] [--mod
 
 PART IV cross-run Step 6 (§21.20). A **capped Experimental portfolio summary** exposed by the historical
 `atlas` command — one payload that composes the concept
-overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into *what's been
-explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
-false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). It reads the
+overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step 5) into **concept
+observations** (concept × returned runs), concepts **observed in one returned run** (not an untried or
+underexplored gap), and **mixed-evidence claim records** (both support and opposition references, not a
+proposition-level contradiction verdict). The compatibility payload still uses the historical
+`explored`/`thin_coverage`/`contradictions` keys. It reads the
 available `lessons.jsonl`, `concept_capsules.jsonl`, persisted `research_claims.jsonl`,
 `claim_decisions.jsonl`, `concept_aliases.jsonl` and `concept_splits.jsonl` sidecars; active contradictions exclude operator-rejected
 claims, while top-level raw claim totals may still include them.
@@ -714,7 +724,7 @@ looplab atlas MEMORY_DIR [--max-items 8] [--json]
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding any of lessons, capsules or D8 research claims, plus optional decision and concept-governance sidecars |
-| `--max-items N` | `8` | Cap per section (explored / contested / thin) |
+| `--max-items N` | `8` | Cap per compatibility section (concept observations / mixed-evidence / observed in one run) |
 | `--json` | off | Emit the capped lean Atlas-summary payload as JSON |
 
 ---
@@ -783,8 +793,13 @@ looplab ui [--run-root DIR] [--host HOST] [--port PORT] [--root-path PATH] [--bu
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
 | `--root-path PATH` | `""` | ASGI `root_path` for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
-| `--build` / `--no-build` | `--build` | Auto-build the React bundle if it's missing (needs Node/npm); `--no-build` serves a prebuilt bundle only |
+| `--build` / `--no-build` | `--build` | Verify/rebuild a missing, unstamped or stale default bundle (needs Node/npm); `--no-build` explicitly serves the existing prebuilt/stale bundle without freshness checks |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
+
+Dependency install plus Vite output are serialized by a required source-root interprocess lock. Freshness is
+rechecked inside that lock, dependency manifest changes trigger reinstall (`npm ci`, with a visible
+`npm install` fallback), and a lock/install/build/moving-input/stamp failure cannot certify or silently serve
+an old bundle under a requested refresh.
 
 See the [Web UI](ui.md) guide.
 
@@ -888,9 +903,10 @@ looplab tensorboard RUN_DIR [--port 6006] [--host 127.0.0.1]
 
 ## `build-ui`
 
-Build the React UI bundle (`ui/dist`) so `looplab ui` can serve it. Runs `npm ci` (first build) +
-`npm run build` in the UI source tree. Normally not needed — `looplab ui` builds on demand — but
-handy for CI or a warm-up step.
+Build the React UI bundle (`ui/dist`) so `looplab ui` can serve it. Under the same required interprocess
+lock as `looplab ui`, it rechecks source/dependency stamps, installs missing or manifest-mismatched
+dependencies (`npm ci`, then a visible `npm install` fallback if needed), and runs `npm run build`.
+Normally not needed — `looplab ui` builds on demand — but handy for CI or a warm-up step.
 
 ```bash
 looplab build-ui [--force]

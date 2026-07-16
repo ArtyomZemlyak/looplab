@@ -94,7 +94,12 @@ def timings(run_dir: Path = typer.Argument(...),
 
 @app.command()
 def inspect(run_dir: Path = typer.Argument(...)):
-    """Show the resolved config snapshot + the run's best result."""
+    """Show the raw launch config snapshot + the run's current folded best result.
+
+    Five holdout/verifier settings are committed by ``run_started`` and can therefore differ from
+    an old or hand-edited snapshot. The owner config API overlays those effective folded values;
+    this diagnostic deliberately prints the on-disk snapshot verbatim for inspection.
+    """
     snap = run_dir / "config.snapshot.json"
     events = run_dir / "events.jsonl"
     # Tolerate a run that crashed after writing config.snapshot.json but before its first event: still
@@ -129,10 +134,13 @@ def _run_tools_for(state):
 
 
 def _settings_for_run(run_dir=None, model=None):
-    """Load the run's PINNED Settings from `config.snapshot.json` (as resume/UI do) so a diagnostic sends
-    run code/logs to the SAME endpoint the run was pinned to — not a possibly-different ambient config
-    (CODEX #1). Falls back to ambient Settings when the snapshot is absent/unreadable; `model` is the only
-    explicit CLI override applied on top."""
+    """Load the run's launch Settings snapshot so a diagnostic sends run code/logs to the same
+    endpoint recorded for that run, not a possibly different ambient endpoint. Falls back to ambient
+    Settings when the snapshot is absent/unreadable; ``model`` is the only explicit override.
+
+    This helper needs endpoint/model provenance, not the five event-pinned holdout/verifier fields;
+    the effective per-run config API owns that latter overlay.
+    """
     from looplab.core.config import Settings
     settings = None
     try:
@@ -874,9 +882,14 @@ def atlas_cmd(
     max_items: int = typer.Option(8, help="Cap per section (explored/contested/thin)."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full Atlas payload as JSON."),
 ):
-    """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
-    it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
-    (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
+    """PART IV cross-run Step 6 (§21.20): the legacy Research Atlas DATA payload — bounded concept
+    observations, concepts observed in one returned run, and mixed-evidence claim records. It composes
+    the concept overview (Step 3), claim assessments (Step 4), and bounded context pack (Step 5).
+    Pure read; the owner React preview is available at ``#/atlas``.
+
+    Wire keys such as ``thin_coverage`` and ``contradictions`` are retained for compatibility; they
+    do not establish a CoverageFrame, an untried gap, or a proposition-level contradiction verdict.
+    """
     from looplab.engine.claims import atlas_for_memory, load_research_claims
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
@@ -894,15 +907,16 @@ def atlas_cmd(
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
     typer.echo(f"Research Atlas: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
-               f"{atlas['n_claims']} claim(s), {atlas['n_contested']} contested")
+               f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence")
     if atlas["explored"]:
-        typer.echo("Explored (concept × #runs):")
+        typer.echo("Concept observations (concept × returned runs):")
         for e in atlas["explored"]:
             typer.echo(f"  {e['n_runs']:2d}×  {e['concept']}")
     if atlas["thin_coverage"]:
-        typer.echo("Thin (explored once): " + ", ".join(atlas["thin_coverage"]))
+        typer.echo("Observed in one returned run (not an untried-gap claim): "
+                   + ", ".join(atlas["thin_coverage"]))
     if atlas["contradictions"]:
-        typer.echo("Contradictions (portfolio disagrees):")
+        typer.echo("Mixed-evidence claim records (support and opposition references):")
         for c in atlas["contradictions"]:
             typer.echo(f"  ⚖ [{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")
 
@@ -919,11 +933,12 @@ def claims_cmd(
                                     "claim key (§21.20.13): opposite-polarity claims contradict, not merge."),
     as_json: bool = typer.Option(False, "--json", help="Emit the full assessments as JSON."),
 ):
-    """PART IV cross-run Step 4/5 (§21.20): project the distilled lessons into evidence-grounded CLAIMS —
-    each with support vs oppose node-id evidence and an epistemic state (supported/refuted/mixed/
-    inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
-    renders the hard-capped agent context pack (pinned → ratified → mixed → supported → refuted →
-    inconclusive; a caveat may replace the weakest non-pinned positive). Pure read of
+    """PART IV cross-run Step 4/5 (§21.20): project distilled lessons into evidence-labelled claim
+    records with support and opposition attempt references. Legacy wire states ``supported`` and
+    ``refuted`` mean support-only and opposition-only evidence here, not proposition verdicts;
+    ``mixed`` means both kinds of reference, and ``inconclusive`` means insufficient evidence.
+    ``--pack`` renders the hard-capped agent context pack (pinned → ratified → mixed → support-only
+    → opposition-only → insufficient; a caveat may replace the weakest non-pinned positive). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
     from looplab.engine.claims import (build_context_pack, claims_for_memory,
                                        load_research_claims, render_context_pack)
@@ -970,8 +985,8 @@ def claims_cmd(
         return
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
     _mat = {"operator-ratified": " [RATIFIED]", "operator-rejected": " [REJECTED]", "operator-pinned": " [PINNED]"}
-    typer.echo(f"Claims ({len(claims)} shown{' — contested only' if contested_only else ''}): "
-               "✓ supported  ✗ refuted  ⚖ mixed  · inconclusive")
+    typer.echo(f"Claim records ({len(claims)} shown{' — mixed-evidence only' if contested_only else ''}): "
+               "✓ support-only  ✗ opposition-only  ⚖ mixed evidence  · insufficient evidence")
     for c in claims[: max(0, top)]:
         typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_mat.get(c.get('maturity'), '')} "
                    f"[{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")

@@ -12,6 +12,7 @@ from looplab.events.digest import (ablation_attribution, ancestral_repair_chain,
                                    experiments_digest, lineage_lessons, sibling_digest)
 from looplab.engine.memory import (consolidate_lessons, filter_contradicted, skill_slug,
                                    write_auto_skill)
+from looplab.tools.memory_tools import MemoryTools
 
 
 def _node(nid, metric=None, op="draft", parents=(), status=NodeStatus.evaluated,
@@ -27,6 +28,18 @@ def _state(nodes, direction="max"):
     st = RunState(direction=direction)
     st.nodes = {n.id: n for n in nodes}
     return st
+
+
+def test_search_lessons_labels_agreement_without_claiming_independent_verification(tmp_path):
+    (tmp_path / "lessons.jsonl").write_text(json.dumps({
+        "statement": "hard negatives helped recall",
+        "outcome": "supported",
+        "evidence_count": 3,
+    }) + "\n", encoding="utf-8")
+    output = MemoryTools(str(tmp_path)).execute("search_lessons", {"query": "hard negatives"})
+    assert "3 agreeing recorded observations" in output
+    assert "not independent verification" in output
+    assert "verified across" not in output
 
 
 # --------------------------------------------------------------------------- #
