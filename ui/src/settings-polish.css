@@ -226,6 +226,22 @@
 .settings-empty strong { color: var(--fg); font-size: 14px; }
 .settings-empty span { color: var(--fg-mut); font-size: 12px; }
 .sf-secret-state { color: var(--fg-dim); font-weight: 600; }
+.sf-warning {
+  margin-top: 7px;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--fail) 52%, var(--line-2));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--fail) 8%, var(--bg-1));
+  color: var(--fail-text);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.sf-warning strong { display: block; margin-bottom: 2px; color: var(--fg); }
+.sf-warning.info {
+  border-color: color-mix(in srgb, var(--accent) 52%, var(--line-2));
+  background: color-mix(in srgb, var(--accent) 8%, var(--bg-1));
+  color: var(--fg-dim);
+}
 
 .settings-save-state {
   color: var(--fg-mut);

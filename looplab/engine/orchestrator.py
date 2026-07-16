@@ -70,6 +70,7 @@ from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
 from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.search.operators import merge_idea
 from looplab.search.policy import KIND_EXPAND, SearchPolicy
 # The strategist-cadence cluster (StrategyContext / make_policy / validate_strategy / coverage_signal
@@ -1077,10 +1078,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             # R1-d: statistical (CI) verifier tie-break. Absent in old logs -> False ->
                             # byte-identical exact-tie pick.
                             "verifier_ci_tie": self._verifier_ci_tie,
-                            # CODEX AGENT: selection flags are pinned, but `select_verifier_samples` (plus
-                            # verifier/model/criteria version) is not. Resume can therefore score different
-                            # nodes under different live sampling policies with no recorded policy change.
-                            # Pin the complete selection-treatment descriptor or emit an explicit transition.
+                            "select_verifier_samples": self._select_verifier_samples,
+                            "select_verifier_contract": VERIFIER_SELECTION_CONTRACT,
                         },
                     )
                 # AGENTS.md (I18): task/contract context for coding-agent backends. Runtime line is
@@ -1171,13 +1170,14 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._apply_strategy(_entry.active_strategy)
         # R1-c resume-safety (invariant #6): the fold applies the RECORDED tie-break rule
         # (`st.select_verifier_tiebreak`, folded from run_started); re-pin the engine's live-verify gate
-        # to match so `_maybe_verify_ties` produces node_verified scores consistently with what the fold
+        # to match so `_maybe_verify_ties` produces atomic group scores consistently with what the fold
         # reads — not a possibly-changed live `LOOPLAB_SELECT_VERIFIER`. Its direct peer `holdout_select`
         # is re-pinned the same way below. Guard on `run_id` (set only by run_started): on a path where
         # setup hasn't recorded run_started yet, keep the live value rather than zero it from an empty fold.
         if _entry.run_id:
             self._select_verifier = _entry.select_verifier_tiebreak
             self._verifier_ci_tie = _entry.verifier_ci_tie   # R1-d: re-pin the recorded CI-tie rule
+            self._select_verifier_samples = _entry.select_verifier_samples
         # D1 resume-safety: honor the holdout split the run ORIGINALLY committed to (recorded in
         # run_started), not a possibly-changed live `holdout_fraction` — otherwise nodes evaluated
         # before vs. after a config change would be scored on different splits and the champion pick
@@ -1330,8 +1330,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
 
         # R1-c: calibrated §12-verifier metric-tie-break. When select_verifier is on and eligible nodes
         # TIE on the ranked metric, verify the tied nodes (grounded on their realized result) so the
-        # fold's mean pick breaks the tie by soundness. Lazy (only real ties), replay-safe (persists
-        # node_verified), advisory (never overrides a strictly-better metric). No-op when off.
+        # fold's final selector breaks the tie by soundness. Lazy (only real ties), replay-safe (persists one
+        # verifier_group_scored event), advisory (never overrides a strictly-better metric). No-op when off.
         state = self._maybe_verify_ties(state)
 
         # A7 Strategist: adapt the search machinery (policy/operators/fidelity/Developer) before
@@ -1780,6 +1780,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 research_origin=research_origin,
+                cross_run_receipt=getattr(self, "_cross_run_advisory_receipt", {}),
                 **({"parent_generations": parent_generations} if parent_generations else {}),
             )
             if node_id not in fold(self.store.read_all()).nodes:

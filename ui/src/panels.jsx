@@ -17,6 +17,7 @@ import { timelineEventKey } from './timelineModel.js'
 import { queuedGenerationControls } from './queue.js'
 import Panel from './PanelShell.jsx'
 import { DataTable } from './accessibility.jsx'
+import { safeExternalHref } from './urlSafety.js'
 
 export { default as Panel } from './PanelShell.jsx'
 
@@ -109,9 +110,14 @@ export function ResearchPanel({ state, runId, onToast, onClose }) {
                 <button className="btn sm ghost" title="steer the next proposal toward this direction (posts a hint)"
                         onClick={() => steer(d)}>steer →</button></li>))}</ul></>}
           {(m.sources || []).length > 0 && <><div className="section-h">Sources</div>
-            <ul className="bul">{m.sources.map((s, j) => (
-              <li key={j}>{s.url ? <a href={s.url} target="_blank" rel="noreferrer">{s.title || s.url}</a> : (s.title || 'source')}
-                {s.snippet && <div className="muted">{String(s.snippet).slice(0, 160)}</div>}</li>))}</ul></>}
+            <ul className="bul">{m.sources.map((source, index) => {
+              const href = safeExternalHref(source?.url)
+              const label = String(source?.title ?? source?.url ?? 'source').slice(0, 300)
+              const snippet = source?.snippet == null ? '' : String(source.snippet).slice(0, 160)
+              return <li key={index}>{href
+                ? <a href={href} target="_blank" rel="noreferrer noopener">{label}</a> : label}
+                {snippet && <div className="muted">{snippet}</div>}</li>
+            })}</ul></>}
           {m.reasoning && <details className="rsch-reasoning"><summary>reasoning (debug)</summary>
             <Markdown className="think-body" text={m.reasoning} /></details>}
         </div>

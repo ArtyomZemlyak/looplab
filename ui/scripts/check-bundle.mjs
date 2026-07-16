@@ -16,7 +16,9 @@ const named = name => Object.freeze({ name })
 // split output — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    js: { gzip: 310 * KIB },
+    // Part V adds one measured, route-lazy Atlas preview. Its own incremental closure below keeps
+    // that feature bounded; 2 KiB of total headroom also avoids zlib-version flakes across supported Node.
+    js: { gzip: 312 * KIB },
     css: { gzip: 45 * KIB },
   },
   individual: {
@@ -34,6 +36,14 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // RunList becomes a named facade when its lazy MapView imports shared list utilities. Vite
       // intentionally omits `src` on that facade, while preserving the stable Rollup chunk name.
       roots: [entry, named('RunList'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
+      limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
+    },
+    {
+      name: 'owner Atlas preview route',
+      roots: [
+        entry, source('src/ResearchAtlas.jsx'),
+        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+      ],
       limits: { js: { gzip: 210 * KIB }, css: { gzip: 35 * KIB } },
     },
     {
@@ -83,6 +93,12 @@ export const DEFAULT_BUDGETS = Object.freeze({
       limits: { js: { gzip: 20 * KIB } },
     },
     {
+      name: 'Research Atlas preview increment',
+      roots: [source('src/ResearchAtlas.jsx')],
+      baselineRoots: [entry],
+      limits: { js: { gzip: 6 * KIB }, css: { gzip: 3 * KIB } },
+    },
+    {
       name: 'React Flow increment',
       roots: [named('vendor-flow')],
       limits: { js: { gzip: 110 * KIB } },
@@ -99,6 +115,18 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Settings defers graph and panel code',
       roots: [entry, source('src/Settings.jsx'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
       targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
+      requireTargets: true,
+    },
+    {
+      name: 'Atlas preview defers graph and panel code',
+      roots: [
+        entry, source('src/ResearchAtlas.jsx'),
+        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+      ],
+      targets: [
+        named('RunView'), named('vendor-flow'), source('src/Dock.jsx'),
+        source('src/Inspector.jsx'), source('src/panels.jsx'), source('src/CollabPanel.jsx'),
+      ],
       requireTargets: true,
     },
     {

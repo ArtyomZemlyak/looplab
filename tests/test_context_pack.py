@@ -67,6 +67,18 @@ def test_render_leads_with_evidence_and_is_empty_when_empty():
     assert "counter-evidence" in txt and "mnr helps" in txt and "⚖" in txt
 
 
+def test_render_names_structured_opposite_assertion():
+    from looplab.engine.claims import claim_assessments
+    claims = claim_assessments([
+        {"statement": "dropout improves generalization", "outcome": "supported",
+         "evidence": [1], "run_id": "r1", "task_id": "t"},
+        {"statement": "dropout never improves generalization", "outcome": "supported",
+         "evidence": [2], "run_id": "r2", "task_id": "t"},
+    ], structured=True)
+    text = render_context_pack(build_context_pack(claims, max_claims=1))
+    assert "contradicts=" in text
+
+
 def test_cli_pack_renders_contested_first(tmp_path):
     import orjson
     from typer.testing import CliRunner
@@ -76,7 +88,7 @@ def test_cli_pack_renders_contested_first(tmp_path):
         {"statement": "mnr helps", "outcome": "supported", "evidence": [2], "run_id": "rB", "task_id": "t"},
         {"statement": "mnr helps", "outcome": "tested", "evidence": [3], "run_id": "rC", "task_id": "t"},
     ]
-    (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(l) for l in lessons) + b"\n")
+    (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(row) for row in lessons) + b"\n")
     res = CliRunner().invoke(app, ["claims", str(tmp_path), "--pack"])
     assert res.exit_code == 0 and "counter-evidence" in res.stdout and "mnr helps" in res.stdout
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { getSettings, saveSettings, saveSecret, llmHealth } from './util.js'
-import { toForm, fromForm, FIELD_BY_KEY, SETTINGS_GROUPS } from './settingsSchema.js'
+import { toForm, settingsSavePayload, FIELD_BY_KEY, SETTINGS_GROUPS } from './settingsSchema.js'
 import { filterSettingsGroups, settingsViewStats } from './settingsModel.js'
 import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
@@ -44,14 +44,15 @@ export default function Settings({ onBack }) {
   const load = () => {
     setLoadError('')
     return getSettings().then(data => {
-    const nextForm = toForm(data.settings)
-    setDefaults(data.defaults)
-    setForm(nextForm)
-    setSaved(nextForm)
-    const control = data.settings.agent_control || {}
-    setAgentControl(control)
-    setSavedAC(control)
-      setSecretState({ llm_api_key: !!data.settings.llm_api_key })
+      const settings = data.settings || {}
+      const nextForm = toForm(settings)
+      setDefaults(data.defaults)
+      setForm(nextForm)
+      setSaved(nextForm)
+      const control = settings.agent_control || {}
+      setAgentControl(control)
+      setSavedAC(control)
+      setSecretState({ llm_api_key: !!settings.llm_api_key })
     }).catch(error => setLoadError(error?.message || 'Could not load settings.'))
   }
   useEffect(() => { load() }, [])
@@ -106,7 +107,7 @@ export default function Settings({ onBack }) {
   const onSave = async () => {
     try {
       const apiKey = (form.llm_api_key || '').trim()
-      const result = await saveSettings({ ...fromForm(form), agent_control: agentControl })
+      const result = await saveSettings(settingsSavePayload(form, agentControl))
       if (apiKey) {
         const resultSecret = await saveSecret('llm_api_key', apiKey)
         setSecretState(current => ({ ...current, llm_api_key: !!resultSecret.set }))

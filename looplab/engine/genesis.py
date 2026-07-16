@@ -200,23 +200,24 @@ def author_task(goal: str, *, client, kinds: tuple[str, ...], data: Optional[str
     # promise — the same repo-scouting the Web UI's Genesis chat does. With no named path it stays
     # None (pure goal→plan) and `agentic_struct` degrades to the single-shot parse_structured.
     tools = _scout_tools(data, repo)
+    has_filesystem_scout = tools is not None
     # PART V §22 — give Genesis the read-only CROSS-RUN knowledge (portfolio-wide, unbound): so it can plan
     # scope/settings informed by what related runs already tried, and DISCLOSE prior art, instead of blind.
     if memory_dir and cross_run_read_tools:
+        from types import SimpleNamespace
         from looplab.agents.agent import CompositeTools
         from looplab.tools.cross_run_tools import CrossRunTools
-        # CODEX AGENT: Genesis receives this provider unbound, before a task passport exists, so it exposes
-        # the entire machine-wide portfolio and is the broadest persistent-injection surface. At minimum bind
-        # a temporary goal-derived scope with hard kind/metric/visibility gates, and require the same bounded
-        # untrusted-data/receipt contract as in-run consumers before letting memory author the task itself.
         crt = CrossRunTools(memory_dir, role="researcher")
+        # No task passport exists yet. Bind the provider to the operator's goal/direction; an empty or vague
+        # scope fails closed rather than exposing the machine-wide portfolio to an agent prompt.
+        crt.bind_state(SimpleNamespace(task_id="", goal=goal, direction=direction or ""))
         tools = CompositeTools([tools, crt]) if tools is not None else crt
         sys_prompt += (
             "\n\nYou also have READ-ONLY CROSS-RUN tools over past runs: cross_run_atlas() (what's been "
             "explored / where the gaps are / what's contradictory), cross_run_prior_attempts(idea) and "
             "cross_run_claims(query) — consult them to ground the task's scope in prior art and steer "
             "toward under-explored or unresolved directions. Advisory: cite, never treat as settled truth.")
-    if tools is not None:
+    if has_filesystem_scout:
         sys_prompt += (
             "\n\nYou have READ-ONLY tools to inspect this machine BEFORE you author the task: "
             "list_dir(path), read_file(path), find_files(root, pattern). The user pointed you at a real "

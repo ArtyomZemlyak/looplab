@@ -32,6 +32,8 @@ const COPY = Object.freeze({
 
 const safeRunId = value => typeof value === 'string' && value.length > 0 && value.length <= 255
   && !CONTROL_RE.test(value) ? value : ''
+const safeContextText = value => typeof value === 'string' && value.trim().length > 0
+  && value.trim().length <= 160 && !CONTROL_RE.test(value) ? value.trim() : ''
 const safeInteger = value => Number.isSafeInteger(value) && value >= 0 ? value : null
 const safeTime = value => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : 0
 
@@ -71,11 +73,14 @@ export function normalizeRunAttention(raw) {
   if ((raw.node_id != null && nodeId == null) || (raw.node_generation != null && nodeGeneration == null)) return null
   if (kind === 'approval' && (nodeId == null || nodeGeneration == null)) return null
   const [title, detail, actionLabel] = COPY[kind]
+  const runLabel = safeContextText(raw.run_label)
+  const taskId = safeContextText(raw.task_id)
   const item = {
     id, source: 'run', kind, severity, title, detail, actionLabel,
     runId, generation, seq, created: safeTime(raw.created), active: raw.active,
     notifyEligible: raw.browser === true && raw.derived === false && raw.stale !== true,
     derived: raw.derived, stale: raw.stale === true, nodeId, nodeGeneration,
+    runLabel, taskId, contextLabel: runLabel || runId,
   }
   return { ...item, href: attentionHref(item), needsAction: NEEDS_ACTION.has(kind) }
 }

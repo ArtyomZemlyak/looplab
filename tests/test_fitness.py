@@ -39,7 +39,7 @@ def test_ci_tie_never_overrides_a_significant_difference():
     """§21.7: a mean better by MORE than the confirm noise is NOT tied — a higher soundness cannot steal it."""
     f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
     # A: mean 0.90, TIGHT noise (std 0.01, 4 seeds -> SE 0.005), LOW soundness 0.1
-    # B: mean 0.80, tight noise, HIGH soundness 0.9. |Δ|=0.10 >> 1.96·√(2·0.005²)=0.014 -> NOT tied.
+    # B: mean 0.80, tight noise, HIGH soundness 0.9. |Δ|=0.10 >> leader SE 0.005 -> NOT tied.
     a = _cn(0, 0.90, std=0.01, seeds=4, score=0.1)
     b = _cn(1, 0.80, std=0.01, seeds=4, score=0.9)
     assert f.best_ci([a, b]).id == 0            # the significantly-better mean wins; soundness can't override
@@ -48,8 +48,8 @@ def test_ci_tie_never_overrides_a_significant_difference():
 def test_ci_tie_breaks_a_statistical_tie_by_soundness():
     """Within the confirm noise, the sounder node wins — even if it is NOT the raw metric leader."""
     f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
-    # A is the raw leader (0.905) but LOW soundness; B is 0.90 with HIGH soundness. SE=0.05/√3=0.029,
-    # CI=1.96·√(2·0.029²)=0.080; |Δ|=0.005 <= 0.080 -> statistically TIED -> the sounder B wins.
+    # A is the raw leader (0.905) but LOW soundness; B is 0.90 with HIGH soundness. Leader
+    # SE=0.05/√3=0.029; |Δ|=0.005 <= 0.029 -> statistically TIED -> the sounder B wins.
     a = _cn(0, 0.905, std=0.05, seeds=3, score=0.2)
     b = _cn(1, 0.90, std=0.05, seeds=3, score=0.95)
     assert f.best_ci([a, b]).id == 1
@@ -77,7 +77,7 @@ def test_ci_tie_candidate_variance_cannot_widen_the_band():
     leader into a tie — the band is anchored on the LEADER's precision only."""
     f = SearchFitness("max", verifier_tiebreak=True, ci_tie=True)
     # leader tight (std 0.001), candidate 0.20 worse but wildly noisy (std 5.0) + high soundness.
-    # band = 1.96·SE_leader (tiny) -> |Δ|=0.20 NOT tied -> the leader wins; C's variance can't steal it.
+    # band <= SE_leader (tiny) -> |Δ|=0.20 NOT tied -> the leader wins; C's variance can't steal it.
     leader = _cn(0, 0.90, std=0.001, seeds=4, score=0.1)
     noisy = _cn(1, 0.70, std=5.0, seeds=3, score=0.9)
     assert f.best_ci([leader, noisy]).id == 0
@@ -192,6 +192,15 @@ def test_promotion_key_inserts_direction_oriented_verifier_slot():
     u = _node(3, 0.5)
     assert SearchFitness("max", verifier_tiebreak=True).promotion_key(u) == (0.5, 0.5, 3)
     assert SearchFitness("min", verifier_tiebreak=True).promotion_key(u) == (0.5, -0.5, 3)
+
+
+def test_promotion_ranking_fails_closed_on_a_partial_exact_tie():
+    scored = _cn(0, 0.5, score=0.9)
+    unscored = _cn(1, 0.5, score=None)
+    fit = SearchFitness("max", verifier_tiebreak=True)
+    assert [node.id for node in fit.rank_promotion([scored, unscored])] == [1, 0]
+    unscored.verifier_score = 0.1
+    assert [node.id for node in fit.rank_promotion([scored, unscored])] == [0, 1]
 
 
 # --------------------------------------------------------------------------- #

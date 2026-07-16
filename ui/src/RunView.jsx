@@ -19,6 +19,7 @@ import {
 import {
   approvalCommandFor, dagEmptyPresentation, lifecyclePhaseLabel, runLifecycle, terminalReady,
 } from './runIndex.js'
+import { initialDagOverviewDecision } from './dagViewport.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -218,6 +219,30 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [groupMode, setGroupMode] = useState('theme')
   const [collapsed, setCollapsed] = useState(() => new Set())
   const [selectedGroup, setSelectedGroup] = useState(null)
+  const graphPreferenceTouchedRef = useRef(false)
+  const largeOverviewAppliedRef = useRef(false)
+  const liveNodeCount = Object.keys(live?.nodes || {}).length
+  // Theme labels are agent-authored and often fragment a large search into dozens of one-off groups.
+  // Start a previously untouched 80+ node run as a small operator-aggregate overview. It is truthful,
+  // bounded, and fully reversible through the group selector / Expand all.
+  useLayoutEffect(() => {
+    if (largeOverviewAppliedRef.current || graphPreferenceTouchedRef.current) return
+    const decision = initialDagOverviewDecision({
+      ready: runStatus === 'ready',
+      nodeCount: liveNodeCount,
+      explicitContext: selectedId != null || selectedGroup != null || historyActive,
+    })
+    if (decision === 'wait') return
+    // Decide exactly once from the first authoritative non-empty snapshot. A run first seen at 79 nodes
+    // must not jump modes when live node 80 arrives, and an exact route must retain its camera context.
+    largeOverviewAppliedRef.current = true
+    if (decision === 'preserve') return
+    const groups = computeGroups(live.nodes, 'operator')
+    if (!groups.size) return
+    setGroupMode('operator')
+    setCollapsed(new Set(groups.keys()))
+    setSelectedGroup(null)
+  }, [live, liveNodeCount, runStatus, selectedId, selectedGroup, historyActive])
   useEffect(() => {
     if (panel && !panelAllowed(panel)) {
       setRouteNotice(current => [current, historyActive
@@ -261,7 +286,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const [sideW, setSideW] = useState(() => +storageGet('ll.sideW', 420) || 420)
   const [dockH, setDockH] = useState(() => +storageGet('ll.dockH', 230) || 230)
   const [sideC, setSideC] = useState(() => storageGet('ll.sideC') === '1')
-  const [dockC, setDockC] = useState(() => storageGet('ll.dockC') === '1')
+  // A new workspace starts canvas-first; an explicit prior open/collapsed choice is preserved.
+  const [dockC, setDockC] = useState(() => storageGet('ll.dockC', '1') === '1')
   // Dock remains the sole owner of durable run-command recovery. It publishes a reactive controller
   // only after its exact run/generation render commits, allowing the zero-node canvas CTA to reuse the
   // same command identity, lock, persistence, and observation path without duplicating transport.
@@ -612,9 +638,24 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     else setSideC(false)     // drill-down means "show me the inspector" — un-fold a collapsed panel
   }
   // --- semantic-zoom grouping controls ---
-  const toggleGroup = (key) => setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
-  const changeMode = (m) => { setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null) }
+  const toggleGroup = (key) => {
+    graphPreferenceTouchedRef.current = true
+    setCollapsed(s => { const n = new Set(s); n.has(key) ? n.delete(key) : n.add(key); return n })
+  }
+  const changeMode = (m) => {
+    graphPreferenceTouchedRef.current = true
+    setGroupMode(m); setCollapsed(new Set()); setSelectedGroup(null)
+  }
+  const collapseAllGroups = keys => {
+    graphPreferenceTouchedRef.current = true
+    setCollapsed(new Set(keys))
+  }
+  const expandAllGroups = () => {
+    graphPreferenceTouchedRef.current = true
+    setCollapsed(new Set())
+  }
   const selectGroup = (key) => {
+    if (key != null) graphPreferenceTouchedRef.current = true
     setSelectedGroup(key)
     if (key != null) {
       setSelectedId(null)
@@ -625,7 +666,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // policy — so it never fights the user's manual toggles). Keeps the champion/selected/working groups
   // open. Wired to the "⊟ settled" button and fired once when a run finishes (only if nothing's been
   // collapsed yet, so it never clobbers a layout the user arranged by hand).
-  const autoCollapse = () => {
+  const autoCollapse = (userInitiated = false) => {
+    if (userInitiated) graphPreferenceTouchedRef.current = true
     const st = hist || live; const ns = st?.nodes; if (!ns) return
     setCollapsed(autoCollapseSet(ns, computeGroups(ns, groupMode),
       { mode: groupMode, bestId: st.best_node_id, selectedId, workId: workingId(st) }))
@@ -856,6 +898,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
+          aria-label={reviewMode ? 'Copy exact read-only review view' : 'Copy exact run view'}
           title={reviewMode ? 'Copy this read-only capability with the exact visible context' : 'Copy the exact view; recipients still need owner access'}>
           <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy view</span>
         </button>
@@ -1020,7 +1063,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
             <Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
-              onCollapseAll={(keys) => setCollapsed(new Set(keys))} onExpandAll={() => setCollapsed(new Set())}
+              onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
               onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}
               mergeArm={readOnlyMode ? null : mergeFrom}
               selectedGroup={selectedGroup} onSelectGroup={selectGroup} themeFilter={themeFilter} />

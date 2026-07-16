@@ -54,6 +54,19 @@ test('run attention uses client-owned copy and an exact generation-fenced route'
   assert.doesNotMatch(rendered, /TOP_SECRET|raw prompt|bearer|Delete everything|attacker|TOKEN_MUST_NOT_RENDER/)
 })
 
+test('run attention has a distinguishable safe context with run-id fallback', () => {
+  const fallback = normalizeRunAttention(runItem())
+  assert.equal(fallback.contextLabel, RUN_ID)
+  assert.equal(fallback.runLabel, '')
+  assert.equal(fallback.taskId, '')
+  const labelled = normalizeRunAttention(runItem({ run_label: 'MiniMax sweep', task_id: 'mle-bench' }))
+  assert.equal(labelled.contextLabel, 'MiniMax sweep')
+  assert.equal(labelled.taskId, 'mle-bench')
+  const unsafe = normalizeRunAttention(runItem({ run_label: 'bad\nlabel', task_id: 'x'.repeat(161) }))
+  assert.equal(unsafe.contextLabel, RUN_ID)
+  assert.equal(unsafe.taskId, '')
+})
+
 test('attention routes expose only allow-listed diagnostic destinations behind a generation fence', () => {
   const cases = [
     ['finished', { view: 'report', panel: null, nodeId: null }],

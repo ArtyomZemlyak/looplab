@@ -8,9 +8,10 @@ hide:
 # LoopLab
 
 **An autonomous ML/DS research engine.** Give it a goal; it **invents → implements → tests → improves**
-candidate solutions in a loop and returns the best *verified* result. Every step is one line in an
-append-only event log — the single source of truth — so a run is fully reproducible and
-crash-resumable by replay.
+candidate solutions in a loop and returns the best *verified* result. Domain decisions are lines in an
+append-only event log that is authoritative for replayable `RunState`, so the search is reproducible and
+crash-resumable by replay. Task/config, tracing, chat, command and cross-run sidecars keep their own
+explicit contracts.
 
 <div class="ll-verbs">
   <span>● Invent →</span><span>● Implement →</span><span>● Test →</span><span>● Improve ↺</span><span>● Champion</span>
@@ -65,7 +66,8 @@ hand work around the wheel, and every arrow also appends one event to `events.js
 </svg>
 </div>
 
-Every arrow above also appends one line to `events.jsonl` — the single source of truth.
+Every domain/control arrow above appends one line to `events.jsonl`, the replay authority for `RunState`.
+Diagnostic and cross-run boxes also use their documented sidecars.
 
 [See the full interactive infographic — every component and stage :material-open-in-new:](guide/architecture.md)
 

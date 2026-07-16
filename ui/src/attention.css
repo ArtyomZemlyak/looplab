@@ -310,6 +310,8 @@
   color: var(--fg-dim);
   line-height: 1.45;
 }
+.attention-item > .attention-run-context { color: var(--fg); overflow-wrap: anywhere; }
+.attention-run-context span { color: var(--fg-mut); font-weight: 400; }
 .attention-item time {
   display: block;
   margin: 6px 0 0 14px;

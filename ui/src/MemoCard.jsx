@@ -1,6 +1,7 @@
 import React, { useState } from 'react'
 import Markdown from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
+import { safeExternalHref } from './urlSafety.js'
 
 // Report-local research memo. This must not live in panels.jsx: importing the report alone should
 // never pull the optional panel hub and its owner-only dependencies into the report closure.
@@ -29,12 +30,15 @@ export default function MemoCard({ memo, idx, open, onToggle }) {
       </>}
       {(memo.sources || []).length > 0 && <>
         <div className="section-h">Sources consulted</div>
-        <ul className="bul">{memo.sources.map((source, index) => <li key={index}>
-          {source.url
-            ? <a href={source.url} target="_blank" rel="noreferrer">{source.title || source.url}</a>
-            : (source.title || '—')}
-          {source.snippet && <span className="muted"> — {String(source.snippet).slice(0, 120)}</span>}
-        </li>)}</ul>
+        <ul className="bul">{memo.sources.map((source, index) => {
+          const href = safeExternalHref(source?.url)
+          const label = String(source?.title ?? source?.url ?? '—').slice(0, 300)
+          const snippet = source?.snippet == null ? '' : String(source.snippet).slice(0, 120)
+          return <li key={index}>
+            {href ? <a href={href} target="_blank" rel="noreferrer noopener">{label}</a> : label}
+            {snippet && <span className="muted"> — {snippet}</span>}
+          </li>
+        })}</ul>
       </>}
       {memo.reasoning && <div className="think-debug" style={{ marginTop: 8 }}>
         <button type="button" className="role-think disclosure-button" aria-expanded={think}

@@ -428,20 +428,19 @@ class Settings(BaseSettings):
     # denied a holdout eval, and the final holdout override breaks a holdout_metric tie by it too. Strictly
     # a TIE-BREAK — it can NEVER move a node ahead of a strictly-better metric (§21.7 advisory-never-
     # overrides). Best-effort: verification is LAZY (only fires on an actual tie) and bounded per cadence,
-    # so an unscored node in a large/late tie group contributes a NEUTRAL midpoint (a fully-scored tie is
-    # resolved by soundness; a partially-scored one degrades to neutral+id). Recorded in run_started so
+    # so a large/late tie stays on deterministic metric+id order unless one atomic treatment scores every
+    # member. Recorded in run_started so
     # replay applies the same rule; old logs fold to False (legacy pick). Opt-in (default off); needs a
     # reachable LLM client. Enable only after validating calibration offline with `verifier.calibrate`.
     # See trust/verifier.py + core/fitness.py.
     select_verifier: bool = False
-    # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — two confirmed
-    # means within the confirm-phase noise (|Δ| <= 1.96·SE, SE=confirmed_std/sqrt(confirmed_seeds)) are
-    # tied and broken by soundness. Requires `select_verifier`. NEVER widens past measured noise, so a
-    # SIGNIFICANT difference is never a tie (§21.7). Off -> exact-metric tie only.
+    # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a conservative STATISTICAL tie.
+    # The band is capped by both the metric leader's SE and the pooled SE-of-difference, so challenger
+    # variance cannot widen it and a significant difference is never a tie (§21.7). Off -> exact only.
     verifier_ci_tie: bool = False
     # Verifier sample count for `select_verifier` (the §12 repeated-sampling expectation). 3 tames the
     # single-shot variance; 1 = single-shot (cheaper, noisier).
-    select_verifier_samples: int = Field(default=3, ge=1)
+    select_verifier_samples: int = Field(default=3, ge=1, le=32)
     # Budget (I13): hard wall-clock ceiling; the run aborts cleanly when exceeded.
     max_seconds: float | None = None
     # Eval-compute budget (#2): hard ceiling on cumulative time spent INSIDE evals (training
@@ -531,10 +530,8 @@ class Settings(BaseSettings):
     # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
     # retries finalize). OPT-IN (default off); needs `memory_dir` + an LLM backend. See engine/lessons.py.
     cross_run_curation: bool = False
-    # Companion to `cross_run_curation`: also APPLY the steward's proposals automatically (through the same
-    # reversible append-only governance writes), instead of only logging them for operator ratification. The
-    # "fully agentic" mode — the append-only reversibility is the safety net. OPT-IN (default off); inert
-    # unless `cross_run_curation` is also on.
+    # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
+    # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
     cross_run_curation_auto: bool = False
     # Role backend (ADR-7/14): "toy" (offline optimizer) | "llm" (live model).
     backend: str = "toy"

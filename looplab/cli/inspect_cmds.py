@@ -286,8 +286,7 @@ def asset_brief_cmd(
         raise typer.Exit(2)
     client = None
     if llm:
-        from looplab.core.config import Settings
-        settings = _settings_for_run(run_dir, model)
+        settings = _settings_for_run(None, model)
         try:
             client = _make_llm_client(settings)
         except Exception as e:  # noqa: BLE001 — degrade to the offline scan
@@ -864,20 +863,19 @@ def atlas_cmd(
     """PART IV cross-run Step 6 (§21.20): the Research Atlas DATA view — one 'what's been explored / where
     it's thin / what's contradictory' payload composing the concept overview (Step 3), claim assessments
     (Step 4) and the bounded context pack (Step 5). Pure read; the React screen is a later visual layer."""
-    from looplab.engine.claims import atlas_for_memory
+    from looplab.engine.claims import atlas_for_memory, load_research_claims
     from looplab.engine.memory import ConceptCapsuleStore
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir)
     lessons_p, caps_p = base / "lessons.jsonl", base / "concept_capsules.jsonl"
     lessons = read_jsonl_lenient(lessons_p, loads=orjson.loads, dicts_only=True) if lessons_p.exists() else []
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
-    # CODEX AGENT: D8 research_claims are now a valid Atlas source, but this preflight exits before
-    # `atlas_for_memory` can load them. D8-only memory works through the HTTP API yet both CLI and live
-    # cues report it empty. Delegate source readiness to the shared loader and report per-source status.
-    if not lessons and not caps:
-        typer.echo(f"no cross-run memory at {base} (need lessons.jsonl and/or concept_capsules.jsonl)")
+    research = load_research_claims(base)
+    if not lessons and not caps and not research:
+        typer.echo(f"no cross-run memory at {base} (need lessons, capsules, and/or research claims)")
         raise typer.Exit(1)
-    atlas = atlas_for_memory(base, lessons=lessons, capsules=caps, max_items=max_items)
+    atlas = atlas_for_memory(base, lessons=lessons, capsules=caps,
+                             research_claims=research, max_items=max_items)
     if as_json:
         typer.echo(orjson.dumps(atlas, option=orjson.OPT_INDENT_2).decode())
         return
@@ -912,25 +910,27 @@ def claims_cmd(
     inconclusive). Contested (`mixed`) claims are where the portfolio disagrees with itself. `--pack`
     renders the bounded agent context pack (contested-first, caveat slot reserved). Pure read of
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
-    from looplab.engine.claims import (build_context_pack, claim_assessments,
-                                        load_claim_decisions, render_context_pack)
+    from looplab.engine.claims import (build_context_pack, claims_for_memory,
+                                       load_research_claims, render_context_pack)
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     path = p if p.is_file() else p / "lessons.jsonl"
-    # CODEX AGENT: requiring lessons.jsonl makes the claims CLI reject a perfectly valid D8-only store that
-    # `claims_for_memory` and the HTTP API can read. Resolve the memory directory first and let the shared
-    # helper combine whichever versioned sources exist; do not make one optional source a hard prerequisite.
-    if not path.exists():
+    base = p if p.is_dir() else p.parent
+    if p.is_file():
+        lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+    elif path.exists():
+        lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
+    else:
+        lessons = []
+    research = load_research_claims(base)
+    if not lessons and not research:
         typer.echo(f"no lessons at {path}")
         raise typer.Exit(1)
-    lessons = read_jsonl_lenient(path, loads=orjson.loads, dicts_only=True)
-    from looplab.engine.claims import claims_for_memory
-    claims = claims_for_memory(p if p.is_dir() else p.parent, lessons=lessons, fuzzy=fuzzy,
-                               structured=structured)   # +D8 +decisions
+    claims = claims_for_memory(base, lessons=lessons, research_claims=research,
+                               fuzzy=fuzzy, structured=structured)
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present
-        base = p if p.is_dir() else p.parent
         caps_path = base / "concept_capsules.jsonl"
         overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all())
                     if caps_path.exists() else None)

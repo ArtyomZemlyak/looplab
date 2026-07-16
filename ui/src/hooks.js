@@ -117,7 +117,7 @@ export function useRunState(runId, { pollOnly = false, pollMs = 4000 } = {}) {
     let backoff = MIN_BACKOFF
     const reconnect = (delay) => { if (stopped) return; clearTimeout(timer); timer = setTimeout(connect, delay) }
     function connect() {
-      const es = new EventSource(apiUrl(`/api/runs/${runId}/events`))
+      const es = new EventSource(apiUrl(`/api/runs/${encodeURIComponent(runId)}/events`))
       esRef.current = es
       es.addEventListener('state', (e) => {
         let p

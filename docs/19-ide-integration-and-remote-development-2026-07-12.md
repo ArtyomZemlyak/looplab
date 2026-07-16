@@ -839,10 +839,11 @@ the event-log contract first-class in the editing UX. Three concrete capabilitie
    bounded tool-loop, review its proposed diff, then commit — closing the manual/autonomous loop on
    one surface.
 
-**Invariants this must respect.** Every agent-assisted commit is still one engine-written
-`inject_node`; the editor never appends domain events directly (the engine is the sole writer). Agent
-invocation from the editor reuses the existing tool-loop and authorization — never a new privileged
-path. Live-attach edits remain out of scope (§11.7).
+**Invariants this must respect.** Every agent-assisted commit is still one validated, serialized
+`inject_node` event through the existing control/event-store path; the editor never writes raw event bytes or
+mutates folded state. One live engine owns `RunState` reduction, while authenticated server controls share the
+event store's cross-process append serialization. Agent invocation from the editor reuses the existing
+tool-loop and authorization — never a new privileged path. Live-attach edits remain out of scope (§11.7).
 
 **Why it changes build priority.** Because this seam unlocks human steering of the *core research
 loop* — something "Open in Desktop VS Code" cannot do — the local-first editor is worth delivering

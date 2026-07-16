@@ -14,8 +14,8 @@ the lean merge was a token-Jaccard union-find. CODEX flagged three failure modes
    EXACT structured key (hash-bucketed grouping, O(n)); two claims merge only on identical
    (subject-stems, scope, metric, polarity), never by transitive bridging.
 
-`claim_signature(statement, scope, metric)` is pure/deterministic. The subject is a light-stemmed content
-token SET (order/duplication/inflection-insensitive); the polarity is negation-cue parity. A `merge_key`
+`claim_signature(statement, scope, metric)` is pure/deterministic. The subject is a light-stemmed,
+role-aware content sequence; the polarity is negation-cue parity. A `merge_key`
 identifies mergeable claims; a `contra_key` (polarity-agnostic) identifies contradiction partners; a stable
 `uid` keys operator governance so a decision is scope-precise. Deliberately lean stemming/negation — a full
 semantic parse (subject/intervention/comparator) is a further TODO, but this is already scope+polarity-safe.
@@ -24,8 +24,9 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 
-CLAIM_KEY_VERSION = 1
+CLAIM_KEY_VERSION = 2
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 # The "n't" contraction (a negation modifier the tokenizer splits off). The apostrophe is REQUIRED — a
@@ -70,7 +71,7 @@ overall generally consistently substantially better best worse worst good bad st
 # sign as polarity makes them contradiction partners (same subject, opposite polarity) instead of two
 # unrelated claims — the core of the structured key (CODEX).
 _POS_EFFECT = _stems("improve boost help increase raise gain enhance benefit outperform beat accelerate "
-                     "stabilize fix solve speed strengthen")
+                     "stabilize fix solve speed strengthen cause lead")
 _NEG_EFFECT = _stems("hurt degrade worsen reduce decrease harm break fail drop lower lose regress damage "
                      "slow weaken")
 # Pure negation MODIFIERS (flip the sign without being effect verbs themselves).
@@ -78,43 +79,74 @@ _NEGATE = _stems("not never without cannot nor no lacks prevent avoid")
 _SUBJECT_DROP = _STOP | _POS_EFFECT | _NEG_EFFECT | _NEGATE
 
 
+def _content(stems, *, allow_symbol: bool = False) -> tuple[str, ...]:
+    """Keep an ordered, duplicate-free content sequence for one semantic role."""
+    out: list[str] = []
+    for s in stems:
+        if (s and s not in _SUBJECT_DROP
+                and (allow_symbol or len(s) > 1 or s.isdigit()) and s not in out):
+            out.append(s)
+    if not out and allow_symbol:
+        # Single-letter experimental variables are genuine role occupants (A->B differs from B->A). The
+        # article "a" is admitted only when it is the role's sole token, so prose such as "a model" still
+        # normalizes to just ``model``.
+        meaningful = [s for s in stems if s and (s not in _SUBJECT_DROP or s == "a")]
+        if meaningful == ["a"]:
+            out.append("a")
+    return tuple(out)
+
+
 def _analyze(statement: str) -> tuple:
-    """Return (subject-tuple, polarity). Subject = stemmed content ENTITIES (effect/negation/function words
-    removed), sorted+deduped. Polarity = -1 iff an ODD number of sign-flippers (negation modifiers +
-    negative-effect verbs + "n't") applies, else +1; 0 when there is no subject content."""
-    low = str(statement or "").casefold()
+    """Return ``(subject, roles, polarity)`` with conservative role-aware identity.
+
+    For an effect assertion, ``roles`` is ``(lhs, rhs)``. Keeping the sides separate means
+    "A improves B" cannot merge with, or contradict, "B improves A" without a real semantic parser.
+    With no recognized effect verb, all ordered content stays in one role. Polarity is negation parity.
+    """
+    low = unicodedata.normalize("NFKC", str(statement or "")).casefold()
     words = _WORD.findall(low)
-    # The SUBJECT keeps content words (len>2) AND numeric literals of ANY length — a bare number is
-    # distinguishing content (two parameterized facts differing only in their values are NOT paraphrases), so
-    # stripping it would over-merge (the very failure mode this key exists to prevent).
-    subject = tuple(sorted({s for s in (_stem(w) for w in words if len(w) > 2 or w.isdigit())
-                            if s and s not in _SUBJECT_DROP and (len(s) > 1 or s.isdigit())}))
+    stems = [_stem(w) for w in words]
+    # Preserve the historical rule that short alphabetic tokens are not claim content, while numeric
+    # literals of any length remain distinguishing content.
+    eligible = [s if (len(w) > 2 or w.isdigit()) else "" for w, s in zip(words, stems)]
+    relation_at = next((i for i, s in enumerate(stems) if s in (_POS_EFFECT | _NEG_EFFECT)), None)
+    if relation_at is None:
+        roles = (_content(eligible),)
+    else:
+        # Assertion roles are identity, not a bag of entities. Sorting A/B together made
+        # "A improves B" collide with "B improves A" and let governance for one relation control the other.
+        roles = (_content(stems[:relation_at], allow_symbol=True),
+                 _content(stems[relation_at + 1:], allow_symbol=True))
+    subject = tuple(s for role in roles for s in role)
     if not subject:
-        return (), 0
-    # POLARITY flips are counted over EVERY token (not just the >2-char subject tokens), so a short negation
-    # like "no" — dropped from the subject by the length filter — still flips the sign (mega-review finding).
-    flips = sum(1 for s in (_stem(w) for w in words) if s in _NEGATE or s in _NEG_EFFECT) \
-        + len(_NT.findall(low))
-    return subject, (-1 if flips % 2 else 1)
+        return (), roles, 0
+    # Count sign-flippers over every token, including short modifiers such as "no".
+    flips = sum(1 for s in stems if s in _NEGATE or s in _NEG_EFFECT) + len(_NT.findall(low))
+    return subject, roles, (-1 if flips % 2 else 1)
 
 
 def claim_signature(statement: str, *, scope: str = "", metric: str = "") -> dict:
     """The structured semantic key for a claim. `scope` (task id) and `metric` qualify identity so the same
     words in two different tasks/metrics are two claims (CODEX). Returns:
-      - subject:   sorted stemmed content-token tuple
+      - subject:   ordered stemmed content-token tuple (flattened from ``roles``)
+      - roles:     ordered semantic sides (lhs/rhs around the first recognized effect verb)
       - polarity:  +1 / -1 / 0
       - scope, metric: the qualifying context (normalized to str)
       - merge_key: identical => the same claim (subject+scope+metric+polarity) — mergeable
       - contra_key: polarity-agnostic — two claims sharing it with OPPOSITE polarity contradict
       - uid:       a stable opaque governance key over merge_key
     Pure/deterministic."""
-    subj, pol = _analyze(statement)
+    subj, roles, pol = _analyze(statement)
     sc, mt = str(scope or ""), str(metric or "")
-    subj_h = hashlib.sha1(("\x1f".join(subj)).encode("utf-8")).hexdigest()[:16]
-    contra_key = f"{CLAIM_KEY_VERSION}|{sc}|{mt}|{subj_h}"
+    role_payload = "\x1e".join("\x1f".join(f"{len(s)}:{s}" for s in role) for role in roles)
+    subj_h = hashlib.sha256(role_payload.encode("utf-8")).hexdigest()[:32]
+    # Length-prefix qualifiers: delimiter-bearing task/metric IDs must not alias another partitioning of
+    # the same bytes (scope="a|b", metric="c" versus scope="a", metric="b|c").
+    contra_key = f"{CLAIM_KEY_VERSION}|{len(sc)}:{sc}|{len(mt)}:{mt}|{subj_h}"
     merge_key = f"{contra_key}|{pol:+d}"
-    uid = "clm_" + hashlib.sha1(merge_key.encode("utf-8")).hexdigest()[:16]
-    return {"subject": subj, "polarity": pol, "scope": sc, "metric": mt,
+    uid = "clm_" + hashlib.sha256(merge_key.encode("utf-8")).hexdigest()[:32]
+    return {"version": CLAIM_KEY_VERSION, "subject": subj, "roles": roles,
+            "polarity": pol, "scope": sc, "metric": mt,
             "merge_key": merge_key, "contra_key": contra_key, "uid": uid}
 
 

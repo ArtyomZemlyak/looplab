@@ -96,6 +96,9 @@ class StrategyContext(BaseModel):
     # the engine when `cross_run_advisory` is on, so the meta-controller grounds its explore/exploit dial in
     # what the whole portfolio has covered, not only this run's narrowing. Advisory prose; empty when off.
     cross_run_note: str = ""
+    # Immutable evidence receipt for the scoped snapshot rendered into ``cross_run_note``. It is persisted
+    # with strategy_decision but omitted from the prose brief; no raw memory text is duplicated here.
+    cross_run_receipt: dict = Field(default_factory=dict)
 
 
 class Strategist(Protocol):

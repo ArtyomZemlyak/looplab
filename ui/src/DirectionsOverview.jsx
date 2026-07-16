@@ -18,7 +18,7 @@ export default function DirectionsOverview({ state, active, onPick }) {
       {active && <div className="do-head">
         <button className="btn sm ghost" onClick={() => onPick(null)}>← all directions ({active})</button>
       </div>}
-      <div className="do-chips">
+      <div className="do-chips" role="group" aria-label="Research directions">
         {rows.map(r => {
           const sel = active === r.theme
           const tone = r.gain == null ? 'var(--line-2)' : (r.gain >= 0 ? 'var(--ok)' : 'var(--alarm)')

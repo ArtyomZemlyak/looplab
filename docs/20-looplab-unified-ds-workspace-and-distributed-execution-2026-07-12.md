@@ -507,11 +507,12 @@ cover multi-region and regulated-residency DR, which are a superset, not a subst
 | authoritative Postgres | continuous WAL archiving + [PITR](https://www.postgresql.org/docs/current/continuous-archiving.html); ≥1 synchronous streaming replica for HA failover; automated, encrypted base backups | restore to a consistent LSN; a backup never restored in a drill is not a backup |
 | transactional outbox/reconciler | committed in the same transaction as its command/event; reconciler is idempotent and at-least-once | pending effects replay safely after restore; no effect is lost or double-committed by design |
 | object store / CAS | versioning plus object-lock (WORM) on immutable blobs; cross-AZ/region replication; lifecycle rules that never expire a blob still referenced by a live manifest | a blob, once accepted, is retrievable for its retention window |
-| JSONL projection (local mode) | the existing single-writer `engine.lock` + atomic-rename file store | unchanged; a single-machine run recovers by re-fold, as today |
+| JSONL projection (local mode) | the existing one-live-engine `engine.lock` fence + cross-process serialized event-store appends | unchanged; a single-machine `RunState` recovers by re-fold, while snapshots/sidecars retain their own recovery contracts |
 
 Recovery is made tractable by the same properties the rest of the design already depends on: events
-are the source of truth and `fold` is deterministic, order-tolerant, and idempotent (the same
-files-as-truth replay the local engine already guarantees). A restore to a consistent (database
+are replay authority for the modeled state and `fold` is deterministic, order-tolerant, and idempotent (the
+same files-as-truth replay the local engine already guarantees). Original snapshots, artifacts, chat/command
+records and cross-run stores are restored under their named contracts rather than inferred from the fold. A restore to a consistent (database
 snapshot, object-store point) is therefore internally consistent and re-foldable; there is no
 separate derived state to repair by hand. Three rules keep a restore honest:
 

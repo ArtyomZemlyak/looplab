@@ -7,9 +7,10 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
-from looplab.core.fitness import SearchFitness
+from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness,
+                                  verifier_evidence_digest)
 from looplab.core.models import (Event, Hypothesis, Idea, Node, NodeStatus, RunState, Trial,
-                     hypothesis_id, run_setup_key)
+                     hypothesis_id, normalize_extra_metrics, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
     EV_ABLATE, EV_AGENT_DECISION, EV_AGENT_VALIDATED, EV_ANNOTATION, EV_APPROVAL_GRANTED,
@@ -33,7 +34,7 @@ from looplab.events.types import (
     EV_RUN_FINISHED, EV_RUN_REOPENED, EV_RUN_SETUP_FINISHED, EV_RUN_STARTED, EV_RUNG_PROMOTED,
     EV_SET_STRATEGY,
     EV_SETUP_FINISHED, EV_SPEC_APPROVAL_REQUESTED, EV_SPEC_APPROVED, EV_SPEC_DRIFT, EV_SPEC_PROPOSED,
-    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_WORKSPACE_CHANGED)
+    EV_STRATEGY_DECISION, EV_TRUST_GATE_CHANGED, EV_VERIFIER_GROUP_SCORED, EV_WORKSPACE_CHANGED)
 
 
 def flagged_node_ids(st: RunState) -> set:
@@ -45,6 +46,40 @@ def flagged_node_ids(st: RunState) -> set:
     if st.trust_gate not in ("gate", "block"):
         return set()
     return hard_flagged_ids(st)
+
+
+def verifier_tie_groups(st: RunState, *, holdout_select: bool | None = None,
+                        ci_tie: bool | None = None) -> list[list[Node]]:
+    """Return the one complete tie-set that can affect the selector's final answer.
+
+    Holdout promotion runs last.  Once it has a non-empty eligible pool, no mean/CI decision can reach the
+    final champion, so surfacing both groups wastes calls and can leave incomparable overlapping treatments.
+    Without a holdout pool, mirror the mean selector's confirmed-pool and CI/exact tie semantics.
+    """
+    holdout_select = st.holdout_select if holdout_select is None else bool(holdout_select)
+    ci_tie = st.verifier_ci_tie if ci_tie is None else bool(ci_tie)
+    flagged = flagged_node_ids(st)
+    eligible = [n for n in st.evaluated_nodes()
+                if SearchFitness.eligible(n, flagged, st.aborted_nodes)]
+    confirmed = [n for n in eligible if n.confirmed_mean is not None]
+    pool = confirmed if confirmed else eligible
+    def _champion_tie(nodes, metric_of):
+        candidates = [n for n in nodes if metric_of(n) is not None]
+        if not candidates:
+            return []
+        chooser = min if st.direction == "min" else max
+        leader = chooser(candidates, key=lambda n: (metric_of(n), n.id))
+        return [n for n in candidates if metric_of(n) == metric_of(leader)]
+
+    holdout_pool = [n for n in eligible if n.holdout_metric is not None]
+    if holdout_select and holdout_pool:
+        tied = _champion_tie(holdout_pool, lambda n: n.holdout_metric)
+    elif ci_tie:
+        tied = SearchFitness(st.direction, verifier_tiebreak=True, ci_tie=True).ci_tie_set(pool)
+    else:
+        tied = _champion_tie(pool, lambda n: n.robust_metric)
+    return [sorted(tied, key=lambda n: n.id)] if (
+        len(tied) >= 2 and any(node.verifier_score is None for node in tied)) else []
 
 
 def is_hard_signal(sig: str) -> bool:
@@ -161,6 +196,12 @@ def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # fold's tie-break rule and the live verify production can't diverge across a config edit (invariant #6).
     st.select_verifier_tiebreak = bool(d.get("select_verifier", False))
     st.verifier_ci_tie = bool(d.get("verifier_ci_tie", False))   # R1-d: absent on old logs -> exact-tie
+    samples = d.get("select_verifier_samples", 3)
+    st.select_verifier_samples = (samples if isinstance(samples, int) and not isinstance(samples, bool)
+                                  and 1 <= samples <= 32 else 3)
+    contract = d.get("select_verifier_contract", VERIFIER_SELECTION_CONTRACT)
+    st.select_verifier_contract = (contract if isinstance(contract, str) and len(contract) <= 80
+                                   else VERIFIER_SELECTION_CONTRACT)
 
 def _on_trust_gate_changed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Operator edited the run's trust gate after launch (server config edit). Last write
@@ -508,7 +549,7 @@ def _on_node_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
             n.rerun_stage = None                # any stage-scoped re-run has now landed
             n.stdout_tail = d.get("stdout_tail", "")
             n.eval_seconds = d.get("eval_seconds")
-            n.extra_metrics = d.get("extra_metrics", {}) or {}
+            n.extra_metrics = normalize_extra_metrics(d.get("extra_metrics"))
             n.violations = d.get("violations", []) or []
             n.feasible = not n.violations       # #5: constraint-violating -> infeasible
             # Intra-node sweep: per-trial results (audit/UI only; node.metric is already the
@@ -668,6 +709,8 @@ def _rotate_search_epoch(st: RunState, *, requeue_partition_scores: bool,
     for candidate in st.nodes.values():
         if candidate.tombstoned or candidate.id in st.aborted_nodes:
             continue                         # post-hoc audit evidence is not part of the new pool
+        if candidate.holdout_metric is not None:
+            candidate.verifier_score = None  # it judged the disclosed holdout evidence being invalidated
         candidate.holdout_metric = None
         candidate.generalization_gap = None
     if requeue_partition_scores:
@@ -966,19 +1009,14 @@ def _on_node_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None
     if (n is not None and n.status is NodeStatus.evaluated
             and n.id not in st.aborted_nodes and not n.tombstoned
             and _generation_matches(n, d, legacy_attempt=True)):
-        # CODEX AGENT: verifier_score was computed from a prompt that includes confirmed/holdout/generalization
-        # evidence when present, yet this event preserves a pre-confirm score and the producer will never
-        # rescore an all-scored tie. A stale single-seed guess can therefore decide the post-confirm champion.
-        # Version the score by an evidence digest/epoch (also invalidate on holdout) and persist criteria,
-        # model and evidence revision in node_verified/group events.
-        # A confirmation REFINES this node's result (more seeds → confirmed_mean) rather than DISCARDING
-        # it, so its verifier_score (a soundness judgment on the same experiment) is kept as a reasonable
-        # estimate — unlike a node_reset, which discards the result entirely and clears verifier_score.
-        # (A confirmed_mean tie that newly emerges is still re-surfaced by _metric_tie_groups, which keys
-        # on robust_metric = confirmed_mean, so any UNSCORED confirmed node in the tie is verified.)
+        # Confirmation changes the evidence revision judged by the verifier. Invalidate any earlier score;
+        # a newly-emerged confirmed tie is re-scored as one complete group by the cadence producer.
+        prior_evidence = verifier_evidence_digest(st.direction, n)
         n.confirmed_mean = d.get("mean")
         n.confirmed_std = d.get("std")
         n.confirmed_seeds = d.get("seeds")
+        if verifier_evidence_digest(st.direction, n) != prior_evidence:
+            n.verifier_score = None
 
 def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # D1 holdout-gated promotion: the engine re-scored this val-leader's predictions on
@@ -1007,10 +1045,13 @@ def _on_holdout_evaluated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> N
     if nid is not None and nid not in st.holdout_evaluated_ids:
         st.holdout_evaluated_ids.append(nid)   # gate: attempted, even if metric is null
     if n is not None and d.get("metric") is not None:
+        prior_evidence = verifier_evidence_digest(st.direction, n)
         try:
             n.holdout_metric = float(d["metric"])
         except (TypeError, ValueError):
             pass
+        if verifier_evidence_digest(st.direction, n) != prior_evidence:
+            n.verifier_score = None
 
 def _on_agent_validated(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = _node_for_event(st, d)
@@ -1420,7 +1461,8 @@ def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # selection. Audit sidecar — read ONLY as a metric-tie-break in _select_best; never a raw override.
     nid = _coerce_node_id(d)
     n = st.nodes.get(nid) if nid is not None else None
-    if n is None or n.id in st.aborted_nodes:
+    if (n is None or n.id in st.aborted_nodes or n.tombstoned
+            or n.status is not NodeStatus.evaluated):
         return
     # node_verified is a BRAND-NEW selection-affecting event — no legacy log carries it, and the engine
     # always stamps `generation` (n.attempt) at emit — so REQUIRE the stamp (reject a missing OR mismatched
@@ -1429,9 +1471,67 @@ def _on_node_verified(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # events must keep for their pre-generation logs.
     if _event_generation(d) is _MISSING or not _generation_matches(n, d):
         return
+    evidence_digest = d.get("evidence_digest")
+    if evidence_digest is not None and (
+            not isinstance(evidence_digest, str)
+            or evidence_digest != verifier_evidence_digest(st.direction, n)):
+        return
     score = d.get("score")
     if isinstance(score, (int, float)) and not isinstance(score, bool) and 0.0 <= float(score) <= 1.0:
         n.verifier_score = float(score)
+
+
+def _on_verifier_group_scored(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """Publish a complete verifier tie treatment only after every member validates."""
+    if (not st.select_verifier_tiebreak or isinstance(d.get("v"), bool) or d.get("v") != 1
+            or d.get("contract") != VERIFIER_SELECTION_CONTRACT
+            or d.get("contract") != st.select_verifier_contract):
+        return
+    requested = d.get("requested_samples")
+    if (isinstance(requested, bool) or not isinstance(requested, int)
+            or requested != st.select_verifier_samples):
+        return
+    members = d.get("members")
+    if not isinstance(members, list) or not 2 <= len(members) <= 8:
+        return
+    seen: set[int] = set()
+    staged: list[tuple[Node, float]] = []
+    for row in members:
+        if not isinstance(row, dict):
+            return
+        nid = _coerce_node_id(row)
+        node = st.nodes.get(nid) if nid is not None else None
+        if (node is None or nid in seen or node.id in st.aborted_nodes or node.tombstoned
+                or node.status is not NodeStatus.evaluated):
+            return
+        if _event_generation(row) is _MISSING or not _generation_matches(node, row):
+            return
+        digest = row.get("evidence_digest")
+        if not isinstance(digest, str) or digest != verifier_evidence_digest(st.direction, node):
+            return
+        score, n_samples, agreement = row.get("score"), row.get("n_samples"), row.get("agreement")
+        if (isinstance(score, bool) or not isinstance(score, (int, float))
+                or not math.isfinite(float(score)) or not 0.0 <= float(score) <= 1.0):
+            return
+        if (isinstance(n_samples, bool) or not isinstance(n_samples, int)
+                or not 1 <= n_samples <= requested or n_samples * 2 <= requested):
+            return
+        if (isinstance(agreement, bool) or not isinstance(agreement, (int, float))
+                or not math.isfinite(float(agreement)) or not 0.5 < float(agreement) <= 1.0):
+            return
+        method = row.get("method")
+        if not isinstance(method, str) or len(method) > 80:
+            return
+        seen.add(nid)
+        staged.append((node, float(score)))
+    expected = {frozenset(node.id for node in group) for group in verifier_tie_groups(st)}
+    # Member validity is insufficient; this must be the complete selector-reachable tie-set.
+    # Reject a well-formed subset, a losing tie, or a mean group shadowed by a non-empty holdout pool before
+    # publishing any score, so a forged/torn record cannot steer a different comparison.
+    if frozenset(seen) not in expected:
+        return
+    for node, score in staged:
+        node.verifier_score = score
 
 def _on_best_confirmed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # R1 epoch identity: a confirmation certificate authorizes selection state (confirmed_done + the
@@ -1881,6 +1981,7 @@ _HANDLERS = {
     EV_NOVELTY_GRADED: _on_novelty_graded,
     EV_CROSS_RUN_PRIOR: _on_cross_run_prior,
     EV_NODE_VERIFIED: _on_node_verified,
+    EV_VERIFIER_GROUP_SCORED: _on_verifier_group_scored,
     EV_HYPOTHESIS_MERGED: _on_hypothesis_merged,
     EV_HYPOTHESIS_ADDED: _on_hypothesis_added,
     EV_HYPOTHESIS_UPDATED: _on_hypothesis_updated,
@@ -2021,7 +2122,7 @@ def _select_best(st: RunState, flagged: set, best_confirmed: int | None,
             # So `verifier_ci_tie` refines only the confirmed-MEAN pick (above); when holdout_select is on
             # (default) the holdout exact-tie pick is the final word — R1-d's CI widening is effective on the
             # champion only when holdout_select is OFF.
-            st.best_node_id = fit.best(hpool, key=fit.holdout_key).id
+            st.best_node_id = fit.best_holdout(hpool).id
 
     # An explicit human approval of a real non-best node is a selection decision, not a global latch
     # that authorizes publication of some OTHER algorithmic best. Honor it last; if the chosen node is

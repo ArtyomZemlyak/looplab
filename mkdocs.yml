@@ -7,7 +7,7 @@ site_url: https://artyomzemlyak.github.io/looplab/
 repo_url: https://github.com/ArtyomZemlyak/looplab
 repo_name: ArtyomZemlyak/looplab
 edit_uri: edit/master/docs/
-copyright: MIT-licensed · files are the source of truth · the engine is the sole writer
+copyright: MIT-licensed · event-sourced run state · serialized control appends
 
 docs_dir: docs
 

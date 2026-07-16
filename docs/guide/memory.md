@@ -28,18 +28,28 @@ In-run **working memory** (rebuilt from the event log each turn, never persisted
 **hypotheses ledger**, the **diversity archive** (MAP-Elites elites/niches), and the **digests** —
 `experiments_digest` (winners + failures + sweep landscape), `sibling_digest` (what siblings already
 tried), `lineage_lessons` (subtree outcomes ranked by |Δ|), `ancestral_repair_chain` (prior repairs).
-The single source of truth for everything in-run is the append-only `events.jsonl`.
+The append-only `events.jsonl` is authoritative for the replayable `RunState`. Task/config snapshots,
+diagnostic spans, chat, command records and cross-run stores retain separate documented sidecar contracts;
+`replay.fold` does not manufacture them.
 
-## Current cross-run boundary and the planned Research Atlas
+## Current cross-run boundary and the Research Atlas target
 
 The shipped memory above is useful, but it is not yet a complete scientific index over a large portfolio.
-Today, sibling tools primarily use exact `task_id`; cases retain one best solution per task; lesson transfer
-uses a compact token fingerprint; the concept graph and its coverage are per-run; and an on-demand scope
-report summarizes per-run reports. This is intentionally different from claiming that LoopLab can already
-answer “what has ever been tried for this technology across 50 heterogeneous applications?”
+LoopLab now also has an **opt-in experimental Part-IV slice**: rebuildable run passports/facts, per-run
+concept capsules with alias/split overlays, v2 persisted D8 claims, task-facet overlays, bounded hybrid
+cross-run retrieval, and backend Atlas/claims projections. Bound pull tools apply role, compatible direction,
+and exact-task-or-strict-goal-fingerprint filtering to every source; task facets rank after that hard match,
+while the standalone CLI remains portfolio-wide. Proactive Researcher/Strategist influence persists lean
+source/render digest receipts. Typed owner governance writes now have revision CAS, action-id idempotency and
+explicit clear actions, while stewards remain proposal-only. These projections are real, but they do not yet
+provide an immutable comparison/access scope, complete corpus-health/snapshot receipts, evidence/taxonomy
+release identity, validated concept-target/backfill semantics or independent evidence-family accounting. Typed
+claim decisions do fence a current claim and its observed evidence digest. An owner-only `#/atlas` **Experimental portfolio diagnostic** now renders the
+bounded read models, but it is not the complete snapshot-consistent Research Atlas. The home Runs Map and a
+run's theme grouping are different surfaces (see [Web UI](ui.md#which-graph-am-i-looking-at)).
 
-The Part-IV design now specifies that larger system as a **cross-run research index** and a UI **Research
-Atlas**. Its core distinction is:
+The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
+Its core distinction is:
 
 - a faceted applicability profile says **where** evidence may transfer (application, entities/modalities,
   domain, language, dataset lineage, objective/metric, constraints, codebase and environment);
@@ -52,8 +62,8 @@ Atlas**. Its core distinction is:
   result remains drillable to the exact run/node evidence.
 
 This is deliberately not one global vector store or one topic tree. Projects/super-tasks remain user
-organization; task applicability and technology concepts are orthogonal. A cross-run novelty hit will
-surface prior outcomes and their conditions, not automatically reject an adjacent-domain idea. The target
+organization; task applicability and technology concepts are orthogonal. A cross-run novelty hit surfaces
+prior outcomes and their conditions; it does not automatically reject an adjacent-domain idea. The target
 schema, retrieval/context contract, UI, lifecycle corners, alternatives and CR0–CR3 rollout are in
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 

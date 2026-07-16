@@ -308,84 +308,140 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return any(str(r.get("run_id") or "") == rid
                    for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True))
 
+    def _append_curation_once(self, log_name: str, final: RunState, rec: dict) -> bool:
+        """Append one finalize steward outcome exactly once per run under the governance lock."""
+        from looplab.engine.concept_registry import _append_governance
+        from looplab.events.eventstore import read_jsonl_lenient
+        import json
+
+        class _AlreadyLogged(RuntimeError):
+            pass
+
+        path = Path(self._e.memory_dir) / log_name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        rid = str(final.run_id or final.task_id)
+
+        def _validate_locked() -> None:
+            if path.exists() and any(str(r.get("run_id") or "") == rid
+                                     for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True)):
+                raise _AlreadyLogged
+
+        payload = {"v": 1, "run_id": rid, "task_id": str(final.task_id or ""), **rec}
+        try:
+            _append_governance(path, payload, validate=_validate_locked)
+            return True
+        except _AlreadyLogged:
+            return False
+
     def store_concept_curation(self, final: RunState) -> None:
         """PART IV §22.4 — the AGENTIC taxonomy steward at finalize: when `cross_run_curation` is on and an
         LLM client is available (`reflect_client`), let the LLM review the freshly-updated portfolio concept
-        graph and PROPOSE a curation (merge/split/purge). Proposals are LOGGED to `concept_curation_log.jsonl`
-        for operator ratification; when `cross_run_curation_auto` is on they are ALSO applied through the SAME
-        reversible governance writes (record_concept_alias/split). Portfolio-scoped and fully decoupled from
-        the run's terminal state — best-effort, never raises, never blocks a run. Idempotency note: on a
-        finalize re-entry this may re-run (one extra bounded LLM call); the append-only aliases make a
-        re-applied merge a harmless last-write-wins duplicate."""
+        graph and PROPOSE a curation (merge/split/purge). Every outcome, including an empty proposal or an
+        unavailable client, is durably LOGGED to `concept_curation_log.jsonl` for operator ratification.
+        Finalize never applies an agent proposal: mutation requires an explicit operator CLI/API action.
+        Portfolio-scoped and fully decoupled from the run's terminal state — best-effort, never raises."""
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
         try:
             if self._already_curated("concept_curation_log.jsonl", final):
                 return                          # idempotent on a finalize re-entry: don't re-run the LLM
             client = self.reflect_client()
             if client is None:
-                return                          # toy backend / no LLM -> steward degrades to empty anyway
-            from looplab.engine.concept_steward import curation_is_empty, steward_concepts
-            auto = bool(getattr(self._e, "_cross_run_curation_auto", False))
-            out = steward_concepts(self._e.memory_dir, client, apply=auto, by="steward")
-            if curation_is_empty(out["proposals"]):
+                self._append_curation_once("concept_curation_log.jsonl", final, {
+                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
                 return
-            import json
-            rec = {"run_id": final.run_id or final.task_id, "auto": auto,
-                   "proposals": out["proposals"], "receipt": out.get("receipt")}
-            with open(Path(self._e.memory_dir) / "concept_curation_log.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec) + "\n")
-        except Exception:  # noqa: BLE001 — agentic curation must never fail a run
-            return
+            from looplab.engine.concept_steward import curation_is_empty, steward_concepts
+            # Finalize is an untrusted-agent proposal boundary. Even the legacy `auto` flag cannot mutate
+            # taxonomy before a durable receipt; only an explicit operator command may apply.
+            out = steward_concepts(self._e.memory_dir, client, apply=False, by="steward")
+            proposals = out["proposals"]
+            self._append_curation_once("concept_curation_log.jsonl", final, {
+                "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                "auto": False, "auto_requested": auto_requested, "proposals": proposals, "receipt": None})
+        except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
+            try:
+                self._append_curation_once("concept_curation_log.jsonl", final, {
+                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                    "auto_requested": auto_requested,
+                    "proposals": {"merges": [], "splits": [], "purges": []}, "receipt": None})
+            except Exception:  # noqa: BLE001 — logging remains best-effort relative to run finalization
+                pass
 
     def store_claim_curation(self, final: RunState) -> None:
         """PART IV §22.4 — the AGENTIC CLAIM steward at finalize (companion to `store_concept_curation`):
         the LLM reviews the evidence-grounded claim assessments and PROPOSES operator decisions
-        (ratify/reject/pin). Proposals are LOGGED to `claim_curation_log.jsonl`; applied when
-        `cross_run_curation_auto`. Same gate/decoupling/best-effort contract as the concept steward."""
+        (ratify/reject/pin). All outcomes are locked/durably logged to `claim_curation_log.jsonl`; finalize
+        never applies them. Same gate/decoupling/best-effort contract as the concept steward."""
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
         try:
             if self._already_curated("claim_curation_log.jsonl", final):
                 return                          # idempotent on a finalize re-entry: don't re-run the LLM
             client = self.reflect_client()
             if client is None:
+                self._append_curation_once("claim_curation_log.jsonl", final, {
+                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"decisions": []}, "receipt": None})
                 return
             from looplab.engine.claim_steward import curation_is_empty, steward_claims
-            auto = bool(getattr(self._e, "_cross_run_curation_auto", False))
-            out = steward_claims(self._e.memory_dir, client, apply=auto, by="steward")
-            if curation_is_empty(out["proposals"]):
-                return
-            import json
-            rec = {"run_id": final.run_id or final.task_id, "auto": auto,
-                   "proposals": out["proposals"], "receipt": out.get("receipt")}
-            with open(Path(self._e.memory_dir) / "claim_curation_log.jsonl", "a", encoding="utf-8") as f:
-                f.write(json.dumps(rec) + "\n")
-        except Exception:  # noqa: BLE001 — agentic curation must never fail a run
-            return
+            out = steward_claims(self._e.memory_dir, client, apply=False, by="steward")
+            proposals = out["proposals"]
+            self._append_curation_once("claim_curation_log.jsonl", final, {
+                "outcome": "empty" if curation_is_empty(proposals) else "proposed",
+                "auto": False, "auto_requested": auto_requested, "proposals": proposals, "receipt": None})
+        except Exception as exc:  # noqa: BLE001 — agentic curation must never fail a run
+            try:
+                self._append_curation_once("claim_curation_log.jsonl", final, {
+                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                    "auto_requested": auto_requested, "proposals": {"decisions": []}, "receipt": None})
+            except Exception:  # noqa: BLE001
+                pass
 
     def store_task_facets(self, final: RunState) -> None:
-        """PART IV §21.20.2 — AGENTIC task faceting at finalize: classify THIS run's task into facets once
-        (skip if already recorded — facets are per-task, not per-run), so the portfolio accumulates a facet
-        overlay that lets cross-run scoping recognize semantically-similar tasks. Gated on `cross_run_curation`
-        + an LLM client; best-effort, decoupled, never blocks a run."""
+        """PART IV §21.20.2 — propose task facets and queue them for operator ratification.
+
+        Facets can widen retrieval scope, so agent output is never silently promoted into policy at finalize.
+        Outcomes are written once/run to `task_facets_curation_log.jsonl`, including empty/unavailable ones.
+        """
         if not (self._e.memory_dir and getattr(self._e, "_cross_run_curation", False)):
             return
+        auto_requested = bool(getattr(self._e, "_cross_run_curation_auto", False))
         try:
+            if self._already_curated("task_facets_curation_log.jsonl", final):
+                return
             tid = str(getattr(final, "task_id", "") or "")
             if not tid:
                 return
-            from looplab.engine.task_facets import load_task_facets, steward_task_facets
-            if tid in load_task_facets(self._e.memory_dir):
-                return                          # already faceted this task -> idempotent, no LLM call
+            from looplab.engine.task_facets import load_task_facets, propose_task_facets
+            current = load_task_facets(self._e.memory_dir).get(tid)
+            if current is not None:
+                self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                    "outcome": "already-governed", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"task_id": tid, "facets": current}, "receipt": None})
+                return
             client = self.reflect_client()
             if client is None:
+                self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                    "outcome": "unavailable", "auto": False, "auto_requested": auto_requested,
+                    "proposals": {"task_id": tid, "facets": {}}, "receipt": None})
                 return
             kind = str(getattr(getattr(self._e, "task", None), "kind", "") or "")
-            steward_task_facets(self._e.memory_dir, client, task_id=tid,
-                                goal=str(getattr(final, "goal", "") or ""), kind=kind, apply=True)
-        except Exception:  # noqa: BLE001 — agentic faceting must never fail a run
-            return
+            facets = propose_task_facets(str(getattr(final, "goal", "") or ""), kind, client)
+            self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                "outcome": "proposed" if facets else "empty", "auto": False,
+                "auto_requested": auto_requested,
+                "proposals": {"task_id": tid, "facets": facets}, "receipt": None})
+        except Exception as exc:  # noqa: BLE001 — agentic faceting must never fail a run
+            try:
+                self._append_curation_once("task_facets_curation_log.jsonl", final, {
+                    "outcome": "error", "error_type": type(exc).__name__, "auto": False,
+                    "auto_requested": auto_requested,
+                    "proposals": {"task_id": str(final.task_id or ""), "facets": {}}, "receipt": None})
+            except Exception:  # noqa: BLE001
+                pass
 
     def store_research_claims(self, final: RunState) -> None:
         """PART IV/§21.20 — persist this run's D8 deep-research claims (from the memo ledger) to the
@@ -396,14 +452,25 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         try:
             claims = []
             for memo in (getattr(final, "research", None) or []):
-                # CODEX AGENT: the event carries `memo["verification"]["verdicts"]`, but this projection
-                # drops it and republishes every raw claim. `claim_assessments` then treats every numeric
-                # citation as support, so even a verifier-marked `unsupported` claim (or node 999 that never
-                # existed) becomes globally `supported`. Join claims to their aligned verification verdict,
-                # persist verdict/method + a stable claim id, and never promote unsupported/unclear evidence
-                # into positive epistemic support.
-                for c in (memo.get("claims") if isinstance(memo, dict) else []) or []:
-                    claims.append(c)
+                if not isinstance(memo, dict):
+                    continue
+                raw_claims = memo.get("claims") or []
+                verification = memo.get("verification") if isinstance(memo.get("verification"), dict) else {}
+                verdicts = verification.get("verdicts") if isinstance(verification.get("verdicts"), list) else []
+                method = str(verification.get("method") or "")[:80]
+                for i, c in enumerate(raw_claims):
+                    if not isinstance(c, dict):
+                        continue
+                    # `verify_memo` promises an index-aligned verdict list.  Fail closed if a malformed event
+                    # breaks that alignment or names a different statement: the citation remains drillable,
+                    # but it is never upgraded into positive support.
+                    v = verdicts[i] if i < len(verdicts) and isinstance(verdicts[i], dict) else {}
+                    same = str(v.get("statement") or "").strip() == str(c.get("statement") or "").strip()
+                    verdict = str(v.get("verdict") or "unverified") if same else "unverified"
+                    claims.append({**c, "verification": {
+                        "verdict": verdict, "method": method,
+                        "note": str(v.get("note") or "")[:400] if same else "verification alignment mismatch",
+                    }})
             if not claims:
                 return
         except Exception:  # noqa: BLE001 — extraction is best-effort, never fails a run

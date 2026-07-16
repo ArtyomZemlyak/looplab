@@ -38,28 +38,57 @@ def build_router(srv) -> APIRouter:
 
     @router.put("/api/settings")
     async def put_settings(request: Request):
-        body = await request.json()
-        incoming = body.get("settings", body) or {}
+        try:
+            body = await request.json()
+        except Exception as exc:  # malformed JSON is a client error, never a server traceback
+            raise HTTPException(400, "settings payload must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "settings payload must be a JSON object")
+        incoming = body.get("settings", body)
+        if not isinstance(incoming, dict):
+            raise HTTPException(400, "settings must be a JSON object")
         # Keep only known, non-secret fields whose value differs from the engine default — the file
         # stays a small, readable diff rather than a full mirror of every Settings field. Diff
         # against the PROFILE-expanded defaults: the form echoes the expanded snapshot back, and
         # diffing against bare defaults would persist every profile value as an explicit override
         # (a one-way ratchet the profile selector could never undo) while dropping an explicit
         # knob that happens to equal the bare default (breaking "explicit knob wins").
+        current = store.load_ui_settings()
+        candidate = dict(current)
+        for k, v in incoming.items():
+            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
+                continue
+            if v is None:
+                candidate.pop(k, None)
+            else:
+                candidate[k] = v
+        profile = candidate.get("profile") or "default"
         try:
-            base = Settings(profile=incoming.get("profile") or "default").model_dump()
+            base = Settings(profile=profile).model_dump()
         except Exception:  # noqa: BLE001 — unknown profile: fall back to bare defaults
             base = Settings().model_dump()
         # Fields the form merely ECHOES from the previous resolved snapshot are not user edits:
         # when the profile changes, those echoes must fall away with the old profile, not stick.
         prev = store.resolved_settings()
         overrides = {}
-        for k, v in incoming.items():
-            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS or v is None or base.get(k) == v:
+        profile_changed = "profile" in incoming and profile != prev.get("profile")
+        for k, v in candidate.items():
+            if k not in _ALLOWED_FIELDS or k in _SECRET_FIELDS:
                 continue
-            if k != "profile" and prev.get(k) == v and incoming.get("profile") != prev.get("profile"):
+            if k == "profile":
+                if v != Settings.model_fields["profile"].default:
+                    overrides[k] = v
+                continue
+            if base.get(k) == v:
+                continue
+            if profile_changed and k in incoming and k not in current and prev.get(k) == v:
                 continue                       # unchanged echo of the old profile's expansion
             overrides[k] = v
+        try:
+            Settings(**overrides)
+        except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
+            raise HTTPException(422, f"invalid settings: {exc}") from exc
+        # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
         store.write_ui_settings(overrides)
         return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides}
 
@@ -68,7 +97,12 @@ def build_router(srv) -> APIRouter:
         """Store (or clear) a secret credential securely. The value is written owner-only to
         secrets.json (never ui_settings.json / a run snapshot) and applied to the server + spawned
         engines as env. The response only reports whether a value is now set — never the value."""
-        body = await request.json()
+        try:
+            body = await request.json()
+        except Exception as exc:
+            raise HTTPException(400, "secret payload must be valid JSON") from exc
+        if not isinstance(body, dict):
+            raise HTTPException(400, "secret payload must be a JSON object")
         key = body.get("key")
         if key not in _SECRET_ENV:
             raise HTTPException(400, f"unknown secret {key!r} (known: {sorted(_SECRET_ENV)})")

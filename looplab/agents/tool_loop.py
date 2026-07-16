@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import hashlib
 import itertools
 import json
+import re
 import time
 from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
 from looplab.tools._base import RESULT_CAP
+from looplab.trust.redact import redact_secrets
 
 
 class CompositeTools:
@@ -120,6 +123,39 @@ def _cap_tool_result(result: str, cap: int = RESULT_CAP) -> str:
         if new_keep == keep:
             return result[:keep] + note
         keep = new_keep
+
+
+def _trace_preview(value, cap: int = RESULT_CAP) -> str:
+    """Bound/redact a trace observation before durable serialization, retaining size + digest."""
+    secret = re.compile(r"(?:api[_-]?key|authorization|password|secret|token)", re.IGNORECASE)
+
+    def _redact(obj, depth=0):
+        if depth > 5:
+            return "<depth-limited>"
+        if isinstance(obj, dict):
+            return {str(k): ("<redacted>" if secret.search(str(k)) else _redact(v, depth + 1))
+                    for k, v in list(obj.items())[:128]}
+        if isinstance(obj, (list, tuple)):
+            return [_redact(v, depth + 1) for v in list(obj)[:128]]
+        return obj
+
+    try:
+        rendered = (json.dumps(_redact(value), ensure_ascii=False, sort_keys=True, default=str,
+                               separators=(",", ":")) if isinstance(value, (dict, list, tuple))
+                    else str(value))
+    except Exception:  # noqa: BLE001 — tracing must never perturb tool execution
+        rendered = str(value)
+    # Values can contain credentials even when their enclosing key is harmless (for example a
+    # command's plain-text stdout containing ``Authorization: Bearer ...``).  Apply the canonical
+    # redactor to the fully rendered observation before either hashing or persisting it.  Trace
+    # previews always enable the conservative entropy pass because they are durable diagnostics,
+    # not byte-exact evaluator output.
+    rendered = redact_secrets(rendered, entropy=True)
+    if len(rendered) <= cap:
+        return rendered
+    digest = hashlib.sha256(rendered.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n…[trace preview: original_chars={len(rendered)} sha256={digest}]"
+    return rendered[:max(0, cap - len(marker))] + marker
 
 
 def _plan_spec() -> dict:
@@ -419,13 +455,9 @@ def drive_tool_loop(client, tools, messages: list, emit_spec: dict, *,
                       arg=next((str(v) for v in (args or {}).values() if v), ""))
                 # First-class TOOL observation (Langfuse-style): input=args, output=result, nested
                 # under the active operation span next to the generations that decided the call.
-                with tracing.tool(name, args) as _tool_obs:
+                with tracing.tool(name, _trace_preview(args)) as _tool_obs:
                     result = tools.execute(name, args) if tools is not None else f"(unknown tool: {name})"
-                    # CODEX AGENT: the 4K model cap is applied only after this trace write. A 250K persisted
-                    # claim produced a 250K spans.jsonl observation (then 4K to the model); repeated calls
-                    # amplify disk/serialization and preserve the hostile payload. Bound/sanitize result and
-                    # args before tracing, with an explicit original-size/hash marker for observability.
-                    _tool_obs.output(result)
+                    _tool_obs.output(_trace_preview(result))
                 # Cap once, up front — appending an explicit truncation marker when the cap actually
                 # bites (P3) — so the provenance hook receives EXACTLY what the tool message below
                 # will carry (a single expression, not two kept-in-sync copies).

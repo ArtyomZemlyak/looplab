@@ -36,6 +36,20 @@ def build_router(srv) -> APIRouter:
         partial = False
         root = srv.root
         try:
+            labels = (srv.projects.load().get("labels") or {})
+        except Exception:  # noqa: BLE001 — labels are optional display metadata
+            labels = {}
+
+        def contextualized(rows, projection, run_id):
+            def _bounded(value):
+                text = str(value or "")
+                return (text if len(text) <= 255
+                        and not any(ord(char) < 32 or ord(char) == 127 for char in text) else "")
+            task_id = _bounded((projection or {}).get("task_id"))
+            run_label = _bounded(labels.get(run_id))
+            return [{**item, **({"task_id": task_id} if task_id else {}),
+                     **({"run_label": run_label} if run_label else {})} for item in rows]
+        try:
             if not root.is_dir():
                 raise OSError("run root is not a readable directory")
             run_dirs = sorted(root.iterdir())
@@ -54,7 +68,9 @@ def build_router(srv) -> APIRouter:
             # release. It remains explicitly stale/non-browser because a corrupt newer tail may hide
             # a subsequent resume; an unverified terminal projection still stays suppressed.
             verified_liveness = False if cached[2] else None
-            for item in visible_event_attention(cached[1], engine_running=verified_liveness):
+            for item in contextualized(
+                    visible_event_attention(cached[1], engine_running=verified_liveness),
+                    cached[1], run_id):
                 items.append({**item, "browser": False, "stale": True})
 
         for rd in run_dirs:
@@ -125,11 +141,12 @@ def build_router(srv) -> APIRouter:
                         and not flags.get("finalization_pending") and rd.name in cache):
                     with cache_lock:
                         cache[rd.name] = (signature, projection, True)
-                items.extend(visible_event_attention(projection, engine_running=alive))
+                items.extend(contextualized(
+                    visible_event_attention(projection, engine_running=alive), projection, rd.name))
                 # Liveness is a derived in-app warning only. This probe never runs resume reconciliation
                 # and never writes events/commands or starts a process.
-                items.extend(project_runtime_attention(
-                    rd.name, projection, engine_running=alive))
+                items.extend(contextualized(project_runtime_attention(
+                    rd.name, projection, engine_running=alive), projection, rd.name))
             except Exception:  # noqa: BLE001 - one partial/corrupt/unreadable run cannot hide the rest
                 partial = True
                 append_stale(rd.name)

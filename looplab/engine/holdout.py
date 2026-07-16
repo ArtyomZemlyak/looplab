@@ -152,8 +152,7 @@ class HoldoutGrader:
         # mean pick chose). Byte-identical to `selection_key` when the flag is off. The pool base
         # (feasible_nodes + flagged) is a different-but-agreeing spelling of the same eligibility.
         fit = SearchFitness(state.direction, verifier_tiebreak=state.select_verifier_tiebreak)
-        pool = sorted((n for n in state.feasible_nodes() if n.id not in flagged),
-                      key=fit.promotion_key, reverse=(state.direction == "max"))
+        pool = fit.rank_promotion(n for n in state.feasible_nodes() if n.id not in flagged)
         return [n.id for n in pool[: self._e._holdout_top_k]]
 
     def holdout_pending(self, state: RunState) -> bool:

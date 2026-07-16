@@ -14,6 +14,22 @@ def test_bm25_ranks_by_rare_shared_term():
     assert scores[0] == max(scores) and scores[0] > 0        # the doc with the rare shared terms wins
 
 
+def test_tokens_are_unicode_safe_and_punctuation_consistent():
+    text = ("\u0420\u0443\u0441\u0441\u043a\u0438\u0439\u2014\u041f\u041e\u0418\u0421\u041a, "
+            "cafe\u0301_\uff26\uff35\uff2c\uff2c\uff37\uff29\uff24\uff34\uff28!")
+    assert _tokens(text) == ["\u0440\u0443\u0441\u0441\u043a\u0438\u0439",
+                              "\u043f\u043e\u0438\u0441\u043a", "caf\u00e9", "fullwidth"]
+
+
+def test_hybrid_retrieves_cyrillic_across_punctuation_and_case():
+    corpus = ["\u043f\u043b\u043e\u0442\u043d\u044b\u0439 \u0440\u0443\u0441\u0441\u043a\u0438\u0439 \u043f\u043e\u0438\u0441\u043a",
+              "\u0434\u043e\u0431\u0430\u0432\u0438\u0442\u044c dropout regularization"]
+    retriever = HybridRetriever(corpus, embed=lambda _text: [0.0, 0.0])
+    query = "\u0420\u0423\u0421\u0421\u041a\u0418\u0419\u2014\u041f\u041e\u0418\u0421\u041a"
+    candidates = retriever.candidates(query, k=2)
+    assert candidates and candidates[0][0] == 0
+
+
 def test_hybrid_retriever_fuses_signals():
     corpus = ["increase the learning rate to improve convergence",
               "raise learning rate to 2e-3",

@@ -19,7 +19,7 @@ on the engine's write-path stay replay-safe (the fold never calls this — see t
 from __future__ import annotations
 
 import math
-import re
+import unicodedata
 from collections import Counter
 from typing import Callable, Optional
 
@@ -28,11 +28,20 @@ from pydantic import BaseModel, Field
 from looplab.core.parse import parse_structured
 from looplab.tools.vectorstore import Vector, cosine, hash_embed
 
-_TOK = re.compile(r"[a-z0-9]+")
-
-
 def _tokens(s: str) -> list[str]:
-    return _TOK.findall((s or "").lower())
+    """Return NFKC/casefolded Unicode word tokens with punctuation as separators."""
+    out: list[str] = []
+    token: list[str] = []
+    for char in unicodedata.normalize("NFKC", str(s or "")).casefold():
+        category = unicodedata.category(char)
+        if category[0] in {"L", "N"} or (token and category[0] == "M"):
+            token.append(char)
+        elif token:
+            out.append("".join(token))
+            token = []
+    if token:
+        out.append("".join(token))
+    return out
 
 
 class BM25:

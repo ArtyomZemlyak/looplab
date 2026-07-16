@@ -132,8 +132,13 @@ EV_CROSS_RUN_PRIOR = "cross_run_prior"
 # R1-c: a calibrated §12-verifier soundness score in [0,1] for a node's REALIZED result, computed live
 # by the engine (an LLM output can't live in the deterministic fold) and frozen here. Generation-scoped
 # and read ONLY as a metric-tie-break in best-selection (never overrides ground truth, §21.7). Additive;
-# folds into Node.verifier_score. Emitted only when `select_verifier` is on. See trust/verifier.py.
+# folds into Node.verifier_score. New writers bind the score to a deterministic `evidence_digest`; replay
+# drops a mismatched revision and invalidates a score when confirm/holdout evidence changes. Emitted only
+# when `select_verifier` is on. See trust/verifier.py.
 EV_NODE_VERIFIED = "node_verified"
+# Versioned all-or-nothing verifier treatment for one complete selector tie component. Replay validates
+# every member/generation/evidence digest before publishing any score; legacy per-node events remain readable.
+EV_VERIFIER_GROUP_SCORED = "verifier_group_scored"
 EV_PROXY_SCORED = "proxy_scored"
 EV_BEST_CONFIRMED = "best_confirmed"
 EV_RUN_FINISHED = "run_finished"

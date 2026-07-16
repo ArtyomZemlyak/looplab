@@ -9,9 +9,9 @@ from __future__ import annotations
 from looplab.engine.claims import claim_assessments
 
 
-def _lesson(statement, outcome, evidence, *, run_id="r1", task_id="t"):
+def _lesson(statement, outcome, evidence, *, run_id="r1", task_id="t", **extra):
     return {"statement": statement, "outcome": outcome, "evidence": evidence,
-            "run_id": run_id, "task_id": task_id}
+            "run_id": run_id, "task_id": task_id, **extra}
 
 
 def test_supported_lesson_becomes_a_supported_claim():
@@ -66,7 +66,8 @@ def test_research_claims_contribute_support_and_sources():
     out = claim_assessments(
         [],
         research_claims=[{"statement": "doc2query expands recall", "node_ids": [11, 12],
-                          "urls": ["http://x"]}])
+                          "urls": ["http://x"],
+                          "verification": {"verdict": "supported", "method": "llm"}}])
     c = out[0]
     assert c["epistemic"] == "supported" and c["support"] == ["?:11", "?:12"]
     assert c["sources"] == ["http://x"]
@@ -77,7 +78,8 @@ def test_lesson_and_research_claim_unify_on_the_same_statement():
     # Identity reuses the shipped `normalize_statement` (whitespace+case), so casing/spacing unify...
     out = claim_assessments(
         [_lesson("Distillation  helps", "refuted", [2])],
-        research_claims=[{"statement": "distillation helps", "node_ids": [8]}])
+        research_claims=[{"statement": "distillation helps", "node_ids": [8],
+                          "verification": {"verdict": "supported", "method": "llm"}}])
     assert len(out) == 1                              # normalized statement collapses them
     c = out[0]
     assert c["epistemic"] == "mixed" and c["support"] == ["?:8"] and c["oppose"] == ["r1:2"]
@@ -105,7 +107,8 @@ def test_ranking_most_evidenced_and_contested_first():
 
 def test_urls_are_not_treated_as_node_evidence():
     out = claim_assessments(
-        [], research_claims=[{"statement": "s", "node_ids": ["4", "bad", True], "urls": ["u"]}])
+        [], research_claims=[{"statement": "s", "node_ids": ["4", "bad", True], "urls": ["u"],
+                              "verification": {"verdict": "supported", "method": "llm"}}])
     # "4" coerces to node 4; "bad"/bool dropped; url goes to sources not support
     assert out[0]["support"] == ["?:4"] and out[0]["sources"] == ["u"]
 
@@ -115,13 +118,26 @@ def test_empty_input_is_empty():
     assert claim_assessments([{"statement": "", "outcome": "supported", "evidence": [1]}]) == []
 
 
+def test_unverified_or_unsupported_d8_citation_never_becomes_support():
+    rows = [
+        {"statement": "legacy citation", "run_id": "r1", "task_id": "t", "node_ids": [9]},
+        {"statement": "verifier rejected", "run_id": "r2", "task_id": "t", "node_ids": [10],
+         "verification": {"verdict": "unsupported", "method": "llm", "note": "does not establish it"}},
+    ]
+    out = {c["statement"]: c for c in claim_assessments([], research_claims=rows)}
+    assert out["legacy citation"]["epistemic"] == "inconclusive"
+    assert out["legacy citation"]["support"] == [] and out["legacy citation"]["unverified"] == ["r1:9"]
+    assert out["verifier rejected"]["oppose"] == [] and out["verifier rejected"]["unverified"] == ["r2:10"]
+    assert out["verifier rejected"]["runs"] == ["r2"] and out["verifier rejected"]["scopes"] == ["t"]
+
+
 # --------------------------------------------------------------------------- #
 # CLI  (`looplab claims`)
 # --------------------------------------------------------------------------- #
 
 def _write_lessons(path, lessons):
     import orjson
-    path.write_bytes(b"\n".join(orjson.dumps(l) for l in lessons) + b"\n")
+    path.write_bytes(b"\n".join(orjson.dumps(lesson) for lesson in lessons) + b"\n")
 
 
 def test_cli_claims_lists_and_filters_contested(tmp_path):
@@ -176,6 +192,83 @@ def test_invalid_decision_raises(tmp_path):
         record_claim_decision(str(tmp_path), statement="x", decision="bogus")
     with pytest.raises(ValueError):
         record_claim_decision(str(tmp_path), statement="", decision="ratified")
+
+
+def test_every_persistable_research_statement_is_governable(tmp_path):
+    import pytest
+    from looplab.engine.claims import record_claim_decision
+    statement = "x improves y " + ("z" * (4000 - len("x improves y ")))
+    record = record_claim_decision(str(tmp_path), statement=statement, decision="pinned")
+    assert record["statement"] == statement
+    with pytest.raises(ValueError, match="statement exceeds 4000"):
+        record_claim_decision(str(tmp_path), statement=statement + "z", decision="pinned")
+
+
+def test_claim_decision_revision_cas_and_idempotency_are_atomic_contracts(tmp_path):
+    import pytest
+    from looplab.engine.claims import (ClaimDecisionConflict, claim_governance_revision,
+                                       record_claim_decision)
+    first = record_claim_decision(str(tmp_path), statement="x improves y", decision="ratified",
+                                  expected_revision=0, action_id="action-1")
+    assert first["revision"] == 1 and claim_governance_revision(str(tmp_path)) == 1
+    # A transport retry returns the durable first receipt even when its old CAS revision is repeated.
+    retry = record_claim_decision(str(tmp_path), statement="x improves y", decision="ratified",
+                                  expected_revision=0, action_id="action-1")
+    assert retry == first and claim_governance_revision(str(tmp_path)) == 1
+    with pytest.raises(ValueError, match="different claim decision"):
+        record_claim_decision(str(tmp_path), statement="x improves y", decision="rejected",
+                              expected_revision=1, action_id="action-1")
+    with pytest.raises(ClaimDecisionConflict) as exc:
+        record_claim_decision(str(tmp_path), statement="z helps", decision="pinned",
+                              expected_revision=0, action_id="action-2")
+    assert exc.value.current_revision == 1 and claim_governance_revision(str(tmp_path)) == 1
+
+
+def test_clear_only_tombstones_its_exact_scope_and_global_key_does_not_leak(tmp_path):
+    from looplab.engine.claim_key import claim_uid
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+    statement = "adapter tuning improves recall"
+    record_claim_decision(str(tmp_path), statement=statement, decision="ratified")
+    record_claim_decision(str(tmp_path), statement=statement, decision="rejected",
+                          scope="taskA", metric="recall")
+    loaded = load_claim_decisions(str(tmp_path))
+    assert loaded[normalize_statement(statement)]["decision"] == "ratified"
+    scoped_uid = claim_uid(statement, scope="taskA", metric="recall")
+    assert loaded[scoped_uid]["decision"] == "rejected"
+    record_claim_decision(str(tmp_path), statement=statement, decision="clear",
+                          scope="taskA", metric="recall")
+    loaded = load_claim_decisions(str(tmp_path))
+    assert scoped_uid not in loaded
+    assert loaded[normalize_statement(statement)]["decision"] == "ratified"
+
+
+def test_global_clear_retires_older_paraphrase_indexes_for_same_uid(tmp_path):
+    from looplab.engine.claim_key import claim_uid
+    from looplab.engine.claims import load_claim_decisions, record_claim_decision
+    from looplab.engine.memory import normalize_statement
+    original = "augmentation improves retrieval recall"
+    paraphrase = "augmentation greatly improves retrieval recall"
+    assert claim_uid(original) == claim_uid(paraphrase)
+    record_claim_decision(str(tmp_path), statement=original, decision="ratified")
+    record_claim_decision(str(tmp_path), statement=paraphrase, decision="clear")
+    loaded = load_claim_decisions(str(tmp_path))
+    assert claim_uid(original) not in loaded
+    assert normalize_statement(original) not in loaded
+
+
+def test_v1_decision_uid_is_migrated_from_durable_statement(tmp_path):
+    import json
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
+    from looplab.engine.claims import load_claim_decisions
+    statement = "teacher distillation improves student recall"
+    legacy = {"statement": statement, "scope": "t", "metric": "recall", "decision": "rejected",
+              "claim_key_version": 1, "claim_uid": "clm_old_collision"}
+    (tmp_path / "claim_decisions.jsonl").write_text(json.dumps(legacy) + "\n", encoding="utf-8")
+    current_uid = claim_uid(statement, scope="t", metric="recall")
+    loaded = load_claim_decisions(str(tmp_path))
+    assert current_uid in loaded and "clm_old_collision" not in loaded
+    assert loaded[current_uid]["claim_key_version"] == CLAIM_KEY_VERSION
 
 
 def test_maturity_overlay_on_assessments():
@@ -274,7 +367,8 @@ def test_d8_claim_contests_a_lesson_verdict(tmp_path):
     from looplab.engine.claims import claims_for_memory, record_research_claims
     _write_lessons(tmp_path / "lessons.jsonl", [_lesson("distillation helps", "refuted", [2], run_id="rL")])
     record_research_claims(str(tmp_path), run_id="rR", task_id="t",
-                           claims=[{"statement": "distillation helps", "node_ids": [9]}])
+                           claims=[{"statement": "distillation helps", "node_ids": [9],
+                                    "verification": {"verdict": "supported", "method": "llm"}}])
     out = {c["statement"]: c for c in claims_for_memory(str(tmp_path))}
     c = out["distillation helps"]
     assert c["epistemic"] == "mixed"                       # now contested
@@ -287,6 +381,28 @@ def test_claims_for_memory_applies_decisions_too(tmp_path):
     record_claim_decision(str(tmp_path), statement="x helps", decision="ratified")
     out = claims_for_memory(str(tmp_path))
     assert out[0]["maturity"] == "operator-ratified"
+
+
+def test_memory_helpers_scope_lessons_research_and_capsules_together(tmp_path):
+    from looplab.engine.claims import atlas_for_memory, claims_for_memory
+    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("visible lesson", "supported", [1], task_id="taskA"),
+        _lesson("secret lesson", "supported", [2], task_id="taskB")])
+    research = [
+        {"statement": "visible research", "task_id": "taskA", "run_id": "rrA", "node_ids": [3]},
+        {"statement": "secret research", "task_id": "taskB", "run_id": "rrB", "node_ids": [4]},
+    ]
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    store.add(build_concept_capsule(run_id="cA", task_id="taskA", fingerprint=["a"],
+                                    direction="max", concepts=["visible-concept"]))
+    store.add(build_concept_capsule(run_id="cB", task_id="taskB", fingerprint=["b"],
+                                    direction="max", concepts=["secret-concept"]))
+    claims = claims_for_memory(str(tmp_path), research_claims=research, scope_task="taskA")
+    assert {c["statement"] for c in claims} == {"visible lesson", "visible research"}
+    atlas = atlas_for_memory(str(tmp_path), research_claims=research, scope_task="taskA")
+    assert {e["concept"] for e in atlas["explored"]} == {"visible-concept"}
+    assert all("secret" not in c["statement"] for c in atlas["context_pack"]["claims"])
 
 
 # --------------------------------------------------------------------------- #
@@ -344,6 +460,44 @@ def test_structured_does_not_merge_opposite_polarity_it_contradicts():
     assert len(out) == 2                              # two SEPARATE assertions, not one merged claim
     # each is marked contested and names the other as a contradiction (unreachable from the lean merge)
     assert all(c["epistemic"] == "mixed" and c["contradicts"] for c in out)
+    assert all(c["evidence_digest"].startswith("cev_") for c in out)
+
+
+def test_structured_evidence_digest_changes_with_proof_not_governance(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    statement = "dropout improves generalization"
+    path = tmp_path / "lessons.jsonl"
+    _write_lessons(path, [_lesson(statement, "supported", [1], run_id="r1")])
+    first = claims_for_memory(tmp_path, structured=True)[0]["evidence_digest"]
+    record_claim_decision(tmp_path, statement=statement, scope="t", decision="pinned")
+    governed_row = claims_for_memory(tmp_path, structured=True)[0]
+    governed = governed_row["evidence_digest"]
+    assert governed == first
+    # Direct CLI decisions predate the HTTP evidence fence, so freshness is explicitly unknown.
+    assert governed_row["decision_fresh"] is None
+    _write_lessons(path, [
+        _lesson(statement, "supported", [1], run_id="r1"),
+        _lesson(statement, "supported", [2], run_id="r2"),
+    ])
+    assert claims_for_memory(tmp_path, structured=True)[0]["evidence_digest"] != first
+
+
+def test_rejecting_an_opposite_changes_live_contradiction_not_evidence_digest(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    positive = "dropout improves generalization"
+    negative = "dropout never improves generalization"
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson(positive, "supported", [1], run_id="r1"),
+        _lesson(negative, "supported", [2], run_id="r2"),
+    ])
+    before = {row["statement"]: row for row in claims_for_memory(tmp_path, structured=True)}
+    record_claim_decision(tmp_path, statement=negative, scope="t", decision="rejected",
+                          evidence_digest=before[negative]["evidence_digest"])
+    after = {row["statement"]: row for row in claims_for_memory(tmp_path, structured=True)}
+    assert after[positive]["contradicts"] == []
+    assert after[positive]["evidence_digest"] == before[positive]["evidence_digest"]
+    assert after[negative]["evidence_digest"] == before[negative]["evidence_digest"]
+    assert after[negative]["decision_fresh"] is True
 
 
 def test_structured_scope_separates_same_words_across_tasks():
@@ -353,6 +507,83 @@ def test_structured_scope_separates_same_words_across_tasks():
     ], structured=True)
     assert len(out) == 2                              # different tasks => different claims (not a mixed merge)
     assert {c["epistemic"] for c in out} == {"supported", "refuted"}
+
+
+def test_structured_metric_identity_separates_same_task_claims():
+    out = claim_assessments([
+        _lesson("adapter tuning improves score", "supported", [1], run_id="rA",
+                fingerprint=["metric:recall"]),
+        _lesson("adapter tuning improves score", "refuted", [2], run_id="rB",
+                fingerprint=["metric:precision"]),
+    ], structured=True)
+    assert len(out) == 2
+    assert {(c["metric"], c["epistemic"]) for c in out} == {
+        ("recall", "supported"), ("precision", "refuted")}
+
+
+def test_rejected_opposite_does_not_poison_live_structured_claim(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    positive = "augmentation improves retrieval recall"
+    negative = "augmentation degrades retrieval recall"
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson(positive, "supported", [1], run_id="rA", fingerprint=["metric:recall"]),
+        _lesson(negative, "supported", [2], run_id="rB", fingerprint=["metric:recall"]),
+    ])
+    record_claim_decision(str(tmp_path), statement=negative, decision="rejected",
+                          scope="t", metric="recall")
+    out = {c["statement"]: c for c in claims_for_memory(str(tmp_path), structured=True)}
+    assert out[positive]["epistemic"] == "supported" and out[positive]["contradicts"] == []
+    assert out[negative]["maturity"] == "operator-rejected"
+    assert out[negative]["epistemic"] == "supported" and out[negative]["contradicts"] == []
+
+
+def test_refuted_or_unverified_opposite_is_not_live_contradictory_evidence():
+    positive = "augmentation improves retrieval recall"
+    negative = "augmentation degrades retrieval recall"
+    out = {c["statement"]: c for c in claim_assessments([
+        _lesson(positive, "supported", [1], run_id="rA"),
+        _lesson(negative, "refuted", [2], run_id="rB"),
+    ], research_claims=[{"statement": negative, "task_id": "t", "run_id": "rC", "node_ids": [3]}],
+        structured=True)}
+    assert out[positive]["epistemic"] == "supported" and out[positive]["contradicts"] == []
+    assert out[negative]["epistemic"] == "refuted"
+
+
+def test_structured_atlas_and_context_pack_expose_mutation_identity(tmp_path):
+    from looplab.engine.claims import atlas_for_memory
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson("augmentation improves retrieval recall", "supported", [1], run_id="rA",
+                task_id="taskA", fingerprint=["metric:recall"])])
+    atlas = atlas_for_memory(str(tmp_path), structured=True)
+    claim = atlas["context_pack"]["claims"][0]
+    assert claim["claim_uid"].startswith("clm_")
+    assert claim["scope"] == "taskA" and claim["metric"] == "recall" and claim["polarity"] == 1
+
+
+def test_metric_decision_precedence_exact_then_scope_then_global(tmp_path):
+    from looplab.engine.claims import claims_for_memory, record_claim_decision
+    statement = "adapter tuning improves score"
+    _write_lessons(tmp_path / "lessons.jsonl", [
+        _lesson(statement, "supported", [1], run_id="rA", task_id="taskA",
+                fingerprint=["metric:recall"]),
+        _lesson(statement, "supported", [2], run_id="rB", task_id="taskA",
+                fingerprint=["metric:precision"]),
+        _lesson(statement, "supported", [3], run_id="rC", task_id="taskB",
+                fingerprint=["metric:recall"]),
+        _lesson(statement, "supported", [4], run_id="rD", task_id="taskB",
+                fingerprint=["metric:precision"]),
+    ])
+    record_claim_decision(str(tmp_path), statement=statement, decision="ratified")
+    record_claim_decision(str(tmp_path), statement=statement, decision="pinned", metric="recall")
+    record_claim_decision(str(tmp_path), statement=statement, decision="pinned", scope="taskA")
+    record_claim_decision(str(tmp_path), statement=statement, decision="rejected",
+                          scope="taskA", metric="recall")
+    out = {(c["scopes"][0], c["metric"]): c["maturity"]
+           for c in claims_for_memory(str(tmp_path), structured=True)}
+    assert out[("taskA", "recall")] == "operator-rejected"
+    assert out[("taskA", "precision")] == "operator-pinned"
+    assert out[("taskB", "recall")] == "operator-pinned"
+    assert out[("taskB", "precision")] == "operator-ratified"
 
 
 def test_structured_governance_is_scope_precise(tmp_path):

@@ -172,7 +172,7 @@
     <!-- budget spent -->
     <g><rect x="1412" y="441" width="100" height="21" rx="10" fill="#0c1219" stroke="#2d4653"/><text x="1462" y="452" text-anchor="middle" dominant-baseline="central" fill="#93a4ab">budget spent</text></g>
     <!-- return -->
-    <g><rect x="452" y="609" width="616" height="22" rx="11" fill="#0e1721" stroke="#2d4653"/><text x="760" y="621" text-anchor="middle" dominant-baseline="central" fill="#9dabb3">policy picks the next node ↺   ·   every value = a pure fold of the log</text></g>
+    <g><rect x="452" y="609" width="616" height="22" rx="11" fill="#0e1721" stroke="#2d4653"/><text x="760" y="621" text-anchor="middle" dominant-baseline="central" fill="#9dabb3">policy picks the next node ↺   ·   RunState = deterministic event fold</text></g>
     <!-- retrieve -->
     <g><rect x="1152" y="590" width="112" height="21" rx="10" fill="#0e1721" stroke="#23394f"/><text x="1208" y="601" text-anchor="middle" dominant-baseline="central" fill="#5aa6f5">retrieve · tools</text></g>
     <!-- store -->
@@ -189,7 +189,7 @@
   <g filter="url(#sh)"><rect x="40" y="940" width="1680" height="86" rx="16" fill="#0b2422" stroke="#1f5b54"/></g>
   <rect x="40" y="940" width="6" height="86" rx="3" fill="#33d6c2"/>
   <text x="70" y="974" font-size="19" font-weight="700" fill="#33d6c2" font-family="ui-monospace,'DejaVu Sans Mono',monospace">events.jsonl</text>
-  <text x="70" y="1000" font-size="13.5" fill="#88b3ae">append-only · the single source of truth — every projection above is a pure fold of this log</text>
+  <text x="70" y="1000" font-size="13.5" fill="#88b3ae">append-only · replay authority for RunState — snapshots, traces and memory keep explicit sidecars</text>
   <g font-family="ui-monospace,'DejaVu Sans Mono',monospace" font-size="12" fill="#cfe6e2">
     <rect x="1116" y="958" width="180" height="50" rx="10" fill="#0d2a27" stroke="#1f5b54"/><text x="1206" y="978" text-anchor="middle" font-weight="700">replay</text><text x="1206" y="995" text-anchor="middle" font-size="10" fill="#7fb0aa">⇒ crash-resume</text>
     <rect x="1308" y="958" width="180" height="50" rx="10" fill="#0d2a27" stroke="#1f5b54"/><text x="1398" y="978" text-anchor="middle" font-weight="700">read-model</text><text x="1398" y="995" text-anchor="middle" font-size="10" fill="#7fb0aa">UI · DAG</text>

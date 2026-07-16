@@ -21,11 +21,29 @@ a policy change; the regression is locked by `tests/test_events_replay.py` + the
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import math
+
+VERIFIER_SELECTION_CONTRACT = "selection-criteria:v1"
+
 
 def is_better(direction: str, a: float, b: float) -> bool:
     """Direction-aware strict improvement: lower wins when minimizing, higher when maximizing. THE
     comparator — `RunState.is_better` delegates here so there is exactly one spelling of "better"."""
     return a < b if direction == "min" else a > b
+
+
+def standard_error_difference(std: float, n: int, incumbent_std: float, incumbent_n: int) -> float:
+    """Pooled SE of two independent mean estimates; shared by confirm and verifier CI selection."""
+    def _se(value, count):
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(float(value)) or value <= 0
+                or isinstance(count, bool) or not isinstance(count, int) or count <= 1):
+            return 0.0
+        return float(value) / math.sqrt(count)
+    a, b = _se(std, n), _se(incumbent_std, incumbent_n)
+    return math.sqrt(a * a + b * b)
 
 
 # R1-c: the neutral verifier "score" for an unscored node (the §12 verifier's own `unclear` midpoint).
@@ -34,12 +52,66 @@ def is_better(direction: str, a: float, b: float) -> bool:
 _NEUTRAL_VERIFIER = 0.5
 
 
+def verifier_evidence_snapshot(direction: str, node) -> dict:
+    """Return the canonical evidence revision used by the selection verifier.
+
+    The verifier is selection-affecting, so its score must be bound to the exact realized evidence it
+    judged. Keep this projection in ``core`` so the live producer and the pure replay reader use one
+    spelling. ``generalization_gap`` is derived here rather than read from the node because replay computes
+    that display field only in its final selection pass, after individual events have folded.
+    """
+
+    def _finite(value):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        value = float(value)
+        return value if math.isfinite(value) else None
+
+    rationale = " ".join((getattr(getattr(node, "idea", None), "rationale", "") or "").split())[:250]
+    metric = _finite(getattr(node, "metric", None))
+    confirmed_mean = _finite(getattr(node, "confirmed_mean", None))
+    confirmed_std = _finite(getattr(node, "confirmed_std", None))
+    holdout_metric = _finite(getattr(node, "holdout_metric", None))
+    robust = holdout_metric if holdout_metric is not None else confirmed_mean
+    gap = None
+    if metric is not None and robust is not None:
+        try:
+            gap = ((float(metric) - float(robust)) if direction == "max"
+                   else (float(robust) - float(metric)))
+            if not math.isfinite(gap):
+                gap = None
+        except (TypeError, ValueError, OverflowError):
+            gap = None
+    return {
+        "v": 1,
+        "direction": direction if direction in ("min", "max") else "min",
+        "node_id": getattr(node, "id", None),
+        "generation": getattr(node, "attempt", None),
+        "rationale": rationale,
+        "metric": metric,
+        "confirmed_mean": confirmed_mean,
+        "confirmed_std": confirmed_std,
+        "confirmed_seeds": (getattr(node, "confirmed_seeds", None)
+                            if isinstance(getattr(node, "confirmed_seeds", None), int)
+                            and not isinstance(getattr(node, "confirmed_seeds", None), bool) else None),
+        "holdout_metric": holdout_metric,
+        "generalization_gap": gap,
+    }
+
+
+def verifier_evidence_digest(direction: str, node) -> str:
+    """Stable SHA-256 identity for :func:`verifier_evidence_snapshot`."""
+
+    raw = json.dumps(verifier_evidence_snapshot(direction, node), sort_keys=True,
+                     separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+
 class SearchFitness:
     """The run's ordering owner, built from its optimize `direction`. Stateless beyond `direction`
     (+ the R1-c `verifier_tiebreak` flag); construct one per fold / policy call (cheap)."""
 
-    def __init__(self, direction: str, *, verifier_tiebreak: bool = False, ci_tie: bool = False,
-                 ci_z: float = 1.96):
+    def __init__(self, direction: str, *, verifier_tiebreak: bool = False, ci_tie: bool = False):
         self.direction = direction
         self._reverse = (direction == "max")     # best-first ordering for `sorted(..., reverse=)`
         # R1-c: when on, the mean-pick key gains a calibrated-verifier tie-break slot BETWEEN the metric
@@ -47,13 +119,11 @@ class SearchFitness:
         # run's chooser (max picks the larger key, min the smaller). Off -> plain (robust_metric, id).
         self._verifier_tiebreak = bool(verifier_tiebreak)
         # R1-d (§21.19): widen the verifier tie-break from EXACT-metric to a STATISTICAL tie — a node is
-        # "tied" with the metric-leader when its mean is within the LEADER's confirm-noise CI (|Δ| <=
-        # ci_z·SE_leader, SE=confirmed_std/sqrt(confirmed_seeds)). Anchored on the LEADER's SE only (not a
-        # pooled SE_diff), so a noisy candidate's own variance can't widen the band. Requires
-        # `verifier_tiebreak`. NEVER widens beyond the leader's measured noise, so a SIGNIFICANT difference
-        # is never a tie (§21.7 preserved). Off -> exact-tie.
+        # "tied" with the metric leader inside a conservative one-SE band. The band is capped by the
+        # leader's own precision and by trust.confirm's pooled SE-of-difference certificate: candidate
+        # variance can never widen it, and the verifier can never cross a significant-difference boundary.
+        # Requires `verifier_tiebreak`; off -> exact-tie.
         self._ci_tie = bool(ci_tie) and self._verifier_tiebreak
-        self._ci_z = float(ci_z)
         self._vsign = 1.0 if direction == "max" else -1.0
 
     # --- comparator -------------------------------------------------------------------------------
@@ -83,6 +153,12 @@ class SearchFitness:
         reference (no non-test callers today — holdout_topk now ranks by `promotion_key`)."""
         return (node.robust_metric, node.id)
 
+    @staticmethod
+    def _usable_verifier(node) -> bool:
+        vs = node.verifier_score
+        return (isinstance(vs, (int, float)) and not isinstance(vs, bool)
+                and math.isfinite(float(vs)) and 0.0 <= float(vs) <= 1.0)
+
     def _vc(self, node):
         """The direction-oriented calibrated-verifier tie-break component for `node` (goes BETWEEN the
         ranked metric and the id). A usable score is a real number in [0,1]; anything else (None, bool —
@@ -92,8 +168,7 @@ class SearchFitness:
         comparison can perturb min/max) — the fold's `_on_node_verified` also enforces the [0,1]-float rule
         before storing."""
         vs = node.verifier_score
-        usable = (isinstance(vs, (int, float)) and not isinstance(vs, bool)
-                  and vs == vs and 0.0 <= vs <= 1.0)
+        usable = self._usable_verifier(node)
         return self._vsign * (float(vs) if usable else _NEUTRAL_VERIFIER)
 
     def promotion_key(self, node):
@@ -107,6 +182,25 @@ class SearchFitness:
             return (node.robust_metric, node.id)
         return (node.robust_metric, self._vc(node), node.id)
 
+    def rank_promotion(self, nodes) -> list:
+        """Best-first robust ranking with verifier scores applied only to complete exact ties.
+
+        ``holdout_topk`` consumes this ranking before holdout evidence exists. It cannot call ``best_ci``
+        one node at a time, so precompute which exact-metric groups have one usable score for every member;
+        torn/expanded groups fall back uniformly to the id order instead of mixing scores with neutrality.
+        """
+        nodes = list(nodes)
+        if not self._verifier_tiebreak:
+            return sorted(nodes, key=self.selection_key, reverse=self._reverse)
+        by_metric: dict[object, list] = {}
+        for node in nodes:
+            by_metric.setdefault(node.robust_metric, []).append(node)
+        complete = {node.id for group in by_metric.values() if len(group) >= 2
+                    and all(self._usable_verifier(node) for node in group) for node in group}
+        def key(node):
+            return (node.robust_metric, self._vc(node) if node.id in complete else 0.0, node.id)
+        return sorted(nodes, key=key, reverse=self._reverse)
+
     @staticmethod
     def _se(node):
         """The standard error of a node's confirmed MEAN = confirmed_std / sqrt(confirmed_seeds), or None
@@ -118,31 +212,28 @@ class SearchFitness:
             return None
         if isinstance(n, bool) or not isinstance(n, int) or n < 1:
             return None
-        import math
         return float(std) / math.sqrt(n)
 
     def _statistically_tied(self, node, leader) -> bool:
-        """Is `node` STATISTICALLY INDISTINGUISHABLE from the metric-leader — does its mean fall within the
-        LEADER's confidence interval, |Δmean| <= ci_z·SE_leader? The band is anchored on the LEADER's own
-        precision ONLY: a candidate's own (possibly inflated) confirmed_std can NOT widen the band, so a lone
-        high-variance node can't drag a genuinely-better tight leader into a tie. When the leader's SE is
-        unknown, fall back to EXACT-metric equality (never a fabricated band). §21.7: a node whose metric is
-        MORE than the leader's noise away is NOT tied and can never be chosen over the leader by soundness."""
+        """Whether two confirmed means are within the conservative verifier tie band.
+
+        The threshold is the smaller of the metric leader's SE and the pooled SE-of-difference used by
+        ``trust.gate.one_se_better``. Missing variance fails back to exact equality. This keeps the tie a
+        subset of statistically non-significant differences without letting a noisy challenger manufacture
+        a wide band from its own variance.
+        """
         if node is leader:
             return True
         lm, nm = leader.robust_metric, node.robust_metric
         if lm is None or nm is None:
             return False
-        lse = self._se(leader)
-        if lse is None:
-            return nm == lm                       # no leader noise estimate -> exact-tie only (conservative)
-        # CODEX AGENT: this 1.96*leader-SE policy conflicts with confirm's `significant` certificate, which
-        # fires at >1 pooled SE. In the ordinary 1..1.96-SE region best_ci selects the sounder tied node, then
-        # replay sees `significant=True` and overwrites it with the mean winner. Use one shared paired decision
-        # certificate/predicate across confirm and selection. Also, with n≈3 a fixed normal z, leader-only
-        # variance and winner selection are not the advertised 95% confidence test; retain per-seed deltas
-        # for a paired t/bootstrap interval or name this honestly as a heuristic leader margin.
-        return abs(nm - lm) <= self._ci_z * lse
+        lse, nse = self._se(leader), self._se(node)
+        if lse is None or nse is None:
+            return nm == lm
+        pooled = standard_error_difference(node.confirmed_std, node.confirmed_seeds,
+                                           leader.confirmed_std, leader.confirmed_seeds)
+        threshold = min(pooled, lse)
+        return nm == lm if threshold <= 0.0 else abs(nm - lm) <= threshold
 
     def ci_tie_set(self, nodes):
         """The statistical tie-set `best_ci` decides among: the metric-LEADER (`selection_key`) plus every
@@ -164,10 +255,27 @@ class SearchFitness:
         METRIC LEADER (not an arbitrary id), while a sounder within-noise node still wins. A significantly-
         worse node is excluded from the tie-set, so this can NEVER promote a node over a genuinely-better
         metric (§21.7). Identical to the plain exact-tie pick when ci_tie is off."""
-        if not self._ci_tie:
-            return self.best(nodes, self.promotion_key)
-        tied = self.ci_tie_set(nodes)
-        return self.best(tied, key=lambda n: (self._vc(n), n.robust_metric, n.id))
+        leader = self.best(nodes, self.selection_key)
+        tied = (self.ci_tie_set(nodes) if self._ci_tie else
+                [n for n in nodes if n.robust_metric == leader.robust_metric])
+        # A verifier treatment is meaningful only for the complete selector tie-set. Fail closed on a
+        # torn legacy prefix or a newly-expanded tie until one atomic group event scores every
+        # member; otherwise process timing could decide which node receives the artificial neutral value.
+        if not self._verifier_tiebreak or not all(self._usable_verifier(n) for n in tied):
+            return leader
+        if self._ci_tie:
+            return self.best(tied, key=lambda n: (self._vc(n), n.robust_metric, n.id))
+        return self.best(tied, self.promotion_key)
+
+    def best_holdout(self, nodes):
+        """Exact holdout winner, using verifier soundness only when the whole tie was scored."""
+        def plain(n):
+            return (n.holdout_metric, n.id)
+        leader = self.best(nodes, plain)
+        tied = [n for n in nodes if n.holdout_metric == leader.holdout_metric]
+        if not self._verifier_tiebreak or not all(self._usable_verifier(n) for n in tied):
+            return leader
+        return self.best(tied, self.holdout_key)
 
     def holdout_key(self, node):
         """The holdout-promotion key: `(holdout_metric, id)`, with the SAME R1-c verifier tie-break slot

@@ -172,7 +172,7 @@ function SuperTaskModal({ supertasks, onCreate, onRename, onDelete, onClose }) {
   </Modal>
 }
 
-export default function RunList({ onOpen, onSettings }) {
+export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   const compactNav = useMediaQuery('(max-width: 900px)')
   const [runs, setRuns] = useState(null)
   const [runsError, setRunsError] = useState(null)
@@ -402,6 +402,10 @@ export default function RunList({ onOpen, onSettings }) {
         <div className="home-actions">
           <ThemeSwitcher />
           <EnergyToggle />
+          <button type="button" className="btn sm ghost" title="Read the experimental bounded portfolio preview"
+                  aria-label="Open Research Atlas preview" onClick={() => onResearchAtlas?.()}>
+            <OpIcon name="compass" className="t-ic" /> Atlas preview
+          </button>
           <button className="btn sm ghost" title="settings" onClick={() => onSettings && onSettings()}><OpIcon name="gear" className="t-ic" /> Settings</button>
         </div>
       </div>

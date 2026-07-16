@@ -101,39 +101,74 @@ class ProposalCuesMixin:
         prior note; advisory only, NEVER touches node selection (§21.7). Off unless `cross_run_advisory`;
         returns "" on no memory dir / empty store / any hiccup, so the prompt is byte-identical when off."""
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+            self._cross_run_advisory_receipt = {}
             return ""
         try:
+            import hashlib
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import build_context_pack, claims_for_memory, render_context_pack
+            from looplab.engine.claims import (build_context_pack, claims_for_memory, load_research_claims,
+                                               render_context_pack)
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
-            # CODEX AGENT: `state` is never used below: this live prompt reads the whole mutable portfolio,
-            # including current-run/mismatched-task rows, on every proposal. Nothing records the store
-            # revision, selected evidence, rendered bytes, or prompt digest before the LLM call, so a crash
-            # + resume can re-propose the same slot under different evidence. Scope through one immutable
-            # snapshot and append a retrieval receipt before any cross-run content can influence reasoning.
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
+            capsules = ConceptCapsuleStore(cp).all() if cp.exists() else []
+            # Freeze one task-scoped view for this prompt.  Exact task id is authoritative; related-task
+            # transfer uses the same fingerprint threshold as lesson priors and never includes this run.
+            from looplab.engine.memory import fingerprint_similarity
+            rid, tid = str(state.run_id or ""), str(state.task_id or "")
+            fp_fn = getattr(self, "_task_fingerprint", None)
+            fp = ([t for t in fp_fn(state, state.best()) if not str(t).startswith("param:")]
+                  if callable(fp_fn) else [])
+
+            def _scoped(row):
+                if rid and str(row.get("run_id") or "") == rid:
+                    return False
+                if not tid and not fp:
+                    return True                 # compatibility for an explicitly unbound/audit caller
+                if tid and str(row.get("task_id") or "") == tid:
+                    return True
+                stored = row.get("fingerprint")
+                if not isinstance(stored, list):
+                    return False
+                stored = [t for t in stored if not str(t).startswith("param:")]
+                row_dir = str(row.get("direction") or "")
+                return (not row_dir or row_dir == str(state.direction or "min")) \
+                    and fingerprint_similarity(fp, stored) >= 0.34
+
+            lessons = [r for r in lessons if _scoped(r)]
+            capsules = [r for r in capsules if _scoped(r)]
+            research = [r for r in load_research_claims(base)
+                        if (not rid or str(r.get("run_id") or "") != rid)
+                        and (not tid or str(r.get("task_id") or "") == tid)]
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
-            overview = (portfolio_concept_overview(ConceptCapsuleStore(cp).all(),
+            overview = (portfolio_concept_overview(capsules,
                         aliases=load_concept_aliases(base), splits=load_concept_splits(base))
-                        if cp.exists() else None)
-            # CODEX AGENT: `research_claims.jsonl` is a first-class source, but this early return checks only
-            # lessons/capsules. D8-only memory is visible through the API helper yet silently absent from the
-            # Researcher prompt. Centralize source loading/readiness in `claims_for_memory` instead.
-            if not lessons and not overview:
+                        if capsules else None)
+            if not lessons and not overview and not research:
+                self._cross_run_advisory_receipt = {}
                 return ""
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
-            claims = claims_for_memory(base, lessons=lessons,
+            claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                        structured=getattr(self, "_cross_run_structured_claims", False))
             text = render_context_pack(build_context_pack(claims, concept_overview=overview))
+            corpus = json.dumps({"lessons": lessons, "capsules": capsules, "research": research},
+                                ensure_ascii=False, sort_keys=True, default=str,
+                                separators=(",", ":")).encode("utf-8")
+            self._cross_run_advisory_receipt = {
+                "v": 1, "scope_task": tid, "excluded_run": rid,
+                "n_lessons": len(lessons), "n_capsules": len(capsules), "n_research": len(research),
+                "corpus_digest": hashlib.sha256(corpus).hexdigest(),
+                "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            }
             return ("\n" + text) if text else ""
         except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing
+            self._cross_run_advisory_receipt = {}
             return ""
 
     def _stamp_novelty_hint(self, state: RunState, stance: str) -> None:

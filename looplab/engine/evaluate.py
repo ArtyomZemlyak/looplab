@@ -18,7 +18,7 @@ from typing import Optional
 
 import anyio
 
-from looplab.core.models import NodeStatus
+from looplab.core.models import NodeStatus, normalize_extra_metrics
 from looplab.engine.options import _UNSET
 from looplab.engine.triage import _MAX_DEP_ROUNDS, _failure_reason, _normalize_error_sig
 from looplab.events.replay import fold
@@ -384,7 +384,7 @@ class EvaluateMixin:
                         {"node_id": node_id, "generation": generation,
                          "metric": res.metric,
                          "stdout_tail": self._redact(res.stdout[-500:]), "eval_seconds": total_eval,
-                         "extra_metrics": res.extra_metrics or {},   # #5 multi-objective
+                         "extra_metrics": normalize_extra_metrics(res.extra_metrics),   # #5 multi-objective
                          "violations": res.violations or [],
                          # Intra-node sweep: the whole grid's per-trial results, carried on the ONE
                          # node_evaluated event (the sweep is a single atomic eval — eval_seconds is

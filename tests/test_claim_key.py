@@ -4,7 +4,7 @@ same-worded claims across tasks, and the O(n) exact-key grouping never bridges t
 """
 from __future__ import annotations
 
-from looplab.engine.claim_key import claim_signature, claim_uid
+from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_signature, claim_uid
 
 
 def test_paraphrase_and_inflection_share_a_merge_key():
@@ -60,3 +60,44 @@ def test_short_negation_no_still_flips():
     # 'no' is 2 chars (dropped from the SUBJECT) but must still flip POLARITY (mega-review regression)
     assert claim_signature("no improvement from dropout")["polarity"] == -1
     assert claim_signature("improvement from dropout")["polarity"] == 1
+
+
+def test_causal_roles_prevent_reverse_relation_collision():
+    forward = claim_signature("teacher distillation improves student recall")
+    reverse = claim_signature("student recall improves teacher distillation")
+    assert forward["roles"] != reverse["roles"]
+    assert forward["merge_key"] != reverse["merge_key"]
+    assert forward["contra_key"] != reverse["contra_key"]
+
+
+def test_single_letter_causal_roles_are_not_discarded():
+    forward = claim_signature("A causes B")
+    reverse = claim_signature("B causes A")
+    assert forward["roles"] == (("a",), ("b",))
+    assert reverse["roles"] == (("b",), ("a",))
+    assert forward["contra_key"] != reverse["contra_key"]
+    negated = claim_signature("A does not improve B")
+    assert negated["roles"] == (("a",), ("b",)) and negated["polarity"] == -1
+
+
+def test_roles_still_pair_same_direction_opposites():
+    improve = claim_signature("augmentation improves retrieval recall")
+    degrade = claim_signature("augmentation degrades retrieval recall")
+    assert improve["roles"] == degrade["roles"]
+    assert improve["contra_key"] == degrade["contra_key"]
+    assert improve["polarity"] == 1 and degrade["polarity"] == -1
+
+
+def test_v2_identity_is_nfkc_normalized_and_metric_qualified():
+    assert CLAIM_KEY_VERSION == 2
+    normal = claim_signature("FULLWIDTH improves recall", scope="t", metric="recall")
+    compat = claim_signature("ＦＵＬＬＷＩＤＴＨ improves recall", scope="t", metric="recall")
+    other_metric = claim_signature("FULLWIDTH improves recall", scope="t", metric="precision")
+    assert normal["uid"] == compat["uid"]
+    assert normal["uid"] != other_metric["uid"]
+
+
+def test_delimiter_bearing_qualifiers_cannot_alias():
+    left = claim_signature("augmentation improves recall", scope="a|b", metric="c")
+    right = claim_signature("augmentation improves recall", scope="a", metric="b|c")
+    assert left["uid"] != right["uid"] and left["contra_key"] != right["contra_key"]

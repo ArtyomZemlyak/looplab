@@ -94,6 +94,41 @@ def test_ui_help_keeps_extra_name():
     assert "looplab[ui]" in result.output
 
 
+def test_atlas_and_claims_accept_d8_only_memory(tmp_path):
+    import json
+
+    from looplab.engine.claims import record_research_claims
+
+    memory = tmp_path / "memory"
+    record_research_claims(memory, run_id="run-d8", task_id="task-d8", claims=[{
+        "statement": "hard negatives improve retrieval",
+        "node_ids": [3],
+        "urls": ["https://example.test/evidence"],
+    }])
+    claims = runner.invoke(app, ["claims", str(memory), "--json"])
+    assert claims.exit_code == 0, claims.output
+    assert json.loads(claims.output)[0]["statement"] == "hard negatives improve retrieval"
+
+    atlas = runner.invoke(app, ["atlas", str(memory), "--json"])
+    assert atlas.exit_code == 0, atlas.output
+    payload = json.loads(atlas.output)
+    assert payload["n_claims"] == 1 and payload["n_runs"] == 1
+
+
+def test_asset_brief_llm_uses_ambient_settings_without_a_run_dir(tmp_path, monkeypatch):
+    import looplab.cli.inspect_cmds as inspect_cmds
+    import looplab.tools.asset_brief as asset_brief_module
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    monkeypatch.setattr(inspect_cmds, "_make_llm_client", lambda settings: object())
+    monkeypatch.setattr(asset_brief_module, "asset_brief",
+                        lambda repo, client=None, task_type=None: "brief-ok")
+    result = runner.invoke(app, ["asset-brief", str(repo), "--llm"])
+    assert result.exit_code == 0, result.output
+    assert "brief-ok" in result.output
+
+
 # --- YAML / unified config + no-file runs --------------------------------------------------------
 
 def test_init_writes_parseable_documented_template(tmp_path):

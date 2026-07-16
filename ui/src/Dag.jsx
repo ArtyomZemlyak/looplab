@@ -1,5 +1,6 @@
 import React, { useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel, useViewport } from '@xyflow/react'
+import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
+  useNodesInitialized, useReactFlow, useViewport } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
@@ -13,8 +14,34 @@ import {
   computeGroups, nodeGroupMap, regionGeometry, rerouteForCollapse, groupColor,
   groupAggregate, superId, GROUP_MODES, isMergeEntryEdge,
 } from './grouping.js'
+import { DAG_READABLE_VIEWPORT, shouldAutoFitDag, shouldRefitDag } from './dagViewport.js'
 
 const NODE_W = 188, NODE_H = 78
+
+// fitView runs only at initialization. A semantic collapse can turn a 131-card forest into five
+// operator aggregates while retaining the old transform; a bounded regroup also moves every card.
+// Wait for React Flow to measure the replacement nodes before fitting. Expanding detail deliberately
+// preserves the user's camera.
+function RefitBoundedGraph({ signature, count, mode }) {
+  const { fitView } = useReactFlow()
+  const nodesInitialized = useNodesInitialized()
+  const previousRef = useRef(null)
+  const pendingRef = useRef(null)
+  useEffect(() => {
+    const previous = previousRef.current
+    const current = { signature, count, mode }
+    previousRef.current = current
+    if (!previous || previous.signature === signature) return
+    pendingRef.current = shouldRefitDag(previous, current) ? signature : null
+  }, [signature, count, mode])
+  useEffect(() => {
+    if (!nodesInitialized || pendingRef.current !== signature) return
+    pendingRef.current = null
+    const frame = requestAnimationFrame(() => fitView({ padding: 0.18, minZoom: 0.6, maxZoom: 1 }))
+    return () => cancelAnimationFrame(frame)
+  }, [nodesInitialized, signature, fitView])
+  return null
+}
 
 // Zoom level-of-detail: a single watcher (rendered INSIDE <ReactFlow> so it can read the live viewport)
 // flips a context boolean when zoom crosses a dead-band; every ExpNode reads it via context. So changing
@@ -169,7 +196,7 @@ function ExpNode({ data }) {
             return <div className="merge-line" title={'combines: ' + mergeThemes.join(' + ')}>{ml}</div> })()
         : chg ? <div className="change-chip" title={chg}>{chg}</div> : null}
       {/* cross-run provenance: this experiment was seeded from a sibling run — deep-link to it */}
-      {node.origin?.run_id && <a className="origin-chip" href={`#/run/${node.origin.run_id}`}
+      {node.origin?.run_id && <a className="origin-chip" href={`#/run/${encodeURIComponent(node.origin.run_id)}`}
         onClick={(e) => e.stopPropagation()}
         title={`seeded from run ${node.origin.run_id} #${node.origin.node_id}`
           + (node.origin.metric != null ? ` · source metric ${fmt(node.origin.metric)}` : '')
@@ -461,6 +488,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     return { nodes: rfNodes, edges: rfEdges, groupKeys: [...groups.keys()] }
   }, [state, selectedId, workId, onSelect, groupMode, collapsed, selectedGroup, onToggleGroup, onSelectGroup,
       themeFilter, fx, onNodeAction, openActions, menu?.nodeId])
+  const interactiveNodeCount = nodes.filter(node => node.type === 'exp' || node.type === 'groupSuper').length
+  const graphSignature = `${groupMode}:${nodes.map(node => node.id).sort().join('|')}`
+  const autoFit = shouldAutoFitDag(interactiveNodeCount)
 
   return (
     <LodContext.Provider value={lod}>
@@ -490,7 +520,9 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
         <feMerge><feMergeNode in="b" /><feMergeNode in="disp" /></feMerge>
       </filter>
     </defs></svg>}
-    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes} fitView fitViewOptions={{ padding: 0.12 }}
+    <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
+               fitView={autoFit} fitViewOptions={{ padding: 0.12, minZoom: 0.6, maxZoom: 1 }}
+               defaultViewport={DAG_READABLE_VIEWPORT}
                minZoom={0.05} maxZoom={1.8}
                onlyRenderVisibleElements proOptions={{ hideAttribution: true }}
                nodesDraggable={!!onNodeAction}
@@ -526,6 +558,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
                onPaneClick={() => { closeMenu(false); onSelect(null); onSelectGroup && onSelectGroup(null) }}>
       <LodWatcher lod={lod} onChange={setLod} />
       <ZoomFontWatcher />
+      <RefitBoundedGraph signature={graphSignature} count={interactiveNodeCount} mode={groupMode} />
       <Background color="#20252f" gap={22} />
       <Controls showInteractive={false} />
       <Panel position="top-right" className="grp-control">
@@ -538,7 +571,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           <button className="btn sm ghost" title="expand all groups" onClick={() => onExpandAll && onExpandAll()}>⊞ all</button>
           {(groupMode === 'theme' || groupMode === 'niche') && onAutoCollapse &&
             <button className="btn sm ghost" title="auto-collapse settled groups (keeps the champion, selected, and active groups open)"
-                    onClick={() => onAutoCollapse()}>⊟ settled</button>}
+                    onClick={() => onAutoCollapse(true)}>⊟ settled</button>}
         </>}
       </Panel>
       {/* lift the toggles above the overview map when it's open — otherwise the minimap (also

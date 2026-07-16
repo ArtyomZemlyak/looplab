@@ -8,7 +8,13 @@ export default function SharedAssistant({ sid, onBack }) {
   const [sess, setSess] = useState(null)
   const [err, setErr] = useState(null)
   useEffect(() => {
-    get(`/api/assistant/shared/${encodeURIComponent(sid)}`).then(setSess).catch(e => setErr(e.message))
+    let active = true
+    const controller = new AbortController()
+    setSess(null); setErr(null)
+    get(`/api/assistant/shared/${encodeURIComponent(sid)}`, { signal: controller.signal })
+      .then(data => { if (active) setSess(data) })
+      .catch(e => { if (active && e?.name !== 'AbortError') setErr(e.message || 'Shared chat could not be loaded.') })
+    return () => { active = false; controller.abort() }
   }, [sid])
   return <main className="asst-view" data-route-main tabIndex={-1}>
     <div className="asst-main">
@@ -18,6 +24,7 @@ export default function SharedAssistant({ sid, onBack }) {
         <span className="pill">read-only</span>
       </div>
       <div className="asst-feed" role="log" aria-label="Shared Assistant transcript" tabIndex={0}>
+        {!sess && !err && <div className="notice" role="status">Loading shared chat…</div>}
         {err && <div className="notice" role="alert" style={{ borderColor: 'var(--fail)', color: 'var(--fg)' }}>{err}</div>}
         {sess && (sess.messages || []).map((m, i) => <Turn key={i} m={m} readOnly />)}
         {sess && (sess.messages || []).length === 0 && <div className="muted">Empty chat.</div>}

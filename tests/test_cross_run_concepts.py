@@ -222,6 +222,15 @@ def test_poisoned_capsule_row_is_quarantined_not_fatal(tmp_path):
     assert caps[0]["concepts"] == ["data/hard-neg"]               # not poisoned into character concepts
 
 
+def test_capsule_store_rejects_unknown_schema_and_bad_live_write(tmp_path):
+    p = tmp_path / "concept_capsules.jsonl"
+    store = ConceptCapsuleStore(p)
+    unknown = build_concept_capsule(run_id="future", fingerprint=["k"], direction="max", concepts=["c"])
+    unknown["v"] = 999
+    assert store.add(unknown) is False and not p.exists()
+    assert store.add({"run_id": "bad", "fingerprint": [], "concepts": "characters"}) is False
+
+
 # --------------------------------------------------------------------------- #
 # Replay-safety of the audit event
 # --------------------------------------------------------------------------- #

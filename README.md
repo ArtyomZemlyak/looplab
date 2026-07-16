@@ -13,8 +13,10 @@ LoopLab runs a closed research loop: a **Researcher** proposes ideas, a **Develo
 code, a sandbox runs it, an evaluator scores it, and the loop refines and **merges** the best
 candidates — repeating until the budget runs out. On a fresh repo node the Developer works in three
 phases — **stages → plan → implement** (declare the eval pipeline — skipped when the operator already
-declared `cmd.stages` — decompose into atomic steps, then write the code). Every step is appended to an **event log that is the single source of truth**, so a
-run is fully **reproducible and crash-resumable by replay**.
+declared `cmd.stages` — decompose into atomic steps, then write the code). Domain decisions are appended to
+an event log that is authoritative for the **replayable run state**, so the search can be reproduced and
+crash-resumed by replay. Task/config snapshots, diagnostic traces, chat and cross-run memory remain explicit
+sidecars; they are not invented by `replay.fold`.
 
 It runs **fully offline with zero external services** (no API keys, no Docker) on a local task, and
 scales up to driving a live LLM, working inside a real repo, or grading actual Kaggle competitions.
@@ -30,7 +32,7 @@ plane is deterministic, and the Search / Memory / Knowledge stores feed the loop
 ## Key features
 
 - **Closed research loop** — a Researcher proposes, a Developer writes the code, a sandbox runs it, an evaluator scores it, and the loop refines and merges the best candidates. See [Concepts](docs/guide/concepts.md).
-- **Event log as the single source of truth** — every step is appended to an append-only log, so runs are fully reproducible and **crash-resumable by replay**. See [Concepts](docs/guide/concepts.md).
+- **Event-sourced, replayable run state** — domain decisions are appended to an append-only log and folded deterministically, so search state is reproducible and **crash-resumable by replay**. Control-plane appends share the event-store lock; task/config, traces, chat and cross-run memory keep their own documented sidecar contracts. See [Concepts](docs/guide/concepts.md).
 - **Offline, or any OpenAI-compatible LLM** — no keys or Docker for local runs; change `base_url` to drive it with Ollama, vLLM, SGLang, or OpenAI. See [LLM & coding agents](docs/guide/llm-and-agents.md).
 - **Describe the task in words** — Genesis (the LLM planner) authors the whole task from a `--goal`, including where your data lives. See [Generating code](docs/guide/generating-code.md).
 - **Nine task adapters** — from a toy objective to your own dataset, an existing repo, or real Kaggle competitions. See [Tasks](docs/guide/tasks.md).
@@ -168,8 +170,9 @@ Full flag-by-flag reference: [CLI reference](docs/guide/cli-reference.md).
 
 ## Crash & resume (the keystone)
 
-Because the event log is the source of truth, a run survives a hard kill and continues from the
-exact frontier — no duplicated or lost work:
+Because the event log is authoritative for replayable run state, a run survives a hard kill and continues
+from the durable frontier. External paid calls and pre-append side effects use their own recovery handshakes;
+see [Concepts](docs/guide/concepts.md#authoritative-command-lifecycle) for the exact ambiguity boundaries:
 
 ```bash
 looplab run examples/toy_task.json --out runs/c --max-nodes 12 --crash-after 3

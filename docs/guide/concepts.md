@@ -59,10 +59,10 @@ the event log, and are never read by `replay.fold`.
 
 ```
 runs/<name>/
-├── events.jsonl          # append-only event log — the source of truth
+├── events.jsonl          # append-only event log — replay authority for RunState
 ├── config.snapshot.json  # resolved settings at launch (secret-masked)
 ├── task.snapshot.json    # verbatim task copy → the run is self-describing
-├── engine.lock           # single-writer lock (one live engine per run dir)
+├── engine.lock           # live-engine fence (one reducer per run dir; control appends serialize separately)
 ├── .commands/            # durable command records plus execution/activity claims
 ├── .llm-usage-outbox/    # numeric same-ID usage awaiting/confirming its event append
 ├── nodes/node_<id>/      # per-node eval workdirs (also confirm/ and ablate/ scratch dirs)
@@ -494,11 +494,17 @@ are merged (exact-hash **plus** a hybrid-retrieval → agentic paraphrase-merge 
 **hypothesis board** is deduped the same way and prioritized by foresight. See
 **[Memory & knowledge](memory.md)** for the full tier-by-tier breakdown.
 
-This shipped lesson/case memory should not be confused with the planned **portfolio research index**. At
-present, concept tags and concept coverage are per-run, and cross-run retrieval does not yet maintain a
-versioned technology graph plus application/domain/data/objective applicability. The target CR0–CR3 design
-adds evidence-grounded claims, incremental run/portfolio summaries, structured “tried before” context and a
-Research Atlas for 50–500 heterogeneous runs; see
+This shipped lesson/case memory should not be confused with the complete **portfolio research index**.
+An opt-in experimental Part-IV slice now ships: rebuildable run passports/facts, per-run concept capsules,
+versioned concept-key alias/split overlays, v2 D8 claims, task facets, bounded retrieval, and backend
+Atlas/claims projections. Its bound agent tools use role, direction and exact-task-or-strict-goal-fingerprint
+filters (task facets are ranking-only), and proactive prompt influence carries lean digest receipts. Typed
+owner governance actions add revision/action fencing and explicit clear operations. The remaining heuristic
+scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
+families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
+bounded read-only preview of these projections, not that full system.
+The target CR0–CR3 design adds the full applicability/coverage frame, durable derivation contracts,
+incremental summaries and interactive Research Atlas; see
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 
 ### Harmonic memory (`memora`, optional)

@@ -19,12 +19,16 @@ from typing import Optional
 from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure_rate,
                                        improves_since_best, is_numeric_space, run_phase,
                                        validate_strategy)
+from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
+                                  verifier_evidence_snapshot)
 from looplab.core.models import RunState
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
-                                  EV_NODE_VERIFIED, EV_STRATEGY_DECISION)
+                                  EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
+from looplab.search.coverage import coverage_signal
+from looplab.search.policy import available_policies, make_policy, operator_yields
 
 # HT (§21.18): max hypotheses to agentically tag per strategist cadence, so a large board (the rubertlite
 # run hit ~150) tags incrementally over a few cadences instead of exploding one cadence's LLM budget.
@@ -34,8 +38,6 @@ _HYP_TAG_CAP = 60
 # the rest refresh over subsequent cadences).
 _RETAG_GROWTH = 0.7
 _RETAG_CAP = 20
-from looplab.search.coverage import coverage_signal
-from looplab.search.policy import available_policies, make_policy, operator_yields
 
 
 class StrategyCadenceMixin:
@@ -66,6 +68,7 @@ class StrategyCadenceMixin:
         # intra-node sweep (amortizing data load / warm-up pays off when each eval is expensive).
         ev = [n.eval_seconds for n in state.nodes.values() if n.eval_seconds]
         avg_es = (sum(ev) / len(ev)) if ev else None
+        cross_run_note = self._cross_run_note_for_ctx(state)
         return StrategyContext(
             node_count=len(state.nodes),
             phase=run_phase(state, self.n_seeds),
@@ -85,42 +88,64 @@ class StrategyCadenceMixin:
             # cadences from the run's own evidence, not priors. Computed on the (rare) consult
             # cadence only — O(nodes) is fine here, not on the per-proposal path.
             operator_yields=operator_yields(state),
-            # CODEX AGENT: the cross-run note receives no RunState, so unlike the local context above it is
-            # portfolio-wide and cannot exclude this run or enforce task/metric compatibility. This also
-            # silently broadened `cross_run_advisory` from a Researcher cue into a policy-changing Strategist
-            # treatment. Pass state + an immutable scoped receipt and document/gate this consumer separately.
-            cross_run_note=self._cross_run_note_for_ctx(),
+            cross_run_note=cross_run_note,
+            cross_run_receipt=getattr(self, "_cross_run_note_receipt", {}),
         )
 
-    def _cross_run_note_for_ctx(self) -> str:
+    def _cross_run_note_for_ctx(self, state: Optional[RunState] = None) -> str:
         """PART V §22 — a bounded cross-run coverage note (portfolio explored / thin / contested) for the
         Strategist's brief. On only under `cross_run_advisory` + a memory dir; best-effort ("" on any hiccup
         or empty store), so it never blocks the cadence. Advisory prose; honors operator claim decisions."""
         if not getattr(self, "_cross_run_advisory", False) or not getattr(self, "memory_dir", ""):
+            self._cross_run_note_receipt = {}
             return ""
         try:
+            import hashlib
             import json
             from pathlib import Path
 
-            from looplab.engine.claims import atlas_for_memory
+            from looplab.engine.claims import atlas_for_memory, load_research_claims
             from looplab.engine.memory import ConceptCapsuleStore
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
             lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if lp.exists() else []
             caps = ConceptCapsuleStore(cp).all() if cp.exists() else []
-            # CODEX AGENT: D8-only memory is discarded before `atlas_for_memory` gets a chance to load it,
-            # making API, Researcher/Strategist, and CLI disagree about whether the portfolio has claims.
-            if not lessons and not caps:
+            research = load_research_claims(base)
+            task_id = str(getattr(state, "task_id", "") or "") if state is not None else ""
+            run_id = str(getattr(state, "run_id", "") or "") if state is not None else ""
+            if state is not None:
+                def _visible(row):
+                    return (bool(task_id) and str(row.get("task_id") or "") == task_id
+                            and (not run_id or str(row.get("run_id") or "") != run_id))
+                lessons, caps, research = ([row for row in rows if _visible(row)]
+                                           for rows in (lessons, caps, research))
+            if not lessons and not caps and not research:
+                self._cross_run_note_receipt = {}
                 return ""
-            a = atlas_for_memory(base, lessons=lessons, capsules=caps)
+            a = atlas_for_memory(base, lessons=lessons, capsules=caps, research_claims=research)
             parts = [f"{a['n_runs']} run(s), {a['n_concepts']} concept(s), {a['n_contested']} contested"]
+            def _safe(value, limit):
+                return "".join(ch for ch in " ".join(str(value or "").split()) if ch.isprintable())[:limit]
             if a["thin_coverage"]:
-                parts.append("thinly-explored: " + ", ".join(a["thin_coverage"][:6]))
+                parts.append("thinly-explored: " + ", ".join(repr(_safe(x, 80))
+                                                              for x in a["thin_coverage"][:6]))
             if a["contradictions"]:
-                parts.append("unresolved: " + "; ".join(c["statement"][:60] for c in a["contradictions"][:2]))
-            return " | ".join(parts)
+                parts.append("unresolved: " + "; ".join(repr(_safe(c.get("statement"), 120))
+                                                          for c in a["contradictions"][:2]))
+            note = "UNTRUSTED_MEMORY_SUMMARY=" + repr(" | ".join(parts))
+            corpus = json.dumps({"lessons": lessons, "capsules": caps, "research": research},
+                                ensure_ascii=False, sort_keys=True, default=str,
+                                separators=(",", ":")).encode("utf-8")
+            self._cross_run_note_receipt = {
+                "v": 1, "scope_task": task_id, "excluded_run": run_id,
+                "n_lessons": len(lessons), "n_capsules": len(caps), "n_research": len(research),
+                "corpus_digest": hashlib.sha256(corpus).hexdigest(),
+                "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),
+            }
+            return note
         except Exception:  # noqa: BLE001 — advisory context, never blocks the strategist cadence
+            self._cross_run_note_receipt = {}
             return ""
 
     def _coverage_for_ctx(self, state: RunState) -> dict:
@@ -152,14 +177,11 @@ class StrategyCadenceMixin:
 
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
-        # CODEX AGENT: cross_run_note can change the strategy, but this durable event persists only three
-        # unrelated context fields. Replay cannot reconstruct which mutable memory/snapshot influenced the
-        # decision once spans are disabled/rotated. Persist a bounded evidence receipt (revision/digest +
-        # selected refs/render hash) alongside the strategy decision.
         self.store.append(EV_STRATEGY_DECISION, {
             "strategy": strat,
             "at_node": len(state.nodes),
-            "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate"})
+            "ctx": (ctx.model_dump(include={"phase", "eval_budget_remaining", "failure_rate",
+                                            "cross_run_receipt"})
                     if ctx is not None else None),
         })
         self._apply_strategy(strat)
@@ -512,15 +534,14 @@ class StrategyCadenceMixin:
 
     # --- R1-c: calibrated-verifier metric-tie-break -------------------------------------------------
     def _maybe_verify_ties(self, state: RunState) -> RunState:
-        """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find eligible nodes that TIE on
-        the ranked scalar (`robust_metric`) where the tie is not yet resolvable — a group of ≥2 nodes with
-        ≥1 lacking a `verifier_score` — and verify the unscored ones (grounded on their realized result,
-        `selection_criteria`) so the fold's mean pick can break the tie by soundness. Lazy (only real,
-        exact ties), bounded per cadence, best-effort (no client / any failure -> skip). Emits
-        `node_verified` (generation-scoped); the fold reads it ONLY as a tie-break — it can never override
+        """R1-c: the calibrated §12-verifier metric-tie-break (opt-in). Find the complete selector-reachable
+        exact/CI tie that is not yet resolvable and re-score every member against one evidence revision
+        (`selection_criteria`) so the fold can break it by soundness. Lazy, bounded per cadence, and
+        best-effort (no client / any failure -> skip). Emits one atomic
+        `verifier_group_scored` record; the fold reads it ONLY as a tie-break — it can never override
         a strictly-better metric (§21.7). No-op when `select_verifier` is off. Runs in the sync cadence
         (like the Strategist consult), so a blocking LLM call here matches the established pattern."""
-        if not getattr(self, "_select_verifier", False):
+        if not state.select_verifier_tiebreak:
             return state
         groups = self._metric_tie_groups(state)
         if not groups:
@@ -531,9 +552,10 @@ class StrategyCadenceMixin:
             client = None
         if client is None:
             return state
-        # Process-local FAILURE guard: a (node, generation) whose verify returned None is recorded so a
-        # degraded client can't re-verify the same tie every cadence (a success sets verifier_score, which
-        # _metric_tie_groups already excludes). In-memory only (verify is live, never replayed); a fresh
+        # Process-local FAILURE guard: record a (node, generation, evidence revision) whose verify returned
+        # None so a degraded client can't re-verify the same tie every cadence (a success sets
+        # verifier_score, which _metric_tie_groups already excludes). In-memory only (verify is live, never
+        # replayed); a fresh
         # process on resume may retry, which is fine (bounded).
         attempted = getattr(self, "_verify_attempted", None)
         if attempted is None:
@@ -541,115 +563,55 @@ class StrategyCadenceMixin:
         budget = 8                       # per-cadence NODE cap so a big tie cluster can't burst cost
         done = False
         for group in groups:
-            # CODEX AGENT: groups can overlap, but `todo` is computed from the stale input state while earlier
-            # appends in this loop are not folded back. A robust group [0,1] can commit, then holdout group
-            # [1,2] fail on 2; score 1 still decides the supposedly abstained second group (and on success 1
-            # is called/appended twice with last-sample-wins). Plan one deduplicated cadence transaction with
-            # explicit group membership/composition, then publish only complete groups atomically.
             # ATOMIC per group: score EVERY unscored member of a tie or NONE of it. A half-scored group
             # would leave an unscored sibling at the neutral 0.5 midpoint, which could outrank a
             # verified-but-low member — deciding the tie by verify TIMING/BUDGET rather than soundness. So
             # a group with a prior FAILED member (can never be fully scored) is skipped entirely (its tie
             # falls back to the id tie-break), and a group larger than the cadence budget is left for a
             # later cadence (a group larger than the cap is never verified — honest + bounded).
-            if any((n.id, n.attempt) in attempted for n in group):
+            attempted_keys = {
+                n.id: (n.id, n.attempt, verifier_evidence_digest(state.direction, n)) for n in group}
+            if any(attempted_keys[n.id] in attempted for n in group):
                 continue
-            todo = [n for n in group if n.verifier_score is None]
-            # Groups are now SEPARATE tie-sets (not union-find-merged), so a small exact tie is never
-            # blocked behind a large one (CODEX #4 fixed at the producer). A genuinely-LARGE single tie
-            # (> budget unscored nodes) is still left whole to a later cadence — atomic-or-nothing, so a
-            # partial score can't decide the tie by verify TIMING/BUDGET; if it never fits the cap it simply
-            # falls to the deterministic id tie-break (the verifier is advisory — a huge tie it can't fully
-            # score just isn't verifier-resolved, which is honest and bounded).
-            if not todo or len(todo) > budget:
+            # Re-score the complete current tie. Carrying an older member score into a newly expanded group
+            # would mix treatments and let one node influence two incompatible evidence snapshots.
+            todo = list(group)
+            if len(todo) > budget:
                 continue
             verdicts, failed = [], False
             for n in todo:
                 v = self._verifier_soundness(state, n, client)
                 budget -= 1
                 if v is None:
-                    attempted.add((n.id, n.attempt))   # a failure abstains the WHOLE group hereafter
+                    attempted.add(attempted_keys[n.id])  # failure abstains this evidence revision hereafter
                     failed = True
                     break
                 verdicts.append((n, v))
-            if not failed:                              # atomic commit: every member scored
-                # CODEX AGENT: the loop below is not durably atomic. A crash/append failure after the first
-                # node leaves a selection-affecting prefix; fold immediately uses that score against an
-                # unscored neutral sibling, and resume may finish without a client/cadence to repair it.
-                # Emit one versioned verifier_group_scored event containing every member/generation/evidence
-                # revision, and have replay ignore incomplete/unknown group records.
-                # KNOWN LIMITATION (CODEX #5, pre-existing since R1-c; off-by-default): the group is atomic
-                # IN MEMORY per cadence, but each score is a separate durable append — a crash BETWEEN them
-                # leaves a durable prefix, so on resume a half-scored tie could be decided by the neutral
-                # 0.5 of its not-yet-scored sibling. Rare (crash mid-scoring-loop) and only under
-                # select_verifier; a single versioned group event would make it fully durable-atomic —
-                # the proper fix, deferred (it needs a new event schema).
-                for n, v in verdicts:
-                    # Persist the score + provenance (n_samples, agreement) so a selection-affecting
-                    # decision is auditable; the fold reads only `score` (the rest is audit-only).
-                    self.store.append(EV_NODE_VERIFIED, {
-                        "node_id": n.id, "generation": n.attempt, "score": round(v["score"], 4),
-                        "n_samples": v["n_samples"], "agreement": v["agreement"]})
+            if not failed:
+                self.store.append(EV_VERIFIER_GROUP_SCORED, {
+                    "v": 1, "contract": VERIFIER_SELECTION_CONTRACT,
+                    "requested_samples": state.select_verifier_samples,
+                    "members": [{
+                        "node_id": n.id, "generation": n.attempt,
+                        "score": round(v["score"], 4), "n_samples": v["n_samples"],
+                        "agreement": v["agreement"], "method": v["method"],
+                        "evidence_digest": verifier_evidence_digest(state.direction, n),
+                    } for n, v in verdicts],
+                })
                 done = True
             if budget <= 0:
                 break
         return fold(self.store.read_all()) if done else state
 
     def _metric_tie_groups(self, state: RunState) -> list:
-        """The metric-ties the verifier could resolve — EXACTLY the tie-sets `_select_best`'s picks read:
-          * EXACT `robust_metric` ties (promotion_key / best_ci fallback);
-          * EXACT `holdout_metric` ties (holdout_key), when `holdout_select` is on;
-          * the CI-BAND of the metric leader (`SearchFitness.ci_tie_set`), when `verifier_ci_tie` is on — so
-            a near-equal (statistically-tied) candidate ACTUALLY gets a verifier_score, matching what best_ci
-            compares (R1-d producer/consumer share ONE tie predicate; CODEX #6).
-        These are SEPARATE groups, not union-find-merged: a small exact tie is therefore never blocked
-        behind a large one (CODEX #4). Groups may OVERLAP — a node's single verifier_score serves every key,
-        and `_maybe_verify_ties` only (re)scores a group's still-UNscored members, so overlap is harmless.
-        Deterministic order (by each group's lowest node id) so the per-cadence budget picks stably. Pure.
+        """The sole complete tie-set that can affect `_select_best`'s final champion.
 
-        Mirrors `_select_best`'s pools: promotion/CI ties over the mean-pick pool (the confirmed subset when
-        any node is confirmed, else all eligible); the holdout tie over the FULL eligible holdout pool
-        (`_select_best`'s `hpool` = every eligible node carrying a holdout_metric, NOT the confirmed subset —
-        R1-c §21.7: an unconfirmed-but-holdout-scored node tied on the holdout metric must be surfaced, not
-        left at the neutral verifier midpoint where it could WIN the holdout tie UNVERIFIED)."""
-        from looplab.core.fitness import SearchFitness
-        from looplab.events.replay import flagged_node_ids
-        flagged = flagged_node_ids(state)
-        eligible = [n for n in state.evaluated_nodes()
-                    if SearchFitness.eligible(n, flagged, state.aborted_nodes)]
-        confirmed = [n for n in eligible if n.confirmed_mean is not None]
-        pool = confirmed if confirmed else eligible                  # mirrors _select_best's mean/CI pick
-        # R1-c: the holdout pick ranks the FULL eligible holdout pool (never the confirmed subset), so its
-        # tie must be grouped over that pool too — else an unconfirmed-but-holdout-scored tied node stays at
-        # the neutral verifier midpoint and could win the holdout tie UNVERIFIED (§21.7).
-        holdout_pool = [n for n in eligible if n.holdout_metric is not None]
-        groups: list = []
-
-        def _add(nodes):
-            if len(nodes) >= 2 and any(n.verifier_score is None for n in nodes):
-                groups.append(nodes)
-
-        def _exact_ties(nodes, metric_of):
-            buckets: dict = {}
-            for n in nodes:
-                m = metric_of(n)
-                if m is not None:
-                    buckets.setdefault(m, []).append(n)
-            # CODEX AGENT: every lower-score tie bucket is enqueued and groups are later sorted by node id,
-            # so an 8-node losing tie can consume the entire cadence cap before the 2-node champion tie.
-            # If the run then finishes, the actual winner stays on id fallback. Produce/prioritize only the
-            # selector-reachable top robust and top holdout buckets (plus the leader CI band).
-            for grp in buckets.values():
-                _add(grp)
-
-        _exact_ties(pool, lambda n: n.robust_metric)                 # promotion_key exact ties (mean-pick pool)
-        if getattr(self, "_holdout_select", False):
-            _exact_ties(holdout_pool, lambda n: n.holdout_metric)    # holdout_key exact ties (FULL eligible pool, R1-c)
-        if getattr(self, "_verifier_ci_tie", False):
-            fit = SearchFitness(state.direction, verifier_tiebreak=True, ci_tie=True)
-            _add(fit.ci_tie_set(pool))                               # R1-d: the CI-band best_ci compares
-        groups.sort(key=lambda nodes: min(n.id for n in nodes))
-        return groups
+        The replay helper owns pool/holdout/CI precedence as one pure contract shared by the event producer
+        and validator. Recorded run state is authoritative here: live engine fields may not silently change
+        selection semantics after resume or a config edit.
+        """
+        from looplab.events.replay import verifier_tie_groups
+        return verifier_tie_groups(state)
 
     def _verifier_soundness(self, state: RunState, node, client) -> Optional[dict]:
         """The calibrated §12-verifier soundness verdict for a node's REALIZED result, or None on any
@@ -657,7 +619,7 @@ class StrategyCadenceMixin:
         `result_sound` criterion mean in [0,1] (grounded on the node's idea + metric + confirm/holdout
         signals); the provenance rides on the audit event. Best-effort — never raises.
 
-        ABSTAINS (None) when cross-sample AGREEMENT is below a majority (only measurable with >1 sample):
+        ABSTAINS (None) when cross-sample AGREEMENT is not a strict majority (only measurable with >1 sample):
         a high-variance verdict — the single-shot noise §21.12 measured — must not decide a tie. Evidence
         is scalar-summary only (the hard leakage/gaming/overfit signals stay the job of the trust layer's
         reward-hack / leakage detectors); this advisory tie-break asks only "does the reported result look
@@ -668,16 +630,18 @@ class StrategyCadenceMixin:
             parser = next((p for o in (r, getattr(r, "inner", None), getattr(r, "fallback", None),
                                        getattr(self, "developer", None)) if (p := getattr(o, "parser", None))),
                           "tool_call")
-            subject = (f"Experiment #{node.id} reported metric={node.metric} on the task (optimize "
+            snapshot = verifier_evidence_snapshot(state.direction, node)
+            subject = (f"Experiment #{node.id} reported metric={snapshot['metric']} on the task (optimize "
                        f"direction: {state.direction}); its result is genuinely sound and will hold up.")
-            evidence = (f"What it did: {' '.join((getattr(node.idea, 'rationale', '') or '').split())[:250]}\n"
-                        f"Metric: {node.metric}"
-                        + (f"; confirmed mean over {node.confirmed_seeds} seeds: {node.confirmed_mean}"
-                           if node.confirmed_mean is not None else "")
-                        + (f"; holdout metric: {node.holdout_metric}" if node.holdout_metric is not None else "")
-                        + (f"; generalization gap: {node.generalization_gap}"
-                           if node.generalization_gap is not None else ""))
-            samples = getattr(self, "_select_verifier_samples", 3)
+            evidence = (f"What it did: {snapshot['rationale']}\n"
+                        f"Metric: {snapshot['metric']}"
+                        + (f"; confirmed mean over {snapshot['confirmed_seeds']} seeds: "
+                           f"{snapshot['confirmed_mean']}" if snapshot['confirmed_mean'] is not None else "")
+                        + (f"; holdout metric: {snapshot['holdout_metric']}"
+                           if snapshot['holdout_metric'] is not None else "")
+                        + (f"; generalization gap: {snapshot['generalization_gap']}"
+                           if snapshot['generalization_gap'] is not None else ""))
+            samples = state.select_verifier_samples
             rep = verify(subject, evidence, selection_criteria(), client=client,
                          samples=samples, parser=parser)
             if rep is None or rep.method == "unavailable":
@@ -685,17 +649,16 @@ class StrategyCadenceMixin:
             crit = (rep.per_criterion or {}).get("result_sound") or {}
             m = crit.get("mean")
             score = float(m) if m is not None else (float(rep.score) if rep.score is not None else None)
-            if score is None:
+            if score is None or score != score or not 0.0 <= score <= 1.0:
                 return None
-            # Reject a too-noisy verdict (variance is only measurable across >1 sample): if fewer than half
-            # the samples agree on the modal verdict, the judgment is unstable — abstain so a coin-flip
-            # can't decide the tie (which then falls back to the id tie-break for the whole group).
-            # CODEX AGENT: the prose promises a majority, but agreement==0.5 (e.g. a 1-1 split with two
-            # allowed samples) passes and can choose the champion. Require strict majority (`<= 0.5`
-            # abstains), constrain sample counts to odd values, or use an explicit confidence rule.
-            if samples > 1 and rep.agreement < 0.5:
+            # Repeated verification needs a strict majority of the REQUESTED samples to
+            # survive parsing as well as a strict modal majority. One lucky parsed answer out of three is
+            # not a repeated verdict and must not become selection-affecting evidence.
+            if (rep.n_samples > samples or rep.n_samples * 2 <= samples
+                    or (samples > 1 and rep.agreement <= 0.5)):
                 return None
-            return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement}
+            return {"score": score, "n_samples": rep.n_samples, "agreement": rep.agreement,
+                    "method": str(rep.method or "")[:80]}
         except Exception:  # noqa: BLE001 — advisory tie-break: any failure just skips (id tie-break stands)
             return None
 

@@ -15,7 +15,7 @@ What just happened:
 
 1. The engine created the run directory `runs/demo/`.
 2. It drafted candidate solutions, ran each in a sandbox, scored it, and refined the best.
-3. Every step was appended to `runs/demo/events.jsonl` (the source of truth).
+3. Every domain decision was appended to `runs/demo/events.jsonl` (the replay authority for `RunState`).
 4. It printed the **best** node and its metric.
 
 ## 2. Read the result
@@ -35,7 +35,7 @@ explored and how they descend from one another.
 
 ```
 runs/demo/
-├── events.jsonl          # append-only event log — the source of truth
+├── events.jsonl          # append-only event log — replay authority for RunState
 ├── config.snapshot.json  # the exact resolved settings (secret-masked)
 ├── task.snapshot.json    # a verbatim copy of the task (makes the run self-describing)
 ├── tree.html             # static lineage view

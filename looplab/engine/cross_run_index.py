@@ -32,6 +32,37 @@ from looplab.core.models import RunState
 # not inherit each run's live `fingerprint_universal` flag, so the index is internally self-consistent.
 SCOPE_SCHEMA_VERSION = 1
 
+# The incremental cache is an optimisation, never a source of truth.  Its compatibility therefore has
+# to describe every projection choice that can change cached facts independently of the source digest:
+# the cache envelope, the facts projector, the passport schema, and the fingerprint/tokenizer mode.
+# A cache written before this contract existed is intentionally cold-started instead of being guessed at.
+INDEX_CACHE_SCHEMA_VERSION = 2
+INDEX_PROJECTOR_VERSION = 1
+_DIGEST_CHUNK_BYTES = 1024 * 1024
+
+
+def _cache_contract(*, universal: bool) -> dict:
+    return {
+        "v": INDEX_CACHE_SCHEMA_VERSION,
+        "projector_v": INDEX_PROJECTOR_VERSION,
+        "scope_v": SCOPE_SCHEMA_VERSION,
+        "fp_mode": "universal" if universal else "legacy",
+    }
+
+
+def _cache_contract_matches(candidate: object, expected: dict) -> bool:
+    return isinstance(candidate, dict) and all(candidate.get(key) == value for key, value in expected.items())
+
+
+def _cached_facts_match_contract(facts: object, expected: dict) -> bool:
+    """Defend against a mixed/tampered cache even when its envelope advertises the right contract."""
+    if not isinstance(facts, dict):
+        return False
+    scope = facts.get("scope")
+    return (isinstance(scope, dict)
+            and scope.get("v") == expected["scope_v"]
+            and scope.get("fp_mode") == expected["fp_mode"])
+
 
 def scope_profile(*, task_id: str, kind: str, direction: str, goal: str, metric: str = "",
                   universal: bool = True, facets: Optional[dict] = None) -> dict:
@@ -167,11 +198,19 @@ def run_source_digest(run_dir: str | Path) -> str:
     if not ev.exists():
         return ""
     h = hashlib.sha1()
-    h.update(ev.read_bytes())
+
+    def _update(path: Path) -> None:
+        # Run logs can grow well beyond memory-sized payloads.  Stream both inputs so computing the cache
+        # key has bounded memory use and never materialises a second full copy of a log.
+        with path.open("rb") as fh:
+            while chunk := fh.read(_DIGEST_CHUNK_BYTES):
+                h.update(chunk)
+
+    _update(ev)
     h.update(b"\x00snapshot\x00")
     snap = d / "task.snapshot.json"
     if snap.exists():
-        h.update(snap.read_bytes())
+        _update(snap)
     return "s_" + h.hexdigest()
 
 
@@ -185,7 +224,13 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
     from looplab.events.eventstore import EventStore
     from looplab.events.replay import fold
     root = Path(run_root)
-    prior_runs = (prior or {}).get("runs") or {}
+    contract = _cache_contract(universal=universal)
+    # Source digests alone are insufficient: identical logs project differently under a different
+    # fingerprint mode or projector/schema generation.  Missing metadata denotes the pre-contract cache
+    # format and deliberately forces a rebuild.
+    prior_runs = (prior or {}).get("runs") or {} if _cache_contract_matches(prior, contract) else {}
+    if not isinstance(prior_runs, dict):
+        prior_runs = {}
     runs: dict[str, dict] = {}
     receipts = {"built": [], "cached": [], "skipped": []}
     entries: list[tuple[RunState, str, str]] = []
@@ -193,7 +238,8 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
         name = ev.parent.name                         # stable per-run cache key (the run dir name)
         digest = run_source_digest(ev.parent)
         cached = prior_runs.get(name)
-        if digest and cached and cached.get("digest") == digest and cached.get("facts"):
+        if (digest and isinstance(cached, dict) and cached.get("digest") == digest
+                and _cached_facts_match_contract(cached.get("facts"), contract)):
             runs[name] = {"digest": digest, "facts": cached["facts"]}
             receipts["cached"].append(name)
             continue
@@ -218,14 +264,20 @@ def build_index_incremental(run_root: str | Path, *, prior: Optional[dict] = Non
     all_facts = [r["facts"] for r in runs.values()]
     all_facts.sort(key=lambda f: (f["run_id"], f["scope"]["task_id"], f["n_attempts"],
                                   str((f.get("best") or {}).get("metric")), _content_digest(f)))
-    return {"index": all_facts, "runs": runs, "receipts": receipts}
+    return {**contract, "index": all_facts, "runs": runs, "receipts": receipts}
 
 
 def save_index(path: str | Path, result: dict) -> None:
     """Persist an incremental-index result (`{"index","runs","receipts"}`) atomically as JSON — the cache a
     later `build_index_incremental(prior=load_index(path))` reads to skip unchanged runs."""
     from looplab.core.atomicio import atomic_write_bytes
-    payload = {"v": SCOPE_SCHEMA_VERSION, "runs": result.get("runs") or {}}
+    fp_mode = result.get("fp_mode")
+    if fp_mode not in {"universal", "legacy"}:
+        raise ValueError("incremental index result is missing a valid fp_mode")
+    contract = _cache_contract(universal=fp_mode == "universal")
+    if not _cache_contract_matches(result, contract):
+        raise ValueError("incremental index result uses an incompatible cache contract")
+    payload = {**contract, "runs": result.get("runs") or {}}
     atomic_write_bytes(Path(path), json.dumps(payload, ensure_ascii=False).encode("utf-8"))
 
 
@@ -239,4 +291,9 @@ def load_index(path: str | Path) -> Optional[dict]:
         payload = json.loads(p.read_text(encoding="utf-8"))
     except Exception:  # noqa: BLE001 — a torn cache forces a clean rebuild
         return None
-    return {"runs": payload.get("runs") or {}} if isinstance(payload, dict) else None
+    if not isinstance(payload, dict) or payload.get("fp_mode") not in {"universal", "legacy"}:
+        return None
+    expected = _cache_contract(universal=payload["fp_mode"] == "universal")
+    if not _cache_contract_matches(payload, expected) or not isinstance(payload.get("runs"), dict):
+        return None
+    return {**expected, "runs": payload["runs"]}

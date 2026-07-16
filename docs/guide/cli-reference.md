@@ -18,6 +18,8 @@ looplab asset-brief     Prior-art & on-disk asset brief for a task repo (PART IV
 looplab lock-in         Action-space lock-in detector (PART IV D7)
 looplab board-dedup     Taxonomy-aware hypothesis-board dedup analysis (PART IV D4)
 looplab research-targets Axis-structured deep-research targets from coverage (PART IV D2)
+looplab novelty-recall  Audit executed proposals for paraphrases the novelty gate missed (PART IV E3)
+looplab lesson-guard    Audit distilled lessons for over-generalization and contradiction (PART IV D6/E4)
 looplab cross-run-index Lean diagnostic run-passport/facts rebuild (PART IV cross-run Step 1)
 looplab cross-run-concepts Valid-capsule raw-slug concept overview (PART IV cross-run Step 3)
 looplab cross-run-search Bounded hybrid cross-run query + lean receipt (PART IV CR2a)
@@ -288,13 +290,14 @@ looplab asset-brief REPO [--task-type dense-retrieval] [--llm] [--model ID]
 
 ## `lock-in`
 
-PART IV D7 (§21.8) offline analytic. Over the concept graph, finds the longest run of **consecutive**
+PART IV D7 (§21.8) read-only analytic. Over the concept graph, finds the longest run of **consecutive**
 experiments confined to one axis-region — the "same-lever streak" the flat coverage signal was blind to
 (on the `rubertlite` replay it trips at ~node 29) — and fires when it exceeds the threshold. Read-only,
-deterministic.
+deterministic once the concept tags exist. The LLM builds those tags by default; `--offline` uses the
+coarser deterministic tagger.
 
 ```bash
-looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5]
+looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5] [--offline] [--model ID]
 ```
 
 | Option | Default | Description |
@@ -302,61 +305,119 @@ looplab lock-in RUN_DIR [--task-type NAME] [--threshold 5]
 | `RUN_DIR` | *(required)* | Run directory to fold and diagnose |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton (e.g. `dense-retrieval`) |
 | `--threshold N` | `5` | Consecutive same-lever experiments that trip the alarm |
+| `--offline` | off | Do not call the LLM; build tags with the deterministic heuristic |
+| `--model ID` | configured model | Override the model used for the agentic tag build |
 
 ---
 
 ## `board-dedup`
 
-PART IV D4 (§21.5) offline analytic. Tags the hypothesis board and surfaces the dominant **within-concept**
+PART IV D4 (§21.5) read-only analytic. Tags the hypothesis board and surfaces the dominant **within-concept**
 redundancy (merge aggressively — e.g. the DCL cluster) plus **cross-branch** look-alike pairs a blind
-lexical/vector merge would wrongly collapse (keep distinct). Read-only; merges nothing.
+lexical/vector merge would wrongly collapse (keep distinct). The LLM builds/tags the graph by default;
+`--offline` forces the deterministic heuristic. Read-only; merges nothing.
 
 ```bash
-looplab board-dedup RUN_DIR [--task-type NAME]
+looplab board-dedup RUN_DIR [--task-type NAME] [--offline] [--model ID]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose hypothesis board to analyze |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
+| `--offline` | off | Do not call the LLM; use deterministic graph and hypothesis tags |
+| `--model ID` | configured model | Override the model used for the agentic build/tag pass |
 
 ---
 
 ## `research-targets`
 
-PART IV D2 (§21.3) offline analytic. Turns the coverage map into a ranked set of axis-structured
+PART IV D2 (§21.3) read-only analytic. Turns the coverage map into a ranked set of axis-structured
 deep-research targets: **uncovered** axes first (the blind regions), **failed directions** re-framed as
 "research a different implementation" (so the loop stops re-proposing the failed variant), then
-**under-covered** axes. Read-only; produces the targets, runs no research.
+**under-covered** axes. The agentic path also derives task-specific important-but-uncovered directions;
+`--offline` emits only deterministic axis targets. Read-only; produces the targets, runs no research.
 
 ```bash
-looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH]
+looplab research-targets RUN_DIR [--task-type NAME] [--asset-repo PATH] [--offline] [--model ID]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_DIR` | *(required)* | Run directory whose coverage to target |
 | `--task-type NAME` | inferred from `task_id` | Concept-graph skeleton |
-| `--asset-repo PATH` | — | Task repo to ground the queries in the D1 asset brief (offline scan) |
+| `--asset-repo PATH` | — | Task repo used to ground the derived importance and queries in a D1 asset brief |
+| `--offline` | off | Do not call the LLM; use the deterministic graph and axis targets only |
+| `--model ID` | configured model | Override the model used for the agentic build |
+
+---
+
+## `novelty-recall`
+
+PART IV E3 (§21.12) read-only novelty-gate audit. It clusters near-duplicate ideas among experiments
+that were actually built, then — by default — asks the configured LLM to distinguish a true paraphrase
+from a legitimate variant. `--max-pairs` bounds the paid adjudication calls and the command sends at most
+the two truncated idea texts for each selected pair. `--offline` reports unjudged candidate pairs without
+calling an endpoint.
+
+The displayed recall is explicitly an **optimistic diagnostic**, not a calibrated quality metric: its
+numerator counts gate-rejection events while its denominator adds adjudicated leaked pairs, and only the
+most-similar bounded tail is judged. Treat the leaked-pair list as the actionable output.
+
+```bash
+looplab novelty-recall RUN_DIR [--offline] [--max-pairs 60] [--model ID]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run whose executed proposals should be audited |
+| `--offline` | off | Skip LLM adjudication and return candidate near-duplicate pairs only |
+| `--max-pairs N` | `60` | Maximum most-similar pairs to adjudicate (`0..100000`; one LLM call per attempted pair) |
+| `--model ID` | configured model | Override the adjudication model |
+
+---
+
+## `lesson-guard`
+
+PART IV D6/E4 (§21.7/§21.12) read-only, LLM-backed audit of the run's distilled lessons. It checks
+whether a lesson generalized one failed implementation into a rejection of an otherwise sound direction,
+then scans up to 40 lesson pairs for contradiction. It writes no events and never changes selection or the
+lesson store. This command has no offline verdict path: an unreachable or fully abstaining verifier is
+reported as **inconclusive**, not as a clean result.
+
+```bash
+looplab lesson-guard RUN_DIR [--model ID]
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `RUN_DIR` | *(required)* | Run whose distilled lessons should be audited |
+| `--model ID` | configured model | Override the verifier model |
 
 ---
 
 ## `cross-run-index`
 
-PART IV cross-run Step 1 (§21.20.3). Builds a **lean diagnostic** index: a run passport plus latest folded node
-rows with optional metric and best, from `<run_root>/*/events.jsonl` + task snapshots. Repeated clean rebuilds
-over distinct runs are stable, but this is not the full CR0 corpus-health/per-generation measurement index:
-reset generations collapse, corrupt/missing inputs can yield a partial result without receipts, and equal-key
-duplicates remain input-order-dependent. No LLM/endpoint and no new source of truth.
+PART IV cross-run Step 1 (§21.20.3). Builds a **lean diagnostic** index: a versioned run passport plus
+latest folded node rows with optional metric and best, from `<run_root>/*/events.jsonl` + task snapshots.
+Rebuild ordering is content-deterministic even when copied runs share coarse keys. `--incremental` reuses a
+source-digest cache and prints built/cached/skipped receipts for unusable run projections.
+
+This is still not the full CR0 corpus-health/per-generation measurement index: reset generations collapse
+to the latest folded attempt, duplicate run identities are not deduplicated, and a missing/garbled task
+snapshot degrades its kind/metric fields to empty without a dedicated receipt. The default non-incremental
+CLI returns only the index and therefore discards the incremental builder's skip receipts. No LLM/endpoint
+and no new source of truth.
 
 ```bash
-looplab cross-run-index RUN_ROOT [--json]
+looplab cross-run-index RUN_ROOT [--incremental] [--json]
 ```
 
 | Option | Default | Description |
 |---|---|---|
 | `RUN_ROOT` | *(required)* | Directory holding run subdirs (each with `events.jsonl` + `task.snapshot.json`) |
-| `--json` | off | Emit the lean index as JSON; it can be partial without health/skip receipts today |
+| `--incremental` | off | Reuse `<run_root>/.cross_run_index.json`; print built/cached/skipped receipts and save the refreshed cache when the index is non-empty |
+| `--json` | off | Emit the lean index array as JSON (receipts are not included in this JSON payload) |
 
 ---
 
@@ -389,10 +450,13 @@ rewritten. Alias writes append under the shared interprocess lock; selected Atla
 load the latest overlay and resolve its chain without claiming a read lock. The `cross-run-concepts` CLI
 intentionally remains a raw-capsule view.
 
-This is a **lean alias overlay**, not full taxonomy governance: the content-addressed `concept_uid` helper is
-not carried in overview/Atlas responses and changes with spelling; source/target existence, self/cycle/case,
-scope, release revision and expected version are not validated; split/backfill, impact preview and history API
-are absent. Do not describe a re-decision as a versioned or audited taxonomy release.
+This local CLI is a **lean alias overlay**, not full taxonomy governance: the content-addressed `concept_uid`
+helper is not a release-pinned entity identity, and source/target existence, scope and taxonomy release are not
+validated. Empty sources, self-links and cycles are rejected under the shared append lock, and keys are
+case-normalized. This command has no `expected_revision`, `action_id` or explicit clear verb; a later record can
+replace the effective mapping and raw capsule tags remain intact. The owner HTTP governance surface is stricter:
+it separates merge from confirmed purge and supplies CAS, idempotency and alias-clear actions. Neither surface
+provides impact preview, assignment backfill or a queryable taxonomy-history workbench.
 
 ```bash
 looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
@@ -409,9 +473,11 @@ looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
 ## `concept-split`
 
 PART IV §21.20.13 — the OPERATOR concept **SPLIT**: declare one coarse concept really covers several finer
-ones, RE-TAGGED per each run's OWN sibling concepts. Non-destructive and reversible — append-only
-`concept_splits.jsonl`, applied at READ time; raw per-run tags are never rewritten. For a given run the FIRST
-rule whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise `--default` (or the
+ones, RE-TAGGED per each run's OWN sibling concepts. The append-only `concept_splits.jsonl` overlay is applied
+at READ time and raw per-run tags are never rewritten; the latest record for a source replaces its effective
+split. This local CLI has no expected-revision/action-id/clear options; the owner HTTP surface adds CAS,
+idempotency and `concept-split-clear`, but neither is a revisioned taxonomy/assignment release. For a given run the FIRST rule
+whose `when_any` terms appear among that run's sibling concept tokens wins; otherwise `--default` (or the
 original slug). Rejects an empty source, a rule targeting its own source, and an empty ruleset with no default.
 
 ```bash
@@ -431,8 +497,8 @@ looplab concept-split MEMORY_DIR FROM_CONCEPT --rule 'TARGET:term1,term2' [--rul
 
 PART IV §21.20.13 / §22.4 — the **AGENTIC taxonomy steward**: an LLM reviews the cross-run concept graph and
 PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise). Advisory by default (shows
-proposals for operator ratification); `--apply` records them through the SAME reversible append-only governance
-writes as the manual `concept-merge`/`concept-split` (the LLM only proposes — it never mutates `fold()` state).
+proposals for operator ratification); `--apply` records them through the SAME locked append-only overlay writes
+as the manual `concept-merge`/`concept-split` (the LLM only proposes — it never mutates `fold()` state).
 Needs a reachable LLM. This is the on-demand CLI companion to the finalize-time `cross_run_curation` flag.
 
 ```bash
@@ -442,7 +508,7 @@ looplab concept-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 12] [-
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` |
-| `--apply` | off | RECORD the proposals instead of only showing them (reversible append-only ledger) |
+| `--apply` | off | Explicitly record the LLM proposals through the local overlay commands; raw capsules remain unchanged. This CLI path has no CAS/action-id/clear contract. The HTTP steward endpoint is proposal-only and rejects apply |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `12` | Cap the total merge/split/purge proposals per pass |
 | `--json` | off | Emit `{proposals, receipt}` as JSON |
@@ -462,20 +528,25 @@ looplab cross-run-digest MEMORY_DIR [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` and optional aliases |
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` and optional alias/split overlays |
 | `--json` | off | Emit `{n_axes, n_concepts, axes[]}` instead of the compact text rollup |
 
 ---
 
 ## `cross-run-search`
 
-PART IV CR2a. Runs a bounded hybrid recall over statement-grouped claims plus alias-aware concept labels and
-excludes operator-rejected claims. The JSON result includes result scores and a **minimal** receipt
-(`query`, requested `k`, corpus/hit counts and advertised channels). It does not explain each hit's channel
-contribution, carry evidence refs/source/scope/snapshot/index-health, enforce a ComparisonContract, or persist a
-derivation receipt. The vector channel uses the default deterministic hash embedding and the corpus is rebuilt
-per call; this is an experimental portfolio recall, not the “Why recalled?” proof contract in doc 18. There is
-no matching HTTP query route yet.
+PART IV CR2a. Runs a bounded hybrid recall over statement-grouped claims plus alias/split-aware concept labels
+and excludes operator-rejected claims. The payload includes an intent classification, aggregate result score
+and relevance rank, corpus digest, corpus/hit/truncation counts, the effective contradiction quota/caveat count,
+and a declaration that the 64-bucket hash "vector" channel is a lexical proxy rather than a semantic model.
+The corpus is capped internally at 2,000 records and rebuilt per call.
+
+It still does not expose each channel's per-hit contribution, carry evidence refs/source/scope/snapshot/index-
+health on each result, enforce a ComparisonContract, or persist the derivation receipt. The CLI has no scope
+option and reads the portfolio-wide stores. Bound agent callers instead pass a role-filtered snapshot scoped by
+direction plus exact task or a strict related-goal fingerprint; task facets are ranking-only. This is useful applicability filtering,
+not a security boundary. This remains an experimental recall, not the full “Why recalled?” proof contract in
+doc 18, and there is no matching HTTP query route yet.
 
 ```bash
 looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
@@ -486,17 +557,20 @@ looplab cross-run-search MEMORY_DIR "QUERY" [--k 8] [--json]
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir; CLI reads are intentionally portfolio-wide |
 | `QUERY` | *(required)* | Free-text idea, technique or question |
 | `--k N` | `8` | Requested result count; no product-level maximum/paging contract exists yet |
-| `--json` | off | Emit results plus the minimal receipt |
+| `--json` | off | Emit ranked results plus the intent/corpus/quota receipt |
 
 ---
 
 ## `claims`
 
-PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` into a **statement-grouped lean claim view** with
-provisional support/oppose references and `supported`/`refuted`/`mixed`/`inconclusive` labels. This is not yet a
-verified independent-evidence assessment: negative-action polarity can invert a factual statement, persisted D8
-claims lose their verifier verdict/proper scope provenance, and refs are attempts rather than evidence families.
-Identity is normalized statement text. Pure read; no LLM/endpoint.
+PART IV cross-run Step 4 (§21.20). Projects `lessons.jsonl` plus persisted D8 `research_claims.jsonl` into a
+**statement-grouped lean claim view** with support/oppose/unverified references and
+`supported`/`refuted`/`mixed`/`inconclusive` labels. New v2 D8 rows preserve `task_id`, run-qualified node
+references, source URLs, and the verifier verdict/method/note; legacy rows without that payload remain
+`unverified` and never become positive support merely because they cited a node. This is still not an
+independent-evidence assessment: the lean lesson mapping can invert a negative factual statement, and refs are
+attempts rather than independent evidence families. Identity is normalized statement text unless
+`--structured` is selected. Pure read; no LLM/endpoint.
 
 ```bash
 looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structured] [--json]
@@ -504,7 +578,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 
 | Option | Default | Description |
 |---|---|---|
-| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (or the file itself) |
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `research_claims.jsonl` (or a lessons file) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
 | `--pack` | off | Render the claim-count-bounded agent **context pack** (Step 5): contested-first, a caveat slot reserved so positives never crowd out opposition, plus a lean portfolio line |
@@ -517,7 +591,7 @@ A rejected claim remains human-visible in the unfiltered claims CLI/API and can 
 top-level `n_claims`/`n_claims_total`; it is excluded from the **active** context pack, Atlas contradictions,
 agent-tool projection and hybrid retrieval. A ratified claim is surfaced first in the context pack. This closes
 the earlier steering leak without pretending rejection deletes evidence or history; scope, D8-verification and
-stable-identity gates in [doc 17 §22.7](../17-project-review-and-directions-2026-07-11.md) still block production
+stable-identity gates in [doc 17 §22.8](../17-project-review-and-directions-2026-07-11.md) still block production
 advisory.
 
 ---
@@ -525,11 +599,14 @@ advisory.
 ## `claim-decide`
 
 PART V §22.4 — the **lean operator decision overlay**: ratify / reject / pin a cross-run claim. Agents have no
-matching mutation tool. Records append to `claim_decisions.jsonl`, keyed by normalized statement text, and the
-latest matching record wins. The append now uses an interprocess lock, but this is not full governance: it has
-no clear/undo verb, stable claim UID, scope/evidence revision, fsync/idempotency/CAS, server-derived actor/time
-or history endpoint. A later decision can replace the badge, but that must not be described as audited or
-reversible undo.
+matching mutation tool. Records append under an interprocess lock with fsync to `claim_decisions.jsonl`, keyed
+both by normalized statement text and by a stable scope+polarity `claim_uid`; the latest matching record wins.
+This local CLI is still not full governance: it has no clear verb, evidence/scope revision object,
+idempotency/CAS, server-derived actor/time or history endpoint. A later decision can replace the effective badge
+while raw JSONL history remains. The typed owner HTTP action adds claim `clear`, `expected_revision`, `action_id`,
+server-derived actor/time and stable 409 conflicts. It also requires a currently projected structured
+`claim_uid` plus the exact `evidence_digest` the operator observed and validates both inside the locked CAS.
+That live digest fence is not a versioned evidence release, and no queryable decision-history workbench exists.
 
 ```bash
 looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."] [--scope TASK_ID]
@@ -553,7 +630,7 @@ PART IV §22.4 — the **AGENTIC claim steward**: an LLM reviews the evidence-gr
 their support/oppose counts and epistemic state) and PROPOSES operator decisions — ratify a well-evidenced
 consistent claim, reject a contradicted/over-generalized/noise claim, pin a load-bearing one. It reviews ONLY
 machine-proposed claims (never re-litigates a human verdict). Advisory by default; `--apply` records the
-decisions through the SAME reversible `claim-decide` governance write (scope-precise via the structured key —
+decisions through the SAME latest-write `claim-decide` overlay (scope-precise via the structured key —
 the LLM only proposes). Needs a reachable LLM. The on-demand companion to the finalize-time `cross_run_curation`.
 
 ```bash
@@ -563,7 +640,7 @@ looplab claim-steward MEMORY_DIR [--apply] [--model M] [--max-proposals 10] [--j
 | Option | Default | Description |
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` (+ persisted claims) |
-| `--apply` | off | RECORD the proposed decisions instead of only showing them (reversible) |
+| `--apply` | off | Explicitly record proposed decisions through the local latest-write overlay; this CLI path has no CAS/action-id/clear contract. The HTTP steward endpoint is proposal-only and rejects apply |
 | `--model` | *(config)* | Override the LLM model id |
 | `--max-proposals` | `10` | Cap the total ratify/reject/pin proposals per pass |
 | `--json` | off | Emit `{proposals, receipt}` as JSON |
@@ -602,11 +679,13 @@ overview (Step 3), claim assessments (Step 4) and the bounded context pack (Step
 explored* (concept × #runs), *where it's thin* (concepts explored only once — a lean gap proxy, **not** a
 false "never tried", which needs a coverage frame), and *what's contradictory* (`mixed` claims). It reads the
 available `lessons.jsonl`, `concept_capsules.jsonl`, persisted `research_claims.jsonl`,
-`claim_decisions.jsonl` and `concept_aliases.jsonl` sidecars; active contradictions exclude operator-rejected
+`claim_decisions.jsonl`, `concept_aliases.jsonl` and `concept_splits.jsonl` sidecars; active contradictions exclude operator-rejected
 claims, while top-level raw claim totals may still include them.
 Aggregate concept buckets apply exact-slug aliases, but responses still carry display slugs and raw run cards
 can disagree after a merge. It has no saved-scope, comparison, snapshot/health, pagination, stable versioned
 identity or CoverageFrame contract; it is not the full backend in [doc 18 §§28, 33](../18-ui-ux-review-2026-07-11.md).
+The CLI accepts any non-empty combination of lessons, concept capsules or D8 `research_claims.jsonl`, including
+a D8-only store. It remains a bounded live summary rather than a frozen/paged Atlas query.
 
 ```bash
 looplab atlas MEMORY_DIR [--max-items 8] [--json]
@@ -614,7 +693,7 @@ looplab atlas MEMORY_DIR [--max-items 8] [--json]
 
 | Option | Default | Description |
 |---|---|---|
-| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding lessons/capsules and optional research-claim, decision and concept-alias sidecars |
+| `MEMORY_DIR` | *(required)* | Cross-run memory dir holding any of lessons, capsules or D8 research claims, plus optional decision and concept-governance sidecars |
 | `--max-items N` | `8` | Cap per section (explored / contested / thin) |
 | `--json` | off | Emit the capped lean Atlas-summary payload as JSON |
 

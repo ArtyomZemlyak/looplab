@@ -262,6 +262,7 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
     }
     return {
         "generation": generation,
+        "task_id": _run_id(state.task_id),
         "items": items,
         "tail_seq": _integer(tail.seq) if rows else -1,
         "tail_ts": _timestamp(tail.ts) if rows else 0.0,

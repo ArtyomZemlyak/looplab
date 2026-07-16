@@ -75,15 +75,21 @@ function AttentionItem({ item, unread, onAcknowledge, onDismiss, onOpenPermissio
       {item.stale && <span className="attention-stale-label">Last verified</span>}
       {unread && <span className="attention-new-label">New</span>}
     </div>
+    {item.source === 'run' && <p className="attention-run-context">
+      <strong>{item.contextLabel || item.runId}</strong>
+      {item.taskId && item.taskId !== item.contextLabel && <span> · task {item.taskId}</span>}
+    </p>}
     <p>{item.detail}</p>
     {timestamp && <time dateTime={timestamp.iso}>{timestamp.label}</time>}
     <div className="attention-item-actions">
       {runHref && <a className="attention-button primary" href={runHref}
+        aria-label={`${item.actionLabel} for ${item.contextLabel || item.runId}`}
         onClick={() => onAcknowledge(item.id)}>{item.actionLabel}</a>}
       {item.source === 'permission' && <button type="button" className="attention-button primary"
         onClick={() => onOpenPermission(item)}>{item.actionLabel}</button>}
       <button type="button" className="attention-button subtle"
-        aria-label={`Dismiss ${item.title}`} onClick={() => onDismiss(item.id)}>Dismiss</button>
+        aria-label={`Dismiss ${item.title}${item.source === 'run' ? ` for ${item.contextLabel || item.runId}` : ''}`}
+        onClick={() => onDismiss(item.id)}>Dismiss</button>
     </div>
   </li>
 }

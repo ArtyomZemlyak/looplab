@@ -13,9 +13,10 @@ diagram's numbers are verified against `looplab/`).
 ## The one-pager
 
 Three planes and their connections. **Magenta = where the LLM / agent is invoked** (Genesis,
-Strategist, Researcher, Developer, Critic, Reflector); the **engine** plane is deterministic
-(select · execute · gate · log); and the **stores** — Search, Memory, Knowledge — feed the loop,
-all over the append-only `events.jsonl` spine.
+Strategist, Researcher, Developer, Critic, Reflector); the **engine** plane owns deterministic
+selection/folding around the append-only `events.jsonl` spine; and the **stores** — Search, Memory,
+Knowledge — feed the loop through explicit event, snapshot and sidecar contracts. The event log is
+authoritative for replayable `RunState`, not for every value shown in the product.
 
 [![LoopLab architecture — one-pager schema](../infographic/architecture-one-pager.svg)](../infographic/architecture-one-pager.svg)
 

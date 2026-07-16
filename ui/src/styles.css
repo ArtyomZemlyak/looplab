@@ -948,7 +948,8 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .settings-form { display: flex; flex-direction: column; gap: 14px; }
 /* Tabbed settings: one tab per group instead of a long scroll. Reuses the standard .tabs/.tab look. */
 .settings-form.tabbed { gap: 0; }
-.sf-tabs { flex-wrap: wrap; }
+.sf-tabs { flex-wrap: nowrap; scrollbar-width: thin; }
+.sf-tabs .tab { flex: 0 0 auto; white-space: nowrap; }
 .settings-form.tabbed .sf-group { border-top-left-radius: 0; border-top-right-radius: 0; border-top: none; }
 .sf-secret { display: flex; gap: 6px; align-items: center; }
 .sf-secret .text { flex: 1; min-width: 0; }
@@ -1347,13 +1348,14 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .do-head { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
 .do-head .muted { font-weight: 400; }
 /* round-6: compact theme chips replace the screen-eating treemap */
-.do-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 62px; overflow: auto; }
+.do-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 62px; min-width: 0; overflow: auto; }
 .do-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 999px;
-  background: var(--bg-2); border: 1px solid var(--line-2); color: var(--fg); cursor: pointer; font-size: 12px; }
+  max-width: 100%; min-width: 0; white-space: nowrap; background: var(--bg-2); border: 1px solid var(--line-2);
+  color: var(--fg); cursor: pointer; font-size: 12px; }
 .do-chip:hover { background: var(--bg-3); border-color: color-mix(in srgb, var(--tone) 70%, var(--line-2)); }
 .do-chip.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .do-chip .do-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tone); flex: none; }
-.do-chip .do-name { font-weight: 600; }
+.do-chip .do-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
 .do-chip .do-meta { color: var(--fg-mut); font-variant-numeric: tabular-nums; }
 
 /* ── Panel bar (Workstream D): grouped by importance + process ─────────────────── */
@@ -2018,6 +2020,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-head .view-toggle { margin-right: auto; }
   .copy-view-label { display: none; }
   .copy-view-btn { min-width: 36px; justify-content: center; }
+  .directions-overview { padding-block: 6px; }
+  .do-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .do-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
   .panel-bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
   .panel-bar.hub-open { overflow: visible; }
   .panel-bar .menu { flex-wrap: nowrap; min-width: max-content; }

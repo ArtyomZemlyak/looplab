@@ -6,6 +6,11 @@
 [ROADMAP.md](ROADMAP.md) / [BACKLOG.md](BACKLOG.md) to avoid re-proposing what is already planned
 or shipped. Companion to [07-architecture-review.md](07-architecture-review.md).
 
+> **Historical research baseline.** “Current,” “shipped,” defaults, file/line references, and missing-feature
+> claims below are pinned to the 2026-07-02 review. Many items subsequently landed or changed. Docs 17 and 18
+> own the current delivery/UI plan; doc 21 records later implementation chronology; current source/tests remain
+> runtime authority.
+>
 **TL;DR.** The engineering backbone (event-sourced loop, replay-resume, pluggable
 roles/policies, Strategist, rich live UI) is genuinely strong and most of the 2026-06 roadmap
 *shipped*. The three biggest remaining gaps are not missing features — they are:

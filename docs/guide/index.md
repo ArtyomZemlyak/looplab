@@ -2,8 +2,9 @@
 
 LoopLab is an **autonomous ML/DS research engine**. You give it a goal; it runs a closed loop —
 **invent → implement → test → improve → merge** — and returns the best *verified* result. Every
-step is appended to an event log that is the single source of truth, so runs are reproducible and
-crash-resumable by replay.
+domain decision is appended to an event log that is authoritative for replayable `RunState`, so runs
+are reproducible and crash-resumable by replay. Task/config, tracing, chat, command and cross-run
+sidecars retain their own documented authority.
 
 This guide is the practical, how-to-use documentation. For the design rationale (architecture,
 decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
@@ -46,7 +47,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
 ```
             ┌──────────────────────────────────────────────────────────┐
             │                       Orchestrator                        │
-            │   (anyio control loop · sole writer of the event log)     │
+            │   (anyio control loop · one live engine per run)          │
             └──────────────────────────────────────────────────────────┘
                  │            │             │             │
             ┌────▼────┐  ┌────▼─────┐  ┌────▼────┐   ┌────▼─────┐
@@ -58,7 +59,7 @@ decision records, roadmap), see [`../00-INDEX.md`](../00-INDEX.md).
                  └────────────┴──────┬──────┴─────────────┘
                                      ▼
                           append to events.jsonl
-                       (source of truth · replayable)
+                       (RunState authority · serialized)
                                      │
                   policy picks the next node → repeat
                                      │

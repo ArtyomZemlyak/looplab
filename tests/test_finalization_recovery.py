@@ -35,6 +35,8 @@ class _EngineStub:
         self.developer = None
         self.run_error = run_error
         self.case_calls = 0
+        self.research_claim_calls = 0
+        self._cross_run_concepts = False
         self.reflection_calls = 0
         self.finish_calls = 0
 
@@ -53,6 +55,9 @@ class _EngineStub:
 
     def _store_case(self, _state):
         self.case_calls += 1
+
+    def _store_research_claims(self, _state):
+        self.research_claim_calls += 1
 
     def _write_reflection_note(self, _state):
         self.reflection_calls += 1
@@ -84,7 +89,9 @@ def test_finalize_retries_only_missing_steps_for_exact_finish(tmp_path):
     second = finalize_run(eng, entry_finished=True, start_time=0.0)
     assert not second.finalization_pending()
     assert [(e.type, e.data) for e in eng.store.read_all()] == before
-    assert eng.case_calls == 1 and eng.reflection_calls == 1
+    # D8 persistence is independent of the concept-capsule flag: concepts are off on this stub, but the
+    # first-class research projection is still written exactly once with the case step.
+    assert eng.case_calls == 1 and eng.research_claim_calls == 1 and eng.reflection_calls == 1
 
 
 def test_engine_reentry_skips_setup_for_finish_seq_pending(tmp_path, monkeypatch):

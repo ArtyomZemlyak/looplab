@@ -1194,6 +1194,36 @@ def test_settings_get_put_roundtrip(tmp_path):
     assert "llm_api_key" not in client.get("/api/settings").json()["overrides"]
 
 
+def test_settings_partial_put_preserves_hidden_overrides_and_null_clears(tmp_path):
+    (tmp_path / "ui_settings.json").write_text(
+        json.dumps({"cross_run_read_tools": True, "max_nodes": 17}), encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    saved = client.put("/api/settings", json={"settings": {"policy": "mcts"}})
+    assert saved.status_code == 200
+    assert saved.json()["overrides"] == {
+        "cross_run_read_tools": True, "max_nodes": 17, "policy": "mcts"}
+
+    cleared = client.put("/api/settings", json={"settings": {"cross_run_read_tools": None}})
+    assert cleared.status_code == 200
+    assert cleared.json()["overrides"] == {"max_nodes": 17, "policy": "mcts"}
+
+
+def test_settings_put_rejects_bad_shape_and_invalid_value_without_writing(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    assert client.put("/api/settings", json={"settings": []}).status_code == 400
+    invalid = client.put("/api/settings", json={"settings": {"max_nodes": 0}})
+    assert invalid.status_code == 422
+    assert client.get("/api/settings").json()["overrides"] == {}
+
+
+def test_settings_profile_is_persisted_instead_of_diffed_away(tmp_path):
+    client = TestClient(make_app(tmp_path))
+    response = client.put("/api/settings", json={"settings": {"profile": "thorough"}})
+    assert response.status_code == 200
+    assert response.json()["overrides"]["profile"] == "thorough"
+
+
 def _write_snapshot(rd: Path, **overrides):
     """Mimic what `cli run` writes: a masked Settings snapshot the resume path re-reads."""
     import json

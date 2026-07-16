@@ -1,22 +1,29 @@
-"""R1-c — persisted per-node calibrated-verifier metric-tie-break in best-selection (Part IV unblock).
+"""R1-c — persisted calibrated-verifier tie treatment in best-selection (Part IV unblock).
 
-Locks: `node_verified` folds into `Node.verifier_score` (generation-scoped, stale-attempt dropped, range
-guarded); `select_verifier_tiebreak` breaks an EXACT metric tie by the higher soundness score (both
-directions) and NEVER overrides a strictly-better metric (§21.7); the engine cadence `_maybe_verify_ties`
-lazily verifies tied nodes and is a no-op when off / no tie / no client. Byte-identical selection when off
-(that is separately locked by test_golden_replay)."""
+Locks: new producers commit one evidence-bound ``verifier_group_scored`` event for the complete
+selector-reachable tie; replay validates it all-or-none. Legacy ``node_verified`` rows remain readable but a
+torn group fails closed. Soundness never overrides a strictly-better metric (§21.7), and the cadence is a
+no-op when the recorded run contract is off / has no tie / has no client.
+"""
 from __future__ import annotations
 
+import pytest
+
 from looplab.core.config import Settings
+from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
 
-def _run(tmp_path, direction="max", *, select_verifier=False) -> EventStore:
+def _run(tmp_path, direction="max", *, select_verifier=False, samples=3,
+         holdout_select=False, verifier_ci_tie=False) -> EventStore:
     s = EventStore(tmp_path / "e.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "direction": direction,
-                             "select_verifier": select_verifier})
+                             "select_verifier": select_verifier,
+                             "select_verifier_samples": samples,
+                             "holdout_select": holdout_select,
+                             "verifier_ci_tie": verifier_ci_tie})
     return s
 
 
@@ -88,6 +95,43 @@ def test_stale_verifier_score_does_not_bias_the_new_attempt(tmp_path):
     assert fold(s.read_all()).best_node_id == 1
 
 
+def test_verifier_score_tracks_confirm_and_holdout_evidence_revision(tmp_path):
+    s = _run(tmp_path, "max", select_verifier=True)
+    _add(s, 0, 0.9)
+    initial = fold(s.read_all())
+    old_digest = verifier_evidence_digest(initial.direction, initial.nodes[0])
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.9,
+                               "evidence_digest": old_digest})
+    assert fold(s.read_all()).nodes[0].verifier_score == 0.9
+
+    # Confirmation changes the evidence: the prior score is cleared, and an in-flight verdict carrying
+    # the pre-confirm digest is rejected even if it lands after the confirmation event.
+    s.append("node_confirmed", {"node_id": 0, "generation": 0,
+                                "mean": 0.88, "std": 0.01, "seeds": 3})
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.99,
+                               "evidence_digest": old_digest})
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+
+    confirmed = fold(s.read_all())
+    confirmed_digest = verifier_evidence_digest(confirmed.direction, confirmed.nodes[0])
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.8,
+                               "evidence_digest": confirmed_digest})
+    assert fold(s.read_all()).nodes[0].verifier_score == 0.8
+    # Variance is part of CI tie membership. Even with the same mean/seed count, a new std is a different
+    # selector evidence revision and must invalidate the old treatment.
+    s.append("node_confirmed", {"node_id": 0, "generation": 0,
+                                "mean": 0.88, "std": 0.02, "seeds": 3})
+    revised = fold(s.read_all())
+    assert revised.nodes[0].verifier_score is None
+    assert verifier_evidence_digest(revised.direction, revised.nodes[0]) != confirmed_digest
+    revised_digest = verifier_evidence_digest(revised.direction, revised.nodes[0])
+    s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.8,
+                               "evidence_digest": revised_digest})
+    _holdout(s, 0, 0.84)
+    assert fold(s.read_all()).nodes[0].verifier_score is None
+
+
 def test_old_logs_default_off(tmp_path):
     s = _run(tmp_path)                                                     # no select_verifier key
     _add(s, 0, 0.9)
@@ -134,13 +178,14 @@ def test_tiebreak_min_direction(tmp_path):
     assert fold(s.read_all()).best_node_id == 1     # #1 more sound -> wins despite the higher id
 
 
-def test_tiebreak_unscored_node_is_neutral(tmp_path):
-    # a scored node ABOVE the neutral midpoint (0.5) beats an unscored (neutral) tied node
+def test_torn_legacy_treatment_fails_closed_to_metric_id_order(tmp_path):
+    # A legacy per-node prefix can exist if an old process crashed between appends. It remains readable,
+    # but may not decide the tie until every contender has a score from one complete treatment.
     s = _run(tmp_path, "max", select_verifier=True)
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     s.append("node_verified", {"node_id": 0, "generation": 0, "score": 0.8})   # #1 stays unscored (neutral)
-    assert fold(s.read_all()).best_node_id == 0     # 0.8 > neutral 0.5 -> #0 wins over unscored #1
+    assert fold(s.read_all()).best_node_id == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -149,6 +194,24 @@ def test_tiebreak_unscored_node_is_neutral(tmp_path):
 
 def _holdout(s, nid, m):
     s.append("holdout_evaluated", {"node_id": nid, "generation": 0, "search_epoch": 0, "metric": m})
+
+
+def _group_record(state, node_ids, scores=None):
+    scores = scores or [0.9 - 0.1 * i for i in range(len(node_ids))]
+    return {
+        "v": 1,
+        "contract": VERIFIER_SELECTION_CONTRACT,
+        "requested_samples": state.select_verifier_samples,
+        "members": [{
+            "node_id": nid,
+            "generation": state.nodes[nid].attempt,
+            "score": score,
+            "n_samples": state.select_verifier_samples,
+            "agreement": 1.0,
+            "method": "llm",
+            "evidence_digest": verifier_evidence_digest(state.direction, state.nodes[nid]),
+        } for nid, score in zip(node_ids, scores)],
+    }
 
 
 def test_holdout_override_breaks_tie_by_verifier(tmp_path):
@@ -174,6 +237,89 @@ def test_holdout_override_tie_falls_to_id_when_verifier_off(tmp_path):
     _holdout(s, 0, 0.80)
     _holdout(s, 1, 0.80)
     assert fold(s.read_all()).best_node_id == 1     # flag off -> legacy max-id holdout tie-break
+
+
+def test_atomic_group_event_publishes_all_scores_together(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    before = fold(s.read_all())
+    s.append("verifier_group_scored", _group_record(before, [0, 1], [0.95, 0.1]))
+    after = fold(s.read_all())
+    assert [after.nodes[nid].verifier_score for nid in (0, 1)] == [0.95, 0.1]
+    assert after.best_node_id == 0
+
+
+def test_atomic_group_rejects_one_invalid_member_without_a_prefix(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    data = _group_record(fold(s.read_all()), [0, 1])
+    data["members"][1]["evidence_digest"] = "0" * 64
+    s.append("verifier_group_scored", data)
+    state = fold(s.read_all())
+    assert state.nodes[0].verifier_score is None
+    assert state.nodes[1].verifier_score is None
+
+
+def test_atomic_group_rejects_invalid_contract_generation_sampling_and_ids(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=3)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    state = fold(s.read_all())
+
+    bad = _group_record(state, [0, 1])
+    bad["contract"] = "selection-criteria:v999"
+    s.append("verifier_group_scored", bad)
+    bad = _group_record(state, [0, 1])
+    bad["members"][0]["generation"] = 99
+    s.append("verifier_group_scored", bad)
+    bad = _group_record(state, [0, 1])
+    bad["members"][0]["n_samples"] = 1  # not a strict majority of the three requested samples
+    s.append("verifier_group_scored", bad)
+    bad = _group_record(state, [0, 1])
+    bad["members"][0]["agreement"] = 0.5
+    s.append("verifier_group_scored", bad)
+    bad = _group_record(state, [0, 1])
+    bad["members"][0]["node_id"] = []  # malformed/unhashable foreign JSON must be an inert event
+    s.append("verifier_group_scored", bad)
+
+    after = fold(s.read_all())
+    assert after.nodes[0].verifier_score is None
+    assert after.nodes[1].verifier_score is None
+
+
+def test_atomic_group_requires_the_complete_champion_tie(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    for nid in range(3):
+        _add(s, nid, 0.9)
+    data = _group_record(fold(s.read_all()), [0, 1])  # valid rows, torn/incomplete tie membership
+    s.append("verifier_group_scored", data)
+    state = fold(s.read_all())
+    assert all(node.verifier_score is None for node in state.nodes.values())
+
+
+def test_atomic_group_rejects_a_well_formed_losing_tie(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    for nid, metric in enumerate((0.9, 0.9, 0.5, 0.5)):
+        _add(s, nid, metric)
+    data = _group_record(fold(s.read_all()), [2, 3])
+    s.append("verifier_group_scored", data)
+    state = fold(s.read_all())
+    assert state.nodes[2].verifier_score is None
+    assert state.nodes[3].verifier_score is None
+
+
+def test_atomic_group_replay_is_idempotent(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    data = _group_record(fold(s.read_all()), [0, 1], [0.2, 0.8])
+    s.append("verifier_group_scored", data)
+    s.append("verifier_group_scored", data)
+    state = fold(s.read_all())
+    assert [state.nodes[nid].verifier_score for nid in (0, 1)] == [0.2, 0.8]
+    assert state.best_node_id == 1
 
 
 # --------------------------------------------------------------------------- #
@@ -215,10 +361,10 @@ def test_metric_tie_groups_scores_the_ci_band_when_verifier_ci_tie(tmp_path):
         st.nodes[nid].confirmed_std = 0.05
         st.nodes[nid].confirmed_seeds = 3
 
-    class _S:
-        _verifier_ci_tie = True
-    groups = Engine._metric_tie_groups(_S(), st)
+    st.verifier_ci_tie = True
+    groups = Engine._metric_tie_groups(None, st)
     assert any({0, 1} <= {n.id for n in g} for g in groups)   # the CI-band is produced -> both get scored
+    st.verifier_ci_tie = False
     assert Engine._metric_tie_groups(None, st) == []          # off -> distinct metrics, no group
 
 
@@ -263,11 +409,11 @@ def test_metric_tie_groups_includes_holdout_ties_when_holdout_select(tmp_path):
     st.nodes[0].holdout_metric = 0.5             # ...but TIED on the unseen-signal holdout metric
     st.nodes[1].holdout_metric = 0.5
 
-    class _S:
-        _holdout_select = True
-    groups = Engine._metric_tie_groups(_S(), st)
+    st.holdout_select = True
+    groups = Engine._metric_tie_groups(None, st)
     assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1}   # holdout tie surfaced
     # holdout_select off -> no holdout linking -> the (robust-distinct) nodes are not a tie
+    st.holdout_select = False
     assert Engine._metric_tie_groups(None, st) == []
 
 
@@ -286,11 +432,46 @@ def test_metric_tie_groups_surfaces_unconfirmed_holdout_tie_past_the_confirmed_p
     st.nodes[1].confirmed_mean = 0.85               # 1,2 confirmed -> mean pool = {1,2} only
     st.nodes[2].confirmed_mean = 0.90
 
-    class _S:
-        _holdout_select = True
-    groups = Engine._metric_tie_groups(_S(), st)
+    st.holdout_select = True
+    groups = Engine._metric_tie_groups(None, st)
     # the unconfirmed node 0 must join the surfaced holdout tie-component, not be dropped with the mean pool
     assert len(groups) == 1 and {n.id for n in groups[0]} == {0, 1, 2}
+
+
+def test_metric_tie_groups_returns_only_final_selector_champion_tie(tmp_path):
+    s = _run(tmp_path, select_verifier=True)
+    for nid in range(8):
+        _add(s, nid, 0.1)                 # large losing tie must never consume the cadence cap
+    _add(s, 8, 0.9)
+    _add(s, 9, 0.9)                       # robust champion tie
+    st = fold(s.read_all())
+    st.nodes[6].holdout_metric = 0.8
+    st.nodes[7].holdout_metric = 0.8       # final-selector champion tie
+    st.nodes[8].holdout_metric = 0.7
+    st.nodes[9].holdout_metric = 0.7       # losing holdout tie
+
+    st.holdout_select = True
+    groups = Engine._metric_tie_groups(None, st)
+    # Holdout is applied last. Its champion tie is the only reachable comparison; the robust
+    # tie and the losing holdout tie can no longer affect the answer and must not consume verifier calls.
+    assert [[n.id for n in group] for group in groups] == [[6, 7]]
+
+
+def test_holdout_pool_suppresses_unreachable_mean_tie_even_without_a_holdout_tie(tmp_path):
+    s = _run(tmp_path, select_verifier=True, holdout_select=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)                         # mean tie
+    _holdout(s, 0, 0.8)
+    _holdout(s, 1, 0.7)                     # unique final holdout winner
+    assert Engine._metric_tie_groups(None, fold(s.read_all())) == []
+
+
+def test_holdout_mode_falls_back_to_mean_tie_until_any_holdout_score_exists(tmp_path):
+    s = _run(tmp_path, select_verifier=True, holdout_select=True)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    groups = Engine._metric_tie_groups(None, fold(s.read_all()))
+    assert [[node.id for node in group] for group in groups] == [[0, 1]]
 
 
 def test_reopen_clears_stale_confirm_override(tmp_path):
@@ -350,6 +531,19 @@ class _NoisyVClient:
         return "x"
 
 
+class _SparseVClient:
+    """Only the first of three requested samples parses; repeated evidence has no strict quorum."""
+    def __init__(self):
+        self.calls = 0
+
+    def complete_tool(self, messages, json_schema):
+        self.calls += 1
+        return {"verdicts": ["yes" if self.calls == 1 else ""], "rationales": ["r"]}
+
+    def complete_text(self, messages):
+        return "x"
+
+
 class _Host:
     # bind the real engine methods so internal self-calls resolve
     _maybe_verify_ties = Engine._maybe_verify_ties
@@ -383,9 +577,9 @@ def test_maybe_verify_ties_scores_tied_nodes(tmp_path):
     _add(s, 1, 0.9)
     client = _VClient("yes")                                        # "yes" -> 0.75
     st2 = _Host(s, client=client)._maybe_verify_ties(fold(s.read_all()))
-    ev = [e for e in s.read_all() if e.type == "node_verified"]
-    assert len(ev) == 2 and all(e.data["score"] == 0.75 for e in ev)
-    assert client.calls == 2                                        # one verify per tied node (samples=1)
+    ev = [e for e in s.read_all() if e.type == "verifier_group_scored"]
+    assert len(ev) == 1 and [row["score"] for row in ev[0].data["members"]] == [0.75, 0.75]
+    assert client.calls == 6                                      # 3 pinned samples per tied node
     # both scored 0.75 -> the verifier component is itself tied -> the id tie-break stands (max -> #1)
     assert st2.best_node_id == 1
 
@@ -394,8 +588,8 @@ def test_maybe_verify_ties_noop_when_off(tmp_path):
     s = _run(tmp_path, select_verifier=False)
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
-    _Host(s, select_verifier=False, client=_VClient())._maybe_verify_ties(fold(s.read_all()))
-    assert not any(e.type == "node_verified" for e in s.read_all())
+    _Host(s, select_verifier=True, client=_VClient())._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
 
 
 def test_maybe_verify_ties_noop_without_client(tmp_path):
@@ -403,7 +597,7 @@ def test_maybe_verify_ties_noop_without_client(tmp_path):
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     _Host(s, client=None)._maybe_verify_ties(fold(s.read_all()))
-    assert not any(e.type == "node_verified" for e in s.read_all())
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
 
 
 def test_maybe_verify_ties_noop_without_a_tie(tmp_path):
@@ -411,27 +605,45 @@ def test_maybe_verify_ties_noop_without_a_tie(tmp_path):
     _add(s, 0, 0.9)
     _add(s, 1, 0.5)                                                 # no tie
     _Host(s, client=_VClient())._maybe_verify_ties(fold(s.read_all()))
-    assert not any(e.type == "node_verified" for e in s.read_all())
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
 
 
-def test_node_verified_carries_provenance(tmp_path):
-    # a selection-affecting event must be auditable: it carries n_samples + agreement (fold reads score)
-    s = _run(tmp_path, select_verifier=True)
+def test_atomic_group_carries_provenance(tmp_path):
+    # A selection-affecting treatment is one auditable record with per-member sample/evidence provenance.
+    s = _run(tmp_path, select_verifier=True, samples=1)
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     _Host(s, client=_VClient("yes"), samples=1)._maybe_verify_ties(fold(s.read_all()))
-    ev = [e for e in s.read_all() if e.type == "node_verified"]
-    assert ev and all("n_samples" in e.data and "agreement" in e.data for e in ev)
+    ev = [e for e in s.read_all() if e.type == "verifier_group_scored"]
+    assert len(ev) == 1 and ev[0].data["contract"] == VERIFIER_SELECTION_CONTRACT
+    assert all("n_samples" in row and "agreement" in row and "evidence_digest" in row
+               for row in ev[0].data["members"])
 
 
 def test_tie_group_abstains_atomically_on_a_failure(tmp_path):
     # ATOMIC: if ANY member of a tie group fails verification, the WHOLE group is left unscored (its tie
     # falls to the id break) — never half-scored (which would let a neutral 0.5 outrank a verified-low).
-    s = _run(tmp_path, select_verifier=True)
+    s = _run(tmp_path, select_verifier=True, samples=1)
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     _Host(s, client=_FlakyVClient(fail_on=2), samples=1)._maybe_verify_ties(fold(s.read_all()))
-    assert not any(e.type == "node_verified" for e in s.read_all())   # neither member committed
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())  # neither member committed
+
+
+def test_failed_attempt_guard_is_scoped_to_the_evidence_revision(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=1)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    host = _Host(s, client=_FlakyVClient(fail_on=1), samples=1)
+    host._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
+
+    for nid in (0, 1):
+        s.append("node_confirmed", {"node_id": nid, "generation": 0,
+                                    "mean": 0.9, "std": 0.01, "seeds": 3})
+    host._client = _VClient("yes")
+    host._maybe_verify_ties(fold(s.read_all()))
+    assert sum(e.type == "verifier_group_scored" for e in s.read_all()) == 1
 
 
 def test_low_agreement_verdict_is_abstained(tmp_path):
@@ -441,8 +653,29 @@ def test_low_agreement_verdict_is_abstained(tmp_path):
     _add(s, 0, 0.9)
     _add(s, 1, 0.9)
     _Host(s, client=_NoisyVClient(), samples=3)._maybe_verify_ties(fold(s.read_all()))
-    assert not any(e.type == "node_verified" for e in s.read_all())
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
+
+
+def test_fewer_than_a_majority_of_requested_samples_abstains(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=3)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    _Host(s, client=_SparseVClient(), samples=1)._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
+
+
+def test_exactly_half_agreement_is_not_a_majority(tmp_path):
+    s = _run(tmp_path, select_verifier=True, samples=2)
+    _add(s, 0, 0.9)
+    _add(s, 1, 0.9)
+    _Host(s, client=_NoisyVClient(), samples=2)._maybe_verify_ties(fold(s.read_all()))
+    assert not any(e.type == "verifier_group_scored" for e in s.read_all())
 
 
 def test_settings_default_off():
     assert Settings().select_verifier is False and Settings().select_verifier_samples == 3
+
+
+def test_settings_caps_verifier_sampling_cost():
+    with pytest.raises(ValueError):
+        Settings(select_verifier_samples=33)

@@ -1288,6 +1288,40 @@ export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { 
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
 // change (only changed fields are sent). Blocked server-side while the run's engine is live.
 export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
+
+// Experimental Research Atlas: owner-only, read-only projections over the shared memory portfolio.
+// Bypass browser caches so Refresh observes newly finalized runs/governance without a stale intermediary.
+const crossRunRead = (path, options = {}) => get(path, { ...options, cache: 'no-store' })
+const boundedCrossRunInt = (value, fallback, maximum, minimum = 0) => {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.max(minimum, Math.min(maximum, Math.trunc(parsed))) : fallback
+}
+const crossRunLimitArgs = (limitOrOptions, fallback, maximum, options) =>
+  limitOrOptions && typeof limitOrOptions === 'object'
+    ? { limit: fallback, options: limitOrOptions }
+    : { limit: boundedCrossRunInt(limitOrOptions, fallback, maximum, 1), options }
+// Bounds exist on both sides of the wire. Client render caps prevent DOM amplification; these query
+// caps also prevent a routine Atlas preview navigation from requesting an unbounded shared ledger.
+export const getCrossRunAtlas = (limitOrOptions = 24, options) => {
+  const args = crossRunLimitArgs(limitOrOptions, 24, 50, options)
+  return crossRunRead(`/api/cross-run/atlas?limit=${args.limit}`, args.options)
+}
+export const getCrossRunClaims = (limitOrOptions = 80, offset = 0, options) => {
+  const args = crossRunLimitArgs(limitOrOptions, 80, 200, options)
+  const offsetIsOptions = offset && typeof offset === 'object'
+  if (offsetIsOptions && args.options == null) args.options = offset
+  return crossRunRead(
+    `/api/cross-run/claims?limit=${args.limit}&offset=${boundedCrossRunInt(offsetIsOptions ? 0 : offset, 0, 1_000_000)}`,
+    args.options)
+}
+export const getCrossRunCurationLog = (limitOrOptions = 20, options) => {
+  const args = crossRunLimitArgs(limitOrOptions, 20, 50, options)
+  return crossRunRead(`/api/cross-run/curation-log?limit=${args.limit}`, args.options)
+}
+export const getCrossRunClaimCurationLog = (limitOrOptions = 20, options) => {
+  const args = crossRunLimitArgs(limitOrOptions, 20, 50, options)
+  return crossRunRead(`/api/cross-run/claim-curation-log?limit=${args.limit}`, args.options)
+}
 // New-run creation is propose -> edit -> validate -> start.  The preflight is non-billable and
 // side-effect free; its opaque token binds the exact payload the server checked.  An inconclusive
 // launch is observed by idempotency key instead of blindly POSTing a second engine start.

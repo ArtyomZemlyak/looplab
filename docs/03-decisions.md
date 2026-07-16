@@ -3,6 +3,15 @@
 **Version:** 0.1 · **Date:** 2026-06-20
 **Companion docs:** [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [04-file-layout.md](04-file-layout.md) · [05-build-decisions.md](05-build-decisions.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
 
+> **Historical ADR record; current runtime correction (2026-07-16).** ADR-1 below records the original
+> control-plane design, not a byte-accurate inventory of the shipped tree. The current product has no
+> `commands.jsonl`/`desired_state.json` reducer: one live engine owns `RunState` reduction under `engine.lock`,
+> while authenticated UI-server control operations append versioned control events through the same
+> cross-process event-store serialization. `events.jsonl` is the replay authority for `RunState`, not for task
+> and config snapshots, spans, chat, command records, cross-run stores, or external effects. Use
+> [the current concepts guide](guide/concepts.md) and current source/tests when this record conflicts with the
+> implementation.
+>
 > This document records the five new requirements you added, the options researched for each, and the **evidence-backed decision**. Each decision is then folded into the architecture doc. Evidence tags: **[IND]** independent, **[SR]** self-reported, **[BENCH]** standardized benchmark.
 
 ---

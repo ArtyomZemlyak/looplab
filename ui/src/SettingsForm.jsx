@@ -38,8 +38,9 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onTogg
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
+  const warningId = `${inputId}-warning`
   const hasDescription = !!f.help || f.type === 'secret'
-  const describedBy = hasDescription ? helpId : undefined
+  const describedBy = [hasDescription ? helpId : '', f.warning ? warningId : ''].filter(Boolean).join(' ') || undefined
   let input
 
   if (f.type === 'bool') {
@@ -84,6 +85,9 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, granted, onTogg
         {secretSet ? 'A credential is stored. Enter a value only to replace it. ' : 'No credential is stored. '}
       </span>}
       {f.help}
+    </div>}
+    {f.warning && <div id={warningId} className={`sf-warning${f.warningTone === 'info' ? ' info' : ''}`} role="note">
+      <strong>{f.warningTitle || 'High-risk experimental setting.'}</strong> {f.warning}
     </div>}
   </div>
 }

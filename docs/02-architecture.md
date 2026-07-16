@@ -5,6 +5,13 @@
 
 > This document defines **how LoopLab works**: principles, components, data model, control flow, the search and trust mechanisms, extension points, rules/invariants, and a tech stack. It is a from-scratch design (no fork) that **synthesizes the best ideas** from the surveyed systems — each major decision cites its source.
 
+> **Current runtime authority boundary (2026-07-16).** `events.jsonl` is authoritative for the replayable
+> `RunState`, not for every byte the product displays. One live engine is fenced by `engine.lock`; the UI
+> server can also append control events through `EventStore`'s cross-process serialization. Task/config
+> snapshots, diagnostic spans, chat, durable command records and cross-run memory are separate sidecars;
+> `replay.fold` deliberately does not reconstruct them. Later sections retain some original design wording,
+> but this shipped boundary takes precedence.
+
 ---
 
 ## 1. Guiding principles
@@ -24,8 +31,8 @@
 9. **The objective is a reward function.** A benchmark/metric harness with a hard budget returns a scalar + validity flags. *(Karpathy BPB-in-5-min; NanoGPT speedrun; SOL-ExecBench.)*
 10. **Ground before you experiment.** Given prior artifacts, analyze them against an immutable goal anchor and build a ranked experiment backlog *before* the search loop. *(MLE-STAR web grounding; co-scientist; [ADR-3](03-decisions.md).)*
 11. **Lineage is a DAG; value is tree-like.** Nodes form a "tree-with-merge" DAG (`parent_ids` is a list), but scores are evaluator-derived and standalone — never back-propagated across a merge. *(Evidence: graph topology ≠ better results; archive+diversity and gated merge do help. [ADR-5](03-decisions.md).)*
-12. **Files are the source of truth; engine is the sole writer.** State is an append-only event log; the UI is a decoupled projection that *reads* files and *appends* command intents. *(Event sourcing + local-first + CQRS; [ADR-1](03-decisions.md).)*
-13. **Track for reproducibility, separately from observability.** The event log is the source of truth; **MLflow is an optional headless exporter** (not a core dependency). *([ADR-4](03-decisions.md), demoted by [ADR-6](03-decisions.md).)*
+12. **The event log owns replayable run state; writes are serialized.** Domain and control events share the append-only event-store contract; `engine.lock` permits one live engine while server-owned control appends are cross-process serialized. The UI is a decoupled projection and submits durable intents rather than mutating folded state. Sidecars keep their own authority. *(Event sourcing + local-first + CQRS; [ADR-1](03-decisions.md).)*
+13. **Track for reproducibility, separately from observability.** The event log is the replay authority for `RunState`; original diagnostic and snapshot sidecars keep their own authority. **MLflow is an optional headless exporter** (not a core dependency). *([ADR-4](03-decisions.md), demoted by [ADR-6](03-decisions.md).)*
 
 > **Added requirements (2026-06-20):** decoupled UI, pluggable algorithm, artifact ingestion pre-phase, reproducibility/tracking, and graph-vs-tree are specified as decision records in **[03-decisions.md](03-decisions.md)** and integrated below.
 > **Further requirements (2026-06-21):** pluggable role backends incl. external coding agents ([ADR-7](03-decisions.md)); prompt management + AGENTS.md ([ADR-8](03-decisions.md)); MCP capability bus + Agent Skills ([ADR-9](03-decisions.md)); unified knowledge/memory ([ADR-10](03-decisions.md)); cross-cutting hardening — secrets/config/observability/HITL/resume/security/cost/isolation ([ADR-11](03-decisions.md)). Folded into §3.4b, §3.10, §3.14, §3.15, and §18.
@@ -194,7 +201,7 @@ Built-ins:
 ### 3.8 Archive / Memory / Journal
 **Responsibility:** persistent record + the proposer's memory.
 - **Archive**: every node's `{patch, metric, verdict, lineage, summary, embedding}`; queryable by similarity; supports `merge(a, b) -> Idea` (the branch-and-combine helper behind `SearchPolicy.should_merge`).
-- **Journal**: the append-only event stream of proposals/runs/verdicts/costs — **persisted to `events.jsonl`** (the source of truth in [04-file-layout.md](04-file-layout.md)); the Archive and all UI projections are folds over it.
+- **Journal**: the append-only event stream of proposals/runs/verdicts/costs — **persisted to `events.jsonl`**, the authority for replayable `RunState` in [04-file-layout.md](04-file-layout.md). Search-state projections fold it; trace, task/config, chat, commands and cross-run views also join their documented sidecars.
 - Conditions every `Researcher.propose` call (closes the loop). *(AlphaEvolve archive; R&D-Agent prior-experiment context.)*
 
 ### 3.9 LLM Backend Layer
@@ -227,10 +234,13 @@ Per-role model assignment is a first-class config concept. Failover + retry + co
 
 ### 3.11 Observability / UI layer (decoupled; [ADR-1](03-decisions.md))
 **Responsibility:** let the user explore traces, the flow, the DAG, per-node/experiment info — and act (pause/resume/fork/edit) — as a **separate layer**.
-- **Files are the source of truth.** The engine appends an event log; **the engine is the only writer of run state**. The UI is a projection that *reads* files and *appends* command intents — eliminating UI↔engine races (event sourcing + single-writer + CQRS).
-- **Live updates** via file-watching (`watchfiles`, polling fallback) + JSONL tailing — no streaming backend needed (matches how real tools actually feel "live").
+- **Replay authority is explicit.** The engine and server-owned control path append to one serialized event log; one live engine is fenced separately by `engine.lock`. The UI reads folded state and sidecars, then submits durable command intents instead of mutating the fold — avoiding UI↔engine races without pretending every product store is event-derived.
+- **Live updates** expose freshly folded file state over SSE, with bounded polling/recovery paths for buffered
+  or dropped streams. File reads remain the backend; SSE is a delivery mechanism, not a competing state store.
 - **Renderers, layered on the same files (build order revised by [ADR-6](03-decisions.md)):** **(first)** an **AIDE-style static HTML lineage tree** — cheap, enough to debug the search; **(then, once the agent gets results)** a **Textual TUI** (`Tree`/`DataTable`/log pane/key-bindings) + `textual-serve` for a browser view; **(later)** a React Flow + ELK web UI. Don't build the decoupled UI before the agent works — that's premature infra.
-- **Write-back:** UI appends to `commands.jsonl` (`pause`/`resume`/`fork_from`/`edit_config`) and/or writes `desired_state.json` (declarative, crash-safe); engine folds them in and emits `command.ack`.
+- **Write-back (shipped correction):** the UI calls authenticated server command/control routes. Durable
+  control events and command records carry generation/idempotency fences and use the serialized event-store
+  path; there is no shipped `commands.jsonl`/`desired_state.json` reducer.
 - File contract + event/command schema: see [ADR-1](03-decisions.md) and §4. **Full on-disk file-layer spec (data classes, formats, run/project layout, content-addressed artifact store, atomic-write rules): [04-file-layout.md](04-file-layout.md).**
 
 ### 3.12 Ingestion / Knowledge pre-phase (new; [ADR-3](03-decisions.md))
@@ -250,7 +260,7 @@ class Ingestion:
 
 ### 3.13 Tracking / Reproducibility layer (new; [ADR-4](03-decisions.md), demoted by [ADR-6](03-decisions.md))
 **Responsibility:** durable, queryable, reproducible record of every experiment — distinct from the live event log.
-> **[ADR-6](03-decisions.md): the event log is the source of truth; MLflow is an *optional exporter* (thin adapter over the event log), not a core dependency.** No surveyed top system uses MLflow — keep it swappable and off the hot path.
+> **[ADR-6](03-decisions.md): the event log is the replay authority for `RunState`; MLflow is an *optional exporter* (thin adapter over the event log), not a core dependency.** No surveyed top system uses MLflow — keep it swappable and off the hot path.
 ```python
 class Tracker:                                  # thin wrapper over MlflowClient (headless, sqlite backend)
     def log_run(self, node: Node, run: RunResult, verdict: Verdict) -> str: ...
@@ -398,7 +408,7 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 8. **Metrics are reported with variance** — never a bare point estimate.
 9. **Config changes can't bypass safety** — sandbox/budget/evaluator are not user-disableable in normal mode.
 10. **Atomic writes only** — write to `.tmp/` then `rename()`; the UI must never see a torn file (Maildir guarantee). *([04-file-layout.md](04-file-layout.md))*
-11. **Store once, derive the rest** — canonical files are the single source of truth; UI projections (SQLite/Parquet/index) are rebuildable and gitignored; never dual-write. *([04-file-layout.md](04-file-layout.md))*
+11. **Name every authority and derive caches** — `events.jsonl` owns replayable run state; snapshots and original sidecars own the data that the fold does not contain. UI caches (SQLite/Parquet/index) are rebuildable from their declared inputs and gitignored; do not make a derived cache a competing authority. *([04-file-layout.md](04-file-layout.md))*
 12. **Version every file** — embed `apiVersion`/`kind`/`v` + a JSON Schema per kind; UI upcasts on read.
 13. **Big bytes by reference** — weights/data live in a content-addressed `store/` and are referenced by hash+path; never inlined into docs/manifests/git.
 
@@ -407,7 +417,7 @@ A single good run is *a hypothesis, not a result* — but **p<0.01 on every prom
 ## 12. Concurrency, persistence, reproducibility
 
 - **Concurrency:** N research threads (config), each a select→propose→implement→run→evaluate chain, sharing one archive + one budget manager. Cap by available GPUs/CPU.
-- **Persistence:** canonical state is **human-readable files** (`events.jsonl` + per-run docs/config/metrics) + a git repo (solutions/lineage); MLflow `mlflow.db` is the durable tracking record; any SQLite/Parquet lives under `_derived/` as a **rebuildable projection**, never the source of truth. A run is fully resumable from `events.jsonl` + git. *([04-file-layout.md](04-file-layout.md))*
+- **Persistence:** canonical inputs are **human-readable files** (`events.jsonl` for replayable run state plus task/config and original sidecars) + a git repo (solutions/lineage); MLflow is an optional export. SQLite/Parquet under `_derived/` is a **rebuildable projection**, never authority. Resume additionally honors the task/config snapshots and the documented command/finalization recovery records; it is not a claim that every external side effect can be recreated from the event log. *([04-file-layout.md](04-file-layout.md))*
 - **Reproducibility:** any reported result ships with `{git_ref, seeds, deps_lock, mlflow_run, exact_command}` so a third party can rerun it (this is also our #2 success metric).
 
 ---

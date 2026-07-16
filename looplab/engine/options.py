@@ -139,7 +139,7 @@ class EngineOptions:
     cross_run_advisory: bool = False     # PART IV CR Step 5: fold the cross-run context pack into the prompt
     cross_run_structured_claims: bool = False  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge
-    cross_run_curation_auto: bool = False  # ...and auto-applies the proposals (reversible governance writes)
+    cross_run_curation_auto: bool = False  # deprecated/inert: old snapshots validate; proposals never auto-apply
     phase_handoff_summary: bool = True   # per-phase handoff briefs across a node build (propose→…→implement)
 
     @classmethod

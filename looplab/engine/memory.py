@@ -268,7 +268,7 @@ def retrieve_lessons_harmonic(candidates, query_text, abstract, embed, *, k: int
     if abstract is None or not candidates:
         return []
     from looplab.tools.memora import Abstraction, expand_by_anchors
-    from looplab.tools.vectorstore import Hit, InMemoryVectorStore, Item
+    from looplab.tools.vectorstore import InMemoryVectorStore, Item
 
     store = InMemoryVectorStore()
     items: list[Item] = []
@@ -586,11 +586,11 @@ class ConceptCapsuleStore:
         string `concepts` poison retrieval (a string iterates into CHARACTER concepts). Quarantine the
         bad row instead of letting it disable the feature: require the list-typed fields to be lists and
         `run_id` to be a non-empty string. Unknown extra fields are fine (forward-compat)."""
-        # CODEX AGENT: `CONCEPT_CAPSULE_VERSION` is decorative here: missing v and unknown v=999 are both
-        # accepted as current records. The row also cannot declare legacy vs universal fingerprint mode,
-        # although those algorithms produce incompatible scopes. Enforce/migrate known schema+fingerprint
-        # versions (or quarantine with an explicit receipt) before treating the capsule as comparable.
-        return (isinstance(c.get("run_id"), str) and c["run_id"]
+        # Missing `v` is the pre-version legacy shape and is still readable as v1.  An explicit unknown
+        # version must be quarantined: treating v999 as today's schema can silently misinterpret evidence.
+        version = c.get("v", CONCEPT_CAPSULE_VERSION)
+        return (version == CONCEPT_CAPSULE_VERSION
+                and isinstance(c.get("run_id"), str) and c["run_id"]
                 and isinstance(c.get("fingerprint"), list)
                 and isinstance(c.get("concepts"), list)
                 and isinstance(c.get("concept_outcomes", {}), dict))
@@ -603,10 +603,10 @@ class ConceptCapsuleStore:
         """Upsert by `run_id` under the same interprocess lock the case/lesson stores use, re-reading
         inside the lock so a concurrent run's capsule survives. Returns True once stored."""
         from looplab.events.eventstore import _interprocess_lock
-        rid = str(capsule.get("run_id") or "")
-        if not rid:
+        if not self._valid_capsule(capsule):
             return False
-        with _interprocess_lock(Path(str(self.path) + ".lock")):
+        rid = str(capsule.get("run_id") or "")
+        with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             self._reload()
             self.capsules = [c for c in self.capsules if str(c.get("run_id") or "") != rid]
             self.capsules.append(capsule)
@@ -654,22 +654,22 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     `aliases` (from `load_concept_aliases`, CR1a) canonicalizes concept slugs at read time: merged aliases
     collapse to one concept and purged concepts drop; `splits` (from `load_concept_splits`) re-tags a coarse
     concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
-    from looplab.engine.concept_registry import _ctx_tokens, resolve_slug, resolve_split
+    from looplab.engine.concept_registry import canonicalize_concept, canonicalize_concepts
     per_concept: dict[str, dict] = {}
     for c in capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
         direction = str(c.get("direction") or "min")
         raw = list(c.get("concepts") or [])
-        ctx = _ctx_tokens(raw) if splits else set()
-        # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug (split then alias),
+        # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug through the shared
+        # alias-source -> split -> alias-target pipeline,
         # then collapse the run's raw concepts that map to the SAME canonical into ONE run-row, so a run
         # never appears twice for one concept (CODEX). The row's metric is the outcome of the sorted-first
         # raw concept that HAS an outcome (deterministic tie-break), else None.
         by_canon: dict[str, list] = {}
-        for concept in raw:
-            s = resolve_split(concept, ctx, splits) if splits else concept
-            key = resolve_slug(s, aliases) if aliases else str(s)
+        for i, concept in enumerate(raw):
+            key = canonicalize_concept(concept, sibling_concepts=raw[:i] + raw[i + 1:],
+                                       aliases=aliases, splits=splits)
             if not key:
                 continue                          # purged concept -> dropped from cross-run views
             by_canon.setdefault(key, []).append(concept)
@@ -683,30 +683,32 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
         e["n_runs"] = len({r["run_id"] for r in e["runs"]})
         concepts.append(e)
     concepts.sort(key=lambda e: (-e["n_runs"], e["concept"]))   # most-explored first, then name
-    cards = [{"run_id": str(c.get("run_id") or ""),
-              "n_concepts": len({str(x) for x in (c.get("concepts") or [])}),
-              "best_metric": c.get("best_metric"),
-              "direction": str(c.get("direction") or "min"),
-              "concepts": sorted({str(x) for x in (c.get("concepts") or [])})}
-             for c in capsules]
+    cards = []
+    for c in capsules:
+        canonical = canonicalize_concepts(c.get("concepts") or [], aliases=aliases, splits=splits)
+        # The overview must apply normalization even with empty governance maps; otherwise
+        # `Hard-Neg` and `hard-neg` are one UID in the registry but two portfolio concepts/cards.
+        cards.append({"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
+                      "best_metric": c.get("best_metric"),
+                      "direction": str(c.get("direction") or "min"), "concepts": canonical})
     cards.sort(key=lambda k: k["run_id"])
     return {"n_runs": len(capsules), "n_concepts": len(concepts), "concepts": concepts, "runs": cards}
 
 
 def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
                      splits: Optional[dict] = None) -> dict:
-    """PART IV cross-run Step 7 (lean, GATED): a recursive summary LEVEL above the flat concept overview —
-    concepts grouped by their AXIS prefix (the part before '/', e.g. 'data/hard-negative-mining' -> 'data')
-    into clusters with rollup counts. Deterministic, no LLM. Per the §21.20.11 hierarchy gate this ships as
-    DATA only (an inspector rollup); it is NOT wired into any prompt/context until it beats the flat
-    Claim+RunCapsule baseline (≥5 pp grounded-answer gain OR ≥30% token reduction) on the benchmark corpus."""
+    """PART IV cross-run Step 7 (lean, GATED): a flat, display-only rollup above the concept overview.
+
+    Concepts are grouped by the conventional prefix before ``/`` (for example
+    ``data/hard-negative-mining`` -> ``data``). This is deterministic and does not claim to be a persisted
+    semantic hierarchy. Per the §21.20.11 hierarchy gate it ships as inspector data only; it is not wired
+    into prompts until a versioned taxonomy proves its value on the benchmark corpus.
+    """
     ov = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
     clusters: dict[str, dict] = {}
     for e in ov["concepts"]:
-        # CODEX AGENT: despite the "recursive summary" contract this is one `split` over an unenforced label
-        # convention, not a hierarchy: every unprefixed concept collapses into one bucket and changing a
-        # display slug can move an entire evidence history between axes. Persist a versioned concept taxonomy
-        # (with stable UIDs and provenance) and benchmark that hierarchy; do not infer semantics from `/`.
+        # This is an unenforced display convention, not a hierarchy: every unprefixed concept lands in one
+        # bucket and changing a display slug can move it. Do not infer semantic ancestry from ``/``.
         axis = e["concept"].split("/", 1)[0] if "/" in e["concept"] else "(ungrouped)"
         cl = clusters.setdefault(axis, {"axis": axis, "concepts": [], "_runs": set()})
         cl["concepts"].append(e["concept"])

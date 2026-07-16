@@ -6,6 +6,9 @@ byte-identical result. No new source of truth; everything folds from events + ta
 """
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
+
 import orjson
 
 from looplab.engine.cross_run_index import (
@@ -122,6 +125,22 @@ def test_source_digest_changes_when_the_log_changes(tmp_path):
     assert run_source_digest(tmp_path / "nope") == ""                       # no log -> ""
 
 
+def test_source_digest_streams_large_inputs(tmp_path, monkeypatch):
+    run = tmp_path / "large"
+    run.mkdir()
+    event_bytes = b"x" * (2 * 1024 * 1024 + 17)
+    snapshot_bytes = b'{"kind":"dataset"}'
+    (run / "events.jsonl").write_bytes(event_bytes)
+    (run / "task.snapshot.json").write_bytes(snapshot_bytes)
+    expected = hashlib.sha1(event_bytes + b"\x00snapshot\x00" + snapshot_bytes).hexdigest()
+
+    def _whole_file_read_is_a_bug(self):
+        raise AssertionError(f"read_bytes materialised {self}")
+
+    monkeypatch.setattr(Path, "read_bytes", _whole_file_read_is_a_bug)
+    assert run_source_digest(run) == "s_" + expected
+
+
 def test_incremental_reuses_unchanged_and_rebuilds_changed(tmp_path):
     root = tmp_path / "runs"
     _make_run_dir(root, "ra", "t1", "goal one", "max", "recall", [(0, {"a": 1.0}, 0.8)])
@@ -143,6 +162,31 @@ def test_incremental_reuses_unchanged_and_rebuilds_changed(tmp_path):
     assert ra["n_attempts"] == 2                                            # the new node is reflected
 
 
+def test_incremental_mode_flip_invalidates_unchanged_sources(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    legacy = build_index_incremental(root, universal=False)
+    assert legacy["fp_mode"] == "legacy"
+
+    universal = build_index_incremental(root, prior=legacy, universal=True)
+    assert universal["receipts"]["built"] == ["ra"]
+    assert universal["receipts"]["cached"] == []
+    assert universal["index"][0]["scope"]["fp_mode"] == "universal"
+
+
+def test_incremental_rejects_old_or_different_projector_cache(tmp_path):
+    root = tmp_path / "runs"
+    _make_run_dir(root, "ra", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
+    current = build_index_incremental(root)
+
+    old = {"runs": current["runs"]}
+    assert build_index_incremental(root, prior=old)["receipts"]["built"] == ["ra"]
+
+    wrong_projector = dict(current)
+    wrong_projector["projector_v"] += 1
+    assert build_index_incremental(root, prior=wrong_projector)["receipts"]["built"] == ["ra"]
+
+
 def test_incremental_matches_full_rebuild(tmp_path):
     root = tmp_path / "runs"
     _make_run_dir(root, "rb", "t2", "goal two", "min", "rmse", [(0, {"a": 1.0}, 0.5)])
@@ -153,7 +197,8 @@ def test_incremental_matches_full_rebuild(tmp_path):
 def test_torn_run_becomes_a_skip_receipt_not_a_gap(tmp_path):
     root = tmp_path / "runs"
     _make_run_dir(root, "ok", "t1", "goal", "max", "recall", [(0, {"a": 1.0}, 0.8)])
-    bad = root / "bad"; bad.mkdir()
+    bad = root / "bad"
+    bad.mkdir()
     (bad / "events.jsonl").write_bytes(b'{"this is not valid json\n')   # a genuinely corrupt complete line
     res = build_index_incremental(root)
     assert [f["run_id"] for f in res["index"]] == ["ok"]                # the good run still indexes
@@ -167,10 +212,18 @@ def test_save_and_load_index_round_trip(tmp_path):
     cache = tmp_path / "idx.json"
     save_index(cache, res)
     reloaded = load_index(cache)
+    persisted = orjson.loads(cache.read_bytes())
+    assert {"v", "projector_v", "scope_v", "fp_mode", "runs"} <= set(persisted)
     # the reloaded cache serves as a prior that reuses everything (no re-fold)
     again = build_index_incremental(root, prior=reloaded)
     assert again["receipts"]["cached"] == ["ra"] and _canon(again["index"]) == _canon(res["index"])
     assert load_index(tmp_path / "absent.json") is None
+
+
+def test_load_index_rejects_pre_contract_cache(tmp_path):
+    cache = tmp_path / "old-index.json"
+    cache.write_bytes(orjson.dumps({"v": 1, "runs": {}}))
+    assert load_index(cache) is None
 
 
 def test_cli_cross_run_index_incremental(tmp_path):

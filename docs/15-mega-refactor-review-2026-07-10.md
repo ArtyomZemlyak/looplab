@@ -13,6 +13,12 @@ duplication · layering/architecture · god-file decomposition · agent-friendli
 dead-code/cruft/naming · config/events/model surface. Findings were de-duplicated and merged
 below (several show up on multiple axes — those are the highest-value).
 
+> **Historical refactor plan.** Counts, line references, open findings, and the invariant wording below are
+> pinned to 2026-07-10. For the current persistence contract, read “engine is the sole writer” as: one live
+> engine owns `RunState` reduction, and every event append—including authenticated UI-server controls—is
+> serialized by the event store; snapshots and original sidecars remain separate authorities. Docs 16–18/21
+> and current source/tests supersede later status claims.
+>
 **Verification pass (same day).** Every claim was then adversarially fact-checked against the
 code (every cited `file:line` re-read), and a separate gap-hunt swept the areas the six axes
 did not cover (package-root modules, the React UI, tests, prompts, concurrency, packaging/CI).

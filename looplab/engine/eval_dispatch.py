@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Optional
 
+from looplab.core.models import normalize_extra_metrics
 from looplab.events.replay import fold
 from looplab.events.types import EV_RUN_SETUP_FINISHED, EV_RUN_SETUP_STARTED
 
@@ -220,8 +221,6 @@ class EvalDispatchMixin:
         chooser = min if self.task.direction == "min" else max
         best_t, best_m = chooser(scored, key=lambda tm: tm[1])
         res.metric = best_m
-        extra = best_t.get("extra_metrics") or {}
-        if not isinstance(extra, dict):
-            extra = {}
+        extra = normalize_extra_metrics(best_t.get("extra_metrics"))
         if extra:
-            res.extra_metrics = {**(res.extra_metrics or {}), **extra}
+            res.extra_metrics = {**normalize_extra_metrics(res.extra_metrics), **extra}

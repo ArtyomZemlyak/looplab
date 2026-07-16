@@ -6,12 +6,13 @@ cycle-safe chain resolution, and the read-model merge (aliased concepts collapse
 """
 from __future__ import annotations
 
-import orjson
-
+import json
 import pytest
 
 from looplab.engine.concept_registry import (
-    canonicalize_concepts, concept_uid, load_concept_aliases, load_concept_splits, normalize_key,
+    ConceptGovernanceConflict, ConceptGovernanceIdempotencyConflict, canonicalize_concepts,
+    clear_concept_alias, clear_concept_split,
+    concept_governance_revision, concept_uid, load_concept_aliases, load_concept_splits, normalize_key,
     record_concept_alias, record_concept_split, resolve_slug, resolve_split,
 )
 from looplab.engine.memory import build_concept_capsule, portfolio_concept_overview
@@ -53,11 +54,60 @@ def test_record_and_load_aliases_last_write_wins(tmp_path):
     assert a["hn"] == "hard-negative-mining"
 
 
+def test_alias_clear_is_distinct_from_purge_and_revision_is_cas(tmp_path):
+    first = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
+                                 expected_revision=0)
+    assert first["revision"] == concept_governance_revision(str(tmp_path), "aliases") == 1
+    with pytest.raises(ConceptGovernanceConflict) as stale:
+        record_concept_alias(str(tmp_path), from_concept="hn", to_concept="other", expected_revision=0)
+    assert stale.value.expected == 0 and stale.value.actual == 1
+
+    cleared = clear_concept_alias(str(tmp_path), from_concept="hn", expected_revision=1)
+    assert cleared["action"] == "clear" and cleared["revision"] == 2
+    assert "hn" not in load_concept_aliases(str(tmp_path))
+    purged = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="", expected_revision=2)
+    assert purged["action"] == "purge" and resolve_slug("hn", load_concept_aliases(str(tmp_path))) is None
+    clear_concept_alias(str(tmp_path), from_concept="hn", expected_revision=3)
+    assert resolve_slug("hn", load_concept_aliases(str(tmp_path))) == "hn"
+
+
+def test_alias_action_id_retry_returns_original_before_stale_cas(tmp_path):
+    first = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
+                                 expected_revision=0, action_id="req-1", at="first")
+    retry = record_concept_alias(str(tmp_path), from_concept="hn", to_concept="hard-neg",
+                                 expected_revision=0, action_id="req-1", at="retry")
+    assert retry == first and retry["revision"] == 1 and retry["at"] == "first"
+    assert len((tmp_path / "concept_aliases.jsonl").read_text().splitlines()) == 1
+    with pytest.raises(ConceptGovernanceIdempotencyConflict):
+        record_concept_alias(str(tmp_path), from_concept="hn", to_concept="different",
+                             expected_revision=0, action_id="req-1")
+
+
+def test_alias_loader_quarantines_malformed_explicit_actions(tmp_path):
+    rows = [
+        {"v": 1, "action": "set", "from": "empty-target", "to": ""},
+        {"v": 1, "action": "purge", "from": "purged", "to": "must-not-become-alias"},
+        {"v": 999, "action": "set", "from": "future", "to": "unknown-schema"},
+    ]
+    (tmp_path / "concept_aliases.jsonl").write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    aliases = load_concept_aliases(str(tmp_path))
+    assert "empty-target" not in aliases and aliases["purged"] == "\x00purged" and "future" not in aliases
+
+
 def test_resolve_follows_chain_and_is_cycle_safe():
-    aliases = {"a": "b", "b": "c", "x": "y", "y": "x"}   # x<->y is a cycle
+    aliases = {"a": "b", "b": "c", "x": "y", "y": "x", "prefix": "m", "m": "n", "n": "m"}
     assert resolve_slug("a", aliases) == "c"
-    assert resolve_slug("x", aliases) in ("x", "y")      # cycle-safe: terminates, no hang
+    assert resolve_slug("x", aliases) == resolve_slug("y", aliases) == "x"  # stable legacy-cycle identity
+    assert resolve_slug("prefix", aliases) == resolve_slug("m", aliases) == resolve_slug("n", aliases) == "m"
     assert resolve_slug("lone", aliases) == "lone"       # unaliased -> itself
+
+
+@pytest.mark.parametrize("revision", [True, -1, "1", 1.0])
+def test_governance_expected_revision_is_strict_non_negative_int(tmp_path, revision):
+    with pytest.raises(ValueError, match="expected_revision"):
+        record_concept_alias(str(tmp_path), from_concept="a", to_concept="b",
+                             expected_revision=revision)
 
 
 def test_purge_resolves_to_none():
@@ -125,6 +175,13 @@ def test_resolve_split_picks_first_matching_rule_from_context():
     assert resolve_split("unrelated", {"hard"}, splits) == "unrelated"      # not in the split -> unchanged
 
 
+def test_split_hyphenated_trigger_matches_unicode_word_tokens():
+    splits = {"data/aug": {"rules": [{"to": "data/hn", "when_any": ["hard-negative"]}],
+                             "default": "data/aug"}}
+    assert resolve_split("data/aug", {"loss/hard-negative"}, splits) == "data/hn"
+    assert resolve_split("data/aug", {"hard"}, splits) == "data/aug"  # all phrase tokens are required
+
+
 def test_split_rejects_no_progress_and_empty(tmp_path):
     with pytest.raises(ValueError):        # a rule re-tagging the source to itself is pointless
         record_concept_split(str(tmp_path), from_concept="x", rules=[{"to": "x", "when_any": ["a"]}])
@@ -140,6 +197,43 @@ def test_canonicalize_applies_split_then_alias():
     # 'data/aug' sees sibling 'data/hard-neg' (token 'hard') -> split to data/hn -> alias to the canonical
     got = canonicalize_concepts(["data/aug", "data/hard-neg"], aliases=aliases, splits=splits)
     assert "data/hard-negative-mining" in got
+
+
+def test_canonicalize_aliases_source_before_split_and_target_after_split():
+    aliases = {"augmentation": "data/aug", "data/hn": "data/hard-negative-mining"}
+    splits = {"data/aug": {"rules": [{"to": "data/hn", "when_any": ["hard-negative"]}],
+                            "default": "data/aug"}}
+    got = canonicalize_concepts(["augmentation", "loss/hard-negative"], aliases=aliases, splits=splits)
+    assert "data/hard-negative-mining" in got and "data/aug" not in got
+
+
+def test_split_clear_restores_unsplit_source_with_independent_revision(tmp_path):
+    rec = record_concept_split(str(tmp_path), from_concept="data/aug",
+                               rules=[{"to": "data/hn", "when_any": ["hard"]}], expected_revision=0)
+    assert rec["revision"] == 1 and concept_governance_revision(str(tmp_path), "splits") == 1
+    clear = clear_concept_split(str(tmp_path), from_concept="data/aug", expected_revision=1)
+    assert clear["revision"] == 2 and "data/aug" not in load_concept_splits(str(tmp_path))
+
+
+def test_split_trigger_cannot_match_its_own_source_slug():
+    splits = {"data/augmentation": {
+        "rules": [{"to": "data/synthetic", "when_any": ["augmentation"]}],
+        "default": "data/augmentation",
+    }}
+    # No sibling mentions augmentation: the source token itself must not trigger a retag.
+    assert canonicalize_concepts(["data/augmentation"], splits=splits) == ["data/augmentation"]
+
+
+def test_split_trigger_cannot_match_duplicate_or_alias_of_its_source():
+    splits = {"data/augmentation": {
+        "rules": [{"to": "data/synthetic", "when_any": ["augmentation"]}],
+        "default": "data/augmentation",
+    }}
+    aliases = {"augmentation": "data/augmentation"}
+    # Canonicalizing the sibling before filtering used to turn the alias into a self-trigger.
+    assert canonicalize_concepts(
+        ["data/augmentation", "augmentation"], aliases=aliases, splits=splits,
+    ) == ["data/augmentation"]
 
 
 def test_overview_re_tags_split_by_sibling_context(tmp_path):
@@ -165,6 +259,15 @@ def test_overview_dedupes_aliased_concepts_within_one_run():
     ov = portfolio_concept_overview(caps, aliases={"hn": "hard-neg", "hnm": "hard-neg"})
     hn = [e for e in ov["concepts"] if e["concept"] == "hard-neg"][0]
     assert hn["n_runs"] == 1 and len(hn["runs"]) == 1 and hn["runs"][0]["metric"] == 0.9
+
+
+def test_overview_always_uses_versioned_normalization_without_governance_maps():
+    caps = [build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                  concepts=[" Hard  Neg ", "hard neg"],
+                                  concept_outcomes={" Hard  Neg ": 0.9})]
+    ov = portfolio_concept_overview(caps)
+    assert ov["n_concepts"] == 1 and ov["concepts"][0]["concept"] == "hard neg"
+    assert ov["runs"][0]["concepts"] == ["hard neg"] and ov["runs"][0]["n_concepts"] == 1
 
 
 def test_cli_concept_split(tmp_path):

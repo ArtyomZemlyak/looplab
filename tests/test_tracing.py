@@ -14,6 +14,7 @@ from looplab.search.policy import GreedyTree
 from looplab.adapters.repo_task import EvalSpec, RepoTask
 from looplab.runtime.sandbox import SubprocessSandbox
 from looplab.core.tracing import JsonlSpanExporter, Tracer, current_ids
+from looplab.agents.tool_loop import _trace_preview
 from looplab.events.traceview import build_trace_view, load_spans
 
 _M = {"kind": "stdout_json", "key": "metric"}
@@ -70,6 +71,25 @@ def test_generation_noop_without_active_tracer():
         g.output("y").usage({"prompt_tokens": 1}).cost(0.0)          # must not raise
     with tracing.tool("t", {"a": 1}) as to:
         to.output("r")
+
+
+def test_tool_trace_preview_redacts_structured_and_free_text_secrets():
+    structured = _trace_preview({
+        "api_key": "sk-abcdefghijklmnopqrstuvwxyz012345",
+        "stdout": "Authorization: Bearer abcdef0123456789ABCDEF and password=hunter2secret",
+    })
+    assert "abcdefghijklmnopqrstuvwxyz012345" not in structured
+    assert "abcdef0123456789ABCDEF" not in structured
+    assert "hunter2secret" not in structured
+    assert "redacted" in structured.lower() or "***" in structured
+
+
+def test_tool_trace_preview_is_bounded_and_hashes_only_redacted_rendering():
+    token = "aZ9k2Lp7qW3xYt5Rb8Nc1Vd6Mf0Gh4J"
+    preview = _trace_preview("prefix token=" + token + " " + ("x" * 500), cap=180)
+    assert len(preview) <= 180
+    assert token not in preview
+    assert "original_chars=" in preview and "sha256=" in preview
 
 
 def test_new_trace_starts_fresh_trace(tmp_path):

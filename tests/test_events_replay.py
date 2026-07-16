@@ -1584,3 +1584,25 @@ def test_spec_content_is_frozen_at_the_human_review_boundary(tmp_path):
     s.append("spec_proposed", proposal_b)  # ratified spec remains frozen as well
     ratified = fold(s.read_all())
     assert ratified.spec_confirmed is True and ratified.proposed_spec == proposal_a
+
+
+def test_legacy_structured_extra_metrics_fold_to_warning_free_numeric_projection(tmp_path):
+    """Real legacy runs contain bookkeeping dicts/lists beside scalar objectives.  Replay must preserve the
+    raw append-only event but expose the documented numeric map without Pydantic serializer warnings."""
+    import warnings
+
+    s = EventStore(tmp_path / "legacy-extra.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "operator": "draft", "parent_ids": [],
+                              "idea": {"operator": "draft", "params": {}}})
+    raw = {"score2": 0.75, "target_weights": {"a": 1}, "labels": ["x"], "flag": True,
+           "nan": float("nan")}
+    s.append("node_evaluated", {"node_id": 0, "metric": 1.0, "extra_metrics": raw})
+    state = fold(s.read_all())
+    assert state.nodes[0].extra_metrics == {"score2": 0.75}
+    assert s.read_all()[-1].data["extra_metrics"]["target_weights"] == {"a": 1}  # event remains auditable
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        dumped = state.model_dump(mode="json")
+    assert dumped["nodes"]["0"]["extra_metrics"] == {"score2": 0.75}
+    assert not any("PydanticSerializationUnexpectedValue" in str(w.message) for w in caught)

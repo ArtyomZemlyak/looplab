@@ -5,6 +5,12 @@
 
 > **What this is.** A from-scratch (non-fork) design for an open, backend-flexible **autonomous ML/DS research engine**: you give it a task and a way to measure success; it *invents → implements → tests → improves* solutions in a loop and returns the best **verified** solution plus a full log of what worked and why.
 
+> **Current runtime authority (2026-07-16).** Where this original design says “engine-only writer” or
+> “files as truth”, read the narrower shipped contract: `events.jsonl` is authoritative for replayable
+> `RunState`; one live engine is fenced by `engine.lock`, and the control server may append serialized
+> control events through `EventStore`. Task/config snapshots, tracing, chat, command records and cross-run
+> memory are separate sidecars and are not reconstructed by `replay.fold`.
+
 ---
 
 ## 1. Vision & one-line pitch
@@ -89,7 +95,7 @@ The differentiator vs everything surveyed: existing OSS systems each hold *one* 
 - Main loop, budget accounting (tokens + compute), **parallel research threads**, model routing per role, stop conditions.
 
 ### H. Observability & exploration UI *(decoupled — [ADR-1](03-decisions.md))*
-- **UI is a separate layer** reading from **files** (append-only event log = source of truth); engine is the only state writer.
+- **UI is a separate layer** reading from **files** (`events.jsonl` is the replayable-run-state authority); it submits durable controls through the server's serialized event/command lifecycle rather than mutating folded state directly.
 - Explore **traces, flow, the DAG, per-node/experiment info**; **act** (pause/resume/fork-from-node, edit config) by appending command intents.
 - **Textual TUI now → browser via textual-serve → React Flow web UI later**, all on the same files. Live updates via file-watching (no streaming backend needed).
 

@@ -22,9 +22,9 @@ def _seed(d, *, lessons=None, capsules=None):
             s.add(c)
 
 
-def _lesson(statement, outcome="supported", evidence=(1,), run_id="r1"):
+def _lesson(statement, outcome="supported", evidence=(1,), run_id="r1", task_id="t", **extra):
     return {"statement": statement, "outcome": outcome, "evidence": list(evidence),
-            "run_id": run_id, "task_id": "t"}
+            "run_id": run_id, "task_id": task_id, **extra}
 
 
 def test_ranks_relevant_claim_first(tmp_path):
@@ -98,14 +98,21 @@ def test_failed_intent_prioritizes_caveats(tmp_path):
     assert any(h.get("epistemic") == "mixed" for h in r["results"])   # the caveat is surfaced
 
 
-def test_scope_task_isolates_d8_claims(tmp_path):
+def test_scope_task_isolates_every_joined_source(tmp_path):
     from looplab.engine.claims import record_research_claims
-    _seed(tmp_path, lessons=[_lesson("shared topic marker one")])
-    # a D8 claim in ANOTHER task must not surface for a scoped query
+    _seed(tmp_path,
+          lessons=[_lesson("shared topic marker visible", task_id="t"),
+                   _lesson("shared topic marker secret lesson", task_id="otherTask")],
+          capsules=[
+              build_concept_capsule(run_id="c1", task_id="t", fingerprint=["a"], direction="max",
+                                    concepts=["visible-concept"], concept_outcomes={}),
+              build_concept_capsule(run_id="c2", task_id="otherTask", fingerprint=["b"], direction="max",
+                                    concepts=["secret-concept"], concept_outcomes={}),
+          ])
     record_research_claims(str(tmp_path), run_id="rX", task_id="otherTask",
                            claims=[{"statement": "shared topic marker secret", "node_ids": [9]}])
-    scoped = cross_run_retrieve(str(tmp_path), "shared topic marker", k=8, scope_task="t")
-    assert all("secret" not in h["text"] for h in scoped["results"])   # other-task D8 excluded
+    scoped = cross_run_retrieve(str(tmp_path), "shared topic marker secret concept", k=20, scope_task="t")
+    assert all("secret" not in h["text"] for h in scoped["results"])
     wide = cross_run_retrieve(str(tmp_path), "shared topic marker", k=8)   # portfolio-wide sees it
     assert any("secret" in h["text"] for h in wide["results"])
 
@@ -143,6 +150,47 @@ def test_corpus_cap_is_reported_not_silent(tmp_path):
     _seed(tmp_path, lessons=[_lesson(f"claim number {i} about topic", run_id=f"r{i}") for i in range(10)])
     rc = cross_run_retrieve(str(tmp_path), "topic", k=3, max_corpus=4)["receipt"]
     assert rc["n_corpus"] == 10 and rc["truncated"] == 6        # full size known, drop count reported
+
+
+def test_corpus_cap_preselection_is_query_aware_not_file_prefix(tmp_path):
+    lessons = [_lesson(f"common filler claim {i}", evidence=(1, 2), run_id=f"r{i}") for i in range(20)]
+    lessons.append(_lesson("zirconium sentinel uniquely improves recall", evidence=(1,), run_id="tail"))
+    _seed(tmp_path, lessons=lessons)
+    out = cross_run_retrieve(str(tmp_path), "zirconium sentinel", k=2, max_corpus=3)
+    assert out["receipt"]["n_corpus"] == 21 and out["receipt"]["n_indexed"] == 3
+    assert out["receipt"]["truncated"] == 18
+    assert out["results"] and "zirconium sentinel" in out["results"][0]["text"]
+
+
+def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
+    first = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
+        _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
+    second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
+        _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
+    assert first["receipt"]["corpus_digest_version"] == 2
+    assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
+    assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
+
+
+def test_quota_does_not_inject_an_unrelated_caveat(tmp_path):
+    lessons = [_lesson(f"retrieval recall method {i} improves quality", run_id=f"r{i}") for i in range(5)]
+    lessons += [_lesson("banana orchard irrigation helps yield", "supported", (1,), "rA"),
+                _lesson("banana orchard irrigation helps yield", "failed", (2,), "rB")]
+    _seed(tmp_path, lessons=lessons)
+    out = cross_run_retrieve(str(tmp_path), "retrieval recall method", k=3, contradiction_quota=0.8)
+    assert out["receipt"]["caveat_target"] == 2
+    assert out["receipt"]["n_caveats"] == 0
+    assert all("banana" not in h["text"] for h in out["results"])
+
+
+def test_failed_intent_is_a_soft_bonus_not_an_unrelated_hard_tier(tmp_path):
+    _seed(tmp_path, lessons=[
+        _lesson("hard negative mining improves retrieval recall", run_id="r1"),
+        _lesson("unrelated banana irrigation helps yield", "supported", (2,), "rA"),
+        _lesson("unrelated banana irrigation helps yield", "failed", (3,), "rB")])
+    out = cross_run_retrieve(str(tmp_path), "hard negative retrieval", k=1, intent="failed")
+    assert "hard negative" in out["results"][0]["text"]
+    assert out["results"][0]["intent_bonus"] == 0.0
 
 
 def test_tool_and_cli(tmp_path):

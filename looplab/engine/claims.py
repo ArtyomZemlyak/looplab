@@ -15,7 +15,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import unicodedata
+from collections.abc import Callable
 from typing import Optional
 
 from looplab.engine.memory import _NEGATIVE, normalize_statement
@@ -24,8 +27,14 @@ from looplab.engine.memory import _NEGATIVE, normalize_statement
 def _node_ids(raw) -> list:
     """Evidence node-id refs from a lesson's `evidence` or a claim's `node_ids`: ints kept as ints,
     numeric strings coerced, everything else dropped (a URL/source belongs in `sources`, not evidence)."""
+    if isinstance(raw, bool) or raw is None:
+        return []
+    if isinstance(raw, int):
+        raw = [raw]
+    elif not isinstance(raw, (list, tuple)):
+        return []
     out = []
-    for x in raw or []:
+    for x in raw:
         if isinstance(x, bool):
             continue
         if isinstance(x, int):
@@ -42,6 +51,39 @@ def _qualify_refs(run_id, node_ids) -> list[str]:
     return [f"{r}:{n}" for n in node_ids]
 
 
+_RESEARCH_VERDICTS = frozenset(("supported", "unsupported", "unclear", "cited", "unverified"))
+
+
+def _research_verification(row: dict) -> tuple[str, str, str]:
+    """Return ``(verdict, method, note)`` for one persisted D8 claim.
+
+    Older rows had no verifier payload.  They are intentionally ``unverified`` rather than implicitly
+    supported: a numeric citation proves only that the memo named a node, not that the node establishes the
+    claim.  The nested shape is the durable v2 contract; top-level fields are accepted for migration.
+    """
+    raw = row.get("verification") if isinstance(row.get("verification"), dict) else {}
+    verdict = str(raw.get("verdict") or row.get("verification_verdict") or "unverified").lower()
+    if verdict not in _RESEARCH_VERDICTS:
+        verdict = "unverified"
+    method = str(raw.get("method") or row.get("verification_method") or "")[:80]
+    note = str(raw.get("note") or row.get("verification_note") or "")[:400]
+    return verdict, method, note
+
+
+def _metric_identity(row: dict) -> str:
+    """Best available metric *name* for structured identity (never a numeric score)."""
+    for key in ("metric_name", "metric_key", "objective_metric", "metric"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:_MAX_DECISION_METRIC]
+    fingerprint = row.get("fingerprint")
+    if isinstance(fingerprint, (list, tuple)):
+        for token in fingerprint:
+            if isinstance(token, str) and token.casefold().startswith("metric:"):
+                return token.split(":", 1)[1][:_MAX_DECISION_METRIC]
+    return ""
+
+
 def _epistemic(support, oppose) -> str:
     """The evidence's current verdict on a claim. 'mixed' when both sides exist (a scoped disagreement,
     never newest-wins); 'inconclusive' when only neutral/unknown evidence remains — distinct from a
@@ -55,16 +97,100 @@ def _epistemic(support, oppose) -> str:
     return "inconclusive"
 
 
+def claim_evidence_digest(claim: dict) -> str:
+    """Stable revision token for the evidence projection an operator actually reviewed.
+
+    Governance metadata is deliberately excluded: ``expected_revision`` fences the decision ledger. This
+    digest changes when proof, verification, provenance, or a live opposite-polarity assertion changes.
+    """
+    fields = (
+        "claim_uid", "statement", "scope", "metric", "polarity", "epistemic", "support", "oppose",
+        "unverified", "runs", "scopes", "sources", "verification", "contradicts",
+    )
+    payload = {key: claim.get(key) for key in fields}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return "cev_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
 # --------------------------------------------------------------------------- #
 # Operator claim DECISIONS (§22.4) — the ONLY write to cross-run MEANING an actor other than the engine
 # may make. Append-only, keyed by normalized statement, overlaid on the machine-proposed assessment.
 # --------------------------------------------------------------------------- #
 
 CLAIM_DECISIONS = ("ratified", "rejected", "pinned")
+CLAIM_DECISION_ACTIONS = CLAIM_DECISIONS + ("clear",)
+
+_MAX_DECISION_STATEMENT = 4000
+_MAX_DECISION_SCOPE = 500
+_MAX_DECISION_METRIC = 200
+_MAX_DECISION_NOTE = 4000
+_MAX_DECISION_ACTOR = 120
+_MAX_DECISION_AT = 120
+_MAX_DECISION_ACTION_ID = 160
+_MAX_EVIDENCE_DIGEST = 80
+
+
+class ClaimDecisionConflict(ValueError):
+    """Optimistic-concurrency conflict on the append-only claim-governance ledger."""
+
+    def __init__(self, expected: int, current: int):
+        super().__init__(f"claim governance revision conflict: expected {expected}, current {current}")
+        self.expected_revision = expected
+        self.current_revision = current
+
+
+class ClaimDecisionIdempotencyConflict(ValueError):
+    """An ``action_id`` was reused with a different semantic decision payload."""
+
+
+def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
+    text = str(value or "")
+    if required and not text.strip():
+        raise ValueError(f"empty {name}")
+    if len(text) > maximum:
+        raise ValueError(f"{name} exceeds {maximum} characters")
+    return text
+
+
+def _decision_payload(row: dict) -> tuple:
+    """Semantic request identity for ``action_id`` replay (timestamps are receipt metadata)."""
+    return tuple(str(row.get(k) or "") for k in
+                 ("statement", "scope", "metric", "decision", "note", "by", "evidence_digest"))
+
+
+def _logical_decision_rows(rows) -> list[dict]:
+    """Quarantine malformed/id-colliding rows and assign one monotonic logical revision per action."""
+    logical: list[dict] = []
+    actions: dict[str, tuple] = {}
+    for raw in rows or []:
+        if not isinstance(raw, dict) or raw.get("decision") not in CLAIM_DECISION_ACTIONS:
+            continue
+        action_id = str(raw.get("action_id") or "")
+        if action_id:
+            if action_id in actions:
+                # Exact duplicate or collision: either way the repeated physical row is not a new action.
+                continue
+            actions[action_id] = _decision_payload(raw)
+        logical.append({**raw, "revision": len(logical) + 1})
+    return logical
+
+
+def claim_governance_revision(memory_dir) -> int:
+    """Current logical claim-governance revision; valid legacy rows count in file order."""
+    from pathlib import Path
+
+    from looplab.events.eventstore import read_jsonl_lenient
+    if not memory_dir:
+        return 0
+    path = Path(memory_dir) / "claim_decisions.jsonl"
+    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    return len(_logical_decision_rows(rows))
 
 
 def record_claim_decision(memory_dir, *, statement: str, decision: str, note: str = "",
-                          by: str = "operator", at: str = "", scope: str = "", metric: str = "") -> dict:
+                          by: str = "operator", at: str = "", scope: str = "", metric: str = "",
+                          expected_revision: Optional[int] = None, action_id: str = "",
+                          evidence_digest: str = "", validate: Optional[Callable[[], None]] = None) -> dict:
     """Persist an OPERATOR verdict on a claim (ratify / reject / pin). Append-only JSONL, keyed BOTH by the
     legacy `normalize_statement` (so the lean projection still overlays) AND by a structured `claim_uid`
     (scope+polarity-precise, so a decision in task A never reaches a same-worded claim in task B — CODEX).
@@ -73,33 +199,67 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
     missing memory dir (a real operator error)."""
     from pathlib import Path
 
-    from looplab.engine.claim_key import claim_uid
-    from looplab.engine.concept_registry import _append_governance
-    if decision not in CLAIM_DECISIONS:
-        raise ValueError(f"decision must be one of {CLAIM_DECISIONS}, got {decision!r}")
-    s = str(statement or "").strip()
-    if not s:
-        raise ValueError("empty statement")
+    if decision not in CLAIM_DECISION_ACTIONS:
+        raise ValueError(f"decision must be one of {CLAIM_DECISION_ACTIONS}, got {decision!r}")
     if not memory_dir:
         raise ValueError("no memory_dir")
-    # Bound the stored free-text fields so a single operator write can't bloat the shared sidecar. Identity —
-    # the legacy `key` (normalize_statement, capped internally at 160) AND the structured `claim_uid`
-    # (scope+polarity-precise) — is computed from the FULL statement/scope/metric, so the display caps never
-    # shift which claim the decision overlays (CODEX).
-    rec = {"statement": s[:2000], "key": normalize_statement(s),
-           "claim_uid": claim_uid(s, scope=scope, metric=metric), "scope": str(scope or ""),
-           "metric": str(metric or ""), "decision": decision, "note": str(note or "")[:4000],
-           "by": str(by or "operator")[:120], "at": str(at or "")}
+    # Reject oversized identity fields instead of truncating them: the exact persisted statement/scope/metric
+    # must always recompute the same UID after restart. The 4000 statement cap matches persisted D8 claims.
+    s = _bounded(statement, "statement", _MAX_DECISION_STATEMENT, required=True).strip()
+    sc = _bounded(scope, "scope", _MAX_DECISION_SCOPE)
+    mt = _bounded(metric, "metric", _MAX_DECISION_METRIC)
+    aid = _bounded(action_id, "action_id", _MAX_DECISION_ACTION_ID).strip()
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
+    rec = {"statement": s, "key": normalize_statement(s), "claim_key_version": CLAIM_KEY_VERSION,
+           "claim_uid": claim_uid(s, scope=sc, metric=mt), "scope": sc, "metric": mt,
+           "decision": decision, "note": _bounded(note, "note", _MAX_DECISION_NOTE),
+           "by": _bounded(by or "operator", "by", _MAX_DECISION_ACTOR),
+           "at": _bounded(at, "at", _MAX_DECISION_AT)}
+    digest = _bounded(evidence_digest, "evidence_digest", _MAX_EVIDENCE_DIGEST).strip()
+    if digest:
+        rec["evidence_digest"] = digest
+    if aid:
+        rec["action_id"] = aid
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    _append_governance(path, rec)      # locked, fsynced append (shared governance write, CODEX)
-    return rec
+    from looplab.core.atomicio import best_effort_fsync
+    from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
+    # Idempotency lookup, revision CAS, allocation and append are one critical section. A
+    # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
+    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+        logical = _logical_decision_rows(rows)
+        if aid:
+            existing = next((r for r in logical if str(r.get("action_id") or "") == aid), None)
+            if existing is not None:
+                if _decision_payload(existing) == _decision_payload(rec):
+                    return existing
+                raise ClaimDecisionIdempotencyConflict(
+                    f"action_id {aid!r} was already used for a different claim decision")
+        current = len(logical)
+        if expected_revision is not None:
+            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
+                raise ValueError("expected_revision must be an integer")
+            if expected_revision != current:
+                raise ClaimDecisionConflict(expected_revision, current)
+        if validate is not None:
+            validate()
+        stored = {**rec, "revision": current + 1}
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(stored) + "\n")
+            f.flush()
+            best_effort_fsync(f.fileno())
+        return stored
 
 
 def load_claim_decisions(memory_dir) -> dict:
-    """The LATEST operator decision, indexed by BOTH its legacy statement key AND its structured `claim_uid`
-    (both entries point at the same record), so the lean projection overlays by normalized statement and the
-    structured projection overlays by uid. Last write wins per key. {} when none / unreadable."""
+    """Replay current decisions into safe global and structured namespaces.
+
+    UIDs are recomputed with the current claim-key version, so durable v1 rows migrate on read. A scoped or
+    metric-qualified row is indexed ONLY by its structured UID: it must never overwrite the global legacy
+    statement key. Unscoped/unqualified rows remain the fallback for every scope. ``clear`` tombstones only
+    the namespace it addresses. Last write wins within each exact namespace.
+    """
     from pathlib import Path
 
     from looplab.events.eventstore import read_jsonl_lenient
@@ -108,17 +268,38 @@ def load_claim_decisions(memory_dir) -> dict:
     path = Path(memory_dir) / "claim_decisions.jsonl"
     if not path.exists():
         return {}
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
     out: dict = {}
-    for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
-        if r.get("decision") not in CLAIM_DECISIONS:
-            continue
-        k = str(r.get("key") or normalize_statement(r.get("statement", "")))
-        if k:
-            out[k] = r            # last wins (legacy statement key)
-        uid = str(r.get("claim_uid") or "")
+    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
+    for r in _logical_decision_rows(rows):
+        statement = str(r.get("statement") or "").strip()
+        scope, metric = str(r.get("scope") or ""), str(r.get("metric") or "")
+        k = str(r.get("key") or normalize_statement(statement))
+        # A legacy scoped row without its statement cannot be migrated safely. Never fall back to its old UID:
+        # that would silently replay a v1 token-set collision under the v2 role-aware contract.
+        uid = claim_uid(statement, scope=scope, metric=metric) if statement else ""
+        current = {**r, "claim_uid": uid, "claim_key_version": CLAIM_KEY_VERSION}
+        keys = ([uid] if uid else []) + ([k] if k and not scope and not metric else [])
+        # One semantic UID may have several historical display spellings. Retire every index that points
+        # at the same namespace before applying its newest row, so ``clear`` cannot be bypassed through an
+        # older legacy statement key.
         if uid:
-            out[uid] = r          # structured scope+polarity key
+            for old_key, old in list(out.items()):
+                if str(old.get("claim_uid") or "") == uid:
+                    out.pop(old_key, None)
+        for key in keys:
+            if r.get("decision") == "clear":
+                out.pop(key, None)
+            else:
+                out[key] = current
     return out
+
+
+def _string_list(raw, *, maximum: int, item_maximum: int) -> list[str]:
+    """Bounded JSON-list normalization; strings are scalar values, never character iterables."""
+    if not isinstance(raw, (list, tuple)):
+        return []
+    return [x[:item_maximum] for x in raw[:maximum] if isinstance(x, str) and x]
 
 
 # --------------------------------------------------------------------------- #
@@ -137,13 +318,21 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> 
     if not memory_dir:
         return 0
     rid = str(run_id or "")
+    if not rid:
+        return 0
     rows = []
-    for c in claims or []:
+    source = claims if isinstance(claims, (list, tuple)) else []
+    for c in source[:256]:
         stmt = str((c.get("statement") if isinstance(c, dict) else "") or "").strip()
         if not stmt:
             continue
-        rows.append({"run_id": rid, "task_id": str(task_id or ""), "statement": stmt,
-                     "node_ids": list(c.get("node_ids") or []), "urls": list(c.get("urls") or [])})
+        verdict, method, note = _research_verification(c)
+        rows.append({"v": 2, "run_id": rid, "task_id": str(task_id or "")[:500],
+                     "statement": stmt[:4000],
+                     "metric": _metric_identity(c),
+                     "node_ids": _node_ids(c.get("node_ids"))[:64],
+                     "urls": _string_list(c.get("urls"), maximum=32, item_maximum=2000),
+                     "verification": {"verdict": verdict, "method": method, "note": note}})
     path = Path(memory_dir) / "research_claims.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     # Hold the same interprocess lock the case/capsule/decision sidecar stores use — and RE-READ inside it —
@@ -151,7 +340,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims) -> 
     # (write_jsonl_atomic is crash-atomic, NOT concurrency-safe; last-writer-wins would silently drop the
     # loser's claims and under-count `contested`) (CODEX). This closes the unlocked read-modify-replace the
     # review flagged: two finalizers reading E then replacing with E+r1 / E+r2 would erase each other.
-    with _interprocess_lock(Path(str(path) + ".lock")):
+    with _interprocess_lock(Path(str(path) + ".lock"), required=True):
         existing = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
         kept = [r for r in existing if str(r.get("run_id") or "") != rid]   # drop this run's old rows
         write_jsonl_atomic(path, kept + rows, dumps=json.dumps)
@@ -169,7 +358,8 @@ def load_research_claims(memory_dir) -> list[dict]:
     return read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
 
 
-def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False,
+def claims_for_memory(memory_dir, *, lessons=None, research_claims=None, decisions=None,
+                      scope_task: str = "", fuzzy: bool = False,
                       structured: bool = False) -> list[dict]:
     """Convenience: `claim_assessments` over a memory dir — lessons.jsonl (or a pre-filtered `lessons`) +
     the persisted D8 research claims + the operator-decision overlay. One call so every read path applies
@@ -182,15 +372,19 @@ def claims_for_memory(memory_dir, *, lessons=None, fuzzy: bool = False,
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
-    # CODEX AGENT: callers may pass task/role-filtered `lessons`, but this helper then re-adds ALL D8 rows
-    # and ALL global decisions. Consequently a CrossRunTools instance bound to task A still returns task B's
-    # research claims (and the Developer sees the R&D stream it claims to exclude). Accept already-scoped
-    # research claims/decisions or one shared scope predicate and apply it to every source before joining.
-    return claim_assessments(lessons, research_claims=load_research_claims(memory_dir),
-                             decisions=load_claim_decisions(memory_dir), fuzzy=fuzzy, structured=structured)
+    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    if scope_task:
+        wanted = str(scope_task)
+        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
+        research = [r for r in research if str(r.get("task_id") or "") == wanted]
+    dec = load_claim_decisions(memory_dir) if decisions is None else decisions
+    return claim_assessments(lessons, research_claims=research, decisions=dec,
+                             fuzzy=fuzzy, structured=structured)
 
 
-def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int = 8) -> dict:
+def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims=None,
+                     decisions=None, scope_task: str = "", max_items: int = 8,
+                     structured: bool = False) -> dict:
     """Convenience: `portfolio_atlas` over a memory dir with EVERY overlay loaded — lessons + D8 research
     claims + operator decisions + concept aliases (CR1a). One call so every atlas surface is consistent."""
     from pathlib import Path
@@ -205,11 +399,19 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, max_items: int 
     if capsules is None:
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
+    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
+    if scope_task:
+        wanted = str(scope_task)
+        # Scope is an access boundary across every joined store, not just D8. Filtering only
+        # research rows still leaked other tasks through lessons and concept capsules in the same response.
+        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
+        capsules = [r for r in capsules if str(r.get("task_id") or "") == wanted]
+        research = [r for r in research if str(r.get("task_id") or "") == wanted]
     return portfolio_atlas(lessons, capsules, max_items=max_items,
-                           decisions=load_claim_decisions(memory_dir),
-                           research_claims=load_research_claims(memory_dir),
+                           decisions=(load_claim_decisions(memory_dir) if decisions is None else decisions),
+                           research_claims=research,
                            aliases=load_concept_aliases(memory_dir),
-                           splits=load_concept_splits(memory_dir))
+                           splits=load_concept_splits(memory_dir), structured=structured)
 
 
 _CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
@@ -220,65 +422,63 @@ def _stmt_tokens(s: str) -> frozenset:
 
 
 def _fuzzy_merge_claims(claims: list[dict], *, threshold: float = 0.6) -> list[dict]:
-    """CR1b (lean, opt-in): merge claims whose STATEMENTS are genuine PARAPHRASES into one. Identity is a
-    strict token-JACCARD test (>= `threshold`) via union-find — deliberately NOT the hybrid top-k
-    clustering, which blobs a HOMOGENEOUS corpus (every claim shares the task's vocabulary) into one giant
-    cluster (verified: it collapsed 73 distinct rubert claims into 1). Jaccard 0.6 requires most words to
-    match, so distinct techniques stay separate and only near-identical restatements merge. Suggestion-grade
-    -> opt-in; the structured semantic claim key is the full CR1b. Unions evidence/runs/scopes/sources,
-    keeps the most-evidenced statement as the label, carries an operator maturity if any member had one."""
+    """Conservative opt-in paraphrase projection.
+
+    Candidates must share scope, semantic polarity and governance maturity, and every member must clear the
+    threshold (complete-link). A bounded token index avoids all-pairs and single-link bridge collapse.
+    """
     n = len(claims)
     if n <= 1:
         return claims
+    from looplab.engine.claim_key import claim_signature
     toks = [_stmt_tokens(c["statement"]) for c in claims]
-    parent = list(range(n))
-
-    # CODEX AGENT: token-set overlap is not a safe paraphrase or governance identity. For example,
-    # "dropout improves model generalization" and "dropout never improves model generalization" clear
-    # 0.6 and merge; a ratified member and a rejected member then inherit whichever non-machine maturity
-    # happens to appear first below. Add semantic polarity/qualifier checks and define decision conflicts
-    # explicitly before allowing this projection to combine operator-controlled claims.
-
-    def _find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    # CODEX AGENT: all-pairs comparison is O(n^2), and union-find turns the threshold into single-linkage:
-    # A~B and B~C merge A with C even when A/C are below 0.6 (reproduced with two one-token substitutions).
-    # Use a bounded candidate index, then require every member to satisfy a representative/complete-link
-    # invariant; otherwise a large or bridge-heavy portfolio can both stall the CLI and over-collapse claims.
-    for i in range(n):
-        if not toks[i]:
-            continue
-        for j in range(i + 1, n):
-            if not toks[j]:
+    meta = [(tuple(c.get("scopes") or []), claim_signature(c["statement"])["polarity"],
+             str(c.get("maturity") or "machine-proposed")) for c in claims]
+    groups: list[list[int]] = []
+    token_groups: dict[str, set[int]] = {}
+    for i, token_set in enumerate(toks):
+        candidates = sorted({gid for token in token_set for gid in token_groups.get(token, ())})[:64]
+        chosen = None
+        for gid in candidates:
+            members = groups[gid]
+            if len(members) >= 64 or any(meta[j] != meta[i] for j in members):
                 continue
-            inter = len(toks[i] & toks[j])
-            if inter and inter / len(toks[i] | toks[j]) >= threshold:
-                parent[_find(i)] = _find(j)
-    groups: dict[int, list[int]] = {}
-    for i in range(n):
-        groups.setdefault(_find(i), []).append(i)
+            complete = True
+            for j in members:
+                union, inter = token_set | toks[j], token_set & toks[j]
+                if not inter or len(inter) / len(union) < threshold:
+                    complete = False
+                    break
+            if complete:
+                chosen = gid
+                break
+        if chosen is None:
+            chosen = len(groups)
+            groups.append([])
+        groups[chosen].append(i)
+        for token in token_set:
+            token_groups.setdefault(token, set()).add(chosen)
 
     out = []
-    for idxs in groups.values():
+    for idxs in groups:
         members = [claims[i] for i in idxs]
         if len(members) == 1:
             out.append(members[0])
             continue
         sup = sorted({r for m in members for r in m["support"]})
         opp = sorted({r for m in members for r in m["oppose"]})
+        unverified = sorted({r for m in members for r in m.get("unverified", [])})
         rep = max(members, key=lambda m: (m["n_support"] + m["n_oppose"], m["statement"]))
-        mat = next((m["maturity"] for m in members if m.get("maturity") != "machine-proposed"),
-                   "machine-proposed")
+        mat = members[0].get("maturity", "machine-proposed")
         out.append({
             "statement": rep["statement"], "epistemic": _epistemic(sup, opp), "maturity": mat,
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted({r for m in members for r in m["runs"]}),
             "scopes": sorted({r for m in members for r in m["scopes"]}),
             "sources": sorted({s for m in members for s in m.get("sources", [])}),
+            "verification": sorted({v for m in members for v in m.get("verification", [])}),
+            "decision": members[0].get("decision"),
             "merged_from": sorted(m["statement"] for m in members),
         })
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
@@ -290,27 +490,28 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
     `claim_signature` merge_key: (subject stems, scope=task, metric, polarity). Opposite-polarity claims
     sharing a `contra_key` are surfaced as a CONTRADICTION (they never merge, and each is marked contested).
     Governance overlays by the structured `claim_uid` (scope-precise)."""
-    from looplab.engine.claim_key import claim_signature
+    from looplab.engine.claim_key import claim_signature, claim_uid
     groups: dict[str, dict] = {}
 
-    def _grp(statement, scope):
+    def _grp(statement, scope, metric=""):
         s = str(statement or "").strip()
         if not s:
             return None
-        sig = claim_signature(s, scope=str(scope or ""))
+        sig = claim_signature(s, scope=str(scope or ""), metric=str(metric or ""))
         if sig["polarity"] == 0:                     # no subject content -> not a claim
             return None
         g = groups.get(sig["merge_key"])
         if g is None:
             g = groups[sig["merge_key"]] = {
                 "uid": sig["uid"], "contra_key": sig["contra_key"], "polarity": sig["polarity"],
-                "scope": sig["scope"], "support": set(), "oppose": set(), "runs": set(),
-                "scopes": set(), "sources": set(), "_ev": {}}
+                "scope": sig["scope"], "metric": sig["metric"],
+                "support": set(), "oppose": set(), "unverified": set(),
+                "runs": set(), "scopes": set(), "sources": set(), "verification": set(), "_ev": {}}
         g["_ev"][s] = g["_ev"].get(s, 0)             # candidate representative statements (evidence-weighted)
         return g
 
     for lz in lessons or []:
-        g = _grp(lz.get("statement"), lz.get("task_id"))
+        g = _grp(lz.get("statement"), lz.get("task_id"), _metric_identity(lz))
         if g is None:
             continue
         if lz.get("run_id"):
@@ -326,7 +527,7 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         g["_ev"][str(lz.get("statement") or "").strip()] += len(refs)
 
     for rc in research_claims or []:
-        g = _grp(rc.get("statement"), rc.get("task_id"))
+        g = _grp(rc.get("statement"), rc.get("task_id"), _metric_identity(rc))
         if g is None:
             continue
         if rc.get("run_id"):
@@ -334,46 +535,94 @@ def _structured_assessments(lessons, research_claims, decisions) -> list[dict]:
         if rc.get("task_id"):
             g["scopes"].add(str(rc["task_id"]))
         refs = _qualify_refs(rc.get("run_id"), _node_ids(rc.get("node_ids")))
-        g["support"].update(refs)
+        verdict, method, _note = _research_verification(rc)
+        g["verification"].add(f"{method}:{verdict}" if method else verdict)
+        if verdict == "supported":
+            g["support"].update(refs)
+        else:
+            # unsupported/unclear/cited/legacy-unverified evidence is not counter-evidence; it simply has
+            # not established the claim.  Keep the refs drillable without promoting them to support.
+            g["unverified"].update(refs)
         g["_ev"][str(rc.get("statement") or "").strip()] += len(refs)
-        for u in (rc.get("urls") or []):
-            if isinstance(u, str) and u:
-                g["sources"].add(u)
+        g["sources"].update(_string_list(rc.get("urls"), maximum=32, item_maximum=2000))
 
     # Contradiction map: a contra_key seen with BOTH polarities means two opposite claims about one subject
     # in one scope — the portfolio disagrees with itself at the ASSERTION level (unreachable from a single
     # merged statement). Each such claim is marked contested and carries its opposites' representative text.
-    contra: dict[str, dict[int, list]] = {}
-    for g in groups.values():
-        contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(g)
-
     _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
-    out = []
+
+    def _decision_for(g: dict, rep: str):
+        overlay = decisions or {}
+        candidates = [g["uid"], claim_uid(rep, scope=g["scope"], metric=g["metric"])]
+        if g["metric"]:
+            candidates.append(claim_uid(rep, scope=g["scope"], metric=""))
+        if g["metric"]:
+            candidates.append(claim_uid(rep, scope="", metric=g["metric"]))
+        candidates.append(claim_uid(rep, scope="", metric=""))
+        seen = set()
+        for uid in candidates:
+            if uid and uid not in seen and uid in overlay:
+                return overlay[uid]
+            seen.add(uid)
+        legacy = overlay.get(normalize_statement(rep))
+        if (legacy and not str(legacy.get("scope") or "")
+                and not str(legacy.get("metric") or "")):
+            return legacy
+        return None
+
+    prepared = []
     for g in groups.values():
         rep = max(g["_ev"], key=lambda s: (g["_ev"][s], s)) if g["_ev"] else ""
-        sup, opp = sorted(g["support"]), sorted(g["oppose"])
-        opposites = [og for pol, gs in contra.get(g["contra_key"], {}).items() if pol != g["polarity"]
-                     for og in gs]
-        contradicts = sorted({max(o["_ev"], key=lambda s: (o["_ev"][s], s)) for o in opposites if o["_ev"]})
-        d = (decisions or {}).get(g["uid"])
-        if d is None:
-            # A SCOPE-LESS operator decision (the default `claim-decide` with no --scope, keyed only by the
-            # legacy normalize_statement) applies to EVERY scope of that statement. A SCOPED decision keeps
-            # its own scope and is NOT applied here via the legacy key, so it never leaks across tasks
-            # (mega-review finding: the default operator path was silently ignored in structured mode).
-            leg = (decisions or {}).get(normalize_statement(rep))
-            if leg and not str(leg.get("scope") or ""):
-                d = leg
-        out.append({
+        sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
+        decision = _decision_for(g, rep)
+        prepared.append({"group": g, "statement": rep, "support": sup, "oppose": opp,
+                         "unverified": unverified, "decision": decision,
+                         "maturity": _dec.get((decision or {}).get("decision"), "machine-proposed")})
+
+    # Keep a governance-independent contradiction map for the evidence digest. The live projection below
+    # may hide a rejected opposite, but rejecting it must not make the reviewed proof revision change by
+    # itself; only source evidence should age a decision.
+    raw_contra: dict[str, dict[int, list]] = {}
+    contra: dict[str, dict[int, list]] = {}
+    for item in prepared:
+        if item["support"]:
+            g = item["group"]
+            raw_contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
+        if item["maturity"] != "operator-rejected" and item["support"]:
+            contra.setdefault(g["contra_key"], {}).setdefault(g["polarity"], []).append(item)
+
+    out = []
+    for item in prepared:
+        g, rep = item["group"], item["statement"]
+        sup, opp, unverified = item["support"], item["oppose"], item["unverified"]
+        opposites = ([] if item["maturity"] == "operator-rejected" else
+                     [og for pol, gs in contra.get(g["contra_key"], {}).items() if pol != g["polarity"]
+                      for og in gs])
+        contradicts = sorted({o["statement"] for o in opposites})
+        raw_opposites = [og for pol, gs in raw_contra.get(g["contra_key"], {}).items()
+                         if pol != g["polarity"] for og in gs]
+        raw_contradicts = sorted({o["statement"] for o in raw_opposites})
+        row = {
             "statement": rep,
             # a polarity contradiction is the strongest contested signal -> mixed even if this side's own
             # evidence is one-directional (that is exactly what the structured key makes reachable).
-            "epistemic": "mixed" if contradicts else _epistemic(sup, opp),
-            "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
+            "epistemic": "mixed" if contradicts and sup else _epistemic(sup, opp),
+            "maturity": item["maturity"],
             "support": sup, "oppose": opp, "n_support": len(sup), "n_oppose": len(opp),
+            "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]), "sources": sorted(g["sources"]),
-            "claim_uid": g["uid"], "polarity": g["polarity"], "contradicts": contradicts,
-        })
+            "verification": sorted(g["verification"]),
+            "claim_uid": g["uid"], "scope": g["scope"], "polarity": g["polarity"],
+            "metric": g["metric"],
+            "decision": item["decision"], "contradicts": contradicts,
+        }
+        digest_row = {**row,
+                      "epistemic": "mixed" if raw_contradicts and sup else _epistemic(sup, opp),
+                      "contradicts": raw_contradicts}
+        row["evidence_digest"] = claim_evidence_digest(digest_row)
+        decision_digest = str((item["decision"] or {}).get("evidence_digest") or "")
+        row["decision_fresh"] = (decision_digest == row["evidence_digest"] if decision_digest else None)
+        out.append(row)
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"],
                             0 if c["contradicts"] else 1, c["statement"]))
     return out
@@ -407,7 +656,8 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         # (§21.20.13); this lean projection keeps scope/runs as metadata on the claim.
         return groups.setdefault(normalize_statement(s), {
             "statement": s, "support": set(), "oppose": set(),
-            "runs": set(), "scopes": set(), "sources": set()})
+            "unverified": set(), "runs": set(), "scopes": set(), "sources": set(),
+            "verification": set()})
 
     def _qualify(run_id, node_ids) -> list[str]:
         # Run-QUALIFY evidence refs so (r1,node0) and (r2,node0) never collapse (CODEX): a bare node id is
@@ -440,36 +690,34 @@ def claim_assessments(lessons: list[dict], *, research_claims: Optional[list[dic
         g = _group(rc.get("statement"))
         if g is None:
             continue
-        # CODEX AGENT: unlike lessons above, D8 rows never add their run_id/task_id to `runs`/`scopes`;
-        # a D8-only Atlas therefore reports zero runs and loses the metadata needed for task filtering.
-        # The row also has no persisted verifier stance, so the mere presence of an integer citation is
-        # counted as support without resolving the node/generation. Preserve provenance + verification and
-        # model unresolved/cited evidence separately from verified positive support.
-        # A D8 memo claim CITES the experiments it rests on -> support evidence. URLs are external sources.
-        # NOTE (CODEX): citation is not verification — a full claim requires a verified verdict + resolvable
-        # run-qualified evidence (CR1b TODO). This unification is exercised via the API/callers that pass
-        # `research_claims`; the shipped CLIs read lessons only (they do not fabricate D8 claims).
-        g["support"].update(_qualify(rc.get("run_id"), _node_ids(rc.get("node_ids"))))
-        for u in (rc.get("urls") or []):
-            if isinstance(u, str) and u:
-                g["sources"].add(u)
+        if rc.get("run_id"):
+            g["runs"].add(str(rc["run_id"]))
+        if rc.get("task_id"):
+            g["scopes"].add(str(rc["task_id"]))
+        refs = _qualify(rc.get("run_id"), _node_ids(rc.get("node_ids")))
+        verdict, method, _note = _research_verification(rc)
+        g["verification"].add(f"{method}:{verdict}" if method else verdict)
+        if verdict == "supported":
+            g["support"].update(refs)
+        else:
+            g["unverified"].update(refs)
+        g["sources"].update(_string_list(rc.get("urls"), maximum=32, item_maximum=2000))
 
     _dec = {"ratified": "operator-ratified", "rejected": "operator-rejected", "pinned": "operator-pinned"}
     out = []
     for key, g in groups.items():
-        sup, opp = sorted(g["support"]), sorted(g["oppose"])
+        sup, opp, unverified = sorted(g["support"]), sorted(g["oppose"]), sorted(g["unverified"])
         d = (decisions or {}).get(key)
-        # CODEX AGENT: note/by/at are discarded here, so API/CLI/Atlas/tools cannot explain who changed the
-        # claim or why after the one write response is gone. Carry the current decision record (and expose
-        # append-only history) rather than reducing an auditable governance action to one maturity string.
         out.append({
             "statement": g["statement"],
             "epistemic": _epistemic(sup, opp),
             "maturity": _dec.get((d or {}).get("decision"), "machine-proposed"),
             "support": sup, "oppose": opp,
             "n_support": len(sup), "n_oppose": len(opp),
+            "unverified": unverified, "n_unverified": len(unverified),
             "runs": sorted(g["runs"]), "scopes": sorted(g["scopes"]),
-            "sources": sorted(g["sources"]),
+            "sources": sorted(g["sources"]), "verification": sorted(g["verification"]),
+            "decision": d,
         })
     # most-evidenced first (support+oppose), contested claims break ties toward visibility, then statement
     out.sort(key=lambda c: (-(c["n_support"] + c["n_oppose"]), -c["n_oppose"], c["statement"]))
@@ -496,21 +744,16 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     # NOTE (CODEX): this bounds by CLAIM COUNT + per-claim field caps (below), not a serialized token/byte
     # budget — a true token envelope is the CR2b TODO. `max_claims<1` is normalized to 1.
     max_claims = max(1, int(max_claims))
-    # Operator governance (§22.4): a claim the operator REJECTED is dropped from the agent's context (the
-    # human overruled it); a RATIFIED claim is surfaced FIRST (the human vouched for it), ahead of even the
-    # contested ones. `machine-proposed` claims keep the default contested-first ordering.
-    # CODEX AGENT: `operator-pinned` receives no retention priority, so a successful pin can fall outside
-    # max_claims. Conversely, with max_claims=1 the caveat swap below can evict the ratified claim that this
-    # comment promises is surfaced first. Define explicit pin/ratify/caveat precedence (and an unpin/clear
-    # transition) before treating these writes as enforceable governance semantics.
+    # Governance precedence is explicit: rejected is absent; pinned is retention-critical; ratified is the
+    # next preference; then evidence ordering. A caveat may replace a non-pinned positive, never a pin.
     live = [c for c in (claims or []) if c.get("maturity") != "operator-rejected"]
+    pinned = [c for c in live if c.get("maturity") == "operator-pinned"]
     ratified = [c for c in live if c.get("maturity") == "operator-ratified"]
-    rest = [c for c in live if c.get("maturity") != "operator-ratified"]
+    rest = [c for c in live if c.get("maturity") not in {"operator-pinned", "operator-ratified"}]
     by_state: dict[str, list] = {"mixed": [], "supported": [], "refuted": [], "inconclusive": []}
     for c in rest:
         by_state.get(c["epistemic"], by_state["inconclusive"]).append(c)
-    # ratified first, then contested (counter-argument), then supported, then remaining caveats.
-    ordered = (ratified + by_state["mixed"] + by_state["supported"]
+    ordered = (pinned + ratified + by_state["mixed"] + by_state["supported"]
                + by_state["refuted"] + by_state["inconclusive"])
     picked = ordered[:max_claims]
     # Reserved caveat slot: if nothing picked carries a caveat but caveats exist, swap the weakest picked
@@ -520,25 +763,38 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         # Include RATIFIED caveats too: a ratified mixed/refuted/inconclusive claim pushed past max_claims by
         # the ratified block must still be able to fill the reserved slot, or a slate of ratified-supported
         # claims could crowd opposition out — the exact §20.5 rule this slot exists to protect (CODEX).
-        caveats = ([c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
+        caveats = ([c for c in pinned if c["epistemic"] in _CAVEAT_STATES]
+                   + [c for c in ratified if c["epistemic"] in _CAVEAT_STATES]
                    + by_state["mixed"] + by_state["refuted"] + by_state["inconclusive"])
         if caveats:
-            picked = picked[:-1] + [caveats[0]]
+            victim = next((i for i in range(len(picked) - 1, -1, -1)
+                           if picked[i].get("maturity") != "operator-pinned"), None)
+            if victim is not None:
+                picked[victim] = caveats[0]
 
     def _slim(c: dict) -> dict:
         # Evidence refs are run-QUALIFIED ("run:node"), so the truncated support/oppose lists stay citable;
         # keep runs/scopes too so a reader can resolve the claim's provenance (CODEX).
         return {"statement": c["statement"][:300], "epistemic": c["epistemic"],
                 "maturity": c.get("maturity", "machine-proposed"),
+                "claim_uid": c.get("claim_uid", ""), "scope": c.get("scope", ""),
+                "evidence_digest": c.get("evidence_digest", ""),
+                "decision_fresh": c.get("decision_fresh"),
+                "metric": c.get("metric", ""), "polarity": c.get("polarity"),
                 "n_support": c["n_support"], "n_oppose": c["n_oppose"],
+                "n_unverified": c.get("n_unverified", 0),
                 "support": c["support"][:6], "oppose": c["oppose"][:6],
+                "unverified": c.get("unverified", [])[:6],
+                # Structured polarity contradictions are assertion-level counter-evidence,
+                # not entries in ``oppose``. Keep their bounded text or a mixed claim renders as 1↑/0↓
+                # with no visible reason for the disagreement.
+                "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
                 "runs": c.get("runs", [])[:6], "scopes": c.get("scopes", [])[:6]}
 
     pack = {
         "claims": [_slim(c) for c in picked],
         "n_claims_total": len(claims or []),
-        # count contested across BOTH pools — a ratified claim is pulled out of by_state but is still mixed.
-        "n_contested": len(by_state["mixed"]) + sum(1 for c in ratified if c["epistemic"] == "mixed"),
+        "n_contested": sum(1 for c in live if c.get("epistemic") == "mixed"),
     }
     if concept_overview:
         pack["coverage"] = {
@@ -589,9 +845,66 @@ def _eligible(kind: str, meta: dict, intent: str) -> bool:
 
 _INTENTS = ("failed", "contested", "worked", "explore")
 
+_RETRIEVAL_CORPUS_VERSION = 2
+_INTENT_SCORE_BONUS = 0.001
+_CAVEAT_SCORE_RATIO = 0.50
+_CAVEAT_QUERY_COVERAGE = 0.10
+
+
+def _retrieval_tokens(text: str) -> frozenset[str]:
+    normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    return frozenset(_CLAIM_WORD.findall(normalized))
+
+
+def _lexical_relevance(query: str, text: str) -> tuple[int, float, float]:
+    q, d = _retrieval_tokens(query), _retrieval_tokens(text)
+    shared = len(q & d)
+    coverage = shared / len(q) if q else 0.0
+    jaccard = shared / len(q | d) if q or d else 0.0
+    return shared, coverage, jaccard
+
+
+def _json_digest(value, *, length: int = 20) -> str:
+    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:length]
+
+
+def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
+    identity = {"v": _RETRIEVAL_CORPUS_VERSION, "kind": kind,
+                "claim_uid": str(meta.get("claim_uid") or ""),
+                "metric": str(meta.get("metric") or ""),
+                "text": " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())}
+    stable_id = f"{kind[:1]}_{_json_digest(identity, length=16)}"
+    return kind, str(text or ""), {**meta, "stable_id": stable_id}
+
+
+def _retrieval_corpus_digest(docs) -> str:
+    canonical = [{"kind": kind, "text": text, "meta": meta}
+                 for kind, text, meta in sorted(docs, key=lambda d: d[2]["stable_id"])]
+    return _json_digest({"v": _RETRIEVAL_CORPUS_VERSION, "docs": canonical}, length=20)
+
+
+def _preselect_retrieval_docs(docs, query: str, limit: int):
+    """Cheap query-aware cap with one best row per source kind before the expensive hybrid index."""
+    cap = max(1, int(limit))
+    if len(docs) <= cap:
+        return list(docs)
+    stats = [_lexical_relevance(query, d[1]) for d in docs]
+    ranked = sorted(range(len(docs)),
+                    key=lambda i: (-stats[i][0], -stats[i][1], -stats[i][2],
+                                   docs[i][2]["stable_id"]))
+    selected: list[int] = []
+    kinds = sorted({d[0] for d in docs})
+    if cap >= len(kinds):
+        for kind in kinds:
+            selected.append(next(i for i in ranked if docs[i][0] == kind))
+    selected_set = set(selected)
+    selected.extend(i for i in ranked if i not in selected_set)
+    return [docs[i] for i in selected[:cap]]
+
 
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
-                       scope_task: str = "", contradiction_quota: float = 0.34,
+                       research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
                        max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
     (epistemic state / operator maturity) + concepts (#runs) — over the shipped `HybridRetriever`
@@ -620,12 +933,13 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     if lessons is None:
         lp = base / "lessons.jsonl" if base else None
         lessons = read_jsonl_lenient(lp, loads=json.loads, dicts_only=True) if (lp and lp.exists()) else []
-    # Scope EVERY source (CODEX): the D8 research claims are filtered to `scope_task` so a bound agent never
-    # retrieves another task's claims; decisions are a global governance overlay (they only ever REMOVE via
-    # rejection). When no scope is given, behaviour is portfolio-wide (back-compat).
-    research = load_research_claims(memory_dir)
+    # Scope EVERY source before joining. Decisions are a governance overlay; they never grant visibility.
+    research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
     if scope_task:
-        research = [r for r in research if str(r.get("task_id") or "") == scope_task]
+        wanted = str(scope_task)
+        lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
+        capsules = [r for r in capsules if str(r.get("task_id") or "") == wanted]
+        research = [r for r in research if str(r.get("task_id") or "") == wanted]
     claims = [c for c in claim_assessments(lessons, research_claims=research,
                                            decisions=load_claim_decisions(memory_dir), structured=structured)
               if c.get("maturity") != "operator-rejected"]
@@ -633,77 +947,116 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                                           splits=load_concept_splits(memory_dir))
     docs: list[tuple[str, str, dict]] = []
     for c in claims:
-        docs.append(("claim", c["statement"], {"epistemic": c["epistemic"], "n_support": c["n_support"],
-                                               "n_oppose": c["n_oppose"], "maturity": c.get("maturity")}))
+        evidence_digest = _json_digest({"support": c.get("support", []), "oppose": c.get("oppose", []),
+                                        "unverified": c.get("unverified", []),
+                                        "sources": c.get("sources", [])})
+        docs.append(_retrieval_doc("claim", c["statement"], {
+            "epistemic": c["epistemic"], "n_support": c["n_support"],
+            "n_oppose": c["n_oppose"], "n_unverified": c.get("n_unverified", 0),
+            "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
+            "maturity": c.get("maturity"), "claim_uid": c.get("claim_uid", ""),
+            "metric": c.get("metric", ""), "scopes": c.get("scopes", []),
+            "decision_revision": (c.get("decision") or {}).get("revision"),
+            "governance_digest": _json_digest(c.get("decision") or {}),
+            "evidence_digest": evidence_digest}))
     for e in overview["concepts"]:
-        docs.append(("concept", e["concept"],
-                     {"n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]]}))
+        docs.append(_retrieval_doc("concept", e["concept"], {
+            "n_runs": e["n_runs"], "runs": [r["run_id"] for r in e["runs"][:5]],
+            "evidence_digest": _json_digest(e["runs"])}))
 
     n_total = len(docs)
-    truncated = max(0, n_total - max(1, int(max_corpus)))
-    if truncated:
-        docs = docs[:max(1, int(max_corpus))]     # bounded; truncation is REPORTED below, never silent
+    corpus_digest = _retrieval_corpus_digest(docs)
+    indexed_docs = _preselect_retrieval_docs(docs, str(query or ""), max_corpus)
+    truncated = n_total - len(indexed_docs)
     # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
     # classify deterministically from the query text. An unknown value falls back to classification.
     intent = intent if intent in _INTENTS else _classify_intent(query)
     kk = max(1, int(k))                            # normalize k (0/-1 -> 1) before it reaches the receipt
+    try:
+        base_quota = float(contradiction_quota)
+    except (TypeError, ValueError):
+        base_quota = 0.34
+    if not math.isfinite(base_quota):
+        base_quota = 0.34
+    base_quota = min(1.0, max(0.0, base_quota))
+    q = max(base_quota, 0.5) if intent in ("failed", "contested") else base_quota
+    target = min(math.ceil(kk * q), max(0, kk - 1))
     # A why-recalled receipt: corpus revision (content digest), the degraded vector-channel semantics, the
     # classified intent + quota, and (below) the per-hit rank — enough to explain/reproduce a result.
-    corpus_digest = hashlib.sha1("\x1f".join(f"{d[0]}:{d[1]}" for d in docs).encode("utf-8")).hexdigest()[:16]
     receipt = {"query": str(query or ""), "k": kk, "n_corpus": n_total,
+               "n_indexed": len(indexed_docs), "corpus_digest_version": _RETRIEVAL_CORPUS_VERSION,
                "channels": ["lexical", "bm25", "vector"], "intent": intent,
                "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
-               "corpus_digest": corpus_digest, "truncated": truncated,
-               "contradiction_quota": round(float(contradiction_quota), 3)}
-    if not docs or not str(query or "").strip():
+               "corpus_digest": corpus_digest,
+               "retrieval_digest": _retrieval_corpus_digest(indexed_docs), "truncated": truncated,
+               "preselection": "query-overlap+one-per-source/v1",
+               "contradiction_quota": round(base_quota, 3),
+               "effective_quota": round(q, 3), "caveat_target": target,
+               "caveat_score_ratio": _CAVEAT_SCORE_RATIO,
+               "caveat_query_coverage": _CAVEAT_QUERY_COVERAGE,
+               "intent_score_bonus": _INTENT_SCORE_BONUS}
+    if not indexed_docs or not str(query or "").strip():
         return {"results": [], "receipt": {**receipt, "n_hits": 0, "n_caveats": 0}}
 
     from looplab.search.hybrid_merge import HybridRetriever
     # Retrieve a POOL larger than k so the intent priority + contradiction quota have room to reorder/swap
     # without extra queries; the vector channel is the `hash_embed` bag-of-words (a lexical proxy — declared
     # in the receipt, not passed off as semantic retrieval).
-    pool_n = min(len(docs), max(kk * 4, kk + 12))
-    pool = HybridRetriever([t for _, t, _ in docs]).candidates(str(query), k=pool_n)
-    ranked = [{"idx": i, "kind": docs[i][0], "text": docs[i][1], "score": round(float(s), 4),
-               "rel_rank": r, **docs[i][2]} for r, (i, s) in enumerate(pool)]
-    # INTENT eligibility: a STABLE re-sort that floats on-intent docs up while preserving relevance order
-    # within each tier (explore => every doc eligible => order unchanged; test-safe).
-    ranked.sort(key=lambda h: (0 if _eligible(h["kind"], h, intent) else 1, h["rel_rank"]))
+    pool_n = min(len(indexed_docs), max(kk * 4, kk + 12))
+    pool = HybridRetriever([t for _, t, _ in indexed_docs]).candidates(str(query), k=pool_n)
+    ranked = []
+    for rel_rank, (i, score) in enumerate(pool):
+        kind, text, meta = indexed_docs[i]
+        shared, coverage, jaccard = _lexical_relevance(str(query), text)
+        eligible = _eligible(kind, meta, intent)
+        # Intent is a bounded tiebreak-like bonus scaled by actual query overlap, never a hard tier that can
+        # lift an unrelated "failed" memory above a strongly relevant positive result.
+        bonus = (_INTENT_SCORE_BONUS * min(1.0, coverage * 2.0)
+                 if intent != "explore" and eligible and shared else 0.0)
+        ranked.append({"idx": i, "kind": kind, "text": text, "score": round(float(score), 6),
+                       "intent_bonus": round(bonus, 6), "query_overlap": shared,
+                       "query_coverage": round(coverage, 4), "query_jaccard": round(jaccard, 4),
+                       "rel_rank": rel_rank, **meta})
+    ranked.sort(key=lambda h: (-(h["score"] + h["intent_bonus"]), h["rel_rank"], h["stable_id"]))
     picked = ranked[:kk]
 
     # CONTRADICTION QUOTA: guarantee ~quota of the k slots are caveat (mixed/refuted) claims when the pool
     # has them — swapping the LEAST-relevant non-caveat picks (from the bottom) for the most-relevant unpicked
     # caveats, so the top relevance hit is never displaced and opposition is never crowded out.
-    q = 0.5 if intent in ("failed", "contested") else float(contradiction_quota)
     # ceil(k*q) caveat slots, but capped at k-1 so the #1 relevance hit is NEVER evicted (at k=1 the target
     # is 0 — the single slot stays the top hit, as the swap contract promises; mega-review finding).
-    target = min(int(kk * max(0.0, q) + 0.999), max(0, kk - 1))
     have = [h for h in picked if h["kind"] == "claim" and h.get("epistemic") in _CAVEAT]
     if target > len(have):
         picked_ids = {h["idx"] for h in picked}
+        top_score = max((h["score"] for h in ranked), default=0.0)
         extra = [h for h in ranked if h["idx"] not in picked_ids
-                 and h["kind"] == "claim" and h.get("epistemic") in _CAVEAT]
+                 and h["kind"] == "claim" and h.get("epistemic") in _CAVEAT
+                 and h["query_coverage"] >= _CAVEAT_QUERY_COVERAGE
+                 and h["score"] >= top_score * _CAVEAT_SCORE_RATIO]
         need = target - len(have)
         for cav in extra[:need]:
-            # evict the last (least-relevant) non-caveat pick; if none remain, stop (never drop a caveat)
+            # Keep the raw relevance winner. Quotas reserve relevant counter-evidence, not an unrelated
+            # caveat selected solely because it has the desired epistemic label.
             victim = next((h for h in reversed(picked) if not (h["kind"] == "claim"
-                          and h.get("epistemic") in _CAVEAT)), None)
+                          and h.get("epistemic") in _CAVEAT) and h["rel_rank"] != 0), None)
             if victim is None:
                 break
             picked[picked.index(victim)] = cav
-        picked.sort(key=lambda h: (0 if _eligible(h["kind"], h, intent) else 1, h["rel_rank"]))
+        picked.sort(key=lambda h: (-(h["score"] + h["intent_bonus"]),
+                                   h["rel_rank"], h["stable_id"]))
 
     n_caveats = sum(1 for h in picked if h["kind"] == "claim" and h.get("epistemic") in _CAVEAT)
     results = [{k2: v for k2, v in h.items() if k2 != "idx"} for h in picked]
     # Report the EFFECTIVE quota actually applied (raised for failed/contested) + the reserved caveat target,
     # so the receipt explains why a contested claim was (or wasn't) surfaced — not just the configured base.
-    return {"results": results, "receipt": {**receipt, "n_hits": len(results), "n_caveats": n_caveats,
-                                            "effective_quota": round(q, 3), "caveat_target": target}}
+    return {"results": results,
+            "receipt": {**receipt, "n_hits": len(results), "n_caveats": n_caveats}}
 
 
 def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int = 8,
                     decisions: Optional[dict] = None, research_claims: Optional[list[dict]] = None,
-                    aliases: Optional[dict] = None, splits: Optional[dict] = None) -> dict:
+                    aliases: Optional[dict] = None, splits: Optional[dict] = None,
+                    structured: bool = False) -> dict:
     """The Research Atlas DATA payload (§21.20 Step 6): one structured "what's been explored / where the
     thin spots are / what's contradictory" view, composing the concept overview (Step 3), the claim
     assessments (Step 4) and the bounded context pack (Step 5). Pure/deterministic — the read-model a
@@ -715,7 +1068,8 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     from looplab.engine.memory import portfolio_concept_overview
     max_items = max(1, int(max_items))                       # normalize (CODEX): 0/negative -> at least 1
     overview = portfolio_concept_overview(capsules, aliases=aliases, splits=splits)
-    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions)
+    claims = claim_assessments(lessons, research_claims=research_claims, decisions=decisions,
+                               structured=structured)
     # A contradiction the operator REJECTED is no longer a live contradiction — honor the verdict here too,
     # consistent with build_context_pack / cross_run_claims which also drop operator-rejected (CODEX). (The
     # companion CODEX note — that `operator-pinned` has no retention semantics in these top-8 slices, so a
@@ -754,11 +1108,17 @@ def render_context_pack(pack: dict) -> str:
     lines = [f"Cross-run evidence ({pack.get('n_claims_total', 0)} claims, "
              f"{pack.get('n_contested', 0)} contested) — prior experiments, with counter-evidence:"]
     for c in pack.get("claims", []):
+        statement = " ".join(str(c.get("statement") or "").split())[:120]
+        contradicts = "; ".join(
+            repr("".join(ch for ch in " ".join(str(value or "").split()) if ch.isprintable())[:160])
+            for value in (c.get("contradicts") or [])[:3])
         lines.append(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
-                     f"{c['statement'][:120]}")
+                     f"UNTRUSTED_MEMORY={statement!r}"
+                     + (f"; contradicts={contradicts}" if contradicts else ""))
     cov = pack.get("coverage")
     if cov:
-        top = ", ".join(cov.get("top_concepts", [])[:6])
+        top = ", ".join(repr("".join(ch for ch in " ".join(str(x or "").split()) if ch.isprintable())[:100])
+                        for x in cov.get("top_concepts", [])[:6])
         lines.append(f"Portfolio coverage: {cov.get('n_runs', 0)} run(s), {cov.get('n_concepts', 0)} "
-                     f"concept(s){'; most-explored: ' + top if top else ''}.")
+                     f"concept(s){'; UNTRUSTED_MEMORY_CONCEPTS=' + top if top else ''}.")
     return "\n".join(lines)

@@ -3,6 +3,13 @@
 **Version:** 0.1 · **Date:** 2026-06-21
 **Companion docs:** [00-INDEX.md](00-INDEX.md) · [01-product-design.md](01-product-design.md) · [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) · [04-file-layout.md](04-file-layout.md) · research basis: [autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)
 
+> **Historical build-decision record; not a shipped-dependency inventory (2026-07-16).** The tables below
+> preserve the implementation choices made at design time; some entries were simplified, deferred, or replaced.
+> Current source, tests, [the user guide](guide/index.md), and docs 16–18/21 govern present behavior. In
+> particular, `events.jsonl` is the replay authority for `RunState`; original sidecars/snapshots remain
+> authoritative for data absent from the fold, and authenticated UI-server controls use serialized event
+> appends rather than a separate `commands.jsonl` reducer.
+>
 > Docs 01–04 fix the **what/why** (principles, components, interfaces, ADR-1…11). This doc fixes the **with-what**: for every component that was still "our code" or carried an *unresolved* choice, it names the concrete library/framework (or scopes the custom code), with the rejected alternatives and the Windows-11 caveat. It adds **ADR-12…ADR-17** (one per subsystem cluster) and ends with the **step-3 validation**: requirements coverage, conflict resolution, and a buildability matrix. Where this doc resolves an earlier open choice or tension, **05 wins** and the change is folded back into 01/02/04 (see §C).
 
 ---

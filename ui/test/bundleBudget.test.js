@@ -110,7 +110,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
   const sources = [
     'RunList.jsx', 'AssistantBar.jsx', 'AttentionCenter.jsx', 'RunView.jsx', 'Dag.jsx',
     'Dock.jsx', 'Inspector.jsx', 'DirectionsOverview.jsx', 'panels.jsx', 'CollabPanel.jsx', 'Settings.jsx',
-    'SharedAssistant.jsx', 'Report.jsx',
+    'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
   ]
   const graph = {
     'index.html': {
@@ -137,7 +137,7 @@ test('the default policy is satisfiable by a fully split route and interaction g
 
   const result = evaluateBundle({ manifest: graph, assetStats: measured })
   assert.deepEqual(result.violations, [])
-  assert.equal(result.reachability.length, 6)
+  assert.equal(result.reachability.length, 7)
   assert.ok(result.reachability.every(item => item.paths.length === 0))
 
   for (const [root, target] of [

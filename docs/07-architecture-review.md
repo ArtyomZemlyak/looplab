@@ -2,6 +2,12 @@
 
 **Scope:** full audit of the `LoopLab/` implementation (~22 modules, 76 tests) against the design (ADR-1…18 in [03](03-decisions.md)/[05](05-build-decisions.md)). Method: two parallel adversarial code-review passes (concurrency/replay/policy cluster; trust/LLM cluster) + manual design-consistency check. Companion: [README.md](../README.md), status board [06](06-implementation-plan.md).
 
+> **Historical point-in-time audit.** Module/test counts, shipped gaps, and the ADR-1 “engine sole writer” row
+> describe the 2026-06-22 revision. They are not the current implementation ledger. Today one live engine owns
+> reduction while UI-server control appends share the event store's cross-process serializer; `events.jsonl`
+> is replay authority for `RunState`, with separately authoritative snapshots/sidecars. Use docs 16–18 and
+> [doc 21](21-full-functionality-review-2026-07-13.md) for later findings and the current source/tests for truth.
+>
 **Verdict:** the implementation is **consistent with the architecture**; the moat (files-as-truth event loop, pluggable roles/policies/sandbox, trust layer) is intact. Seven real bugs were found and **fixed**; documented deviations are deliberate. No design change required — only the I10 gate *semantics* were clarified (below).
 
 ---

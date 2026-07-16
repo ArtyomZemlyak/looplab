@@ -183,7 +183,7 @@ export const SETTINGS_GROUPS = [
         help: 'How many identical call+result turns in a row count as “stuck” (min 2).' },
       { key: 'agent_stuck_alternate', label: '↳ alternate threshold', type: 'int', placeholder: '4',
         help: 'How many ping-pong cycles between two calls count as “stuck” (min 2).' },
-      { key: 'agent_self_plan', label: 'Self-plan (TODO)', type: 'bool',
+      { key: 'agent_self_plan', label: 'Self-plan checklist', type: 'bool',
         help: 'C1: give long-running agents a TodoWrite-style update_plan tool so they keep their OWN checklist; the current plan is re-surfaced every few turns to keep the goal in view across a long loop. On by default.' },
       { key: 'agent_plan_reinject_every', label: '↳ plan re-inject every (turns)', type: 'int', placeholder: '5',
         help: 'How often (in tool-loop turns) to re-surface the agent’s current plan as a reminder.' },
@@ -304,6 +304,27 @@ export const SETTINGS_GROUPS = [
         help: 'Index cross-run cases + knowledge notes by a short ABSTRACTION + cue anchors (not raw text), consolidate near-duplicate memories, and expand retrieval through anchors to surface related-but-not-similar memories. On by default; off restores the raw-text index.' },
     ],
   },
+  {
+    title: 'Cross-run research', sub: 'experimental Part IV/V portfolio memory, retrieval, and governance',
+    fields: [
+      { key: 'fingerprint_universal', label: 'Universal task fingerprints', type: 'bool',
+        help: 'Part IV: include Unicode words in task fingerprints so non-Latin goals are not reduced to kind/metric only. Keep one mode across a live portfolio: changing it changes which stored runs are considered similar.' },
+      { key: 'cross_run_concepts', label: 'Concept capsules + prior surfacing', type: 'bool',
+        help: 'Part IV: write concept capsules and surface overlapping earlier concepts as audit-only priors. D8 memo-derived claim rows persist independently whenever a shared Memory dir is configured; this toggle does not control them. Prior surfacing also needs Concept pivot and Graded novelty.' },
+      { key: 'cross_run_structured_claims', label: 'Structured claim identity', type: 'bool',
+        help: 'Part IV: use task-scoped, polarity-aware claim identity for advisory projections. Enable consistently for readers of the same portfolio; this changes grouping, not the immutable source records.' },
+      { key: 'cross_run_read_tools', label: 'Cross-run read tools', type: 'bool',
+        help: 'Part V: let supported reasoning roles query prior attempts, claims, the bounded Atlas preview, and retrieval results. Applicability is a retrieval heuristic, not an authorization boundary: exact-task and bounded goal-fingerprint matching reduce but cannot eliminate irrelevant or foreign-task material. Stored portfolio text is untrusted model input. Requires a shared Memory dir.' },
+      { key: 'cross_run_advisory', label: 'Cross-run prompt advisory', type: 'bool',
+        help: 'Part IV/V: inject a bounded evidence-and-counter-evidence pack into Researcher and Strategist prompts. It can steer proposals but never selects a winner directly. Scope/redaction and durable derivation receipts are still experimental; stored text is untrusted. Requires a shared Memory dir.' },
+      { key: 'cross_run_curation', label: 'Taxonomy steward proposals', type: 'bool',
+        help: 'Part V: at finalization, ask the configured LLM to propose portfolio taxonomy and claim curation. Proposals are recorded for operator review. Requires a shared Memory dir and an LLM backend.' },
+      { key: 'cross_run_curation_auto', label: 'Legacy auto-apply request (audit only)', type: 'bool',
+        help: 'Compatibility flag retained for old configurations. Finalization records that auto-apply was requested, but never applies an agent proposal; changing portfolio meaning requires an explicit operator CLI/API action.',
+        warningTitle: 'Compatibility safeguard.', warningTone: 'info',
+        warning: 'This flag never applies steward output automatically. It is retained only so existing configurations round-trip and the request remains visible in the curation audit log.' },
+    ],
+  },
 ]
 
 // Agent-governance pills (Settings.agent_control): for a field with `agents`, render one toggle per
@@ -354,5 +375,16 @@ export function fromForm(form) {
     if (f.type === 'secret') continue
     out[k] = coerce(f, form[k])
   }
+  return out
+}
+
+// The server applies this as a patch over its latest override document. Send only fields this UI owns:
+// replaying a stale hidden baseline would overwrite a newer setting written by another tab/newer client.
+// `fromForm` already excludes write-only credentials, which use /api/settings/secret exclusively.
+export function settingsSavePayload(form, agentControl) {
+  const out = fromForm(form || {})
+  out.agent_control = agentControl && typeof agentControl === 'object' && !Array.isArray(agentControl)
+    ? agentControl
+    : {}
   return out
 }

@@ -18,7 +18,7 @@ The earlier `tracing.py` emitted two flat spans (evaluate/ablate) — a placehol
 
 | Plane | File / form | Authority | Driven by |
 |---|---|---|---|
-| Domain **events** | `events.jsonl` | source of truth, minimal | `replay.fold` → RunState |
+| Domain **events** | `events.jsonl` | replay authority for `RunState`, minimal | `replay.fold` → RunState |
 | **Traces** | `spans.jsonl` (+ OTLP) | observability, rich | `tracing.Tracer` |
 | UI **read model** | `readmodel.sqlite`, `trace.json`, `tree.html` | derived | `build_readmodel` + `build_trace_view` |
 | Trace **index** | `spans.index.jsonl` | derived cache (accelerator) | `events.span_index` |
@@ -52,8 +52,9 @@ separation + byte-offset seeks is the Grafana-Tempo / Jaeger / Perfetto pattern;
 kept over SQLite/Arrow deliberately — no locking, atomic-rename-safe on the FUSE/NFS/S3 mounts the
 rest of the store already guards for.)
 
-Events = *what was decided* (coarse, authoritative). Spans = *how execution unfolded* (fine,
-timing/status/errors). They are two projections of the same activity; **no duplication** — the
+Events = *what was decided* (coarse, authoritative for replay). Spans = *how execution unfolded* (fine,
+timing/status/errors). They are complementary records of the same activity; limited correlation fields
+overlap intentionally, but neither can reconstruct the other — the
 event says "node 3 evaluated, metric=0.9", the span subtree says "eval took 4m12s: setup /
 command(exit 0) / read_metric; here's the error if any".
 
@@ -77,7 +78,7 @@ carry `run_id` + `node_id`. So the UI joins the event tree to its span subtree, 
 onboard), tagged with `node_id`, NOT one giant per-run trace. Real runs are long and resumable;
 a single in-memory trace can't survive resume and would be unbounded. The run-level tree is
 reconstructed from **events** (parent_ids) — another reason events, not a trace, are the
-structural source of truth.
+structural replay authority.
 
 ### Determinism preserved
 `replay.fold` never reads spans. Tracing can be incomplete (crash) or non-deterministic

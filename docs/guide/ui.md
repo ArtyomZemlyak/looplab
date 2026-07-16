@@ -26,9 +26,10 @@ manual build step. If Node isn't installed it prints how to build by hand and st
 
 | Option | Default | Description |
 |---|---|---|
-| `--run-root DIR` | `runs` | Directory containing run subdirectories |
+| `--run-root DIR` | `$LOOPLAB_RUN_ROOT` or `runs` | Directory containing run subdirectories |
 | `--host HOST` | `127.0.0.1` | Bind host |
 | `--port PORT` | `8765` | Bind port |
+| `--root-path PATH` | `""` | ASGI prefix for a non-prefix-stripping proxy; auto-derived from `JUPYTERHUB_SERVICE_PREFIX` when unset |
 | `--build / --no-build` | `--build` | Auto-build the bundle if missing (`--no-build` to skip) |
 | `--rebuild` | off | Force a fresh `npm run build` even if a bundle already exists |
 
@@ -151,6 +152,33 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
   to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
   via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it.
+
+## Which graph am I looking at?
+
+LoopLab has two graph surfaces and one separate experimental portfolio summary. They answer different
+questions; the Atlas preview is deliberately **not** another force/DAG graph:
+
+| Surface | What its nodes/regions mean | What it does **not** mean |
+|---|---|---|
+| **Runs → Map** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the map topology. |
+| **Run → Search** | The experiment DAG for one run. `group by` can project nodes into `theme`, `operator`, metric tercile, or parameter `niche` regions; direction chips filter the DAG by the node's `idea.theme`. | A theme is a per-node proposer label. It is not the Part-IV concept ID/taxonomy, and grouping does not show cross-run concept coverage or claim evidence. |
+| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over the current portfolio-wide Atlas, claims and recent curation-log projections. It shows bounded explored concepts/run links, thin coverage, contradictions, claim evidence references and proposal history; partial endpoint failure is labelled as a degraded view. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18: there is no saved/fail-closed scope, CoverageFrame, compatible comparison, complete Atlas exploration paging/health receipt, interactive concept topology, or governance workbench. It cannot change claims, taxonomy, runs or selection. |
+
+The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
+`GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
+`looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence
+limitations. The owner React route does not turn those bounded whole-store summaries into the complete
+Part-IV Research Space/Atlas contract, and no interactive concept graph is shipped. Do not interpret the
+home Map, run theme grouping, or Atlas preview as the canonical concept/evidence UI specified in
+[the UI/UX review](../18-ui-ux-review-2026-07-11.md).
+
+The preview intentionally exposes **no mutation controls**. Separately, authenticated owner API clients can
+use typed claim/concept governance POSTs: they require the revision the operator observed plus an idempotent
+action ID, derive actor/time on the server, return 409 on stale/colliding actions, and provide explicit clear
+operations. A claim decision must also name a currently projected structured claim and its observed evidence
+digest. The steward POSTs are proposal-only. This closes blind last-write and stale-claim-evidence semantics;
+it does not yet provide validated concept targets/backfill, taxonomy/assignment or evidence-family releases, impact preview, ACL/RBAC or
+a complete history workbench, so those writes are not surfaced in the preview.
 
 ## Exposure & auth
 

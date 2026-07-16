@@ -13,6 +13,26 @@ from pydantic import BaseModel, Field, field_serializer, field_validator, model_
 from looplab.core.fitness import is_better as _is_better
 
 
+def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
+    """Normalize the public multi-objective metric map to finite scalar JSON numbers.
+
+    Evaluation stdout and old event logs are untrusted JSON.  Bookkeeping objects/lists occasionally landed
+    in ``extra_metrics`` even though every consumer (Pareto UI, MLflow, schemas) treats values as scalars;
+    Pydantic then warned on every API serialization.  The append-only raw event retains those values for
+    audit, while the folded/public model exposes only its documented numeric contract.
+    """
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, raw in value.items():
+        if len(out) >= max_items or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+            continue
+        number = float(raw)
+        if math.isfinite(number):
+            out[str(key)[:200]] = number
+    return out
+
+
 class NodeStatus(str, Enum):
     pending = "pending"      # node_created seen, not yet evaluated (resume re-entry point)
     evaluated = "evaluated"  # has a metric
@@ -116,8 +136,13 @@ class Trial(BaseModel):
     params: dict[str, float] = Field(default_factory=dict)
     metric: Optional[float] = None
     seconds: Optional[float] = None
-    extra_metrics: dict[str, Optional[float]] = Field(default_factory=dict)
+    extra_metrics: dict[str, float] = Field(default_factory=dict)
     error: str = ""
+
+    @field_validator("extra_metrics", mode="before")
+    @classmethod
+    def _normalize_extra_metrics(cls, value):
+        return normalize_extra_metrics(value)
 
 
 class Node(BaseModel):
@@ -171,9 +196,9 @@ class Node(BaseModel):
     # overperformed on the signal the search optimized — the overfitting indicator the Trust
     # panel surfaces. Audit-only.
     generalization_gap: Optional[float] = None
-    # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result (set by a
-    # `node_verified` event, generation-scoped, only when `select_verifier` is on and a metric-tie needs
-    # breaking). Used ONLY as a tie-break among metric-EQUAL feasible nodes (SearchFitness.promotion_key)
+    # R1-c: a calibrated §12-verifier soundness score in [0,1] for THIS node's realized result. New writers
+    # publish the complete tie atomically in `verifier_group_scored`; legacy `node_verified` remains readable.
+    # Used ONLY as a tie-break among metric-EQUAL/CI-tied feasible nodes (SearchFitness)
     # — it can never override a strictly-better robust_metric (§21.7 advisory-never-overrides). None
     # otherwise; additive/reader-defaulted so old logs fold byte-identically.
     verifier_score: Optional[float] = None
@@ -181,9 +206,14 @@ class Node(BaseModel):
     # Multi-objective (#5): extra reported metrics + unmet hard constraints. `feasible` is
     # False when any constraint was violated — such a node keeps its metric (for the audit
     # trail) but is excluded from best-selection.
-    extra_metrics: dict[str, Optional[float]] = Field(default_factory=dict)
+    extra_metrics: dict[str, float] = Field(default_factory=dict)
     violations: list[dict] = Field(default_factory=list)
     feasible: bool = True
+
+    @field_validator("extra_metrics", mode="before")
+    @classmethod
+    def _normalize_extra_metrics(cls, value):
+        return normalize_extra_metrics(value)
     # Transient re-run marker (node_reset): "propose" | "implement" set it so the engine RE-RUNS this
     # existing node in place from that stage; cleared once the re-run's node_created lands. ("eval" resets
     # just clear the terminal — the node becomes pending-with-code and the normal eval loop re-scores it,
@@ -403,6 +433,9 @@ class RunState(BaseModel):
     # R1-d (§21.19): recorded `verifier_ci_tie` — widen the verifier tie-break to a statistical (CI) tie.
     # Folded from run_started; absent on old logs -> False -> byte-identical exact-tie selection.
     verifier_ci_tie: bool = False
+    # Complete verifier treatment pinned by run_started so resume cannot mix sampling/criteria policies.
+    select_verifier_samples: int = 3
+    select_verifier_contract: str = "selection-criteria:v1"
     nodes: dict[int, Node] = Field(default_factory=dict)
     # Fold-internal current-failure threshold state. Keeping the causal crossing seq prevents a
     # reset/abort from regrouping old failures into a brand-new browser notification identity.

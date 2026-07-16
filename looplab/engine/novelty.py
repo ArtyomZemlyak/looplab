@@ -209,11 +209,13 @@ class NoveltyGateMixin:
         # §21.20 Step 2: cross-run priors are AUDIT-ONLY and computed SEPARATELY from the grade above — we
         # SURFACE an earlier run's outcome (a `cross_run_prior` event) only when the idea's OWN concepts
         # overlap a prior run's, and it NEVER changes the selection decision. Best-effort throughout.
-        prior_set, prior_caps = self._cross_run_prior(state)
+        prior_set, prior_caps, aliases, splits = self._cross_run_prior(state)
         if prior_set:
             try:
+                from looplab.engine.concept_registry import canonicalize_concepts
                 from looplab.search.graded_novelty import tag_idea
-                idea_concepts = set(idea_tags) if idea_tags is not None else set(tag_idea(idea, graph))
+                raw_concepts = list(idea_tags) if idea_tags is not None else list(tag_idea(idea, graph))
+                idea_concepts = set(canonicalize_concepts(raw_concepts, aliases=aliases, splits=splits))
             except Exception:  # noqa: BLE001 — a tagger hiccup just means no surfacing
                 idea_concepts = set()
             matched = idea_concepts & prior_set
@@ -248,13 +250,15 @@ class NoveltyGateMixin:
     _CROSS_RUN_MIN_SIM = 0.3   # task-fingerprint Jaccard floor for a prior run to count as "similar"
 
     def _cross_run_prior(self, state: RunState):
-        """(prior_concepts:set, ranked_capsules:list[(sim, capsule)]) from the shared ConceptCapsuleStore
+        """Return canonical prior concepts/capsules plus the taxonomy snapshot used for proposal tags.
         for tasks SIMILAR to this run's fingerprint. (set(), []) when `cross_run_concepts` is off / no
         memory dir / store empty. Best-effort — any hiccup yields no priors so proposing is never blocked."""
         if not getattr(self, "_cross_run_concepts", False) or not getattr(self, "memory_dir", ""):
-            return set(), []
+            return set(), [], {}, {}
         try:
             from pathlib import Path
+            from looplab.engine.concept_registry import (canonicalize_concept, canonicalize_concepts,
+                                                         load_concept_aliases, load_concept_splits)
             from looplab.engine.memory import ConceptCapsuleStore
             # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
             # a bounded, versioned, scope-keyed query index replaces it once the retrieval planner lands.
@@ -267,16 +271,29 @@ class NoveltyGateMixin:
             caps = [(s, c) for s, c in store.prior_capsules(
                         fp, min_sim=self._CROSS_RUN_MIN_SIM, exclude_run_id=getattr(state, "run_id", "") or "")
                     if str(c.get("direction") or "min") == my_dir]
+            aliases = load_concept_aliases(self.memory_dir)
+            splits = load_concept_splits(self.memory_dir)
             prior: set[str] = set()
-            # CODEX AGENT: this live novelty consumer bypasses the concept registry. An operator-purged
-            # concept disappears from Atlas but still influences graded novelty and is recorded as a prior;
-            # merges likewise compare raw spellings. Resolve every capsule and proposal tag through the
-            # same taxonomy snapshot/UID before any live or audit consumer uses it.
-            for _sim, c in caps:
-                prior.update(str(x) for x in (c.get("concepts") or []))
-            return prior, caps
+            canonical_caps = []
+            for similarity, capsule in caps:
+                raw = [str(x) for x in (capsule.get("concepts") or []) if str(x)]
+                concepts = canonicalize_concepts(raw, aliases=aliases, splits=splits)
+                if not concepts:
+                    continue
+                outcomes = {}
+                raw_outcomes = capsule.get("concept_outcomes") or {}
+                if isinstance(raw_outcomes, dict):
+                    for source in sorted(raw_outcomes, key=str):
+                        target = canonicalize_concept(source, sibling_concepts=raw,
+                                                      aliases=aliases, splits=splits)
+                        if target and target in concepts and target not in outcomes:
+                            outcomes[target] = raw_outcomes[source]
+                normalized = {**capsule, "concepts": concepts, "concept_outcomes": outcomes}
+                canonical_caps.append((similarity, normalized))
+                prior.update(concepts)
+            return prior, canonical_caps, aliases, splits
         except Exception:  # noqa: BLE001 — cross-run read is advisory; a hiccup just yields no priors
-            return set(), []
+            return set(), [], {}, {}
 
     def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps) -> None:
         """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in

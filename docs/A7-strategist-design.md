@@ -257,4 +257,3 @@ config + CLI wiring. Tests:
   `orchestrator.py` (ctor + consult/apply/resume + `set_strategy` control), `config.py` (2 settings),
   `tasks.py`/`cli.py` (wire `make_strategist`), `server.py` (expose fields + `set_strategy`),
   `ui/src` (panel + Settings preset). Net: ~1 new module + small edits to 6 files.
-```

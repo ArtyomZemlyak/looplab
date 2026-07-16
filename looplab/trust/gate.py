@@ -8,7 +8,7 @@ detectors) extends this module; this is the minimal, unit-tested core.
 """
 from __future__ import annotations
 
-import math
+from looplab.core.fitness import standard_error_difference
 
 
 def one_se_better(
@@ -28,10 +28,7 @@ def one_se_better(
     either side it falls back to a strict comparison.
     """
     strict = candidate < incumbent if direction == "min" else candidate > incumbent
-    se_cand = std / math.sqrt(n) if (n > 1 and std > 0.0) else 0.0
-    se_inc = (incumbent_std / math.sqrt(incumbent_n)
-              if (incumbent_n > 1 and incumbent_std > 0.0) else 0.0)
-    se = math.sqrt(se_cand ** 2 + se_inc ** 2)
+    se = standard_error_difference(std, n, incumbent_std, incumbent_n)
     if se <= 0.0:
         return strict
     if direction == "min":

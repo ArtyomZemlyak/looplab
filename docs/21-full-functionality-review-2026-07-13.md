@@ -1,15 +1,16 @@
-# Full functionality review — historical origin `claude/full-functionality-review-c0z0e3`, current addendum on `codex/ui-ux-overhaul-20260712` (2026-07-13–15)
+# Full functionality review — historical branch origin and final `master` checkpoint (2026-07-13–16)
 
-Scope: everything this branch adds on top of `origin/master` (merge-base `edf06f7`): **10 commits,
+Historical initial scope: everything the original feature branch added on top of its then-`origin/master`
+(merge-base `edf06f7`): **10 commits,
 144 files, ~32.7k insertions**. This is a large UI/UX overhaul plus substantial backend work — a
 durable LLM cost-accounting ledger, crash-idempotent finalization/resume, read-only review
 capabilities, a generation-fenced run-command service, log pagination, and a big React control
 plane. The review covers correctness, validation, security, replay/idempotency invariants, corner
 cases, and code/decision quality.
 
-Rounds 1–17 retain the historical branch chronology above. Rounds 18A–20 review and reconcile the current
-`codex/ui-ux-overhaul-20260712` feature branch through incoming tip `0e45bd3`; Round 20 is the current maturity
-verdict where earlier round notes conflict.
+Rounds 1–22 retain the branch/integration chronology and the commit/test facts that were true at each checkpoint.
+**Round 23 is the current `master` implementation and validation authority wherever an earlier status claim
+conflicts.** Doc 17 still owns release ordering; doc 18 still owns UI/UX acceptance criteria.
 
 ## Method
 
@@ -19,7 +20,7 @@ re-verified against the actual code (and, where noted, reproduced by running the
 **P0** security/data-loss/replay-corruption · **P1** real bug hit in normal use · **P2** validation
 gap / edge-case bug / resource issue · **P3** quality/latent.
 
-## Ground truth (measured on this branch)
+## Historical initial ground truth (measured on the origin branch)
 
 | Check | Result |
 |---|---|
@@ -1397,3 +1398,156 @@ master's fixes with this branch's own additions, and the branch's still-unique i
 `build_context_pack` ratified-caveat reserved slot + both-pool `n_contested` count, the `portfolio_atlas`
 operator-rejected contradiction filter + `n_runs` coverage consistency, and the operator-write field caps.
 The branch tip therefore carries master through `fe6727b` plus this branch's extra hardening.
+
+## Round 23 — final `master` Part-IV/V mega-review, fixes and product-truth reconciliation (2026-07-16)
+
+This round is the current implementation authority and supersedes the status conclusions in Rounds 18–22
+without rewriting their chronology. The review covered the event/replay contract, D8 persistence, cross-run
+scope and retrieval, typed governance, curation, configuration, the owner UI and the documentation/schema
+surface together. The full Research Atlas and per-run Research Space remain future products; what ships is an
+explicitly **Experimental, bounded, owner-only, read-only Atlas preview**.
+
+### Current contracts confirmed or fixed
+
+- **Verifier tie treatment is atomic.** A producer scores the complete selector-reachable exact/CI tie
+  component and appends one evidence-bound `verifier_group_scored` event only when every member succeeds
+  inside the eight-node cadence budget. Replay validates the complete set, generations, contract/sample count
+  and every evidence digest before applying any score. Legacy `node_verified` rows remain readable; the score
+  is still only a tie-break and never crosses a better metric.
+- **D8 is first-class shared memory.** Finalize upserts v2 research claims whenever `memory_dir` is configured,
+  independently of `cross_run_concepts`; that flag now controls concept capsules/prior surfacing only. V2 rows
+  retain task/run identity, run-qualified references, URLs and verifier verdict/method/note. Unsupported,
+  malformed and legacy rows fail closed as unverified rather than becoming support.
+- **Agent scope no longer trusts facets.** Bound readers require compatible direction plus exact task or a
+  strict related-goal fingerprint across lessons, capsules and D8 rows. Genesis is goal/direction-bound before
+  task creation and the in-house Repo Developer is task-bound. Agent-proposed facets may rank already-visible
+  material but never grant visibility; this remains an applicability heuristic, not an ACL boundary.
+- **Typed governance is fenced.** Owner mutations require `expected_revision` and stable `action_id`, derive
+  actor/time on the server, serialize idempotency+CAS+append, expose explicit claim/alias/split clear actions,
+  separate merge from confirmed purge and return stable 409/503 semantics. Claim decisions additionally require
+  a currently projected structured `claim_uid` and its observed `evidence_digest`, validated inside the locked
+  CAS. Concept target existence, versioned evidence/taxonomy/assignment releases, impact preview, ACL and
+  queryable history remain open.
+- **Stewards only propose.** Finalize and HTTP concept/claim/task-facet steward paths persist bounded proposal,
+  empty, unavailable or error outcomes; they never apply model output. The legacy
+  `cross_run_curation_auto` input is inert except for the `auto_requested` audit marker. Explicit local CLI
+  `--apply` remains a weaker operator action and is labelled as lacking the typed HTTP CAS/action-id contract.
+- **Reads/UI are bounded and honest.** Claims expose scope, bounded offset paging and revision metadata; Atlas
+  sections and curation tails are bounded live projections. The lazy `#/atlas` owner route reads coverage,
+  claims and both steward logs independently with `no-store`/abort semantics, hard render/text caps, malformed
+  record accounting, partial-refresh slice preservation, stale total-failure recovery and explicit empty/
+  degraded/not-configured states. It has no Saved Scope, frozen snapshot, CoverageFrame, compatible Compare,
+  complete Atlas paging/health contract, concept topology or governance workbench.
+- **Settings persistence and copy match the boundary.** The UI saves only schema-owned fields, never replays
+  hidden future overrides or the write-only secret, and exposes all seven Part-IV/V controls. The concept flag
+  is labelled for capsules/prior surfacing rather than D8; legacy auto-apply copy says audit-only.
+
+### Validation and remaining release boundary
+
+The integrated UI suite passed **321/321**. Production Vite 7 build and static bundle size/reachability checks
+passed. An in-app desktop browser pass at 1280×720 covered owner navigation, empty and populated Atlas fixtures,
+Settings search, stale-view preservation after a four-source server-off refresh, visible computed layout and an
+empty console error/warning capture. No 360 px or screen-reader walk-through was claimed; those remain manual
+promotion gates alongside automated responsive/semantic coverage.
+
+The release order is unchanged: immutable scope/comparison/access → stable evidence/taxonomy/assignment
+releases and eligible evidence families → snapshot/health and corpus-safe queries → matrix-first Atlas proof/
+compare → governance workbench → measured opt-in promotion. CAS and a polished preview do not collapse those
+scientific/product gates.
+
+## Round 23 — final `master` comprehensive review, fixes, and independent re-review (2026-07-16)
+
+This is the current implementation checkpoint and supersedes every earlier open/closed claim in this file.
+The review covered architecture and replay, verifier/fitness selection, cross-run memory/retrieval/governance,
+server contracts, settings/attention/tracing, React behavior and resource states, documentation authority and
+the diagrams. Backend, UI and docs received independent second passes after the fixes; the full Research Atlas
+destination remains intentionally unimplemented.
+
+### Backend and architecture fixes
+
+| Area | Final landed contract |
+|---|---|
+| Verifier selection/replay | One shared standard-error-of-difference primitive now backs trust and selection. The producer emits one atomic `verifier_group_scored` treatment for the complete selector-reachable final tie only. Contract/sample policy is pinned at run start; every member carries generation, evidence digest, score, sample count, agreement and method. Replay validates exact current membership/lifecycle/provenance and applies all-or-none; confirmation/holdout evidence changes invalidate stale scores. Partial, subset, stale or newly expanded groups fall back to deterministic metric+ID, and significant/holdout-last precedence is shared by producer, replay and selector. |
+| Evaluation projection | Legacy or hostile `extra_metrics` is normalized to at most 256 finite numeric scalars with bounded keys before the folded/public model, eliminating nested/non-finite schema drift while preserving raw events for audit. |
+| D8 evidence | Finalization persists v2 research claims whenever shared `memory_dir` is configured, independently of `cross_run_concepts`. Records retain task/run identity, run-qualified node references, URLs and aligned verifier verdict/method/note; unsupported/unclear/cited/malformed/legacy evidence remains unverified. `claims` and `atlas` accept D8-only stores and Atlas counts their runs/claims. |
+| Agent scope/provenance | Bound pull tools use direction plus exact task or a strict ≥2-term/≥50%-of-smaller goal fingerprint across lessons, capsules and D8; bound empty/vague scope fails closed, task facets are ranking-only, Developer never receives D8, and only never-bound human/CLI reads are portfolio-wide. CLI/Web Genesis bind goal+direction; Repo Developer binds its task. Researcher and Strategist proactive paths exclude the current run and persist scoped corpus/render digest receipts with node/strategy events. Taxonomy overlays apply before prior/novelty matching. |
+| Claims/retrieval | Structured claim identity preserves semantic relation roles. Fuzzy grouping is bounded conservative complete-link rather than transitive over-merge; rejected and unverified-only rows do not manufacture contradictions; decision precedence is exact scope+metric → scoped → global; context packing preserves pinned/ratified/caveat priority; scalar `node_ids`/URLs no longer iterate by character. Hybrid results expose stable IDs, rank/score, evidence/governance digests and richer corpus/retrieval receipts, while retaining an explicit lexical hash-vector caveat. |
+| Governance reads | Atlas GET has bounded sections, `scope_task`, live projection and claim/alias/split revisions. Claims GET is structured, contested-filterable and bounded by `limit`/`offset` with total/revision. Both curation-log GETs retain only O(limit) response memory. |
+| Governance writes | Claim decision, concept merge, separately confirmed purge, alias clear, split and split clear are strict typed owner actions. Bodies forbid extras and require nonnegative strict `expected_revision` plus bounded `action_id`. Locked/fsynced append performs idempotency lookup, CAS, revision allocation and write in one critical section: same action/payload returns its durable receipt even after the observed revision becomes stale; collisions and stale revisions return stable 409, lock failure 503. Claim decision additionally reprojects a current `claim_uid` and exact observed `evidence_digest` inside the decision-ledger critical section; missing/changed evidence returns 409. Clear is an audited append, never deletion. |
+| Agentic stewards | Finalize and HTTP stewards are proposal-only; legacy `cross_run_curation_auto` is inert/audit-only. HTTP `apply=true` is 422. Per-process plus required cross-process invocation locking makes concurrent same-action retries pay once; empty/error/proposal outcomes are durably idempotent, and provider error text is allow-listed and canonically redacted before persistence. Only an explicit typed/local operator action changes meaning. |
+| Server/security quality | Settings/secret malformed JSON is a 400; Settings persistence is patch-like and validates before write. Trace tool arguments/results are structurally and canonically redacted, entropy-checked, digest-marked and bounded before durable serialization. Web Genesis now receives the same scoped cross-run capability as CLI Genesis. Attention transports bounded task ID and fresh bounded project-derived run label. `asset-brief --llm` no longer references an undefined `run_dir`. |
+
+### UI fixes and current product boundary
+
+- A canonical owner `#/atlas` route (legacy `#/research-atlas` canonicalized) renders four abortable,
+  `no-store`, client/server-bounded sources: live Atlas, paged claims and both steward logs. It preserves
+  last-good slices on partial refresh, distinguishes memory-missing/loading/empty/degraded/stale/error/malformed
+  states, caps every render collection/text field, discloses omissions and keeps run links encoded. It is
+  labelled **Experimental · bounded · read-only** and exposes no governance mutations.
+- Large DAGs make one reversible overview decision on their first authoritative snapshot: 80+ nodes collapse
+  to operator aggregates unless exact selection/group/history context exists; 79→80 live growth does not jump.
+  Initial auto-fit stops above 48 nodes, compressive regroup/collapse refits only at ≤24 measured nodes and
+  expansion preserves the camera. Fresh workspaces start canvas-first with timeline/dock collapsed while
+  persisted preference remains authoritative.
+- All seven cross-run flags are visible under **Cross-run research**. `cross_run_concepts` is correctly named
+  **Concept capsules + prior surfacing** and explicitly says D8 persists independently with Memory dir;
+  legacy auto curation says audit-only/never applies. Settings saves only UI-owned fields and never replays
+  hidden server values or write-only secrets.
+- Direction chips and Settings tabs stay named, horizontally scrollable and touch-sized; Shared Assistant
+  cancels stale loads; research links allow only credential-free HTTP(S); run IDs are encoded at transport and
+  deep-link boundaries; Attention shows bounded run/task/project context with precise action labels.
+
+The UI destination in doc 18 remains unchanged: the preview is not a `CoverageFrame`, Saved Scope, compatible
+Compare, evidence-family proof, per-run Research Space, concept topology or governance workbench. Matrix-first
+Atlas and bounded focused concept topology remain gated on the underlying truth/resource contracts.
+
+### Documentation and diagram reconciliation
+
+- README, MkDocs landing/index, current guides and architecture/tracing diagrams now say exactly what the event
+  log owns: replayable `RunState`, not every product byte. Task/config, tracing, chat, durable commands and
+  cross-run stores retain explicit sidecar authority; one live engine is fenced while server control appends
+  use the serialized event-store path.
+- Historical architecture/build/review documents retain their evidence but carry current-authority banners.
+  Doc 17 §22.8 is the release/gate reconciliation; doc 18 §34 is the UI concept and shipped-preview checkpoint;
+  this Round 23 is the implementation/test chronology. User guides distinguish local CLI overlays from the
+  stronger typed HTTP governance contract and distinguish the bounded preview from the full Atlas.
+- Process diagrams no longer claim “every projection is a pure event fold” or “engine sole writer,” and steward
+  copy consistently says proposal-only plus explicit operator apply.
+
+### Residual risks after the second review
+
+1. Agent task/fingerprint matching is an applicability heuristic, not an ACL or immutable
+   `CrossRunScope`/`ComparisonContract`. Pull-tool calls still lack durable consuming-turn attribution and a
+   frozen corpus/access/redaction receipt.
+2. Claim decisions now fence current target/evidence, but evidence-family/applicability releases and negative-
+   proposition-versus-action-effect semantics remain incomplete. Concept targets, opaque taxonomy entities,
+   taxonomy/assignment releases, migration/backfill, impact preview, ACL/RBAC and queryable history remain open.
+3. Atlas needs immutable Saved Scope/corpus/access snapshots, `CoverageFrame`, per-source health/completeness,
+   cursor/filter/byte/token contracts, compatible Compare and proof. Hybrid retrieval still lacks truthful
+   per-channel contribution and full source/snapshot explanation on every hit.
+4. Per-run `ConceptFrame`, Direction×Concept crosswalk, Landscape/Journey, accessible focused topology and the
+   complete responsive Research Space remain concept work. The shipped cards preview is not usability evidence
+   for those screens.
+5. The backend/UI focused and expanded suites below are green. The root integration owner retains the final
+   full-repository suite and real browser walk-through as separate gates; this round does not silently convert
+   a targeted pass into that broader evidence.
+
+### Final validation ledger
+
+| Check | Result |
+|---|---|
+| focused post-fix backend suite | **196 passed, 0 failed** |
+| expanded backend matrix (claims/concepts/governance/cross-run/verifier/replay/tracing/attention/server/Genesis/novelty/Atlas/task facets/CLI) | **566 passed, 2 skipped, 0 failed** |
+| backend compile/static hygiene | `compileall looplab tests` **PASS**; Ruff F821/F822/F823 **PASS**; backend `git diff --check` **PASS**; zero `CODEX AGENT` markers |
+| focused Atlas/global-UI/settings regressions | **14 passed, 0 failed** |
+| full React/node suite | **321 passed, 0 failed** |
+| production UI + bundle budgets | **PASS**, 270 modules; Atlas increment 5,705 B JS gzip + 1,704 B CSS gzip; owner Atlas closure 118,755 B JS gzip + 28,896 B CSS gzip |
+| UI hygiene | `git diff --check` **PASS**; package/lock unchanged; zero UI `CODEX` markers |
+| settings ↔ documentation synchronization | **2 passed, 0 failed** (`tests/test_config_docs_sync.py`) |
+| documentation build | `mkdocs build --strict` **PASS**; only expected INFO for intentional links from `docs/` to repository files outside `docs_dir` |
+| documentation structural audit | **PASS** across 26 changed Markdown files: balanced fences, every local link target exists, no UTF-8 replacement/NUL characters |
+| documentation whitespace | `git diff --check -- README.md mkdocs.yml docs` **PASS** |
+
+Only existing FastAPI `on_event`/HTTPX deprecation warnings remain in the backend matrix. MkDocs emits its
+upstream Material-for-MkDocs 2.0 notice and informational warnings for deliberate links to repository files
+outside `docs_dir`; neither is a strict-build failure.
