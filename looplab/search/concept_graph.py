@@ -614,7 +614,10 @@ def graph_from_node_concepts(node_concepts, seed_graph: Optional["ConceptGraph"]
             cid = _normalize_concept_id(raw)
             if not cid:
                 continue
-            if cid not in graph and "/" in cid:
+            # CODEX AGENT: A slash describes hierarchy, not validity. Root-only concepts are first-class
+            # vocabulary entries too; dropping them here makes replay lose exactly the broad concepts that
+            # an authored/classifier event recorded.
+            if cid not in graph:
                 graph.ensure(cid)
             if cid in graph:
                 got.add(cid)
@@ -897,15 +900,17 @@ def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
 
 def concept_touch_counts(node_concepts) -> dict:
     """Per-concept touch count from `node_concepts` (how many nodes carry each id) — the orientation
-    signal a symmetric (co_occurs) lens needs (higher touch = the hub/parent). Pure/deterministic."""
+    signal a symmetric (co_occurs) lens needs (higher touch = the hub/parent). Multiple raw ids on one
+    node that normalize/consolidate to the same canonical id count as ONE touch. Pure/deterministic."""
     from collections import Counter as _C
     c: _C = _C()
     for ids in (node_concepts or {}).values():
-        for cid in (ids or []):
-            k = _normalize_concept_id(cid)
-            if k:
-                c[k] += 1
-    return dict(c)
+        # CODEX AGENT: Touch is a distinct-node statistic, not a tag-occurrence statistic. The endpoint
+        # applies consolidation before this function; normalizing and deduplicating per node here prevents
+        # an alias+canonical pair (or case/whitespace variants) from inflating hub orientation.
+        seen = {k for k in (_normalize_concept_id(cid) for cid in (ids or ())) if k}
+        c.update(seen)
+    return dict(sorted(c.items()))
 
 
 def default_lenses() -> list[dict]:
@@ -988,7 +993,7 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
                 parent_of[cid] = p
                 break
     children: dict[Optional[str], list] = {}
-    for cid in all_ids:
+    for cid in sorted(all_ids):
         children.setdefault(parent_of.get(cid), []).append(cid)
     roots = sorted(children.get(None, []))
     depth: dict[str, int] = {}
@@ -1001,7 +1006,7 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
         for ch in sorted(children.get(cid, [])):
             dq.append((ch, d + 1))
     nodes = {}
-    # Iterate SORTED ids (not the raw set): a raw-set iteration makes the `nodes` dict's key order
+    # CODEX AGENT: Iterate SORTED ids (not the raw set): a raw-set iteration makes the `nodes` dict's key order
     # string-hash-dependent (randomized per process via PYTHONHASHSEED), so json.dumps of this
     # projection is not byte-stable across processes despite the "DETERMINISTIC" docstring — the concepts
     # endpoint returns this tree, so byte-instability breaks its HTTP etag/caching and diff-based tests.

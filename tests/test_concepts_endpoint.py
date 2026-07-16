@@ -32,7 +32,7 @@ def test_concepts_endpoint_is_a_lens(tmp_path):
     assert r.status_code == 200
     data = r.json()
     assert data["lens"] == "is_a"
-    assert [l["name"] for l in data["lenses"]][0] == "is_a"       # the lens pack ships, is_a default
+    assert [item["name"] for item in data["lenses"]][0] == "is_a"  # the lens pack ships, is_a default
     nodes = data["tree"]["nodes"]
     # the is_a tree materializes the full path chain from the authored deep tags
     assert {"loss", "loss/contrastive", "loss/contrastive/dcl", "loss/contrastive/mnr",
@@ -60,8 +60,9 @@ def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
     s = EventStore(rd / "events.jsonl")
     s.append("run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
     s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
-                              "idea": {"operator": "draft", "params": {}, "rationale": "r",
-                                       "concepts": ["loss/contrastive", "architecture/moe"]}})
+                               "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                                        "concepts": ["loss/contrast", "loss/contrastive",
+                                                     "architecture/moe"]}})
     s.append("node_evaluated", {"node_id": 0, "metric": 0.9})
     # a "uses" edge authored against the RAW id "loss/contrast" ...
     s.append("concept_edge", {"edges": [{"src": "architecture/moe", "rel": "uses",
@@ -79,6 +80,8 @@ def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
     assert "loss/contrast" not in nodes                          # retired raw id NOT a ghost node
     # the directed uses-edge makes the canonical concept the parent of architecture/moe
     assert nodes["architecture/moe"]["parent"] == "loss/contrastive"
+    # The raw+canonical pair collapses to one membership on node 0; touch is distinct nodes, not tag count.
+    assert data["touch"]["loss/contrastive"] == 1
 
 
 def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_path):

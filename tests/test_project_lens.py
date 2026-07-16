@@ -2,6 +2,10 @@
 (src, rel, dst) as "src's parent is dst"; symmetric co_occurs is oriented by touch (parent = higher-
 touch endpoint). Deterministic spanning arborescence + cross_parents + cycle-avoidance."""
 import itertools
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 from looplab.search.concept_graph import (project_lens, default_lenses, concept_touch_counts)
 
@@ -15,12 +19,22 @@ def _edges(triples):
 def test_default_lenses():
     ls = default_lenses()
     assert ls[0]["name"] == "is_a"                                  # is_a is the default (first)
-    assert {l["name"] for l in ls} == {"is_a", "uses", "part_of", "co_occurs"}
+    assert {item["name"] for item in ls} == {"is_a", "uses", "part_of", "co_occurs"}
 
 
 def test_touch_counts():
     assert concept_touch_counts({0: ["loss/dcl", "arch/moe"], 1: ["loss/dcl"], 2: []}) \
         == {"loss/dcl": 2, "arch/moe": 1}
+
+
+def test_touch_counts_are_distinct_nodes_after_normalization():
+    # Repeated spellings on one node are one canonical membership, not independent touches; only the
+    # second node raises the count to two. Empty values never create a concept.
+    assert concept_touch_counts({
+        0: [" Loss/DCL ", "loss/dcl", "LOSS/DCL"],
+        1: ["loss/dcl"],
+        2: [None, "", "   "],
+    }) == {"loss/dcl": 2}
 
 
 def test_directed_uses_lens():
@@ -73,6 +87,39 @@ def test_nodes_dict_is_id_sorted_not_hash_ordered():
     t = [("zeta", "uses", "hub", 1.0), ("alpha", "uses", "hub", 1.0), ("mid", "uses", "alpha", 1.0)]
     h = project_lens(["zeta", "alpha", "hub", "mid"], _edges(t), "uses")
     assert list(h["nodes"]) == sorted(h["nodes"])
+
+
+def test_serialized_projection_is_byte_stable_across_python_hash_seeds():
+    # A same-process equality assertion cannot expose randomized set iteration. Spawn fresh interpreters
+    # so each projection is built under a genuinely different string-hash layout, then compare wire bytes.
+    script = r"""
+import json
+from looplab.search.concept_graph import project_lens
+
+concepts = ["zeta", "alpha", "hub", "mid", "omega", "beta"]
+triples = [
+    ("zeta", "uses", "hub", 1.0),
+    ("alpha", "uses", "hub", 1.0),
+    ("mid", "uses", "alpha", 0.9),
+    ("omega", "uses", "alpha", 0.8),
+    ("beta", "uses", "mid", 0.7),
+]
+edges = {
+    f"{src}\t{rel}\t{dst}": {"src": src, "rel": rel, "dst": dst, "confidence": confidence}
+    for src, rel, dst, confidence in triples
+}
+projection = project_lens(concepts, edges, "uses")
+print(json.dumps(projection, ensure_ascii=False, separators=(",", ":")))
+"""
+    root = Path(__file__).resolve().parents[1]
+    payloads = []
+    for seed in ("1", "7", "41"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        payloads.append(subprocess.check_output(
+            [sys.executable, "-c", script], cwd=root, env=env, text=True,
+        ))
+    assert len(set(payloads)) == 1
 
 
 def test_string_is_a_lens_filters_to_is_a_not_all_rels():

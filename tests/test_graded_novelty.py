@@ -148,14 +148,17 @@ def test_graph_from_node_concepts_rebuilds_deterministically():
         "loss", "loss/decoupled-contrastive", "negatives", "negatives/external-mining"]
     # The per-node TAG assignment stays the exact named leaf — intermediates are graph structure, not tags.
     assert tags == {0: frozenset({"loss/decoupled-contrastive"}), 1: frozenset({"negatives/external-mining"})}
-    # a grown id's axis comes from its prefix; malformed/empty ids are dropped
+    # a grown id's axis comes from its prefix; top-level ids are valid roots and only empty ids are dropped
     g2, t2 = graph_from_node_concepts({5: ["", "badnoslash", "axis/ok"]})
-    assert t2 == {5: frozenset({"axis/ok"})} and "axis/ok" in g2
+    assert t2 == {5: frozenset({"badnoslash", "axis/ok"})}
+    assert "badnoslash" in g2 and "axis/ok" in g2
 
 
 class _IdeaTagClient:
     """Fake LLM idea-tagger returning a fixed id set (tool_call)."""
-    def __init__(self, ids): self.ids = ids; self.calls = 0
+    def __init__(self, ids):
+        self.ids = ids
+        self.calls = 0
     def complete_tool(self, messages, json_schema):
         self.calls += 1
         return {"concept_ids": self.ids}
