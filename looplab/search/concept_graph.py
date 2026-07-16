@@ -782,6 +782,74 @@ def _empty_coverage(graph: ConceptGraph) -> dict:
     }
 
 
+def _median(xs: list[float]) -> Optional[float]:
+    """Deterministic median (sorted); None on empty. Used as the per-run outcome baseline."""
+    s = sorted(xs)
+    n = len(s)
+    if n == 0:
+        return None
+    mid = n // 2
+    return s[mid] if n % 2 else (s[mid - 1] + s[mid]) / 2.0
+
+
+def concept_metrics(state: RunState, graph: ConceptGraph,
+                    tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
+    """Per-concept OUTCOME rollup — the metric/Δ view the concept table (View 1) needs, alongside the
+    touch-only `concept_coverage`. PURE and deterministic over `(state, graph, tags)`: no I/O, no LLM,
+    so it recomputes byte-identically on replay and ships to the UI via /state-derived reads.
+
+    Joins each concept's touching experiments to their `robust_metric` (models.py) — WITHOUT dividing a
+    multi-membership node's metric across its concepts: a node that touches loss AND architecture counts
+    its FULL metric in BOTH (decided — we never fake breadth by splitting a real result). `delta_*` is
+    SIGNED so positive always means "better than the run baseline" for the run's `direction`; the
+    baseline is the run's MEDIAN robust_metric over feasible evaluated experiments (robust to outliers,
+    so one lucky node can't move it). Failed / not-yet-evaluated nodes still count in `touched` (effort
+    spent on the concept) but contribute no metric.
+
+    Returns {"baseline", "direction", "rows": {concept_id: {touched, evaluated, first_touch, best,
+    mean, worst, delta_best, delta_mean}}} — rows id-sorted; metric fields None when a concept has no
+    evaluated node. Empty run / no tags -> empty rows."""
+    nodes = _experiment_nodes(state)
+    if tags is None:
+        tags = tag_nodes_heuristic(state, graph)
+    direction = str(getattr(state, "direction", "max") or "max").lower()
+    is_min = direction == "min"
+    sign = -1.0 if is_min else 1.0
+    touched: dict[str, int] = {}
+    first: dict[str, int] = {}
+    metrics: dict[str, list[float]] = {}
+    all_metrics: list[float] = []
+    for idx, node in enumerate(nodes):
+        m = node.robust_metric
+        # feasible + has a metric = an evaluated experiment that can carry an outcome; the rest still
+        # count as effort (touched) but never as a metric sample.
+        ok = m is not None and getattr(node, "feasible", True) is not False
+        if ok:
+            all_metrics.append(float(m))
+        for cid in tags.get(node.id, frozenset()):
+            touched[cid] = touched.get(cid, 0) + 1
+            first.setdefault(cid, idx)
+            if ok:
+                metrics.setdefault(cid, []).append(float(m))
+    baseline = _median(all_metrics)
+    rows: dict[str, dict] = {}
+    for cid in sorted(touched):
+        ms = metrics.get(cid, [])
+        row = {"touched": touched[cid], "evaluated": len(ms), "first_touch": first.get(cid),
+               "best": None, "mean": None, "worst": None, "delta_best": None, "delta_mean": None}
+        if ms:
+            best = min(ms) if is_min else max(ms)
+            worst = max(ms) if is_min else min(ms)
+            mean = sum(ms) / len(ms)
+            row["best"], row["worst"], row["mean"] = round(best, 6), round(worst, 6), round(mean, 6)
+            if baseline is not None:
+                row["delta_best"] = round(sign * (best - baseline), 6)
+                row["delta_mean"] = round(sign * (mean - baseline), 6)
+        rows[cid] = row
+    return {"baseline": None if baseline is None else round(baseline, 6),
+            "direction": direction, "rows": rows}
+
+
 def uncovered_regions(state: RunState, graph: ConceptGraph,
                       tags: Optional[dict[int, frozenset[str]]] = None) -> dict:
     """The decisive *uncovered winning-region* alarm (§21.11) — the single most actionable PART IV
