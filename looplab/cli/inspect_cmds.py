@@ -30,6 +30,7 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int) -
     CLASSIFIER provenance and are generation-fenced (`generation == node.attempt`), exactly like the live
     engine's `concept_pivot` cadence emits — so a later fold/resume is idempotent, and any operator
     re-tag (`EV_CONCEPT_TAG_EDITED`) still wins (invariant 5). Returns the number of nodes tagged."""
+    known = getattr(state, "node_concepts", {}) or {}
     count = 0
     for nid, ft in (raw_tags or {}).items():
         nid = int(nid)
@@ -38,6 +39,11 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int) -
             continue
         ids = sorted(str(c) for c in ft)
         if not ids:
+            continue
+        # Skip a node whose folded tags already equal these — mirrors the live cadence's
+        # `nid not in known or known != new_ids`, so re-running --persist is idempotent (no duplicate
+        # events, no needless log growth) and an operator/classifier tag that already matches is untouched.
+        if known.get(nid) == ids:
             continue
         store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": ids, "mode": mode,
                                         "at_vocab": int(vocab_size), "generation": node.attempt})
@@ -252,6 +258,10 @@ def concept_coverage(
                                  "events so they FOLD into node_concepts and show in the UI + feed cross-run "
                                  "(otherwise the tags are printed and discarded). Intended for FINISHED runs "
                                  "created before Phase 0. Operator re-tags still win."),
+    force: bool = typer.Option(
+        False, "--force", help="Allow --persist on a run that has not reached finalization (the engine may "
+                               "still be live). Only pass this when you are sure no engine is running — two "
+                               "writers of EV_NODE_CONCEPTS can clobber good agentic tags or tear the log."),
 ):
     """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
     the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
@@ -262,6 +272,15 @@ def concept_coverage(
                                               tag_nodes_heuristic)
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
+    # Single-writer guard: the live engine emits the SAME EV_NODE_CONCEPTS during a run, so persisting
+    # onto a still-live run can clobber good agentic tags with coarse offline ones or tear the log under a
+    # geesefs no-op flock. A run that reached finalization is terminal (its engine is gone); require --force
+    # otherwise. `finished` alone is unreliable for pre-Phase-0 logs, so accept a finalized_finish_seq too.
+    if persist and not force and not (getattr(state, "finished", False)
+                                      or getattr(state, "finalized_finish_seq", 0)):
+        typer.echo("refusing --persist: this run has not reached finalization, so an engine may still be "
+                   "writing EV_NODE_CONCEPTS. Stop the run first, or pass --force if you are sure it is dead.")
+        raise typer.Exit(code=2)
     resolved_type = task_type or state.task_id or ""
     # A curated pack is only a SEED / starting vocabulary the agent expands (like agentic_asset_brief's
     # seed_scan); None => the LLM builds the graph from scratch (works on any task).

@@ -556,10 +556,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   // value at metricRows[id] instead of the correct "no row" undefined.
   const metricRows = Object.create(null)
   for (const key of Object.keys(data.metrics.rows)) metricRows[key] = data.metrics.rows[key]
-  // Overlay the SUBTREE rollup so an AXIS/parent row shows metrics aggregated over everything at or below
-  // it (leaf rows equal their own rollup, so this is a no-op for them) — otherwise collapsed parents read
-  // as blank "·" though their children have data. Additive: absent on pre-rollup frames.
-  for (const key of Object.keys(data.metrics.rollup || {})) metricRows[key] = data.metrics.rollup[key]
+  // Overlay the SUBTREE rollup ONLY on PURE parents (a concept with no direct experiment_refs, e.g. an
+  // axis root never tagged itself) so their row shows metrics aggregated from descendants instead of a
+  // blank "·". A directly-tagged concept keeps its own direct row so its metric and its (direct) evidence
+  // stay consistent — the rollup's descendant experiments would otherwise not appear in its evidence list.
+  const directRefs = data.experiment_refs || {}
+  for (const key of Object.keys(data.metrics.rollup || {})) {
+    if (!Object.hasOwn(directRefs, key)) metricRows[key] = data.metrics.rollup[key]
+  }
   const experimentCount = new Set(Object.values(byConcept).flat()
     .map(ref => `${ref.node_id}:${ref.node_generation}`)).size
   const shippedLenses = data.edges_present ? data.lenses : data.lenses.filter(item => item.name === 'is_a')

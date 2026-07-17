@@ -266,7 +266,8 @@ class SessionStore:
 
 
 # --------------------------------------------------------------------------- system prompt + toolset
-def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None) -> str:
+def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str | None = None,
+                  cross_run_tools: bool = False, taxonomy_tools: bool = False) -> str:
     mode = normalize_mode(mode)
     mode_line = {
         "plan": "MODE=plan: you are READ-ONLY. You may inspect files and runs and PROPOSE changes in "
@@ -293,16 +294,19 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         "produced it). Ground your answers in what you actually read — inspect before you assert. When "
         "the user refers to a run, use list_runs/read_run to find and read it.\n"
         # E1: name the cross-run CONCEPT tools so the model reaches for them — they were wired but unnamed,
-        # so it never used them (the same 'wired but forgotten' gap the Researcher's pointer text fixed).
-        "For cross-run KNOWLEDGE you have concept tools: `cross_run_concept_map` (the shared concept "
-        "taxonomy across runs — which concepts appear most, their hierarchy, and which pairs co-occur), "
-        "`cross_run_atlas` / `cross_run_prior_attempts` / `cross_run_search` (what prior runs explored and "
-        "found), and `concept_taxonomy` to READ the editable shared taxonomy. Use these when a question "
-        "spans runs or is about the concept graph itself.\n"
-        + ("" if mode == "plan" else
-           "You can CURATE the shared concept taxonomy: concept_merge (fold a near-duplicate/rename), "
-           "concept_split (a coarse concept into finer ones), concept_purge (tombstone), and "
-           "concept_edit_clear (undo) — appended, reversible, and mode/approver-gated.\n")
+        # so it never used them. GATED on actual availability (build_tools registers CrossRunTools only when
+        # memory_dir + cross_run_read_tools, and the taxonomy tools only when memory_dir), else the prompt
+        # would advertise tools absent from the schema and the model would call a non-existent tool.
+        + ("For cross-run KNOWLEDGE you have concept tools: `cross_run_concept_map` (the shared concept "
+           "taxonomy across runs — which concepts appear most, their hierarchy, which pairs co-occur), "
+           "`cross_run_atlas` / `cross_run_prior_attempts` / `cross_run_search` (what prior runs explored "
+           "and found). Use these when a question spans runs or is about the concept graph.\n"
+           if cross_run_tools else "")
+        + ("" if not taxonomy_tools else
+           "`concept_taxonomy` READS the editable shared concept taxonomy.\n" if mode == "plan" else
+           "`concept_taxonomy` READS the editable shared concept taxonomy; you can CURATE it with "
+           "concept_merge (fold a near-duplicate/rename), concept_split (coarse -> finer), concept_purge "
+           "(tombstone) and concept_edit_clear (undo) — appended, reversible, mode/approver-gated.\n")
         + ("" if mode == "plan" else
            "You can also drive a run's LIFECYCLE directly: finalize_run (stop + wrap-up: report, "
            "lessons, cost), stop_run (freeze, no wrap-up), resume_run, reset_node (re-run a node in "
@@ -498,8 +502,13 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     from looplab.serve.assistant_commands import expand_command
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
+    # Mirror build_tools' gating so the prompt only names tools that are actually registered.
+    _mdir = getattr(settings, "memory_dir", None) if settings else None
+    _has_taxonomy = bool(_mdir)
+    _has_cross_run = bool(_mdir and getattr(settings, "cross_run_read_tools", False))
     convo = [{"role": "system", "content": system_prompt(
-        mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None))}]
+        mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None),
+        cross_run_tools=_has_cross_run, taxonomy_tools=_has_taxonomy)}]
     for m in messages:
         role = m.get("role")
         # A user turn may carry `raw` — the full model-facing instruction (attached-file contents,

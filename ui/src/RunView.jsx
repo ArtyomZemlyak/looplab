@@ -140,7 +140,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
   const requestedRouteView = routeState.view
-  const themeFilter = routeState.directionFilter
+  // C3: the DirectionsOverview bar was the only control that SET/cleared this filter. With it gone, a
+  // bookmarked/back-nav URL carrying `directionFilter` would silently filter the DAG to a subset with no
+  // affordance to clear it — so stop honoring it. Passed through as null everywhere (Dag/GroupSummary/
+  // grouping) is a no-op; concept highlighting via the ConceptChipBar is the replacement.
+  const themeFilter = null
   const routeFenceBlocked = generationMismatch || generationPending
   const historyActive = viewSeq != null
   const landedRef = useRef(false)                            // auto-land on Report once, on finish

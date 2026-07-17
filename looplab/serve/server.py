@@ -374,11 +374,12 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     # LOOPLAB_UI_HOSTS still 403s every POST/PUT/DELETE: the UI is same-origin from the BROWSER's view
     # (page + API both under https://<public-host>/…/proxy/<port>/), but behind the proxy the server's
     # request.base_url is the internal http://127.0.0.1:<port>, so target != the browser's Origin and the
-    # cross-origin-mutation guard rejected it. Trust both schemes on the default ports (the common
-    # https-front case); an exotic public port still needs an explicit LOOPLAB_UI_CORS entry.
+    # cross-origin-mutation guard rejected it. Trust ONLY the HTTPS origin on the default port — adding
+    # the plaintext http:80 origin would let any co-hosted http content (an http->https redirect vhost, a
+    # legacy app, a reflected injection) forge cross-origin mutations, weakening CSRF on the exact surface
+    # this guards. A genuinely-http or non-standard-port deployment lists its origin in LOOPLAB_UI_CORS.
     for _h in configured_hosts:
         allowed_origins.add(("https", _h, 443))
-        allowed_origins.add(("http", _h, 80))
 
     @app.middleware("http")
     async def _reject_untrusted_host(request: "Request", call_next):
