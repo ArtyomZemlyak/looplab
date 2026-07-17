@@ -19,21 +19,24 @@ test('the shared RunList mutation guard is single-flight, bounded, and honest ab
 
   assert.match(copy, /error\?\.status === 409[\s\S]*error\?\.status === 503/)
   assert.match(copy, /current input or selection kept/)
-  assert.match(copy, /outcome is unknown[\s\S]*Refresh before retrying/)
+  assert.match(copy, /outcome is unknown/)
+  assert.doesNotMatch(copy, /Refresh before retrying/,
+    'the UI must not instruct a retry before it has actually reconciled the store')
   assert.doesNotMatch(copy, /\.message|\.detail|String\(/,
     'provider text must not be reflected into a mutation alert')
   assert.match(hook, /if \(lock\.current\) return false/)
   assert.match(hook, /lock\.current = true; setState\(true\)/)
   assert.equal((hook.match(/settleWithin\(action, LIST_WRITE_TIMEOUT_MS\)/g) || []).length, 1,
     'a mutation intent is sent once through the bounded settlement guard')
-  assert.match(hook, /if \(!settlement\.ok\)[\s\S]*settlement\.timeout[\s\S]*return false/,
-    'a stalled write releases the interaction lock without claiming failure or success')
+  assert.match(hook, /if \(!settlement\.ok\)[\s\S]*typeof reconcile === 'function'[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*Current data was refreshed[\s\S]*return false/,
+    'a stalled write reconciles the affected store before the explicit retry path is re-armed')
+  assert.match(hook, /follow-up refresh timed out[\s\S]*follow-up refresh failed/)
   assert.match(hook, /const outcome = settlement\.value[\s\S]*if \(outcome === false\)[\s\S]*return false/,
     'a stronger caller-owned reconciliation result cannot be relabeled as success')
-  assert.match(hook, /catch \(error\) \{ setState\(mutationMessage\(error\)\); return false \}/)
+  assert.match(hook, /catch \(error\)[\s\S]*settleWithin\(reconcile, LIST_RECONCILE_TIMEOUT_MS\)[\s\S]*setState\(message\); return false/)
   assert.match(hook, /finally \{ lock\.current = false \}/)
-  assert.doesNotMatch(hook, /setTimeout|setInterval|while\s*\(|retry/i,
-    'RunList must never retry a mutation automatically')
+  assert.doesNotMatch(hook, /setTimeout|setInterval|while\s*\(/,
+    'RunList must never schedule or loop an automatic mutation replay')
 })
 
 test('prompt dialogs retain their draft, focus layer, and controls until success', async () => {
@@ -47,7 +50,7 @@ test('prompt dialogs retain their draft, focus layer, and controls until success
   assert.match(modal, /!busy && event\.target === event\.currentTarget/)
   assert.match(modal, /aria-busy=\{busy\}/)
   assert.match(modal, /disabled=\{busy\} onClick=\{onClose\}/)
-  assert.match(prompt, /await mutate\(\(\) => onSubmit\(v\.trim\(\)\)\)[\s\S]*onClose\(\)/,
+  assert.match(prompt, /await mutate\(\(\) => onSubmit\(v\.trim\(\)\), onReconcile\)[\s\S]*onClose\(\)/,
     'close happens only after the authoritative request resolves')
   assert.match(prompt, /readOnly=\{busy\}/)
   assert.match(prompt, /disabled=\{!ok \|\| busy\}/)
@@ -63,7 +66,7 @@ test('move, project, and super-task drafts remain recoverable through failures',
   const tree = between(text, 'function TreeNode', '// Small centered popup')
   const projectRename = between(text, 'const finishProjectRename', 'const removeProject')
 
-  assert.match(menu, /const act = async action => \{ if \(await mutate\(action\)\) onClose\(true\) \}/)
+  assert.match(menu, /const act = async action => \{ if \(await mutate\(action, onReconcile\)\) onClose\(true\) \}/)
   assert.match(menu, /aria-busy=\{busy\}/)
   assert.match(menu, /aria-disabled=\{busy\}/)
   assert.match(menu, /onClickCapture=\{e => \{ if \(busy\)/,
@@ -73,15 +76,15 @@ test('move, project, and super-task drafts remain recoverable through failures',
   assert.match(menu, /role="status">Saving…/)
   assert.match(menu, /role="alert"/)
 
-  assert.match(superModal, /await mutate\(\(\) => onCreate\(v\)\)[\s\S]*setName\(''\)/,
+  assert.match(superModal, /await mutate\(\(\) => onCreate\(v\), onReconcile\)[\s\S]*setName\(''\)/,
     'create clears the controlled draft only after success')
-  assert.match(superModal, /mutate\(\(\) => onRename\(task\.id, v\)\)/)
-  assert.match(superModal, /await mutate\(async \(\) => \{ removed = await onDelete\(task\) \}\)/)
+  assert.match(superModal, /mutate\(\(\) => onRename\(task\.id, v\), onReconcile\)/)
+  assert.match(superModal, /await mutate\(async \(\) => \{ removed = await onDelete\(task\) \}, onReconcile\)/)
   assert.match(superModal, /readOnly=\{busy\}/)
   assert.match(superModal, /disabled=\{busy \|\| !name\.trim\(\)\}/)
   assert.match(superModal, /role="alert"/)
 
-  assert.match(projectRename, /if \(value && !await saveProjectRename\(\(\) => patchProject[\s\S]*return false/)
+  assert.match(projectRename, /if \(value && !await saveProjectRename\([\s\S]*patchProject[\s\S]*loadProjects\)\) return false/)
   assert.match(projectRename, /setRenaming\(null\)[\s\S]*return true/,
     'the inline project editor remains mounted with its exact draft on rejection')
   assert.match(tree, /input\.dataset\.pending = 'true'[\s\S]*await finishProjectRename[\s\S]*delete input\.dataset\.pending/,

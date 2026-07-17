@@ -122,6 +122,68 @@ const NARR = {
   env_changed: () => 'environment changed since run start — re-grounding',
 }
 
+const ownValue = (value, key) => value !== null && typeof value === 'object'
+  && Object.hasOwn(value, key) && value[key] !== null && value[key] !== undefined
+const ownAny = (value, keys) => keys.some(key => ownValue(value, key))
+const nestedValue = (value, parent, key) => ownValue(value, parent) && ownValue(value[parent], key)
+const objectValue = (value, key) => ownValue(value, key) && value[key] !== null
+  && typeof value[key] === 'object' && !Array.isArray(value[key])
+// Narration is a compatibility surface over append-only logs. Optional fields may enrich a line,
+// but fields that define the claim itself must be present before a renderer interpolates them. This
+// avoids coercing missing legacy/partial values into authoritative-looking "#undefined", "clean",
+// or "FAILED (exit undefined)" prose while preserving legitimate user text containing that word.
+const NARR_VALID = {
+  run_started: d => ownAny(d, ['goal', 'task_id']) && ownValue(d, 'direction'),
+  node_building: d => ownValue(d, 'node_id'),
+  node_created: d => ownValue(d, 'node_id') && ownValue(d, 'operator'),
+  node_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
+  node_failed: d => ownValue(d, 'node_id') && ownValue(d, 'reason'),
+  node_repaired: d => ownValue(d, 'node_id') && ownValue(d, 'attempt'),
+  node_confirmed: d => ['node_id', 'mean', 'std', 'seeds'].every(key => ownValue(d, key)),
+  best_confirmed: d => ownValue(d, 'node_id'),
+  ablate: d => ownValue(d, 'parent_id') && objectValue(d, 'impacts'),
+  data_leakage: d => typeof d?.leak === 'boolean',
+  approval_requested: d => ownValue(d, 'node_id'),
+  approval_granted: d => ownValue(d, 'node_id'),
+  node_abort: d => ownValue(d, 'node_id'),
+  hint: d => ownValue(d, 'text'),
+  promote: d => ownValue(d, 'node_id'),
+  policy_decision: d => ownValue(d, 'chosen') && objectValue(d, 'scores'),
+  strategy_decision: d => nestedValue(d, 'strategy', 'policy'),
+  rung_promoted: d => ownValue(d, 'rung') && Array.isArray(d?.survivors),
+  set_strategy: d => nestedValue(d, 'strategy', 'policy'),
+  proxy_scored: d => ownValue(d, 'node_id') && ownValue(d, 'score'),
+  reward_hack_suspected: d => ownValue(d, 'node_id') && Array.isArray(d?.signals)
+    && d.signals.every(signal => ownValue(signal, 'signal')),
+  novelty_rejected: d => ownValue(d, 'near_node') && ownValue(d, 'distance'),
+  hypothesis_ranked: d => ownValue(d, 'n') || Array.isArray(d?.order),
+  foresight_selected: d => ownValue(d, 'kind') && ownValue(d, 'chosen')
+    && (ownValue(d, 'n') || Array.isArray(d?.order)),
+  llm_cost: d => ownValue(d, 'total_tokens') && ownValue(d, 'cost'),
+  force_confirm: d => ownValue(d, 'node_id'),
+  force_ablate: d => ownValue(d, 'node_id'),
+  fork: d => ownValue(d, 'from_node_id'),
+  inject_node: d => objectValue(d, 'idea'),
+  annotation: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
+  hypothesis_added: d => ownValue(d, 'statement'),
+  hypothesis_merged: d => ownValue(d, 'statement'),
+  lessons_distilled: d => ownValue(d, 'count'),
+  coverage_snapshot: d => ownValue(d, 'themes') && ownValue(d, 'niches'),
+  confirm_done: d => ownValue(d, 'node_id'),
+  confirm_eval: d => ['seed', 'node_id', 'metric'].every(key => ownValue(d, key)),
+  agent_decision: d => nestedValue(d, 'chosen', 'kind') && Array.isArray(d?.legal),
+  agent_validated: d => ownValue(d, 'node_id'),
+  spec_drift: d => ownValue(d, 'node_id'),
+  data_profiled: d => ownValue(d, 'columns') && d.columns !== null
+    && typeof d.columns === 'object',
+  data_provenance: d => objectValue(d, 'assets'),
+  setup_step: d => ownValue(d, 'step'),
+  workspace_seeded: d => ownValue(d, 'node_id') && Array.isArray(d?.materialized),
+  run_setup_started: d => Array.isArray(d?.command),
+  run_setup_finished: d => ownValue(d, 'exit_code'),
+  budget: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
+}
+
 // The node an event refers to, if any — lets a feed click drill into that node.
 function eventNode(e) {
   const d = e.data || {}
@@ -465,16 +527,12 @@ export function eventNarration(event) {
     if (render && (data === null || typeof data !== 'object' || Array.isArray(data))) {
       throw new TypeError('invalid event narration payload')
     }
+    if (render && NARR_VALID[event.type] && !NARR_VALID[event.type](data)) {
+      throw new TypeError('incomplete event narration payload')
+    }
     const value = render ? render(data) : JSON.stringify(data ?? {}).slice(0, 80)
     // # CODEX AGENT: Narration contains agent/user prose. Validate its structured input and renderer
     // result; never infer a template failure from a legitimate word inside the rendered data.
-    // REVIEW(2026-07-16): the REVIEW spec that removed the \bundefined\b heuristic asked for its
-    // REPLACEMENT — "have NARR renderers return null on missing fields, which the !value branch
-    // already handles" — and that half was never implemented: the renderers still interpolate
-    // fields directly, so an event from an older/partial log missing one field (additive-evolution
-    // logs are expected per invariant 5) now renders coerced garbage like "building node #undefined
-    // via improve…" where the pre-fix code degraded to "details could not be summarized". Guard the
-    // interpolated fields inside each renderer (return null when a required field is absent).
     if (!value) throw new TypeError('incomplete event narration')
     return String(value || event?.type || 'event')
   } catch {

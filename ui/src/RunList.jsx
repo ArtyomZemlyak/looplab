@@ -49,16 +49,8 @@ function ResourceNotice({ state, label, retry }) {
   </div>
 }
 
-// REVIEW(2026-07-16): the timeout message says "Refresh before retrying", but NOTHING refreshes and
-// nothing fences the retry: the lock frees at the 12s deadline while the un-abortable transport
-// (send() has no AbortSignal) stays in flight for minutes, and no useMutation caller reconciles
-// projects/supertasks on timeout (those stores load only on mount/success — no poll covers them).
-// Rename to 'A' (stalls, times out) then retry with 'B' (lands first): the stalled 'A' lands LAST,
-// the server ends at 'A' while the UI shows 'B' — silent divergence until a full page reload. The
-// timeout path needs what useListMutation's contract mandates: an automatic reconcile read of the
-// affected store before the operator can retry.
 const mutationMessage = (error, timedOut = false) => timedOut
-  ? 'Save timed out; its outcome is unknown. Refresh before retrying.'
+  ? 'Save timed out; its outcome is unknown.'
   : error?.status === 409
     ? 'Conflict; current input or selection kept.'
     : error?.status === 503
@@ -70,7 +62,7 @@ const mutationMessage = (error, timedOut = false) => timedOut
 function useMutation() {
   const lock = useRef(false)
   const [state, setState] = useState(null)
-  const run = async action => {
+  const run = async (action, reconcile) => {
     if (lock.current) return false
     lock.current = true; setState(true)
     try {
@@ -79,7 +71,18 @@ function useMutation() {
       // safer than freezing every navigation surface until a hung proxy eventually settles.
       const settlement = await settleWithin(action, LIST_WRITE_TIMEOUT_MS)
       if (!settlement.ok) {
-        setState(mutationMessage(settlement.error, settlement.timeout)); return false
+        let message = mutationMessage(settlement.error, settlement.timeout)
+        if (typeof reconcile === 'function') {
+          const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
+          message += check.ok
+            ? ' Current data was refreshed; verify the current value before retrying.'
+            : check.timeout
+              ? ' The follow-up refresh timed out; reload before retrying.'
+              : ' The follow-up refresh failed; reload before retrying.'
+        } else {
+          message += ' Reload this view before retrying.'
+        }
+        setState(message); return false
       }
       const outcome = settlement.value
       // A caller may own a stronger reconciliation contract (for example useListMutation below).
@@ -87,7 +90,20 @@ function useMutation() {
       if (outcome === false) { setState(null); return false }
       setState(null); return true
     }
-    catch (error) { setState(mutationMessage(error)); return false }
+    catch (error) {
+      let message = mutationMessage(error)
+      if (typeof reconcile === 'function') {
+        const check = await settleWithin(reconcile, LIST_RECONCILE_TIMEOUT_MS)
+        message += check.ok
+          ? ' Current data was refreshed; verify the current value before retrying.'
+          : check.timeout
+            ? ' The follow-up refresh timed out; reload before retrying.'
+            : ' The follow-up refresh failed; reload before retrying.'
+      } else {
+        message += ' Reload this view before retrying.'
+      }
+      setState(message); return false
+    }
     finally { lock.current = false }
   }
   return [state === true, typeof state === 'string' ? state : '', run, setState]
@@ -222,11 +238,14 @@ function Modal({ title, onClose, children, busy = false }) {
   </div>
 }
 
-function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false, onSubmit, onClose }) {
+function PromptModal({ title, label, placeholder, initial = '', confirm = 'Create', allowEmpty = false,
+  onSubmit, onReconcile, onClose }) {
   const [v, setV] = useState(initial)
   const [busy, error, mutate] = useMutation()
   const ok = allowEmpty || !!v.trim()
-  const go = async () => { if (ok && await mutate(() => onSubmit(v.trim()))) onClose() }
+  const go = async () => {
+    if (ok && await mutate(() => onSubmit(v.trim()), onReconcile)) onClose()
+  }
   return <Modal title={title} onClose={onClose} busy={busy}>
     {label && <div className="muted" style={{ marginBottom: 8 }}>{label}</div>}
     <input className="text" autoFocus readOnly={busy} aria-label={label || title} placeholder={placeholder} value={v} onChange={e => setV(e.target.value)}
@@ -240,7 +259,8 @@ function PromptModal({ title, label, placeholder, initial = '', confirm = 'Creat
 }
 
 // Per-run "⋮" dropdown: open / rename / move (project) / assign (super-task) / delete.
-function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename, onDelete, onClose, onBusyChange }) {
+function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManageSupers, onRename,
+  onDelete, onReconcile, onClose, onBusyChange }) {
   const menuRef = useRef(null)
   const [busy, error, mutate] = useMutation()
   useEffect(() => { menuRef.current?.querySelector('[role="menuitem"]')?.focus() }, [])
@@ -249,7 +269,7 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
     return () => onBusyChange?.(false)
   }, [busy, onBusyChange])
   const close = (restore = false) => { if (!busy) onClose(restore) }
-  const act = async action => { if (await mutate(action)) onClose(true) }
+  const act = async action => { if (await mutate(action, onReconcile)) onClose(true) }
   const onKeyDown = event => {
     if (busy && event.key === 'Tab') { event.preventDefault(); return }
     const items = [...(menuRef.current?.querySelectorAll('[role="menuitem"]') || [])]
@@ -293,18 +313,25 @@ function RunMenu({ r, projects, supertasks, onOpen, onMove, onSetSuper, onManage
 
 // Manage super-tasks in one popup: create, rename (inline), delete. Assignment happens per-run via
 // the ⋮ menu / drag; this is just the CRUD over the buckets themselves.
-function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDelete, onClose }) {
+function SuperTaskModal({ supertasks, state, onRetry, onCreate, onRename, onDelete,
+  onReconcile, onClose }) {
   const [name, setName] = useState('')
   const newTaskRef = useRef(null)
   const [busy, error, mutate] = useMutation()
-  const add = async () => { const v = name.trim(); if (v && await mutate(() => onCreate(v))) setName('') }
-  const edit = (task, input) => { const v = input.value.trim(); if (v && v !== task.name) mutate(() => onRename(task.id, v)) }
+  const add = async () => {
+    const v = name.trim()
+    if (v && await mutate(() => onCreate(v), onReconcile)) setName('')
+  }
+  const edit = (task, input) => {
+    const v = input.value.trim()
+    if (v && v !== task.name) mutate(() => onRename(task.id, v), onReconcile)
+  }
   const remove = async (task, event) => {
     const row = event.currentTarget.closest('.st-row')
     const fallback = row?.nextElementSibling?.querySelector('.st-rename')
       || row?.previousElementSibling?.querySelector('.st-rename') || newTaskRef.current
     let removed
-    const saved = await mutate(async () => { removed = await onDelete(task) })
+    const saved = await mutate(async () => { removed = await onDelete(task) }, onReconcile)
     if (saved && removed) requestAnimationFrame(() => fallback?.isConnected
       ? fallback.focus({ preventScroll: true }) : newTaskRef.current?.focus({ preventScroll: true }))
   }
@@ -465,6 +492,7 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
 
   const toggle = (id) => setExpanded(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
   const refresh = () => Promise.all([loadProjects(), loadRuns()])
+  const reconcileAll = () => Promise.all([loadProjects(), loadRuns(), loadSupers()])
 
   const restoreProjectModalFocus = () => {
     const target = projectModalReturnRef.current
@@ -489,7 +517,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
   }
   const finishProjectRename = async (id, name, restoreFocus = false) => {
     const value = name?.trim()
-    if (value && !await saveProjectRename(() => patchProject(id, { name: value }))) return false
+    if (value && !await saveProjectRename(
+      () => patchProject(id, { name: value }), loadProjects)) return false
     if (value) await loadProjects()
     else clearProjectError(null)
     setRenaming(null)
@@ -745,7 +774,8 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
                         }}>⋮</button>
                 {runMenu === r.run_id && <RunMenu r={r} projects={proj.projects} supertasks={superdata.supertasks}
                   onOpen={onOpen} onMove={moveRun} onSetSuper={assignToSuper} onManageSupers={() => openSuperTasks(runMenuTriggerRef.current)}
-                  onRename={openRunRename} onDelete={removeRun} onClose={closeRunMenu} onBusyChange={setMenuBusy} />}
+                  onRename={openRunRename} onDelete={removeRun} onReconcile={reconcileAll}
+                  onClose={closeRunMenu} onBusyChange={setMenuBusy} />}
               </div>
             </div>
           ))}
@@ -756,16 +786,16 @@ export default function RunList({ onOpen, onSettings, onResearchAtlas }) {
         title={projModal.parent_id ? 'New sub-project' : 'New project'}
         label={projModal.parent_id ? `Inside “${projName[projModal.parent_id]}”` : 'Group runs into a project folder.'}
         placeholder="e.g. baseline sweep" confirm="Create"
-        onSubmit={submitProject} onClose={closeProjectModal} />}
+        onSubmit={submitProject} onReconcile={refresh} onClose={closeProjectModal} />}
 
       {runRename && <PromptModal
         title="Rename run" label={`Display name for ${runRename.run_id} (clear it to fall back to the id).`}
         placeholder={runRename.run_id} initial={runRename.label || ''} confirm="Save" allowEmpty
-        onSubmit={submitRunRename} onClose={closeRunRename} />}
+        onSubmit={submitRunRename} onReconcile={loadRuns} onClose={closeRunRename} />}
 
       {stModal && <SuperTaskModal supertasks={superdata.supertasks} state={superState} onRetry={loadSupers}
         onCreate={createSuper} onRename={renameSuper} onDelete={removeSuper}
-        onClose={closeSuperTasks} />}
+        onReconcile={reconcileAll} onClose={closeSuperTasks} />}
 
       {showReport && scope && <LazyBoundary label="scope report" mode="overlay" resetKey={scope.label}>
         <ScopeReport scope={scope}

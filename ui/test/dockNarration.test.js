@@ -21,6 +21,19 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'node_failed', data: {
       node_id: 4, reason: 'guard against undefined behavior',
     } }), 'node #4 failed (guard against undefined behavior)')
+    for (const [type, data] of [
+      ['node_building', { operator: 'improve' }],
+      ['data_leakage', {}],
+      ['run_setup_finished', {}],
+      ['node_confirmed', { node_id: 2, mean: 1, seeds: 3 }],
+      ['strategy_decision', { strategy: {} }],
+    ]) {
+      assert.equal(eventNarration({ type, data }),
+        `${type} — details could not be summarized`, `${type} must not coerce a missing field`)
+    }
+    assert.equal(eventNarration({ type: 'run_started', data: {
+      task_id: 'task-a', direction: 'max',
+    } }), 'run started — task-a (max)')
     assert.equal(eventNarration({ type: 'future_event', data: {
       text: 'params.x was undefined at eval',
     } }), '{"text":"params.x was undefined at eval"}')
