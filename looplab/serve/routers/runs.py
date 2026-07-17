@@ -395,6 +395,18 @@ def build_router(srv) -> APIRouter:
         base_frame = _project_concept_frame(
             core, requested_lens="is_a", lens_pack=lens_pack)
         response.headers["Cache-Control"] = "no-store"
+        # REVIEW(2026-07-16): this all-or-nothing completeness gate permanently disables lens minting
+        # on real runs. `complete = not reasons` collapses every completeness reason into one refusal,
+        # but most reasons derive from IMMUTABLE log contents or monotone caps and can never clear in
+        # an append-only log: the engine's own co_occurs counts >= 2 trip invalid_edge (see the REVIEW
+        # note in concept_frame.py — guaranteed on any tagged run reaching the edge cadence twice),
+        # and node_membership_cap/concepts_per_node_cap/membership_cap/edge_cap only ever ratchet.
+        # Once tripped, every POST here refuses BEFORE the model call, forever — while the UI maps
+        # the reason to "try naming a relation to group by", telling the operator to rephrase a
+        # prompt that cannot succeed. The GET path deliberately serves partial frames with itemized
+        # reasons receipts; this gate should match it: refuse only on corruption-class reasons, and
+        # mint against the bounded (partial) frame otherwise — or at minimum return the reasons so
+        # the UI can say WHY it is permanent.
         if not base_frame["complete"]:
             return {**base_frame, "ok": False, "reason": "concept_frame_partial"}
         inputs = _concept_core_lens_inputs(core)

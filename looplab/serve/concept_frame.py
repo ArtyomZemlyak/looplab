@@ -235,6 +235,18 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         dst, dst_problem = canonical_concept(edge.get("dst"), rename)
         relation = edge.get("rel")
         confidence = finite_metric(edge.get("confidence"))
+        # REVIEW(2026-07-16): the `0.0 <= confidence <= 1.0` bound rejects the ENGINE'S OWN edges.
+        # The strategist cadence emits co_occurs confidence as the raw pair COUNT
+        # (engine/strategy.py: `_edge(a, "co_occurs", b, "evidenced", float(cnt))`), and the fold
+        # stores it unclamped (tests/test_concept_edges.py even asserts confidence==5.0 survives) —
+        # so the moment any concept pair co-occurs on >= 2 nodes, this drops exactly the STRONGEST
+        # co_occurs edges as "invalid_edge". Consequences (reproduced end-to-end): the frame is
+        # stamped partial/non-authoritative forever (append-only log + max-wins fold, the reason can
+        # never clear), effective_lens falls back to is_a with the FALSE receipt
+        # fallback='no_matching_edges', edges_present=false strips every typed lens from the picker,
+        # and derive_concept_lens hard-fails on the partiality (runs.py concept_frame_partial). The
+        # bound must accept the substrate's actual value domain (counts >= 1) — normalize/clamp for
+        # display if a [0,1] scale is wanted, never reject the recorded shape.
         if (src_problem or dst_problem or not src or not dst or src == dst
                 or relation not in registered_rels or confidence is None
                 or not 0.0 <= confidence <= 1.0):
