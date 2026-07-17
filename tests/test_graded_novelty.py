@@ -153,6 +153,22 @@ def test_classifier_surface_excludes_authored_concept_claims():
     assert "loss/contrastive" not in _describe_node(node)
 
 
+def test_idea_text_includes_search_space_keys_like_node_text():
+    # A sweep proposal's only concept signal can live in the search SPACE (params empty). The idea tagger
+    # must describe it by the same structural fields the node tagger uses, so idea and node tags agree and
+    # graded-novelty's L4/L5 admission can fire for search-space proposals. Space keys are structural
+    # dimension names (not the self-assertable `concepts` field), so this adds no gaming surface.
+    from looplab.search.graded_novelty import _idea_text
+    from looplab.search.concept_graph import _node_text
+    from types import SimpleNamespace
+    idea = Idea(operator="improve", params={}, rationale="tune the scaling",
+                space={"temperature": [0.01, 0.1], "warmup_steps": [100, 500]})
+    text = _idea_text(idea)
+    assert "temperature" in text and "warmup_steps" in text
+    node = SimpleNamespace(idea=idea, operator="improve")
+    assert "temperature" in _node_text(node)          # idea + node describe the same fields
+
+
 def test_graph_from_node_concepts_rebuilds_deterministically():
     """The cached LLM tags reconstruct into a graph + tags with NO LLM (Feature-1 reuse)."""
     from looplab.search.concept_graph import graph_from_node_concepts

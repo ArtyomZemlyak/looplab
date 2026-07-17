@@ -49,16 +49,12 @@ def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
 
     tokens: list[str] = []
     token: list[str] = []
-    # REVIEW(2026-07-16): boundary inconsistency at exactly _IDEA_IDENTITY_MAX_TOKENS. A text whose
-    # 2048th token is flushed by a SEPARATOR (e.g. a trailing period) hits the cap check and marks
-    # complete=False even though that was the LAST token — while the byte-identical text WITHOUT the
-    # trailing separator flushes token #2048 in the for/else and stays complete=True. Same token
-    # tuple, divergent completeness — and completeness now carries real weight: one such prior makes
-    # `_cached_prior_idea_identity` permanently "incomplete", `_warn_incomplete_prior_identity` fires,
-    # and the level-4/5 short-circuit disables itself for the rest of the run on content whose
-    # identity WAS fully captured. Only mark incomplete when input genuinely remains after the cap
-    # (e.g. check a lookahead/remaining-chars flag before setting complete=False on the flush).
-    for char in normalized:
+    # Boundary care at exactly _IDEA_IDENTITY_MAX_TOKENS: a text whose 2048th token is flushed by a
+    # trailing SEPARATOR must NOT be marked incomplete just for the separator — the byte-identical text
+    # without it flushes token #2048 in the for/else and stays complete. Completeness carries real weight
+    # (an "incomplete" prior permanently self-disables the level-4/5 graded-novelty short-circuit), so only
+    # flip complete=False when token-worthy content GENUINELY remains past the cap.
+    for i, char in enumerate(normalized):
         category = unicodedata.category(char)
         if category[0] in {"L", "N"} or (token and category[0] == "M"):
             token.append(char)
@@ -67,7 +63,9 @@ def _canonical_idea_identity(text: str) -> tuple[tuple[str, ...], bool]:
             tokens.append("".join(token))
             token = []
             if len(tokens) >= _IDEA_IDENTITY_MAX_TOKENS:
-                complete = False
+                # A new token can only START on an L/N char, so genuine truncation requires one ahead.
+                if any(unicodedata.category(c)[0] in {"L", "N"} for c in normalized[i + 1:]):
+                    complete = False
                 break
     else:
         if token:

@@ -18,6 +18,7 @@ CONCEPT_FRAME_SCHEMA = 1
 MAX_NODE_MEMBERSHIPS = 2_048
 MAX_CONCEPTS_PER_NODE = 64
 MAX_MEMBERSHIPS = 8_192
+MAX_EDGE_WEIGHT = MAX_MEMBERSHIPS
 MAX_TREE_NODES = 4_096
 MAX_EDGES = 2_048
 MAX_EDGE_ENDPOINTS = 4_096
@@ -235,21 +236,18 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         dst, dst_problem = canonical_concept(edge.get("dst"), rename)
         relation = edge.get("rel")
         confidence = finite_metric(edge.get("confidence"))
-        # REVIEW(2026-07-16): the `0.0 <= confidence <= 1.0` bound rejects the ENGINE'S OWN edges.
-        # The strategist cadence emits co_occurs confidence as the raw pair COUNT
-        # (engine/strategy.py: `_edge(a, "co_occurs", b, "evidenced", float(cnt))`), and the fold
-        # stores it unclamped (tests/test_concept_edges.py even asserts confidence==5.0 survives) —
-        # so the moment any concept pair co-occurs on >= 2 nodes, this drops exactly the STRONGEST
-        # co_occurs edges as "invalid_edge". Consequences (reproduced end-to-end): the frame is
-        # stamped partial/non-authoritative forever (append-only log + max-wins fold, the reason can
-        # never clear), effective_lens falls back to is_a with the FALSE receipt
-        # fallback='no_matching_edges', edges_present=false strips every typed lens from the picker,
-        # and derive_concept_lens hard-fails on the partiality (runs.py concept_frame_partial). The
-        # bound must accept the substrate's actual value domain (counts >= 1) — normalize/clamp for
-        # display if a [0,1] scale is wanted, never reject the recorded shape.
+        # CODEX AGENT: ``confidence`` is the replay field for both normalized confidence and the
+        # integer co-occurrence evidence emitted by strategy.py. Bound the weight by the largest
+        # self-contained evidence receipt instead of silently discarding every repeated pairing.
+        # REVIEW(2026-07-16): the MAX_EDGE_WEIGHT bound fixes the count>=2 rejection, but a run whose
+        # one pair co-occurs on MORE than MAX_EDGE_WEIGHT nodes still trips "invalid_edge" — and the
+        # max-wins fold means that once recorded, the reason never clears (same permanence as before,
+        # just a higher threshold). At the cap the edge should be CLAMPED to MAX_EDGE_WEIGHT (the
+        # evidence saturates), not rejected — rejection converts the run's strongest empirical edge
+        # into a permanent partial/non-authoritative frame.
         if (src_problem or dst_problem or not src or not dst or src == dst
                 or relation not in registered_rels or confidence is None
-                or not 0.0 <= confidence <= 1.0):
+                or not 0.0 <= confidence <= MAX_EDGE_WEIGHT):
             reasons.add(src_problem or dst_problem or "invalid_edge")
             continue
         new_endpoints = {src, dst} - edge_endpoints

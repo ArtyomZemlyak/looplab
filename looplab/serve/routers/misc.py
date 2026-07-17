@@ -20,7 +20,7 @@ from fastapi import APIRouter, HTTPException, Request
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
-from looplab.trust.redact import redact_persisted_text
+from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 
 
 _MEMORY_TIER_LIMIT = 200
@@ -71,14 +71,13 @@ def _bounded_json_value(value, *, depth: int = 0, budget: Optional[list[int]] = 
             if key in out:
                 truncated = True
                 continue
-            # REVIEW(2026-07-16): this is the ONLY bounded JSON projector in the repo with NO
-            # is_secret_key_name masking — both siblings (core/advisory_payloads._tree and
-            # trust/cross_run's walk) emit "***" for a secret-NAMED key before looking at the value.
-            # Here a cross-run memory row {"api_key": "<short low-entropy secret>"} sails through:
-            # _memory_text's entropy redaction only catches high-entropy strings, so short/wordlike
-            # credentials leak into the memory-browser response that the key-name rule exists to
-            # catch. Add the same `if is_secret_key_name(raw_key): out[key] = "***"` gate (classified
-            # on the ORIGINAL key, per 8d1bcda) before projecting the child.
+            # Mask a secret-NAMED key before projecting its value (matches the sibling projectors
+            # core/advisory_payloads._tree and trust/cross_run's walk): _memory_text's entropy redaction
+            # only catches high-entropy strings, so a short/wordlike credential like {"api_key":"tok-abcd"}
+            # would otherwise leak into the memory-browser response. Classify on the ORIGINAL key (per 8d1bcda).
+            if is_secret_key_name(raw_key):
+                out[key] = "***"
+                continue
             projected, cut = _bounded_json_value(value[raw_key], depth=depth + 1, budget=budget)
             out[key] = projected
             truncated = truncated or cut

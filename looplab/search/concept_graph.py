@@ -61,6 +61,12 @@ class Concept:
     reports EVERY uncovered skeleton region, not only the key ones."""
     id: str                                 # canonical, axis-prefixed, e.g. "negatives/external-mining"
     label: str = ""                         # human label (defaults to id)
+    # DESIGN NOTE (2026-07-17 critique): a concept's parent is encoded TWICE — implicitly by the id prefix
+    # (`a/b`->`a`) and explicitly by this `axes` tuple (cross-links). Keeping the two consistent is exactly
+    # what produced review #10 (ancestor materialization), #11 (root self-parent) and #12 (axes_of vs
+    # parents_of). Whenever two representations of the same fact must be kept in sync, expect drift.
+    # Consider unifying: EITHER id-path is the only hierarchy (cross-links become a separate relates_to
+    # edge, not an axis) OR the id is an opaque label and hierarchy lives entirely in parents.
     axes: tuple[str, ...] = ()              # parent axis ids — DAG multi-membership
     aliases: tuple[str, ...] = ()           # lowercase surface tokens for the heuristic tagger
     key: bool = False                       # part of a known/target winning region (alarm labelling)

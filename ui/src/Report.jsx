@@ -11,6 +11,7 @@ import { DataTable, downloadBlob } from './accessibility.jsx'
 import { normalizeResearchMemos } from './researchMemoModel.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
   reportNarrativeCoverage } from './reportModel.js'
+import { nodeTheme } from './conceptId.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -132,10 +133,11 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
 function ChampionCard({ best }) {
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
+  const direction = nodeTheme(best)
   return (
     <div className="champion-card">
       <div className="kv">
-        <div className="k">champion</div><div className="v">#{best.id} · {best.operator}{best.idea?.theme ? ` · ${best.idea.theme}` : ''}</div>
+        <div className="k">champion</div><div className="v">#{best.id} · {best.operator}{direction ? ` · ${direction}` : ''}</div>
         <div className="k">metric</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
           ? <span className="muted"> ±{fmt(best.confirmed_std)} over {best.confirmed_seeds} seed{best.confirmed_seeds === 1 ? '' : 's'}</span>
           : <span className="muted"> (single-seed)</span>}</div>

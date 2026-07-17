@@ -7,6 +7,8 @@ import {
 } from './conceptViewModel.js'
 
 const TIMEOUT_MS = 12_000
+const LENS_PROMPT_MAX_CHARS = 800
+const LENS_PROMPT_MAX_BYTES = 2_048
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const metric = value => value === null || (typeof value === 'number' && Number.isFinite(value))
 const count = value => Number.isSafeInteger(value) && value >= 0
@@ -19,10 +21,23 @@ const generationId = value => value === null
 const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
 const countRecord = value => record(value) && Object.values(value).every(item => count(item))
 const validList = (value, test) => Array.isArray(value) && value.every(test)
+const uniqueList = (value, test) => validList(value, test) && new Set(value).size === value.length
+const fieldNames = names => names.split(' ')
+const fields = (value, names, test) => fieldNames(names).every(name => test(value[name]))
+const exactRecord = (value, names, test) => {
+  const required = fieldNames(names)
+  return record(value) && Object.keys(value).length === required.length
+    && required.every(name => Object.hasOwn(value, name) && (!test || test(value[name])))
+}
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
-const sortedKeys = value => Object.keys(value).sort()
+const bool = value => typeof value === 'boolean'
+const KINDS = ['path', 'edge']
+const METRIC_FIELDS = 'best mean worst delta_best delta_mean'
+const LIMIT_FIELDS = 'concepts_per_node edge_endpoints edges membership_nodes memberships tree_nodes'
+const SOURCE_FIELDS = 'edges membership_nodes'
+const INCLUDED_FIELDS = 'concepts edges experiment_refs membership_nodes memberships tree_nodes'
 
-// # CODEX AGENT: HTTP 200 is transport success, not projection truth. Require the versioned frame,
+// HTTP 200 is transport success, not projection truth. Require the versioned frame,
 // lifecycle identity, authority receipt, bounds receipt, and self-contained experiment references
 // before an empty tree can become an authoritative "no concepts" state.
 export function validateConceptPayload(value, expected = {}) {
@@ -39,18 +54,19 @@ export function validateConceptPayload(value, expected = {}) {
       || typeof runId !== 'string' || !generationId(generation)
       || !(requestedSeq === null || sequence(requestedSeq))
       || !sequence(capturedSeq) || !sequence(maxSeq) || capturedSeq > maxSeq
-      || typeof historical !== 'boolean' || historical !== (capturedSeq < maxSeq)
+      || !fields(value, 'historical edges_present lens_edges_present authoritative complete', bool)
+      || historical !== (capturedSeq < maxSeq)
       || !conceptId(lens) || !conceptId(effectiveLens) || lens !== effectiveLens
       || !conceptId(requestedLens) || !Array.isArray(lenses) || !lenses.length
-      || typeof edgesPresent !== 'boolean' || typeof lensEdgesPresent !== 'boolean'
-      || !record(touch) || !record(experimentRefs) || !record(tree) || tree.lens !== lens
-      || !validList(tree.roots, conceptId) || !record(tree.nodes)
-      || !record(metrics) || !record(metrics.rows) || !metric(metrics.baseline)
-      || !['min', 'max'].includes(metrics.direction)
-      || typeof authoritative !== 'boolean' || typeof complete !== 'boolean'
-      || !record(authority) || !record(provenance) || !record(completeness)
-      || !record(spec) || !record(contract)) invalidPayload()
+      || !fields(value, 'touch experiment_refs tree metrics authority provenance completeness '
+        + 'requested_lens_spec lens_contract', record)
+      || tree.lens !== lens || !validList(tree.roots, conceptId) || !record(tree.nodes)
+      || !record(metrics.rows) || !metric(metrics.baseline)
+      || !['min', 'max'].includes(metrics.direction)) invalidPayload()
 
+  const nodes = tree.nodes
+  const roots = tree.roots
+  const metricRows = metrics.rows
   const unidentifiedHistoricalPrefix = requestedSeq !== null && generation === null
   if ((expected.runId != null && runId !== String(expected.runId))
       || (Object.hasOwn(expected, 'generation') && generation !== expected.generation
@@ -62,28 +78,23 @@ export function validateConceptPayload(value, expected = {}) {
   const shippedByName = new Map()
   for (const item of lenses) {
     if (!record(item) || !conceptId(item.name) || typeof item.label !== 'string'
-        || !validList(item.rels, conceptId) || !item.rels.length
-        || item.rels.length > 8 || new Set(item.rels).size !== item.rels.length
-        || !['path', 'edge'].includes(item.kind) || lensNames.has(item.name)) invalidPayload()
+        || !uniqueList(item.rels, conceptId) || !item.rels.length || item.rels.length > 8
+        || !KINDS.includes(item.kind) || lensNames.has(item.name)) invalidPayload()
     lensNames.add(item.name)
     shippedByName.set(item.name, item)
   }
   const derived = expected.derived === true
   if (!conceptId(spec.name) || spec.name !== requestedLens
-      || !validList(spec.rels, conceptId) || !spec.rels.length
-      || spec.rels.length > 8 || new Set(spec.rels).size !== spec.rels.length
-      || !['path', 'edge'].includes(spec.kind)
-      || !['shipped', 'ephemeral-validated'].includes(spec.registration)
+      || !uniqueList(spec.rels, conceptId) || !spec.rels.length || spec.rels.length > 8
+      || !KINDS.includes(spec.kind)
       || spec.registration !== (derived ? 'ephemeral-validated' : 'shipped')
       || (derived && Array.isArray(expected.rels) && !same(spec.rels, expected.rels))
       || contract.requested !== requestedLens || contract.effective !== effectiveLens
       || contract.registration !== spec.registration
-      || !(contract.fallback === null || contract.fallback === 'no_matching_edges')
-      || (contract.fallback === null) !== (requestedLens === effectiveLens)
+      || contract.fallback !== (requestedLens === effectiveLens ? null : 'no_matching_edges')
       || !lensNames.has('is_a') || (!derived && !lensNames.has(requestedLens))
       || (!lensNames.has(effectiveLens) && effectiveLens !== requestedLens)
-      || (lensEdgesPresent && effectiveLens !== requestedLens)
-      || (lensEdgesPresent && !edgesPresent)
+      || (lensEdgesPresent && (effectiveLens !== requestedLens || !edgesPresent))
       || (spec.kind === 'path' && (!same(spec.rels, ['is_a'])
         || lensEdgesPresent || effectiveLens !== requestedLens))
       || (spec.kind === 'edge'
@@ -103,136 +114,107 @@ export function validateConceptPayload(value, expected = {}) {
   }
 
   const hierarchyTree = spec.kind === 'path' || contract.fallback === 'no_matching_edges'
-  const nodeIds = Object.keys(tree.nodes)
-  const rootIds = new Set(tree.roots)
-  if (rootIds.size !== tree.roots.length) invalidPayload()
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    if (!conceptId(id) || !record(node) || !(node.parent === null || conceptId(node.parent))
-        || !count(node.depth) || typeof node.tagged !== 'boolean'
-        || !validList(node.children, conceptId)
-        || new Set(node.children).size !== node.children.length
-        || (hierarchyTree && Object.hasOwn(node, 'cross_parents'))
-        || (!hierarchyTree && (!validList(node.cross_parents, conceptId)
-          || new Set(node.cross_parents).size !== node.cross_parents.length))) invalidPayload()
-  }
-  for (const id of tree.roots) {
-    if (!Object.hasOwn(tree.nodes, id)) invalidPayload()
-  }
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    const isRoot = rootIds.has(id)
-    if ((node.parent === null) !== isRoot || (isRoot && node.depth !== 0)) invalidPayload()
-    if (node.parent !== null) {
-      const parent = tree.nodes[node.parent]
-      if (!record(parent) || !parent.children.includes(id) || node.depth !== parent.depth + 1) {
-        invalidPayload()
-      }
-    }
-    for (const childId of node.children) {
-      if (!record(tree.nodes[childId]) || tree.nodes[childId].parent !== id) invalidPayload()
-    }
+  const nodeIds = Object.keys(nodes)
+  let treeReferences = roots.length
+  if (nodeIds.length > 10_000 || treeReferences > nodeIds.length) invalidPayload()
+  // # CODEX AGENT: One bounded walk proves ownership, topology, reachability and tagged receipts;
+  // the reference budget prevents an invalid fan-out from allocating an unbounded pending stack.
+  const seenNodes = new Set()
+  const pending = roots.map(id => [id, null, 0])
+  while (pending.length) {
+    const [id, parent, depth] = pending.pop()
+    const node = nodes[id]
+    if (seenNodes.has(id) || !conceptId(id) || !Object.hasOwn(nodes, id) || !record(node)
+        || node.parent !== parent || node.depth !== depth || depth > 256
+        || !Array.isArray(node.children)
+        || node.tagged !== Object.hasOwn(experimentRefs, id)) invalidPayload()
+    seenNodes.add(id)
     if (hierarchyTree) {
       const parts = id.split('/')
       const pathParent = parts.length === 1 ? null : parts.slice(0, -1).join('/')
-      if (node.parent !== pathParent || node.depth !== parts.length - 1) invalidPayload()
-    } else if (node.cross_parents.some(parentId => parentId === id || parentId === node.parent
-        || !Object.hasOwn(tree.nodes, parentId))) invalidPayload()
-  }
-  for (const [id, valueCount] of Object.entries(touch)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !count(valueCount)) invalidPayload()
-  }
-  for (const [id, row] of Object.entries(metrics.rows)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !record(row)
-        || !count(row.touched) || !count(row.evaluated) || row.evaluated > row.touched
-        || !(row.first_touch === null || count(row.first_touch))
-        || !['best', 'mean', 'worst', 'delta_best', 'delta_mean'].every(key => metric(row[key]))) {
-      invalidPayload()
+      if (parent !== pathParent || depth !== parts.length - 1
+          || Object.hasOwn(node, 'cross_parents')) invalidPayload()
+    } else if (!uniqueList(node.cross_parents, conceptId)
+        || node.cross_parents.some(parentId => parentId === id || parentId === parent
+        || !Object.hasOwn(nodes, parentId))) invalidPayload()
+    for (const child of node.children) {
+      treeReferences += 1
+      if (treeReferences > nodeIds.length) invalidPayload()
+      pending.push([child, id, depth + 1])
     }
   }
+  if (seenNodes.size !== nodeIds.length) invalidPayload()
 
   let referenceCount = 0
   const provenanceCounts = Object.create(null)
   const lifecycleByNode = new Map()
-  const membershipCountsByNode = new Map()
+  const lifecycleMemberships = new Map()
   for (const [id, refs] of Object.entries(experimentRefs)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !Array.isArray(refs) || !refs.length
-        || touch[id] !== refs.length || !Object.hasOwn(metrics.rows, id)
-        || metrics.rows[id].touched !== refs.length) invalidPayload()
+    if (!conceptId(id) || !Object.hasOwn(nodes, id) || !Array.isArray(refs) || !refs.length
+        || !Object.hasOwn(touch, id) || !count(touch[id]) || touch[id] !== refs.length
+        || !Object.hasOwn(metricRows, id) || !record(metricRows[id])
+        || !fields(metricRows[id], 'touched evaluated', count)
+        || metricRows[id].evaluated > metricRows[id].touched
+        || !(metricRows[id].first_touch === null || count(metricRows[id].first_touch))
+        || !fields(metricRows[id], METRIC_FIELDS, metric)
+        || metricRows[id].touched !== refs.length) invalidPayload()
     const lifecycle = new Set()
     let evaluated = 0
     for (const ref of refs) {
-      if (!record(ref) || !count(ref.node_id) || !count(ref.node_generation)
+      if (!record(ref) || !fields(ref, 'node_id node_generation', count)
           || !metric(ref.metric) || ref.metric_kind !== 'robust_metric' || !conceptId(ref.status)
           || !(ref.feasible === null || typeof ref.feasible === 'boolean')
-          || typeof ref.is_best !== 'boolean' || !conceptId(ref.membership_provenance)) invalidPayload()
+          || !bool(ref.is_best) || !conceptId(ref.membership_provenance)) invalidPayload()
       const key = `${ref.node_id}:${ref.node_generation}`
       if (lifecycle.has(key)) invalidPayload()
       lifecycle.add(key)
       const signature = JSON.stringify([ref.node_generation, ref.metric, ref.metric_kind, ref.status,
         ref.feasible, ref.is_best, ref.membership_provenance])
-      if (lifecycleByNode.has(ref.node_id) && lifecycleByNode.get(ref.node_id) !== signature) {
+      const prior = lifecycleByNode.get(ref.node_id)
+      if (prior && prior !== signature) {
         invalidPayload()
       }
       lifecycleByNode.set(ref.node_id, signature)
-      membershipCountsByNode.set(ref.node_id, (membershipCountsByNode.get(ref.node_id) || 0) + 1)
+      lifecycleMemberships.set(ref.node_id, (lifecycleMemberships.get(ref.node_id) || 0) + 1)
       if (ref.metric !== null && ref.feasible !== false) evaluated += 1
       referenceCount += 1
       provenanceCounts[ref.membership_provenance]
         = (provenanceCounts[ref.membership_provenance] || 0) + 1
     }
-    if (metrics.rows[id].evaluated !== evaluated) invalidPayload()
-  }
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    if (node.tagged !== Object.hasOwn(experimentRefs, id)) invalidPayload()
+    if (metricRows[id].evaluated !== evaluated) invalidPayload()
   }
 
-  const reasons = completeness.reasons
-  const sourceIntegrity = completeness.source_integrity
-  const limitKeys = ['concepts_per_node', 'edge_endpoints', 'edges', 'membership_nodes',
-    'memberships', 'tree_nodes']
-  const sourceKeys = ['edges', 'membership_nodes']
-  const includedKeys = ['concepts', 'edges', 'experiment_refs', 'membership_nodes',
-    'memberships', 'tree_nodes']
-  if (typeof completeness.complete !== 'boolean' || completeness.complete !== complete
-      || typeof completeness.truncated !== 'boolean' || !Array.isArray(reasons)
-      || !reasons.every(conceptId) || new Set(reasons).size !== reasons.length
+  const { reasons, limits, source, included, source_integrity: sourceIntegrity } = completeness
+  const integrityFields = sourceIntegrity?.complete
+    ? 'complete generation_identified'
+    : 'complete corrupt_line dropped_lines generation_identified'
+  if (!fields(completeness, 'complete truncated', bool)
+      || completeness.complete !== complete || !uniqueList(reasons, conceptId)
       || !same(reasons, [...reasons].sort())
       || completeness.truncated !== reasons.some(reason => reason.endsWith('_cap'))
       || status !== (complete ? 'complete' : 'partial') || complete !== (reasons.length === 0)
-      || !countRecord(completeness.limits) || !countRecord(completeness.source)
-      || !countRecord(completeness.included) || !record(sourceIntegrity)
-      || !same(sortedKeys(completeness.limits), limitKeys)
-      || limitKeys.some(key => completeness.limits[key] <= 0)
-      || !same(sortedKeys(completeness.source), sourceKeys)
-      || !same(sortedKeys(completeness.included), includedKeys)
-      || typeof sourceIntegrity.complete !== 'boolean'
-      || typeof sourceIntegrity.generation_identified !== 'boolean'
+      || !exactRecord(limits, LIMIT_FIELDS, count)
+      || fieldNames(LIMIT_FIELDS).some(key => limits[key] <= 0)
+      || !exactRecord(source, SOURCE_FIELDS, count)
+      || !exactRecord(included, INCLUDED_FIELDS, count)
+      || !exactRecord(sourceIntegrity, integrityFields)
+      || !fields(sourceIntegrity, 'complete generation_identified', bool)
       || sourceIntegrity.generation_identified !== (generation !== null)
-      || (sourceIntegrity.complete
-        ? !same(sortedKeys(sourceIntegrity), ['complete', 'generation_identified'])
-        : !same(sortedKeys(sourceIntegrity),
-          ['complete', 'corrupt_line', 'dropped_lines', 'generation_identified']))
       || (!sourceIntegrity.complete
-        && (!count(sourceIntegrity.corrupt_line) || !count(sourceIntegrity.dropped_lines)))
-      || completeness.included.tree_nodes !== nodeIds.length
-      || completeness.included.membership_nodes !== lifecycleByNode.size
-      || completeness.included.concepts !== Object.keys(experimentRefs).length
-      || completeness.included.experiment_refs !== referenceCount
-      || completeness.included.memberships !== referenceCount
-      || edgesPresent !== (completeness.included.edges > 0)
-      || completeness.included.membership_nodes > completeness.limits.membership_nodes
-      || completeness.included.memberships > completeness.limits.memberships
-      || completeness.included.tree_nodes > completeness.limits.tree_nodes
-      || completeness.included.edges > completeness.limits.edges
-      || completeness.source.membership_nodes < completeness.included.membership_nodes
-      || completeness.source.edges < completeness.included.edges
-      || [...membershipCountsByNode.values()]
-        .some(valueCount => valueCount > completeness.limits.concepts_per_node)
-      || !same(sortedKeys(touch), sortedKeys(experimentRefs))
-      || !same(sortedKeys(metrics.rows), sortedKeys(experimentRefs))) invalidPayload()
+        && !fields(sourceIntegrity, 'corrupt_line dropped_lines', count))
+      || included.tree_nodes !== nodeIds.length
+      || included.membership_nodes !== lifecycleByNode.size
+      || included.concepts !== Object.keys(experimentRefs).length
+      || included.experiment_refs !== referenceCount || included.memberships !== referenceCount
+      || edgesPresent !== (included.edges > 0)
+      || fieldNames('membership_nodes memberships tree_nodes edges')
+        .some(key => included[key] > limits[key])
+      || fieldNames(SOURCE_FIELDS).some(key => source[key] < included[key])
+      || [...lifecycleMemberships.values()].some(valueCount => valueCount > limits.concepts_per_node)
+      || Object.keys(touch).length !== Object.keys(experimentRefs).length
+      || Object.keys(metricRows).length !== Object.keys(experimentRefs).length) invalidPayload()
 
-  if (typeof authority.authoritative !== 'boolean'
-      || typeof authority.source_authoritative !== 'boolean'
-      || typeof authority.complete !== 'boolean'
+  if (!fields(authority, 'authoritative source_authoritative complete', bool)
       || authority.authoritative !== authoritative || authority.complete !== complete
       || authoritative !== (authority.source_authoritative && complete)
       || authority.source_authoritative !== (sourceIntegrity.complete
@@ -245,15 +227,13 @@ export function validateConceptPayload(value, expected = {}) {
       || !same(Object.entries(provenance.membership_counts).sort(),
         Object.entries(provenanceCounts).sort())) invalidPayload()
 
-  const completeProjection = visibleConceptRows(tree, new Set(nodeIds))
-  if (completeProjection.projectionStatus.state !== 'current'
-      || completeProjection.length !== nodeIds.length) invalidPayload()
   return value
 }
 
 const entries = value => record(value) ? Object.keys(value).sort().map(key => [key, value[key]]) : []
+const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 
-// # CODEX AGENT: mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
+// Mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
 // lifecycle/status/provenance changes, champion changes, typed edges,
 // feasibility and robust metrics refresh; an engine-liveness-only SSE tick does not.
 export function conceptProjectionKey(state) {
@@ -290,20 +270,28 @@ function StateCard({ tone, title, body, action, pending = false, stale = false }
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode }) {
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
+  const hasExactGeneration = typeof generation === 'string' && generationId(generation)
   const [lensSelection, setLensSelection] = useState({ scope: lensScope, name: 'is_a' })
   const lens = lensSelection.scope === lensScope ? lensSelection.name : 'is_a'
   const setLens = name => setLensSelection({ scope: lensScope, name })
   const [resource, setResource] = useState(initial)
   const [retry, setRetry] = useState(0)
   const [expanded, setExpanded] = useState(() => new Set())
+  const [evidenceExpanded, setEvidenceExpanded] = useState(() => new Set())
   const [columns, setColumns] = useState(DEFAULT_COLUMNS)
   // Derived lenses are view-state specs: the paid derivation happens once, then GET replays their
   // exact relation subset so ordinary semantic refreshes remain deterministic and read-only.
   const [derivedLenses, setDerivedLenses] = useState([])
-  const [lensPrompt, setLensPrompt] = useState('')
-  const [lensBusy, setLensBusy] = useState(false)
-  const [lensErr, setLensErr] = useState('')
-  const lensCreate = useRef(null)
+  const [lensFormState, setLensFormState] = useState(() => emptyLensForm(lensScope))
+  const lensCreates = useRef(new Map())
+  const lensForm = lensFormState.scope === lensScope ? lensFormState : emptyLensForm(lensScope)
+  const { prompt: lensPrompt, error: lensErr } = lensForm
+  const lensBusy = lensForm.busy || lensCreates.current.has(lensScope)
+  const setCurrentLensForm = update => setLensFormState(previous => {
+    const currentForm = previous.scope === lensScope ? previous : emptyLensForm(lensScope)
+    const next = typeof update === 'function' ? update(currentForm) : update
+    return { ...next, scope: lensScope }
+  })
   const currentLensScope = useRef(lensScope)
   currentLensScope.current = lensScope
   const request = useRef(null)
@@ -335,7 +323,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     const finish = (ok, data = null) => {
       if (done) return
       done = true
-      // # CODEX AGENT: render-time semantic identity closes the gap before effect cleanup; owner
+      // Render-time semantic identity closes the gap before effect cleanup; owner
       // identity fences late results from a superseded semantic projection.
       if (request.current !== owner || expectedVersion.current !== requestVersion) return
       request.current = null
@@ -370,11 +358,24 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   useEffect(() => {
     if (data?.edges_present === false && lens !== 'is_a' && !activeDerived) {
       setExpanded(new Set())
+      setEvidenceExpanded(new Set())
       setLens('is_a')
     }
   }, [data, lens, activeDerived])
 
-  const byConcept = data?.experiment_refs || {}
+  // experiment_refs is raw JSON (carries Object.prototype), and a concept id can be an untrusted prototype
+  // key — the intermediate node of a "constructor/foo" tag is "constructor", so reading
+  // byConcept["constructor"] on the raw object resolves UP the chain to Object.prototype.constructor (a
+  // function); expanding that row then calls `.map` on the function and crashes the whole Concept view.
+  // Rehydrate into a null-prototype map (own array values only) so every by-concept read is safe.
+  const byConcept = useMemo(() => {
+    const out = Object.create(null)
+    const src = data?.experiment_refs
+    if (src && typeof src === 'object') {
+      for (const key of Object.keys(src)) if (Array.isArray(src[key])) out[key] = src[key]
+    }
+    return out
+  }, [data])
   const rows = useMemo(() => visibleConceptRows(data?.tree, expanded), [data, expanded])
   const projectionStatus = useMemo(() => data
     ? visibleConceptRows(data.tree, new Set(Object.keys(data.tree.nodes))).projectionStatus
@@ -386,6 +387,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const toggle = id => setExpanded(previous => {
     const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next
   })
+  const toggleEvidence = id => setEvidenceExpanded(previous => {
+    const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next
+  })
   const toggleColumn = key => setColumns(value => value.includes(key)
     ? value.length === 1 ? value : value.filter(item => item !== key) : [...value, key])
   const cols = CONCEPT_COLUMNS.filter(column => columns.includes(column.key))
@@ -393,14 +397,22 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const createLens = async event => {
     event.preventDefault()
     const prompt = lensPrompt.trim()
-    if (!prompt || displayedSequence != null || lensCreate.current) return
+    if (!prompt || displayedSequence != null || !hasExactGeneration
+        || lensCreates.current.has(lensScope)) return
+    if (prompt.length > LENS_PROMPT_MAX_CHARS
+        || new TextEncoder().encode(prompt).length > LENS_PROMPT_MAX_BYTES) {
+      setCurrentLensForm(form => ({ ...form,
+        error: 'Lens description is too long. Keep it within 800 characters and 2,048 bytes.' }))
+      return
+    }
     const owner = { scope: lensScope }
-    lensCreate.current = owner
-    setLensBusy(true)
-    setLensErr('')
+    lensCreates.current.set(lensScope, owner)
+    setCurrentLensForm(form => ({ ...form, busy: true, error: '' }))
     try {
-      const response = await post(runApiPath(runId, '/concepts/lens'), { prompt })
-      if (lensCreate.current !== owner || currentLensScope.current !== lensScope) return
+      const response = await post(runApiPath(runId, '/concepts/lens'), {
+        prompt, expected_generation: generation,
+      })
+      if (lensCreates.current.get(lensScope) !== owner || currentLensScope.current !== lensScope) return
       const spec = response?.spec
       if (response?.ok === true && record(spec) && conceptId(spec.name)
           && typeof spec.label === 'string' && Array.isArray(spec.rels)
@@ -420,37 +432,55 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         setDerivedLenses(list => [...list.filter(item => item.scope !== lensScope
           || item.name !== derived.name), derived])
         setExpanded(new Set())
+        setEvidenceExpanded(new Set())
         setLens(derived.name)
-        setLensPrompt('')
+        setCurrentLensForm(form => ({ ...form, prompt: '', error: '' }))
       } else {
-        setLensErr(response?.reason === 'no_model'
+        setCurrentLensForm(form => ({ ...form, error: response?.reason === 'no_model'
           ? 'No model is configured for lens creation.'
-          : 'Could not derive a lens from that request; try naming a relation to group by.')
+          : 'Could not derive a lens from that request; try naming a relation to group by.' }))
       }
-    } catch {
-      if (lensCreate.current === owner && currentLensScope.current === lensScope) {
-        setLensErr('Lens creation failed.')
+    } catch (error) {
+      if (lensCreates.current.get(lensScope) === owner
+          && currentLensScope.current === lensScope) {
+        const safelyRejected = ['invalid_run_generation', 'run_generation_unavailable',
+          'concept_lens_prompt_too_large'].includes(error?.code)
+        setCurrentLensForm(form => ({ ...form, error: error?.code === 'run_generation_changed'
+          ? 'Run changed. Reload Concepts before creating another paid lens.'
+          : safelyRejected
+            ? 'The paid request was rejected before model work began. Reload Concepts and review the request.'
+            : 'Outcome unknown; provider charges may have occurred. Reload before deciding whether to submit a new paid request.' }))
       }
     } finally {
-      if (lensCreate.current === owner) {
-        lensCreate.current = null
-        setLensBusy(false)
+      if (lensCreates.current.get(lensScope) === owner) {
+        lensCreates.current.delete(lensScope)
+        if (currentLensScope.current === lensScope) {
+          setCurrentLensForm(form => ({ ...form, busy: false }))
+        }
       }
     }
   }
   const deleteLens = name => {
     setDerivedLenses(list => list.filter(item => item.scope !== lensScope || item.name !== name))
-    if (lens === name) { setExpanded(new Set()); setLens('is_a') }
+    if (lens === name) { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens('is_a') }
   }
-  // # CODEX AGENT: fence paid lens derivation by owner and run; disabled state alone cannot stop a
+  // Fence paid lens derivation by owner and run; disabled state alone cannot stop a
   // double submit or keep a late paid response out of a same-id replacement run.
+  const lensUnavailable = displayedSequence != null || !hasExactGeneration
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
-    <input className="text" value={lensPrompt} onChange={event => setLensPrompt(event.target.value)}
-      placeholder={displayedSequence == null ? 'create a lens…' : 'live view required'}
-      aria-label="Describe a lens to create" disabled={lensBusy || displayedSequence != null} />
+    <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
+      onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
+      placeholder={displayedSequence != null ? 'live view required'
+        : hasExactGeneration ? 'describe a grouping lens…' : 'verified generation required'}
+      aria-label="Describe a lens to create" aria-describedby="paid-concept-lens-status"
+      disabled={lensBusy || lensUnavailable} />
     <button type="submit" className="btn sm"
-      disabled={lensBusy || displayedSequence != null || !lensPrompt.trim()}>
-      {lensBusy ? '…' : '✦ lens'}</button>
+      aria-describedby="paid-concept-lens-status"
+      title={!hasExactGeneration ? 'Reload the run and wait for its verified generation.' : undefined}
+      disabled={lensBusy || lensUnavailable || !lensPrompt.trim()}>
+      {lensBusy ? 'Creating…' : 'Create lens · paid'}</button>
+    <span id="paid-concept-lens-status" className="muted" role="note">
+      Uses the configured model provider; provider charges may apply.</span>
     {lensErr && <span className="cv-lenserr" role="alert">{lensErr}</span>}
   </form>
 
@@ -474,7 +504,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   if (stateCard) return <div className="concept-view cv-state-layout" data-route-main tabIndex={-1}
     aria-label="Concept tree"><StateCard {...stateCard} /></div>
 
-  const metricRows = data.metrics.rows
+  // Null-prototype rehydrate (same prototype-safety as byConcept): metrics.rows is raw JSON, and a
+  // "constructor"/"__proto__" intermediate concept id would otherwise read an inherited Object.prototype
+  // value at metricRows[id] instead of the correct "no row" undefined.
+  const metricRows = Object.create(null)
+  for (const key of Object.keys(data.metrics.rows)) metricRows[key] = data.metrics.rows[key]
   const experimentCount = new Set(Object.values(byConcept).flat()
     .map(ref => `${ref.node_id}:${ref.node_generation}`)).size
   const shippedLenses = data.edges_present ? data.lenses : data.lenses.filter(item => item.name === 'is_a')
@@ -483,13 +517,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     ...shippedLenses.filter(item => !derivedNames.has(item.name)),
     ...runDerivedLenses.map(item => ({ ...item, derived: true })),
   ]
+  const linkKind = data.requested_lens_spec.rels.join(', ')
   return <div className="concept-view" data-route-main tabIndex={-1} aria-label="Concept tree"
     aria-busy={refreshing}>
     <header className="cv-bar">
       <div className="cv-heading"><strong>Concept tree</strong><span>{Object.keys(data.tree.nodes).length} concepts · {experimentCount} tagged experiments · frame seq {data.captured_seq}</span></div>
       <div className="cv-lensctl">
         <label className="cv-lenspick"><span>Hierarchy lens</span><select className="text" value={lens}
-          onChange={event => { setExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
+          onChange={event => { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
           {availableLenses.map(item => <option key={item.name} value={item.name}>
             {(item.derived ? '✦ ' : '') + (item.label || item.name)}</option>)}
         </select></label>
@@ -499,8 +534,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         {lensCreator}
       </div>
       <div className="cv-tree-actions">
-        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>Expand all</button>
-        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>Collapse all</button>
+        <button type="button" className="btn sm ghost"
+          onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>Expand hierarchy</button>
+        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>Collapse hierarchy</button>
         <button type="button" className="btn sm" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
       </div>
       <div className="cv-cols" role="group" aria-label="Visible metric columns"><span>Metrics</span>
@@ -508,7 +544,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           disabled={columns.includes(column.key) && columns.length === 1}
           className={'cv-col' + (columns.includes(column.key) ? ' on' : '')}
           onClick={() => toggleColumn(column.key)}>{column.label}</button>)}
-        {data.metrics.baseline != null && <span className="cv-baseline">run baseline {fmt(data.metrics.baseline)}</span>}
+        {data.metrics.baseline != null && <span className="cv-baseline" role="note"
+          title="Median robust metric across eligible evaluated experiments (metric available and not explicitly infeasible); Δ columns are direction-normalized relative to this median."
+          aria-label={`Run median robust metric ${fmt(data.metrics.baseline)} across eligible evaluated experiments: metric available and not explicitly infeasible. Delta columns are direction-normalized relative to this median.`}>
+          run median {fmt(data.metrics.baseline)}</span>}
       </div>
     </header>
     {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />Refreshing concepts… Last loaded view remains visible.</div>}
@@ -529,33 +568,58 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const node = data.tree.nodes[id]
         const experiments = byConcept[id] || []
         const open = expanded.has(id)
+        const evidenceOpen = evidenceExpanded.has(id)
+        const crossParents = Array.isArray(node?.cross_parents) ? node.cross_parents : []
+        const edgeProjection = Array.isArray(node?.cross_parents)
+        const conceptLabel = edgeProjection ? id : conceptLeaf(id)
+        const crossParentSummary = crossParents.length
+          ? `Secondary ${linkKind} ${crossParents.length === 1 ? 'parent' : 'parents'}: ${crossParents.join(', ')}`
+          : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>
-            {hasChildren || experiments.length ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
+            {hasChildren ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
               aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${id}`}>{open ? '▾' : '▸'}</button>
               : <span className="cv-chev-placeholder" aria-hidden="true">·</span>}
-            <span className="cv-cid" title={id}>{conceptLeaf(id)}</span>
-            {!!experiments.length && <span className="cv-badge" aria-label={`${experiments.length} tagged experiments`}>{experiments.length}</span>}
+            <span className="cv-cid" title={id}>{conceptLabel}</span>
+            {!!crossParents.length && <span className="cv-badge" title={crossParentSummary}
+              aria-label={crossParentSummary}>+{crossParents.length} links</span>}
+            {!!experiments.length && <button type="button" className="cv-badge btn xs"
+              onClick={() => toggleEvidence(id)} aria-expanded={evidenceOpen}
+              title={`${evidenceOpen ? 'Hide' : 'Show'} tagged experiments for ${id}`}
+              aria-label={`${evidenceOpen ? 'Hide' : 'Show'} ${experiments.length} tagged ${experiments.length === 1 ? 'experiment' : 'experiments'} for ${id}`}>
+              {experiments.length} refs</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]
             const tone = column.delta ? deltaTone(value) : ''
             return <td key={column.key} className={'cv-num' + (tone ? ` d-${tone}` : '')}>{fmtCell(value)}</td>
           })}</tr>
-          {/* # CODEX AGENT: render the frame's generation-bound refs, never a live-state join that can
+          {/* Render the frame's generation-bound refs, never a live-state join that can
               attach historical concepts to a replaced node with the same numeric id. */}
-          {open && experiments.map(ref => {
+          {evidenceOpen && experiments.map(ref => {
             const displayed = state.nodes?.[ref.node_id]
             const lifecycleMatches = !!displayed
               && Number.isSafeInteger(displayed.attempt)
               && displayed.attempt === ref.node_generation
+            const constraint = ref.feasible === false ? 'infeasible'
+              : ref.feasible === true ? 'feasible' : 'constraint status not reported'
+            const rollup = ref.metric === null ? 'not included in the concept rollup: robust metric unavailable'
+              : ref.feasible === false ? 'excluded from the concept rollup because it is infeasible'
+                : 'included in the concept rollup under the current eligibility rule'
+            const refSummary = `Experiment #${ref.node_id}, attempt ${ref.node_generation}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
             return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className="cv-erow"><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
               <button type="button" className="cv-exp-button" disabled={!lifecycleMatches}
-                onClick={() => onPickNode?.(ref.node_id)} aria-label={lifecycleMatches
-                  ? `Open experiment ${ref.node_id} in Inspector`
-                  : `Experiment ${ref.node_id} is not in the displayed run snapshot`}>
-                <span className="cv-exp">Experiment #{ref.node_id}</span>{ref.is_best
+                onClick={() => onPickNode?.(ref.node_id)} title={refSummary}
+                aria-label={`${refSummary}. ${lifecycleMatches
+                  ? 'Open in Inspector'
+                  : 'This attempt is not in the displayed run snapshot'}`}>
+                <span className="cv-exp">Experiment #{ref.node_id} · attempt {ref.node_generation}</span>
+                <span className="badge">{ref.status}</span>
+                {ref.feasible === false && <span className="badge reason">infeasible</span>}
+                {ref.feasible === null && <span className="badge">constraint?</span>}
+                {ref.is_best
                   && <span className="cv-best" title="Frame champion" aria-label="Frame champion">★</span>}</button></td>
-              <td className="cv-num cv-expmetric" colSpan={cols.length}>{fmt(ref.metric)}</td></tr>
+              <td className="cv-num cv-expmetric" colSpan={cols.length} title={rollup}>
+                {ref.metric === null ? 'metric unavailable' : `${fmt(ref.metric)}${ref.feasible === false ? ' · excluded' : ''}`}</td></tr>
           })}</Fragment>
       })}
     </tbody></table></div>

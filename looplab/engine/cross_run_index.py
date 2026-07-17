@@ -119,6 +119,12 @@ def run_facts(state: RunState, *, kind: str = "", metric: str = "", universal: b
         nd = state.nodes[nid]
         idea = getattr(nd, "idea", None)
         # CODEX AGENT: cross-run facts are reusable evidence, so display-only authored claims fail closed.
+        # DESIGN NOTE (2026-07-17 critique): the authored-vs-classifier trust wall is HARD here — authored
+        # concepts fail closed, and the classifier only runs WITH a reflect client, so an OFFLINE run's
+        # concepts never reach cross-run facts ([] for the whole passport, #4). "Concepts as the single
+        # source of truth" then silently doesn't hold offline. Consider softening the wall: carry a
+        # provenance=authored|classifier field on the fact and let consumers weight it, rather than dropping
+        # the offline signal to []. Keeps the trust distinction without losing the evidence.
         concepts = classifier_verified_node_concepts(state, nid)
         st = getattr(nd, "status", "")
         attempts.append({

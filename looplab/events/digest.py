@@ -64,6 +64,11 @@ def param_distance(a: dict, b: dict) -> float:
     return math.sqrt(sum((a[k] - b[k]) ** 2 for k in keys)) / math.sqrt(len(keys))
 
 
+# DESIGN NOTE (2026-07-17 critique): "theme" is not actually gone — this helper is a LOSSY parallel view
+# (first-axis only, reads frozen idea.concepts not folded state.node_concepts, #7), so the /runs theme map
+# can disagree with /concepts in the same UI. That is an acceptable TRANSITION state, but it should be
+# FINISHED, not left: complete Phase 6a (coverage_signal/theme_rollup aggregate natively over the folded
+# per-node concept AXES, multi-membership, post-rename) so there is genuinely one source of truth.
 def node_theme(node) -> Optional[str]:
     """A node's single THEME label — the one grouping vocabulary shared by `theme_rollup`,
     `coverage.py::_node_theme` and the /runs API.

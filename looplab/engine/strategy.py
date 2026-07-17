@@ -507,6 +507,13 @@ class StrategyCadenceMixin:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": mode, "at_vocab": v_now,
                                                              "generation": node.attempt})
+                # DESIGN NOTE (2026-07-17 critique): every edge here is DERIVED — is_a from the id path,
+                # co_occurs from co-tagging — yet it is PERSISTED to the event log, which bought the offline
+                # emit gap (#5), the co_occurs ratchet-with-no-decay (#9) and the is_a flatten (#12) at once.
+                # Consider dropping the persisted substrate entirely and RECOMPUTING edges from folded
+                # node_concepts at /concepts read time (as the tree projection already does): that removes
+                # #5/#9/#12, the concept_edge fold+commutativity surface, and the "never cache the tree"
+                # worry, for no loss of durability (nothing consumes edges except a read-time projection).
                 # PART IV concept-edge substrate: record the typed graph so hierarchy becomes a swappable
                 # projection. is_a = each concept's immediate PATH parent (the full chain) plus any curated
                 # extra parent AXIS the id-prefix alone misses (asserted, conf 1.0); co_occurs = concept
@@ -545,20 +552,17 @@ class StrategyCadenceMixin:
                     for c in graph.concepts():
                         if c.id.endswith("/*"):
                             continue
-                        if "/" in c.id:
-                            _edge(c.id, "is_a", c.id.rsplit("/", 1)[0], "asserted", 1.0)
-                        root = c.id.split("/", 1)[0]
-                        # REVIEW(2026-07-16): `axes_of` FLATTENS every cross-link parent to its top-level
-                        # root (seg0), but `parents_of` holds the actual curated parent — a skeleton
-                        # declaring Concept("x/y", axes=("loss/contrastive",)) (a depth the ensure() API
-                        # explicitly supports) is recorded here as `x/y is_a loss`, silently losing the
-                        # intermediate level. The typed-edge substrate then represents LESS structure than
-                        # the ConceptGraph it mirrors, which defeats "hierarchy becomes a swappable
-                        # projection" — emit `parents_of(c.id)` (minus the id-prefix parent already
-                        # emitted above) instead of the rolled-up axes.
-                        for ax in graph.axes_of(c.id):
-                            if ax and ax != root:                 # a curated MULTI-parent axis paths miss
-                                _edge(c.id, "is_a", ax, "asserted", 1.0)
+                        prefix_parent = c.id.rsplit("/", 1)[0] if "/" in c.id else None
+                        if prefix_parent:
+                            _edge(c.id, "is_a", prefix_parent, "asserted", 1.0)
+                        # Emit the concept's ACTUAL immediate parents (parents_of), not the top-level roots
+                        # (axes_of): a curated cross-link like Concept("x/y", axes=("loss/contrastive",))
+                        # must record `x/y is_a loss/contrastive`, keeping the intermediate level, or the
+                        # typed-edge substrate would represent LESS structure than the graph it mirrors.
+                        # The id-prefix parent is already emitted above, so skip it here to avoid a dup.
+                        for parent in graph.parents_of(c.id):
+                            if parent and parent != prefix_parent:
+                                _edge(c.id, "is_a", parent, "asserted", 1.0)
                     pair: _Counter = _Counter()
                     for cids in tags.values():
                         for a, b in _comb(sorted(cids), 2):

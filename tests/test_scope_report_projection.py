@@ -120,10 +120,12 @@ def test_scope_projection_redacts_bounds_and_discards_model_numeric_authority(mo
 
 def test_successful_agent_content_crosses_the_sanitizer_once(monkeypatch):
     def fake_loop(_client, _tools, _messages, _emit_spec, **kwargs):
-        return kwargs["finalize"]({
+        # Simulate an instrumentation/transport wrapper returning an equal copy rather than the exact
+        # finalize object. Sanitization must be a single architectural boundary, never an identity trick.
+        return dict(kwargs["finalize"]({
             "headline": "bounded synthesis",
             "caveats": ["model-specific caveat"],
-        })
+        }))
 
     monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", fake_loop)
     content = scope_report.generate_scope_report(

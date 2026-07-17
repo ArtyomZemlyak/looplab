@@ -5,7 +5,7 @@ import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
 import { nodeChip } from './report.js'
-import { canonicalId } from './conceptId.js'
+import { canonicalId, nodeTheme } from './conceptId.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
@@ -166,8 +166,9 @@ function ExpNode({ data }) {
   // says baseline, everything else diffs vs parent. nodeChip owns those rules (merges handled below).
   const parents = (node.parent_ids || []).map(p => state.nodes[p]).filter(Boolean)
   const isMerge = parents.length > 1
+  const theme = nodeTheme(node)
   const chg = nodeChip(node, state.nodes)   // returns '' for a (resolved) merge — render guards isMerge
-  const mergeThemes = isMerge ? parents.map(p => p.idea?.theme || ('#' + p.id)) : null
+  const mergeThemes = isMerge ? parents.map(p => nodeTheme(p) || ('#' + p.id)) : null
   const dim = data.dim   // precomputed in the canvas memo: lineage-focus dimming OR the theme filter
   // View 2: the node's authored concepts (canonical, de-duped) — drawn as on-node tags when zoomed in
   // past the glyph LOD. node_concepts keys are strings in the wire state; node.id is numeric, so read
@@ -198,7 +199,7 @@ function ExpNode({ data }) {
     dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,
-    node.idea?.theme ? `theme ${node.idea.theme}` : null,
+    theme ? `direction ${theme}` : null,
     conceptTags.length ? `concepts ${conceptTags.join(', ')}` : null,
     node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
@@ -522,7 +523,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       // dim a node that's outside the selected lineage, off the active theme filter, or (View 2) not in
       // the concept-chip highlight set. highlightIds is null when no concept is selected -> no dimming.
       const dimmed = (focusSet ? !focusSet.has(n.id) : false)
-        || (themeFilter && n.idea?.theme !== themeFilter)
+        || (themeFilter && nodeTheme(n) !== themeFilter)
         || (highlightIds && !highlightIds.has(n.id))
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
         focusable: false,

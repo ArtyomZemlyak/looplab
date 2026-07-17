@@ -6,29 +6,58 @@
 // Two guarantees: canonicalId never reads an inherited property; conceptMap is a null-prototype map so
 // building/reading it with an agent key can never touch the chain.
 
-// Canonicalize a raw concept id through the consolidation rename map. The rename lookup is guarded with
-// hasOwnProperty so a raw id that names a prototype property is NOT silently replaced by an inherited
-// value; a falsy mapping falls back to the raw id (matching the old `rename[raw] || raw` intent).
+const MAX_ID_CHARS = 256
+const MAX_ID_DEPTH = 12
+const MAX_RENAME_HOPS = 16
+
+export function normalizeConceptId(raw) {
+  if (typeof raw !== 'string' || [...raw].length > MAX_ID_CHARS) return ''
+  const value = raw.trim().toLowerCase().replaceAll(' ', '-').replace(/^\/+|\/+$/g, '')
+  const parts = value.split('/')
+  return value && [...value].length <= MAX_ID_CHARS && parts.length <= MAX_ID_DEPTH
+    && parts.every(Boolean) && !/[\s\p{C}]/u.test(value) ? value : ''
+}
+
+// Canonicalize exactly like the server ConceptFrame boundary: normalize each hop, follow a bounded
+// raw-or-normalized rename chain, and fail closed on invalid ids/cycles. Every lookup is own-property
+// guarded, so an agent-authored prototype name can never resolve through Object.prototype.
 export function canonicalId(raw, rename = {}) {
-  // REVIEW(2026-07-16): this canonicalizer does NOT mirror the server's _normalize_concept_id
-  // (strip/lowercase/space->hyphen/trim slashes), so the client and server key DIFFERENT
-  // vocabularies for the same run. Server projections normalize (graph_from_node_concepts,
-  // project_hierarchy, concept_touch_counts all lowercase via _normalize_concept_id), but authored
-  // ids fold RAW into node_concepts and the client joins on that raw string: a Researcher-authored
-  // "Regularization/R-Drop" gets a lowercased tree/metrics row while experimentsByConcept keys the
-  // raw-cased id — the Concept view renders the row with metrics but ZERO experiments/badge. Mirror
-  // the server normalization here (trim, casefold, spaces->hyphens, strip slashes) before the rename
-  // lookup, or have the server ship pre-normalized node_concepts in /state so there is one vocabulary.
-  const key = String(raw == null ? '' : raw)
-  if (rename && Object.prototype.hasOwnProperty.call(rename, key)) {
-    const mapped = rename[key]
-    if (mapped) return String(mapped)
+  const map = rename && typeof rename === 'object' ? rename : {}
+  const seen = new Set()
+  let current = raw
+  for (let hop = 0; hop <= MAX_RENAME_HOPS; hop += 1) {
+    const canonical = normalizeConceptId(current)
+    if (!canonical || seen.has(canonical)) return ''
+    seen.add(canonical)
+    // Replay can retain an exact legacy raw key, while current producers store the
+    // normalized key. Mirror the server's lookup order so both surfaces join on one vocabulary.
+    const exact = Object.prototype.hasOwnProperty.call(map, current)
+    const normalized = current !== canonical && Object.prototype.hasOwnProperty.call(map, canonical)
+    if (!exact && !normalized) return canonical
+    const next = map[exact ? current : canonical]
+    if (next == null) return canonical
+    current = next
   }
-  return key
+  return ''
 }
 
 // A null-prototype object usable as a map with untrusted string keys (no inherited props to shadow or
 // trip over). Prefer this (or a real Map) over `{}` anywhere concept ids become keys.
 export function conceptMap() {
   return Object.create(null)
+}
+
+// Compatibility reader for the coarse direction used by the legacy "theme" UI. New Ideas no
+// longer author `theme`; the server falls back to the axis of the first authored concept
+// (`loss/contrastive` -> `loss`). Keep client grouping/filter/report on that same vocabulary.
+export function nodeTheme(node) {
+  const legacy = node?.idea?.theme
+  if (legacy) return String(legacy)
+  const concepts = node?.idea?.concepts
+  if (!Array.isArray(concepts)) return null
+  for (const concept of concepts) {
+    const axis = String(concept == null ? '' : concept).trim().split('/', 1)[0].trim()
+    if (axis) return axis
+  }
+  return null
 }

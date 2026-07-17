@@ -2257,6 +2257,44 @@ def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
     assert stored["content"]["coverage"]["unavailable_runs"] == 1
 
 
+def test_scope_report_rechecks_transient_omission_even_when_probe_is_unchanged(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+    from looplab.serve.scope_sources import ScopeSourceError
+
+    task_id = "transient-omission-repair"
+    _seed_scope_run(tmp_path, "temporarily-locked", task_id)
+    real_capture = reports.capture_scope_source
+    available = False
+    repaired_captures = 0
+
+    def transient_capture(root, run_id, **kwargs):
+        nonlocal repaired_captures
+        if run_id == "temporarily-locked" and not available:
+            # The filesystem metadata remains byte-for-byte identical: only the transient ability to
+            # open the source changes, as with a Windows sharing violation clearing.
+            raise ScopeSourceError("test-only transient sharing violation")
+        if run_id == "temporarily-locked":
+            repaired_captures += 1
+        return real_capture(root, run_id, **kwargs)
+
+    monkeypatch.setattr(reports, "capture_scope_source", transient_capture)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    generated = client.post(url + "/generate").json()
+    assert generated["ok"] is True
+    assert generated["omitted_runs"] == ["temporarily-locked"]
+    available = True
+
+    repaired = client.get(url).json()
+
+    assert repaired["stale"] is True
+    assert repaired_captures == 1, (
+        "an omission cache must not authorize freshness after same-probe access repair")
+
+
 def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
         tmp_path, monkeypatch):
     from looplab.serve.routers import reports
@@ -2472,6 +2510,42 @@ def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monke
     assert response.json()["code"] == "scope_report_inputs_changed"
     assert response.json()["stale"] is True
     assert captures == 1
+    assert provider_calls == 0
+    assert not list((tmp_path / "reports").glob("*.json"))
+
+
+def test_scope_report_rejects_task_snapshot_changed_after_job_reservation(
+        tmp_path, monkeypatch):
+    """The paid worker must own the task/config probe observed by its POST reservation."""
+    task_id = "reserved-snapshot-cas"
+    run_id = "reserved-run"
+    _seed_scope_run(tmp_path, run_id, task_id)
+    task_path = tmp_path / run_id / "task.snapshot.json"
+    task_path.write_text(
+        json.dumps({"id": task_id, "goal": "alpha"}), encoding="utf-8")
+    app = make_app(tmp_path)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    async def mutate_before_worker(_job_id, compute, **_kwargs):
+        # Same-length valid JSON keeps every event-size preflight unchanged; only the reserved
+        # task/config probe distinguishes the action the user actually submitted.
+        task_path.write_text(
+            json.dumps({"id": task_id, "goal": "bravo"}), encoding="utf-8")
+        return compute()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", mutate_before_worker)
+    response = TestClient(app).post(
+        f"/api/scope-report/task/{task_id}/generate")
+
+    assert response.status_code == 200
+    assert response.json()["code"] == "scope_report_inputs_changed"
+    assert response.json()["stale"] is True
     assert provider_calls == 0
     assert not list((tmp_path / "reports").glob("*.json"))
 

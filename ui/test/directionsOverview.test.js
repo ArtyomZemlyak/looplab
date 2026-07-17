@@ -8,12 +8,17 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
 import { directionProfit, optimizationLabel, toMarkdown } from '../src/report.js'
-import { GROUP_MODES } from '../src/grouping.js'
+import { GROUP_MODES, computeGroups } from '../src/grouping.js'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const node = (id, metric, direction, parentIds = []) => ({
   id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
   idea: { theme: direction, params: {} },
+})
+
+const conceptNode = (id, metric, concept, parentIds = []) => ({
+  id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
+  idea: { theme: null, concepts: [concept], params: {} },
 })
 
 test('direction controls keep first-discovery order while live performance changes', () => {
@@ -43,6 +48,19 @@ test('direction projection safely accepts agent-authored property-like names', (
   } })
   assert.deepEqual(rows.map(row => row.direction), ['__proto__', 'constructor'])
   assert.deepEqual(rows.map(row => row.count), [1, 1])
+})
+
+test('concept-authored nodes keep directions and theme grouping alive without legacy themes', () => {
+  const nodes = {
+    first: conceptNode(1, 10, 'loss/contrastive'),
+    second: conceptNode(2, 8, 'architecture/moe', [1]),
+    revisit: conceptNode(3, 7, 'loss/distillation', [2]),
+  }
+  assert.deepEqual(directionProfit({ direction: 'min', nodes }).map(row => row.direction),
+    ['loss', 'architecture'])
+  assert.deepEqual([...computeGroups(nodes, 'theme')], [
+    ['loss', [1, 3]], ['architecture', [2]],
+  ])
 })
 
 test('optimization and grouping labels use user-facing language without changing wire values', () => {

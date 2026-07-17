@@ -14,6 +14,7 @@ import { reviewInspectorTabs } from './runRouteState.js'
 import { DataTable, nextRovingIndex } from './accessibility.jsx'
 import CommentsThread from './CommentsThread.jsx'
 import { traceDetailState, tracePartial, traceUnavailable, unavailableTraceDetail } from './traceProjection.js'
+import { nodeTheme } from './conceptId.js'
 
 // One lifecycle "Trace" tab replaces the old Reasoning / LLM / Agent split: a node is worked on by
 // several parts in sequence (Researcher proposes, Developer implements/repairs, then it's evaluated
@@ -285,7 +286,7 @@ export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, o
   const countLabel = aggregate.filterActive
     ? `${aggregate.matchedCount}/${aggregate.totalCount}`
     : String(aggregate.totalCount)
-  const themes = [...new Set(members.map(n => n.idea?.theme).filter(Boolean))]
+  const themes = [...new Set(members.map(nodeTheme).filter(Boolean))]
   return <>
     <div className="tabs">
       <div className="tab active">Group · {groupKey}</div>
@@ -297,7 +298,7 @@ export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, o
         <KV k={aggregate.filterActive ? 'matching experiments' : 'experiments'} v={countLabel} />
         {aggregate.filterActive && <KV k="direction filter" v={themeFilter} />}
         <KV k="best" v={zeroMatch ? 'No matching result' : fmt(aggregate.best)} />
-        {themes.length > 0 && <KV k="themes" v={themes.join(', ')} />}
+        {themes.length > 0 && <KV k="directions" v={themes.join(', ')} />}
       </div>
       {zeroMatch
         ? <div className="insp-empty" role="status">No experiments in this group match direction {themeFilter}.</div>

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, SecretStr, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Single source of the LLM first-byte (response-headers) default — see core/llm.py.
@@ -515,6 +515,10 @@ class Settings(BaseSettings):
     # of the vague "broaden". ON by default in the product Settings (ce4a379), EngineOptions off: it
     # only enriches an already-mode-gated explore hint, never forces exploration, and no-ops for a task
     # with no curated concept skeleton. Audit + prompt-cue only; never touches selection. See search/concept_graph.py.
+    # DESIGN NOTE (2026-07-17 critique): now ON unconditionally, but a toy / non-ML task yields EMPTY concept
+    # tags while still paying the per-node LLM concept cost (~10 calls/node with the full Part IV/V bundle).
+    # Consider AUTO-QUIESCING: if the heuristic tagger returns empty for the first N nodes (no concept signal),
+    # skip the LLM concept work for the run — keeps it on for ML tasks, free on toy/degenerate ones.
     concept_pivot: bool = True
     # PART IV Phase 2b — D3 graded novelty into the LIVE novelty gate (§21.4/§21.13). When on and the
     # task has a curated concept skeleton, the novelty gate first grades a proposal over the concept
@@ -641,16 +645,22 @@ class Settings(BaseSettings):
     foresight_verify: bool = True
     # Verifier sample count for `foresight_verify` (the §12 repeated-sampling expectation on a no-logprob
     # backend). 3 tames the single-shot variance §21.12 measured; 1 = single-shot (cheaper, noisier).
-    # REVIEW(2026-07-16): this schema bound BREAKS previously-valid snapshots. The field used to be
-    # unbounded (foresight.py runtime-clamps with max(1, int(...)) and its own cap), so a run started
-    # with LOOPLAB_FORESIGHT_VERIFY_SAMPLES=10 recorded 10 in config.snapshot.json; now every path
-    # that reconstructs Settings(**snapshot) — `looplab resume`, finalization recovery, serve's
-    # replay relaunch — raises ValidationError and the run becomes un-resumable, contrary to the
-    # snapshots/env-compat rule ("snapshots and env compat depend on the names" — and on old VALUES
-    # staying loadable). Validation bounds on RESUME-critical fields must clamp (field_validator
-    # coercing into range), not reject; reserve hard ge/le for fields never persisted in snapshots.
-    foresight_verify_samples: int = Field(
-        default=3, ge=1, le=MAX_FORESIGHT_VERIFY_SAMPLES)
+    # RESUME-critical: this value is persisted in config.snapshot.json, so a hard `le` schema bound would
+    # make an old run started with a larger LOOPLAB_FORESIGHT_VERIFY_SAMPLES un-resumable (Settings(**snapshot)
+    # would raise on `looplab resume` / finalize-recovery / serve replay). CLAMP into [1, MAX] via a validator
+    # instead of rejecting — the runtime cap is preserved without breaking the snapshots/env-compat rule.
+    foresight_verify_samples: int = 3
+
+    @field_validator("foresight_verify_samples")
+    @classmethod
+    def _clamp_foresight_verify_samples(cls, v: int) -> int:
+        # Coerce a persisted/env value into [1, MAX] rather than reject (see field note above).
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            return 3
+        return max(1, min(v, MAX_FORESIGHT_VERIFY_SAMPLES))
+
     # T7 LLM response cache: serve an identical DETERMINISTIC (temperature 0) request from an
     # in-process content-addressed cache instead of re-hitting the model — cuts cost on
     # retry/panel/verify flows. NEVER caches sampling calls (temp>0: best-of-N / panel / novelty

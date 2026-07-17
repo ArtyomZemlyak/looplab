@@ -104,6 +104,29 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     assert.ok(hi instanceof Set)
     assert.deepEqual([...hi].sort((a, b) => a - b), [0])
 
+    // A live reset that removes the last concept must clear graph dimming before hiding the bar.
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: { node_concepts: {} }, onHighlight: v => calls.push(v),
+    })))
+    assert.equal(document.querySelector('.concept-bar'), null)
+    assert.equal(calls.at(-1), null,
+      'an empty live concept projection cannot strand the DAG fully dimmed without controls')
+
+    // If concepts return, the vanished projection must not restore an invisible stale selection.
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: STATE, onHighlight: v => calls.push(v),
+    })))
+    assert.equal(document.querySelector('.cb-pill'), null)
+    assert.equal(calls.at(-1), null)
+
+    const restoredArch = [...document.querySelectorAll('.cb-chip')].find(
+      c => c.querySelector('.cb-name')?.textContent === 'architecture')
+    await act(async () => {
+      restoredArch.querySelector('.cb-chip-main').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
     // a removable pill appears; clicking it clears the selection -> null highlight
     const pill = document.querySelector('.cb-pill')
     assert.ok(pill)

@@ -40,6 +40,10 @@ test('analytical charts expose named table and CSV alternatives', async () => {
   assert.match(charts, /const _RUN_DASHES = \[/)
   assert.match(charts, /strokeDasharray=\{_RUN_DASHES/)
   assert.match(charts, /className="metric-group-toggle" aria-expanded=\{open\}/)
+  assert.match(charts, /\{ key: 'theme', label: 'Direction' \}/,
+    'the legacy theme wire key must be presented as the coarse Direction dimension')
+  assert.match(charts, /groupDimensionLabel\(g\)/,
+    'the visible trajectory grouping control must not print the raw theme wire key')
 })
 
 test('shared table/chart contract is responsive and touch targets remain explicit', async () => {

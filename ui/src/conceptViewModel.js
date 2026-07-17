@@ -172,7 +172,5 @@ export function visibleConceptRows(tree, expanded = new Set()) {
 
 // The short leaf label for a concept id (last path segment) -- the tree already conveys the ancestry.
 export function conceptLeaf(id) {
-  const value = String(id || '')
-  const separator = value.lastIndexOf('/')
-  return separator < 0 ? value : value.slice(separator + 1)
+  return String(id || '').split('/').pop()
 }
