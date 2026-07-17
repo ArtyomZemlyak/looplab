@@ -75,6 +75,10 @@ CONTROL_EVENTS = {
 COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,
+    # PART V (D): a base-concept edit is command-only too — force it through the generation-fenced command
+    # endpoint (not the legacy /control route) so a write formed against an old generation can't land on a
+    # post-reset replacement run, exactly like its per-node sibling EV_CONCEPT_TAG_EDITED.
+    EV_RUN_CONCEPTS,
 })
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

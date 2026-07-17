@@ -26,7 +26,7 @@ _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
-    "cross_run_concept_map",
+    "cross_run_concept_map", "similar_runs",
 })
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 _MAX_TOOL_RESULT_CHARS = 16_000
@@ -51,8 +51,10 @@ class CrossRunTools:
         self.dir = Path(memory_dir) if memory_dir else None
         self.role = str(role or "researcher")
         self._task_id = ""
+        self._run_id = ""
         self._direction = ""
         self._scope_terms: set[str] = set()
+        self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
         self._bound = False
 
     def bind_state(self, state, parent=None) -> None:
@@ -66,9 +68,18 @@ class CrossRunTools:
             return
         self._bound = True
         self._task_id = str(getattr(state, "task_id", "") or getattr(state, "id", "") or "")
+        self._run_id = str(getattr(state, "run_id", "") or "")
         direction = str(getattr(state, "direction", "") or "")
         self._direction = direction if direction in ("min", "max") else ""
         self._scope_terms = _toks(getattr(state, "goal", "") or "")
+        # E2: the current run's live concept set (union of folded node_concepts) for similar_runs overlap.
+        concepts: set[str] = set()
+        for tags in (getattr(state, "node_concepts", None) or {}).values():
+            for c in (tags or []):
+                s = str(c)
+                if s:
+                    concepts.add(s)
+        self._concepts = concepts
         # Agentic facets are intentionally not loaded into this visibility predicate. They are
         # untrusted advisory metadata reserved for a future post-scope ranking experiment.
 
@@ -141,6 +152,12 @@ class CrossRunTools:
                  "intent": {"type": "string", "enum": ["worked", "failed", "contested", "explore"],
                             "description": "Why you're searching — biases eligibility + contradiction quota."}},
                 ["query"]),
+            fn_spec("similar_runs",
+                "The prior runs MOST similar to THIS one by shared concepts (Jaccard overlap of concept "
+                "sets), ranked. Use it to find which past experiments explored the same directions before "
+                "you propose — then read_run / cross_run_concept_map to dig into a specific one. Advisory.",
+                {"limit": {"type": "integer", "description": "How many similar runs to return (default 10)."}},
+                []),
         ]
 
     def _load(self, fname: str) -> list[dict]:
@@ -374,6 +391,39 @@ class CrossRunTools:
             rc = r.get("receipt") or {}
             lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
                          f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))}]")
+            return "\n".join(lines)
+
+        if name == "similar_runs":
+            try:
+                limit = int(args.get("limit") or 10)
+            except (TypeError, ValueError):
+                limit = 10
+            limit = max(1, min(limit, 50))
+            if not self._concepts:
+                return "(this run has no concepts yet — similar_runs ranks by shared concept overlap)"
+            from looplab.engine.memory import ConceptCapsuleStore
+            p = self.dir / "concept_capsules.jsonl"
+            caps = ConceptCapsuleStore(p).all() if p.exists() else []      # portfolio-wide (not task-scoped)
+            mine = self._concepts
+            ranked = []
+            for cap in caps:
+                rid = str(cap.get("run_id") or "")
+                if not rid or (self._run_id and rid == self._run_id):     # skip self
+                    continue
+                theirs = {str(c) for c in (cap.get("concepts") or []) if str(c)}
+                shared = mine & theirs
+                if not shared:
+                    continue
+                jac = len(shared) / len(mine | theirs)
+                ranked.append((jac, len(shared), rid, sorted(shared)))
+            if not ranked:
+                return "(no prior run shares a concept with this one)"
+            ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
+            lines = [f"{min(len(ranked), limit)} prior run(s) most similar by shared concepts (advisory):"]
+            for jac, n, rid, shared in ranked[:limit]:
+                preview = ", ".join(shared[:8]) + ("…" if len(shared) > 8 else "")
+                lines.append(f"  {rid}: {n} shared ({jac:.0%}) — {preview}")
+            lines.append("Dig into one with cross_run_concept_map / cross_run_search.")
             return "\n".join(lines)
 
         return "(unknown cross-run tool)"

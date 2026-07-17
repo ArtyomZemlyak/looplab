@@ -42,7 +42,7 @@ def test_specs_are_read_only():
     t = CrossRunTools("/tmp/whatever")
     names = {s["function"]["name"] for s in t.specs()}
     assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
-                     "cross_run_concept_map"}
+                     "cross_run_concept_map", "similar_runs"}
     # no create/update/delete/ratify tool is exposed — advisory only (§22.4)
     assert not any(re for re in names if any(w in re for w in ("write", "edit", "add", "ratify", "delete")))
 
@@ -506,3 +506,32 @@ def test_genesis_gets_cross_run_tool_when_enabled(tmp_path, monkeypatch):
 def test_genesis_omits_cross_run_tool_when_off(tmp_path, monkeypatch):
     flat = _genesis_tools(tmp_path, on=False, monkeypatch=monkeypatch)
     assert not any(isinstance(p, CrossRunTools) for p in flat)
+
+
+def test_similar_runs_ranks_by_shared_concepts_and_excludes_self(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, capsules=[
+        _cap("rA", ["loss/contrastive", "regularization/r-drop", "data/aug"], {}),  # 2 shared / 3 union
+        _cap("rB", ["loss/contrastive", "loss/triplet"], {}),                        # 1 shared / 3 union
+        _cap("rC", ["architecture/moe"], {}),                                        # 0 shared -> excluded
+        _cap("me", ["loss/contrastive"], {}),                                        # self -> excluded
+    ])
+    t = CrossRunTools(tmp_path)
+    t.bind_state(SimpleNamespace(run_id="me", task_id="t", goal="g", direction="max",
+                                 node_concepts={0: ["loss/contrastive", "regularization/r-drop"]}))
+    out = t.execute("similar_runs", {})
+    assert "rA" in out and "rB" in out
+    assert "rC" not in out and "\n  me:" not in out                # no overlap / self excluded
+    assert out.index("rA") < out.index("rB")                       # higher Jaccard first
+
+
+def test_similar_runs_handles_no_concepts_and_no_overlap(tmp_path):
+    from types import SimpleNamespace
+    _seed(tmp_path, capsules=[_cap("rA", ["loss/x"], {})])
+    empty = CrossRunTools(tmp_path)
+    empty.bind_state(SimpleNamespace(run_id="cur", task_id="t", goal="g", direction="max", node_concepts={}))
+    assert "no concepts yet" in empty.execute("similar_runs", {})
+    disjoint = CrossRunTools(tmp_path)
+    disjoint.bind_state(SimpleNamespace(run_id="cur", task_id="t", goal="g", direction="max",
+                                        node_concepts={0: ["arch/other"]}))
+    assert "no prior run shares" in disjoint.execute("similar_runs", {})

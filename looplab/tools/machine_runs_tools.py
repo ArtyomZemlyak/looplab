@@ -1318,7 +1318,13 @@ class RunControlTools:
         if not isinstance(raw, list):
             return ("(set_run_concepts needs a `concepts` list of axis/slug ids, "
                     'e.g. ["model/transformer", "loss/contrastive"])')
-        concepts = [str(c) for c in raw]
+        concepts = [str(c) for c in raw if str(c)]
+        if not concepts:
+            # An EMPTY base is indistinguishable from "never seeded", so while concept_run_base is on the
+            # engine cadence would re-seed it from the first node and silently undo the clear. Replace the
+            # base with a real set instead; to disable run-base authoring entirely, turn off concept_run_base.
+            return ("(set_run_concepts needs at least one concept — an empty base is re-seeded by the engine. "
+                    "Pass the base set you want, or disable concept_run_base to stop run-base authoring.)")
         blocked, formed_generation = self._gate(
             "set_run_concepts", rid, rd, f"set the base concepts of {rid}",
             scope={"run_id": rid, "concepts": concepts})

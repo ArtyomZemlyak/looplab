@@ -904,3 +904,12 @@ def test_set_run_concepts_denied_in_plan_mode(tmp_path):
     t = RunControlTools(tmp_path, mode="plan")
     out = t.execute("set_run_concepts", {"run_id": "r1", "concepts": ["a/b"]})
     assert "plan mode" in out or "disabled" in out
+
+
+def test_set_run_concepts_rejects_empty(tmp_path):
+    # D review B: an empty base is re-seeded by the engine, so reject the clear-to-empty.
+    _run(tmp_path / "r1")
+    commands = _RecordingCommands(tmp_path)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto", command_service=commands)
+    out = t.execute("set_run_concepts", {"run_id": "r1", "concepts": []})
+    assert "at least one concept" in out and not commands.calls
