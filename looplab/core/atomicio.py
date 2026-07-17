@@ -10,9 +10,11 @@ truncate each other — so we fsync best-effort and give every write its OWN tem
 """
 from __future__ import annotations
 
+import math
 import os
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 # fsync timeout (seconds) before we give up on it for the rest of the process. Env-overridable.
@@ -20,13 +22,21 @@ from pathlib import Path
 # (LOOPLAB_FSYNC_TIMEOUT=abc) must degrade to the default, not crash `import looplab` at load.
 def _fsync_timeout() -> float:
     try:
-        return float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)
+        value = float(os.environ.get("LOOPLAB_FSYNC_TIMEOUT", "5") or 5)
     except (TypeError, ValueError):
         return 5.0
+    return value if math.isfinite(value) and value > 0 else 5.0
 
 
 _FSYNC_TIMEOUT = _fsync_timeout()
 _FSYNC_DISABLED = False   # flips permanently once fsync is seen to BLOCK — a stalled FUSE mount
+
+# # CODEX AGENT: strict syncs are process-wide single-flight. If the kernel blocks one fsync past
+# the deadline, retries fail closed without allocating another thread or duplicated descriptor.
+# The worker clears these tokens only after the original syscall really returns.
+_STRICT_FSYNC_CONDITION = threading.Condition()
+_STRICT_FSYNC_ACTIVE_TOKEN: object | None = None
+_STRICT_FSYNC_STALLED_TOKEN: object | None = None
 
 
 def strict_fsync(fileno: int) -> None:
@@ -36,35 +46,98 @@ def strict_fsync(fileno: int) -> None:
     call after an unconfirmed claim could make a retry bill twice. Duplicate the descriptor so a
     timed-out sync thread can finish safely after the caller closes its own file handle.
     """
-    # REVIEW(2026-07-16): unlike best_effort_fsync's _FSYNC_DISABLED latch, this has no circuit
-    # breaker, and each TIMEOUT leaks one dup'd fd plus one daemon thread until the wedged os.fsync
-    # returns (the worker's finally is the only close). On the exact scenario the module header
-    # documents — a stalled FUSE/S3 memory_dir — every retried strict write permanently consumes an
-    # fd; enough retries (many runs finishing, a steward loop) accumulate to EMFILE and unrelated
-    # subsystems (event-log appends, sockets) start failing process-wide. Needs a latch like the
-    # best-effort path (stop dup'ing after N consecutive timeouts) or a bounded worker pool.
-    duplicate = os.dup(fileno)
-    done = threading.Event()
-    failure: list[BaseException] = []
+    global _STRICT_FSYNC_ACTIVE_TOKEN, _STRICT_FSYNC_STALLED_TOKEN
 
-    def _sync() -> None:
+    deadline = time.monotonic() + max(0.0, _FSYNC_TIMEOUT)
+    token = object()
+    with _STRICT_FSYNC_CONDITION:
+        while _STRICT_FSYNC_ACTIVE_TOKEN is not None:
+            if _STRICT_FSYNC_STALLED_TOKEN is _STRICT_FSYNC_ACTIVE_TOKEN:
+                raise TimeoutError("a previous durable fsync is still in progress")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("durable fsync wait timed out")
+            _STRICT_FSYNC_CONDITION.wait(remaining)
+        _STRICT_FSYNC_ACTIVE_TOKEN = token
+
+    duplicate: int | None = None
+    preserve_active = False
+    try:
+        duplicate = os.dup(fileno)
+        worker_descriptor = duplicate
+        done = threading.Event()
+        failure: list[BaseException] = []
+
+        def _sync(descriptor: int = worker_descriptor) -> None:
+            global _STRICT_FSYNC_ACTIVE_TOKEN, _STRICT_FSYNC_STALLED_TOKEN
+            try:
+                os.fsync(descriptor)
+            except BaseException as exc:  # noqa: BLE001 - propagate exact durability failure
+                failure.append(exc)
+            finally:
+                try:
+                    os.close(descriptor)
+                except BaseException as exc:  # noqa: BLE001 - close failure is not a receipt
+                    failure.append(exc)
+                finally:
+                    done.set()
+                    with _STRICT_FSYNC_CONDITION:
+                        if _STRICT_FSYNC_ACTIVE_TOKEN is token:
+                            _STRICT_FSYNC_ACTIVE_TOKEN = None
+                        if _STRICT_FSYNC_STALLED_TOKEN is token:
+                            _STRICT_FSYNC_STALLED_TOKEN = None
+                        _STRICT_FSYNC_CONDITION.notify_all()
+
+        worker = threading.Thread(target=_sync, daemon=True)
         try:
-            os.fsync(duplicate)
-        except BaseException as exc:  # noqa: BLE001 - propagate the exact durability failure
-            failure.append(exc)
-        finally:
+            worker.start()
+        except RuntimeError:
+            owned_descriptor = duplicate
+            duplicate = None
+            os.close(owned_descriptor)
+            raise
+        except BaseException:
+            # Thread.start() can be interrupted after the native worker has begun. Transfer the
+            # descriptor irrevocably to that worker and quarantine strict syncs until it exits.
+            duplicate = None
+            preserve_active = True
+            with _STRICT_FSYNC_CONDITION:
+                if _STRICT_FSYNC_ACTIVE_TOKEN is token:
+                    _STRICT_FSYNC_STALLED_TOKEN = token
+                    _STRICT_FSYNC_CONDITION.notify_all()
+            raise
+    except BaseException:
+        if duplicate is not None:
             try:
                 os.close(duplicate)
-            finally:
-                done.set()
-
-    worker = threading.Thread(target=_sync, daemon=True)
-    try:
-        worker.start()
-    except BaseException:
-        os.close(duplicate)
+            except OSError:
+                pass
+        if not preserve_active:
+            with _STRICT_FSYNC_CONDITION:
+                if _STRICT_FSYNC_ACTIVE_TOKEN is token:
+                    _STRICT_FSYNC_ACTIVE_TOKEN = None
+                if _STRICT_FSYNC_STALLED_TOKEN is token:
+                    _STRICT_FSYNC_STALLED_TOKEN = None
+                _STRICT_FSYNC_CONDITION.notify_all()
         raise
-    if not done.wait(_FSYNC_TIMEOUT):
+
+    try:
+        completed = done.wait(max(0.0, deadline - time.monotonic()))
+    except BaseException:
+        with _STRICT_FSYNC_CONDITION:
+            if _STRICT_FSYNC_ACTIVE_TOKEN is token:
+                _STRICT_FSYNC_STALLED_TOKEN = token
+                _STRICT_FSYNC_CONDITION.notify_all()
+        raise
+    if not completed:
+        with _STRICT_FSYNC_CONDITION:
+            if _STRICT_FSYNC_ACTIVE_TOKEN is token:
+                _STRICT_FSYNC_STALLED_TOKEN = token
+                _STRICT_FSYNC_CONDITION.notify_all()
+                raise TimeoutError("durable fsync timed out")
+        # The worker completed exactly at the deadline and cleared the active token.
+        completed = done.is_set()
+    if not completed:
         raise TimeoutError("durable fsync timed out")
     if failure:
         raise OSError("durable fsync failed") from failure[0]

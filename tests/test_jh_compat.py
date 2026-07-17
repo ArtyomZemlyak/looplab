@@ -89,6 +89,9 @@ def test_fsync_timeout_env_parse_tolerates_garbage(monkeypatch):
     assert aio._fsync_timeout() == 5.0              # garbage -> default, no ValueError at import
     monkeypatch.setenv("LOOPLAB_FSYNC_TIMEOUT", "12.5")
     assert aio._fsync_timeout() == 12.5             # valid -> honored
+    for invalid in ("0", "-1", "nan", "inf"):
+        monkeypatch.setenv("LOOPLAB_FSYNC_TIMEOUT", invalid)
+        assert aio._fsync_timeout() == 5.0
 
 
 def test_atomic_write_uses_unique_temp_and_leaves_no_leftover(tmp_path):

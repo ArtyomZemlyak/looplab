@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 
 import pytest
 
@@ -9,6 +11,148 @@ import looplab.core.atomicio as atomicio
 
 def _temp_files(directory) -> list[str]:
     return sorted(path.name for path in directory.iterdir() if path.name.endswith(".tmp"))
+
+
+def test_strict_fsync_timeout_single_flights_and_recovers(tmp_path, monkeypatch):
+    target = tmp_path / "claim"
+    target.write_bytes(b"claim")
+    entered = threading.Event()
+    release = threading.Event()
+    sync_calls = 0
+    duplicate_fds: list[int] = []
+    real_dup = os.dup
+
+    def record_dup(fileno: int) -> int:
+        duplicate = real_dup(fileno)
+        duplicate_fds.append(duplicate)
+        return duplicate
+
+    def blocked_sync(_fileno: int) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        entered.set()
+        assert release.wait(timeout=5)
+
+    monkeypatch.setattr(atomicio, "_FSYNC_TIMEOUT", 0.01)
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_ACTIVE_TOKEN", None)
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_STALLED_TOKEN", None)
+    monkeypatch.setattr(atomicio.os, "dup", record_dup)
+    monkeypatch.setattr(atomicio.os, "fsync", blocked_sync)
+
+    with target.open("rb") as handle:
+        with pytest.raises(TimeoutError, match="durable fsync timed out"):
+            atomicio.strict_fsync(handle.fileno())
+        assert entered.is_set()
+
+        # # CODEX AGENT: one wedged filesystem syscall is the complete resource bound. A retry
+        # storm fails closed without another daemon or descriptor until that syscall exits.
+        for _ in range(100):
+            with pytest.raises(TimeoutError, match="previous durable fsync"):
+                atomicio.strict_fsync(handle.fileno())
+        assert sync_calls == 1
+        assert len(duplicate_fds) == 1
+
+        release.set()
+        deadline = time.monotonic() + 2
+        while atomicio._STRICT_FSYNC_STALLED_TOKEN is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert atomicio._STRICT_FSYNC_STALLED_TOKEN is None
+        with pytest.raises(OSError):
+            os.fstat(duplicate_fds[0])
+
+        monkeypatch.setattr(atomicio.os, "fsync", lambda _fileno: None)
+        atomicio.strict_fsync(handle.fileno())
+
+
+def test_strict_fsync_interrupted_start_preserves_worker_ownership(tmp_path, monkeypatch):
+    target = tmp_path / "claim"
+    target.write_bytes(b"claim")
+    entered = threading.Event()
+    release = threading.Event()
+    duplicate_fds: list[int] = []
+    sync_calls = 0
+    real_dup = os.dup
+    real_start = threading.Thread.start
+
+    def record_dup(fileno: int) -> int:
+        duplicate = real_dup(fileno)
+        duplicate_fds.append(duplicate)
+        return duplicate
+
+    def blocked_sync(_fileno: int) -> None:
+        nonlocal sync_calls
+        sync_calls += 1
+        entered.set()
+        assert release.wait(timeout=5)
+
+    def start_then_interrupt(worker: threading.Thread) -> None:
+        real_start(worker)
+        assert entered.wait(timeout=2)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(atomicio, "_FSYNC_TIMEOUT", 1.0)
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_ACTIVE_TOKEN", None)
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_STALLED_TOKEN", None)
+    monkeypatch.setattr(atomicio.os, "dup", record_dup)
+    monkeypatch.setattr(atomicio.os, "fsync", blocked_sync)
+    monkeypatch.setattr(atomicio.threading.Thread, "start", start_then_interrupt)
+
+    with target.open("rb") as handle:
+        with pytest.raises(KeyboardInterrupt):
+            atomicio.strict_fsync(handle.fileno())
+        for _ in range(100):
+            with pytest.raises(TimeoutError, match="previous durable fsync"):
+                atomicio.strict_fsync(handle.fileno())
+        assert sync_calls == 1
+        assert len(duplicate_fds) == 1
+
+        release.set()
+        deadline = time.monotonic() + 2
+        while (atomicio._STRICT_FSYNC_ACTIVE_TOKEN is not None
+               or atomicio._STRICT_FSYNC_STALLED_TOKEN is not None) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert atomicio._STRICT_FSYNC_ACTIVE_TOKEN is None
+        assert atomicio._STRICT_FSYNC_STALLED_TOKEN is None
+        with pytest.raises(OSError):
+            os.fstat(duplicate_fds[0])
+
+        monkeypatch.setattr(atomicio.threading.Thread, "start", real_start)
+        monkeypatch.setattr(atomicio.os, "fsync", lambda _fileno: None)
+        atomicio.strict_fsync(handle.fileno())
+
+
+def test_strict_fsync_thread_creation_failure_releases_reservation(tmp_path, monkeypatch):
+    target = tmp_path / "claim"
+    target.write_bytes(b"claim")
+    duplicate_fds: list[int] = []
+    real_dup = os.dup
+    real_start = threading.Thread.start
+
+    def record_dup(fileno: int) -> int:
+        duplicate = real_dup(fileno)
+        duplicate_fds.append(duplicate)
+        return duplicate
+
+    def fail_before_start(_worker: threading.Thread) -> None:
+        raise RuntimeError("cannot start thread")
+
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_ACTIVE_TOKEN", None)
+    monkeypatch.setattr(atomicio, "_STRICT_FSYNC_STALLED_TOKEN", None)
+    monkeypatch.setattr(atomicio.os, "dup", record_dup)
+    monkeypatch.setattr(atomicio.threading.Thread, "start", fail_before_start)
+
+    with target.open("rb") as handle:
+        with pytest.raises(RuntimeError, match="cannot start thread"):
+            atomicio.strict_fsync(handle.fileno())
+        assert len(duplicate_fds) == 1
+        assert atomicio._STRICT_FSYNC_ACTIVE_TOKEN is None
+        assert atomicio._STRICT_FSYNC_STALLED_TOKEN is None
+        with pytest.raises(OSError):
+            os.fstat(duplicate_fds[0])
+
+        monkeypatch.setattr(atomicio.threading.Thread, "start", real_start)
+        monkeypatch.setattr(atomicio.os, "fsync", lambda _fileno: None)
+        atomicio.strict_fsync(handle.fileno())
 
 
 def test_strict_atomic_write_syncs_contents_then_publishes_directory(tmp_path, monkeypatch):
