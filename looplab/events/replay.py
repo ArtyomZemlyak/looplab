@@ -10,7 +10,8 @@ from typing import Iterable
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
-                     NODE_CONCEPT_PROVENANCE_CLASSIFIER, Event, Hypothesis, Idea, Node, NodeStatus,
+                     NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
+                     Event, Hypothesis, Idea, Node, NodeStatus,
                      RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
 from looplab.events.types import (
@@ -25,7 +26,8 @@ from looplab.events.types import (
     EV_FORK_DONE, EV_HINT, EV_HOLDOUT_EVALUATED, EV_HOST_GRADING, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_MERGED,
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
-    EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_EDGE, EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
+    EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_EDGE, EV_CONCEPT_TAG_EDITED,
+    EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
@@ -1312,6 +1314,12 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Unknown nodes and explicit stale/invalid generations remain fail-closed.
     if node is None:
         return
+    # Phase 2b: an OPERATOR edit is authoritative and must not be clobbered by the classifier cadence.
+    # Checked BEFORE the generation gate so the classifier yields regardless of arrival order (invariant 5):
+    # {classifier, operator} folds to the operator's tags either way. A node RESET clears the provenance
+    # (so the classifier re-tags the fresh node), which is the intended way to drop an operator override.
+    if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR:
+        return
     if generation is _MISSING:
         # CODEX AGENT: lifecycle generation != concept-subject generation. Preserve legacy replay
         # after same-Idea retries, but never guess once this node crossed an observed Idea boundary.
@@ -1329,6 +1337,36 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts_at_vocab[nid] = av
     else:
         st.node_concepts_at_vocab.pop(nid, None)
+
+
+def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """PART V Phase 2b: an OPERATOR replaces ONE node's concept tags. Authoritative for the run's read
+    models — stamped OPERATOR provenance so `_on_node_concepts` (the classifier cadence) yields to it
+    regardless of arrival order (invariant 5). The command layer generation-fences the intent (matches
+    node.attempt) before it is appended, so the fold trusts a recorded edit and only re-checks the node
+    exists. Last operator edit in log order wins (like the classifier cadence). A `node_generation`, when
+    present, is honored the same way as the classifier's generation gate so a stale edit from a since-reset
+    node is dropped. Concepts are a bounded list of strings; NOT independent evidence (provenance sidecar)."""
+    nid = _coerce_node_id(d, "node_id")
+    if nid is None:
+        return
+    node = st.nodes.get(nid)
+    if node is None:
+        return
+    # A recorded operator edit carries the node generation it was formed against (`node_generation`, the
+    # same field the comment lifecycle uses). If present it must match the live attempt — a reset (which
+    # clears node_concepts/provenance) invalidates a pre-reset edit; absent (older intent) stays permissive.
+    raw_generation = d.get("node_generation")
+    if raw_generation is not None:
+        generation = _coerce_node_id({"node_id": raw_generation})
+        if generation is None or generation != node.attempt:
+            return
+    concepts = d.get("concepts")
+    st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    st.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_OPERATOR
+    # Operator tags are not vocabulary-versioned; clear any classifier staleness receipt for this node.
+    st.node_concepts_at_vocab.pop(nid, None)
+
 
 def _on_hypothesis_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for one hypothesis, recorded once so taxonomy
@@ -2139,6 +2177,7 @@ _HANDLERS = {
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_CONCEPT_COVERAGE_SNAPSHOT: _on_concept_coverage_snapshot,
     EV_NODE_CONCEPTS: _on_node_concepts,
+    EV_CONCEPT_TAG_EDITED: _on_concept_tag_edited,
     EV_HYPOTHESIS_CONCEPTS: _on_hypothesis_concepts,
     EV_CONCEPT_CONSOLIDATION: _on_concept_consolidation,
     EV_CONCEPT_EDGE: _on_concept_edge,

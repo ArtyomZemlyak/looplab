@@ -201,6 +201,9 @@ EV_ANNOTATION = "annotation"
 EV_COMMENT_CREATED = "comment_created"
 EV_COMMENT_EDITED = "comment_edited"
 EV_COMMENT_RESOLUTION_CHANGED = "comment_resolution_changed"
+# PART V Phase 2b: an operator manually re-tags ONE node's concepts (command-only, generation-fenced like
+# comments). Folded to node_concepts + operator provenance; the classifier re-tag cadence must not clobber it.
+EV_CONCEPT_TAG_EDITED = "concept_tag_edited"
 EV_PROMOTE = "promote"
 EV_APPROVAL_GRANTED = "approval_granted"
 EV_SPEC_APPROVED = "spec_approved"

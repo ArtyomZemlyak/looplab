@@ -506,7 +506,11 @@ Every experiment carries a **set** of research concepts — multi-label `axis/sl
 `loss/contrastive/dcl` — instead of a single free-text grouping slug. The Researcher **authors** a
 node's concepts on the `Idea` (`concepts: list[str]`); they fold into `RunState.node_concepts` at
 `node_created` (deterministic, offline — no tagging cadence required), and the strategist cadence may
-later consolidate/enrich them. Membership is not a metric, independent evidence or a direct champion score.
+later consolidate/enrich them. An **operator** can also re-tag one node's concepts directly via the durable
+command `concept_tag_edited` (generation-fenced like a comment): it folds with `operator-edited` provenance,
+which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5) — a node reset
+clears the override. Operator edits are authoritative for the run's read models but are deliberately **not**
+promoted to independent classifier evidence. Membership is not a metric, independent evidence or a direct champion score.
 When enabled, however, `concept_pivot` coverage and `graded_novelty` deliberately use the recorded concept
 claims to steer exploration/proposal admission; disabling those controls restores the ordinary non-concept
 search path. UI rollups remain descriptive and do not independently verify taxonomy semantics.

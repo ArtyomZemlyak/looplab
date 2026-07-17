@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
@@ -65,12 +65,14 @@ CONTROL_EVENTS = {
     EV_HYPOTHESIS_ADDED,    # P1: a human registers a hypothesis on the board (open question to test)
     EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
+    EV_CONCEPT_TAG_EDITED,  # PART V Phase 2b: an operator re-tags one node's concepts (command-only)
 }
 
 # Versioned collaboration is command-only: unlike the compatibility /control route, the durable
 # command protocol requires an idempotency key plus the exact run generation the operator observed.
 COLLABORATION_EVENTS = frozenset({
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
+    EV_CONCEPT_TAG_EDITED,
 })
 
 POLL_SECONDS = 0.4   # SSE tail cadence — fast enough to feel live, light on the disk

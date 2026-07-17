@@ -43,7 +43,7 @@ from looplab.events.eventstore import (
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_ANNOTATION, EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_DEEP_RESEARCH,
-    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
+    EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
     EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
@@ -98,6 +98,7 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_COMMENT_EDITED: _spec(EV_COMMENT_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_COMMENT_RESOLUTION_CHANGED: _spec(
         EV_COMMENT_RESOLUTION_CHANGED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_CONCEPT_TAG_EDITED: _spec(EV_CONCEPT_TAG_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
@@ -133,6 +134,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
         {"comment_id", "node_id", "node_generation", "expected_version", "text"}),
     EV_COMMENT_RESOLUTION_CHANGED: frozenset(
         {"comment_id", "node_id", "node_generation", "expected_version", "resolved"}),
+    EV_CONCEPT_TAG_EDITED: frozenset({"node_id", "node_generation", "concepts"}),
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
@@ -617,6 +619,38 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                 })
             normalized["resolved"] = resolved
         data = normalized
+
+    if event_type == EV_CONCEPT_TAG_EDITED:
+        # PART V Phase 2b: an operator replaces one node's concept tags. Generation-fenced like a comment
+        # (the tags subject is the node), and each id is canonicalized/validated against the SAME
+        # concept_id() contract the /concepts frame ships, so the fold + UI key the same vocabulary.
+        from looplab.serve.concept_frame import MAX_CONCEPTS_PER_NODE, concept_id
+        current = _state()
+        node_id = _node("node_id")
+        node_generation = _strict_integer(data.get("node_generation"), "node_generation")
+        if node_generation < 0:
+            raise HTTPException(400, "node_generation must be non-negative")
+        node = current.nodes[node_id]
+        if node.attempt != node_generation:
+            raise HTTPException(409, {
+                "code": "node_generation_changed",
+                "message": (f"experiment #{node_id} is generation {node.attempt}, not "
+                            f"{node_generation}"),
+                "remediation": "refresh the run before re-tagging this experiment",
+            })
+        raw_concepts = data.get("concepts")
+        if not isinstance(raw_concepts, list):
+            raise HTTPException(400, "concepts must be a list of axis/slug ids")
+        if len(raw_concepts) > MAX_CONCEPTS_PER_NODE:
+            raise HTTPException(400, f"concepts exceeds {MAX_CONCEPTS_PER_NODE} ids")
+        canonical: list[str] = []
+        for raw in raw_concepts:
+            cid = concept_id(raw) if isinstance(raw, str) else None
+            if cid is None:
+                raise HTTPException(400, f"invalid concept id: {raw!r}")
+            if cid not in canonical:                     # dedup, preserve order
+                canonical.append(cid)
+        data = {"node_id": node_id, "node_generation": node_generation, "concepts": canonical}
 
     if event_type == EV_NODE_RESET:
         raw_stage = data.get("from_stage", "eval")
@@ -2262,6 +2296,20 @@ class RunCommandService:
                     (f"experiment #{node_id} generation {generation} already has "
                      f"{COMMENT_MAX_PER_NODE_GENERATION} comments"),
                     "resolve or consolidate the existing discussion")
+            return None
+        if event_type == EV_CONCEPT_TAG_EDITED:
+            # Phase 2b: a concept re-tag targets a NODE (not a comment_id). Re-verify the exact subject
+            # immediately before the strict-lock append, in case the node was reset since intake.
+            node_id = data.get("node_id")
+            generation = data.get("node_generation")
+            node = state.nodes.get(node_id)
+            if node is None or node.attempt != generation:
+                error = _error(
+                    "node_generation_changed",
+                    f"the re-tag target is no longer experiment #{node_id} generation {generation}",
+                    "refresh the run and re-tag against the current lifecycle")
+                error["current_generation"] = getattr(node, "attempt", None)
+                return error
             return None
         comment_id = data.get("comment_id")
         comment = state.comments.get(comment_id)

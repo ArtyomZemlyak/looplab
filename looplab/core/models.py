@@ -43,6 +43,11 @@ MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 # malformed / missing value as untrusted until that producer is reviewed.
 NODE_CONCEPT_PROVENANCE_AUTHORED = "researcher-authored"
 NODE_CONCEPT_PROVENANCE_CLASSIFIER = "classifier"
+# PART V Phase 2b: an OPERATOR manually re-tagged this node's concepts. Authoritative for the run's
+# READ MODELS (UI/tools) and NOT clobbered by the classifier re-tag cadence — but deliberately NOT treated
+# as independent classifier EVIDENCE (classifier_verified_node_concepts stays classifier-only), so a human
+# curation edit never silently becomes cross-run/novelty evidence without its own review.
+NODE_CONCEPT_PROVENANCE_OPERATOR = "operator-edited"
 
 
 def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
