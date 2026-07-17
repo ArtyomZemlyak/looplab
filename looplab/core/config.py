@@ -515,6 +515,10 @@ class Settings(BaseSettings):
     # of the vague "broaden". ON by default in the product Settings (ce4a379), EngineOptions off: it
     # only enriches an already-mode-gated explore hint, never forces exploration, and no-ops for a task
     # with no curated concept skeleton. Audit + prompt-cue only; never touches selection. See search/concept_graph.py.
+    # DESIGN NOTE (2026-07-17 critique): now ON unconditionally, but a toy / non-ML task yields EMPTY concept
+    # tags while still paying the per-node LLM concept cost (~10 calls/node with the full Part IV/V bundle).
+    # Consider AUTO-QUIESCING: if the heuristic tagger returns empty for the first N nodes (no concept signal),
+    # skip the LLM concept work for the run — keeps it on for ML tasks, free on toy/degenerate ones.
     concept_pivot: bool = True
     # PART IV Phase 2b — D3 graded novelty into the LIVE novelty gate (§21.4/§21.13). When on and the
     # task has a curated concept skeleton, the novelty gate first grades a proposal over the concept

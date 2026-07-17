@@ -507,6 +507,13 @@ class StrategyCadenceMixin:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": mode, "at_vocab": v_now,
                                                              "generation": node.attempt})
+                # DESIGN NOTE (2026-07-17 critique): every edge here is DERIVED — is_a from the id path,
+                # co_occurs from co-tagging — yet it is PERSISTED to the event log, which bought the offline
+                # emit gap (#5), the co_occurs ratchet-with-no-decay (#9) and the is_a flatten (#12) at once.
+                # Consider dropping the persisted substrate entirely and RECOMPUTING edges from folded
+                # node_concepts at /concepts read time (as the tree projection already does): that removes
+                # #5/#9/#12, the concept_edge fold+commutativity surface, and the "never cache the tree"
+                # worry, for no loss of durability (nothing consumes edges except a read-time projection).
                 # PART IV concept-edge substrate: record the typed graph so hierarchy becomes a swappable
                 # projection. is_a = each concept's immediate PATH parent (the full chain) plus any curated
                 # extra parent AXIS the id-prefix alone misses (asserted, conf 1.0); co_occurs = concept
