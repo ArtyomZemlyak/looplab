@@ -17,20 +17,25 @@ import { followClientRoute, nextRovingIndex } from './accessibility.jsx'
 const MapView = lazy(() => import('./MapView.jsx'))
 const ScopeReport = lazy(() => import('./ScopeReport.jsx'))
 
-function useResource(read, initial) {
+export function useResource(read, initial) {
   const [data, setData] = useState(initial)
   const [state, setState] = useState('loading')
-  // REVIEW(2026-07-16): no in-flight/out-of-order guard — every OTHER fetch helper in this window
-  // (OwnerAuth, SharedAssistant, ScopeReport, usePanelResource) carries an epoch/sequence token, but
-  // this one lets overlapping reads race: loadRuns fires every 2.5s from usePoll PLUS an immediate
-  // visibilitychange tick, so when the server responds slower than the interval an OLDER /api/runs
-  // response can resolve LAST and overwrite newer data as 'ready'. Concretely: right after removeRun
-  // completes deleteRun+refresh, a poll dispatched BEFORE the delete resolves last and re-inserts the
-  // deleted run's card — it "resurrects" (clickable) until the next tick; same window corrupts
-  // renames and project moves. One sequence ref (apply only the latest load's result) closes it.
-  const load = () => read()
-    .then(value => { setData(value); setState('ready') })
-    .catch(() => setState(current => ['ready', 'stale'].includes(current) ? 'stale' : 'error'))
+  const version = useRef(0)
+  useEffect(() => () => { version.current += 1 }, [])
+  const load = () => {
+    const owner = ++version.current
+    // # CODEX AGENT: Poll, visibility and post-mutation reads can overlap. Only the newest request
+    // owns the resource; cleanup invalidates every late settlement after this component unmounts.
+    return Promise.resolve().then(read)
+      .then(value => {
+        if (version.current !== owner) return
+        setData(value); setState('ready')
+      })
+      .catch(() => {
+        if (version.current !== owner) return
+        setState(current => ['ready', 'stale'].includes(current) ? 'stale' : 'error')
+      })
+  }
   return [data, state, load]
 }
 
