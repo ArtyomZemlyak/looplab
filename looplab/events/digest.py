@@ -69,33 +69,45 @@ def param_distance(a: dict, b: dict) -> float:
 # can disagree with /concepts in the same UI. That is an acceptable TRANSITION state, but it should be
 # FINISHED, not left: complete Phase 6a (coverage_signal/theme_rollup aggregate natively over the folded
 # per-node concept AXES, multi-membership, post-rename) so there is genuinely one source of truth.
-def node_theme(node) -> Optional[str]:
-    """A node's single THEME label — the one grouping vocabulary shared by `theme_rollup`,
-    `coverage.py::_node_theme` and the /runs API.
+def _folded_axes(state, node) -> set:
+    """The DISTINCT coarse concept AXES a node occupies per the FOLDED, post-rename/re-tag
+    `state.node_concepts` (the canonical current set — NOT the frozen `idea.concepts`). Consolidation
+    renames are applied (read-time overlay), so the axis matches the /concepts vocabulary. Empty when the
+    node has no folded concepts (a genuinely legacy / not-yet-classified node). Never raises."""
+    nc = getattr(state, "node_concepts", None)
+    nc = nc if isinstance(nc, dict) else {}          # soft-fail on a malformed read-model (never raise)
+    rename = getattr(state, "concept_consolidation", None)
+    rename = rename if isinstance(rename, dict) else {}   # read-time overlay: a merged concept may move axis
+    axes: set = set()
+    for concept in (nc.get(getattr(node, "id", None)) or []):
+        concept = rename.get(str(concept), str(concept))  # apply consolidation so the axis matches /concepts
+        axis = concept.strip().split("/", 1)[0].strip()
+        if axis:
+            axes.add(axis)
+    return axes
 
-    Legacy `idea.theme` when present; else the coarse AXIS of the node's first authored concept. Phase 0
-    (bd816a5) migrated AUTHORING from a single `theme` slug to the `concepts` set but did not move the
-    readers, so on new runs every node is untitled and every theme surface zeroed (the digest's theme
-    chips, the coverage breadth scalars the Strategist narrowing detector reads, the explore-hint's
-    "concentrates on '<theme>'"). Falling back to the concept axis (e.g. "loss/contrastive" -> "loss")
-    keeps the OLD coarse-theme granularity so those signals stay live until the theme readers are torn
-    out entirely. Deterministic (first concept = the Researcher's authoring order, replay-stable).
-    Returns None only when the node carries neither a theme nor any concept."""
+
+def node_theme(node, state=None) -> Optional[str]:
+    """A node's single primary AXIS label — the legacy single-slot display glue (the digest working-set
+    lines, `serve/report.py`, `coverage._node_theme`, the /runs API chip). `node_axes` is the full
+    multi-membership set; this is one representative of it.
+
+    Priority (PART V Phase 6a — the CANONICAL folded concepts win over the frozen authoring):
+      1. with `state`: the first (sorted, deterministic) axis of the folded `state.node_concepts`
+         (post-rename) — so cadence re-tags + consolidation reach this label and it agrees with /concepts;
+      2. else the legacy `idea.theme` slug (pre-concept runs still group);
+      3. else the coarse axis of the node's first authored `idea.concepts` entry (a fresh node whose
+         classifier pass hasn't run yet still shows a label instead of blank).
+    Deterministic + replay-stable. Returns None only when the node carries no folded concept, no theme
+    and no authored concept. Callers WITHOUT run state get the legacy authored/theme behavior (2→3)."""
+    if state is not None:
+        folded = _folded_axes(state, node)
+        if folded:
+            return sorted(folded)[0]                # canonical current axis (deterministic representative)
     idea = getattr(node, "idea", None)
     theme = getattr(idea, "theme", None)
     if theme:
         return theme
-    # REVIEW(2026-07-16): two distortions in this fallback. (1) FIRST-concept-only: a node tagged
-    # ['loss/contrastive', 'data/aug-mix'] projects theme "loss" and its data-side effort vanishes —
-    # a run diverse on second axes reads as dominant_theme_frac ~1.0 / theme_entropy ~0, so the
-    # Strategist's narrowing detector fires explore pressure against a genuinely broad run (or,
-    # ordered the other way, never fires on a truly narrow one): cadence decisions keyed to the
-    # Researcher's authoring ORDER, an artifact. (2) It reads idea.concepts (frozen at creation), not
-    # the folded state.node_concepts — cadence re-tags and consolidation renames never reach any
-    # theme surface, so the /runs theme map can disagree with the /concepts vocabulary in the same
-    # UI. coverage_signal should aggregate natively over the folded per-node concept AXES (a node
-    # counted under every axis it touches, post-rename), keeping this helper as display glue for
-    # genuinely legacy runs only.
     for concept in (getattr(idea, "concepts", None) or []):
         axis = str(concept).strip().split("/", 1)[0].strip()
         if axis:
@@ -104,24 +116,17 @@ def node_theme(node) -> Optional[str]:
 
 
 def node_axes(state, node) -> set:
-    """The DISTINCT coarse concept AXES a node occupies, read from the FOLDED, post-rename/re-tag
-    `state.node_concepts` (NOT the frozen `idea.concepts`): a node tagged
-    `['loss/contrastive', 'data/aug']` occupies `{'loss', 'data'}`. Legacy nodes with no folded
-    concepts fall back to `node_theme`'s single axis (so pre-concept runs still group). Empty when the
-    node carries neither.
+    """The DISTINCT coarse concept AXES a node occupies (MULTI-membership). Reads the FOLDED, post-rename
+    `state.node_concepts` (`_folded_axes`); a node tagged `['loss/contrastive', 'data/aug']` occupies
+    `{'loss', 'data'}`. Legacy nodes with no folded concepts fall back to `node_theme`'s single legacy axis
+    (so pre-concept runs still group). Empty when the node carries neither.
 
-    PART V Phase 6a: this MULTI-membership set is the concept-native breadth — `theme_rollup` and
-    `coverage_signal` now count a node under EVERY axis it touches, retiring the first-concept-only
-    distortion `node_theme` alone had (a run diverse on second axes used to read as
-    dominant_theme_frac~1.0 / theme_entropy~0). Reading the FOLDED map means cadence re-tags and
-    consolidation renames reach the breadth signals, so /concepts and the Strategist agree.
-    Deterministic (set membership, order-free)."""
-    axes: set = set()
-    folded = (getattr(state, "node_concepts", None) or {}).get(getattr(node, "id", None)) or []
-    for concept in folded:
-        axis = str(concept).strip().split("/", 1)[0].strip()
-        if axis:
-            axes.add(axis)
+    PART V Phase 6a: this is the concept-native breadth — `theme_rollup` and `coverage_signal` count a node
+    under EVERY axis it touches, retiring the first-concept-only distortion `node_theme` alone had (a run
+    diverse on second axes used to read as dominant_theme_frac~1.0 / theme_entropy~0). Reading the FOLDED
+    map means cadence re-tags and consolidation renames reach the breadth signals, so /concepts, the list
+    tools and the Strategist all agree. Deterministic (set membership, order-free)."""
+    axes = _folded_axes(state, node)
     if axes:
         return axes
     t = node_theme(node)                        # legacy display glue: pre-concept runs still group by idea.theme
@@ -216,14 +221,15 @@ def trial_line(t) -> str:
 
 
 
-def _node_line(n) -> str:
+def _node_line(n, state=None) -> str:
     if n.status is NodeStatus.failed:
         outcome = f"FAILED ({n.error_reason or 'error'})"
     else:
         outcome = f"metric={fmt_num(node_metric(n))}"
-    # CODEX AGENT: derive the legacy theme or first authored concept's coarse axis so this working-set
-    # line uses the same vocabulary as theme_rollup/coverage and is not blank on concept-authored runs.
-    theme_label = node_theme(n)
+    # The node's primary CANONICAL axis (folded node_concepts when state is passed, else legacy theme /
+    # first authored axis) — the SAME vocabulary theme_rollup/coverage/the list tools group by, so this
+    # working-set line agrees with them and is not blank on concept-authored runs.
+    theme_label = node_theme(n, state)
     theme = f" {{{theme_label}}}" if theme_label else ""
     swept = f" swept ×{len(n.trials)}" if getattr(n, "trials", None) else ""
     # Signal-delivery (§1): surface the crash-triage verdict on a failed node so the "avoid
@@ -291,7 +297,7 @@ def sibling_digest(state: RunState, parent) -> str:
     lines = ["\nSiblings of this expansion (already tried — push diversity, don't repeat):"]
     for n in sibs[:5]:
         why = " ".join((n.idea.rationale or "").split())[:90]
-        lines.append(_node_line(n) + (f" — {why}" if why else ""))
+        lines.append(_node_line(n, state) + (f" — {why}" if why else ""))
     return "\n".join(lines)
 
 
@@ -416,7 +422,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     winners = top_nodes(state, top_k)
     if winners:
         lines.append("Strongest:")
-        lines += [_node_line(n) for n in winners]
+        lines += [_node_line(n, state) for n in winners]
 
     # Tuning landscape of the best SWEPT experiment — a small representative sample (best→worst, even
     # spread) so the model reasons over the response surface, not just the winning point. Placed right
@@ -439,7 +445,7 @@ def experiments_digest(state: RunState, top_k: int = 5, worst_n: int = 3,
     avoid = weak + [f for f in fails if f not in weak]
     if avoid:
         lines.append("Weakest / failures (avoid repeating):")
-        lines += [_node_line(n) for n in avoid]
+        lines += [_node_line(n, state) for n in avoid]
 
     themes = theme_rollup(state)
     if themes:

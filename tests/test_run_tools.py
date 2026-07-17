@@ -346,10 +346,11 @@ def test_run_tools_read_and_rank():
     assert "no experiment" in rt.execute("read_experiment", {"node_id": 99}).lower()
 
 
-def test_list_experiments_theme_filter_matches_derived_concept_axis():
-    # On a concept-authored run (no legacy idea.theme), list_themes advertises the DERIVED theme (the
-    # first concept's coarse axis), so the list_experiments theme filter must use the same vocabulary —
-    # a raw idea.theme filter matched nothing and the agent could never drill a theme it was shown.
+def test_list_experiments_theme_filter_matches_folded_concept_axis():
+    # PART V Phase 6a: list_themes advertises the folded CONCEPT AXES (node_axes over state.node_concepts,
+    # multi-membership), so the list_experiments theme filter, the per-line {label} AND the always-on
+    # experiments_digest must ALL use that same canonical vocabulary — one concept set across every surface
+    # (no more advertise-vs-filter divergence). The CANONICAL folded set wins over the frozen authoring.
     st = RunState(goal="g", direction="max")
     st.nodes = {
         0: Node(id=0, operator="draft",
@@ -363,21 +364,22 @@ def test_list_experiments_theme_filter_matches_derived_concept_axis():
                           concepts=["data/synth"]),
                 metric=0.5, status=NodeStatus.evaluated),
     }
-    # CODEX AGENT: classifier output is an independent sidecar. Compatibility theme surfaces keep
-    # following the authored Idea, with the legacy theme taking precedence over authored concepts.
-    st.node_concepts[0] = ["classifier/override"]
+    # Node 0 has been re-tagged by the classifier: its FOLDED concept set is the canonical current one and
+    # drives every surface (nodes 1 & 2 have no folded set -> fall back to first authored axis / legacy theme).
+    st.node_concepts[0] = ["arch/moe"]
     st.node_concept_provenance[0] = NODE_CONCEPT_PROVENANCE_CLASSIFIER
     rt = RunTools()
     rt.bind_state(st)
     themes = rt.execute("list_themes", {})
-    assert "loss" in themes and "legacy-theme" in themes    # exactly the filter vocabulary
-    listed = rt.execute("list_experiments", {"theme": "loss"})
-    assert "#0" in listed and "#1" in listed and "#2" not in listed   # filter uses the derived axis
-    assert "no matching" not in listed.lower()
-    assert "{loss}" in digest.experiments_digest(st)       # the always-on digest uses it too
+    assert "arch" in themes and "loss" in themes and "legacy-theme" in themes   # folded axis + fallbacks
+    arch = rt.execute("list_experiments", {"theme": "arch"})
+    assert "#0" in arch and "{arch}" in arch                # node 0 filters + labels by its FOLDED axis
+    loss = rt.execute("list_experiments", {"theme": "loss"})
+    assert "#1" in loss and "#0" not in loss                # node 0 is no longer under its frozen authored axis
+    assert "no matching" not in loss.lower()
+    assert "{arch}" in digest.experiments_digest(st)        # the always-on digest agrees (canonical label)
     legacy = rt.execute("list_experiments", {"theme": "legacy-theme"})
-    assert "#2" in legacy and "{legacy-theme}" in legacy
-    assert "no matching" in rt.execute("list_experiments", {"theme": "classifier"})
+    assert "#2" in legacy and "{legacy-theme}" in legacy    # pre-concept node still groups by its legacy theme
 
 
 def test_run_tools_unbound_is_safe():

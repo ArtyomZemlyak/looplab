@@ -446,6 +446,11 @@ class Settings(BaseSettings):
     #   Strategist READS the run/data/sibling-runs/KB/memory with tools before deciding, not a single-shot
     #   call over aggregate stats. "llm" = the old non-agentic single-shot; "rule"/"off" = no LLM.
     strategist_every: int = Field(default=3, ge=1)   # consult cadence (created nodes)
+    # PART V (F1): concept CLASSIFIER re-tag + consolidation cadence, DECOUPLED from strategist_every. The
+    # LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on its own
+    # (sparser) interval. Researcher-authored idea.concepts still fold immediately at node_created — this
+    # only paces the classifier-evidence + consolidation refresh (and the concept-coverage pivot snapshot).
+    concept_retag_every: int = Field(default=30, ge=1)
     # === Confirmation & holdout ===========================================================
     # Multi-seed confirmation (I12, ADR-15): confirm the top-k under N seeds before
     # finishing. 0 disables (default). Only meaningful when eval has variance.

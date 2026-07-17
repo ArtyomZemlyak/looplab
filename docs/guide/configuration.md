@@ -215,6 +215,7 @@ See [LLM & coding agents](llm-and-agents.md) for full guidance.
 |---|---|---|---|
 | `strategist_backend` | `LOOPLAB_STRATEGIST_BACKEND` | `agent` | Meta-controller: `off` / `rule` / `llm` (single-shot over aggregate stats) / `agent` (default — tool-using, READS run/data/siblings/KB/memory before deciding) |
 | `strategist_every` | `LOOPLAB_STRATEGIST_EVERY` | `3` | Consult cadence (created nodes) |
+| `concept_retag_every` | `LOOPLAB_CONCEPT_RETAG_EVERY` | `30` | PART V (F1) concept CLASSIFIER re-tag + consolidation cadence (created nodes), decoupled from `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it refreshes on this sparser interval (and paces the `concept_pivot` coverage-snapshot). Researcher-authored `idea.concepts` still fold immediately at node_created — this only paces the classifier-evidence + consolidation refresh, so UI concept freshness is unaffected. Fires at the seed boundary too so short runs get one pass |
 | `budget_aware` | `LOOPLAB_BUDGET_AWARE` | `false` | Surface remaining eval-compute budget into the proposal prompt |
 | `agent_control` | `LOOPLAB_AGENT_CONTROL` | *(see below)* | Per-setting allow-list of which agent roles may change it at runtime |
 

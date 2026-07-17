@@ -71,6 +71,7 @@ class EngineOptions:
     policy_name: str = "greedy"          # Settings.policy (renamed: the Engine keeps the policy OBJECT under .policy)
     ablate_every: int = 0
     strategist_every: int = 3
+    concept_retag_every: int = 30   # PART V (F1): concept classifier re-tag cadence, decoupled from strategist_every
     deep_research_every: int = 0         # run the stage every N created nodes (0 = manual/strategist only)
     concurrent_research: bool = False    # overlap a due research "think" with the GPU-bound eval
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)

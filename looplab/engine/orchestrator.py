@@ -187,6 +187,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         policy_name = _opt("policy_name")
         ablate_every = _opt("ablate_every")
         strategist_every = _opt("strategist_every")
+        concept_retag_every = _opt("concept_retag_every")
         deep_research_every = _opt("deep_research_every")
         concurrent_research = _opt("concurrent_research")
         report_every = _opt("report_every")
@@ -263,6 +264,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._ablate_every = ablate_every
         self.strategist = strategist
         self.strategist_every = max(1, strategist_every)
+        self.concept_retag_every = max(1, concept_retag_every)
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
         self.concurrent_research = concurrent_research

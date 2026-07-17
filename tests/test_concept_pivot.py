@@ -78,11 +78,12 @@ def test_snapshot_is_hashseed_independent(tmp_path):
 # --------------------------------------------------------------------------- #
 
 def _snap_engine(store, *, concept_pivot=True, consult=True):
-    """Minimal host for the live emission path: it reads _concept_pivot, _should_consult(state), store,
-    and _concept_coverage_snapshot(state) (which is pure over state, so bound as an unbound call)."""
+    """Minimal host for the live emission path: it reads _concept_pivot, _should_consult_concepts(state),
+    store, and _concept_coverage_snapshot(state) (which is pure over state, so bound as an unbound call).
+    PART V (F1): the cadence gate is now the DECOUPLED `_should_consult_concepts`, not `_should_consult`."""
     return SimpleNamespace(
         _concept_pivot=concept_pivot,
-        _should_consult=lambda st: consult,
+        _should_consult_concepts=lambda st: consult,
         _concept_coverage_snapshot=lambda st: Engine._concept_coverage_snapshot(None, st),
         store=store)
 
@@ -115,6 +116,26 @@ def test_off_cadence_emits_no_snapshot(tmp_path):
     store = _dr_store(tmp_path, _DCL)
     Engine._maybe_snapshot_concept_coverage(_snap_engine(store, consult=False), fold(store.read_all()))
     assert not any(e.type == "concept_coverage_snapshot" for e in store.read_all())
+
+
+def test_concept_cadence_decoupled_from_strategist_every():
+    # PART V (F1): the concept re-tag cadence uses its OWN concept_retag_every, not strategist_every. With
+    # strategist_every=3 (would fire at 3,6,9…) but concept_retag_every=10, the concept snapshot fires only
+    # at the seed boundary and every 10th node — independent of the strategy consult cadence.
+    eng = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=10)
+    fire = lambda k: Engine._should_consult_concepts(
+        eng, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
+    assert fire(2) is True           # seed boundary
+    assert fire(3) is False          # a strategist consult point, but NOT a concept one (decoupled)
+    assert fire(6) is False
+    assert fire(10) is True          # every concept_retag_every
+    assert fire(20) is True
+    assert fire(12) is False
+    # falls back to strategist_every when the knob is unset/zero (back-compat)
+    eng0 = SimpleNamespace(n_seeds=2, strategist_every=3, concept_retag_every=0)
+    fire0 = lambda k: Engine._should_consult_concepts(
+        eng0, SimpleNamespace(nodes={i: None for i in range(k)}, pending_nodes=lambda: []))
+    assert fire0(3) is True and fire0(6) is True and fire0(4) is False
 
 
 def test_no_skeleton_task_emits_no_snapshot(tmp_path):

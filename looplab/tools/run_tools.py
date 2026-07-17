@@ -162,9 +162,10 @@ class RunTools:
             outcome = f"FAILED({n.error_reason or 'error'})"
         else:
             outcome = f"metric={digest.fmt_num(digest.node_metric(n))}"
-        # CODEX AGENT: derived theme (legacy idea.theme, else the first concept's coarse axis) — the SAME vocabulary
-        # list_themes/list_experiments advertise, so a concept-authored run isn't shown blank here.
-        node_theme = digest.node_theme(n)
+        # The node's primary CANONICAL axis (folded node_concepts via state, else legacy theme/first authored
+        # axis) — the SAME vocabulary list_themes/list_experiments advertise + filter on (node_axes), so the
+        # {label} shown here matches the grouping and a concept-authored run isn't shown blank.
+        node_theme = digest.node_theme(n, self.state)
         theme = f" {{{node_theme}}}" if node_theme else ""
         return f"#{n.id} {n.operator} {outcome} {digest.fmt_params(n.idea.params)}{theme}"
 
@@ -177,9 +178,11 @@ class RunTools:
         else:
             nodes = digest.top_nodes(st, len(st.nodes), worst=(sort == "worst"))
         if theme:
-            # CODEX AGENT: filter on the DERIVED theme (digest.node_theme) — the vocabulary list_themes advertises;
-            # a raw idea.theme filter matched nothing on concept-authored runs (themes come from concepts).
-            nodes = [n for n in nodes if digest.node_theme(n) == theme]
+            # Filter on the MULTI-membership concept axes (digest.node_axes over folded node_concepts) — the
+            # EXACT vocabulary list_themes advertises (`_themes` -> theme_rollup -> node_axes). Phase 6a: a node
+            # tagged on a non-first axis (e.g. 'data' as its 2nd concept) is still returned for theme="data";
+            # a single node_theme filter would silently return nothing for an axis list_themes just listed.
+            nodes = [n for n in nodes if theme in digest.node_axes(st, n)]
         nodes = nodes[:limit]
         if not nodes:
             return "(no matching experiments)"

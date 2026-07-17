@@ -212,6 +212,22 @@ class StrategyCadenceMixin:
         # `Engine(strategist_every=0, coverage_context=True)` raises ZeroDivisionError mid-loop.
         return n == self.n_seeds or (self.strategist_every > 0 and n % self.strategist_every == 0)
 
+    def _should_consult_concepts(self, state: RunState) -> bool:
+        """PART V (F1): the concept CLASSIFIER re-tag / consolidation cadence — DECOUPLED from
+        `strategist_every`. The LLM concept map is heavier and slower-moving than a strategy consult, so it
+        refreshes on its OWN `concept_retag_every` interval (default 30) rather than every consult.
+        Researcher-authored `idea.concepts` still fold into node_concepts at node_created (immediate UI
+        freshness); this only paces the classifier-EVIDENCE + consolidation refresh and the concept-coverage
+        pivot snapshot. Same shape/guards as `_should_consult` (creation decision point, seed boundary, then
+        every interval; modulo guarded for the `0` kwarg case)."""
+        if state.pending_nodes():
+            return False
+        n = len(state.nodes)
+        if n == 0:
+            return False
+        every = getattr(self, "concept_retag_every", 0) or self.strategist_every
+        return n == self.n_seeds or (every > 0 and n % every == 0)
+
     def _record_strategy(self, strat: dict, state: RunState,
                          ctx: Optional[StrategyContext] = None) -> None:
         self.store.append(EV_STRATEGY_DECISION, {
@@ -404,7 +420,7 @@ class StrategyCadenceMixin:
         Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op off-cadence / mid-eval / when
         the flag is off / when the task has no curated concept skeleton (so it never perturbs a generic
         task). Never affects selection."""
-        if not getattr(self, "_concept_pivot", False) or not self._should_consult(state):
+        if not getattr(self, "_concept_pivot", False) or not self._should_consult_concepts(state):
             return state
         n = len(state.nodes)
         # `at_node == n` is a monotonic-progress gate, not a lifecycle identity: node records are
