@@ -4,6 +4,7 @@
 // the report never credits a result the engine itself rejected.
 
 import { fmt, isSweep, operatorMeta } from './util.js'
+import { nodeTheme } from './conceptId.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
@@ -42,7 +43,7 @@ export function improvements(nodes, direction) {
     if (best === null || bt(v, best.v)) {
       const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
       steps.push({
-        id: n.id, operator: n.operator, theme: n.idea?.theme || null,
+        id: n.id, operator: n.operator, theme: nodeTheme(n),
         from: best ? best.v : null, to: v,
         delta: best ? v - best.v : null,
         params: n.idea?.params || {}, rationale: n.idea?.rationale || '',
@@ -85,18 +86,9 @@ function rollup(nodes, direction, keyFn) {
 }
 
 export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
-// REVIEW(2026-07-16): the CLIENT-side theme readers were never migrated off `idea.theme`, which
-// Phase 0 (bd816a5) stopped authoring — eba3cc6 added the concepts-axis fallback only SERVER-side
-// (events/digest.py::node_theme). On every new run `idea.theme` is empty for all nodes, so here in
-// the UI: themeEffectiveness returns [], directionProfit returns [] (DirectionsOverview — the
-// directions bar over the DAG — silently renders null forever), mergeSummary's "⊕ combines" line
-// loses its theme labels, and the DAG's theme grouping/filter chips have nothing to key on. Worse,
-// Phase 5b's ConceptChipBar commit (c21c3e9) RELIES on this deadness ("DirectionsOverview ... is
-// null on concept-authored runs ... so no double bar appears in practice") — codifying the
-// regression as a layout assumption. These readers need the same fallback the server got (first
-// concept's axis via a shared helper, e.g. in conceptId.js), and then the double-bar layout needs a
-// real decision instead of an accident.
-export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.idea?.theme || null)
+// Keep this compatibility projection aligned with events/digest.py::node_theme: new Ideas author
+// concepts rather than the legacy `theme`, so their first concept axis becomes the coarse direction.
+export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, nodeTheme)
 
 // Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
 // this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
@@ -107,7 +99,7 @@ export function directionProfit(state) {
   const baseline = (improvements(nodes, dir)[0] || {}).to ?? null   // first feasible frontier value
   const byDirection = new Map(themeEffectiveness(nodes, dir).map(row => [row.key, row]))
   const directions = [...new Set(Object.values(nodes).sort((a, b) => a.id - b.id)
-    .map(node => node.idea?.theme).filter(Boolean))]
+    .map(nodeTheme).filter(Boolean))]
   return directions.map(direction => {
     const t = byDirection.get(direction)
     let gain = null
@@ -128,7 +120,7 @@ export function mergeSummary(node, nodes) {
     const p = nodes[pid]
     if (!p) return { parentId: pid, theme: null, change: '' }
     const gp = (p.parent_ids || []).map(x => nodes[x]).find(Boolean)
-    return { parentId: pid, theme: p.idea?.theme || null, change: paramDiffLabel(paramDiff(p, gp)) }
+    return { parentId: pid, theme: nodeTheme(p), change: paramDiffLabel(paramDiff(p, gp)) }
   })
 }
 
@@ -195,7 +187,7 @@ export function nodeChip(node, nodes) {
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
-    const what = brief(node.idea?.rationale) || brief(node.idea?.theme)
+    const what = brief(node.idea?.rationale) || brief(nodeTheme(node))
     return what ? `baseline · ${what}` : 'baseline'        // describe the baseline, don't just label it
   }
   if (node.idea?.change_summary) return brief(node.idea.change_summary)
@@ -215,7 +207,7 @@ export function regressions(nodes, direction) {
     const pm = parent ? metricOf(parent) : null
     if (pm != null && !bt(metricOf(n), pm) && metricOf(n) !== pm) {
       out.push({ id: n.id, operator: n.operator, metric: metricOf(n), parentId: parent.id,
-                 parentMetric: pm, diff: paramDiff(n, parent), theme: n.idea?.theme || null })
+                 parentMetric: pm, diff: paramDiff(n, parent), theme: nodeTheme(n) })
     }
   })
   return out.sort((a, b) => a.id - b.id)

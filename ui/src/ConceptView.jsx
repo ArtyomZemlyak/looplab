@@ -7,6 +7,8 @@ import {
 } from './conceptViewModel.js'
 
 const TIMEOUT_MS = 12_000
+const LENS_PROMPT_MAX_CHARS = 800
+const LENS_PROMPT_MAX_BYTES = 2_048
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const metric = value => value === null || (typeof value === 'number' && Number.isFinite(value))
 const count = value => Number.isSafeInteger(value) && value >= 0
@@ -22,7 +24,7 @@ const validList = (value, test) => Array.isArray(value) && value.every(test)
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
 const sortedKeys = value => Object.keys(value).sort()
 
-// # CODEX AGENT: HTTP 200 is transport success, not projection truth. Require the versioned frame,
+// HTTP 200 is transport success, not projection truth. Require the versioned frame,
 // lifecycle identity, authority receipt, bounds receipt, and self-contained experiment references
 // before an empty tree can become an authoritative "no concepts" state.
 export function validateConceptPayload(value, expected = {}) {
@@ -252,8 +254,9 @@ export function validateConceptPayload(value, expected = {}) {
 }
 
 const entries = value => record(value) ? Object.keys(value).sort().map(key => [key, value[key]]) : []
+const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 
-// # CODEX AGENT: mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
+// Mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
 // lifecycle/status/provenance changes, champion changes, typed edges,
 // feasibility and robust metrics refresh; an engine-liveness-only SSE tick does not.
 export function conceptProjectionKey(state) {
@@ -290,20 +293,28 @@ function StateCard({ tone, title, body, action, pending = false, stale = false }
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode }) {
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
+  const hasExactGeneration = typeof generation === 'string' && generationId(generation)
   const [lensSelection, setLensSelection] = useState({ scope: lensScope, name: 'is_a' })
   const lens = lensSelection.scope === lensScope ? lensSelection.name : 'is_a'
   const setLens = name => setLensSelection({ scope: lensScope, name })
   const [resource, setResource] = useState(initial)
   const [retry, setRetry] = useState(0)
   const [expanded, setExpanded] = useState(() => new Set())
+  const [evidenceExpanded, setEvidenceExpanded] = useState(() => new Set())
   const [columns, setColumns] = useState(DEFAULT_COLUMNS)
   // Derived lenses are view-state specs: the paid derivation happens once, then GET replays their
   // exact relation subset so ordinary semantic refreshes remain deterministic and read-only.
   const [derivedLenses, setDerivedLenses] = useState([])
-  const [lensPrompt, setLensPrompt] = useState('')
-  const [lensBusy, setLensBusy] = useState(false)
-  const [lensErr, setLensErr] = useState('')
-  const lensCreate = useRef(null)
+  const [lensFormState, setLensFormState] = useState(() => emptyLensForm(lensScope))
+  const lensCreates = useRef(new Map())
+  const lensForm = lensFormState.scope === lensScope ? lensFormState : emptyLensForm(lensScope)
+  const { prompt: lensPrompt, error: lensErr } = lensForm
+  const lensBusy = lensForm.busy || lensCreates.current.has(lensScope)
+  const setCurrentLensForm = update => setLensFormState(previous => {
+    const currentForm = previous.scope === lensScope ? previous : emptyLensForm(lensScope)
+    const next = typeof update === 'function' ? update(currentForm) : update
+    return { ...next, scope: lensScope }
+  })
   const currentLensScope = useRef(lensScope)
   currentLensScope.current = lensScope
   const request = useRef(null)
@@ -335,7 +346,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     const finish = (ok, data = null) => {
       if (done) return
       done = true
-      // # CODEX AGENT: render-time semantic identity closes the gap before effect cleanup; owner
+      // Render-time semantic identity closes the gap before effect cleanup; owner
       // identity fences late results from a superseded semantic projection.
       if (request.current !== owner || expectedVersion.current !== requestVersion) return
       request.current = null
@@ -370,6 +381,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   useEffect(() => {
     if (data?.edges_present === false && lens !== 'is_a' && !activeDerived) {
       setExpanded(new Set())
+      setEvidenceExpanded(new Set())
       setLens('is_a')
     }
   }, [data, lens, activeDerived])
@@ -398,6 +410,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const toggle = id => setExpanded(previous => {
     const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next
   })
+  const toggleEvidence = id => setEvidenceExpanded(previous => {
+    const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next
+  })
   const toggleColumn = key => setColumns(value => value.includes(key)
     ? value.length === 1 ? value : value.filter(item => item !== key) : [...value, key])
   const cols = CONCEPT_COLUMNS.filter(column => columns.includes(column.key))
@@ -405,14 +420,22 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const createLens = async event => {
     event.preventDefault()
     const prompt = lensPrompt.trim()
-    if (!prompt || displayedSequence != null || lensCreate.current) return
+    if (!prompt || displayedSequence != null || !hasExactGeneration
+        || lensCreates.current.has(lensScope)) return
+    if (prompt.length > LENS_PROMPT_MAX_CHARS
+        || new TextEncoder().encode(prompt).length > LENS_PROMPT_MAX_BYTES) {
+      setCurrentLensForm(form => ({ ...form,
+        error: 'Lens description is too long. Keep it within 800 characters and 2,048 bytes.' }))
+      return
+    }
     const owner = { scope: lensScope }
-    lensCreate.current = owner
-    setLensBusy(true)
-    setLensErr('')
+    lensCreates.current.set(lensScope, owner)
+    setCurrentLensForm(form => ({ ...form, busy: true, error: '' }))
     try {
-      const response = await post(runApiPath(runId, '/concepts/lens'), { prompt })
-      if (lensCreate.current !== owner || currentLensScope.current !== lensScope) return
+      const response = await post(runApiPath(runId, '/concepts/lens'), {
+        prompt, expected_generation: generation,
+      })
+      if (lensCreates.current.get(lensScope) !== owner || currentLensScope.current !== lensScope) return
       const spec = response?.spec
       if (response?.ok === true && record(spec) && conceptId(spec.name)
           && typeof spec.label === 'string' && Array.isArray(spec.rels)
@@ -432,37 +455,55 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         setDerivedLenses(list => [...list.filter(item => item.scope !== lensScope
           || item.name !== derived.name), derived])
         setExpanded(new Set())
+        setEvidenceExpanded(new Set())
         setLens(derived.name)
-        setLensPrompt('')
+        setCurrentLensForm(form => ({ ...form, prompt: '', error: '' }))
       } else {
-        setLensErr(response?.reason === 'no_model'
+        setCurrentLensForm(form => ({ ...form, error: response?.reason === 'no_model'
           ? 'No model is configured for lens creation.'
-          : 'Could not derive a lens from that request; try naming a relation to group by.')
+          : 'Could not derive a lens from that request; try naming a relation to group by.' }))
       }
-    } catch {
-      if (lensCreate.current === owner && currentLensScope.current === lensScope) {
-        setLensErr('Lens creation failed.')
+    } catch (error) {
+      if (lensCreates.current.get(lensScope) === owner
+          && currentLensScope.current === lensScope) {
+        const safelyRejected = ['invalid_run_generation', 'run_generation_unavailable',
+          'concept_lens_prompt_too_large'].includes(error?.code)
+        setCurrentLensForm(form => ({ ...form, error: error?.code === 'run_generation_changed'
+          ? 'Run changed. Reload Concepts before creating another paid lens.'
+          : safelyRejected
+            ? 'The paid request was rejected before model work began. Reload Concepts and review the request.'
+            : 'Outcome unknown; provider charges may have occurred. Reload before deciding whether to submit a new paid request.' }))
       }
     } finally {
-      if (lensCreate.current === owner) {
-        lensCreate.current = null
-        setLensBusy(false)
+      if (lensCreates.current.get(lensScope) === owner) {
+        lensCreates.current.delete(lensScope)
+        if (currentLensScope.current === lensScope) {
+          setCurrentLensForm(form => ({ ...form, busy: false }))
+        }
       }
     }
   }
   const deleteLens = name => {
     setDerivedLenses(list => list.filter(item => item.scope !== lensScope || item.name !== name))
-    if (lens === name) { setExpanded(new Set()); setLens('is_a') }
+    if (lens === name) { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens('is_a') }
   }
-  // # CODEX AGENT: fence paid lens derivation by owner and run; disabled state alone cannot stop a
+  // Fence paid lens derivation by owner and run; disabled state alone cannot stop a
   // double submit or keep a late paid response out of a same-id replacement run.
+  const lensUnavailable = displayedSequence != null || !hasExactGeneration
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
-    <input className="text" value={lensPrompt} onChange={event => setLensPrompt(event.target.value)}
-      placeholder={displayedSequence == null ? 'create a lens…' : 'live view required'}
-      aria-label="Describe a lens to create" disabled={lensBusy || displayedSequence != null} />
+    <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
+      onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
+      placeholder={displayedSequence != null ? 'live view required'
+        : hasExactGeneration ? 'describe a grouping lens…' : 'verified generation required'}
+      aria-label="Describe a lens to create" aria-describedby="paid-concept-lens-status"
+      disabled={lensBusy || lensUnavailable} />
     <button type="submit" className="btn sm"
-      disabled={lensBusy || displayedSequence != null || !lensPrompt.trim()}>
-      {lensBusy ? '…' : '✦ lens'}</button>
+      aria-describedby="paid-concept-lens-status"
+      title={!hasExactGeneration ? 'Reload the run and wait for its verified generation.' : undefined}
+      disabled={lensBusy || lensUnavailable || !lensPrompt.trim()}>
+      {lensBusy ? 'Creating…' : 'Create lens · paid'}</button>
+    <span id="paid-concept-lens-status" className="muted" role="note">
+      Uses the configured model provider; provider charges may apply.</span>
     {lensErr && <span className="cv-lenserr" role="alert">{lensErr}</span>}
   </form>
 
@@ -499,13 +540,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     ...shippedLenses.filter(item => !derivedNames.has(item.name)),
     ...runDerivedLenses.map(item => ({ ...item, derived: true })),
   ]
+  const linkKind = data.requested_lens_spec.rels.join(', ')
   return <div className="concept-view" data-route-main tabIndex={-1} aria-label="Concept tree"
     aria-busy={refreshing}>
     <header className="cv-bar">
       <div className="cv-heading"><strong>Concept tree</strong><span>{Object.keys(data.tree.nodes).length} concepts · {experimentCount} tagged experiments · frame seq {data.captured_seq}</span></div>
       <div className="cv-lensctl">
         <label className="cv-lenspick"><span>Hierarchy lens</span><select className="text" value={lens}
-          onChange={event => { setExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
+          onChange={event => { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
           {availableLenses.map(item => <option key={item.name} value={item.name}>
             {(item.derived ? '✦ ' : '') + (item.label || item.name)}</option>)}
         </select></label>
@@ -515,8 +557,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         {lensCreator}
       </div>
       <div className="cv-tree-actions">
-        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>Expand all</button>
-        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>Collapse all</button>
+        <button type="button" className="btn sm ghost"
+          onClick={() => setExpanded(new Set(Object.keys(data.tree.nodes)))}>Expand hierarchy</button>
+        <button type="button" className="btn sm ghost" onClick={() => setExpanded(new Set())}>Collapse hierarchy</button>
         <button type="button" className="btn sm" onClick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh'}</button>
       </div>
       <div className="cv-cols" role="group" aria-label="Visible metric columns"><span>Metrics</span>
@@ -524,7 +567,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           disabled={columns.includes(column.key) && columns.length === 1}
           className={'cv-col' + (columns.includes(column.key) ? ' on' : '')}
           onClick={() => toggleColumn(column.key)}>{column.label}</button>)}
-        {data.metrics.baseline != null && <span className="cv-baseline">run baseline {fmt(data.metrics.baseline)}</span>}
+        {data.metrics.baseline != null && <span className="cv-baseline" role="note"
+          title="Median robust metric across eligible evaluated experiments (metric available and not explicitly infeasible); Δ columns are direction-normalized relative to this median."
+          aria-label={`Run median robust metric ${fmt(data.metrics.baseline)} across eligible evaluated experiments: metric available and not explicitly infeasible. Delta columns are direction-normalized relative to this median.`}>
+          run median {fmt(data.metrics.baseline)}</span>}
       </div>
     </header>
     {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />Refreshing concepts… Last loaded view remains visible.</div>}
@@ -545,33 +591,58 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const node = data.tree.nodes[id]
         const experiments = byConcept[id] || []
         const open = expanded.has(id)
+        const evidenceOpen = evidenceExpanded.has(id)
+        const crossParents = Array.isArray(node?.cross_parents) ? node.cross_parents : []
+        const edgeProjection = Array.isArray(node?.cross_parents)
+        const conceptLabel = edgeProjection ? id : conceptLeaf(id)
+        const crossParentSummary = crossParents.length
+          ? `Secondary ${linkKind} ${crossParents.length === 1 ? 'parent' : 'parents'}: ${crossParents.join(', ')}`
+          : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>
-            {hasChildren || experiments.length ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
+            {hasChildren ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
               aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${id}`}>{open ? '▾' : '▸'}</button>
               : <span className="cv-chev-placeholder" aria-hidden="true">·</span>}
-            <span className="cv-cid" title={id}>{conceptLeaf(id)}</span>
-            {!!experiments.length && <span className="cv-badge" aria-label={`${experiments.length} tagged experiments`}>{experiments.length}</span>}
+            <span className="cv-cid" title={id}>{conceptLabel}</span>
+            {!!crossParents.length && <span className="cv-badge" title={crossParentSummary}
+              aria-label={crossParentSummary}>+{crossParents.length} links</span>}
+            {!!experiments.length && <button type="button" className="cv-badge btn xs"
+              onClick={() => toggleEvidence(id)} aria-expanded={evidenceOpen}
+              title={`${evidenceOpen ? 'Hide' : 'Show'} tagged experiments for ${id}`}
+              aria-label={`${evidenceOpen ? 'Hide' : 'Show'} ${experiments.length} tagged ${experiments.length === 1 ? 'experiment' : 'experiments'} for ${id}`}>
+              {experiments.length} refs</button>}
           </td>{cols.map(column => {
             const value = metricRows[id]?.[column.key]
             const tone = column.delta ? deltaTone(value) : ''
             return <td key={column.key} className={'cv-num' + (tone ? ` d-${tone}` : '')}>{fmtCell(value)}</td>
           })}</tr>
-          {/* # CODEX AGENT: render the frame's generation-bound refs, never a live-state join that can
+          {/* Render the frame's generation-bound refs, never a live-state join that can
               attach historical concepts to a replaced node with the same numeric id. */}
-          {open && experiments.map(ref => {
+          {evidenceOpen && experiments.map(ref => {
             const displayed = state.nodes?.[ref.node_id]
             const lifecycleMatches = !!displayed
               && Number.isSafeInteger(displayed.attempt)
               && displayed.attempt === ref.node_generation
+            const constraint = ref.feasible === false ? 'infeasible'
+              : ref.feasible === true ? 'feasible' : 'constraint status not reported'
+            const rollup = ref.metric === null ? 'not included in the concept rollup: robust metric unavailable'
+              : ref.feasible === false ? 'excluded from the concept rollup because it is infeasible'
+                : 'included in the concept rollup under the current eligibility rule'
+            const refSummary = `Experiment #${ref.node_id}, attempt ${ref.node_generation}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
             return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className="cv-erow"><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
               <button type="button" className="cv-exp-button" disabled={!lifecycleMatches}
-                onClick={() => onPickNode?.(ref.node_id)} aria-label={lifecycleMatches
-                  ? `Open experiment ${ref.node_id} in Inspector`
-                  : `Experiment ${ref.node_id} is not in the displayed run snapshot`}>
-                <span className="cv-exp">Experiment #{ref.node_id}</span>{ref.is_best
+                onClick={() => onPickNode?.(ref.node_id)} title={refSummary}
+                aria-label={`${refSummary}. ${lifecycleMatches
+                  ? 'Open in Inspector'
+                  : 'This attempt is not in the displayed run snapshot'}`}>
+                <span className="cv-exp">Experiment #{ref.node_id} · attempt {ref.node_generation}</span>
+                <span className="badge">{ref.status}</span>
+                {ref.feasible === false && <span className="badge reason">infeasible</span>}
+                {ref.feasible === null && <span className="badge">constraint?</span>}
+                {ref.is_best
                   && <span className="cv-best" title="Frame champion" aria-label="Frame champion">★</span>}</button></td>
-              <td className="cv-num cv-expmetric" colSpan={cols.length}>{fmt(ref.metric)}</td></tr>
+              <td className="cv-num cv-expmetric" colSpan={cols.length} title={rollup}>
+                {ref.metric === null ? 'metric unavailable' : `${fmt(ref.metric)}${ref.feasible === false ? ' · excluded' : ''}`}</td></tr>
           })}</Fragment>
       })}
     </tbody></table></div>

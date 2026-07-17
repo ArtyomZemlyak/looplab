@@ -29,7 +29,7 @@ export function canonicalId(raw, rename = {}) {
     const canonical = normalizeConceptId(current)
     if (!canonical || seen.has(canonical)) return ''
     seen.add(canonical)
-    // # CODEX AGENT: replay can retain an exact legacy raw key, while current producers store the
+    // Replay can retain an exact legacy raw key, while current producers store the
     // normalized key. Mirror the server's lookup order so both surfaces join on one vocabulary.
     const exact = Object.prototype.hasOwnProperty.call(map, current)
     const normalized = current !== canonical && Object.prototype.hasOwnProperty.call(map, canonical)
@@ -45,4 +45,19 @@ export function canonicalId(raw, rename = {}) {
 // trip over). Prefer this (or a real Map) over `{}` anywhere concept ids become keys.
 export function conceptMap() {
   return Object.create(null)
+}
+
+// Compatibility reader for the coarse direction used by the legacy "theme" UI. New Ideas no
+// longer author `theme`; the server falls back to the axis of the first authored concept
+// (`loss/contrastive` -> `loss`). Keep client grouping/filter/report on that same vocabulary.
+export function nodeTheme(node) {
+  const legacy = node?.idea?.theme
+  if (legacy) return String(legacy)
+  const concepts = node?.idea?.concepts
+  if (!Array.isArray(concepts)) return null
+  for (const concept of concepts) {
+    const axis = String(concept == null ? '' : concept).trim().split('/', 1)[0].trim()
+    if (axis) return axis
+  }
+  return null
 }

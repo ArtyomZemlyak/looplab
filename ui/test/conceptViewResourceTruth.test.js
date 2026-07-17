@@ -83,6 +83,20 @@ function framePayload({ id = null, runId = 'run#one', generation = GENERATION_A,
 
 const emptyPayload = framePayload()
 const conceptPayload = (id, options = {}) => framePayload({ id, ...options })
+const linkedEdgePayload = (options = {}) => {
+  const payload = framePayload({
+    id: 'loss/contrastive', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
+    requestedRels: ['uses'], requestedKind: 'edge', edgesPresent: true,
+    lensEdgesPresent: true, ...options,
+  })
+  payload.tree.roots.push('training/contrastive')
+  payload.tree.nodes['training/contrastive'] = {
+    parent: null, depth: 0, children: [], tagged: false, cross_parents: [],
+  }
+  payload.tree.nodes['loss/contrastive'].cross_parents = ['training/contrastive']
+  payload.completeness.included.tree_nodes += 1
+  return payload
+}
 
 test('ConceptView fences, retries and preserves truthful last-good resource states', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
@@ -99,7 +113,9 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     MutationObserver: dom.window.MutationObserver, HTMLElement: dom.window.HTMLElement,
     requestAnimationFrame: callback => nativeSetTimeout(callback, 0),
     cancelAnimationFrame: handle => nativeClearTimeout(handle), IS_REACT_ACT_ENVIRONMENT: true,
-    fetch: (url, options = {}) => new Promise(resolve => requests.push({ url: String(url), options, resolve })),
+    fetch: (url, options = {}) => new Promise((resolve, reject) => requests.push({
+      url: String(url), options, resolve, reject,
+    })),
     setTimeout: (callback, delay, ...args) => {
       if (delay !== 12_000) return nativeSetTimeout(callback, delay, ...args)
       const id = ++timerId; deadlines.set(id, callback); return id
@@ -245,22 +261,46 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await click(button('Refresh concepts'))
     await reply(requests[2], conceptPayload('loss/a'))
     assert.match(document.body.textContent, /Concept tree.*2 concepts/s)
-    await click(button('Expand all'))
+    await click(button('Expand hierarchy'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a')
-    const experiment = document.querySelector('button[aria-label="Open experiment 0 in Inspector"]')
+    const median = document.querySelector('.cv-baseline')
+    assert.equal(median?.getAttribute('role'), 'note')
+    assert.match(median?.textContent, /run median/i)
+    assert.match(median?.getAttribute('title'),
+      /eligible evaluated experiments.*not explicitly infeasible.*Δ columns/s)
+    assert.match(median?.getAttribute('aria-label'),
+      /metric available and not explicitly infeasible.*Delta columns are direction-normalized/i)
+    assert.equal(document.querySelector('.cv-exp-button'), null,
+      'bulk hierarchy expansion must not materialize every evidence row')
+    const evidenceToggle = document.querySelector(
+      'button[aria-label="Show 1 tagged experiment for loss/a"]')
+    assert.equal(evidenceToggle?.getAttribute('aria-expanded'), 'false')
+    await click(evidenceToggle)
+    const experiment = document.querySelector('button[aria-label*="Open in Inspector"]')
     assert.equal(experiment?.tagName, 'BUTTON')
     assert.equal(experiment?.getAttribute('role'), null, 'native button owns Enter and Space semantics')
+    assert.match(experiment.textContent, /Experiment #0 · attempt 0.*evaluated/s)
+    assert.match(experiment.getAttribute('title'), /membership researcher-authored.*included in the concept rollup/i)
     await click(experiment)
     assert.equal(picked, 0)
     state = { ...state, nodes: { 0: { ...state.nodes[0], attempt: undefined } } }
     await render()
     const unboundExperiment = document.querySelector(
-      'button[aria-label="Experiment 0 is not in the displayed run snapshot"]')
+      'button[aria-label*="not in the displayed run snapshot"]')
     assert.equal(unboundExperiment?.disabled, true,
       'a missing attempt identity must not bind a frame ref to a same-number live node')
     state = { ...state, nodes: { 0: { ...state.nodes[0], attempt: 0 } } }
     await render()
-    await reply(requests.at(-1), conceptPayload('loss/a'))
+    const excludedPayload = conceptPayload('loss/a')
+    excludedPayload.experiment_refs['loss/a'][0].feasible = false
+    Object.assign(excludedPayload.metrics.rows['loss/a'], {
+      evaluated: 0, best: null, mean: null, worst: null, delta_best: null, delta_mean: null,
+    })
+    await reply(requests.at(-1), excludedPayload)
+    assert.match(document.querySelector('.cv-exp-button')?.textContent, /infeasible/)
+    assert.match(document.querySelector('.cv-exp-button')?.getAttribute('title'),
+      /excluded from the concept rollup because it is infeasible/i)
+    assert.match(document.querySelector('.cv-expmetric')?.textContent, /excluded/i)
     const selectedColumns = [...document.querySelectorAll('.cv-col[aria-pressed="true"]')]
     assert.equal(selectedColumns.length, 3)
     await click(selectedColumns[0]); await click(selectedColumns[1])
@@ -279,7 +319,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a',
       'last-good data stays visible while a semantic refresh is pending')
     await reply(requests.at(-1), conceptPayload('architecture/moe'))
-    await click(button('Expand all'))
+    await click(button('Expand hierarchy'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'architecture/moe')
 
     before = requests.length
@@ -306,7 +346,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     await reply(requests.at(-1), partial)
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
-    await click(button('Expand all'))
+    await click(button('Expand hierarchy'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'safe/root')
     assert.match(document.body.textContent, /recorded claims.*not independently verified/i)
 
@@ -346,7 +386,21 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }))
     const lensInput = document.querySelector('[aria-label="Describe a lens to create"]')
     assert.equal(lensInput.disabled, false)
+    assert.equal(lensInput.maxLength, 800)
+    await setInput(lensInput, '界'.repeat(700))
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before,
+      'an over-byte-limit prompt is rejected before any paid transport')
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /too long.*800 characters.*2,048 bytes/i)
     await setInput(lensInput, 'group by usage')
+    assert.equal(document.querySelector('.cv-lenserr'), null,
+      'editing the prompt clears the previous local validation error')
     before = requests.length
     await act(async () => {
       const form = document.querySelector('.cv-lensnew')
@@ -357,7 +411,80 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(requests.length, before + 1, 'paid lens derivation has a synchronous single-flight lock')
     const lensPost = requests.at(-1)
     assert.equal(lensPost.options.method, 'POST')
-    assert.deepEqual(JSON.parse(lensPost.options.body), { prompt: 'group by usage' })
+    assert.deepEqual(JSON.parse(lensPost.options.body), {
+      prompt: 'group by usage', expected_generation: GENERATION_B,
+    })
+    assert.match(document.querySelector('#paid-concept-lens-status')?.textContent,
+      /configured model provider.*provider charges may apply/i)
+
+    runId = 'lens-scope-run'
+    generation = GENERATION_A
+    await render()
+    const scopedGet = requests.at(-1)
+    assert.match(scopedGet.url, /\/api\/runs\/lens-scope-run\/concepts\?lens=is_a$/)
+    await reply(scopedGet, conceptPayload('scope/root', {
+      runId: 'lens-scope-run', generation: GENERATION_A,
+    }))
+    const scopedInput = document.querySelector('[aria-label="Describe a lens to create"]')
+    assert.equal(scopedInput.value, '', 'another run never inherits the pending paid prompt')
+    assert.equal(scopedInput.disabled, false, 'another run is not blocked by the old run lock')
+    await setInput(scopedInput, 'group by composition')
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1,
+      'paid lens single-flight locks are scoped to the exact run generation')
+    const scopedPost = requests.at(-1)
+    assert.equal(scopedPost.options.method, 'POST')
+    assert.deepEqual(JSON.parse(scopedPost.options.body), {
+      prompt: 'group by composition', expected_generation: GENERATION_A,
+    })
+    await reply(scopedPost, { ok: false, reason: 'no_model' })
+    assert.match(document.querySelector('.cv-lenserr')?.textContent, /No model is configured/)
+
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1)
+    await reply(requests.at(-1), { detail: {
+      code: 'run_generation_changed', message: 'changed',
+    } }, 409)
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /Run changed.*Reload Concepts.*another paid lens/i)
+
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1)
+    await act(async () => {
+      requests.at(-1).reject(new TypeError('simulated network loss'))
+      await settle()
+    })
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /Outcome unknown.*provider charges may have occurred.*Reload.*new paid request/i)
+
+    runId = 'final-run'
+    generation = GENERATION_B
+    await render()
+    await reply(requests.at(-1), conceptPayload('current/root', {
+      runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
+    }))
+    const restoredInput = document.querySelector('[aria-label="Describe a lens to create"]')
+    assert.equal(restoredInput.value, '',
+      'replacing the scope discards the old prompt instead of retaining one form per run')
+    assert.equal(restoredInput.disabled, true)
+    assert.equal(document.querySelector('.cv-lenserr'), null,
+      'another run generation cannot leak its lens error')
+
     await reply(lensPost, {
       ...framePayload({ id: 'derived/root', runId: 'final-run', generation: GENERATION_B,
         requestedLens: 'usage', effectiveLens: 'usage', derived: true,
@@ -367,17 +494,35 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     assert.match(requests.at(-1).url,
       /\/api\/runs\/final-run\/concepts\?lens=usage&rels=uses$/)
-    await reply(requests.at(-1), framePayload({
-      id: 'derived/root', runId: 'final-run', generation: GENERATION_B,
-      requestedLens: 'usage', effectiveLens: 'usage', derived: true,
-      capturedSeq: 7, edgesPresent: true, lensEdgesPresent: true,
+    await reply(requests.at(-1), linkedEdgePayload({
+      runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
     }))
     assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value, 'usage')
+    assert.equal(document.querySelector('.cv-cid[title="loss/contrastive"]')?.textContent,
+      'loss/contrastive', 'edge lenses retain the full canonical id instead of an ambiguous leaf')
+    const crossLink = document.querySelector('.cv-badge[title^="Secondary uses"]')
+    assert.match(crossLink?.textContent, /\+1 links/)
+    assert.match(crossLink?.getAttribute('title'), /training\/contrastive/,
+      'validated secondary parents remain visible evidence instead of disappearing from the tree')
 
     generation = GENERATION_A
     await render()
     assert.match(requests.at(-1).url, /\/api\/runs\/final-run\/concepts\?lens=is_a$/,
       'same-id generation replacement discards the ephemeral lens scope')
+    await reply(requests.at(-1), conceptPayload('unverified/root', {
+      runId: 'final-run', generation: GENERATION_A,
+    }))
+
+    generation = null
+    await render()
+    await reply(requests.at(-1), conceptPayload('unverified/root', {
+      runId: 'final-run', generation: null, sourceAuthoritative: false,
+    }))
+    const unverifiedLensInput = document.querySelector('[aria-label="Describe a lens to create"]')
+    assert.equal(unverifiedLensInput.disabled, true)
+    assert.equal(unverifiedLensInput.placeholder, 'verified generation required')
+    assert.equal(button('Create lens · paid').disabled, true,
+      'paid lens work fails closed without an exact displayed run generation')
   } finally {
     if (root) await act(async () => { root.unmount(); await settle() })
     if (vite) await vite.close()

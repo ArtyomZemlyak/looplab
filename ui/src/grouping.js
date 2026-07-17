@@ -2,6 +2,7 @@
 // mode, build groups, compute a soft enclosing region (BubbleSets-lite hull) from member rects,
 // and reroute edges when a group collapses into a super-node. No React, no side effects.
 import { fmt } from './util.js'
+import { nodeTheme } from './conceptId.js'
 
 export const GROUP_MODES = [
   ['theme', 'direction'], ['operator', 'operator'], ['metric', 'metric'], ['niche', 'niche'], ['none', 'none'],
@@ -23,7 +24,7 @@ function makeCtx(nodes, mode) {
 }
 
 export function groupKey(node, mode, ctx) {
-  if (mode === 'theme') return node.idea?.theme || null
+  if (mode === 'theme') return nodeTheme(node)
   if (mode === 'operator') return node.operator || null
   if (mode === 'metric') { const m = node.confirmed_mean ?? node.metric; return (m == null || !ctx.bucketOf) ? null : ctx.bucketOf(m) }
   if (mode === 'niche') {
@@ -158,7 +159,7 @@ export function groupAggregate(memberIds, nodesObj, direction) {
 export function themeFilteredGroupAggregate(memberIds, nodesObj, direction, themeFilter = null) {
   const totalCount = memberIds.length
   const matchedIds = themeFilter
-    ? memberIds.filter(id => nodesObj[id]?.idea?.theme === themeFilter)
+    ? memberIds.filter(id => nodeTheme(nodesObj[id]) === themeFilter)
     : memberIds
   return {
     ...groupAggregate(matchedIds, nodesObj, direction),

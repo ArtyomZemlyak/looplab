@@ -1,6 +1,7 @@
 import React from 'react'
 import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
+import { nodeTheme } from './conceptId.js'
 
 const AX = 'var(--fg-mut)', GRID = 'var(--line)'
 const MARK_SHAPES = ['circle', 'square', 'diamond', 'triangle', 'triangle-down', 'pentagon',
@@ -94,7 +95,8 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
   const [hoverId, setHoverId] = React.useState(null)   // interactivity: crosshair + tooltip on hover
   const [focusGrp, setFocusGrp] = React.useState(null)   // interactivity: click the legend to isolate one group
   const [groupBy, setGroupBy] = React.useState('operator')   // grouping dimension: operator | theme
-  const grpKey = (n) => groupBy === 'theme' ? (n.idea?.theme || 'untagged') : (n.operator || '—')
+  const groupDimensionLabel = value => value === 'theme' ? 'direction' : value
+  const grpKey = (n) => groupBy === 'theme' ? (nodeTheme(n) || 'untagged') : (n.operator || '—')
   const grpColor = (n) => groupBy === 'theme' ? themeColor(grpKey(n)) : opColor(n.operator)
   const grpLabel = (g) => groupBy === 'theme' ? g : operatorMeta(g).label
   const grpSwatch = (g) => groupBy === 'theme' ? themeColor(g) : opColor(g)
@@ -123,7 +125,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     const v = n.confirmed_mean ?? n.metric
     if (n.feasible !== false && (best === null || (direction === 'min' ? v < best : v > best))) best = v
     if (best !== null) bestPts.push([X(n.id), Y(best)])
-    tableRows.push({ node: n.id, operator: n.operator || '—', theme: n.idea?.theme || 'untagged',
+    tableRows.push({ node: n.id, operator: n.operator || '—', theme: nodeTheme(n) || 'untagged',
       metric: v, best, feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
   })
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
@@ -152,11 +154,11 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     return { shape: MARK_SHAPES[index % MARK_SHAPES.length],
       variant: ['solid', 'outline', 'dot'][Math.floor(index / MARK_SHAPES.length) % 3] }
   }
-  const hasThemes = evald.some(n => n.idea?.theme)
+  const hasThemes = evald.some(nodeTheme)
   const columns = [
     { key: 'node', label: 'Node', firstColumnHeader: true,
       render: (value) => pick ? <button type="button" className="btn xs ghost" onClick={() => pick(value)}>#{value}</button> : `#${value}` },
-    { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Theme' },
+    { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Direction' },
     { key: 'metric', label: 'Metric', numeric: true },
     { key: 'best', label: 'Best so far', numeric: true }, { key: 'feasible', label: 'Constraint status' },
   ]
@@ -169,7 +171,8 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       {hasThemes && <span className="chart-grp">group:
         {['operator', 'theme'].map(g => <button type="button" key={g} aria-pressed={groupBy === g}
           className={'btn xs ghost' + (groupBy === g ? ' primary' : '')}
-          onClick={() => { setGroupBy(g); setFocusGrp(null) }} title={`colour points by ${g}`}>{g}</button>)}
+          onClick={() => { setGroupBy(g); setFocusGrp(null) }}
+          title={`colour points by ${groupDimensionLabel(g)}`}>{groupDimensionLabel(g)}</button>)}
       </span>}
       {canLog && <button type="button" aria-pressed={logY}
         className={'btn xs ghost' + (logY ? ' primary' : '')} onClick={() => setLogY(v => !v)}
@@ -195,6 +198,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       })()}
       {evald.map(n => {
         const v = n.confirmed_mean ?? n.metric
+        const theme = nodeTheme(n)
         const c = grpColor(n)
         const dim = focusGrp && grpKey(n) !== focusGrp   // legend focus: fade the other groups
         const status = n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'unknown'
@@ -203,7 +207,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
           x={X(n.id)} y={Y(v)} size={n.id === selected ? 5 : 4} color={c}
           shape={marker.shape} variant={marker.variant}
           feasibility={status} opacity={dim ? .12 : .88}
-          title={`#${n.id} ${n.operator || ''}${n.idea?.theme ? ` (${n.idea.theme})` : ''} → ${fmt(v)} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
+          title={`#${n.id} ${n.operator || ''}${theme ? ` (${theme})` : ''} → ${fmt(v)} · ${status === 'unknown' ? 'constraint status not reported' : status}`} />
       })}
       <path d={line} fill="none" stroke="var(--fg)" strokeWidth="4" opacity=".78" />
       <path d={line} fill="none" stroke="var(--ok)" strokeWidth="2.2" />

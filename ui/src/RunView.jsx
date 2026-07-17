@@ -23,6 +23,7 @@ import { initialDagOverviewDecision } from './dagViewport.js'
 import {
   captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
 } from './mergeIntent.js'
+import { nodeTheme } from './conceptId.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -556,7 +557,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     currentSelectedAttempt, commentAttemptMatches])
   useEffect(() => {
     if (!live2 || !themeFilter) return
-    const exists = Object.values(live2.nodes || {}).some(node => node.idea?.theme === themeFilter)
+    const exists = Object.values(live2.nodes || {}).some(node => nodeTheme(node) === themeFilter)
     if (exists) return
     setRouteNotice(current => [current, `Direction “${themeFilter}” is not available in this run state.`]
       .filter(Boolean).join(' '))

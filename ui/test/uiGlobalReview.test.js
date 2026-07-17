@@ -88,6 +88,9 @@ test('collapsed group drill-down preserves the active direction projection', asy
   assert.match(inspector, /themeFilteredGroupAggregate\(memberIds \|\| \[\], state\.nodes, dir, themeFilter\)/)
   assert.match(inspector, /aggregate\.matchedIds\.map/)
   assert.match(inspector, /No experiments in this group match direction/)
+  assert.match(inspector, /<KV k="directions" v=\{themes\.join\(', '\)\}/,
+    'Group Summary must present the legacy theme field as coarse directions')
+  assert.doesNotMatch(inspector, /<KV k="themes"/)
   assert.match(groupnodes, /className="grp-super-select"[\s\S]*?aria-pressed=\{!!selected\}/)
   assert.match(dag, /<button type="button" className="grp-chev btn-chev"/)
 })

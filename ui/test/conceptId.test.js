@@ -1,7 +1,7 @@
 // Unit tests for the shared prototype-safe concept-id helpers. Run with `node --test test/` from ui/.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { canonicalId, normalizeConceptId, conceptMap } from '../src/conceptId.js'
+import { canonicalId, normalizeConceptId, conceptMap, nodeTheme } from '../src/conceptId.js'
 
 test('canonicalId applies the rename map', () => {
   assert.equal(canonicalId('raw', { raw: 'loss/x' }), 'loss/x')
@@ -53,4 +53,13 @@ test('conceptMap is a null-prototype map', () => {
   m['__proto__'] = 5                                 // real own prop on a null-proto object (no setter)
   assert.equal(m['__proto__'], 5)
   assert.equal(m['toString'], undefined)             // no inherited props to leak
+})
+
+test('nodeTheme matches the server legacy-theme then first-concept-axis contract', () => {
+  assert.equal(nodeTheme({ idea: { theme: 'legacy', concepts: ['loss/contrastive'] } }), 'legacy')
+  assert.equal(nodeTheme({ idea: { theme: null, concepts: [' loss/contrastive ', 'architecture/moe'] } }), 'loss')
+  assert.equal(nodeTheme({ idea: { concepts: ['', null, ' architecture/moe'] } }), 'architecture')
+  assert.equal(nodeTheme({ idea: { concepts: [] } }), null)
+  assert.equal(nodeTheme({ idea: { concepts: 'loss/contrastive' } }), null)
+  assert.equal(nodeTheme(null), null)
 })

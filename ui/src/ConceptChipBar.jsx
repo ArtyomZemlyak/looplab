@@ -26,11 +26,20 @@ export default function ConceptChipBar({ state, onHighlight }) {
   // zero nodes" (empty Set -> everything dims): else, if the matches vanish while selected and the user
   // then clicks Clear, both map to the same key, the effect never re-fires, and the graph stays fully
   // dimmed. Prefix null with `none` and a Set with `s:`.
+  // If a live projection temporarily carries no concepts, remove graph dimming in the same
+  // render that hides this control. Keeping an empty Set here would dim every DAG node while also
+  // removing the only visible way to clear the filter.
   const highlight = useMemo(
-    () => matchingNodeIds(nodeConcepts, selected, rename), [nodeConcepts, selected, rename])
+    () => hasConcepts ? matchingNodeIds(nodeConcepts, selected, rename) : null,
+    [hasConcepts, nodeConcepts, selected, rename])
   const sig = highlight ? 's:' + [...highlight].sort((a, b) => a - b).join(',') : 'none'
   useEffect(() => { onHighlight && onHighlight(highlight) }, [sig])       // onHighlight is a stable setter
   useEffect(() => () => { onHighlight && onHighlight(null) }, [])         // clear the dim when unmounted
+  useEffect(() => {
+    if (hasConcepts) return
+    setSelected(value => value.length ? [] : value)
+    setPath(value => value ? '' : value)
+  }, [hasConcepts])
 
   // A chip's SELECTION KEY: a normal chip selects its subtree (plain id, prefix match); the "· here"
   // chip selects EXACTLY the nodes tagged at `path` (an `=`-prefixed key, exact match) so its count and
@@ -40,15 +49,6 @@ export default function ConceptChipBar({ state, onHighlight }) {
     setSelected(s => s.includes(key) ? s.filter(x => x !== key) : [...s, key])
   const removeSelected = (key) => setSelected(s => s.filter(x => x !== key))
   const clearSelection = () => setSelected([])
-
-  // If the run's concepts vanish while a selection is active (e.g. the only tagged node is
-  // propose-reset), clear it. Otherwise the highlight memo yields an empty Set → the [sig] effect dims
-  // every node → and the null-render below then removes the whole bar (pills + Clear) WITHOUT unmounting
-  // the component, so onHighlight(null) never fires and the graph is stranded fully dimmed with no
-  // controls. Clearing the selection collapses the highlight to null through the same [sig] effect.
-  useEffect(() => {
-    if (!hasConcepts && selected.length) setSelected([])
-  }, [hasConcepts, selected.length])
 
   if (!hasConcepts) return null
   const leaf = (id) => String(id).split('/').pop()
