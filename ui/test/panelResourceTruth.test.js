@@ -153,6 +153,32 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     assert.match(document.body.textContent, /Cross-run trajectories.*After/)
     assert.doesNotMatch(document.body.textContent, /Before/)
 
+    let trajectoryStart = requests.length
+    await render(panels.CrossRunTrajectories, {
+      rows: [{ run_id: 'healthy-run', label: 'Healthy' }, { run_id: 'gone-run', label: 'Gone' }],
+      dir: 'max', task: 'partial-demo',
+    })
+    let batch = requests.slice(trajectoryStart)
+    assert.equal(batch.length, 2)
+    await reply(batch.find(request => request.url.includes('/healthy-run/')),
+      { state: { nodes: { 0: { id: 0, metric: 3, feasible: true } } } })
+    await reply(batch.find(request => request.url.includes('/gone-run/')), {}, 404)
+    assert.match(document.body.textContent, /Cross-run trajectories.*Healthy/)
+    assert.match(document.querySelector('[role="status"]')?.textContent || '', /1 of 2 run trajectories omitted/)
+    assert.doesNotMatch(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay/)
+
+    trajectoryStart = requests.length
+    await render(panels.CrossRunTrajectories, {
+      rows: [{ run_id: 'gone-a', label: 'Gone A' }, { run_id: 'gone-b', label: 'Gone B' }],
+      dir: 'max', task: 'failed-demo',
+    })
+    batch = requests.slice(trajectoryStart)
+    assert.equal(batch.length, 2)
+    await reply(batch[0], {}, 404)
+    await reply(batch[1], { state: { nodes: [] } })
+    assert.match(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay: Unavailable.*Retry/)
+    assert.doesNotMatch(document.body.textContent, /run trajectories omitted/)
+
     await render(panels.GpuPanel)
     const hungRequest = requests.at(-1)
     assert.equal(hungRequest.options.signal.aborted, false)

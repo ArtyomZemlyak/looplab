@@ -973,22 +973,26 @@ export const crossRunTrajectoryKey = (rows, dir, task) => JSON.stringify([
 
 export function CrossRunTrajectories({ rows, dir, task }) {
   const rowKey = crossRunTrajectoryKey(rows, dir, task)
-  // REVIEW(2026-07-16): Promise.all with NO per-run catch is all-or-nothing — one rejected fetch
-  // (a run deleted between list polls -> 404) or one run tripping trajectoryNodes' strict validation
-  // rejects the WHOLE batch, and usePanelResource turns that into a panel-wide "Unavailable" instead
-  // of drawing the 7 healthy runs. The pre-rework code degraded each failed run to {series: []}.
-  // The rows list refreshes independently of run lifetimes, so a just-removed run is routine, not
-  // exceptional — add `.catch(() => null)` per run and filter, keeping the overlay partial-tolerant.
-  const [resource, retry] = usePanelResource(signal => Promise.all(rows.slice(0, 8).map(r =>
+  const requested = rows.slice(0, 8)
+  const [resource, retry] = usePanelResource(signal => Promise.all(requested.map(r =>
     get(runApiPath(r.run_id, '/state'), { signal }).then(p => {
       const ns = trajectoryNodes(p).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
       let best = null; const series = []
       for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
       return { run_id: r.run_id, label: r.label || r.run_id, series }
-    }))), undefined, rowKey)
+    }).catch(() => null))).then(results => {
+    const runs = results.filter(Boolean)
+    // # CODEX AGENT: A deleted or malformed sibling is a bounded omission, not authority to erase
+    // healthy trajectories. With no valid source at all, keep the ordinary retryable error state.
+    if (requested.length && !runs.length) invalidPanelPayload()
+    return { runs, omitted: requested.length - runs.length }
+  }), undefined, rowKey)
   return <div style={{ marginBottom: 12 }}>
     <PanelResourceNotice resource={resource} label="Trajectory overlay" onRetry={retry} />
-    {resource.data && <MultiTrajectory runs={resource.data} />}
+    {!!resource.data?.omitted && <div className="notice resource-warning" role="status">
+      {resource.data.omitted} of {requested.length} run trajectories omitted because their sources were unavailable or invalid.
+    </div>}
+    {resource.data && <MultiTrajectory runs={resource.data.runs} />}
   </div>
 }
 
