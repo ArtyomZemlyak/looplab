@@ -481,8 +481,11 @@ untrusted tier.
   backend is a single-shot call over aggregate stats; `rule` is a fixed heuristic; `off` runs fully
   static). Every choice it makes is also a direct config knob, so you can run fully static (`off`). At its consult cadence it reads a **coverage
   read-model** (`coverage_context`, on by default): a deterministic breadth summary of the run so
-  far — distinct themes and parameter-niches, the theme entropy, and the dominant-theme fraction —
-  recorded as a `coverage_snapshot` audit event (the run's *narrowing curve*). This is context, not
+  far — the distinct **concept axes** occupied and parameter-niches, the axis entropy, and the
+  dominant-axis fraction — recorded as a `coverage_snapshot` audit event (the run's *narrowing
+  curve*). Breadth is read over the **folded per-node concept set** (multi-membership: a node counts
+  under every axis it touches), so re-tags and consolidation renames reach the signal and it agrees
+  with the /concepts map — no longer the Researcher's first-authored theme. This is context, not
   a decision: it gives the controller eyes on whether the search is broadening or collapsing onto a
   single line of attack, so breadth can be a deliberate signal rather than only a reaction to metric
   stagnation. From that reading the Strategist sets a **novelty stance** (`explore` / `balanced` /
