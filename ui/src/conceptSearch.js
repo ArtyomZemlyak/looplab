@@ -144,6 +144,10 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
       result.expand.add(parent)
       current = parent
     }
+    // Note on descendants: with substring-on-full-id matching, every descendant of a concept-id match is
+    // itself a match (its id contains the query), so it is already added via its own ancestor walk — the
+    // filter needs no explicit subtree pass. A concept matched ONLY by a tagged experiment keeps just its
+    // own row + evidence; the component suppresses its expander since no child concept is visible.
   }
   return result
 }

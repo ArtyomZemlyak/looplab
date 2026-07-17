@@ -636,7 +636,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       {rows.map(({ id, depth, hasChildren }) => {
         const node = data.tree.nodes[id]
         const experiments = byConcept[id] || []
-        const open = expanded.has(id)
+        // Reflect the EFFECTIVE expansion (search force-opens ancestor paths) so the chevron/aria state
+        // matches what is actually rendered; toggling still writes to the user-controlled `expanded` set.
+        const open = effectiveExpanded.has(id)
+        // Under an active filter a concept can have children that are all filtered out (it matched only
+        // via a tagged experiment); don't offer an expander that would reveal nothing when opened.
+        const showExpander = hasChildren && (!searching
+          || (Array.isArray(node?.children) && node.children.some(child => filter.visible.has(child))))
         // A search that matched an EXPERIMENT (not the concept id) auto-opens that concept's evidence,
         // narrowed to the matching refs; a concept-id match (or a manual toggle) shows all its refs.
         const conceptHit = searching && filter.conceptHit.has(id)
@@ -652,7 +658,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost') + (conceptHit ? ' hit' : '')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>
-            {hasChildren ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
+            {showExpander ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
               aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${id}`}>{open ? '▾' : '▸'}</button>
               : <span className="cv-chev-placeholder" aria-hidden="true">·</span>}
             <span className="cv-cid" title={id}><Marked text={conceptLabel} query={searching ? query : ''} /></span>

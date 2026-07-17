@@ -137,6 +137,15 @@ test('filterConceptTree keeps a concept match and every ancestor, expanding the 
   assert.equal(f.evidenceOpen.size, 0)
 })
 
+test('a concept-id match pulls in its whole subtree (descendants are matches too)', () => {
+  // Every loss-tree id contains "loss", so each descendant is itself a match, visible and on an
+  // expanded path — no explicit subtree pass is needed to reveal children of a matched concept.
+  const f = filterConceptTree(TREE, REFS, 'loss')
+  assert.deepEqual([...f.visible].sort(), ['loss', 'loss/contrastive', 'loss/contrastive/dcl'])
+  assert.deepEqual([...f.expand].sort(), ['loss', 'loss/contrastive'])
+  assert.equal(f.conceptHit.size, 3)
+})
+
 test('filterConceptTree matches an experiment by status and auto-opens its evidence', () => {
   const f = filterConceptTree(TREE, REFS, 'failed')
   // only optimizer/adamw has a failed experiment
