@@ -83,6 +83,7 @@ _PRIOR_REPORT_PARSE_MAX_BYTES = 16 * 1024 * 1024
 _SCOPE_REPORT_RECORD_MAX_BYTES = 512 * 1024
 _SCOPE_REVISION_CACHE_MAX = 256
 _SCOPE_REVISION_CACHE_TTL_S = 60.0
+_SCOPE_CONTEXT_SCHEMA = 2
 
 
 class _ScopeReportStorageConflict(RuntimeError):
@@ -779,9 +780,10 @@ def build_router(srv) -> APIRouter:
     revision_cache_lock = threading.Lock()
     revision_cache: OrderedDict[tuple, tuple[float, dict[str, Any]]] = OrderedDict()
     omission_cache: OrderedDict[tuple, float] = OrderedDict()
+    generation_jobs_lock = threading.Lock()
+    generation_jobs: dict[str, str] = {}
 
-    def _scope_label(scope_type: str, scope_id: str) -> str:
-        data = projects.load()
+    def _scope_label_from_data(data: dict[str, Any], scope_type: str, scope_id: str) -> str:
         if scope_type == "project":
             p = next((x for x in data["projects"] if x["id"] == scope_id), None)
             return f"project “{p['name']}”" if p else f"project {scope_id}"
@@ -789,6 +791,9 @@ def build_router(srv) -> APIRouter:
             s = next((x for x in data["supertasks"] if x["id"] == scope_id), None)
             return f"super-task “{s['name']}”" if s else f"super-task {scope_id}"
         return f"task {scope_id}"
+
+    def _scope_label(scope_type: str, scope_id: str) -> str:
+        return _scope_label_from_data(projects.load(), scope_type, scope_id)
 
     def _scope_run_ids(scope_type: str, scope_id: str) -> list:
         """The runs a scope covers. project = the folder AND everything nested under it; task = same
@@ -806,20 +811,60 @@ def build_router(srv) -> APIRouter:
     def _scope_context_digest(scope_type: str, scope_id: str, run_ids: list[str]) -> str:
         project_data = projects.load()
         labels = project_data.get("labels", {}) if isinstance(project_data, dict) else {}
-        # REVIEW(2026-07-16): `projects_revision` embeds the ENTIRE workspace-global projects store in
-        # the digest, so ANY unrelated change — renaming a project this scope never touches, assigning
-        # a run in a different folder, creating an empty project — flips the digest for EVERY scope
-        # and marks every stored report stale. Combined with the quarantine gate below, one unrelated
-        # rename hides all paid reports workspace-wide until each is regenerated. Digest only the
-        # slice that can change THIS scope's meaning: the scope's own ancestry chain (names/parents),
-        # this scope's membership assignments, and the run_labels already included — not the store.
+        scoped_ids = sorted(set(run_ids))
+        scope_metadata: dict[str, Any] = {}
+        membership: dict[str, Any] = {}
+        if scope_type == "project":
+            # A project report's meaning includes the selected folder's ancestry and the exact
+            # placement of its member runs, but not unrelated folders elsewhere in the workspace.
+            # ``run_ids`` already binds the resulting membership set; assignments retain meaningful
+            # moves between descendants even when that set happens to stay unchanged.
+            rows = project_data.get("projects", []) if isinstance(project_data, dict) else []
+            index = {
+                row.get("id"): row for row in rows
+                if isinstance(row, dict) and isinstance(row.get("id"), str)
+            }
+            ancestry = []
+            current = scope_id
+            seen: set[str] = set()
+            while current not in seen:
+                seen.add(current)
+                row = index.get(current)
+                if row is None:
+                    break
+                ancestry.append({
+                    "id": row.get("id"), "name": row.get("name"),
+                    "parent_id": row.get("parent_id"),
+                })
+                parent = row.get("parent_id")
+                if not isinstance(parent, str):
+                    break
+                current = parent
+            scope_metadata["ancestry"] = list(reversed(ancestry))
+            assignments = (
+                project_data.get("assignments", {}) if isinstance(project_data, dict) else {})
+            membership = {run_id: assignments.get(run_id) for run_id in scoped_ids}
+        elif scope_type == "supertask":
+            rows = project_data.get("supertasks", []) if isinstance(project_data, dict) else []
+            selected = next((
+                row for row in rows
+                if isinstance(row, dict) and row.get("id") == scope_id
+            ), None)
+            if selected is not None:
+                scope_metadata["supertask"] = {
+                    "id": selected.get("id"), "name": selected.get("name"),
+                    "task_id": selected.get("task_id"),
+                }
+            assignments = (
+                project_data.get("supertask_assignments", {})
+                if isinstance(project_data, dict) else {})
+            membership = {run_id: assignments.get(run_id) for run_id in scoped_ids}
         context = {
             "scope": _scope_identity(scope_type, scope_id),
-            "label": _scope_label(scope_type, scope_id),
-            "run_labels": {rid: labels.get(rid) for rid in sorted(set(run_ids))},
-            # Project rename/reparent and super-task assignment can change report meaning even when
-            # the resulting membership happens to contain the same run ids.
-            "projects_revision": project_data,
+            "label": _scope_label_from_data(project_data, scope_type, scope_id),
+            "scope_metadata": scope_metadata,
+            "membership": membership,
+            "run_labels": {rid: labels.get(rid) for rid in scoped_ids},
         }
         return hashlib.sha256(json.dumps(
             context, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str,
@@ -1108,12 +1153,7 @@ def build_router(srv) -> APIRouter:
         if probe_key is None:
             return True, event_bytes
         try:
-            # REVIEW(2026-07-16): the SUCCESS path of this capture discards its result — no
-            # _remember_revision, no assignment — so neither closure cache is primed and the next
-            # request repeats the full events.jsonl read+hash+parse for the same unchanged run. Only
-            # the failure path below caches (via _remember_omission). Prime the revision cache with
-            # the successful capture here, matching the fast path this probe exists to feed.
-            capture_scope_source(
+            source = capture_scope_source(
                 srv.root, run_id, event_budget_bytes=max(1, remaining_bytes))
         except ScopeSourceError:
             after_probe, after_key = _source_probe_receipt(run_id, log_sig)
@@ -1122,6 +1162,13 @@ def build_router(srv) -> APIRouter:
             if after_key is not None:
                 _remember_omission(after_key)
             return True, event_bytes
+        _after_probe, after_key = _source_probe_receipt(
+            run_id, source.revision["log_sig"])
+        if after_key is not None:
+            # The report is stale because a previously omitted source is now readable. Retain the
+            # exact successful revision so subsequent GET observers do not repeatedly parse the same
+            # unchanged event prefix while the operator decides whether to regenerate.
+            _remember_revision(after_key, source.revision)
         # CODEX AGENT: a negative cache may skip work only when the answer is already stale. An
         # omitted receipt needs a current failed-open observation before it can authorize
         # ``stale:false``: accessibility is not part of the cheap stat key, so a transient lock can
@@ -1147,25 +1194,32 @@ def build_router(srv) -> APIRouter:
         added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
         rec, legacy_authority = _public_scope_record(rec)
         current_sig = _scope_sig(cur_ids)
-        stale = legacy_authority or current_sig != rec.get("sig")
+        stale_reason = "report_authority_upgrade" if legacy_authority else None
+        stale = legacy_authority
         source_revisions = rec.get("source_revisions")
         omitted_runs = rec.get("omitted_runs")
         omitted_source_probes = rec.get("omitted_source_probes")
         expected_context = rec.get("context_digest")
-        # REVIEW(2026-07-16): records persisted BEFORE 0f63c5f have no context_digest at all, so this
-        # gate marks every pre-existing report stale even when all inputs are byte-identical — a
-        # one-way legacy invalidation with no receipt telling the operator WHY (the UI just shows the
-        # stale quarantine + Regenerate, i.e. re-spend). Additive-reader rules elsewhere in this repo
-        # default missing fields, they don't retro-invalidate; if the intent IS to retire pre-v3
-        # records, stamp a distinct reason (e.g. legacy_authority-style) so the UI can say "report
-        # format upgraded — regenerate once" instead of implying the scope changed.
-        if (not isinstance(expected_context, str)
-                or _RUN_GENERATION_RE.fullmatch(expected_context) is None
-                or _scope_context_digest(scope_type, scope_id, cur_ids) != expected_context):
+        if rec.get("context_schema") != _SCOPE_CONTEXT_SCHEMA:
+            # Schema 1 digested the workspace-global projects store; digestless records predate even
+            # that receipt. Neither can prove the new scope-local semantic slice, so retire them with
+            # an explicit one-time migration reason instead of claiming that this scope changed.
             stale = True
+            stale_reason = stale_reason or "report_format_upgrade"
+        elif (not isinstance(expected_context, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_context) is None):
+            stale = True
+            stale_reason = stale_reason or "report_format_upgrade"
+        elif _scope_context_digest(scope_type, scope_id, cur_ids) != expected_context:
+            stale = True
+            stale_reason = stale_reason or "scope_context_changed"
+        if current_sig != rec.get("sig"):
+            stale = True
+            stale_reason = stale_reason or "scope_evidence_changed"
         if not stale and not isinstance(source_revisions, list):
             # Pre-v2 records did not bind task/config snapshots or the full event prefix.
             stale = True
+            stale_reason = "report_source_receipt_upgrade"
         elif not stale:
             try:
                 remaining = MAX_SCOPE_TOTAL_EVENT_BYTES
@@ -1189,10 +1243,13 @@ def build_router(srv) -> APIRouter:
                     remaining -= consumed
                     if not matches:
                         stale = True
+                        stale_reason = "scope_evidence_changed"
                         break
             except ScopeSourceError:
                 stale = True
+                stale_reason = "scope_evidence_changed"
         return {**rec, "exists": True, "stale": stale,
+                "stale_reason": stale_reason,
                 "current_run_count": len(cur_ids), "added": added}
 
     @router.post("/api/scope-report/{scope_type}/{scope_id:path}/generate")
@@ -1387,6 +1444,7 @@ def build_router(srv) -> APIRouter:
                    "omitted_runs": omitted,
                    "omitted_source_probes": {
                        rid: frozen_probe_receipts[rid] for rid in omitted},
+                   "context_schema": _SCOPE_CONTEXT_SCHEMA,
                    "context_digest": frozen_context_digest,
                    "model": s.llm_model, "content": content}
             try:
@@ -1409,21 +1467,26 @@ def build_router(srv) -> APIRouter:
             return {"ok": True, **rec, "authoritative": True,
                     "stale": False, "added": []}
 
-        # CODEX AGENT: synthesis is paid. Coalesce the exact action while it is running or its result
-        # is unobserved; consume the terminal process receipt after inline/poll delivery so a later
-        # explicit Regenerate remains a genuinely new action over the same source snapshot.
-        # REVIEW(2026-07-16): consume_on_poll retires the receipt on the FIRST poll that observes the
-        # terminal state — but reserve() rejoins CONCURRENT posts onto the same job_id, so several
-        # observers share ONE receipt: whichever tab/client polls first consumes it, and every other
-        # observer's next poll gets {"status":"unknown"} for a job that finished (they cannot tell
-        # success from failure and their UI falls into the ambiguous-outcome quarantine — see
-        # ScopeReport.jsx generationFlights, where exactly this manifests as a locked Generate). A
-        # shared receipt needs per-observer delivery (consume when ALL joined observers have polled,
-        # or a short retention window), not first-poll destruction.
-        reservation = srv.jobs.reserve(generation_identity, consume_on_poll=True)
+        # Synthesis is paid. Coalesce only the exact work that is still RUNNING, while retaining each
+        # terminal process receipt for the registry's bounded observer window. This separates two
+        # contracts that a consume-on-first-poll identity cannot satisfy at once: every joined tab can
+        # observe the shared terminal, and a later explicit Regenerate over unchanged evidence is a
+        # genuinely new action rather than a replay of an old narrative.
+        with generation_jobs_lock:
+            for identity, job_id in list(generation_jobs.items()):
+                job = srv.jobs.get(job_id)
+                if job is None or job.get("status") != "running":
+                    generation_jobs.pop(identity, None)
+            joined_job_id = generation_jobs.get(generation_identity)
+            if joined_job_id is not None:
+                reservation = {"status": "running", "job_id": joined_job_id}
+            else:
+                reservation = srv.jobs.reserve(consume_on_poll=False)
+                if reservation.get("status") == "running":
+                    generation_jobs[generation_identity] = reservation["job_id"]
         if reservation.get("status") != "running":
             return reservation
         return await srv.jobs.run_as_job(
-            _compute, reserved_job_id=reservation["job_id"], consume_inline_result=True)
+            _compute, reserved_job_id=reservation["job_id"], consume_inline_result=False)
 
     return router

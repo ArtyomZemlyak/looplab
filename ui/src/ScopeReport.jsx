@@ -19,21 +19,12 @@ const generatedAt = value => Number.isInteger(value?.generated_at) && value.gene
 const reportAdvanced = (value, baseline) => value?.exists === true && generatedAt(value) !== null
   && (baseline === null || generatedAt(value) !== baseline)
 
-// REVIEW(2026-07-16): an `uncertain` flight has NO exit besides a later GET observing generated_at
-// ADVANCE (reportAdvanced) — but the ambiguous outcome this quarantine models is precisely the case
-// where the job may have FAILED and never persists a new report: generated_at never advances, the
-// flight stays in this module-level Map for the rest of the SPA session, generate() early-returns on
-// existing?.uncertain, and both Generate/Regenerate render disabled — the scope's paid feature is
-// locked with no recovery short of a full page reload. Made MORE likely by the backend's
-// consume_on_poll receipt (see reports.py REVIEW note): a concurrent observer's poll retires the
-// shared receipt, this client sees status:"unknown", marks the flight uncertain, and locks. The
-// quarantine needs a resolution path for the not-advanced case too: an explicit "check status /
-// unlock retry" action, a bounded TTL, or a server status probe that distinguishes failed-and-gone
-// from still-running.
 function beginGeneration(key, baseline, start) {
   const existing = generationFlights.get(key)
   if (existing) return existing
-  const flight = { baseline, uncertain: false, error: null, promise: null }
+  const flight = {
+    baseline, uncertain: false, recoveryRequested: false, error: null, promise: null,
+  }
   flight.promise = Promise.resolve().then(start)
   generationFlights.set(key, flight)
   flight.promise.then(
@@ -137,7 +128,12 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
           return
         }
         const unresolved = generationFlights.get(key)
-        if (unresolved?.uncertain && reportAdvanced(value, unresolved.baseline)) {
+        if (unresolved?.uncertain && (
+          reportAdvanced(value, unresolved.baseline) || unresolved.recoveryRequested
+        )) {
+          // A successful authoritative read is the only manual unlock. It sends no generation POST;
+          // a later paid retry remains a separate explicit click and the backend re-joins the same
+          // retained job identity when that work is still present.
           generationFlights.delete(key)
         }
         const uncertainFlight = generationFlights.get(key)?.uncertain === true
@@ -184,6 +180,21 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     observeGeneration(flight, epoch)
   }
 
+  const recoverUncertain = () => {
+    const flight = generationFlights.get(key)
+    if (!flight?.uncertain) return
+    flight.recoveryRequested = true
+    setView(previous => ({
+      key,
+      data: previous.key === key && previous.data?.exists
+        ? { ...previous.data, stale: null } : previous.key === key ? previous.data : null,
+      busy: true, uncertain: true, err: null,
+    }))
+    // GET-only reconciliation: the effect clears the quarantine only after a valid current-scope
+    // response. A transport failure leaves the original uncertain flight fenced.
+    setReadRevision(value => value + 1)
+  }
+
   const c = data?.content
   const authority = scopeReportAuthority(data)
   const groups = authority.inspectable ? list(c?.comparison_groups) : []
@@ -194,6 +205,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   const runCount = count(data?.run_count) ?? 0
   const headline = text(c?.headline)
   const verdict = text(c?.verdict)
+  const formatUpgrade = data?.stale === true && data?.stale_reason === 'report_format_upgrade'
   useDialogFocus(dialogRef, onClose)
 
   return <div className="overlay" onMouseDown={event => { if (event.target === event.currentTarget) onClose?.() }}>
@@ -210,7 +222,10 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         {err && <div className="notice resource-error" role="alert">
           <span>{err}</span>{' '}
           <button type="button" className="btn sm ghost" disabled={busy}
-            onClick={() => setReadRevision(value => value + 1)}>Retry read</button>
+            onClick={() => setReadRevision(value => value + 1)}>Check again</button>
+          {uncertain && <button type="button" className="btn sm ghost" disabled={busy}
+            onClick={recoverUncertain}>Recheck &amp; unlock</button>}
+          {uncertain && <span className="muted"> Unlocking sends no generation request.</span>}
         </div>}
         {data == null && !err && <div className="notice" role="status">Loading…</div>}
 
@@ -227,7 +242,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             {evidenceRuns != null && sourceRuns != null
               ? <span>· evidence {evidenceRuns}/{sourceRuns} runs{c.coverage.incomplete === true ? ' (incomplete)' : ''}</span>
               : <span>· snapshot: {Array.isArray(data.run_ids) ? data.run_ids.length : '?'} runs</span>}
-            {data.stale === true && <span className="sr-stale"> · stale snapshot — regenerate</span>}
+            {data.stale === true && <span className="sr-stale"> · {formatUpgrade
+              ? 'report format upgraded — regenerate once'
+              : 'stale snapshot — regenerate'}</span>}
             {authority.freshness === 'unknown' && <span className="sr-stale"> · snapshot freshness unknown</span>}
           </div>
           {!authority.authoritative && <div className="notice sr-quarantine" role="status">
@@ -237,7 +254,9 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             Stored report freshness cannot be verified. Narrative, observations, and outcome claims are withheld.
           </div>}
           {authority.freshness === 'stale' && <div className="notice sr-quarantine" role="status">
-            This is a stale historical snapshot. Advisory narrative and observations remain inspectable; snapshot outcome claims are withheld.
+            {formatUpgrade
+              ? 'This report predates the current scope receipt. Regenerate once to migrate it; historical advisory content remains inspectable.'
+              : 'This is a stale historical snapshot. Advisory narrative and observations remain inspectable; snapshot outcome claims are withheld.'}
           </div>}
           {authority.fresh && !authority.verdict && <div className="notice sr-quarantine" role="status">
             The server did not provide a current authoritative verdict. Report observations remain unranked.

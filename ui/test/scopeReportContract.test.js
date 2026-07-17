@@ -129,6 +129,10 @@ test('ScopeReport fences late requests and quarantines outcome-bearing legacy co
   assert.match(source, /incomplete_runs[\s\S]*run incomplete/)
   assert.match(source, /typeof value\?\.exists === 'boolean'[\s\S]*!Array\.isArray\(value\.content\)/)
   assert.match(source, /scopeReportGenerationError\(error\)/)
+  assert.match(source, /recoveryRequested/)
+  assert.match(source, /Recheck &amp; unlock/)
+  assert.match(source, /Unlocking sends no generation request/)
+  assert.match(source, /stale_reason === 'report_format_upgrade'/)
   assert.doesNotMatch(source, /\/400\/\.test\(error\.message\)|'Generation failed: ' \+ error\.message/)
 })
 
@@ -216,6 +220,114 @@ test('ScopeReport renders only current authority and ignores an old generation a
     await reply(requests[3], payload('LATE A'))
     assert.match(document.body.textContent, /VERDICT B.*HEADLINE B/s)
     assert.doesNotMatch(document.body.textContent, /LATE A|VERDICT A|HEADLINE A/)
+  } finally {
+    if (root) await act(async () => root.unmount())
+    if (vite) await vite.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+    dom.window.close()
+  }
+})
+
+test('ScopeReport resolves an ambiguous flight through GET-only explicit recovery', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const requests = []
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    location: dom.window.location, sessionStorage: dom.window.sessionStorage,
+    requestAnimationFrame: callback => setTimeout(callback, 0),
+    cancelAnimationFrame: handle => clearTimeout(handle), IS_REACT_ACT_ENVIRONMENT: true,
+    fetch: (url, options) => new Promise(resolve => requests.push({
+      url: String(url), options, resolve,
+    })),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const payload = marker => ({
+    exists: true, authoritative: true, stale: false, label: marker,
+    generated_at: 100, run_ids: ['run-a'],
+    content: {
+      schema: SCOPE_CONTENT_SCHEMA,
+      verdict_authority: SCOPE_VERDICT_AUTHORITY,
+      narrative_authority: SCOPE_NARRATIVE_AUTHORITY,
+      verdict: `VERDICT ${marker}`, headline: `HEADLINE ${marker}`,
+      comparison_groups: [], metric_observations: [],
+      coverage: { prompt_runs: 1, source_runs: 1 },
+      what_worked: [], what_didnt: [], learnings: [], next_directions: [], caveats: [],
+    },
+  })
+  const reply = async (request, body) => act(async () => {
+    request.resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => body })
+    await Promise.resolve()
+    await Promise.resolve()
+  })
+  let root
+  let vite
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const [{ createRoot }, { default: ScopeReport }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ScopeReport.jsx'),
+    ])
+    root = createRoot(document.getElementById('root'))
+    await act(async () => {
+      root.render(React.createElement(ScopeReport, {
+        scope: { type: 'task', id: 'uncertain-recovery', label: 'uncertain-recovery' },
+        onClose: () => {},
+      }))
+      await Promise.resolve()
+    })
+    await reply(requests[0], payload('BASELINE'))
+
+    await act(async () => {
+      [...document.querySelectorAll('button')]
+        .find(button => /Regenerate/.test(button.textContent)).click()
+      await Promise.resolve()
+    })
+    assert.match(requests[1].url, /\/uncertain-recovery\/generate$/)
+    await reply(requests[1], { status: 'running', job_id: 'shared-job' })
+    assert.match(requests[2].url, /\/api\/jobs\/shared-job$/)
+    await reply(requests[2], { status: 'unknown' })
+    assert.match(document.body.textContent, /Generation outcome is unknown/i)
+    assert.match(document.body.textContent, /Recheck & unlock/i)
+    assert.equal(
+      [...document.querySelectorAll('button')].find(button => /outcome unknown/.test(button.textContent))
+        .disabled,
+      true,
+    )
+
+    const generationPostsBeforeRecovery = requests.filter(request =>
+      /\/generate$/.test(request.url)).length
+    await act(async () => {
+      [...document.querySelectorAll('button')]
+        .find(button => /Recheck & unlock/.test(button.textContent)).click()
+      await Promise.resolve()
+    })
+    assert.match(requests[3].url, /\/api\/scope-report\/task\/uncertain-recovery$/)
+    assert.equal(requests.filter(request => /\/generate$/.test(request.url)).length,
+      generationPostsBeforeRecovery, 'recovery itself must remain GET-only')
+    await reply(requests[3], payload('BASELINE'))
+
+    const regenerate = [...document.querySelectorAll('button')]
+      .find(button => /Regenerate/.test(button.textContent))
+    assert.equal(regenerate.disabled, false)
+    await act(async () => {
+      regenerate.click()
+      await Promise.resolve()
+    })
+    assert.match(requests[4].url, /\/uncertain-recovery\/generate$/)
+    assert.equal(requests.filter(request => /\/generate$/.test(request.url)).length, 2,
+      'a later retry remains a separate explicit user action')
+    await reply(requests[4], payload('RECOVERED'))
   } finally {
     if (root) await act(async () => root.unmount())
     if (vite) await vite.close()

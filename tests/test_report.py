@@ -2289,10 +2289,12 @@ def test_scope_report_rechecks_transient_omission_even_when_probe_is_unchanged(
     available = True
 
     repaired = client.get(url).json()
+    repeated = client.get(url).json()
 
     assert repaired["stale"] is True
+    assert repeated["stale"] is True
     assert repaired_captures == 1, (
-        "an omission cache must not authorize freshness after same-probe access repair")
+        "a successful omission probe must prime the revision cache without authorizing freshness")
 
 
 def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
@@ -2323,6 +2325,61 @@ def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
         json.dumps({"id": task_id, "goal": "changed model-visible task"}), encoding="utf-8")
     assert client.get(url).json()["stale"] is True
     assert captures == 1, "a cheap snapshot-identity miss must trigger exact revalidation"
+
+
+def test_scope_report_context_digest_is_scoped_to_relevant_project_semantics(
+        tmp_path, monkeypatch):
+    from looplab.serve.projects import ProjectStore
+
+    task_id = "project-context-slice"
+    _seed_scope_run(tmp_path, "owned-run", task_id)
+    store = ProjectStore(tmp_path / "projects.json")
+    root = store.create("owned root")
+    left = store.create("left", root.id)
+    right = store.create("right", root.id)
+    unrelated = store.create("unrelated")
+    store.assign("owned-run", left.id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/project/{root.id}"
+
+    generated = client.post(url + "/generate").json()
+    assert generated["ok"] is True
+    assert client.get(url).json()["stale"] is False
+
+    # This used to invalidate every report because the digest embedded all of projects.json.
+    store.rename(unrelated.id, "unrelated renamed")
+    store.create("empty unrelated child", unrelated.id)
+    unchanged = client.get(url).json()
+    assert unchanged["stale"] is False
+    assert unchanged["stale_reason"] is None
+
+    # Moving a member between descendants retains the same project-level run set, but it changes
+    # this scope's semantic membership slice and therefore must invalidate the snapshot.
+    store.assign("owned-run", right.id)
+    moved = client.get(url).json()
+    assert moved["stale"] is True
+    assert moved["stale_reason"] == "scope_context_changed"
+
+
+def test_scope_report_missing_context_receipt_has_explicit_upgrade_reason(
+        tmp_path, monkeypatch):
+    task_id = "digestless-context-record"
+    _seed_scope_run(tmp_path, "owned-run", task_id)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert client.post(url + "/generate").json()["ok"] is True
+    report_path = next((tmp_path / "reports").glob("*.json"))
+    record = json.loads(report_path.read_text(encoding="utf-8"))
+    record.pop("context_schema")
+    record.pop("context_digest")
+    report_path.write_text(json.dumps(record), encoding="utf-8")
+
+    migrated = client.get(url).json()
+    assert migrated["exists"] is True and migrated["stale"] is True
+    assert migrated["stale_reason"] == "report_format_upgrade"
+    assert migrated["authoritative"] is True
 
 
 def _seed_scope_run(root: Path, run_id: str, task_id: str) -> None:
@@ -2548,6 +2605,54 @@ def test_scope_report_rejects_task_snapshot_changed_after_job_reservation(
     assert response.json()["stale"] is True
     assert provider_calls == 0
     assert not list((tmp_path / "reports").glob("*.json"))
+
+
+def test_scope_report_terminal_receipt_is_shared_by_concurrent_observers(
+        tmp_path, monkeypatch):
+    import threading
+    import time
+
+    task_id = "shared-terminal-receipt"
+    _seed_scope_run(tmp_path, "owned-run", task_id)
+    app = make_app(tmp_path)
+    app.state.looplab.jobs._inline_wait = 0.0
+    started = threading.Event()
+    release = threading.Event()
+    synthesis_calls = 0
+
+    def slow_synthesis(_scope, _briefs, _client, **_kwargs):
+        nonlocal synthesis_calls
+        synthesis_calls += 1
+        started.set()
+        release.wait(timeout=5)
+        return {"headline": "shared terminal result"}
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report", slow_synthesis)
+    client = TestClient(app)
+    url = f"/api/scope-report/task/{task_id}/generate"
+
+    first = client.post(url).json()
+    assert first["status"] == "running" and started.wait(timeout=2)
+    second = client.post(url).json()
+    assert second == first
+    release.set()
+
+    terminal = None
+    for _ in range(200):
+        terminal = client.get(f"/api/jobs/{first['job_id']}").json()
+        if terminal.get("status") == "done":
+            break
+        time.sleep(0.01)
+    assert terminal is not None and terminal["status"] == "done"
+    assert terminal["ok"] is True
+    # A second tab polling the same joined job receives the same bounded retained terminal receipt;
+    # first observation must not consume it.
+    observed_again = client.get(f"/api/jobs/{first['job_id']}").json()
+    assert observed_again["status"] == "done"
+    assert observed_again["generated_at"] == terminal["generated_at"]
+    assert synthesis_calls == 1
 
 
 def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monkeypatch):
