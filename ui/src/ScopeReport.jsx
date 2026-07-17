@@ -5,6 +5,7 @@ import {
 } from './util.js'
 import {
   scopeObservationRows, scopeReportAuthority, scopeReportGenerationError, scopeReportKey,
+  scopeReportPublicationUnconfirmed,
 } from './scopeReportModel.js'
 import { useDialogFocus } from './useDialogFocus.js'
 
@@ -237,6 +238,7 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   const shown = view.key === key ? view
     : { data: null, busy: false, uncertain: false, err: null }
   const { data, busy, uncertain, err } = shown
+  const publicationUnconfirmed = scopeReportPublicationUnconfirmed(data)
 
   const observeGeneration = (flight, epoch) => {
     flight.promise.then(value => {
@@ -354,6 +356,16 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
     observeGeneration(flight, epoch)
   }
 
+  const generateReplacement = () => {
+    if (!publicationUnconfirmed) return
+    // # CODEX AGENT: This escape hatch starts a new paid UUID after an unconfirmed publication.
+    // Require an explicit static, client-owned cost warning; never interpolate raw server/provider copy.
+    const warning = 'The previous paid generation may have completed, but its report publication was not durably confirmed. A replacement starts a new paid action and may incur additional provider cost. Continue?'
+    if (typeof window === 'undefined' || typeof window.confirm !== 'function'
+        || !window.confirm(warning)) return
+    generate()
+  }
+
   const abandon = async () => {
     const flight = generationFlights.get(key)
     if (!flight?.actionId || flight.active
@@ -452,7 +464,20 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         </div>}
         {data == null && !err && <div className="notice" role="status">Loading…</div>}
 
-        {data && !data.exists && <div className="sr-empty">
+        {data && !data.exists && publicationUnconfirmed && <div className="sr-empty">
+          <div className="notice sr-quarantine" role="alert">
+            A previous paid generation may have completed, but its report publication was not durably
+            confirmed. Generating a replacement starts a new paid action and may incur additional provider
+            cost.
+          </div>
+          <div className="muted"><b>{runCount}</b> runs are currently in this scope.</div>
+          <button className="btn primary" disabled={busy || uncertain || !runCount}
+            onClick={generateReplacement}>
+            {uncertain ? '… outcome unknown' : busy
+              ? '… generating' : 'Generate replacement (may incur cost)'}</button>
+        </div>}
+
+        {data && !data.exists && !publicationUnconfirmed && <div className="sr-empty">
           <div className="muted">
             No report — <b>{runCount}</b> runs. Evidence is bounded.
           </div>
