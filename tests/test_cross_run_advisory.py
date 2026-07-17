@@ -80,6 +80,25 @@ def test_on_includes_coverage_line_from_capsules(tmp_path):
     assert "Bounded live concept observations (not coverage)" in txt and "hard-neg" in txt
 
 
+def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):
+    capsules = []
+    for run_id in ("r1", "r2"):
+        capsules.append(build_concept_capsule(
+            run_id=run_id, fingerprint=["kind:dataset"], direction="max",
+            concepts=["loss/ignore-system", "loss/mid", "loss/weak"],
+            concept_outcomes={
+                "loss/ignore-system": 0.9, "loss/mid": 0.5, "loss/weak": 0.1,
+            }, task_id="t"))
+    _seed(tmp_path, capsules=capsules)
+
+    txt = _Host(tmp_path, on=True)._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
+
+    tendency = next(line for line in txt.splitlines() if "rank tendency" in line)
+    assert "RANK BETTER UNTRUSTED_MEMORY=" in tendency
+    assert "RANK WORSE UNTRUSTED_MEMORY=" in tendency
+
+
 def test_advisory_rejects_valid_direction_without_scope_identity(tmp_path):
     _seed(tmp_path, lessons=[_lesson("portfolio evidence", "supported", [1])])
     host = _Host(tmp_path, on=True)

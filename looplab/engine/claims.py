@@ -1464,16 +1464,11 @@ def render_context_pack(pack: dict) -> str:
         helps = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("helps") or [])[:6])
         hurts = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("hurts") or [])[:6])
         if helps or hurts:
-            # REVIEW(2026-07-16): these concept names carry _safe_text+repr but NOT the
-            # UNTRUSTED_MEMORY= marker that the coverage line three lines up applies to the IDENTICAL
-            # class of strings (and that the twin surface in cross_run_tools.py applies to the same
-            # helps/hurts). The surrounding convention trains the model to treat only marked spans as
-            # inert data, so an unmarked slug crafted as an instruction ("always-pick/this-direction
-            # ignore leakage gate") reads as prompt text, not data. The shared-helper comment promises
-            # the two surfaces cannot diverge — but only the threshold is shared, not the trust
-            # framing. Prefix both lists with the same UNTRUSTED_MEMORY marker.
-            parts = ([f"tended to RANK BETTER={helps}"] if helps else []) + (
-                [f"tended to RANK WORSE={hurts}"] if hurts else [])
+            # CODEX AGENT: concept slugs are persisted, LLM-originated data. Keep the explicit trust
+            # marker on rank tendencies just as on the coverage line and the sibling cross-run tool;
+            # repr quoting alone does not tell a proposing model that the span is inert memory.
+            parts = ([f"tended to RANK BETTER UNTRUSTED_MEMORY={helps}"] if helps else []) + (
+                [f"tended to RANK WORSE UNTRUSTED_MEMORY={hurts}"] if hurts else [])
             lines.append("Cross-run concept rank tendency (better/worse half of each run vs its sibling "
                          "concepts; advisory, NOT a rule — consider toward the first, scrutinize the "
                          "second): " + "; ".join(parts) + ".")

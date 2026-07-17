@@ -275,29 +275,21 @@ class CrossRunTools:
                 lines.append("Most explored: "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
                                          f"(×{e['n_runs']})" for e in atlas["explored"][:6]))
-            # PART V Phase 1: direction-normalized RANK tendency — concepts that consistently landed in the
-            # better vs worse half of their run's own field across similar runs. The qualifying threshold is
-            # the SHARED `concept_profit_tendencies` helper (identical to the researcher advisory pack, so the
-            # two surfaces cannot diverge). ADVISORY rank tendency, never a rule/selection input.
-            # REVIEW(2026-07-16): the "cannot diverge" promise above only holds for the THRESHOLD —
-            # the INPUTS differ: this computes over atlas["explored"], which portfolio_atlas caps to
-            # the top-8 concepts by n_runs, while build_context_pack computes the same tendency over
-            # the FULL overview rows (up to 512). A concept helping/hurting consistently in 3 runs
-            # but ranked 9th+ by exploration count appears in the Researcher's advisory pack yet is
-            # absent here (the same payload's context_pack.coverage even lists it) — the assistant
-            # reports "no consistent tendencies" while the engine's own prompt pack says the
-            # opposite. Feed both surfaces the same row set (full overview), not the display cap.
-            from looplab.engine.memory import concept_profit_tendencies
-            tendency = concept_profit_tendencies(atlas["explored"])
-            helps, hurts = tendency["helps"], tendency["hurts"]
+            # PART V Phase 1: use the context pack's tendency projection, which was computed from the
+            # FULL overview before ``explored`` was display-capped. This keeps the assistant and the
+            # Researcher on one eligible population as well as one threshold: a qualifying concept
+            # ranked ninth by frequency must not disappear only from this twin surface.
+            coverage = (atlas.get("context_pack") or {}).get("coverage") or {}
+            helps = coverage.get("helps") or []
+            hurts = coverage.get("hurts") or []
             if helps or hurts:
                 seg = []
                 if helps:
                     seg.append("tended to RANK BETTER: " + ", ".join(
-                        f"UNTRUSTED_MEMORY={_safe_text(c, 120)!r}(+{n})" for c, n in helps[:6]))
+                        f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in helps[:6]))
                 if hurts:
                     seg.append("tended to RANK WORSE: " + ", ".join(
-                        f"UNTRUSTED_MEMORY={_safe_text(c, 120)!r}(-{n})" for c, n in hurts[:6]))
+                        f"UNTRUSTED_MEMORY={_safe_text(c, 140)!r}" for c in hurts[:6]))
                 lines.append("Cross-run rank tendency (better/worse half of each run; advisory, not a rule): "
                              + "; ".join(seg))
             if atlas["thin_coverage"]:

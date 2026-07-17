@@ -408,13 +408,12 @@ class RunTools:
                 hits.append(self._line(n) if n else f"#{nid}")
         if not hits:
             return f"(no experiments tagged '{target}')"
-        # REVIEW(2026-07-16): the header advertises the FULL hit count but the listing silently caps
-        # at 60 rows with no omission marker — unlike the sibling _concept_tree in the same change,
-        # which appends an explicit "(tree truncated ...)" receipt. On a 90-hit concept the
-        # Researcher reads "90 experiment(s)" + 60 lines, treats the listing as exhaustive, and
-        # re-proposes duplicates of the 30 hidden (most-recent) experiments. Append the same
-        # truncation receipt: f"... (+{len(hits) - 60} more, not shown)".
-        return f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(hits[:60])
+        shown = hits[:60]
+        if len(hits) > len(shown):
+            # CODEX AGENT: the headline reports the full population, so the bounded listing needs an
+            # honest omission receipt; otherwise a Researcher can mistake the first 60 for exhaustive.
+            shown.append(f"… (+{len(hits) - len(shown)} more experiment(s), not shown)")
+        return f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(shown)
 
     def _node_concepts_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):
@@ -432,6 +431,8 @@ class RunTools:
         parents = d["parent_ids"]
         base = ("root (no parent)" if not parents
                 else "parent" + ("s " if len(parents) > 1 else " ") + ", ".join(f"#{p}" for p in parents))
+        if d.get("untagged"):
+            return f"#{nid} concept delta vs {base}: (classification pending; no delta inferred)"
         def _fmt(label, ids):
             return f"{label}: {', '.join(ids)}" if ids else ""
         parts = [p for p in (_fmt("+added", d["added"]), _fmt("-removed", d["removed"]),

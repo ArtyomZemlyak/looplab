@@ -151,7 +151,8 @@ def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
     }
     st.node_concepts = {0: ["loss/contrast/dcl", "architecture/moe"], 1: ["loss/contrastive/mnr"]}
     st.concept_consolidation = {"loss/contrast/dcl": "loss/contrastive/dcl"}   # a live rename
-    rt = RunTools(); rt.bind_state(st)
+    rt = RunTools()
+    rt.bind_state(st)
     names = {f["function"]["name"] for f in rt.specs()}
     assert {"read_concept_tree", "concept_nodes", "node_concepts"} <= names
 
@@ -192,7 +193,8 @@ def test_node_concept_delta_read_model_and_tool():
     assert d2["parent_ids"] == [0, 1] and d2["added"] == ["data/aug"] and d2["inherited"] == ["loss/b"]
     assert set(d2["removed"]) == {"arch/moe", "loss/a"}
 
-    rt = RunTools(); rt.bind_state(st)
+    rt = RunTools()
+    rt.bind_state(st)
     assert "node_concept_delta" in {f["function"]["name"] for f in rt.specs()}
     out = rt.execute("node_concept_delta", {"node_id": 1})
     assert "#1 concept delta vs parent #0" in out
@@ -214,7 +216,8 @@ def test_node_concept_delta_never_raises_on_non_dict_stores():
     st.node_concepts = "loss/a"                                  # a str, not a dict
     d = node_concept_delta(st, 0)
     assert isinstance(d, dict) and d["added"] == [] and d["removed"] == []
-    rt = RunTools(); rt.bind_state(st)
+    rt = RunTools()
+    rt.bind_state(st)
     assert isinstance(rt.execute("node_concept_delta", {"node_id": 0}), str)   # never raises out of execute
 
 
@@ -234,6 +237,51 @@ def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
     assert d["inherited"] == ["loss/contrastive/dcl"] and d["added"] == ["loss/new"] and d["removed"] == []
 
 
+def test_node_concept_delta_distinguishes_pending_classification_from_empty_tags():
+    from looplab.search.concept_graph import node_concept_delta
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                status=NodeStatus.evaluated),
+        1: Node(id=1, parent_ids=[0], operator="improve", idea=Idea(operator="improve", params={}),
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: ["loss/a"]}
+
+    pending = node_concept_delta(st, 1)
+    assert pending == {"parent_ids": [0], "added": [], "removed": [], "inherited": [],
+                       "untagged": True}
+    tools = RunTools()
+    tools.bind_state(st)
+    rendered = tools.execute("node_concept_delta", {"node_id": 1})
+    assert "classification pending" in rendered and "-removed" not in rendered
+
+    # An explicit empty classifier receipt is materially different: it says the parent tag is absent.
+    st.node_concepts[1] = []
+    classified_empty = node_concept_delta(st, 1)
+    assert classified_empty["removed"] == ["loss/a"]
+    assert "untagged" not in classified_empty
+
+
+def test_concept_nodes_reports_omitted_experiments():
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        nid: Node(id=nid, operator="draft", idea=Idea(operator="draft", params={}),
+                  status=NodeStatus.evaluated)
+        for nid in range(65)
+    }
+    st.node_concepts = {nid: ["loss/a"] for nid in st.nodes}
+    tools = RunTools()
+    tools.bind_state(st)
+
+    rendered = tools.execute("concept_nodes", {"concept": "loss/a"})
+
+    assert rendered.startswith("65 experiment(s)")
+    assert "(+5 more experiment(s), not shown)" in rendered
+    assert "#59" in rendered and "#60" not in rendered
+
+
 def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
     # REVIEW: the tools must NORMALIZE ids (case/space/slash) the SAME way project_hierarchy + the
     # /concepts frame + the UI do, or the rendered tree's subtree counts collapse to [0] and a query on
@@ -244,7 +292,8 @@ def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
         1: Node(id=1, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
     }
     st.node_concepts = {0: ["loss/InfoNCE", "architecture/MoE"], 1: ["loss/InfoNCE"]}
-    rt = RunTools(); rt.bind_state(st)
+    rt = RunTools()
+    rt.bind_state(st)
     tree = rt.execute("read_concept_tree", {})
     assert "loss  [2]" in tree and "infonce  [2]" in tree and "moe  [1]" in tree   # counts join, not [0]
     # the agent queries the DISPLAYED (normalized) id and finds both nodes
@@ -262,7 +311,8 @@ def test_concept_read_tools_follow_full_rename_chain_and_never_raise(tmp_path):
                         status=NodeStatus.evaluated)}
     st.node_concepts = {0: ["loss/a"]}
     st.concept_consolidation = {"loss/a": "loss/b", "loss/b": "loss/c"}   # 2-hop chain
-    rt = RunTools(); rt.bind_state(st)
+    rt = RunTools()
+    rt.bind_state(st)
     assert "loss/c" in rt.execute("node_concepts", {"node_id": 0})        # resolved to the chain END
     assert "#0" in rt.execute("concept_nodes", {"concept": "loss/c"})     # query the true canonical
     assert "#0" in rt.execute("concept_nodes", {"concept": "loss/a"})     # or any earlier chain id

@@ -153,6 +153,22 @@ def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
     assert "RANK WORSE" in out and "loss/lose" in out
 
 
+def test_atlas_rank_tendency_uses_full_overview_not_explored_display_cap(tmp_path):
+    neutral = [f"axis/{letter}" for letter in "abcdefgh"]
+    capsules = []
+    for run_id in ("r1", "r2"):
+        outcomes = {concept: 0.5 for concept in neutral}
+        outcomes["axis/z-hidden"] = 0.9
+        capsules.append(_cap(run_id, [*neutral, "axis/z-hidden"], outcomes))
+    _seed(tmp_path, capsules=capsules)
+
+    out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
+
+    # All nine concepts tie on n_runs, so z-hidden is outside atlas['explored'][:8]. The context-pack
+    # tendency is computed before that display cap and must remain the common source for this tool.
+    assert "RANK BETTER" in out and "axis/z-hidden" in out
+
+
 def test_concept_map_tool_renders_global_graph(tmp_path):
     # PART V Phase 4/5: the global cross-run concept map — most-explored concepts + cross-run co-occurrences.
     _seed(tmp_path, capsules=[
