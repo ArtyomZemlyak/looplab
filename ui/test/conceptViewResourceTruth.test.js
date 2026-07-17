@@ -388,3 +388,71 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     dom.window.close()
   }
 })
+
+// Finding 1 (round-2 mega-review): a concept id can be an untrusted prototype key. The intermediate
+// (untagged) node of a "constructor/foo" tag is "constructor", which has NO experiment_refs entry —
+// reading the RAW experiment_refs object by that id resolves up the prototype chain to
+// Object.prototype.constructor (a function), and expanding the row then calls `.map` on the function and
+// crashes the whole view. The frame's refs/metrics must be read through a prototype-safe (null-proto) map.
+test('ConceptView does not crash on a concept id that is a JS prototype key (expand-all)', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const requests = []
+  const native = { setTimeout: globalThis.setTimeout, clearTimeout: globalThis.clearTimeout }
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    location: dom.window.location, HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true,
+    requestAnimationFrame: cb => native.setTimeout(cb, 0), cancelAnimationFrame: h => native.clearTimeout(h),
+    fetch: (url, options = {}) => new Promise(resolve => requests.push({ url: String(url), options, resolve })),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  let root, vite
+  const settle = async () => { await Promise.resolve(); await Promise.resolve(); await Promise.resolve() }
+  const button = text => [...document.querySelectorAll('button')].find(n => n.textContent.trim() === text)
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent', server: { middlewareMode: true },
+    })
+    const [{ createRoot }, conceptModule] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ConceptView.jsx'),
+    ])
+    // the payload the endpoint would ship: "constructor" is an untagged intermediate, only "constructor/foo"
+    // carries refs/metrics — validation accepts it (a real, valid tree), so the crash input is reachable.
+    const payload = conceptPayload('constructor/foo')
+    assert.doesNotThrow(() => conceptModule.validateConceptPayload(payload))
+    root = createRoot(document.getElementById('root'))
+    const state = {
+      direction: 'max', engine_running: true, best_node_id: 0,
+      node_concepts: { 0: ['constructor/foo'] }, concept_consolidation: {}, concept_edges: {},
+      node_concept_provenance: { 0: 'researcher-authored' },
+      nodes: { 0: { id: 0, attempt: 0, status: 'evaluated', idea: {}, metric: 0.7, confirmed_mean: null, feasible: true } },
+    }
+    await act(async () => {
+      root.render(React.createElement(conceptModule.default, {
+        runId: 'run#one', generation: GENERATION_A, sequence: null, state, onPickNode() {},
+      })); await settle()
+    })
+    await act(async () => {
+      requests.at(-1).resolve({ ok: true, status: 200, headers: { get: () => null }, json: async () => payload })
+      await settle()
+    })
+    // expand every row (this is what triggers experiments.map on the prototype-key node) — must not throw
+    await act(async () => { button('Expand all')?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); await settle() })
+    const cids = [...document.querySelectorAll('.cv-cid')].map(n => n.textContent)
+    assert.ok(cids.includes('constructor'), 'the prototype-key intermediate row rendered')
+    assert.ok(document.querySelector('.cv-table'), 'the concept table rendered without crashing')
+  } finally {
+    if (root) await act(async () => root.unmount())
+    if (vite) await vite.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+    dom.window.close()
+  }
+})

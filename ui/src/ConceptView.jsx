@@ -374,7 +374,19 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     }
   }, [data, lens, activeDerived])
 
-  const byConcept = data?.experiment_refs || {}
+  // experiment_refs is raw JSON (carries Object.prototype), and a concept id can be an untrusted prototype
+  // key — the intermediate node of a "constructor/foo" tag is "constructor", so reading
+  // byConcept["constructor"] on the raw object resolves UP the chain to Object.prototype.constructor (a
+  // function); expanding that row then calls `.map` on the function and crashes the whole Concept view.
+  // Rehydrate into a null-prototype map (own array values only) so every by-concept read is safe.
+  const byConcept = useMemo(() => {
+    const out = Object.create(null)
+    const src = data?.experiment_refs
+    if (src && typeof src === 'object') {
+      for (const key of Object.keys(src)) if (Array.isArray(src[key])) out[key] = src[key]
+    }
+    return out
+  }, [data])
   const rows = useMemo(() => visibleConceptRows(data?.tree, expanded), [data, expanded])
   const projectionStatus = useMemo(() => data
     ? visibleConceptRows(data.tree, new Set(Object.keys(data.tree.nodes))).projectionStatus
@@ -474,7 +486,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   if (stateCard) return <div className="concept-view cv-state-layout" data-route-main tabIndex={-1}
     aria-label="Concept tree"><StateCard {...stateCard} /></div>
 
-  const metricRows = data.metrics.rows
+  // Null-prototype rehydrate (same prototype-safety as byConcept): metrics.rows is raw JSON, and a
+  // "constructor"/"__proto__" intermediate concept id would otherwise read an inherited Object.prototype
+  // value at metricRows[id] instead of the correct "no row" undefined.
+  const metricRows = Object.create(null)
+  for (const key of Object.keys(data.metrics.rows)) metricRows[key] = data.metrics.rows[key]
   const experimentCount = new Set(Object.values(byConcept).flat()
     .map(ref => `${ref.node_id}:${ref.node_generation}`)).size
   const shippedLenses = data.edges_present ? data.lenses : data.lenses.filter(item => item.name === 'is_a')

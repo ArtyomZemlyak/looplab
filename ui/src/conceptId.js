@@ -6,25 +6,35 @@
 // Two guarantees: canonicalId never reads an inherited property; conceptMap is a null-prototype map so
 // building/reading it with an agent key can never touch the chain.
 
-// Canonicalize a raw concept id through the consolidation rename map. The rename lookup is guarded with
-// hasOwnProperty so a raw id that names a prototype property is NOT silently replaced by an inherited
-// value; a falsy mapping falls back to the raw id (matching the old `rename[raw] || raw` intent).
+// Normalize a raw concept id the SAME way the server's concept_frame.py::concept_id() does — trim,
+// case-fold, spaces->hyphens, strip leading/trailing slashes — so the client keys the SAME vocabulary
+// the /concepts frame ships (which is normalized). Without this the graph-tab surfaces (chip bar, on-node
+// Dag tags, highlight matching) key raw-cased ids while the tree/table use the normalized ids, so a
+// Researcher-authored "Regularization/R-Drop" splits into two concepts across the two tabs and a
+// lower-cased chip never highlights an upper-cased-authored node.
+export function normalizeConceptId(raw) {
+  return String(raw == null ? '' : raw).trim().toLowerCase().replace(/ /g, '-').replace(/^\/+|\/+$/g, '')
+}
+
+// Canonicalize a raw concept id: normalize it, then resolve the consolidation rename CHAIN exactly as the
+// server's canonical_concept does (try the rename map by the raw id first, then by the normalized id,
+// re-normalizing each hop, bounded to avoid a cycle). Every rename lookup is hasOwnProperty-guarded so an
+// id that names a prototype property ("constructor", "__proto__", …) can never be silently replaced by an
+// inherited value; an empty mapping ends the chain at the current normalized id.
 export function canonicalId(raw, rename = {}) {
-  // REVIEW(2026-07-16): this canonicalizer does NOT mirror the server's _normalize_concept_id
-  // (strip/lowercase/space->hyphen/trim slashes), so the client and server key DIFFERENT
-  // vocabularies for the same run. Server projections normalize (graph_from_node_concepts,
-  // project_hierarchy, concept_touch_counts all lowercase via _normalize_concept_id), but authored
-  // ids fold RAW into node_concepts and the client joins on that raw string: a Researcher-authored
-  // "Regularization/R-Drop" gets a lowercased tree/metrics row while experimentsByConcept keys the
-  // raw-cased id — the Concept view renders the row with metrics but ZERO experiments/badge. Mirror
-  // the server normalization here (trim, casefold, spaces->hyphens, strip slashes) before the rename
-  // lookup, or have the server ship pre-normalized node_concepts in /state so there is one vocabulary.
-  const key = String(raw == null ? '' : raw)
-  if (rename && Object.prototype.hasOwnProperty.call(rename, key)) {
-    const mapped = rename[key]
-    if (mapped) return String(mapped)
+  let current = String(raw == null ? '' : raw)
+  const seen = new Set()
+  for (let hop = 0; hop < 8; hop++) {                       // MAX_RENAME_HOPS-style bound; cannot loop
+    const canon = normalizeConceptId(current)
+    if (!canon || seen.has(canon)) return canon
+    seen.add(canon)
+    let next
+    if (rename && Object.prototype.hasOwnProperty.call(rename, current)) next = rename[current]
+    else if (rename && current !== canon && Object.prototype.hasOwnProperty.call(rename, canon)) next = rename[canon]
+    if (next == null || next === '') return canon          // no (further) rename -> the normalized id wins
+    current = String(next)
   }
-  return key
+  return normalizeConceptId(current)
 }
 
 // A null-prototype object usable as a map with untrusted string keys (no inherited props to shadow or

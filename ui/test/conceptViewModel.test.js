@@ -31,7 +31,7 @@ test('experimentsByConcept preserves hostile concept ids without prototype colli
   assert.equal(Object.getPrototypeOf(out), null)
   assert.deepEqual(out.__proto__, [0, 1])
   assert.deepEqual(out.constructor, [0])
-  assert.deepEqual(out.toString, [1])
+  assert.deepEqual(out.tostring, [1])                // 'toString' now normalizes (lower-cases) to 'tostring'
   assert.equal(Object.prototype.polluted, undefined)
   assert.deepEqual(experimentsByConcept({ 0: ['constructor'] }, {}).constructor, [0])
 })
