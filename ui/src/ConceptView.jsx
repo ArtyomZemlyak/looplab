@@ -648,17 +648,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const showExpander = hasChildren && (!searching
           || (Array.isArray(node?.children) && node.children.some(child => filter.visible.has(child))))
         // A search that matched an EXPERIMENT (not the concept id) auto-opens that concept's evidence,
-        // narrowed to the matching refs; a concept-id match (or a manual toggle) shows all its refs.
+        // narrowed to the matching refs; a concept-id match, or a MANUAL toggle of this row's evidence,
+        // shows all its refs. Consulting evidenceExpanded here lets clicking the "N refs" badge widen
+        // the auto-narrowed list back to the full set (otherwise the other refs stay unreachable until
+        // the filter is cleared, while the badge still advertises the full count).
         const conceptHit = searching && filter.conceptHit.has(id)
         const evidenceOpen = evidenceExpanded.has(id) || (searching && filter.evidenceOpen.has(id))
-        // REVIEW(2026-07-16): this narrowing ignores a MANUAL evidence toggle, contradicting the
-        // comment above ("a concept-id match (or a manual toggle) shows all its refs") and the
-        // badge: with a query matching 1 of 5 refs, the auto-opened list shows 1 row, the badge
-        // still reads "5 refs", and clicking it (evidenceExpanded.has(id) becomes true) changes
-        // nothing because this condition never consults evidenceExpanded — the other 4 refs are
-        // unreachable until the filter is cleared. Add `&& !evidenceExpanded.has(id)` so the manual
-        // toggle widens to the full list as documented.
-        const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit)
+        const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit && !evidenceExpanded.has(id))
           ? experiments.filter(ref => experimentRefMatches(ref, query))
           : experiments
         const crossParents = Array.isArray(node?.cross_parents) ? node.cross_parents : []

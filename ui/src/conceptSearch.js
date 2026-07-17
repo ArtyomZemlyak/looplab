@@ -7,7 +7,8 @@
 // highlight reuses matchingNodeIds from conceptChips.js so search and chip selection stay one mechanism.
 import { canonicalId } from './conceptId.js'
 
-const DEFAULT_LIMIT = 50   // cap the results list so a 1-char query cannot balloon the dropdown/DOM
+const DEFAULT_LIMIT = 50    // cap the results list so a 1-char query cannot balloon the dropdown/DOM
+const MAX_SUBTREE = 20_000 // bound the matched-subtree walk (>= the projection's 10k node cap) vs cycles
 
 // Normalize a user query the way every matcher below reads it: trimmed + lower-cased ('' when absent).
 export function normalizeQuery(query) {
@@ -20,21 +21,23 @@ export function normalizeQuery(query) {
 // (the CodeViewer `highlighted` helper does the same by hand; this keeps it testable and id-safe).
 export function highlightSegments(text, query) {
   const value = text == null ? '' : String(text)
-  const q = normalizeQuery(query)
-  if (!q) return [{ text: value, hit: false }]
-  // REVIEW(2026-07-16): the match index is computed in value.toLowerCase() but the slice below cuts
-  // the ORIGINAL string at that index. For characters whose lowercase mapping changes length
-  // ('İ' U+0130 -> 'i' + U+0307), indexes in the lowered string shift relative to the original, so
-  // the <mark> is misaligned ('İnit loss' + query 'loss' marks 'oss…' off by the expansion). Low
-  // likelihood today (concept ids are pre-lowercased) but Highlight.jsx made this THE shared <mark>
-  // renderer for arbitrary display strings. Walk the original with a per-character casefold
-  // comparison, or reject highlight (hit:false) when lowered length differs from the original.
-  const index = value.toLowerCase().indexOf(q)
+  const raw = typeof query === 'string' ? query.trim() : ''
+  if (!raw) return [{ text: value, hit: false }]
+  // The slice below cuts the ORIGINAL string at the match index, so that index must be aligned to the
+  // original. A case-insensitive `toLowerCase().indexOf` is only aligned when lowercasing preserves
+  // length; some characters expand ('İ' U+0130 -> 'i' + U+0307), shifting lowered-string indexes. When
+  // that happens, fall back to an exact-case match on the original (aligned by construction) rather than
+  // marking the wrong slice — a case-differing match inside such a string simply isn't highlighted.
+  const lowered = value.toLowerCase()
+  const aligned = lowered.length === value.length
+  const needle = aligned ? raw.toLowerCase() : raw
+  const index = aligned ? lowered.indexOf(needle) : value.indexOf(needle)
   if (index < 0) return [{ text: value, hit: false }]
+  const end = index + needle.length
   const segments = []
   if (index > 0) segments.push({ text: value.slice(0, index), hit: false })
-  segments.push({ text: value.slice(index, index + q.length), hit: true })
-  if (index + q.length < value.length) segments.push({ text: value.slice(index + q.length), hit: false })
+  segments.push({ text: value.slice(index, end), hit: true })
+  if (end < value.length) segments.push({ text: value.slice(end), hit: false })
   return segments
 }
 
@@ -145,18 +148,23 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
       result.expand.add(parent)
       current = parent
     }
-    // Note on descendants: with substring-on-full-id matching, every descendant of a concept-id match is
-    // itself a match (its id contains the query), so it is already added via its own ancestor walk — the
-    // filter needs no explicit subtree pass. A concept matched ONLY by a tagged experiment keeps just its
-    // own row + evidence; the component suppresses its expander since no child concept is visible.
-    // REVIEW(2026-07-16): that rationale holds ONLY for the is_a PATH hierarchy, where child ids
-    // extend the parent id. Under an EDGE lens (spec.kind === 'edge' — nodes carry cross_parents,
-    // children are arbitrary src/dst pairs), a child's id does NOT contain the parent's id, so
-    // descendants of a matched concept are filtered OUT and the component then suppresses the
-    // matched row's expander — the user cannot see or reach anything under the match without
-    // clearing the filter, with no hint children exist. Same query under is_a shows the full
-    // subtree, so behavior is lens-inconsistent (the unit test covers only the path lens). Edge-lens
-    // filtering needs an explicit subtree pass (mark descendants of concept-id matches visible).
+    // For a CONCEPT-id match, mark its whole subtree visible (collapsed) so the row's children are
+    // reachable when expanded. Under the is_a PATH lens every descendant id already contains the query
+    // (so each is self-visible and this is redundant), but under an EDGE lens child ids are arbitrary
+    // src/dst pairs that need NOT contain the parent id — without this pass their rows are filtered out
+    // and the component suppresses the match's expander, making edge-lens filtering inconsistent with
+    // the path lens (the user could neither see nor reach anything under the match). A concept matched
+    // ONLY by a tagged experiment keeps just its own row + evidence. Bounded via `visible` dedup + budget.
+    if (selfHit && Array.isArray(node.children)) {
+      const stack = [...node.children]
+      for (let budget = MAX_SUBTREE; stack.length && budget > 0; budget -= 1) {
+        const childId = stack.pop()
+        if (!has(nodes, childId) || result.visible.has(childId)) continue
+        result.visible.add(childId)
+        const child = nodes[childId]
+        if (child && Array.isArray(child.children)) for (const grandchild of child.children) stack.push(grandchild)
+      }
+    }
   }
   return result
 }

@@ -35,6 +35,15 @@ test('highlightSegments marks the first case-insensitive occurrence', () => {
   assert.deepEqual(highlightSegments(null, 'x'), [{ text: '', hit: false }])
 })
 
+test('highlightSegments stays aligned when lowercasing changes length', () => {
+  // 'İ' (U+0130) lowercases to two code units, so a lowered-string index would be shifted; the mark
+  // must still land on the ORIGINAL slice, not one character off.
+  const segs = highlightSegments('İoss', 'oss')
+  assert.deepEqual(segs, [{ text: 'İ', hit: false }, { text: 'oss', hit: true }])
+  // the hit text is exactly the original substring, never a shifted slice
+  assert.equal(segs.find(s => s.hit).text, 'oss')
+})
+
 test('conceptUniverse counts every ancestor with subtree membership', () => {
   const universe = conceptUniverse(NC, {})
   // loss subtree touches nodes 0,1,2,4
@@ -128,6 +137,23 @@ test('a concept-id match pulls in its whole subtree (descendants are matches too
   assert.deepEqual([...f.visible].sort(), ['loss', 'loss/contrastive', 'loss/contrastive/dcl'])
   assert.deepEqual([...f.expand].sort(), ['loss', 'loss/contrastive'])
   assert.equal(f.conceptHit.size, 3)
+})
+
+test('filterConceptTree marks an edge-lens match subtree visible (child id need not contain parent)', () => {
+  // Under an edge lens, child ids are arbitrary src/dst pairs that do NOT extend the parent id, so a
+  // concept-id match must pull its subtree in explicitly or the children are filtered out + unreachable.
+  const edgeTree = {
+    lens: 'uses',
+    roots: ['loss/contrastive'],
+    nodes: {
+      'loss/contrastive': { parent: null, depth: 0, children: ['training/warmup'], tagged: true, cross_parents: [] },
+      'training/warmup': { parent: 'loss/contrastive', depth: 1, children: [], tagged: true, cross_parents: [] },
+    },
+  }
+  const f = filterConceptTree(edgeTree, {}, 'contrastive')
+  assert.ok(f.conceptHit.has('loss/contrastive'))
+  // the edge-child, whose id does not contain "contrastive", is still visible so it can be revealed
+  assert.ok(f.visible.has('training/warmup'), 'edge-lens descendant of a concept match must be visible')
 })
 
 test('filterConceptTree matches an experiment by status and auto-opens its evidence', () => {
