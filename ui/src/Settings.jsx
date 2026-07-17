@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { getSettings, saveSettings, saveSecret, llmHealth } from './util.js'
-import { toForm, fromForm, settingsSavePayload, settingsValidationErrors, FIELD_BY_KEY, SETTINGS_GROUPS } from './settingsSchema.js'
+import {
+  toForm, fromForm, settingsSavePayload, settingsValidationErrors, loadSettingsSchema,
+} from './settingsSchema.js'
 import { filterSettingsGroups, reconcileAcceptedRecord, settingsViewStats } from './settingsModel.js'
 import SettingsForm from './SettingsForm.jsx'
 import { OpIcon } from './icons.jsx'
@@ -31,6 +33,7 @@ export function LlmHealth() {
 // run's Settings panel; this page deliberately starts with the small set most people need.
 export default function Settings({ onBack }) {
   const [defaults, setDefaults] = useState(null)
+  const [schema, setSchema] = useState(null)
   const [form, setForm] = useState(null)
   const [saved, setSaved] = useState(null)
   const [agentControl, setAgentControl] = useState({})
@@ -42,35 +45,47 @@ export default function Settings({ onBack }) {
   const [query, setQuery] = useState('')
   const [mutationBusy, setMutationBusy] = useState('')
   const mutationRef = useRef(null)
+  const loadRef = useRef(0)
 
-  const load = () => {
+  const load = (reloadSchema = false) => {
+    const owner = ++loadRef.current
     setLoadError('')
-    return getSettings().then(data => {
+    return Promise.all([getSettings(), loadSettingsSchema({ reload: reloadSchema })]).then(([data, nextSchema]) => {
+      if (loadRef.current !== owner) return
       const settings = data.settings || {}
-      const nextForm = toForm(settings)
+      const nextForm = toForm(settings, nextSchema)
       setDefaults(data.defaults)
+      setSchema(nextSchema)
       setForm(nextForm)
       setSaved(nextForm)
       const control = settings.agent_control || {}
       setAgentControl(control)
       setSavedAC(control)
       setSecretState({ llm_api_key: !!settings.llm_api_key })
-    }).catch(error => setLoadError(error?.message || 'Could not load settings.'))
+    }).catch(() => {
+      if (loadRef.current === owner) {
+        setSchema(null)
+        setLoadError('Settings or their editor schema could not be loaded.')
+      }
+    })
   }
-  useEffect(() => { load() }, [])
+  useEffect(() => {
+    load()
+    return () => { loadRef.current += 1 }
+  }, [])
 
   // Values that differ from engine defaults stay marked after Save.
   const dirty = useMemo(() => {
-    if (!form || !defaults) return new Set()
-    const current = fromForm(form)
+    if (!form || !defaults || !schema) return new Set()
+    const current = fromForm(form, schema)
     const changed = new Set()
-    for (const key of Object.keys(FIELD_BY_KEY)) {
-      if (FIELD_BY_KEY[key].type === 'secret') continue
-      const defaultValue = defaults[key] ?? (FIELD_BY_KEY[key].type === 'list' ? [] : null)
+    for (const key of Object.keys(schema.fieldByKey)) {
+      if (schema.fieldByKey[key].type === 'secret') continue
+      const defaultValue = defaults[key] ?? (schema.fieldByKey[key].type === 'list' ? [] : null)
       if (JSON.stringify(current[key]) !== JSON.stringify(defaultValue ?? null)) changed.add(key)
     }
     return changed
-  }, [form, defaults])
+  }, [form, defaults, schema])
 
   // A field is unsaved when either its value or runtime-governance roles changed since the last save.
   const unsavedKeys = useMemo(() => {
@@ -85,10 +100,12 @@ export default function Settings({ onBack }) {
     return changed
   }, [form, saved, agentControl, savedAC])
   const unsaved = unsavedKeys.size > 0
-  const validationErrors = useMemo(() => form ? settingsValidationErrors(form) : {}, [form])
+  const validationErrors = useMemo(() => form && schema
+    ? settingsValidationErrors(form, schema) : {}, [form, schema])
   const invalidCount = Object.keys(validationErrors).length
 
-  const visibleGroups = useMemo(() => filterSettingsGroups(SETTINGS_GROUPS, { mode, query }), [mode, query])
+  const visibleGroups = useMemo(() => schema
+    ? filterSettingsGroups(schema.groups, { mode, query }) : [], [mode, query, schema])
   const visibleStats = useMemo(() => settingsViewStats(visibleGroups), [visibleGroups])
   const hiddenUnsaved = [...unsavedKeys].filter(key => !visibleStats.keys.has(key)).length
   const searching = !!query.trim()
@@ -133,12 +150,12 @@ export default function Settings({ onBack }) {
     const submittedControl = agentControl
     const apiKey = (submittedForm.llm_api_key || '').trim()
     try {
-      const settingsPatch = settingsSavePayload(submittedForm, submittedControl, saved, savedAC)
+      const settingsPatch = settingsSavePayload(submittedForm, submittedControl, saved, savedAC, schema)
       const settingsChanged = Object.keys(settingsPatch).length > 0
       // PATCH only edits since this tab's baseline; replaying the full stale form
       // would overwrite disjoint settings saved by another tab after this one loaded.
       const result = await saveSettings(settingsPatch)
-      const acceptedForm = toForm(result.settings)
+      const acceptedForm = toForm(result.settings, schema)
       const acceptedControl = result.settings.agent_control || {}
 
       // Commit the ordinary-settings ACK immediately. If the independent secret write fails, the
@@ -197,7 +214,7 @@ export default function Settings({ onBack }) {
   }
   const resetToDefaults = () => {
     if (defaults) {
-      setForm(toForm(defaults))
+      setForm(toForm(defaults, schema))
       setAgentControl(defaults.agent_control || {})
     }
   }
@@ -216,8 +233,8 @@ export default function Settings({ onBack }) {
     </div>
 
     <main className="settings-page" data-route-main tabIndex={-1}>
-      {!form ? (loadError
-        ? <div className="notice resource-error" role="alert"><b>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={load}>Retry</button></div>
+      {!form || !schema ? (loadError
+        ? <div className="notice resource-error" role="alert"><b>Could not load settings.</b><span>{loadError}</span><button className="btn sm primary" onClick={() => load(true)}>Retry</button></div>
         : <div className="notice" role="status">Loading settings…</div>) : <>
         <section className="settings-overview" aria-labelledby="settings-heading">
           <div className="settings-heading-row">
@@ -276,11 +293,11 @@ export default function Settings({ onBack }) {
                       errors={validationErrors}
                       agentControl={agentControl} onToggleAgent={onToggleAgent}
                       secretState={secretState} onClearSecret={onClearSecret}
-                      mode={mode} query={query} />
+                      mode={mode} query={query} schema={schema} />
       </>}
     </main>
 
-    {form && <div className="settings-actions"><div className="sa-inner">
+    {form && schema && <div className="settings-actions"><div className="sa-inner">
       <LlmHealth />
       <span className="spacer" style={{ flex: 1 }} />
       <span className={'settings-save-state' + (unsaved ? ' is-unsaved' : '') + (invalidCount ? ' is-invalid' : '')}

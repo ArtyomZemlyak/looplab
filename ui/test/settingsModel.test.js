@@ -2,9 +2,10 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  SETTINGS_GROUPS, FIELD_BY_KEY, INVALID_SETTING_VALUE, coerce, parseSettingValue,
+  INVALID_SETTING_VALUE, coerce, parseSettingValue,
   settingsValidationErrors,
 } from '../src/settingsSchema.js'
+import { FIELD_BY_KEY, SETTINGS_GROUPS, SETTINGS_SCHEMA } from './settingsSchemaFixture.js'
 import {
   ESSENTIAL_SETTING_KEYS,
   filterSettingsGroups,
@@ -73,7 +74,8 @@ test('numeric settings distinguish invalid input from a deliberate blank clear',
   assert.deepEqual(parseSettingValue({ type: 'int' }, ''), { valid: true, value: null, error: '' })
   assert.match(parseSettingValue({ type: 'int' }, '2.5').error, /whole number/i)
   assert.match(parseSettingValue({ type: 'float' }, '1e309').error, /finite number/i)
-  assert.match(settingsValidationErrors({ max_nodes: '2.5' }).max_nodes, /whole number/i)
+  assert.match(settingsValidationErrors({ max_nodes: '2.5' }, SETTINGS_SCHEMA).max_nodes,
+    /whole number/i)
 })
 
 test('accepted save records rebase without erasing edits made after submit', () => {

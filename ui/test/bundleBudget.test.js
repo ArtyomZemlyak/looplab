@@ -109,14 +109,17 @@ test('an incremental budget fails closed when its baseline selector disappears',
 test('the default policy is satisfiable by a fully split route and interaction graph', () => {
   const sources = [
     'RunList.jsx', 'AssistantBar.jsx', 'AttentionCenter.jsx', 'RunView.jsx', 'Dag.jsx',
-    'Dock.jsx', 'Inspector.jsx', 'DirectionsOverview.jsx', 'panels.jsx', 'CollabPanel.jsx', 'Settings.jsx',
+    'Dock.jsx', 'Inspector.jsx', 'DirectionsOverview.jsx', 'panels.jsx', 'CollabPanel.jsx',
     'SharedAssistant.jsx', 'Report.jsx', 'ResearchAtlas.jsx',
   ]
   const graph = {
     'index.html': {
       file: 'assets/entry.js', src: 'index.html', name: 'index', isEntry: true,
-      dynamicImports: [...sources.map(file => `src/${file}`), '_vendor-flow.js'],
+      dynamicImports: [...sources.map(file => `src/${file}`), '_settings-support.js', '_vendor-flow.js'],
       css: ['assets/base.css'],
+    },
+    '_settings-support.js': {
+      file: 'assets/settings-support.js', name: 'settings-support', isDynamicEntry: true,
     },
     '_vendor-flow.js': { file: 'assets/vendor-flow.js', name: 'vendor-flow' },
   }

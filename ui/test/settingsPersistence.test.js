@@ -2,13 +2,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
-  FIELD_BY_KEY,
   settingsSavePayload,
   settingsValidationErrors,
   toForm,
 } from '../src/settingsSchema.js'
+import { FIELD_BY_KEY, SETTINGS_SCHEMA } from './settingsSchemaFixture.js'
 
 const CROSS_RUN_FLAGS = [
+  'concept_pivot',
+  'graded_novelty',
+  'capability_expansion',
   'fingerprint_universal',
   'cross_run_concepts',
   'cross_run_read_tools',
@@ -25,9 +28,10 @@ test('global Settings sends only controlled fields and never replays stale hidde
     llm_api_key: '***',
     agent_control: { timeout: ['strategist'] },
   }
-  const baseline = toForm(loaded)
+  const baseline = toForm(loaded, SETTINGS_SCHEMA)
   const form = { ...baseline, max_nodes: '13' }
-  const payload = settingsSavePayload(form, loaded.agent_control, baseline, loaded.agent_control)
+  const payload = settingsSavePayload(form, loaded.agent_control, baseline, loaded.agent_control,
+    SETTINGS_SCHEMA)
 
   assert.equal(Object.hasOwn(payload, 'future_engine_override'), false)
   assert.deepEqual(payload, { max_nodes: 13 })
@@ -41,17 +45,17 @@ test('two stale tabs emit disjoint patches and preserve explicit clears and gove
     memory_dir: 'portfolio',
     agent_control: { timeout: ['researcher', 'strategist'], max_nodes: ['boss'] },
   }
-  const baseline = toForm(loaded)
+  const baseline = toForm(loaded, SETTINGS_SCHEMA)
   const tabA = { ...baseline, max_nodes: '21', memory_dir: '' }
   const tabB = { ...baseline, policy: 'mcts' }
   const controlB = { ...loaded.agent_control, timeout: ['strategist'] }
 
   assert.deepEqual(
-    settingsSavePayload(tabA, loaded.agent_control, baseline, loaded.agent_control),
+    settingsSavePayload(tabA, loaded.agent_control, baseline, loaded.agent_control, SETTINGS_SCHEMA),
     { max_nodes: 21, memory_dir: null },
   )
   assert.deepEqual(
-    settingsSavePayload(tabB, controlB, baseline, loaded.agent_control),
+    settingsSavePayload(tabB, controlB, baseline, loaded.agent_control, SETTINGS_SCHEMA),
     { policy: 'mcts', agent_control: { timeout: ['strategist'] } },
   )
 })
@@ -59,7 +63,7 @@ test('two stale tabs emit disjoint patches and preserve explicit clears and gove
 test('Settings page imports coercion and saves against its last baseline', () => {
   const source = readFileSync(new URL('../src/Settings.jsx', import.meta.url), 'utf8')
   assert.match(source, /import \{[^}]*\bfromForm\b[^}]*\} from ['"]\.\/settingsSchema\.js['"]/)
-  assert.match(source, /settingsSavePayload\(submittedForm, submittedControl, saved, savedAC\)/)
+  assert.match(source, /settingsSavePayload\(submittedForm, submittedControl, saved, savedAC, schema\)/)
   assert.match(source, /disabled=\{!unsaved \|\| invalidCount > 0 \|\| !!mutationBusy\}/)
   const formSource = readFileSync(new URL('../src/SettingsForm.jsx', import.meta.url), 'utf8')
   assert.match(formSource, /aria-invalid=\{error \? 'true' : undefined\}/)
@@ -97,31 +101,34 @@ test('per-run Settings aborts stale loads and rebases a save ACK onto newer edit
 })
 
 test('an invalid numeric edit fails before transport and cannot clear the persisted override', () => {
-  const baseline = toForm({ max_nodes: 17 })
+  const baseline = toForm({ max_nodes: 17 }, SETTINGS_SCHEMA)
   const form = { ...baseline, max_nodes: '2.5' }
-  assert.match(settingsValidationErrors(form).max_nodes, /whole number/i)
+  assert.match(settingsValidationErrors(form, SETTINGS_SCHEMA).max_nodes, /whole number/i)
   assert.throws(
-    () => settingsSavePayload(form, {}, baseline, {}),
+    () => settingsSavePayload(form, {}, baseline, {}, SETTINGS_SCHEMA),
     error => error?.code === 'invalid_settings_form'
       && /max_nodes/.test(JSON.stringify(error.validationErrors)),
   )
   assert.equal(baseline.max_nodes, 17, 'the last persisted baseline remains intact')
-  assert.deepEqual(settingsSavePayload({ ...baseline, max_nodes: '' }, {}, baseline, {}),
+  assert.deepEqual(settingsSavePayload({ ...baseline, max_nodes: '' }, {}, baseline, {}, SETTINGS_SCHEMA),
     { max_nodes: null }, 'a deliberate blank remains an explicit clear')
 })
 
 test('every Part IV/V flag is visible and round-trips its boolean value', () => {
   const baseline = Object.fromEntries(CROSS_RUN_FLAGS.map(key => [key, false]))
   baseline.future_engine_override = 'still-here'
-  const form = toForm(baseline)
+  const form = toForm(baseline, SETTINGS_SCHEMA)
   for (const key of CROSS_RUN_FLAGS) form[key] = true
 
-  const payload = settingsSavePayload(form, {})
+  const payload = settingsSavePayload(form, {}, undefined, undefined, SETTINGS_SCHEMA)
   for (const key of CROSS_RUN_FLAGS) {
     assert.equal(FIELD_BY_KEY[key]?.type, 'bool', `${key} must be a visible boolean control`)
     assert.equal(payload[key], true, `${key} must round-trip through the form`)
   }
   assert.equal(Object.hasOwn(payload, 'future_engine_override'), false)
+  assert.match(FIELD_BY_KEY.concept_pivot.help, /never ranks or selects/i)
+  assert.match(FIELD_BY_KEY.graded_novelty.help, /proposal admission/i)
+  assert.match(FIELD_BY_KEY.capability_expansion.help, /Concept coverage pivot/i)
   assert.match(FIELD_BY_KEY.cross_run_concepts.help, /D8.*persist independently/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.warning, /never applies/i)
   assert.match(FIELD_BY_KEY.cross_run_curation_auto.help, /explicit operator/i)

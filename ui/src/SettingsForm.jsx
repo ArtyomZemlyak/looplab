@@ -1,5 +1,4 @@
 import React, { useId, useState } from 'react'
-import { SETTINGS_GROUPS, AGENT_ROLE_PILLS } from './settingsSchema.js'
 import { filterSettingsGroups, normalizeSettingsQuery } from './settingsModel.js'
 import './settings-polish.css'
 
@@ -9,11 +8,11 @@ import './settings-polish.css'
 //
 // `only` and `hideSecret` keep compact consumers (run settings and launch dialogs) compatible.
 // `mode` and `query` add progressive disclosure to the full Settings page.
-function AgentPills({ f, granted, onToggleAgent }) {
+function AgentPills({ f, granted, onToggleAgent, rolePills }) {
   if (!f.agents || !onToggleAgent) return null
   return <div className="sf-agents" role="group" aria-label={`Runtime access for ${f.label}`}>
     {f.agents.map(role => {
-      const p = AGENT_ROLE_PILLS[role]
+      const p = rolePills[role]
       const on = granted.includes(role)
       return <button key={role} type="button" className={'agpill' + (on ? ' on' : '')}
                      aria-pressed={on} aria-label={`${p.title}: ${on ? 'allowed' : 'not allowed'}`}
@@ -34,7 +33,7 @@ function changeDot(unsaved, changed) {
 const safeId = value => String(value).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
-                 secretSet, onClearSecret, readOnly }) {
+                 secretSet, onClearSecret, readOnly, rolePills }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
@@ -91,7 +90,8 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
       <label className="sf-label" htmlFor={inputId}>{f.label}{dot}
         {readOnly && <span className="muted" title="Fixed when this run started"> · launch-pinned</span>}
       </label>
-      <AgentPills f={f} granted={granted || []} onToggleAgent={readOnly ? undefined : onToggleAgent} />
+      <AgentPills f={f} granted={granted || []} onToggleAgent={readOnly ? undefined : onToggleAgent}
+        rolePills={rolePills} />
     </div>
     <div className="sf-input">{input}</div>
     {error && <div id={errorId} className="sf-error" role="alert">{error}</div>}
@@ -112,7 +112,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
                       onToggleAgent, secretState, onClearSecret, readOnlyKeys,
-                      panelId, labelledBy, searchable }) {
+                      panelId, labelledBy, searchable, rolePills }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
                   role={labelledBy ? 'tabpanel' : undefined}
@@ -126,15 +126,16 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
         changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} error={errors?.[f.key]} onChange={onChange}
         granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
         secretSet={secretState?.[f.key]} onClearSecret={onClearSecret}
-        readOnly={readOnlyKeys?.has(f.key)} />)}
+        readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills} />)}
     </div>
   </section>
 }
 
 export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
                                        secretState, onClearSecret, readOnlyKeys, hideSecret,
-                                       mode = 'all', query = '' }) {
-  const groups = filterSettingsGroups(SETTINGS_GROUPS, { mode, query, only, hideSecret })
+                                       mode = 'all', query = '', schema }) {
+  const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
+  const rolePills = schema.agentRolePills
   const [active, setActive] = useState(0)
   const reactId = useId()
   const idPrefix = `sf-${safeId(reactId)}`
@@ -154,7 +155,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
     {groups.map(gr => <GroupPanel key={gr.title} group={gr} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
-      readOnlyKeys={readOnlyKeys} searchable />)}
+      readOnlyKeys={readOnlyKeys} searchable rolePills={rolePills} />)}
   </div>
 
   const onTabKeyDown = (event, index) => {
@@ -186,6 +187,6 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
-      readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} />
+      readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills} />
   </div>
 }

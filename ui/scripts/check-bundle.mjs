@@ -12,8 +12,8 @@ const source = src => Object.freeze({ src })
 const named = name => Object.freeze({ name })
 
 // These are target budgets for the split graph, not a waiver for eager code. The route/panel lazy
-// boundaries have landed and the checker passes today; keep these calibrated downward from measured
-// split output — do not raise them to make eager code green.
+// boundaries have landed; the checker deliberately stays red whenever a working build exceeds a
+// measured target. Keep them calibrated downward — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
     // Measured July 2026 clean parallel-master baseline was 325,655 B (already 23 B above 318 KiB).
@@ -120,7 +120,9 @@ export const DEFAULT_BUDGETS = Object.freeze({
     },
     {
       name: 'Settings defers graph and panel code',
-      roots: [entry, source('src/Settings.jsx'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
+      // Settings.jsx and its shared schema/form are one manual group; Rolldown omits `src` from the
+      // grouped dynamic entry, so use its stable chunk name rather than weakening this proof.
+      roots: [entry, named('settings-support'), source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx')],
       targets: [named('vendor-flow'), source('src/panels.jsx'), source('src/CollabPanel.jsx')],
       requireTargets: true,
     },

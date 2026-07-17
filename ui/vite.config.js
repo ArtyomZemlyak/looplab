@@ -61,8 +61,11 @@ export default defineConfig({
               includeDependenciesRecursively: false,
             },
             {
-              name: 'code-support',
-              test: /[/\\]src[/\\](CodeViewer\.jsx|lineDiff\.js)$/,
+              name: 'text-support',
+              // Markdown is already present wherever the narrower code viewer is opened. Sharing
+              // their parser/rendering dictionary removes another tiny transfer boundary without
+              // pulling either feature into the app shell.
+              test: /[/\\]src[/\\](CodeViewer\.jsx|lineDiff\.js|markdown\.jsx)$/,
               includeDependenciesRecursively: false,
             },
             {
@@ -71,8 +74,38 @@ export default defineConfig({
               includeDependenciesRecursively: false,
             },
             {
+              name: 'settings-support',
+              // The Settings route and the run-local Settings panel share the same bounded schema,
+              // coercion and form renderer. One interaction-scoped stream avoids a second wrapper
+              // and lets their repeated field vocabulary share a gzip dictionary.
+              test: /[/\\]src[/\\](Settings|SettingsForm|settingsModel|settingsSchema)\.(js|jsx)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
               name: 'ui-primitives',
-              test: /[/\\]src[/\\](EnergyToggle|PanelShell|icons|runMapModel|useDialogFocus)\.(js|jsx)$/,
+              // accessibility.jsx is an app-shell dependency and also the only dependency of this
+              // small, widely shared primitive group. One chunk avoids paying two gzip wrappers;
+              // no route-only surface is captured here.
+              test: /[/\\]src[/\\](EnergyToggle|PanelShell|accessibility|fx|icons|runMapModel|useDialogFocus)\.(js|jsx)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'domain-support',
+              // util re-exports format, and their route consumers substantially overlap. Keep the
+              // pure domain helpers together while API/layout remain independently tree-shaken.
+              test: /[/\\]src[/\\](format|urlSafety|util)\.js$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'live-support',
+              // Polling hooks and the run index travel together on every owner list/run surface.
+              test: /[/\\]src[/\\](hooks|runIndex)\.js$/,
+              includeDependenciesRecursively: false,
+            },
+            {
+              name: 'timeline-support',
+              // The virtualized feed is the primary consumer of its canonical event model.
+              test: /[/\\]src[/\\](timelineModel\.js|timelineWindow\.js|VirtualTimeline\.jsx)$/,
               includeDependenciesRecursively: false,
             },
           ],

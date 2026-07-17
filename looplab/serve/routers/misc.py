@@ -15,11 +15,15 @@ import os
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
+from looplab.serve.settings_ui_schema import (
+    SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
+)
 from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 
 
@@ -201,6 +205,20 @@ def build_router(srv) -> APIRouter:
     # ------------------------------------------------------------------ settings (UI defaults)
     # The engine has no settings server (ADR-18); these are UI-chosen DEFAULTS for new runs,
     # persisted at <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env.
+    @router.get("/api/settings/schema/{version}")
+    def get_settings_schema(version: int, request: Request):
+        """Immutable display metadata for the versioned Settings/Config form contract."""
+        if version != SETTINGS_UI_SCHEMA_VERSION:
+            raise HTTPException(404, "unknown settings UI schema version")
+        headers = {
+            "Cache-Control": "private, max-age=31536000, immutable",
+            "ETag": SETTINGS_UI_SCHEMA_ETAG,
+            "X-LoopLab-Schema-Version": str(SETTINGS_UI_SCHEMA_VERSION),
+        }
+        if request.headers.get("if-none-match") == SETTINGS_UI_SCHEMA_ETAG:
+            return Response(status_code=304, headers=headers)
+        return JSONResponse(SETTINGS_UI_SCHEMA, headers=headers)
+
     @router.get("/api/settings")
     def get_settings():
         s = Settings()                        # build once — each Settings() now also reads .env off disk

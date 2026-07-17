@@ -10,7 +10,7 @@ import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
 import SettingsForm from './SettingsForm.jsx'
-import { toForm, fromForm, settingsValidationErrors, FIELD_BY_KEY } from './settingsSchema.js'
+import { toForm, fromForm, settingsValidationErrors, loadSettingsSchema } from './settingsSchema.js'
 import { reconcileAcceptedRecord, splitRunConfigPayload } from './settingsModel.js'
 import { driftStatus, leakageStatus, rewardHackStatus } from './trustSemantics.js'
 import VirtualTimeline from './VirtualTimeline.jsx'
@@ -558,6 +558,7 @@ export function DataQualityPanel({ state, onClose }) {
 // and a "Pause & resume" applies it now by restarting the engine (pause → wait for it to stop → resume).
 export function ConfigPanel({ runId, state, live, onClose, onToast }) {
   const [cfg, setCfg] = useState(null)
+  const [settingsSchema, setSettingsSchema] = useState(null)
   const [form, setForm] = useState(null)
   const [loadError, setLoadError] = useState('')
   const [loadNonce, setLoadNonce] = useState(0)
@@ -575,14 +576,18 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     const controller = new AbortController()
     // A reused panel must never display or reconcile the previous run while the next config loads.
     mutationRef.current = null
-    setBusy(false); setCfg(null); setForm(null); setSaved(null); setLoadError('')
+    setBusy(false); setCfg(null); setSettingsSchema(null); setForm(null); setSaved(null); setLoadError('')
     setAgentControl({}); setSavedAC({})
     setConfigMeta({ pinnedFields: new Set(), mismatchFields: [] })
-    get(runApiPath(runId, '/config'), { signal: controller.signal }).then(c => {
+    Promise.all([
+      get(runApiPath(runId, '/config'), { signal: controller.signal }),
+      loadSettingsSchema({ reload: loadNonce > 0 }),
+    ]).then(([c, nextSchema]) => {
       if (controller.signal.aborted || generation !== loadGenerationRef.current) return
       const parsed = splitRunConfigPayload(c)
       setCfg(parsed.config); setConfigMeta(parsed)
-      const f = toForm(parsed.config); setForm(f); setSaved(f)
+      setSettingsSchema(nextSchema)
+      const f = toForm(parsed.config, nextSchema); setForm(f); setSaved(f)
       const ac = parsed.config.agent_control || {}; setAgentControl(ac); setSavedAC(ac)
     }).catch(error => {
       if (error?.name !== 'AbortError' && generation === loadGenerationRef.current) {
@@ -610,13 +615,16 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     return feedback
   }
   const dirty = useMemo(() => {
-    if (!form || !saved) return new Set()
-    const cur = fromForm(form), base = fromForm(saved), s = new Set()
-    for (const k of Object.keys(FIELD_BY_KEY)) if (JSON.stringify(cur[k]) !== JSON.stringify(base[k])) s.add(k)
+    if (!form || !saved || !settingsSchema) return new Set()
+    const cur = fromForm(form, settingsSchema), base = fromForm(saved, settingsSchema), s = new Set()
+    for (const k of Object.keys(settingsSchema.fieldByKey)) {
+      if (JSON.stringify(cur[k]) !== JSON.stringify(base[k])) s.add(k)
+    }
     return s
-  }, [form, saved])
+  }, [form, saved, settingsSchema])
   const acDirty = useMemo(() => JSON.stringify(agentControl) !== JSON.stringify(savedAC), [agentControl, savedAC])
-  const validationErrors = useMemo(() => form ? settingsValidationErrors(form) : {}, [form])
+  const validationErrors = useMemo(() => form && settingsSchema
+    ? settingsValidationErrors(form, settingsSchema) : {}, [form, settingsSchema])
   const invalidCount = Object.keys(validationErrors).length
   const hasChanges = dirty.size > 0 || acDirty
   const canSave = hasChanges && invalidCount === 0
@@ -641,7 +649,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
     if (invalidCount) { onToast('Fix invalid numeric settings before saving'); return }
     const submittedForm = form
     const submittedControl = agentControl
-    const cur = fromForm(submittedForm), changed = {}
+    const cur = fromForm(submittedForm, settingsSchema), changed = {}
     for (const k of dirty) changed[k] = cur[k]    // send ONLY edited fields (minimal snapshot diff)
     if (acDirty) changed.agent_control = submittedControl
     if (!Object.keys(changed).length) return
@@ -652,7 +660,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
       const r = await saveRunConfig(submittedRunId, changed)
       if (mutation.generation !== loadGenerationRef.current) return
       const parsed = splitRunConfigPayload(r.config)
-      const acceptedForm = toForm(parsed.config)
+      const acceptedForm = toForm(parsed.config, settingsSchema)
       const acceptedControl = parsed.config.agent_control || {}
       setCfg(parsed.config); setConfigMeta(parsed); setSaved(acceptedForm); setSavedAC(acceptedControl)
       setForm(current => reconcileAcceptedRecord(current, submittedForm, acceptedForm))
@@ -721,7 +729,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
           placeholder="seconds" value={sec} onChange={e => setSec(e.target.value)} />
         <button className="btn sm primary" disabled={!sec || controlBusy} onClick={extendBudget}>apply</button>
       </div>
-      {!form ? (loadError
+      {!form || !settingsSchema ? (loadError
         ? <div className="report-inline-state error" role="alert">
             <OpIcon name="alert" size={14} /><span>{loadError}</span>
             <button className="btn sm" onClick={() => setLoadNonce(value => value + 1)}>Retry</button>
@@ -756,7 +764,7 @@ export function ConfigPanel({ runId, state, live, onClose, onToast }) {
         {/* This panel's `dirty` is changed-vs-saved (unsaved), so feed it as `unsaved` → the amber dot that clears on Save. */}
         {raw ? rawTable : <SettingsForm form={form} onChange={onChange} unsaved={dirty}
           errors={validationErrors} agentControl={agentControl} onToggleAgent={onToggleAgent}
-          readOnlyKeys={configMeta.pinnedFields} hideSecret />}
+          readOnlyKeys={configMeta.pinnedFields} hideSecret schema={settingsSchema} />}
       </>}
     </Panel>
   )
