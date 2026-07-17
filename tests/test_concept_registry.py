@@ -13,9 +13,11 @@ from looplab.engine.concept_registry import (
     ConceptGovernanceConflict, ConceptGovernanceGlobalConflict,
     ConceptGovernanceIdempotencyConflict, canonicalize_concepts, clear_concept_alias,
     clear_concept_split,
-    concept_governance_global_revision, concept_governance_revision, concept_uid,
+    concept_governance_global_revision, concept_governance_revision,
+    concept_governance_snapshot, concept_uid,
     load_concept_aliases, load_concept_splits, normalize_key,
-    record_concept_alias, record_concept_split, resolve_slug, resolve_split,
+    prepare_concept_alias, prepare_concept_split, record_concept_alias,
+    record_concept_split, resolve_slug, resolve_split,
 )
 from looplab.engine.memory import build_concept_capsule, portfolio_concept_overview
 
@@ -41,6 +43,42 @@ def test_normalize_key_strips_control_chars_no_tombstone_collision():
     # merge into a covert purge.
     assert "\x00" not in normalize_key("\x00purged")
     assert normalize_key("\x00purged") == "purged"          # sentinel stripped -> ordinary slug
+
+
+def test_prepare_payload_matches_normalized_durable_semantics():
+    assert prepare_concept_alias(" LOSS/A ", "LOSS/B") == {
+        "from": "loss/a", "to": "loss/b",
+    }
+    assert prepare_concept_split(
+        " DATA/AUG ",
+        [{"to": "DATA/IMAGE", "when_any": [" Vision ", "vision"]},
+         {"to": "", "when_any": ["inert"]}],
+        " DATA/KEEP ",
+    ) == {
+        "from": "data/aug",
+        "rules": [{"to": "data/image", "when_any": ["vision"]}],
+        "default": "data/keep",
+    }
+
+
+def test_governance_snapshot_returns_states_and_revisions_from_one_receipt(tmp_path):
+    record_concept_alias(
+        tmp_path, from_concept="loss/a", to_concept="loss/b",
+        expected_revision=0, expected_governance_revision=0,
+    )
+    record_concept_split(
+        tmp_path, from_concept="data/aug",
+        rules=[{"to": "data/image", "when_any": ["vision"]}],
+        expected_revision=0, expected_governance_revision=1,
+    )
+
+    snapshot = concept_governance_snapshot(tmp_path)
+
+    assert snapshot["aliases"] == {"loss/a": "loss/b"}
+    assert snapshot["splits"]["data/aug"]["rules"][0]["to"] == "data/image"
+    assert snapshot["alias_revision"] == 1
+    assert snapshot["split_revision"] == 1
+    assert snapshot["governance_revision"] == 2
 
 
 def test_uid_follows_canonical_identity_not_display():

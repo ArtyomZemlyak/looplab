@@ -125,6 +125,25 @@ def _validated_action_id(value: str) -> str:
     return action_id
 
 
+def prepare_concept_alias(from_concept: str, to_concept: str) -> dict:
+    """Return the exact normalized semantic payload an alias/purge append will store.
+
+    Approval surfaces use this before asking the operator, then pass the returned values to
+    :func:`record_concept_alias`.  Keeping normalization here prevents an approval card from describing
+    raw model arguments while the ledger commits a materially different normalized action.
+    """
+    src = _bounded_key(from_concept, "from_concept", required=True)
+    dst = _bounded_key(to_concept, "to_concept")
+    if dst and src == dst:
+        raise ValueError("self-link: from_concept == to_concept")
+    return {"from": src, "to": dst}
+
+
+def prepare_concept_source(from_concept: str) -> str:
+    """Return the exact normalized source key an alias/split clear will store."""
+    return _bounded_key(from_concept, "from_concept", required=True)
+
+
 # Back-compat alias: earlier code called the (strip-only) helper `_norm`. It is now the versioned contract.
 _norm = normalize_key
 
@@ -165,15 +184,13 @@ def record_concept_alias(memory_dir, *, from_concept: str, to_concept: str, by: 
     Rejects an empty source, a self-link, or an edge that would close a cycle (a cycle has no
     canonical result), and a missing dir — all real operator errors. The stored keys are normalized under
     the ONE versioned contract, so writes and reads agree."""
-    src = _bounded_key(from_concept, "from_concept", required=True)
-    dst = _bounded_key(to_concept, "to_concept")
+    prepared = prepare_concept_alias(from_concept, to_concept)
+    src, dst = prepared["from"], prepared["to"]
     _validate_expected_revision(expected_revision)
     _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
-    if dst and src == dst:
-        raise ValueError("self-link: from_concept == to_concept")
     rec = {"action": "set" if dst else "purge", "from": src, "to": dst,
            "by": _bounded_text(by or "operator", "by", _MAX_ACTOR),
            "at": _bounded_text(at, "at", _MAX_AT), "v": CONCEPT_KEY_VERSION}
@@ -230,7 +247,7 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
     target tombstones the concept itself). Replay removes the source from the alias map, exposing its raw
     normalized identity again.
     """
-    src = _bounded_key(from_concept, "from_concept", required=True)
+    src = prepare_concept_source(from_concept)
     _validate_expected_revision(expected_revision)
     _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
@@ -316,6 +333,42 @@ def resolve_slug(slug: str, aliases: dict) -> Optional[str]:
 # One coarse concept -> several finer ones, chosen per run from that run's OWN sibling concepts/goal terms.
 # --------------------------------------------------------------------------- #
 
+def prepare_concept_split(from_concept: str, rules, default: str = "") -> dict:
+    """Return the exact normalized semantic payload a split append will store.
+
+    Inert rules are removed and trigger terms are normalized/deduplicated exactly as the durable writer
+    does.  This is intentionally public so an approval boundary can display and digest the committed
+    semantics rather than an untrusted pre-normalization approximation.
+    """
+    src = _bounded_key(from_concept, "from_concept", required=True)
+    if not isinstance(rules, (list, tuple)):
+        raise ValueError("rules must be a list")
+    if len(rules) > _MAX_SPLIT_RULES:
+        raise ValueError(f"rules exceeds {_MAX_SPLIT_RULES} items")
+    norm_rules = []
+    for rule in rules:
+        if not isinstance(rule, dict):
+            raise ValueError("each split rule must be an object")
+        to = _bounded_key(rule.get("to"), "rule.to")
+        raw_terms = rule.get("when_any") or []
+        if not isinstance(raw_terms, (list, tuple)):
+            raise ValueError("rule.when_any must be a list")
+        if len(raw_terms) > _MAX_SPLIT_TERMS:
+            raise ValueError(f"rule.when_any exceeds {_MAX_SPLIT_TERMS} items")
+        terms = [_bounded_key(term, "rule.when_any item", _MAX_SPLIT_TERM)
+                 for term in raw_terms]
+        terms = [term for term in terms if term]
+        if not to or not terms:
+            continue
+        if to == src:
+            raise ValueError(f"split rule targets its own source {src!r} (no progress)")
+        norm_rules.append({"to": to, "when_any": sorted(set(terms))})
+    dflt = _bounded_key(default, "default")
+    if not norm_rules and (not dflt or dflt == src):
+        raise ValueError("split needs at least one rule (a bare identity default is inert)")
+    return {"from": src, "rules": norm_rules, "default": dflt}
+
+
 def record_concept_split(memory_dir, *, from_concept: str, rules, default: str = "", by: str = "operator",
                          at: str = "", expected_revision: Optional[int] = None,
                          expected_governance_revision: Optional[int] = None,
@@ -328,36 +381,15 @@ def record_concept_split(memory_dir, *, from_concept: str, rules, default: str =
 
     Rejects an empty source, a rule targeting the source (no progress / would re-split forever), an empty
     ruleset with no default, and a missing dir — real operator errors."""
-    src = _bounded_key(from_concept, "from_concept", required=True)
+    prepared = prepare_concept_split(from_concept, rules, default)
+    src = prepared["from"]
+    norm_rules = prepared["rules"]
+    dflt = prepared["default"]
     _validate_expected_revision(expected_revision)
     _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
     if not memory_dir:
         raise ValueError("no memory_dir")
-    if not isinstance(rules, (list, tuple)):
-        raise ValueError("rules must be a list")
-    if len(rules) > _MAX_SPLIT_RULES:
-        raise ValueError(f"rules exceeds {_MAX_SPLIT_RULES} items")
-    norm_rules = []
-    for r in rules:
-        if not isinstance(r, dict):
-            raise ValueError("each split rule must be an object")
-        to = _bounded_key(r.get("to"), "rule.to")
-        raw_terms = r.get("when_any") or []
-        if not isinstance(raw_terms, (list, tuple)):
-            raise ValueError("rule.when_any must be a list")
-        if len(raw_terms) > _MAX_SPLIT_TERMS:
-            raise ValueError(f"rule.when_any exceeds {_MAX_SPLIT_TERMS} items")
-        terms = [_bounded_key(t, "rule.when_any item", _MAX_SPLIT_TERM) for t in raw_terms]
-        terms = [t for t in terms if t]
-        if not to or not terms:
-            continue                   # a rule with no target or no trigger term is inert -> drop
-        if to == src:
-            raise ValueError(f"split rule targets its own source {src!r} (no progress)")
-        norm_rules.append({"to": to, "when_any": sorted(set(terms))})
-    dflt = _bounded_key(default, "default")
-    if not norm_rules and (not dflt or dflt == src):
-        raise ValueError("split needs at least one rule (a bare identity default is inert)")
     rec = {"action": "set", "from": src, "rules": norm_rules, "default": dflt,
            "by": _bounded_text(by or "operator", "by", _MAX_ACTOR),
            "at": _bounded_text(at, "at", _MAX_AT), "v": CONCEPT_KEY_VERSION}
@@ -422,7 +454,7 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
                         expected_governance_revision: Optional[int] = None,
                         action_id: str = "", require_existing: bool = False) -> dict:
     """Undo the active split rule for one source through an append-only clear record."""
-    src = _bounded_key(from_concept, "from_concept", required=True)
+    src = prepare_concept_source(from_concept)
     _validate_expected_revision(expected_revision)
     _validate_expected_revision(expected_governance_revision, "expected_governance_revision")
     action_id = _validated_action_id(action_id)
@@ -639,6 +671,28 @@ def concept_governance_global_revision(memory_dir) -> int:
                 if isinstance(row.get("governance_revision"), int)
                 and not isinstance(row.get("governance_revision"), bool)]
     return max([len(rows), *explicit], default=0)
+
+
+def concept_governance_snapshot(memory_dir) -> dict:
+    """Read aliases, splits and all CAS revisions from one governance-locked snapshot.
+
+    The returned dictionaries are new replay projections.  Callers can safely use the revisions as an
+    approval receipt and pass them back to the next append; any intervening alias *or* split mutation then
+    fails the global CAS instead of silently changing what the approval meant.
+    """
+    if not memory_dir:
+        return {
+            "aliases": {}, "splits": {}, "alias_revision": 0,
+            "split_revision": 0, "governance_revision": 0,
+        }
+    with _concept_governance_transaction(memory_dir):
+        return {
+            "aliases": load_concept_aliases(memory_dir),
+            "splits": load_concept_splits(memory_dir),
+            "alias_revision": concept_governance_revision(memory_dir, "aliases"),
+            "split_revision": concept_governance_revision(memory_dir, "splits"),
+            "governance_revision": concept_governance_global_revision(memory_dir),
+        }
 
 
 @contextmanager

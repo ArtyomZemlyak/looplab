@@ -66,6 +66,10 @@ _ACTION_RISK = {
     ("concept_edit", "concept_purge"): RISK_HIGH,
     ("concept_edit", "concept_split"): RISK_CONSEQUENTIAL,
     ("concept_edit", "concept_edit_clear"): RISK_CONSEQUENTIAL,
+    # CODEX AGENT: clearing a tombstone re-exposes content that an operator deliberately removed.  Give
+    # that state-derived transition a concrete central identity; providers cannot downgrade it with an
+    # arbitrary risk field, and Auto must still obtain an explicit approval.
+    ("concept_edit", "concept_unpurge"): RISK_HIGH,
     # Arbitrary commands (including tests, which execute repo code) are HIGH until a future parser or
     # sandbox proof can classify a concrete argv more narrowly. Auto must still ask.
     ("shell", "run_command"): RISK_HIGH,
@@ -106,6 +110,7 @@ _ACTION_CONSEQUENCE = {
     ("concept_edit", "concept_purge"): "Tombstones one concept in the shared cross-run taxonomy.",
     ("concept_edit", "concept_split"): "Splits a coarse concept into finer ones across the shared taxonomy.",
     ("concept_edit", "concept_edit_clear"): "Reverts a prior merge/purge/split in the shared taxonomy.",
+    ("concept_edit", "concept_unpurge"): "Restores a tombstoned concept to every shared taxonomy view.",
     ("shell", "run_command"): "Executes the reviewed argument vector in the scoped working directory.",
     ("shell", "run_tests"): "Executes repository test code in a local Python process.",
     ("shell", "kill_background"): "Terminates the scoped background task.",

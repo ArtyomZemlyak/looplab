@@ -573,7 +573,12 @@ prompt influence carries lean digest receipts. Typed
 owner governance actions add revision/action fencing and explicit clear operations — reachable both from
 the `/api/cross-run/concept-*` endpoints and, for the owner assistant, from mode+approver-gated
 `concept_merge` / `concept_purge` / `concept_split` / `concept_edit_clear` tools (read-only
-`concept_taxonomy` is available even in plan mode). The remaining heuristic
+`concept_taxonomy` is available even in plan mode). Assistant taxonomy reads are a redacted,
+`UNTRUSTED_MEMORY`-framed projection capped at 16K; they include active split rule semantics and exact
+alias/split/global revision receipts. Every assistant edit binds its approval to the normalized payload and
+those revisions, so a concurrent HTTP/CLI edit rejects the stale action. Clearing a purge (un-purging) is a
+high-risk transition and therefore still asks in Auto, while clearing an ordinary merge/split remains the
+normal consequential edit. The remaining heuristic
 scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
 families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
 bounded read-only preview of these projections, not that full system.

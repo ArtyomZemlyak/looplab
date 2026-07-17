@@ -108,6 +108,18 @@ def test_write_without_a_recovery_path_is_consequential_not_reversible():
     assert decide_action("acceptEdits", action) == "ask"
 
 
+def test_concept_unpurge_has_central_high_risk_identity_even_in_auto():
+    action = {
+        "tool": "concept_unpurge", "tool_kind": "concept_edit",
+        "scope": {"from": "loss/junk"},
+        # Provider-supplied risk metadata is intentionally not an authorization input.
+        "risk": RISK_READ,
+    }
+    policy = classify_action(action)
+    assert policy.risk == RISK_HIGH and policy.rememberable is False
+    assert decide_action("auto", action) == "ask"
+
+
 def test_remembered_grant_is_exact_mode_epoch_action_scope_and_expires():
     now = [100.0]
     grants = RememberedGrantStore(clock=lambda: now[0])
