@@ -1,7 +1,8 @@
 // Unit tests for the View 2 concept-chip model. Run with `node --test test/` from ui/.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chipsAtPath, breadcrumb, conceptMatches, matchingNodeIds, orderChipsByDelta } from '../src/conceptChips.js'
+import { addConceptSelection, chipsAtPath, breadcrumb, conceptMatches, matchingNodeIds,
+  orderChipsByDelta, toggleConceptSelection } from '../src/conceptChips.js'
 
 test('orderChipsByDelta ranks chips by descending Δbest, nulls last, count/id tie-break', () => {
   const chips = [
@@ -96,6 +97,27 @@ test('breadcrumb segments', () => {
   assert.deepEqual(breadcrumb(''), [])
   assert.deepEqual(breadcrumb('loss/contrastive'),
     [{ id: 'loss', label: 'loss' }, { id: 'loss/contrastive', label: 'contrastive' }])
+})
+
+test('OR selections discard comparable ancestors so a child filter really refines the graph', () => {
+  assert.deepEqual(addConceptSelection(['data'], 'data/features/physics'), ['data/features/physics'])
+  assert.deepEqual(addConceptSelection(['data/features/physics'], 'data'), ['data'])
+  assert.deepEqual(addConceptSelection(['data', 'model/tree'], 'data/features/physics'),
+    ['model/tree', 'data/features/physics'])
+  assert.deepEqual(addConceptSelection(['old'], 'loss/contrastive', { old: 'loss' }),
+    ['loss/contrastive'])
+
+  // Exact points are only redundant when a plain subtree contains them. Exact ancestors and plain
+  // descendants remain distinct OR alternatives.
+  assert.deepEqual(addConceptSelection(['=data'], 'data/features/physics'),
+    ['=data', 'data/features/physics'])
+  assert.deepEqual(addConceptSelection(['data'], '=data/features/physics'),
+    ['=data/features/physics'])
+  assert.deepEqual(addConceptSelection(['=data/features/physics'], 'data'), ['data'])
+
+  assert.deepEqual(toggleConceptSelection(['data'], 'data'), [])
+  assert.deepEqual(toggleConceptSelection(['data'], 'data/features/physics'),
+    ['data/features/physics'])
 })
 
 test('conceptMatches is prefix-aware OR', () => {

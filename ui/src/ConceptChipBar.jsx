@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { chipsAtPath, breadcrumb, matchingNodeIds, orderChipsByDelta } from './conceptChips.js'
+import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds, orderChipsByDelta,
+  toggleConceptSelection } from './conceptChips.js'
 import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
@@ -108,15 +109,15 @@ export default function ConceptChipBar({ state, onHighlight, runId = null, gener
   // chip selects EXACTLY the nodes tagged at `path` (an `=`-prefixed key, exact match) so its count and
   // its highlight agree. `selected` holds these keys; conceptMatches interprets the `=` marker.
   const keyOf = (chip) => (chip.atLevel ? '=' : '') + chip.id
-  const toggleSelect = (key) =>
-    setSelected(s => s.includes(key) ? s.filter(x => x !== key) : [...s, key])
+  const toggleSelect = (key) => setSelected(s => toggleConceptSelection(s, key, rename))
   const removeSelected = (key) => setSelected(s => s.filter(x => x !== key))
   const clearSelection = () => setSelected([])
 
   // Commit a searched concept as a plain (subtree) selection, then clear the query but keep the box open
-  // and focused so several concepts can be pinned in a row. Deduped against the existing selection.
+  // and focused so several concepts can be pinned in a row. Comparable ancestor/descendant selections
+  // collapse to the latest intent so an OR ancestor cannot silently make a child refinement ineffective.
   const commitConcept = (id) => {
-    setSelected(s => s.includes(id) ? s : [...s, id])
+    setSelected(s => addConceptSelection(s, id, rename))
     setQuery('')
     setCursor(-1)
     inputRef.current?.focus()

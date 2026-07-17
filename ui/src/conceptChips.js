@@ -75,6 +75,59 @@ export function breadcrumb(path = '') {
   })
 }
 
+// Keep an OR selection semantically minimal. A plain concept selects its whole subtree, so retaining
+// both `data` and `data/features/physics` makes the child look like a refinement while `data` still
+// keeps every sibling highlighted. Prefer the concept the operator selected most recently whenever
+// two plain subtree selections are ancestor/descendant-comparable. Exact (`=`) selections only
+// overlap a plain subtree when that subtree contains the exact path; disjoint/exact-only selections
+// remain valid OR alternatives.
+const selectionPart = (key, rename = {}) => {
+  const exact = typeof key === 'string' && key[0] === '='
+  const id = canonicalId(exact ? key.slice(1) : key, rename)
+  return { exact, id }
+}
+
+function addSelection(selected, nextKey, rename = {}, toggle = false) {
+  const next = selectionPart(nextKey, rename)
+  if (!next.id) return selected
+  const same = selected.some(key => {
+    const value = selectionPart(key, rename)
+    return value.id === next.id && value.exact === next.exact
+  })
+  if (same) {
+    if (!toggle) return selected
+    return selected.filter(key => {
+      const value = selectionPart(key, rename)
+      return value.id !== next.id || value.exact !== next.exact
+    })
+  }
+
+  const kept = selected.filter(key => {
+    const value = selectionPart(key, rename)
+    if (!value.id) return false
+    if (value.exact) {
+      // A newly selected plain ancestor contains this exact point and replaces it. An exact ancestor
+      // does not contain a newly selected descendant, so that pair remains a meaningful OR.
+      return next.exact || !(value.id === next.id || value.id.startsWith(next.id + '/'))
+    }
+    if (next.exact) {
+      // Prefer the new exact point over a plain ancestor that would otherwise make it ineffective.
+      return !(next.id === value.id || next.id.startsWith(value.id + '/'))
+    }
+    // Two plain subtree filters on one branch are always redundant in an OR; keep the newest intent.
+    return !(next.id === value.id
+      || next.id.startsWith(value.id + '/')
+      || value.id.startsWith(next.id + '/'))
+  })
+  return [...kept, (next.exact ? '=' : '') + next.id]
+}
+
+export const addConceptSelection = (selected = [], nextKey, rename = {}) =>
+  addSelection(selected, nextKey, rename, false)
+
+export const toggleConceptSelection = (selected = [], nextKey, rename = {}) =>
+  addSelection(selected, nextKey, rename, true)
+
 // Does a node (its raw concept id list) match ANY selected concept (OR)? A plain selected id matches a
 // node tagged with it OR with any DESCENDANT of it (select `loss` -> highlight `loss/contrastive/dcl`).
 // A selection prefixed with `=` is an EXACT match — it matches ONLY a node tagged with that id verbatim,

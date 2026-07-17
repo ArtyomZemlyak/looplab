@@ -92,42 +92,45 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     // mount effect pushes the initial (empty selection -> null) highlight
     assert.equal(calls.at(-1), null)
 
-    // click the "architecture" chip -> highlight node 0 only (architecture/moe)
-    const arch = [...document.querySelectorAll('.cb-chip')].find(
-      c => c.querySelector('.cb-name')?.textContent === 'architecture')
+    // click the "loss" chip -> highlight its whole subtree (0,1,2,4)
+    const loss = [...document.querySelectorAll('.cb-chip')].find(
+      c => c.querySelector('.cb-name')?.textContent === 'loss')
     await act(async () => {
-      arch.querySelector('.cb-chip-main').dispatchEvent(
+      loss.querySelector('.cb-chip-main').dispatchEvent(
         new dom.window.MouseEvent('click', { bubbles: true }))
       await Promise.resolve()
     })
     const hi = calls.at(-1)
     assert.ok(hi instanceof Set)
-    assert.deepEqual([...hi].sort((a, b) => a - b), [0])
-    assert.equal(document.querySelector('.cb-pill-label')?.textContent, 'architecture')
+    assert.deepEqual([...hi].sort((a, b) => a - b), [0, 1, 2, 4])
+    assert.equal(document.querySelector('.cb-pill-label')?.textContent, 'loss')
 
-    // A nested selection must retain its full path: duplicate leaves are otherwise indistinguishable.
+    // A nested selection must retain its full path, but replace its plain ancestor: OR-ing both would
+    // leave the ancestor authoritative and make the apparent child refinement ineffective.
     await act(async () => {
-      arch.querySelector('.cb-drill').dispatchEvent(
+      loss.querySelector('.cb-drill').dispatchEvent(
         new dom.window.MouseEvent('click', { bubbles: true }))
       await Promise.resolve()
     })
-    const moe = [...document.querySelectorAll('.cb-chip')].find(
-      c => c.querySelector('.cb-name')?.textContent === 'moe')
+    const contrastive = [...document.querySelectorAll('.cb-chip')].find(
+      c => c.querySelector('.cb-name')?.textContent === 'contrastive')
     await act(async () => {
-      moe.querySelector('.cb-chip-main').dispatchEvent(
+      contrastive.querySelector('.cb-chip-main').dispatchEvent(
         new dom.window.MouseEvent('click', { bubbles: true }))
       await Promise.resolve()
     })
+    assert.deepEqual([...calls.at(-1)].sort((a, b) => a - b), [0, 1],
+      'the child replaces its OR ancestor and genuinely narrows the graph highlight')
     assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
-      ['architecture', 'architecture/moe'])
+      ['loss/contrastive'])
 
     // A live consolidation rename also updates an already-selected legacy key's visible identity.
     await act(async () => root.render(React.createElement(ConceptChipBar, {
-      state: { ...STATE, concept_consolidation: { 'architecture/moe': 'model/moe' } },
+      state: { ...STATE, concept_consolidation: { 'loss/contrastive': 'objective/contrastive' } },
       onHighlight: v => calls.push(v),
     })))
     assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
-      ['architecture', 'model/moe'])
+      ['objective/contrastive'])
 
     // A live reset that removes the last concept must clear graph dimming before hiding the bar.
     await act(async () => root.render(React.createElement(ConceptChipBar, {
