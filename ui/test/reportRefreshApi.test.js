@@ -2,10 +2,12 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 import {
-  peekReportRefreshIntent, reportRefreshIntent, CONTROL, genScopeReport, jobAwait,
+  abandonScopeReportAction, peekReportRefreshIntent, reportRefreshIntent, CONTROL,
+  genScopeReport, getScopeReport, jobAwait, reconcileScopeReportGeneration,
 } from '../src/api.js'
 
 const GENERATION = 'c'.repeat(64)
+const ACTION_ID = '12345678-1234-4234-9234-123456789abc'
 
 const memoryStorage = () => {
   const values = new Map()
@@ -56,15 +58,340 @@ test('scope report publication conflicts reject message-only failure receipts', 
     ok: true,
     json: async () => ({
       ok: false,
+      action_id: ACTION_ID,
       code: 'scope_report_storage_conflict',
       message: 'The report store changed during generation.',
     }),
   })
   try {
     await assert.rejects(
-      genScopeReport('task', 'scope-id'),
+      genScopeReport('task', 'scope-id', { actionId: ACTION_ID }),
       error => error?.code === 'scope_report_storage_conflict'
         && /changed during generation/.test(error.message))
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('scope generation submits one caller-owned UUID and quarantines lost or invalid receipts', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  try {
+    const scenarios = [
+      async () => { throw new TypeError('connection reset') },
+      async () => ({
+        ok: false, status: 409, headers: { get: () => null },
+        json: async () => ({ detail: {
+          code: 'scope_report_storage_conflict',
+          message: 'The paid action store could not confirm its strict claim.',
+        } }),
+      }),
+      async () => ({
+        ok: true, status: 200,
+        json: async () => ({
+          status: 'indeterminate', ok: false, action_id: ACTION_ID,
+          code: 'scope_report_action_indeterminate',
+        }),
+      }),
+      async () => ({
+        ok: true, status: 200,
+        json: async () => { throw new SyntaxError('truncated JSON') },
+      }),
+      async () => ({
+        ok: true, status: 200,
+        json: async () => ({ ok: true, action_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' }),
+      }),
+      async () => ({
+        ok: true, status: 200,
+        json: async () => ({ status: 'unknown', ok: true, action_id: ACTION_ID }),
+      }),
+    ]
+    for (const response of scenarios) {
+      const requests = []
+      globalThis.fetch = async (url, options) => {
+        requests.push({ url: String(url), options })
+        return response()
+      }
+      await assert.rejects(
+        genScopeReport('task', 'paid/scope', { actionId: ACTION_ID }),
+        error => error?.ambiguous === true
+          && error?.submissionMayHaveSucceeded === true
+          && error?.action_id === ACTION_ID,
+      )
+      assert.equal(requests.length, 1, 'an ambiguous initial submission is never replayed')
+      assert.match(requests[0].url, /\/api\/scope-report\/task\/paid%2Fscope\/generate$/)
+      assert.equal(requests[0].options.method, 'POST')
+      assert.equal(requests[0].options.headers['Idempotency-Key'], ACTION_ID)
+      assert.equal(requests[0].options.body, '{}')
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('scope generation reconciliation falls back from the known job to the durable action using GET only', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options })
+    if (requests.length === 1) {
+      return {
+        ok: true, status: 200,
+        json: async () => { throw new SyntaxError('consumed terminal body') },
+      }
+    }
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        status: 'done', ok: true, action_id: ACTION_ID,
+        authoritative: true, stale: false, content: {},
+      }),
+    }
+  }
+  try {
+    const result = await reconcileScopeReportGeneration('task', 'paid/scope', {
+      actionId: ACTION_ID, jobId: 'known-paid-job', intervalMs: 0,
+    })
+    assert.equal(result.action_id, ACTION_ID)
+    assert.equal(result.ok, true)
+    assert.equal(requests.length, 2)
+    assert.match(requests[0].url, /\/api\/jobs\/known-paid-job$/)
+    assert.match(requests[1].url,
+      /\/api\/scope-report-actions\/12345678-1234-4234-9234-123456789abc\?scope_type=task&scope_id=paid%2Fscope$/)
+    assert.ok(requests.every(request => request.options.method !== 'POST'))
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('unknown, indeterminate, and mismatched durable actions stay observation-only', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  try {
+    const unknownRequests = []
+    globalThis.fetch = async (url, options = {}) => {
+      unknownRequests.push({ url: String(url), options })
+      return { ok: true, status: 200,
+        json: async () => ({ status: 'unknown', action_id: ACTION_ID }) }
+    }
+    await assert.rejects(
+      reconcileScopeReportGeneration('task', 'scope-id', { actionId: ACTION_ID }),
+      error => error?.ambiguous === true && error?.action_id === ACTION_ID,
+    )
+    assert.equal(unknownRequests.length, 1)
+    assert.notEqual(unknownRequests[0].options.method, 'POST')
+
+    for (const body of [
+      { status: 'indeterminate', action_id: ACTION_ID, job_id: 'lost-paid-job' },
+      { status: 'done', ok: true, action_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' },
+    ]) {
+      const requests = []
+      globalThis.fetch = async (url, options = {}) => {
+        requests.push({ url: String(url), options })
+        return { ok: true, status: 200, json: async () => body }
+      }
+      await assert.rejects(
+        reconcileScopeReportGeneration('task', 'scope-id', { actionId: ACTION_ID }),
+        error => error?.ambiguous === true && error?.action_id === ACTION_ID,
+      )
+      assert.equal(requests.length, 1)
+      assert.ok(requests.every(request => request.options.method !== 'POST'))
+    }
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('scope action APIs canonicalize UUIDs and accept only exact durable or proven-unknown discard', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  const upper = ACTION_ID.toUpperCase()
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options })
+    return { ok: true, status: 200, json: async () => requests.length === 1
+      ? ({
+          status: 'abandoned', ok: false,
+          code: 'scope_report_action_abandoned', action_id: ACTION_ID,
+        })
+      : ({ status: 'unknown', action_id: ACTION_ID }) }
+  }
+  try {
+    const result = await abandonScopeReportAction('task', 'paid/scope', upper)
+    assert.equal(result.action_id, ACTION_ID)
+    const unknown = await abandonScopeReportAction('task', 'paid/scope', upper)
+    assert.equal(unknown.status, 'unknown')
+    assert.equal(requests.length, 2)
+    assert.equal(requests[0].options.method, 'POST')
+    assert.match(requests[0].url,
+      /\/api\/scope-report-actions\/12345678-1234-4234-9234-123456789abc\/abandon\?scope_type=task&scope_id=paid%2Fscope$/)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('a scope fence conflict adopts the exact existing paid action for recovery', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  const fresh = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options })
+    return {
+      ok: false, status: 409, headers: { get: () => null },
+      json: async () => ({ detail: {
+        code: 'scope_report_action_in_progress', action_id: ACTION_ID,
+        error: 'another action is active',
+      } }),
+    }
+  }
+  try {
+    await assert.rejects(
+      genScopeReport('task', 'shared-scope', { actionId: fresh }),
+      error => error?.code === 'scope_report_action_in_progress'
+        && error?.ambiguous === true && error?.action_id === ACTION_ID,
+    )
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].options.method, 'POST')
+    assert.equal(requests[0].options.headers['Idempotency-Key'], fresh)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('canonical scope-report reads have a response-body deadline', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  globalThis.fetch = async () => new Promise(() => {})
+  try {
+    await assert.rejects(
+      getScopeReport('task', 'bounded-read', { requestTimeoutMs: 1 }),
+      error => error?.code === 'COMMAND_REQUEST_TIMEOUT',
+    )
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('an exact action-bound terminal failure is definitive only after durable reconciliation', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  let requests = 0
+  globalThis.fetch = async () => {
+    requests += 1
+    return {
+      ok: true, status: 200,
+      json: async () => ({
+        status: 'done', ok: false, action_id: ACTION_ID,
+        code: 'scope_report_inputs_changed', ambiguous: true,
+      }),
+    }
+  }
+  try {
+    await assert.rejects(
+      reconcileScopeReportGeneration('task', 'scope-id', {
+        actionId: ACTION_ID, jobId: 'known-paid-job', intervalMs: 0,
+      }),
+      error => error?.code === 'scope_report_inputs_changed'
+        && error?.action_id === ACTION_ID
+        && error?.ambiguous !== true
+        && error?.submissionMayHaveSucceeded !== true,
+    )
+    assert.equal(requests, 2, 'the volatile terminal is verified through the durable action ledger')
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('a volatile done wrapper cannot turn an indeterminate paid action into a terminal failure', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options })
+    return {
+      ok: true, status: 200,
+      json: async () => requests.length === 1
+        ? ({
+            status: 'done', ok: false, action_id: ACTION_ID,
+            code: 'scope_report_action_indeterminate',
+          })
+        : ({ status: 'indeterminate', action_id: ACTION_ID, job_id: 'known-paid-job' }),
+    }
+  }
+  try {
+    await assert.rejects(
+      reconcileScopeReportGeneration('task', 'scope-id', {
+        actionId: ACTION_ID, jobId: 'known-paid-job', intervalMs: 0,
+      }),
+      error => error?.code === 'scope_report_action_indeterminate'
+        && error?.action_id === ACTION_ID
+        && error?.ambiguous === true
+        && error?.submissionMayHaveSucceeded === true,
+    )
+    assert.equal(requests.length, 2, 'the durable action ledger remains the terminal authority')
+    assert.match(requests[0].url, /\/api\/jobs\/known-paid-job$/)
+    assert.match(requests[1].url, /\/api\/scope-report-actions\//)
+    assert.ok(requests.every(request => request.options.method !== 'POST'))
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('a mismatched volatile terminal falls through to the exact durable action receipt', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  const requests = []
+  globalThis.fetch = async (url, options = {}) => {
+    requests.push({ url: String(url), options })
+    return requests.length === 1
+      ? {
+          ok: true, status: 200,
+          json: async () => ({
+            status: 'done', ok: true,
+            action_id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+          }),
+        }
+      : {
+          ok: true, status: 200,
+          json: async () => ({ status: 'done', ok: true, action_id: ACTION_ID, content: {} }),
+        }
+  }
+  try {
+    const result = await reconcileScopeReportGeneration('task', 'scope-id', {
+      actionId: ACTION_ID, jobId: 'known-paid-job', intervalMs: 0,
+    })
+    assert.equal(result.action_id, ACTION_ID)
+    assert.equal(requests.length, 2)
+    assert.ok(requests.every(request => request.options.method !== 'POST'))
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[key]
@@ -281,6 +608,8 @@ test('malformed background-job receipts become same-request ambiguity', async ()
       { status: 'running', job_id: 'malformed' }, { intervalMs: 0 })
     assert.equal(result.code, 'job_protocol_error')
     assert.equal(result.ambiguous, true)
+    assert.equal(result.job_id, 'malformed')
+    assert.equal(result.jobId, 'malformed')
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[key]
@@ -307,7 +636,10 @@ test('poll protocol and client errors retain the accepted paid identity', async 
       globalThis.fetch = async () => response
       await assert.rejects(
         jobAwait({ status: 'running', job_id: 'accepted-paid-job' }, { intervalMs: 0 }),
-        error => error?.submissionMayHaveSucceeded === true)
+        error => error?.submissionMayHaveSucceeded === true
+          && error?.ambiguous === true
+          && error?.job_id === 'accepted-paid-job'
+          && error?.jobId === 'accepted-paid-job')
     }
   } finally {
     for (const [key, value] of Object.entries(previous)) {

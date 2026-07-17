@@ -24,8 +24,26 @@ export function scopeReportAuthority(value) {
 
 export function scopeReportGenerationError(error) {
   const code = typeof error?.code === 'string' ? error.code : ''
+  if (code === 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE') {
+    return 'Durable paid-action identity is unavailable. Generation stays locked until tab storage is restored.'
+  }
+  if (code === 'scope_report_action_indeterminate') {
+    return 'The paid action cannot be proven complete after a server restart. Check again or explicitly abandon its recovery lock before starting another generation.'
+  }
+  if (code === 'scope_report_action_unknown') {
+    return 'No durable claim exists for this action. Retry this same paid action or durably discard it; a fresh UUID stays disabled.'
+  }
+  if (code === 'scope_report_action_in_progress') {
+    return 'Another paid generation is already unresolved for this scope. Wait for it or recover that action before starting a new one.'
+  }
+  if (code === 'scope_report_action_capacity') {
+    return 'The permanent paid-action ledger is full. Start a new run root or migrate the complete ledger; never delete individual receipts.'
+  }
+  if (code === 'scope_report_publication_read_failed') {
+    return 'Generation completed, but the current published report could not be read. Retry the report read.'
+  }
   if (error?.ambiguous === true || error?.submissionMayHaveSucceeded === true) {
-    return 'Generation outcome is unknown. Check status before retrying to avoid duplicate paid work.'
+    return 'Generation outcome is unknown. Check the same paid action status; a new generation is disabled.'
   }
   if (error?.status === 400) return 'No runs in this scope yet.'
   if (code === 'scope_report_inputs_changed') {

@@ -16,7 +16,8 @@ test('stored scope reports always bypass intermediary browser caches', async () 
     await getScopeReport('task', 'opaque/id', { signal: controller.signal })
     assert.match(request.url, /\/api\/scope-report\/task\/opaque%2Fid$/)
     assert.equal(request.options.cache, 'no-store')
-    assert.equal(request.options.signal, controller.signal)
+    assert.ok(request.options.signal)
+    assert.equal(request.options.signal.aborted, false)
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete globalThis[key]

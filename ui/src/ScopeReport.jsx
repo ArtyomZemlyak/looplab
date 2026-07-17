@@ -1,5 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { getScopeReport, genScopeReport, fmt } from './util.js'
+import {
+  abandonScopeReportAction, createIdempotencyKey, getScopeReport, genScopeReport,
+  reconcileScopeReportGeneration, fmt,
+} from './util.js'
 import {
   scopeObservationRows, scopeReportAuthority, scopeReportGenerationError, scopeReportKey,
 } from './scopeReportModel.js'
@@ -11,33 +14,191 @@ const count = value => Number.isInteger(value) && value >= 0 ? value : null
 const status = value => text(value).slice(0, 64).replaceAll('_', ' ')
 const valid = value => typeof value?.exists === 'boolean'
   && (!value.exists || (value.content && typeof value.content === 'object' && !Array.isArray(value.content)))
+const ACTION_ID_RE = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
+const GENERATION_STORAGE_PREFIX = 'll.scope-report-generation.'
 const generationFlights = new Map()
 const generationAmbiguous = error => error?.ambiguous === true
   || error?.submissionMayHaveSucceeded === true
-const generatedAt = value => Number.isInteger(value?.generated_at) && value.generated_at >= 0
-  ? value.generated_at : null
-const reportAdvanced = (value, baseline) => value?.exists === true && generatedAt(value) !== null
-  && (baseline === null || generatedAt(value) !== baseline)
+const safeJobId = value => typeof value === 'string' && value.length > 0 && value.length <= 200
+  && !/[\u0000-\u001f\u007f]/.test(value)
+const errorActionId = error => ACTION_ID_RE.test(error?.action_id || error?.actionId || '')
+  ? (error.action_id || error.actionId).toLowerCase() : null
+const errorJobId = error => safeJobId(error?.job_id || error?.jobId)
+  ? (error.job_id || error.jobId) : null
+const flightStorageKey = key => GENERATION_STORAGE_PREFIX + encodeURIComponent(key)
+const flightStorage = () => {
+  try { return typeof sessionStorage === 'undefined' ? null : sessionStorage } catch { return null }
+}
 
-function beginGeneration(key, baseline, start) {
-  const existing = generationFlights.get(key)
-  if (existing) return existing
-  const flight = {
-    baseline, uncertain: false, recoveryRequested: false, error: null, promise: null,
+function persistGeneration(key, flight) {
+  const storage = flightStorage()
+  if (!storage || !ACTION_ID_RE.test(flight?.actionId || '')) return false
+  flight.actionId = flight.actionId.toLowerCase()
+  const raw = JSON.stringify({ v: 1, action_id: flight.actionId, job_id: flight.jobId || null })
+  try {
+    storage.setItem(flightStorageKey(key), raw)
+    return storage.getItem(flightStorageKey(key)) === raw
+  } catch { return false }
+}
+
+function clearPersistedGeneration(key, actionId = null) {
+  const storage = flightStorage()
+  if (!storage) return false
+  const storageKey = flightStorageKey(key)
+  try {
+    if (actionId) {
+      const current = storage.getItem(storageKey)
+      if (current != null) {
+        try {
+          const value = JSON.parse(current)
+          const storedActionId = ACTION_ID_RE.test(value?.action_id || '')
+            ? value.action_id.toLowerCase() : value?.action_id
+          if (storedActionId && storedActionId !== actionId.toLowerCase()) return false
+        } catch { return false }
+      }
+    }
+    storage.removeItem(storageKey)
+    if (storage.getItem(storageKey) == null) return true
+    // A blocked remove must not resurrect a settled paid lock on reload. A bounded tombstone has no
+    // report payload or credential and is ignored by the strict reader below.
+    storage.setItem(storageKey, JSON.stringify({ v: 1, terminal: true }))
+    return storage.getItem(storageKey)?.includes('"terminal":true') === true
+  } catch { return false }
+}
+
+function readPersistedGeneration(key) {
+  const storage = flightStorage()
+  if (!storage) return null
+  let raw, value
+  try { raw = storage.getItem(flightStorageKey(key)) } catch { return { invalid: true } }
+  if (raw == null) return null
+  try { value = JSON.parse(raw) } catch { return { invalid: true } }
+  if (value?.v === 1 && value?.terminal === true) {
+    try { storage.removeItem(flightStorageKey(key)) } catch { /* tombstone stays safely inert */ }
+    return null
   }
-  flight.promise = Promise.resolve().then(start)
+  if (!value || typeof value !== 'object' || Array.isArray(value) || value.v !== 1
+      || !ACTION_ID_RE.test(value.action_id || '')
+      || (value.job_id != null && !safeJobId(value.job_id))
+      || Object.keys(value).some(field => !['v', 'action_id', 'job_id'].includes(field))) {
+    return { invalid: true }
+  }
+  return { actionId: value.action_id.toLowerCase(), jobId: value.job_id || null }
+}
+
+function restoredFlight(key, { reprobeStorageError = false } = {}) {
+  const current = generationFlights.get(key)
+  if (current && !(reprobeStorageError && !current.actionId
+      && current.error?.code === 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE')) return current
+  if (current) generationFlights.delete(key)
+  const stored = readPersistedGeneration(key)
+  if (!stored) return null
+  const error = new Error('scope report action has not reached an exact terminal')
+  error.code = stored.invalid
+    ? 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE' : 'scope_report_action_unresolved'
+  error.ambiguous = true
+  error.submissionMayHaveSucceeded = true
+  if (stored.actionId) { error.actionId = stored.actionId; error.action_id = stored.actionId }
+  if (stored.jobId) { error.jobId = stored.jobId; error.job_id = stored.jobId }
+  const flight = { ...stored, actionId: stored.actionId || null, jobId: stored.jobId || null,
+    active: false, uncertain: true, error, promise: null }
   generationFlights.set(key, flight)
+  return flight
+}
+
+function rememberFlightIdentity(key, flight, errorOrJobId) {
+  const jobId = typeof errorOrJobId === 'string' ? errorOrJobId : errorJobId(errorOrJobId)
+  const actionId = typeof errorOrJobId === 'object' ? errorActionId(errorOrJobId) : null
+  if (actionId && actionId !== flight.actionId) {
+    // A server scope fence may reject this tab's fresh UUID while naming the exact paid action
+    // already owned by another tab. Only that typed conflict may replace the local identity.
+    if (errorOrJobId?.code !== 'scope_report_action_in_progress') {
+      flight.error = errorOrJobId
+      return false
+    }
+    flight.actionId = actionId
+    flight.jobId = null
+  }
+  if (jobId) flight.jobId = jobId
+  if (persistGeneration(key, flight)) return true
+  const error = new Error('durable scope generation state is unavailable')
+  error.code = 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE'
+  error.ambiguous = true
+  error.submissionMayHaveSucceeded = true
+  if (flight.actionId) { error.actionId = flight.actionId; error.action_id = flight.actionId }
+  if (flight.jobId) { error.jobId = flight.jobId; error.job_id = flight.jobId }
+  flight.error = error
+  return false
+}
+
+function driveGeneration(key, flight, start, { uncertain = false } = {}) {
+  if (flight.active) return flight
+  flight.active = true
+  flight.uncertain = uncertain
+  flight.promise = Promise.resolve().then(start)
   flight.promise.then(
-    () => { if (generationFlights.get(key) === flight) generationFlights.delete(key) },
+    () => {
+      flight.active = false
+      if (generationFlights.get(key) === flight) generationFlights.delete(key)
+      clearPersistedGeneration(key, flight.actionId)
+    },
     error => {
       if (generationFlights.get(key) !== flight) return
+      flight.active = false
+      const remembered = rememberFlightIdentity(key, flight, error)
       if (generationAmbiguous(error)) {
         flight.uncertain = true
-        flight.error = error
-      } else generationFlights.delete(key)
+        if (remembered) flight.error = error
+      } else {
+        generationFlights.delete(key)
+        clearPersistedGeneration(key, flight.actionId)
+      }
     },
   )
   return flight
+}
+
+function beginGeneration(key, actionId, start) {
+  const existing = restoredFlight(key)
+  if (existing) return existing
+  const flight = { actionId, jobId: null, active: false, uncertain: false, error: null, promise: null }
+  generationFlights.set(key, flight)
+  if (!persistGeneration(key, flight)) {
+    generationFlights.delete(key)
+    const error = new Error('durable scope generation state is unavailable')
+    error.code = 'SCOPE_REPORT_ACTION_STORAGE_UNAVAILABLE'
+    throw error
+  }
+  return driveGeneration(key, flight, start)
+}
+
+async function completedGeneration(value, actionId, type, id) {
+  const terminal = value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  if (terminal?.action_id === actionId && terminal?.ok === true) {
+    // The action receipt proves settlement, not that its historical payload is still the current
+    // publication. Re-read the canonical scope report so an older recovered action cannot replace a
+    // newer regeneration in the UI. The GET also proves the strict publication survived.
+    let current
+    try { current = await getScopeReport(type, id) }
+    catch (cause) {
+      // The paid action is already an exact durable terminal. A bounded canonical read failure is a
+      // normal read problem, not permission to keep the paid-action lock ambiguous forever.
+      const error = new Error('scope report publication could not be read', { cause })
+      error.code = 'scope_report_publication_read_failed'
+      throw error
+    }
+    if (valid(current) && current.exists) return current
+    const error = new Error('scope report publication is missing or invalid')
+    error.code = 'scope_report_publication_read_failed'
+    throw error
+  }
+  const error = new Error('scope report terminal response is invalid')
+  error.code = 'scope_report_invalid_response'
+  error.ambiguous = true
+  error.submissionMayHaveSucceeded = true
+  error.actionId = actionId
+  error.action_id = actionId
+  throw error
 }
 
 function Section({ title, items }) {
@@ -83,8 +244,10 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
       setView({ key, data: value, busy: false, uncertain: false, err: null })
     }).catch(error => {
       if (requestEpoch.current !== epoch || keyRef.current !== key) return
-      const ambiguous = generationAmbiguous(error)
-      const inputsChanged = error?.code === 'scope_report_inputs_changed'
+      const effectiveError = generationFlights.get(key)?.error || error
+      const ambiguous = generationAmbiguous(effectiveError)
+      const inputsChanged = effectiveError?.code === 'scope_report_inputs_changed'
+      const publicationReadFailed = effectiveError?.code === 'scope_report_publication_read_failed'
       setView(previous => {
         const previousData = previous.key === key ? previous.data : null
         const guardedData = !previousData ? previousData
@@ -92,30 +255,51 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             : ambiguous ? { ...previousData, stale: null } : previousData
         return {
           key, data: guardedData, busy: false, uncertain: ambiguous,
-          err: scopeReportGenerationError(error),
+          err: scopeReportGenerationError(effectiveError),
         }
       })
-      if (inputsChanged) setReadRevision(value => value + 1)
+      if (inputsChanged || publicationReadFailed) setReadRevision(value => value + 1)
     })
   }
 
   useEffect(() => {
     const epoch = ++requestEpoch.current
-    const flight = generationFlights.get(key)
-    if (flight && !flight.uncertain) {
+    let flight = restoredFlight(key, { reprobeStorageError: true })
+    if (flight?.uncertain && !flight.active && flight.actionId) {
+      // # CODEX AGENT: remount/reload never invents a new action. It observes the known job/receipt;
+      // only a strict server `unknown` may safely replay this same UUID through POST.
+      flight = driveGeneration(key, flight, async () => completedGeneration(
+        await reconcileScopeReportGeneration(scope.type, scope.id, {
+          actionId: flight.actionId, jobId: flight.jobId,
+          onJob: jobId => rememberFlightIdentity(key, flight, jobId),
+        }), flight.actionId, scope.type, scope.id), { uncertain: true })
+    }
+    if (flight?.active) {
       readAbort.current?.abort()
       setView(previous => ({
-        key, data: previous.key === key ? previous.data : null,
-        busy: true, uncertain: false, err: null,
+        key, data: previous.key === key && previous.data
+          ? (flight.uncertain ? { ...previous.data, stale: null } : previous.data) : null,
+        busy: true, uncertain: flight.uncertain,
+        err: flight.uncertain ? scopeReportGenerationError(flight.error) : null,
       }))
       observeGeneration(flight, epoch)
+      return () => { requestEpoch.current += 1 }
+    }
+    if (flight?.uncertain) {
+      // Corrupt durable metadata cannot be overwritten with a new paid action: its missing exact
+      // identity is itself an unresolved outcome. Keep the surface locked until storage is repaired.
+      setView(previous => ({
+        key, data: previous.key === key && previous.data
+          ? { ...previous.data, stale: null } : null,
+        busy: false, uncertain: true, err: scopeReportGenerationError(flight.error),
+      }))
       return () => { requestEpoch.current += 1 }
     }
     const controller = new AbortController()
     readAbort.current = controller
     setView(previous => ({
       key, data: previous.key === key ? previous.data : null,
-      busy: true, uncertain: flight?.uncertain === true,
+      busy: true, uncertain: false,
       err: previous.key === key ? previous.err : null,
     }))
     getScopeReport(scope.type, scope.id, { signal: controller.signal })
@@ -127,28 +311,13 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
             err: 'Invalid report response.' })
           return
         }
-        const unresolved = generationFlights.get(key)
-        if (unresolved?.uncertain && (
-          reportAdvanced(value, unresolved.baseline) || unresolved.recoveryRequested
-        )) {
-          // A successful authoritative read is the only manual unlock. It sends no generation POST;
-          // a later paid retry remains a separate explicit click and the backend re-joins the same
-          // retained job identity when that work is still present.
-          generationFlights.delete(key)
-        }
-        const uncertainFlight = generationFlights.get(key)?.uncertain === true
         setView({ key,
-          // # CODEX AGENT: an unresolved paid outcome cannot lend the previous receipt fresh
-          // authority. Keep it visible only through the unknown-freshness quarantine.
-          data: uncertainFlight && value.exists ? { ...value, stale: null } : value,
-          busy: false, uncertain: uncertainFlight,
-          err: uncertainFlight
-            ? scopeReportGenerationError(generationFlights.get(key)?.error) : null })
+          data: value, busy: false, uncertain: false, err: null })
       })
       .catch(error => {
         if (requestEpoch.current !== epoch || keyRef.current !== key || error?.name === 'AbortError') return
         setView(previous => ({ key, data: previous.key === key ? previous.data : null,
-          busy: false, uncertain: flight?.uncertain === true, err: 'Report unavailable.' }))
+          busy: false, uncertain: false, err: 'Report unavailable.' }))
       })
     return () => {
       controller.abort()
@@ -158,41 +327,87 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
   }, [key, scope.type, scope.id, readRevision])
 
   const generate = () => {
-    const existing = generationFlights.get(key)
-    if (existing?.uncertain) return
+    const existing = restoredFlight(key)
+    if (existing) return
+    const actionId = createIdempotencyKey()
+    let flight
+    try {
+      flight = beginGeneration(key, actionId, async () => {
+        return completedGeneration(await genScopeReport(scope.type, scope.id, {
+          actionId,
+          onJob: jobId => rememberFlightIdentity(key, flight, jobId),
+        }), actionId, scope.type, scope.id)
+      })
+    } catch (error) {
+      setView(previous => ({
+        key, data: previous.key === key ? previous.data : null,
+        busy: false, uncertain: false, err: scopeReportGenerationError(error),
+      }))
+      return
+    }
     readAbort.current?.abort()
     const epoch = ++requestEpoch.current
     setView(previous => ({
       key, data: previous.key === key ? previous.data : null,
       busy: true, uncertain: false, err: null,
     }))
-    // # CODEX AGENT: module-owned single-flight survives scope navigation and modal remounts. The
-    // backend also coalesces the exact unobserved job, so no UI lifecycle can duplicate paid work.
-    const flight = beginGeneration(key, generatedAt(view.key === key ? view.data : null), async () => {
-      const value = { ...await genScopeReport(scope.type, scope.id), exists: true }
-      if (!valid(value)) {
-        const error = new Error('invalid report response')
-        error.code = 'scope_report_invalid_response'
-        throw error
-      }
-      return value
-    })
     observeGeneration(flight, epoch)
   }
 
-  const recoverUncertain = () => {
+  const abandon = async () => {
     const flight = generationFlights.get(key)
-    if (!flight?.uncertain) return
-    flight.recoveryRequested = true
+    if (!flight?.actionId || flight.active
+        || !['scope_report_action_indeterminate', 'scope_report_action_unknown']
+          .includes(flight.error?.code)) return
+    const warning = 'The previous paid request may have completed. Abandoning its recovery lock can allow a second paid generation. Continue?'
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+        && !window.confirm(warning)) return
+    flight.active = true
     setView(previous => ({
-      key,
-      data: previous.key === key && previous.data?.exists
-        ? { ...previous.data, stale: null } : previous.key === key ? previous.data : null,
-      busy: true, uncertain: true, err: null,
+      key, data: previous.key === key ? previous.data : null,
+      busy: true, uncertain: true, err: scopeReportGenerationError(flight.error),
     }))
-    // GET-only reconciliation: the effect clears the quarantine only after a valid current-scope
-    // response. A transport failure leaves the original uncertain flight fenced.
-    setReadRevision(value => value + 1)
+    try {
+      await abandonScopeReportAction(scope.type, scope.id, flight.actionId)
+      if (generationFlights.get(key) === flight) generationFlights.delete(key)
+      clearPersistedGeneration(key, flight.actionId)
+      setView(previous => ({
+        key, data: previous.key === key ? previous.data : null,
+        busy: false, uncertain: false, err: null,
+      }))
+      setReadRevision(value => value + 1)
+    } catch (error) {
+      flight.active = false
+      flight.error = error
+      rememberFlightIdentity(key, flight, error)
+      setView(previous => ({
+        key, data: previous.key === key ? previous.data : null,
+        busy: false, uncertain: true, err: scopeReportGenerationError(error),
+      }))
+    }
+  }
+
+  const retrySameAction = () => {
+    let flight = generationFlights.get(key)
+    if (!flight?.actionId || flight.active
+        || flight.error?.code !== 'scope_report_action_unknown') return
+    const warning = 'No durable claim exists for this UUID. Retrying may start the paid generation now. Retry the same action?'
+    if (typeof window !== 'undefined' && typeof window.confirm === 'function'
+        && !window.confirm(warning)) return
+    const actionId = flight.actionId
+    flight.error = null
+    flight = driveGeneration(key, flight, async () => completedGeneration(
+      await genScopeReport(scope.type, scope.id, {
+        actionId,
+        onJob: jobId => rememberFlightIdentity(key, flight, jobId),
+      }), actionId, scope.type, scope.id))
+    readAbort.current?.abort()
+    const epoch = ++requestEpoch.current
+    setView(previous => ({
+      key, data: previous.key === key ? previous.data : null,
+      busy: true, uncertain: false, err: null,
+    }))
+    observeGeneration(flight, epoch)
   }
 
   const c = data?.content
@@ -222,10 +437,18 @@ export default function ScopeReport({ scope, onOpen, onClose }) {
         {err && <div className="notice resource-error" role="alert">
           <span>{err}</span>{' '}
           <button type="button" className="btn sm ghost" disabled={busy}
-            onClick={() => setReadRevision(value => value + 1)}>Check again</button>
-          {uncertain && <button type="button" className="btn sm ghost" disabled={busy}
-            onClick={recoverUncertain}>Recheck &amp; unlock</button>}
-          {uncertain && <span className="muted"> Unlocking sends no generation request.</span>}
+            onClick={() => setReadRevision(value => value + 1)}>
+            {uncertain ? 'Check paid status' : 'Retry read'}</button>
+          {uncertain
+            && generationFlights.get(key)?.error?.code === 'scope_report_action_unknown'
+            && <button type="button" className="btn sm ghost" disabled={busy}
+              onClick={retrySameAction}>Retry same paid action</button>}
+          {uncertain
+            && ['scope_report_action_indeterminate', 'scope_report_action_unknown']
+              .includes(generationFlights.get(key)?.error?.code)
+            && <button type="button" className="btn sm ghost" disabled={busy} onClick={abandon}>
+              {generationFlights.get(key)?.error?.code === 'scope_report_action_unknown'
+                ? 'Discard unaccepted action' : 'Abandon recovery lock'}</button>}
         </div>}
         {data == null && !err && <div className="notice" role="status">Loading…</div>}
 
