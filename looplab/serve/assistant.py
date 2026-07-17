@@ -405,6 +405,14 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         return CompositeTools(providers)
 
     providers.append(RunLauncherTools())
+    mdir = getattr(settings, "memory_dir", None) if settings else None
+    if mdir:
+        # PART V §22.4 (Phase 2): edit the shared cross-run concept TAXONOMY (merge/rename/purge/split)
+        # via the append-only, reversible governance ledger. The provider itself gates: it contributes
+        # only the read `concept_taxonomy` in plan mode and adds the mutation verbs (mode+approver gated,
+        # like the KB/write tools) in mutating modes — so it is safe to add in every non-recovery mode.
+        from looplab.tools.concept_tools import ConceptGovernanceTools
+        providers.append(ConceptGovernanceTools(mdir, mode=mode, approver=approver))
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
     if kdir and mode != "plan":                         # shared KB append is a real mutation
         from looplab.tools.knowledge_tools import KnowledgeWriteTools

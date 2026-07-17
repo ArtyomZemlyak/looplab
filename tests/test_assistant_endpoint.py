@@ -281,6 +281,27 @@ def test_cross_run_reads_absent_when_flag_off_or_no_memory(tmp_path):
         assert "CrossRunTools" not in [type(p).__name__ for p in tools.providers]
 
 
+def test_concept_governance_tools_wired_read_in_plan_edit_in_mutating(tmp_path):
+    # PART V §22.4 Phase 2: the owner assistant edits the shared concept taxonomy. Read (concept_taxonomy)
+    # is present in plan; the mutation verbs appear only in mutating modes. Gated on memory_dir.
+    from types import SimpleNamespace
+
+    from looplab.serve.assistant import build_tools
+
+    settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"))
+    auto = build_tools(tmp_path, mode="auto", settings=settings)
+    assert "ConceptGovernanceTools" in [type(p).__name__ for p in auto.providers]
+    anames = {s["function"]["name"] for s in auto.specs()}
+    assert {"concept_taxonomy", "concept_merge", "concept_purge", "concept_split",
+            "concept_edit_clear"} <= anames
+    plan = build_tools(tmp_path, mode="plan", settings=settings)
+    pnames = {s["function"]["name"] for s in plan.specs()}
+    assert "concept_taxonomy" in pnames                                   # inspect the taxonomy in plan
+    assert "concept_merge" not in pnames and "concept_purge" not in pnames  # but never edit it
+    none = build_tools(tmp_path, mode="auto", settings=SimpleNamespace())  # no memory_dir
+    assert "ConceptGovernanceTools" not in [type(p).__name__ for p in none.providers]
+
+
 def test_recovered_turn_exposes_only_reads_todo_and_journaled_run_control(tmp_path):
     """Lost model traces cannot safely replay any mutator outside the durable run-command journal."""
     from types import SimpleNamespace

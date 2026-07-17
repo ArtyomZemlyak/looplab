@@ -19,7 +19,7 @@ DEFAULT_MODE = "plan"
 
 READONLY_KINDS = frozenset({"read", "git_ro"})
 MUTATING_KINDS = frozenset({
-    "write", "knowledge_write", "shell", "git_mut", "create_run", "run_control", "mcp"})
+    "write", "knowledge_write", "concept_edit", "shell", "git_mut", "create_run", "run_control", "mcp"})
 
 RISK_READ = "READ"
 RISK_REVERSIBLE = "REVERSIBLE"
@@ -57,6 +57,13 @@ _ACTION_RISK = {
     ("write", "delete_file"): RISK_HIGH,
     ("write", "revert_file"): RISK_HIGH,
     ("knowledge_write", "remember"): RISK_CONSEQUENTIAL,
+    # Cross-run concept-taxonomy edits change SHARED durable portfolio state (aliases/splits), like a KB
+    # note — append-only + reversible (concept_edit_clear), so CONSEQUENTIAL, not HIGH: Auto proceeds,
+    # default/acceptEdits ask, plan denies.
+    ("concept_edit", "concept_merge"): RISK_CONSEQUENTIAL,
+    ("concept_edit", "concept_purge"): RISK_CONSEQUENTIAL,
+    ("concept_edit", "concept_split"): RISK_CONSEQUENTIAL,
+    ("concept_edit", "concept_edit_clear"): RISK_CONSEQUENTIAL,
     # Arbitrary commands (including tests, which execute repo code) are HIGH until a future parser or
     # sandbox proof can classify a concrete argv more narrowly. Auto must still ask.
     ("shell", "run_command"): RISK_HIGH,
@@ -93,6 +100,10 @@ _ACTION_CONSEQUENCE = {
     ("write", "delete_file"): "Deletes the scoped file from disk.",
     ("write", "revert_file"): "Overwrites the scoped file from its previous snapshot.",
     ("knowledge_write", "remember"): "Writes a durable note into the shared cross-run knowledge base.",
+    ("concept_edit", "concept_merge"): "Merges/renames one concept into another across the shared taxonomy.",
+    ("concept_edit", "concept_purge"): "Tombstones one concept in the shared cross-run taxonomy.",
+    ("concept_edit", "concept_split"): "Splits a coarse concept into finer ones across the shared taxonomy.",
+    ("concept_edit", "concept_edit_clear"): "Reverts a prior merge/purge/split in the shared taxonomy.",
     ("shell", "run_command"): "Executes the reviewed argument vector in the scoped working directory.",
     ("shell", "run_tests"): "Executes repository test code in a local Python process.",
     ("shell", "kill_background"): "Terminates the scoped background task.",

@@ -557,7 +557,10 @@ exact task or a strict related-goal fingerprint, while v2 D8 is exact-task-only 
 fingerprint. Task facets are advisory metadata reserved for future ranking and currently neither grant
 visibility nor change ordering. External coding-agent Developer backends receive no D8 provider. Proactive
 prompt influence carries lean digest receipts. Typed
-owner governance actions add revision/action fencing and explicit clear operations. The remaining heuristic
+owner governance actions add revision/action fencing and explicit clear operations — reachable both from
+the `/api/cross-run/concept-*` endpoints and, for the owner assistant, from mode+approver-gated
+`concept_merge` / `concept_purge` / `concept_split` / `concept_edit_clear` tools (read-only
+`concept_taxonomy` is available even in plan mode). The remaining heuristic
 scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
 families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
 bounded read-only preview of these projections, not that full system.
