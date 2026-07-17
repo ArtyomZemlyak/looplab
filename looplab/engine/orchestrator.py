@@ -173,6 +173,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         cross_run_structured_claims = _opt("cross_run_structured_claims")
         cross_run_curation = _opt("cross_run_curation")
         cross_run_curation_auto = _opt("cross_run_curation_auto")
+        cross_run_read_tools = _opt("cross_run_read_tools")
         phase_handoff_summary = _opt("phase_handoff_summary")
         eval_trust_mode = _opt("eval_trust_mode")
         trust_mode = _opt("trust_mode")
@@ -356,6 +357,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._cross_run_structured_claims = bool(cross_run_structured_claims)
         self._cross_run_curation = bool(cross_run_curation)
         self._cross_run_curation_auto = bool(cross_run_curation_auto)
+        self._cross_run_read_tools = bool(cross_run_read_tools)
         self._phase_handoff_summary = bool(phase_handoff_summary)
         # Novelty stance (Strategist-owned dial): how hard the proposer / foresight ranker / novelty
         # gate push for NEW directions. "balanced" == today's behavior; the Strategist raises it to

@@ -140,6 +140,8 @@ class EngineOptions:
     cross_run_structured_claims: bool = False  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge
     cross_run_curation_auto: bool = False  # deprecated/inert: old snapshots validate; proposals never auto-apply
+    cross_run_read_tools: bool = False   # PART V §22: reasoning roles get the cross_run_* READ tools; the engine
+    # mirrors the Settings flag ONLY so the proposal hint can add a lean pointer to those tools (never wires them)
     phase_handoff_summary: bool = True   # per-phase handoff briefs across a node build (propose→…→implement)
 
     @classmethod

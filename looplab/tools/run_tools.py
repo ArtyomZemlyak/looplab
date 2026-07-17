@@ -98,6 +98,19 @@ class RunTools:
             fn_spec("list_themes",
                 "List the experiment themes explored so far with counts and best metric per theme.",
                 {}),
+            fn_spec("read_concept_tree",
+                "Read THIS run's CONCEPT hierarchy — the axis/slug concepts the experiments touch, as an "
+                "indented tree with the number of experiments under each branch. Use it before proposing "
+                "to see the concept vocabulary already in play, so you REUSE existing ids instead of "
+                "minting near-duplicates. Richer than list_themes (which only shows coarse axes).",
+                {}),
+            fn_spec("concept_nodes",
+                "List the experiments tagged with a concept (or any of its sub-concepts). Give an "
+                "axis/slug id like 'loss/contrastive' (see read_concept_tree for the vocabulary).",
+                {"concept": {"type": "string"}}, ["concept"]),
+            fn_spec("node_concepts",
+                "The canonical concept ids one experiment is tagged with (after consolidation).",
+                {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_research_memo",
                 "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
                 "evidence-cited claims. The run periodically does a 'think hard' review over all "
@@ -124,6 +137,12 @@ class RunTools:
                 return self._analogous(st, args)
             if name == "list_themes":
                 return self._themes(st)
+            if name == "read_concept_tree":
+                return self._concept_tree(st)
+            if name == "concept_nodes":
+                return self._concept_nodes(st, str(args.get("concept") or ""))
+            if name == "node_concepts":
+                return self._node_concepts_tool(st, int(args.get("node_id")))
             if name == "read_research_memo":
                 return self._research_memo(st)
             return f"(unknown tool: {name})"
@@ -296,6 +315,81 @@ class RunTools:
             f"{t}: {d['count']} experiment(s)" +
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
+
+    def _canon_node_concepts(self, st: RunState) -> dict:
+        """This run's per-node concepts, each id collapsed through the consolidation rename — the SAME
+        canonical vocabulary the /concepts frame ships, so the agent reads/reuses REAL ids."""
+        rename = getattr(st, "concept_consolidation", None) or {}
+        raw = getattr(st, "node_concepts", None) or {}
+        out: dict[int, list[str]] = {}
+        for nid, ids in raw.items():
+            try:
+                key = int(nid)
+            except (TypeError, ValueError):
+                continue
+            out[key] = [rename.get(c, c) for c in (ids or []) if c]
+        return out
+
+    def _concept_tree(self, st: RunState) -> str:
+        """Indented is_a concept tree with per-branch experiment counts (subtree, deduped)."""
+        from collections import defaultdict
+        from looplab.search.concept_graph import project_hierarchy
+        nc = self._canon_node_concepts(st)
+        if not any(nc.values()):
+            return "(no concepts tagged yet — experiments carry concepts once the Researcher tags them)"
+        cids = sorted({c for ids in nc.values() for c in ids})
+        tree = project_hierarchy(cids) or {}
+        nodes = tree.get("nodes", {})
+        # subtree experiment count: a node counts under each concept AND all its ancestor prefixes
+        sub: dict[str, set] = defaultdict(set)
+        for nid, ids in nc.items():
+            for c in ids:
+                parts = c.split("/")
+                for i in range(len(parts)):
+                    sub["/".join(parts[:i + 1])].add(nid)
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        def walk(cid: str, depth: int) -> None:
+            if cid in seen or len(lines) >= 400:
+                return
+            seen.add(cid)
+            node = nodes.get(cid) or {}
+            leaf = cid.rsplit("/", 1)[-1]
+            mark = "" if node.get("tagged") else " ·"   # · = grouping level, no direct tag
+            lines.append(f"{'  ' * depth}{leaf}  [{len(sub.get(cid, ()))}]{mark}")
+            for ch in sorted(node.get("children") or []):
+                walk(ch, depth + 1)
+        for r in tree.get("roots", []):
+            walk(r, 0)
+        exps = sum(1 for v in nc.values() if v)
+        head = (f"{len(cids)} concept id(s) across {exps} experiment(s)  "
+                "([N] = experiments under the branch; · = grouping level, no direct tag):")
+        text = head + "\n" + "\n".join(lines)
+        return text if len(text) <= self.max_chars else text[:self.max_chars].rstrip() + " …(truncated)"
+
+    def _concept_nodes(self, st: RunState, concept: str) -> str:
+        rename = getattr(st, "concept_consolidation", None) or {}
+        target = rename.get(concept.strip(), concept.strip())
+        if not target:
+            return "(give an axis/slug concept id — see read_concept_tree)"
+        nc = self._canon_node_concepts(st)
+        hits = []
+        for nid in sorted(nc):
+            if any(c == target or c.startswith(target + "/") for c in nc[nid]):
+                n = st.nodes.get(nid)
+                hits.append(self._line(n) if n else f"#{nid}")
+        if not hits:
+            return f"(no experiments tagged '{target}')"
+        return f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(hits[:60])
+
+    def _node_concepts_tool(self, st: RunState, nid: int) -> str:
+        if not st.nodes.get(nid):
+            return f"(no experiment #{nid})"
+        ids = self._canon_node_concepts(st).get(nid)
+        if not ids:
+            return f"#{nid}: (no concepts tagged)"
+        return f"#{nid} concepts: " + ", ".join(sorted(set(ids)))
 
     def _research_memo(self, st: RunState) -> str:
         """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top

@@ -252,6 +252,35 @@ def test_plan_mode_has_no_write_tool(tmp_path):
     assert any("unknown tool" in (m.get("content") or "") for m in tool_msgs)
 
 
+def test_cross_run_reads_present_in_every_mode_when_memory_configured(tmp_path):
+    # The owner assistant gets the §22 cross-run concept/claims/atlas reads (advisory, portfolio-wide)
+    # in EVERY mode when memory_dir + cross_run_read_tools are on — including read-only plan.
+    from types import SimpleNamespace
+
+    from looplab.serve.assistant import build_tools
+
+    settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
+    for mode in ("plan", "auto"):
+        tools = build_tools(tmp_path, mode=mode, settings=settings)
+        assert "CrossRunTools" in [type(p).__name__ for p in tools.providers]
+        names = {spec["function"]["name"] for spec in tools.specs()}
+        assert {"cross_run_atlas", "cross_run_prior_attempts", "cross_run_claims"} <= names
+
+
+def test_cross_run_reads_absent_when_flag_off_or_no_memory(tmp_path):
+    from types import SimpleNamespace
+
+    from looplab.serve.assistant import build_tools
+
+    for settings in (
+        SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=False),  # flag off
+        SimpleNamespace(cross_run_read_tools=True),                                      # no memory_dir
+        None,                                                                            # no settings
+    ):
+        tools = build_tools(tmp_path, mode="plan", settings=settings)
+        assert "CrossRunTools" not in [type(p).__name__ for p in tools.providers]
+
+
 def test_recovered_turn_exposes_only_reads_todo_and_journaled_run_control(tmp_path):
     """Lost model traces cannot safely replay any mutator outside the durable run-command journal."""
     from types import SimpleNamespace

@@ -242,14 +242,16 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         # REVIEW(2026-07-16): the MAX_EDGE_WEIGHT bound fixes the count>=2 rejection, but a run whose
         # one pair co-occurs on MORE than MAX_EDGE_WEIGHT nodes still trips "invalid_edge" — and the
         # max-wins fold means that once recorded, the reason never clears (same permanence as before,
-        # just a higher threshold). At the cap the edge should be CLAMPED to MAX_EDGE_WEIGHT (the
-        # evidence saturates), not rejected — rejection converts the run's strongest empirical edge
-        # into a permanent partial/non-authoritative frame.
+        # just a higher threshold). At the cap the edge is CLAMPED to MAX_EDGE_WEIGHT (the evidence
+        # saturates), not rejected — rejection would convert the run's strongest empirical edge into a
+        # permanent partial/non-authoritative frame. Only a NEGATIVE/None/malformed weight is invalid.
         if (src_problem or dst_problem or not src or not dst or src == dst
                 or relation not in registered_rels or confidence is None
-                or not 0.0 <= confidence <= MAX_EDGE_WEIGHT):
+                or confidence < 0.0):
             reasons.add(src_problem or dst_problem or "invalid_edge")
             continue
+        if confidence > MAX_EDGE_WEIGHT:
+            confidence = float(MAX_EDGE_WEIGHT)
         new_endpoints = {src, dst} - edge_endpoints
         # One global projection-node budget covers BOTH tag/path nodes and edge-only endpoints.
         if (len(edge_endpoints) + len(new_endpoints) > MAX_EDGE_ENDPOINTS

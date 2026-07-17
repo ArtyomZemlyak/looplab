@@ -45,6 +45,7 @@ EXPECTED = {
     "cross_run_structured_claims": (True, False),
     "cross_run_curation": (True, False),
     "cross_run_advisory": (True, False),
+    "cross_run_read_tools": (True, False),
     "fingerprint_universal": (True, False),
 }
 # Divergent by SHAPE, not a scalar worth freezing: the product default is a non-trivial

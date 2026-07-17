@@ -190,3 +190,39 @@ def test_malformed_store_never_raises(tmp_path):
 def test_settings_flag_defaults_on():
     # Part IV/V ships ON by default (advisory prompt cue; opt out per-run).
     assert Settings().cross_run_advisory is True
+
+
+# --------------------------------------------------------------------------- lean cross-run pointer
+class _PointerHost(ProposalCuesMixin):
+    """Host for the lean `_cross_run_pointer_text` — reads read-tools flag, memory_dir, advisory flag."""
+    def __init__(self, memory_dir="/mem", *, read_tools=False, advisory=False):
+        self._cross_run_read_tools = read_tools
+        self._cross_run_advisory = advisory
+        self.memory_dir = str(memory_dir)
+
+
+def test_pointer_present_when_read_tools_on_and_advisory_off():
+    # The default product config: tools wired, rich pack off -> the lean pointer names the tools so the
+    # model actually uses them. Advisory only (mentions the tools, never constrains selection).
+    txt = _PointerHost(read_tools=True, advisory=False)._cross_run_pointer_text()
+    assert "cross_run_prior_attempts" in txt and "cross_run_atlas" in txt
+    assert "advisory only" in txt.lower()
+
+
+def test_pointer_suppressed_when_advisory_on():
+    # The rich context pack already primes cross-run thinking, so the lean pointer would be redundant.
+    assert _PointerHost(read_tools=True, advisory=True)._cross_run_pointer_text() == ""
+
+
+def test_pointer_empty_without_read_tools_or_memory_dir():
+    assert _PointerHost(read_tools=False)._cross_run_pointer_text() == ""       # tools not wired
+    assert _PointerHost(memory_dir="", read_tools=True)._cross_run_pointer_text() == ""  # nothing to query
+
+
+def test_pointer_is_static_and_does_no_store_io(tmp_path):
+    # Per-node hot path: the pointer must be a constant string (no lessons/capsules read), so a garbled
+    # or absent store cannot slow or break proposing. Same text regardless of memory_dir contents.
+    a = _PointerHost(memory_dir=tmp_path, read_tools=True)._cross_run_pointer_text()
+    (tmp_path / "lessons.jsonl").write_bytes(b"{not json\n\x00\n")
+    b = _PointerHost(memory_dir=tmp_path, read_tools=True)._cross_run_pointer_text()
+    assert a == b and a.startswith("\nCross-run memory")

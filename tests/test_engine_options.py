@@ -113,6 +113,7 @@ ATTR_BY_FIELD = {
     "cross_run_structured_claims": "_cross_run_structured_claims",
     "cross_run_curation": "_cross_run_curation",
     "cross_run_curation_auto": "_cross_run_curation_auto",
+    "cross_run_read_tools": "_cross_run_read_tools",
     "phase_handoff_summary": "_phase_handoff_summary",
     "inline_repair_retrain_cap": "_inline_repair_retrain_cap",
 }
@@ -230,6 +231,7 @@ def test_from_settings_matches_old_cli_kwarg_mapping(tmp_path):
         cross_run_structured_claims=settings.cross_run_structured_claims,
         cross_run_curation=settings.cross_run_curation,
         cross_run_advisory=settings.cross_run_advisory,
+        cross_run_read_tools=settings.cross_run_read_tools,
         fingerprint_universal=settings.fingerprint_universal,
     )
 

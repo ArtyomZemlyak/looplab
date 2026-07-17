@@ -365,8 +365,9 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
                 on_todos: Optional[Callable] = None, cancel_check: Optional[Callable] = None,
                 command_service=None, command_key_namespace: str = "",
                 mutation_journal_path=None, mutation_recovery: bool = False):
-    """The assistant's toolset. Read tools (filesystem scout + cross-run introspection) are present in
-    EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
+    """The assistant's toolset. Read tools (filesystem scout, machine-run introspection, and — when
+    memory_dir + cross_run_read_tools are on — the §22 cross-run concept/claims/atlas reads) are present
+    in EVERY mode; the mutating write/shell/git providers are added only when the mode allows mutation
     (plan is read-only), mirroring "deny drops the tool from the schema". Each mutating provider gets
     the mode + the injected `approver` (which blocks on a UI confirm-card in `ask` situations).
     `subagents`/`mcp` add the `task` delegation tool and any configured MCP-server tools (top level
@@ -384,6 +385,14 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn)]
+    # Cross-run concept/claims/atlas READS — the same §22 portfolio knowledge the Researcher/Strategist
+    # can ASK for mid-loop, now reachable by the owner assistant too (the operator asked for reading
+    # tools). PORTFOLIO-WIDE: run_turn binds no single RunState, so the provider stays unbound (see its
+    # bind_state docstring) and answers across the whole portfolio. Pure read, no mutation → present in
+    # EVERY mode, incl. read-only plan and recovery; gated on the same memory_dir + flag as the roles.
+    if settings and getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
+        from looplab.tools.cross_run_tools import CrossRunTools
+        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
     if mutation_recovery:
         if mode != "plan" and mutation_journal_path is not None and command_key_namespace:
             providers.append(RunControlTools(

@@ -80,6 +80,7 @@ class ProposalCuesMixin:
                      "that don't (feature engineering is non-universal).")
         hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
         hint += self._cross_run_advisory_text(state)   # §21.20 Step 5: cross-run context pack (empty unless enabled)
+        hint += self._cross_run_pointer_text()         # lean "you have cross_run_* tools" nudge (advisory-off default)
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001
@@ -95,6 +96,22 @@ class ProposalCuesMixin:
         except Exception:  # noqa: BLE001
             pass
         self._stamp_novelty_hint(state, self._novelty_stance)
+
+    def _cross_run_pointer_text(self) -> str:
+        """PART V §22 (advisory): a LEAN, static one-line pointer telling the Researcher it holds the
+        cross_run_* READ tools and should consult them before proposing. Closes the default-config gap
+        where the tools are wired (cross_run_read_tools ON) but the prompt never mentions them, so the
+        model forgets they exist. Deliberately STATIC — no store I/O on the per-node proposal hot path
+        (that is what the tools themselves are for; the rich pushed pack is `_cross_run_advisory_text`).
+        Suppressed when the full context pack is on (it already primes cross-run thinking, so the pointer
+        would be redundant) and when there is no memory_dir to query. Never touches node selection."""
+        if (not getattr(self, "_cross_run_read_tools", False) or not getattr(self, "memory_dir", "")
+                or getattr(self, "_cross_run_advisory", False)):
+            return ""
+        return ("\nCross-run memory may hold prior attempts and evidence for related runs. Before "
+                "proposing, you MAY call cross_run_prior_attempts / cross_run_claims / cross_run_atlas "
+                "to check what was already tried and what the evidence supports — advisory only, it "
+                "never constrains your choice.")
 
     def _cross_run_advisory_text(self, state: RunState) -> str:
         """§21.20 Step 5 (advisory): the bounded cross-run CONTEXT PACK for the Researcher prompt —

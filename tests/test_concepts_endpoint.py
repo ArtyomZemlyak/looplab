@@ -144,13 +144,19 @@ def test_concepts_endpoint_accepts_bounded_co_occurrence_weights(tmp_path):
     ).json()
 
     # CODEX AGENT: co-occurrence is a count-weighted typed edge, not a probability. A repeated pair
-    # must select the requested lens, while a weight beyond the public evidence bound fails closed.
+    # must select the requested lens.
+    # REVIEW(2026-07-16): a weight BEYOND the public evidence bound SATURATES — the pair is the run's
+    # strongest empirical edge, so its weight is clamped to MAX_EDGE_WEIGHT and the edge is KEPT, never
+    # rejected. Rejection would drop the strongest edge and permanently taint the frame as
+    # non-authoritative (max-wins fold never clears "invalid_edge").
     assert data["requested_lens"] == data["effective_lens"] == data["lens"] == "co_occurs"
     assert data["edges_present"] is True and data["lens_edges_present"] is True
     assert data["tree"]["nodes"]["b"]["parent"] == "a"
-    assert data["completeness"]["included"]["edges"] == 1
+    assert data["tree"]["nodes"]["c"]["parent"] == "a"       # over-cap edge clamped in, not dropped
+    assert data["completeness"]["included"]["edges"] == 2
     assert data["completeness"]["source"]["edges"] == 2
-    assert "invalid_edge" in data["completeness"]["reasons"]
+    assert "invalid_edge" not in data["completeness"]["reasons"]
+    assert data["authoritative"] is True                     # strongest edge kept -> frame stays complete
 
 
 def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_path):
@@ -513,9 +519,7 @@ def test_concept_frame_marks_corrupt_source_prefix_non_authoritative(tmp_path):
     _assert_frame_parity(data)
 
 
-def test_derive_lens_caps_body_prompt_and_refuses_partial_source(tmp_path, monkeypatch):
-    import looplab.serve.concept_frame as frame_module
-
+def test_derive_lens_caps_body_prompt(tmp_path):
     _edge_run(tmp_path)
     client = TestClient(make_app(tmp_path))
     too_long = client.post("/api/runs/demo/concepts/lens", json={"prompt": "x" * 801})
@@ -523,13 +527,47 @@ def test_derive_lens_caps_body_prompt_and_refuses_partial_source(tmp_path, monke
     too_large = client.post("/api/runs/demo/concepts/lens", json={"prompt": "x" * 5_000})
     assert too_large.status_code == 413 and too_large.headers["cache-control"] == "no-store"
 
-    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)
-    partial = client.post("/api/runs/demo/concepts/lens",
-                          json=_lens_body(client, "group by usage"))
-    payload = partial.json()
-    assert partial.status_code == 200 and partial.headers["cache-control"] == "no-store"
+
+def test_derive_lens_mints_against_cap_truncated_partial_frame(tmp_path, monkeypatch):
+    # REVIEW(2026-07-16): a cap-truncated (partial) frame is a faithful minting substrate — the SAME
+    # bounded frame the GET path serves and the UI renders. A monotone cap must NOT permanently refuse
+    # lens minting (the old all-or-nothing `if not complete` gate did, forever, on any large run). The
+    # minted frame honestly reports status=partial with the cap reason, but ok=True.
+    import looplab.serve.concept_frame as frame_module
+    import looplab.serve.server as server_mod
+
+    _edge_run(tmp_path)
+    monkeypatch.setattr(server_mod, "make_llm_client",
+                        lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
+    # Patch the cap BEFORE the first materialize: the concept core is cached by file-version, so a cap
+    # raised after the GET would not rebuild it. The generation token is the first event, cap-independent.
+    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)  # force a monotone membership_cap
+    client = TestClient(make_app(tmp_path))
+    body = _lens_body(client, "group by usage")
+    resp = client.post("/api/runs/demo/concepts/lens", json=body)
+    payload = resp.json()
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
+    assert payload["ok"] is True and payload["lens"] == "usage"       # minted, not refused
+    assert payload["status"] == "partial"                            # against the bounded frame
+    assert payload["completeness"]["truncated"] is True
+    assert "membership_cap" in payload["completeness"]["reasons"]
+
+
+def test_derive_lens_refuses_corrupt_source(tmp_path):
+    # A corruption-class reason (torn/invalid source) DOES block minting BEFORE the model call, and
+    # rides back as a blocking_reasons receipt so the UI can explain WHY it is permanent instead of
+    # telling the operator to rephrase a prompt that can never succeed. The generation token is the
+    # FIRST event, so a corrupt tail line does not trip the generation guard — it reaches this gate.
+    _edge_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    body = _lens_body(client, "group by usage")
+    with (tmp_path / "demo" / "events.jsonl").open("ab") as stream:
+        stream.write(b"{not-json}\n")
+    resp = client.post("/api/runs/demo/concepts/lens", json=body)
+    payload = resp.json()
+    assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
     assert payload["ok"] is False and payload["reason"] == "concept_frame_partial"
-    assert payload["status"] == "partial" and payload["authoritative"] is False
+    assert "event_log_corruption" in payload["blocking_reasons"]
 
 
 def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_path, monkeypatch):

@@ -137,6 +137,37 @@ def test_select_trials_k1_and_tool_never_raises_on_edge_selectors():
 
 
 # --------------------------------------------------------------------------- RunTools
+def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
+    # Phase 0: the Researcher/Strategist can read THIS run's concept hierarchy + membership on demand,
+    # so they reuse existing ids instead of minting near-duplicates. Canonicalized through consolidation.
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft",
+                idea=Idea(operator="draft", params={}, concepts=["loss/contrastive/dcl", "architecture/moe"]),
+                metric=0.9, status=NodeStatus.evaluated),
+        1: Node(id=1, parent_ids=[0], operator="improve",
+                idea=Idea(operator="improve", params={}, concepts=["loss/contrastive/mnr"]),
+                metric=0.7, status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: ["loss/contrast/dcl", "architecture/moe"], 1: ["loss/contrastive/mnr"]}
+    st.concept_consolidation = {"loss/contrast/dcl": "loss/contrastive/dcl"}   # a live rename
+    rt = RunTools(); rt.bind_state(st)
+    names = {f["function"]["name"] for f in rt.specs()}
+    assert {"read_concept_tree", "concept_nodes", "node_concepts"} <= names
+
+    tree = rt.execute("read_concept_tree", {})
+    assert "loss" in tree and "contrastive" in tree and "moe" in tree
+    assert "loss  [2]" in tree                              # subtree count: both nodes under loss
+    # membership by concept OR descendant, on the CANONICAL id (rename applied)
+    under = rt.execute("concept_nodes", {"concept": "loss/contrastive"})
+    assert "#0" in under and "#1" in under
+    # querying the RETIRED raw id still finds the node — the query is retargeted through the rename too
+    assert "#0" in rt.execute("concept_nodes", {"concept": "loss/contrast/dcl"})
+    nc0 = rt.execute("node_concepts", {"node_id": 0})
+    assert "loss/contrastive/dcl" in nc0 and "architecture/moe" in nc0
+    assert "no experiment #99" in rt.execute("node_concepts", {"node_id": 99})
+
+
 def test_run_tools_read_and_rank():
     rt = RunTools()
     rt.bind_state(_st())
