@@ -369,6 +369,17 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
     }
     allowed_hosts = {"localhost", "127.0.0.1", "::1"} | configured_hosts
 
+    # A host trusted for the Host header (LOOPLAB_UI_HOSTS) is ALSO trusted as a same-site mutation
+    # Origin. Without this, a proxied deployment (e.g. jupyter-server-proxy) that correctly set
+    # LOOPLAB_UI_HOSTS still 403s every POST/PUT/DELETE: the UI is same-origin from the BROWSER's view
+    # (page + API both under https://<public-host>/…/proxy/<port>/), but behind the proxy the server's
+    # request.base_url is the internal http://127.0.0.1:<port>, so target != the browser's Origin and the
+    # cross-origin-mutation guard rejected it. Trust both schemes on the default ports (the common
+    # https-front case); an exotic public port still needs an explicit LOOPLAB_UI_CORS entry.
+    for _h in configured_hosts:
+        allowed_origins.add(("https", _h, 443))
+        allowed_origins.add(("http", _h, 80))
+
     @app.middleware("http")
     async def _reject_untrusted_host(request: "Request", call_next):
         host = _host_name(request.headers.get("host"))
