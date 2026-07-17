@@ -1,6 +1,20 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { chipsAtPath, breadcrumb, matchingNodeIds } from './conceptChips.js'
+import { searchConcepts, searchHighlightIds, highlightSegments } from './conceptSearch.js'
 import { canonicalId } from './conceptId.js'
+
+const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
+
+// Render a concept label with the matched query slice wrapped in <mark> (pure segments, no innerHTML).
+function Marked({ text, query }) {
+  return highlightSegments(text, query).map((seg, i) =>
+    seg.hit ? <mark key={i}>{seg.text}</mark> : <React.Fragment key={i}>{seg.text}</React.Fragment>)
+}
+
+const SearchIcon = ({ small }) => (
+  <svg width={small ? 13 : 15} height={small ? 13 : 15} viewBox="0 0 24 24" fill="none"
+    stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+    <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>)
 
 // View 2 — the concept chip bar riding OVER the lineage graph. Breadcrumb-navigable (drill into a
 // concept to reveal its next level) and multi-selectable (OR): selecting concepts highlights every
@@ -14,11 +28,24 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const rename = state?.concept_consolidation || {}
   const [path, setPath] = useState('')                 // breadcrumb drill position ('' = roots)
   const [selected, setSelected] = useState([])         // ordered selected concept ids (OR)
+  const [searchOpen, setSearchOpen] = useState(false)  // the search box is revealed (icon toggled)
+  const [query, setQuery] = useState('')               // live free-text concept query
+  const [cursor, setCursor] = useState(-1)             // keyboard-focused result index
+  const inputRef = useRef(null)
 
   const hasConcepts = useMemo(
     () => Object.values(nodeConcepts).some(v => v && v.length), [nodeConcepts])
   const chips = useMemo(() => chipsAtPath(nodeConcepts, rename, path), [nodeConcepts, rename, path])
   const crumbs = useMemo(() => breadcrumb(path), [path])
+
+  // Free-text search is GLOBAL (across the whole concept tree, not just the drilled level): the ranked
+  // results drive a live graph-highlight preview and, on commit, become an ordinary subtree selection.
+  const trimmedQuery = query.trim()
+  const searching = hasConcepts && trimmedQuery.length > 0
+  const results = useMemo(
+    () => searching ? searchConcepts(nodeConcepts, rename, query, SEARCH_RESULTS) : [],
+    [searching, nodeConcepts, rename, query])
+  const matchedIds = useMemo(() => new Set(results.map(r => r.id)), [results])
 
   // The highlighted node set is a pure function of (nodeConcepts, selected, rename). Push it up whenever
   // its VALUE changes — keyed on a stable signature so a live SSE tick that only re-refs node_concepts
@@ -30,9 +57,15 @@ export default function ConceptChipBar({ state, onHighlight }) {
   // If a live projection temporarily carries no concepts, remove graph dimming in the same
   // render that hides this control. Keeping an empty Set here would dim every DAG node while also
   // removing the only visible way to clear the filter.
-  const highlight = useMemo(
+  const committed = useMemo(
     () => hasConcepts ? matchingNodeIds(nodeConcepts, selected, rename) : null,
     [hasConcepts, nodeConcepts, selected, rename])
+  // While a query is live, the graph previews the SEARCH match instead of the pinned selection (null on
+  // no match -> no dimming, never a stuck empty Set); clearing the query reverts to the committed set.
+  const preview = useMemo(
+    () => searching ? searchHighlightIds(nodeConcepts, rename, query) : null,
+    [searching, nodeConcepts, rename, query])
+  const highlight = searching ? preview : committed
   const sig = highlight ? 's:' + [...highlight].sort((a, b) => a - b).join(',') : 'none'
   useEffect(() => { onHighlight && onHighlight(highlight) }, [sig])       // onHighlight is a stable setter
   useEffect(() => () => { onHighlight && onHighlight(null) }, [])         // clear the dim when unmounted
@@ -40,7 +73,11 @@ export default function ConceptChipBar({ state, onHighlight }) {
     if (hasConcepts) return
     setSelected(value => value.length ? [] : value)
     setPath(value => value ? '' : value)
+    setQuery(value => value ? '' : value)
+    setSearchOpen(value => value ? false : value)
   }, [hasConcepts])
+  // Keep the keyboard cursor inside the current result list as the query narrows/widens.
+  useEffect(() => { setCursor(results.length ? 0 : -1) }, [query])
 
   // A chip's SELECTION KEY: a normal chip selects its subtree (plain id, prefix match); the "· here"
   // chip selects EXACTLY the nodes tagged at `path` (an `=`-prefixed key, exact match) so its count and
@@ -50,6 +87,23 @@ export default function ConceptChipBar({ state, onHighlight }) {
     setSelected(s => s.includes(key) ? s.filter(x => x !== key) : [...s, key])
   const removeSelected = (key) => setSelected(s => s.filter(x => x !== key))
   const clearSelection = () => setSelected([])
+
+  // Commit a searched concept as a plain (subtree) selection, then clear the query but keep the box open
+  // and focused so several concepts can be pinned in a row. Deduped against the existing selection.
+  const commitConcept = (id) => {
+    setSelected(s => s.includes(id) ? s : [...s, id])
+    setQuery('')
+    setCursor(-1)
+    inputRef.current?.focus()
+  }
+  const openSearch = () => { setSearchOpen(true); setTimeout(() => inputRef.current?.focus(), 0) }
+  const closeSearch = () => { setSearchOpen(false); setQuery(''); setCursor(-1) }
+  const onSearchKey = (event) => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); setCursor(c => Math.min(c + 1, results.length - 1)) }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setCursor(c => Math.max(c - 1, 0)) }
+    else if (event.key === 'Enter') { event.preventDefault(); const r = results[cursor]; if (r) commitConcept(r.id) }
+    else if (event.key === 'Escape') { event.preventDefault(); query ? setQuery('') : closeSearch() }
+  }
 
   if (!hasConcepts) return null
   // Display a selection key: strip the `=` exact marker for the label, keep a hint that it's level-exact.
@@ -72,6 +126,42 @@ export default function ConceptChipBar({ state, onHighlight }) {
           </React.Fragment>)}
         </nav>
         <span className="spacer" style={{ flex: 1 }} />
+        <div className="cs">
+          {!searchOpen
+            ? <button type="button" className="cs-icon" aria-label="Search concepts" title="Search concepts"
+                onClick={openSearch}><SearchIcon /></button>
+            : <div className={'cs-box' + (searching ? ' focus' : '')}>
+                <SearchIcon small />
+                <input ref={inputRef} className="cs-input" style={{ width: 150 }} value={query}
+                  placeholder="find a concept…" aria-label="Search concepts" autoComplete="off"
+                  role="combobox" aria-expanded={searching} aria-controls="cb-search-results"
+                  onChange={e => setQuery(e.target.value)} onKeyDown={onSearchKey}
+                  onBlur={() => { if (!query) closeSearch() }} />
+                {query &&
+                  <button type="button" className="cs-clear" aria-label="Clear search"
+                    onClick={() => { setQuery(''); inputRef.current?.focus() }}>×</button>}
+              </div>}
+          {searching &&
+            <div className="cs-pop" id="cb-search-results" role="listbox" aria-label="Concept search results">
+              {results.length === 0
+                ? <div className="cs-empty">No concept matches “{trimmedQuery}”.</div>
+                : <>
+                  <div className="cs-pop-h">Concepts · Enter to pin</div>
+                  {results.map((r, i) => {
+                    const parent = r.id.includes('/') ? r.id.slice(0, r.id.lastIndexOf('/') + 1) : ''
+                    return (
+                      <button key={r.id} type="button" role="option" aria-selected={i === cursor}
+                        className={'cs-res' + (i === cursor ? ' cursor' : '')}
+                        onMouseEnter={() => setCursor(i)} onClick={() => commitConcept(r.id)}
+                        title={`${r.id} · ${r.count} experiment(s)`}>
+                        <span><span className="cs-path">{parent}</span><Marked text={r.label} query={query} /></span>
+                        <span className="cs-cnt">{r.count}</span>
+                      </button>
+                    )
+                  })}
+                </>}
+            </div>}
+        </div>
         {selected.length > 0 &&
           <button type="button" className="btn sm ghost" onClick={clearSelection}>
             clear ({selected.length})</button>}
@@ -100,7 +190,8 @@ export default function ConceptChipBar({ state, onHighlight }) {
             const on = selected.includes(key)
             return (
               <span key={chip.id + (chip.atLevel ? '#here' : '')}
-                className={'cb-chip' + (on ? ' on' : '') + (chip.atLevel ? ' here' : '')}>
+                className={'cb-chip' + (on ? ' on' : '') + (chip.atLevel ? ' here' : '')
+                  + (!on && searching && matchedIds.has(chip.id) ? ' match' : '')}>
                 <button type="button" className="cb-chip-main" aria-pressed={on}
                   onClick={() => toggleSelect(key)}
                   title={`${chip.id} · ${chip.count} experiment(s)${chip.atLevel ? ' tagged here (not deeper) — highlights only these' : ''}`}>

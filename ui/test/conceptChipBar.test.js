@@ -171,6 +171,124 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
   }
 })
 
+test('search previews a graph highlight and commits a concept on result click', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true,
+    requestAnimationFrame: cb => setTimeout(cb, 0), cancelAnimationFrame: h => clearTimeout(h),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const calls = []
+  let root, vite
+  const setValue = (input, value) => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, value)
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  }
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
+    ])
+    root = createRoot(document.getElementById('root'))
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: STATE, onHighlight: v => calls.push(v),
+    })))
+
+    // open the search box, type "loss" -> live preview highlight over the whole loss subtree (0,1,2,4)
+    await act(async () => {
+      document.querySelector('.cs-icon').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await act(async () => { setValue(document.querySelector('.cs-input'), 'loss'); await Promise.resolve() })
+    const previewHi = calls.at(-1)
+    assert.ok(previewHi instanceof Set)
+    assert.deepEqual([...previewHi].sort((a, b) => a - b), [0, 1, 2, 4])
+    // ranked results are listed; the exact-leaf `loss` ranks first
+    const resultNames = [...document.querySelectorAll('.cs-res')].map(r => r.textContent)
+    assert.ok(resultNames.some(t => t.includes('loss')))
+    // no pinned selection yet
+    assert.equal(document.querySelector('.cb-pill'), null)
+
+    // click the first result -> pins `loss`, clears the query, keeps the committed highlight
+    await act(async () => {
+      document.querySelector('.cs-res').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    assert.equal(document.querySelector('.cs-input').value, '')            // query cleared
+    assert.equal(document.querySelector('.cs-pop'), null)                  // dropdown gone
+    assert.equal(document.querySelector('.cb-pill-label')?.textContent, 'loss')
+    assert.deepEqual([...calls.at(-1)].sort((a, b) => a - b), [0, 1, 2, 4]) // committed = same set
+  } finally {
+    if (root) await act(async () => root.unmount())
+    if (vite) await vite.close()
+    dom.window.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  }
+})
+
+test('a non-matching query shows an empty state and dims nothing', async () => {
+  const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
+    url: 'https://looplab.test/', pretendToBeVisual: true,
+  })
+  const installed = {
+    window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
+    HTMLElement: dom.window.HTMLElement, IS_REACT_ACT_ENVIRONMENT: true,
+    requestAnimationFrame: cb => setTimeout(cb, 0), cancelAnimationFrame: h => clearTimeout(h),
+  }
+  const previous = Object.fromEntries(Object.keys(installed)
+    .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]))
+  const calls = []
+  let root, vite
+  const setValue = (input, value) => {
+    Object.getOwnPropertyDescriptor(dom.window.HTMLInputElement.prototype, 'value').set.call(input, value)
+    input.dispatchEvent(new dom.window.Event('input', { bubbles: true }))
+  }
+  try {
+    for (const [key, value] of Object.entries(installed)) {
+      Object.defineProperty(globalThis, key, { configurable: true, writable: true, value })
+    }
+    vite = await createServer({
+      root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+      server: { middlewareMode: true },
+    })
+    const [{ createRoot }, { default: ConceptChipBar }] = await Promise.all([
+      import('react-dom/client'), vite.ssrLoadModule('/src/ConceptChipBar.jsx'),
+    ])
+    root = createRoot(document.getElementById('root'))
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: STATE, onHighlight: v => calls.push(v),
+    })))
+    await act(async () => {
+      document.querySelector('.cs-icon').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    await act(async () => { setValue(document.querySelector('.cs-input'), 'zzznope'); await Promise.resolve() })
+    assert.ok(document.querySelector('.cs-empty'))                         // empty state shown
+    assert.equal(calls.at(-1), null)                                      // no dimming (null, not empty Set)
+  } finally {
+    if (root) await act(async () => root.unmount())
+    if (vite) await vite.close()
+    dom.window.close()
+    for (const [key, descriptor] of Object.entries(previous)) {
+      if (descriptor) Object.defineProperty(globalThis, key, descriptor)
+      else delete globalThis[key]
+    }
+  }
+})
+
 test('concepts vanishing while selected clears the highlight instead of stranding the graph dimmed', async () => {
   const dom = new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>', {
     url: 'https://looplab.test/', pretendToBeVisual: true,

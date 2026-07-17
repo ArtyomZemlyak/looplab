@@ -1470,6 +1470,40 @@ pre.code.event-json { max-height: 220px; }
   cursor: pointer; padding: 0 8px; font-size: 14px; }
 .cb-drill:hover { background: var(--bg-3); color: var(--fg); }
 
+/* ── Concept quick-search (shared by View 2 chip bar + View 1 tree) ─────────────────
+   A slim free-text filter over concepts. In the chip bar it hides behind a search icon (space is
+   tight over the graph); in the concept tree it rides the header inline. Both drive the SAME pure
+   model (conceptSearch.js) — a live graph-highlight preview in View 2, row filtering in View 1. */
+.cs { position: relative; display: inline-flex; align-items: center; }
+.cs-icon { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 24px;
+  border: 1px solid transparent; border-radius: 6px; background: none; color: var(--fg-mut); cursor: pointer; }
+.cs-icon:hover { color: var(--fg); background: var(--bg-3); }
+.cs-icon.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.cs-box { display: inline-flex; align-items: center; gap: 6px; background: var(--bg-2);
+  border: 1px solid var(--line-2); border-radius: 7px; padding: 2px 6px; }
+.cs-box.focus { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.cs-box > svg { color: var(--fg-mut); flex: none; }
+.cs-input { background: none; border: 0; color: var(--fg); font-size: 12.5px; padding: 3px 0; outline: none; min-width: 0; }
+.cs-input::placeholder { color: var(--fg-mut); }
+.cs-clear { background: none; border: 0; color: var(--fg-mut); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
+.cs-clear:hover { color: var(--fg); }
+.cs-pop { position: absolute; top: calc(100% + 6px); left: 0; z-index: 30; min-width: 260px; max-width: 360px;
+  background: var(--bg-1); border: 1px solid var(--line-2); border-radius: 9px; box-shadow: var(--shadow);
+  padding: 5px; max-height: 264px; overflow: auto; }
+.cs-pop-h { font-size: 10.5px; text-transform: uppercase; letter-spacing: .7px; color: var(--fg-mut); padding: 5px 8px 3px; }
+.cs-res { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0; background: none;
+  color: var(--fg); cursor: pointer; border-radius: 6px; padding: 6px 8px; font-size: 12.5px; }
+.cs-res:hover, .cs-res.cursor { background: var(--bg-3); }
+.cs-res:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.cs-res .cs-path { color: var(--fg-mut); font-size: 11px; }
+.cs-res .cs-cnt { margin-left: auto; color: var(--fg-mut); font-variant-numeric: tabular-nums; font-size: 11px;
+  background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
+.cs-empty { padding: 9px 8px; color: var(--fg-mut); font-size: 12px; }
+.cs mark, .cv-cid mark, .cv-exp mark { background: color-mix(in srgb, var(--best) 74%, transparent);
+  color: var(--accent-solid-ink); border-radius: 3px; padding: 0 1px; }
+/* a chip whose concept is a live search hit (visual only — the graph preview does the dimming) */
+.cb-chip.match { border-color: var(--best); box-shadow: 0 0 0 1px var(--best); }
+
 /* ── Panel bar (Workstream D): grouped by importance + process ─────────────────── */
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .panel-sep { width: 1px; height: 16px; background: var(--line-2); margin: 0 6px; display: inline-block; }
