@@ -18,6 +18,12 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'node_created', data: {
       node_id: 3, operator: 'improve', idea: { rationale: 7 },
     } }), 'node_created — details could not be summarized')
+    assert.equal(eventNarration({ type: 'node_failed', data: {
+      node_id: 4, reason: 'guard against undefined behavior',
+    } }), 'node #4 failed (guard against undefined behavior)')
+    assert.equal(eventNarration({ type: 'future_event', data: {
+      text: 'params.x was undefined at eval',
+    } }), '{"text":"params.x was undefined at eval"}')
     assert.match(eventNarration({ type: 'future_event', data: { text: 'bounded' },
       _log_page: { truncated: true, raw_bytes: 2048 } }),
     /details omitted \(2.048 source bytes exceed page limit\)/)
