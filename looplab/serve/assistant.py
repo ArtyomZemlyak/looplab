@@ -310,7 +310,9 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         + ("" if mode == "plan" else
            "You can also drive a run's LIFECYCLE directly: finalize_run (stop + wrap-up: report, "
            "lessons, cost), stop_run (freeze, no wrap-up), resume_run, reset_node (re-run a node in "
-           "place from a stage), and the DESTRUCTIVE delete_node / delete_run. And you can adjust a "
+           "place from a stage), retag_node (replace one node's concept tags — the per-run counterpart to "
+           "the cross-run concept_merge/split), set_run_concepts (set the run's BASE concept set that nodes "
+           "inherit), and the DESTRUCTIVE delete_node / delete_run. And you can adjust a "
            "LIVE run's settings: extend_budget (more nodes/time — REOPENS a finished run so the budget "
            "is used), set_directive (a standing steer for the agents, e.g. 'use only sklearn'), and "
            "set_trust_gate (audit/gate/block). Each is gated by your mode and may raise a confirm card.\n")

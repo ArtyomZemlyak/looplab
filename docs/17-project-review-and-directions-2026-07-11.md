@@ -4070,11 +4070,18 @@ tokens. A lazy owner-only `#/atlas` route now renders the lean GET projections a
 The hard invariant from §21.20.1 is **evidence before synthesis** and **no poisoning**: a single run's
 opinion must never rewrite portfolio truth. Therefore:
 
-- **Agents propose, they do not commit.** A Researcher/Strategist/Developer READS claims and priors and
-  may CITE them, but cannot mark a claim "verified", merge two concepts, or delete a run's evidence. The
-  only thing an agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim,
-  written by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation
-  of the shared claim/concept store.
+- **The IN-LOOP agents propose, they do not commit.** A Researcher/Strategist/Developer running INSIDE a
+  loop READS claims and priors and may CITE them, but cannot mark a claim "verified", merge two concepts, or
+  delete a run's evidence — a single run's opinion must not rewrite portfolio truth. The only thing an
+  in-loop agent's reasoning produces that persists cross-run is a *machine-proposed* lesson/D8 claim, written
+  by the ENGINE at finalize through the existing role-routed lessons path — never a direct mutation of the
+  shared claim/concept store.
+- **This is about the in-loop agents, NOT the owner's ASSISTANT.** The assistant acts on the operator's
+  behalf, behind a permission-mode confirm card, and IS a full editor: it merges/splits/purges the cross-run
+  taxonomy (Phase 2a `ConceptGovernanceTools`) and — PART V (D) — re-tags a run's node concepts
+  (`EV_CONCEPT_TAG_EDITED`, `retag_node`) and sets a run's base concept set (`EV_RUN_CONCEPTS`,
+  `set_run_concepts`) through the same command funnel + generation fence the operator UI uses. "Operator is
+  the sole editor" below means *operator OR the operator's assistant*, never an autonomous in-loop agent.
 - **The engine writes projections, not human verdicts.** Event atoms are immutable; capsules are replace-by-run
   materialized records and lean run facts collapse generations. They need explicit version/health receipts and
   must not be described as immutable atoms themselves.

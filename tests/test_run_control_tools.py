@@ -848,3 +848,59 @@ def test_settings_tools_denied_in_plan_mode(tmp_path):
                        ("set_directive", {"run_id": "p1", "text": "x"}),
                        ("set_trust_gate", {"run_id": "p1", "trust_gate": "gate"})):
         assert "plan mode" in t.execute(name, args)
+
+
+def test_retag_node_submits_concept_tag_edited_auto_mode(tmp_path):
+    # D: the assistant re-tags a node's concepts -> EV_CONCEPT_TAG_EDITED with the fold's OPERATOR
+    # provenance (wins over authored/classifier tags), node-generation fenced, via the command funnel.
+    rd = tmp_path / "r1"
+    _run(rd)                                   # nodes 0,1,2 evaluated (attempt 0)
+    commands = _RecordingCommands(tmp_path)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto", command_service=commands)
+    out = t.execute("retag_node",
+                    {"run_id": "r1", "node_id": 1, "concepts": ["loss/contrastive", "regularization/r-drop"]})
+    assert "re-tagged" in out
+    rid_, etype, data, key, gen = commands.calls[0]
+    assert rid_ == "r1" and etype == "concept_tag_edited"
+    assert data["node_id"] == 1 and data["node_generation"] == 0
+    assert data["concepts"] == ["loss/contrastive", "regularization/r-drop"]
+    assert gen == commands.run_generation(rd)
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert st.node_concepts[1] == ["loss/contrastive", "regularization/r-drop"]
+    assert st.node_concept_provenance[1] == "operator-edited"
+
+
+def test_retag_node_denied_in_plan_mode(tmp_path):
+    _run(tmp_path / "r1")
+    t = RunControlTools(tmp_path, mode="plan")
+    out = t.execute("retag_node", {"run_id": "r1", "node_id": 1, "concepts": ["a/b"]})
+    assert "plan mode" in out or "disabled" in out
+
+
+def test_retag_node_rejects_non_list_concepts(tmp_path):
+    _run(tmp_path / "r1")
+    commands = _RecordingCommands(tmp_path)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto", command_service=commands)
+    out = t.execute("retag_node", {"run_id": "r1", "node_id": 1, "concepts": "loss/x"})
+    assert "concepts" in out and not commands.calls
+
+
+def test_set_run_concepts_submits_run_concepts_auto_mode(tmp_path):
+    # D: the assistant sets a run's BASE concept set -> EV_RUN_CONCEPTS (folds to run_base_concepts, LWW).
+    rd = tmp_path / "r1"
+    _run(rd)
+    commands = _RecordingCommands(tmp_path)
+    t = RunControlTools(tmp_path, alive_fn=lambda _rd: False, mode="auto", command_service=commands)
+    out = t.execute("set_run_concepts", {"run_id": "r1", "concepts": ["model/transformer", "loss/contrastive"]})
+    assert "base concepts set" in out
+    rid_, etype, data, key, gen = commands.calls[0]
+    assert etype == "run_concepts" and data == {"concepts": ["model/transformer", "loss/contrastive"]}
+    st = fold(EventStore(rd / "events.jsonl").read_all())
+    assert st.run_base_concepts == ["model/transformer", "loss/contrastive"]
+
+
+def test_set_run_concepts_denied_in_plan_mode(tmp_path):
+    _run(tmp_path / "r1")
+    t = RunControlTools(tmp_path, mode="plan")
+    out = t.execute("set_run_concepts", {"run_id": "r1", "concepts": ["a/b"]})
+    assert "plan mode" in out or "disabled" in out

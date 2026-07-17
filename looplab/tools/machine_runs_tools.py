@@ -905,6 +905,24 @@ class RunControlTools:
                            "description": "propose | implement | eval, or any eval-pipeline stage "
                            "name (train, data_prep, …) to re-run the pipeline from that stage"}},
                 ["run_id", "node_id"]),
+            fn_spec("retag_node",
+                "Re-tag ONE experiment's CONCEPTS on a run — replace node #node_id's concept ids with the "
+                "given `axis/slug` list (e.g. after you notice a mis-tag). Operator-authoritative: it wins "
+                "over the Researcher's authored tags and the classifier, and is the per-run counterpart to "
+                "the cross-run `concept_merge`/`concept_split` taxonomy edits. Pass every concept the node "
+                "should carry (not a delta); an empty list clears its tags.",
+                {"run_id": {"type": "string"}, "node_id": {"type": "integer"},
+                 "concepts": {"type": "array", "items": {"type": "string"},
+                              "description": "the full axis/slug concept id list for this node"}},
+                ["run_id", "node_id", "concepts"]),
+            fn_spec("set_run_concepts",
+                "Set a run's BASE concept set — the common `axis/slug` concepts every node inherits unless "
+                "it authors a delta. The engine seeds this from the first experiment; use this to correct or "
+                "refine it. Last-write-wins; pass the full base list.",
+                {"run_id": {"type": "string"},
+                 "concepts": {"type": "array", "items": {"type": "string"},
+                              "description": "the full axis/slug base concept id list for the run"}},
+                ["run_id", "concepts"]),
             fn_spec("delete_node",
                 "DELETE a node AND its descendants from a run. Default is an APPEND-ONLY tombstone: the "
                 "subtree is logically removed (excluded from best-pick / breeding / re-eval) while its "
@@ -1038,6 +1056,10 @@ class RunControlTools:
                 return self._control(name, rid, rd)
             if name == "reset_node":
                 return self._reset_node(rid, rd, args)
+            if name == "retag_node":
+                return self._retag_node(rid, rd, args)
+            if name == "set_run_concepts":
+                return self._set_run_concepts(rid, rd, args)
             if name in ("extend_budget", "set_directive", "set_trust_gate"):
                 return self._settings(name, rid, rd, args)
             if name == "delete_node":
@@ -1236,6 +1258,81 @@ class RunControlTools:
         return _render_command_result(
             record, name="reset_node", run_id=rid,
             completed=f"node #{nid} of {rid} re-run from {stage}")
+
+    def _retag_node(self, rid: str, rd: Path, args: dict) -> str:
+        # PART V (D): let the assistant re-tag ONE node's concepts — the operator's per-run concept edit,
+        # now available to the operator's assistant. Reuses the existing EV_CONCEPT_TAG_EDITED control event
+        # (folds to node_concepts with OPERATOR provenance, wins over authored/classifier tags), through the
+        # same command funnel + generation fence + permission gate as reset_node. The server normalizes and
+        # caps the concept ids, so submit raw and surface any 400/409 through the command result.
+        from looplab.events.eventstore import EventStore
+        from looplab.events.replay import fold
+        from looplab.events.types import EV_CONCEPT_TAG_EDITED
+        try:
+            nid = int(args.get("node_id"))
+        except (TypeError, ValueError):
+            return "(retag_node needs an integer node_id)"
+        raw = args.get("concepts")
+        if not isinstance(raw, list):
+            return ("(retag_node needs a `concepts` list of axis/slug ids, "
+                    'e.g. ["loss/contrastive", "regularization/r-drop"])')
+        concepts = [str(c) for c in raw]
+        store = EventStore(rd / "events.jsonl")
+        inspected = store.read_all()
+        expected_tail = inspected[-1].seq if inspected else -1
+        node = fold(inspected).nodes.get(nid)
+        if node is None:
+            return f"(no node #{nid} in {rid})"
+        if node.tombstoned:
+            return f"(node #{nid} in {rid} is tombstoned and cannot be re-tagged)"
+        node_gen = node.attempt
+        blocked, formed_generation = self._gate(
+            "retag_node", rid, rd, f"re-tag node #{nid} of {rid}",
+            scope={"run_id": rid, "node_id": nid, "generation": node_gen, "concepts": concepts})
+        if blocked:
+            return blocked
+        # Reject a stale subject that changed while the confirm card was open (same fence as reset_node).
+        latest = store.read_all()
+        latest_tail = latest[-1].seq if latest else -1
+        fresh = fold(latest).nodes.get(nid)
+        if (latest_tail != expected_tail or fresh is None or fresh.tombstoned
+                or fresh.attempt != node_gen):
+            return f"(node #{nid} or run intent changed while awaiting permission — refresh and retry)"
+        data = {"node_id": nid, "node_generation": node_gen, "concepts": concepts}
+        with self._mutation_intent(
+                "retag_node", rid, rd, {"event_type": EV_CONCEPT_TAG_EDITED, "data": data},
+                command_backed=True, expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_CONCEPT_TAG_EDITED, data, idempotency_key=key,
+                expected_generation=generation)
+        return _render_command_result(
+            record, name="retag_node", run_id=rid,
+            completed=f"node #{nid} of {rid} re-tagged with {len(concepts)} concept(s)")
+
+    def _set_run_concepts(self, rid: str, rd: Path, args: dict) -> str:
+        # PART V (D): set a run's BASE concept set (EV_RUN_CONCEPTS, last-write-wins). The engine seeds this
+        # once from the first node; the assistant can override/refine it. Run-scoped (no node fence); the
+        # server normalizes/caps the ids. Nodes then author only deltas vs this base.
+        from looplab.events.types import EV_RUN_CONCEPTS
+        raw = args.get("concepts")
+        if not isinstance(raw, list):
+            return ("(set_run_concepts needs a `concepts` list of axis/slug ids, "
+                    'e.g. ["model/transformer", "loss/contrastive"])')
+        concepts = [str(c) for c in raw]
+        blocked, formed_generation = self._gate(
+            "set_run_concepts", rid, rd, f"set the base concepts of {rid}",
+            scope={"run_id": rid, "concepts": concepts})
+        if blocked:
+            return blocked
+        data = {"concepts": concepts}
+        with self._mutation_intent(
+                "set_run_concepts", rid, rd, {"event_type": EV_RUN_CONCEPTS, "data": data},
+                command_backed=True, expected_generation=formed_generation) as (key, generation):
+            record = self._commands.submit(
+                rd, EV_RUN_CONCEPTS, data, idempotency_key=key, expected_generation=generation)
+        return _render_command_result(
+            record, name="set_run_concepts", run_id=rid,
+            completed=f"run {rid} base concepts set ({len(concepts)})")
 
     def _delete_node(self, rid: str, rd: Path, args: dict) -> str:
         from looplab.events.eventstore import EventStore

@@ -46,7 +46,8 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
+    EV_SPEC_APPROVED)
 from looplab.serve.command_observation import CommandObservation, CommandObservationIndex
 from looplab.serve.engine_proc import (
     _claim_and_spawn_resume, _engine_alive, _engine_liveness, _spawn_engine)
@@ -99,6 +100,7 @@ CONTROL_SPECS: dict[str, ControlSpec] = {
     EV_COMMENT_RESOLUTION_CHANGED: _spec(
         EV_COMMENT_RESOLUTION_CHANGED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_CONCEPT_TAG_EDITED: _spec(EV_CONCEPT_TAG_EDITED, EnginePolicy.NO_SPAWN, "folded_intent"),
+    EV_RUN_CONCEPTS: _spec(EV_RUN_CONCEPTS, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_PROMOTE: _spec(EV_PROMOTE, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_ADDED: _spec(EV_HYPOTHESIS_ADDED, EnginePolicy.NO_SPAWN, "folded_intent"),
     EV_HYPOTHESIS_UPDATED: _spec(EV_HYPOTHESIS_UPDATED, EnginePolicy.NO_SPAWN, "folded_intent"),
@@ -135,6 +137,7 @@ CONTROL_DATA_FIELDS: dict[str, frozenset[str]] = {
     EV_COMMENT_RESOLUTION_CHANGED: frozenset(
         {"comment_id", "node_id", "node_generation", "expected_version", "resolved"}),
     EV_CONCEPT_TAG_EDITED: frozenset({"node_id", "node_generation", "concepts"}),
+    EV_RUN_CONCEPTS: frozenset({"concepts"}),
     EV_PROMOTE: frozenset({"node_id", "generation", "alias"}),
     EV_HYPOTHESIS_ADDED: frozenset({"id", "statement", "source"}),
     EV_HYPOTHESIS_UPDATED: frozenset({"id", "status"}),
@@ -651,6 +654,25 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             if cid not in canonical:                     # dedup, preserve order
                 canonical.append(cid)
         data = {"node_id": node_id, "node_generation": node_generation, "concepts": canonical}
+
+    if event_type == EV_RUN_CONCEPTS:
+        # PART V (D): operator/assistant sets the RUN's BASE concept set (last-write-wins; the fold flows it
+        # through the DAG). No node fence — the subject is the run; the top-level expected_generation run
+        # token still guards last-write-wins. Each id passes the same concept_id() contract as the frame.
+        from looplab.serve.concept_frame import MAX_CONCEPTS_PER_NODE, concept_id
+        raw_concepts = data.get("concepts")
+        if not isinstance(raw_concepts, list):
+            raise HTTPException(400, "concepts must be a list of axis/slug ids")
+        if len(raw_concepts) > MAX_CONCEPTS_PER_NODE:
+            raise HTTPException(400, f"concepts exceeds {MAX_CONCEPTS_PER_NODE} ids")
+        canonical = []
+        for raw in raw_concepts:
+            cid = concept_id(raw) if isinstance(raw, str) else None
+            if cid is None:
+                raise HTTPException(400, f"invalid concept id: {raw!r}")
+            if cid not in canonical:
+                canonical.append(cid)
+        data = {"concepts": canonical}
 
     if event_type == EV_NODE_RESET:
         raw_stage = data.get("from_stage", "eval")

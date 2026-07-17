@@ -85,6 +85,8 @@ _ACTION_RISK = {
     ("run_control", "stop_run"): RISK_CONSEQUENTIAL,
     ("run_control", "resume_run"): RISK_CONSEQUENTIAL,
     ("run_control", "reset_node"): RISK_CONSEQUENTIAL,
+    ("run_control", "retag_node"): RISK_CONSEQUENTIAL,   # re-tags a node's concepts (reversible, LWW)
+    ("run_control", "set_run_concepts"): RISK_CONSEQUENTIAL,   # sets the run base concepts (reversible, LWW)
     ("run_control", "extend_budget"): RISK_CONSEQUENTIAL,
     ("run_control", "set_directive"): RISK_CONSEQUENTIAL,
     ("run_control", "delete_node"): RISK_HIGH,
@@ -122,6 +124,8 @@ _ACTION_CONSEQUENCE = {
     ("run_control", "stop_run"): "Pauses the scoped run.",
     ("run_control", "resume_run"): "Resumes execution of the scoped run.",
     ("run_control", "reset_node"): "Re-runs the scoped node from the reviewed stage.",
+    ("run_control", "retag_node"): "Replaces the scoped node's concept tags with the reviewed list.",
+    ("run_control", "set_run_concepts"): "Replaces the scoped run's base concept set with the reviewed list.",
     ("run_control", "extend_budget"): "Increases the scoped run budget by the reviewed amounts.",
     ("run_control", "set_directive"): "Writes or replaces the reviewed directive on the scoped run.",
     ("run_control", "delete_node"): "Permanently removes the reviewed node subtree from the run.",

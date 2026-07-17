@@ -45,7 +45,8 @@ from looplab.events.types import (
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED, EV_CONCEPT_TAG_EDITED,
     EV_FORCE_ABLATE, EV_FORCE_CONFIRM, EV_FORK, EV_HINT, EV_HYPOTHESIS_ADDED,
     EV_HYPOTHESIS_UPDATED, EV_INJECT_NODE, EV_NODE_ABORT, EV_NODE_RESET, EV_PAUSE, EV_PROMOTE,
-    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_REOPENED, EV_SET_STRATEGY, EV_SPEC_APPROVED)
+    EV_RESTART, EV_RESUME, EV_RUN_ABORT, EV_RUN_CONCEPTS, EV_RUN_REOPENED, EV_SET_STRATEGY,
+    EV_SPEC_APPROVED)
 
 # ---- run-generation command precondition ---------------------------------------------------------
 # The read model exposes the generation currently occupying a reusable run id. A brand-new durable
@@ -66,6 +67,7 @@ CONTROL_EVENTS = {
     EV_HYPOTHESIS_UPDATED,  # P1: a human abandons a hypothesis line (status=abandoned)
     EV_COMMENT_CREATED, EV_COMMENT_EDITED, EV_COMMENT_RESOLUTION_CHANGED,
     EV_CONCEPT_TAG_EDITED,  # PART V Phase 2b: an operator re-tags one node's concepts (command-only)
+    EV_RUN_CONCEPTS,  # PART V (D): operator/assistant sets the run's BASE concept set (last-write-wins)
 }
 
 # Versioned collaboration is command-only: unlike the compatibility /control route, the durable
