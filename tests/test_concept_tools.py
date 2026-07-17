@@ -40,7 +40,8 @@ def test_merge_persists_to_ledger_and_shows_in_taxonomy(tmp_path):
 
 def test_purge_then_clear_reverts(tmp_path):
     _seed_portfolio(tmp_path, ["loss/junk", "loss/keep"])
-    t = _auto(tmp_path)
+    # purge is a HIGH (removal) verb -> it asks even in auto, so give an allowing approver.
+    t = ConceptGovernanceTools(tmp_path, mode="auto", approver=lambda a: "allow_once")
     t.execute("concept_purge", {"concept": "loss/junk"})
     assert resolve_slug("loss/junk", load_concept_aliases(tmp_path)) is None   # tombstoned -> dropped
     assert "loss/junk" in t.execute("concept_taxonomy", {})              # shown under Purged
@@ -78,6 +79,33 @@ def test_approver_allow_once_lets_default_mode_edit(tmp_path):
     t = ConceptGovernanceTools(tmp_path, mode="default", approver=lambda a: "allow_once")
     t.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
     assert load_concept_aliases(tmp_path).get("loss/a") == "loss/b"
+
+
+def test_purge_is_high_asks_even_in_auto_but_merge_proceeds(tmp_path):
+    # REVIEW: purge tombstones a concept out of ALL portfolio views -> HIGH (asks even in auto), matching
+    # the delete_* convention. Merge/split are reversible MODIFY verbs -> CONSEQUENTIAL (auto proceeds).
+    _seed_portfolio(tmp_path, ["loss/a", "loss/b"])
+    auto_no_approver = ConceptGovernanceTools(tmp_path, mode="auto")   # default_approver denies
+    out = auto_no_approver.execute("concept_purge", {"concept": "loss/a"})
+    assert "declined" in out.lower()                                   # HIGH -> asked -> denied
+    from looplab.engine.concept_registry import resolve_slug
+    assert resolve_slug("loss/a", load_concept_aliases(tmp_path)) == "loss/a"   # not purged
+    auto_no_approver.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
+    assert load_concept_aliases(tmp_path).get("loss/a") == "loss/b"    # CONSEQUENTIAL merge proceeded
+
+
+def test_reapply_after_clear_takes_effect_no_false_success(tmp_path):
+    # REVIEW (action_id): merge A->B, clear A, merge A->B again MUST leave A merged (not silently no-op).
+    # Omitting the registry idempotency token makes each call append fresh (last-write-wins in effect).
+    _seed_portfolio(tmp_path, ["loss/a", "loss/b"])
+    t = _auto(tmp_path)
+    t.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
+    t.execute("concept_edit_clear", {"concept": "loss/a", "kind": "alias"})
+    from looplab.engine.concept_registry import resolve_slug
+    assert resolve_slug("loss/a", load_concept_aliases(tmp_path)) == "loss/a"   # cleared
+    out = t.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
+    assert "merged" in out
+    assert load_concept_aliases(tmp_path).get("loss/a") == "loss/b"    # re-applied, not a false-success no-op
 
 
 def test_never_raises_on_bad_input(tmp_path):

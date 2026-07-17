@@ -15,8 +15,6 @@ raised exception (the ToolProvider contract, tools/_base.py).
 """
 from __future__ import annotations
 
-import hashlib
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -95,10 +93,13 @@ class ConceptGovernanceTools:
     def _now(self) -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def _action_id(self, op: str, payload: dict) -> str:
-        material = op + "\0" + json.dumps(payload, sort_keys=True, separators=(",", ":"),
-                                          ensure_ascii=False, default=str)
-        return "asst_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
+    # NOTE: we deliberately DO NOT pass a registry `action_id`. That field is a per-request idempotency
+    # TOKEN, not a content hash — the registry returns the FIRST receipt (and appends nothing) for a repeat
+    # id+payload, and RAISES on a repeat id with a changed payload. A content-hashed id would (a) silently
+    # no-op a legitimate re-apply after a clear (merge A->B; clear A; merge A->B would leave A unmerged while
+    # reporting success) and (b) reject a same-arity split re-edit. Concept edits are last-write-wins in
+    # EFFECT, so letting each call append fresh is correct: a repeated edit is a harmless no-op-in-effect and
+    # a changed edit takes effect. (Reviewed 2026-07-17.)
 
     def _gate(self, name: str, label: str, preview: str, scope: dict) -> Optional[str]:
         """Apply the shared permission policy to one mutation. Returns None to PROCEED, else a message."""
@@ -165,8 +166,7 @@ class ConceptGovernanceTools:
             return gate
         from looplab.engine.concept_registry import record_concept_alias
         rec = record_concept_alias(self.dir, from_concept=src, to_concept=dst, by=self.actor,
-                                   at=self._now(), action_id=self._action_id("merge", {"f": src, "t": dst}),
-                                   require_existing=True)
+                                   at=self._now(), require_existing=True)
         return f"merged '{rec.get('from')}' -> '{rec.get('to')}' (governance revision {rec.get('governance_revision')})"
 
     def _purge(self, concept: str) -> str:
@@ -177,8 +177,7 @@ class ConceptGovernanceTools:
             return gate
         from looplab.engine.concept_registry import record_concept_alias
         rec = record_concept_alias(self.dir, from_concept=concept, to_concept="", by=self.actor,
-                                   at=self._now(), action_id=self._action_id("purge", {"c": concept}),
-                                   require_existing=True)
+                                   at=self._now(), require_existing=True)
         return f"purged '{rec.get('from')}' (governance revision {rec.get('governance_revision')})"
 
     def _split(self, src: str, rules, default: str) -> str:
@@ -191,10 +190,10 @@ class ConceptGovernanceTools:
             return gate
         from looplab.engine.concept_registry import record_concept_split
         rec = record_concept_split(self.dir, from_concept=src, rules=list(rules), default=default,
-                                   by=self.actor, at=self._now(),
-                                   action_id=self._action_id("split", {"c": src, "n": len(rules)}),
-                                   require_existing=True)
-        return f"split '{rec.get('from')}' into {len(rules)} rule(s) (governance revision {rec.get('governance_revision')})"
+                                   by=self.actor, at=self._now(), require_existing=True)
+        # Report the STORED rule count (the registry drops inert rules), not the raw input count.
+        n_stored = len(rec.get("rules") or [])
+        return f"split '{rec.get('from')}' into {n_stored} rule(s) (governance revision {rec.get('governance_revision')})"
 
     def _clear(self, concept: str, kind: str) -> str:
         if not concept.strip():
@@ -207,6 +206,5 @@ class ConceptGovernanceTools:
             return gate
         from looplab.engine.concept_registry import clear_concept_alias, clear_concept_split
         clearer = clear_concept_alias if kind == "alias" else clear_concept_split
-        rec = clearer(self.dir, from_concept=concept, by=self.actor, at=self._now(),
-                      action_id=self._action_id("clear", {"c": concept, "k": kind}))
+        rec = clearer(self.dir, from_concept=concept, by=self.actor, at=self._now())
         return f"cleared {kind} policy for '{rec.get('from')}' (governance revision {rec.get('governance_revision')})"
