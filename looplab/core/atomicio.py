@@ -36,6 +36,13 @@ def strict_fsync(fileno: int) -> None:
     call after an unconfirmed claim could make a retry bill twice. Duplicate the descriptor so a
     timed-out sync thread can finish safely after the caller closes its own file handle.
     """
+    # REVIEW(2026-07-16): unlike best_effort_fsync's _FSYNC_DISABLED latch, this has no circuit
+    # breaker, and each TIMEOUT leaks one dup'd fd plus one daemon thread until the wedged os.fsync
+    # returns (the worker's finally is the only close). On the exact scenario the module header
+    # documents — a stalled FUSE/S3 memory_dir — every retried strict write permanently consumes an
+    # fd; enough retries (many runs finishing, a steward loop) accumulate to EMFILE and unrelated
+    # subsystems (event-log appends, sockets) start failing process-wide. Needs a latch like the
+    # best-effort path (stop dup'ing after N consecutive timeouts) or a bounded worker pool.
     duplicate = os.dup(fileno)
     done = threading.Event()
     failure: list[BaseException] = []
@@ -215,6 +222,20 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
     parent directory entry must receive a successful strict sync receipt.  Any newly-created parent
     directories are also durably published before the temporary file is opened.
     """
+    # REVIEW(2026-07-16): three gaps against the docstring's contract. (1) POSTCONDITION AMBIGUITY:
+    # a failure BEFORE _strict_replace leaves the old destination intact, but a strict_fsync_parent
+    # failure AFTER it raises while the destination already holds the NEW bytes — the caller cannot
+    # distinguish "not published" from "published but unconfirmed", so a paid-claim writer that
+    # aborts on exception can leave a visible claim it believes was never recorded (orphan
+    # "work begun" with no receipt). An exception here means INDETERMINATE; the docstring should say
+    # so and callers need a recovery probe. (2) ZERO PRODUCTION CALLERS: the actual paid-record
+    # writers (engine/lessons.py claim writer via open('xb'), concept_registry._append_governance,
+    # the scope-report record via atomic_write_text) never route through this helper, so the Windows
+    # write-through publication added for them protects nothing yet. (3) Windows parent-dir
+    # publication (_ensure_strict_parent -> _strict_publish_directory, replace=False) makes two
+    # racing writers of the SAME missing parent fail one of them with ERROR_ALREADY_EXISTS (POSIX
+    # mkdir(exist_ok=True) tolerates the identical race), and a crash between mkdtemp and the move
+    # leaves a permanent '.{name}.{rand}.tmp' directory no sweeper removes.
     p = Path(path)
     _ensure_strict_parent(p.parent)
     fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
