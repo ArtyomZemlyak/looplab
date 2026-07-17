@@ -12,20 +12,23 @@ const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const source = () => readFile(new URL('../src/RunList.jsx', import.meta.url), 'utf8')
 const between = (text, start, end) => text.slice(text.indexOf(start), text.indexOf(end))
 
-test('the shared RunList mutation guard is single-flight and exposes only bounded inline errors', async () => {
+test('the shared RunList mutation guard is single-flight, bounded, and honest about timeouts', async () => {
   const text = await source()
   const copy = between(text, 'const mutationMessage', 'function useMutation')
   const hook = between(text, 'function useMutation', 'const focusSoon')
 
   assert.match(copy, /error\?\.status === 409[\s\S]*error\?\.status === 503/)
   assert.match(copy, /current input or selection kept/)
+  assert.match(copy, /outcome is unknown[\s\S]*Refresh before retrying/)
   assert.doesNotMatch(copy, /\.message|\.detail|String\(/,
     'provider text must not be reflected into a mutation alert')
   assert.match(hook, /if \(lock\.current\) return false/)
   assert.match(hook, /lock\.current = true; setState\(true\)/)
-  assert.equal((hook.match(/await action\(\)/g) || []).length, 1,
-    'a mutation intent is sent exactly once')
-  assert.match(hook, /const outcome = await action\(\)[\s\S]*if \(outcome === false\)[\s\S]*return false/,
+  assert.equal((hook.match(/settleWithin\(action, LIST_WRITE_TIMEOUT_MS\)/g) || []).length, 1,
+    'a mutation intent is sent once through the bounded settlement guard')
+  assert.match(hook, /if \(!settlement\.ok\)[\s\S]*settlement\.timeout[\s\S]*return false/,
+    'a stalled write releases the interaction lock without claiming failure or success')
+  assert.match(hook, /const outcome = settlement\.value[\s\S]*if \(outcome === false\)[\s\S]*return false/,
     'a stronger caller-owned reconciliation result cannot be relabeled as success')
   assert.match(hook, /catch \(error\) \{ setState\(mutationMessage\(error\)\); return false \}/)
   assert.match(hook, /finally \{ lock\.current = false \}/)

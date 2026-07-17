@@ -49,30 +49,31 @@ function ResourceNotice({ state, label, retry }) {
   </div>
 }
 
-const mutationMessage = error => error?.status === 409
-  ? 'Conflict; current input or selection kept.'
-  : error?.status === 503
-    ? 'Unavailable; current input or selection kept.'
-    : 'Save failed; current input or selection kept.'
+const mutationMessage = (error, timedOut = false) => timedOut
+  ? 'Save timed out; its outcome is unknown. Refresh before retrying.'
+  : error?.status === 409
+    ? 'Conflict; current input or selection kept.'
+    : error?.status === 503
+      ? 'Unavailable; current input or selection kept.'
+      : 'Save failed; current input or selection kept.'
 
 // Prompt-local input and menu selection survive a failed mutation until the operator retries.
 
 function useMutation() {
-  // REVIEW(2026-07-16): unlike its sibling useListMutation (12s settleWithin deadline), this lock
-  // awaits `action()` with NO deadline and no AbortSignal (api.js send() has neither) — and while
-  // busy it hard-blocks every exit path: the Modal/RunMenu suppress Escape/backdrop/close/Tab, and
-  // busy feeds menuBusy -> navigationBusy, which disables run cards, crumbs, the drawer, Settings
-  // and New-run page-wide. A single stalled move/assign/rename fetch (hung proxy, dropped
-  // connection) therefore soft-locks the ENTIRE runs route until a full page reload. Wrap the await
-  // in the shared requestDeadline helper (extracted for exactly this) so a stall degrades to the
-  // bounded inline error instead of a page-wide freeze.
   const lock = useRef(false)
   const [state, setState] = useState(null)
   const run = async action => {
     if (lock.current) return false
     lock.current = true; setState(true)
     try {
-      const outcome = await action()
+      // The transport is intentionally not replayed: after the local deadline its write outcome is
+      // ambiguous. Releasing the page-wide interaction lock with explicit unknown-outcome copy is
+      // safer than freezing every navigation surface until a hung proxy eventually settles.
+      const settlement = await settleWithin(action, LIST_WRITE_TIMEOUT_MS)
+      if (!settlement.ok) {
+        setState(mutationMessage(settlement.error, settlement.timeout)); return false
+      }
+      const outcome = settlement.value
       // A caller may own a stronger reconciliation contract (for example useListMutation below).
       // Keep its explicit unknown/failure result authoritative instead of closing the menu as success.
       if (outcome === false) { setState(null); return false }
@@ -111,7 +112,7 @@ const settleWithin = (work, timeout) => new Promise(resolve => {
   }
   const timer = setTimeout(() => finish({ timeout: true }), timeout)
   Promise.resolve().then(work).then(
-    () => finish({ ok: true }),
+    value => finish({ ok: true, value }),
     error => finish({ error }),
   )
 })
