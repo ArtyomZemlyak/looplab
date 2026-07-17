@@ -534,7 +534,11 @@ These are surfaced at `GET /api/runs/{id}/concepts?lens=…` (per-lens tree + me
 and drive two run-view surfaces: the **Concepts** view (a concept tree/table — concepts as folders at
 any depth, experiments nested under the exact concept they touched, a configurable metric table with
 Δ-from-baseline coloring, and a lens switcher) and, on the **Search** graph, concept chips that
-highlight the matching nodes. Concept tagging ships **on by default** (`concept_pivot`).
+highlight the matching nodes. Both surfaces carry a **quick-search**: a search icon in the chip bar
+gives a free-text concept lookup that live-previews the graph highlight and pins a concept on
+Enter/click, and the Concepts view has a header filter over concepts and their experiments (by node
+id/status) that auto-expands the path to each match. Both filter client-side over already-loaded
+state (no extra request). Concept tagging ships **on by default** (`concept_pivot`).
 
 ## Cross-run memory
 
