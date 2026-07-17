@@ -311,19 +311,30 @@ class CrossRunTools:
             graph = portfolio_concept_graph(self._scoped_capsules(),
                                             aliases=load_concept_aliases(self.dir),
                                             splits=load_concept_splits(self.dir))
-            if not graph["concepts"]:
+            # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
+            # display — they are hierarchy scaffolding, not concepts any run touched.
+            explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
+            if not explored:
                 return "(no cross-run concepts yet)"
-            lines = [f"Global concept map: {graph['n_concepts']} concept(s) across {graph['n_runs']} run(s)."]
-            top = graph["concepts"][:12]
+            lines = [f"Global concept map: {len(explored)} explored concept(s) across {graph['n_runs']} run(s)."]
+            # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
+            axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
+            if axes:
+                lines.append("Axes: " + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in axes[:12]))
             lines.append("Most explored: " + ", ".join(
-                f"UNTRUSTED_MEMORY={_safe_text(e['concept'], 120)!r}(×{e['n_runs']})" for e in top))
-            cooc = [e for e in graph["edges"] if e["rel"] == "co_occurs"][:8]
+                f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}(×{e.get('n_runs', 0)})"
+                for e in explored[:12]))
+            cooc = [e for e in graph["edges"] if e.get("rel") == "co_occurs"]
             if cooc:
                 lines.append("Concept pairs that co-occur across runs: " + "; ".join(
-                    f"{_safe_text(e['src'], 80)!r}+{_safe_text(e['dst'], 80)!r}(×{e['n_runs']})" for e in cooc))
-            if graph["concepts_omitted"] or graph["edges_omitted"]:
-                lines.append(f"(+{graph['concepts_omitted']} concept(s), {graph['edges_omitted']} edge(s) "
-                             "beyond the display cap)")
+                    f"UNTRUSTED_MEMORY={_safe_text(e.get('src'), 80)!r}+UNTRUSTED_MEMORY="
+                    f"{_safe_text(e.get('dst'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
+            # omission relative to what is DISPLAYED (12 concepts / 8 pairs), plus anything beyond the
+            # read-model caps — so the receipt never implies the render showed everything.
+            hidden_c = max(0, len(explored) - 12) + graph.get("concepts_omitted", 0)
+            hidden_e = max(0, len(cooc) - 8) + graph.get("edges_omitted", 0)
+            if hidden_c or hidden_e:
+                lines.append(f"(+{hidden_c} more concept(s), {hidden_e} more co-occurrence pair(s) not shown)")
             return "\n".join(lines)
 
         if name == "cross_run_search":

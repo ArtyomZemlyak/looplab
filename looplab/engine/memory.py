@@ -983,8 +983,12 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
         parent = cid.rsplit("/", 1)[0] if "/" in cid else ""
         if parent and parent in kept:
             edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": len(concept_runs[cid])})
+    try:
+        threshold = max(1, int(min_cooccurrence))       # a per-pair run-count floor; <=0 means "keep all"
+    except (TypeError, ValueError):
+        threshold = 2                                    # a contract-violating caller falls back to the default
     cooc = sorted(((a, b, runs) for (a, b), runs in pair_runs.items()
-                   if len(runs) >= max(1, int(min_cooccurrence)) and a in kept and b in kept),
+                   if len(runs) >= threshold and a in kept and b in kept),
                   key=lambda t: (-len(t[2]), t[0], t[1]))
     for a, b, runs in cooc:
         if len(edges) >= _MAX_GRAPH_EDGES:

@@ -160,10 +160,14 @@ def test_concept_map_tool_renders_global_graph(tmp_path):
         _cap("r2", ["loss/dcl", "arch/moe"], {}),
     ])
     out = CrossRunTools(tmp_path).execute("cross_run_concept_map", {})
-    assert "Global concept map:" in out
+    assert "Global concept map: 2 explored concept(s) across 2 run(s)." in out   # spine excluded from count
+    assert "×0" not in out                                     # no zero-run structural spine placeholders
     assert "loss/dcl" in out and "arch/moe" in out
-    assert "co-occur across runs" in out and "×2" in out       # the pair appeared together in 2 runs
-    assert isinstance(CrossRunTools(tmp_path).specs(), list)
+    axes_line = next(line for line in out.splitlines() if line.startswith("Axes:"))
+    assert "'loss'" in axes_line and "'arch'" in axes_line     # is_a hierarchy roots surfaced
+    pair_line = next(line for line in out.splitlines() if "co-occur across runs" in line)
+    assert "×2" in pair_line                                   # the pair appeared together in 2 runs
+    assert pair_line.count("UNTRUSTED_MEMORY=") >= 2           # both slugs of the pair are framed untrusted
     assert "cross_run_concept_map" in {s["function"]["name"] for s in CrossRunTools(tmp_path).specs()}
 
 
