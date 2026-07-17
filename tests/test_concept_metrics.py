@@ -35,6 +35,24 @@ def test_bare_single_segment_concepts_produce_metrics_rows(tmp_path):
     assert res["rows"]["agents"]["touched"] == 2 and res["rows"]["agents"]["best"] == 0.9
 
 
+def test_subtree_rollup_aggregates_descendants_keeping_rows_leaf(tmp_path):
+    # The frame parity invariant needs `rows` leaf/direct, so the axis aggregate lives in a SEPARATE
+    # `rollup` map: for each concept, every experiment at or below it on the id-path, UNION per node.
+    st, res = _run(tmp_path, [
+        (["loss/dcl", "loss/triplet"], 0.9),     # one node, two loss leaves -> loss counted once
+        (["loss/dcl"], 0.5),
+        (["hyperparameter/temperature"], 0.7),
+    ])
+    assert "loss" not in res["rows"]              # rows stay leaf/direct (parity preserved)
+    roll = res["rollup"]
+    assert roll["loss"]["touched"] == 2          # union: node0 counts once for the axis
+    assert roll["loss/dcl"]["touched"] == 2      # a leaf's rollup equals its own direct row
+    assert roll["loss"]["best"] == 0.9           # best over descendants
+    assert roll["hyperparameter"]["touched"] == 1
+    assert res["baseline"] == 0.7                 # median(0.9,0.5,0.7)
+    assert roll["loss"]["delta_best"] == 0.2      # 0.9 - 0.7, signed for direction=max
+
+
 def test_median_helper():
     assert _median([]) is None
     assert _median([3.0, 1.0, 2.0]) == 2.0

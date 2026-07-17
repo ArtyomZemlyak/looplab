@@ -865,8 +865,48 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
                 row["delta_best"] = round(sign * (best - baseline), 6)
                 row["delta_mean"] = round(sign * (mean - baseline), 6)
         rows[cid] = row
+
+    # SUBTREE rollup (separate from `rows`, which stays leaf/direct for the frame parity invariant
+    # set(touch)==set(rows)==set(experiment_refs)). For each concept it aggregates every experiment at or
+    # BELOW it on the id-path — so an AXIS/parent row (`loss`) shows real touched/best/Δ instead of a blank
+    # `·` when the tree collapses its children. UNION per node (a node tagged loss/contrastive AND
+    # loss/triplet counts ONCE for `loss`). The UI reads this for every tree row; for a leaf it equals its
+    # own `rows` entry. Also the basis for sorting concept chips by Δbest-from-baseline (View 2).
+    agg_nodes: dict[str, set] = {}
+    agg_metrics: dict[str, list[float]] = {}
+    agg_first: dict[str, int] = {}
+    for idx, node in enumerate(nodes):
+        m = node.robust_metric
+        ok = m is not None and getattr(node, "feasible", True) is not False
+        seen: set[str] = set()
+        for cid in tags.get(node.id, frozenset()):
+            c = str(cid)
+            while c and c not in seen:
+                seen.add(c)
+                c = c.rsplit("/", 1)[0] if "/" in c else ""
+        for cid in seen:
+            agg_nodes.setdefault(cid, set()).add(idx)
+            if idx < agg_first.get(cid, idx + 1):
+                agg_first[cid] = idx
+            if ok:
+                agg_metrics.setdefault(cid, []).append(float(m))
+    rollup: dict[str, dict] = {}
+    for cid in sorted(agg_nodes):
+        ms = agg_metrics.get(cid, [])
+        r = {"touched": len(agg_nodes[cid]), "evaluated": len(ms), "first_touch": agg_first.get(cid),
+             "best": None, "mean": None, "worst": None, "delta_best": None, "delta_mean": None}
+        if ms:
+            best = min(ms) if is_min else max(ms)
+            worst = max(ms) if is_min else min(ms)
+            mean = sum(ms) / len(ms)
+            r["best"], r["worst"], r["mean"] = round(best, 6), round(worst, 6), round(mean, 6)
+            if baseline is not None:
+                r["delta_best"] = round(sign * (best - baseline), 6)
+                r["delta_mean"] = round(sign * (mean - baseline), 6)
+        rollup[cid] = r
+
     return {"baseline": None if baseline is None else round(baseline, 6),
-            "direction": direction, "rows": rows}
+            "direction": direction, "rows": rows, "rollup": rollup}
 
 
 _CONCEPT_RENAME_HOP_CAP = 16   # mirrors serve.concept_frame.MAX_RENAME_HOPS (kept local; no serve import)

@@ -332,12 +332,13 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
     if metrics.get("baseline") is not None and finite_metric(metrics["baseline"]) is None:
         metrics["baseline"] = None
         reasons.add("nonfinite_metric")
-    for row in (metrics.get("rows") or {}).values():
-        for field in ("best", "mean", "worst", "delta_best", "delta_mean"):
-            value = row.get(field)
-            if value is not None and finite_metric(value) is None:
-                row[field] = None
-                reasons.add("nonfinite_metric")
+    for bucket in ("rows", "rollup"):
+        for row in (metrics.get(bucket) or {}).values():
+            for field in ("best", "mean", "worst", "delta_best", "delta_mean"):
+                value = row.get(field)
+                if value is not None and finite_metric(value) is None:
+                    row[field] = None
+                    reasons.add("nonfinite_metric")
 
     best = state.best()
     best_id = best.id if best is not None else None

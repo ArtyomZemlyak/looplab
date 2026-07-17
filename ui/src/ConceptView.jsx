@@ -556,6 +556,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   // value at metricRows[id] instead of the correct "no row" undefined.
   const metricRows = Object.create(null)
   for (const key of Object.keys(data.metrics.rows)) metricRows[key] = data.metrics.rows[key]
+  // Overlay the SUBTREE rollup so an AXIS/parent row shows metrics aggregated over everything at or below
+  // it (leaf rows equal their own rollup, so this is a no-op for them) — otherwise collapsed parents read
+  // as blank "·" though their children have data. Additive: absent on pre-rollup frames.
+  for (const key of Object.keys(data.metrics.rollup || {})) metricRows[key] = data.metrics.rollup[key]
   const experimentCount = new Set(Object.values(byConcept).flat()
     .map(ref => `${ref.node_id}:${ref.node_generation}`)).size
   const shippedLenses = data.edges_present ? data.lenses : data.lenses.filter(item => item.name === 'is_a')
