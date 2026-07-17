@@ -56,8 +56,13 @@ export function orderChipsByDelta(chips, rollup) {
     const d = rollup[id] && rollup[id].delta_best
     return typeof d === 'number' ? d : -Infinity
   }
-  return [...chips].sort((a, b) =>
+  // Keep the trailing "· here" chip (atLevel — the nodes tagged EXACTLY at the current path) LAST, where
+  // chipsAtPath placed it. Its count is exact-tagged-only while rollup[path] is the whole SUBTREE, so
+  // ranking it by that Δbest would wrongly float it above the very child chips that produced the number.
+  const level = chips.filter(c => c.atLevel)
+  const rest = chips.filter(c => !c.atLevel).sort((a, b) =>
     key(b.id) - key(a.id) || b.count - a.count || a.id.localeCompare(b.id))
+  return level.length ? [...rest, ...level] : rest
 }
 
 // Breadcrumb segments for a path: [{id, label}] from root to the full path (inclusive).

@@ -26,6 +26,18 @@ test('orderChipsByDelta preserves the given order when no rollup is available', 
   assert.equal(orderChipsByDelta(chips, undefined), chips)
 })
 
+test('orderChipsByDelta keeps the atLevel "here" chip last, not ranked by its subtree Δ', () => {
+  const chips = [
+    { id: 'loss/a', label: 'a', count: 3 },
+    { id: 'loss/b', label: 'b', count: 5 },
+    { id: 'loss', label: 'loss', count: 1, atLevel: true },   // exact-at-path -> must stay last
+  ]
+  // rollup['loss'] is the SUBTREE best (>= children); ranking the here-chip by it would float it front.
+  const rollup = { 'loss/a': { delta_best: 0.02 }, 'loss/b': { delta_best: 0.05 }, loss: { delta_best: 0.09 } }
+  const ordered = orderChipsByDelta(chips, rollup).map(c => c.id)
+  assert.deepEqual(ordered, ['loss/b', 'loss/a', 'loss'])      // children by Δ; the here-chip trails
+})
+
 const NC = {
   0: ['loss/contrastive/dcl', 'architecture/moe'],
   1: ['loss/contrastive/mnr'],
