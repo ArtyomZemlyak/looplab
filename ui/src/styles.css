@@ -953,6 +953,9 @@ textarea.text { min-height: 220px; font-family: ui-monospace, Consolas, monospac
 .md .md-hr { border: none; border-top: 1px solid var(--line); margin: 10px 0; }
 .md a { text-decoration: underline; }
 .md strong { color: var(--fg); }
+/* Node rationale rendered as Markdown inside the event detail / inspector — compact detail type. */
+.rationale-md.md { margin: 2px 0 4px; word-break: break-word; }
+.rationale-md.md .md-p { margin: 3px 0; }
 .chat-in { border-top: 1px solid var(--line); padding-top: 8px; margin-top: 6px; }
 .chat-in textarea.text { min-height: 44px; }
 

@@ -102,6 +102,24 @@ const NARR = {
   diversity_archive: () => 'diversity archive updated',
   workspace_changed: () => 'workspace changed since the last run — re-grounding',
   budget: (d) => `checkpoint — ${d.nodes} node${d.nodes === 1 ? '' : 's'}, ${fmt(d.elapsed_s, 3)}s elapsed`,
+  // Meaningful events that previously LEAKED as raw JSON (no narration + not hidden). Narrated here so
+  // they read cleanly. The high-volume / internal read-model events (node_concepts and the rest of the
+  // concept-cadence sidecars, verifier scores, resume/restart plumbing) are deliberately left WITHOUT a
+  // narration — the curated feed is now an allow-list (see `isCuratedType`), so anything unnarrated stays
+  // out of the feed (still in events.jsonl + the raw Event Explorer) instead of rendering as a JSON blob.
+  node_reset: (d) => `re-running node #${d.node_id} from ${d.from_stage || d.stage || 'propose'}`,
+  node_tombstoned: (d) => { const ids = d.node_ids || (d.node_id != null ? [d.node_id] : []); return `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ') || '(subtree)'}` },
+  holdout_evaluated: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
+  novelty_graded: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
+  cross_run_prior: (d) => { const cs = (d.concepts || []).slice(0, 3).join(', '); return `cross-run prior${cs ? ': ' + cs : ''} — tried in an earlier run` },
+  comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.body || d.text || '').slice(0, 80)}`,
+  comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
+  comment_resolution_changed: (d) => `comment ${d.resolved === false ? 'reopened' : 'resolved'} on #${d.node_id ?? '?'}`,
+  concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
+  hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
+  trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
+  inject_failed: (d) => `experiment injection failed${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
+  env_changed: () => 'environment changed since run start — re-grounding',
 }
 
 // The node an event refers to, if any — lets a feed click drill into that node.
@@ -142,7 +160,10 @@ const TYPE2GROUP = {
   run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle', budget: 'lifecycle',
   data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
   setup_started: 'lifecycle', setup_step: 'lifecycle', setup_finished: 'lifecycle', workspace_seeded: 'lifecycle',
-  run_setup_started: 'lifecycle', run_setup_finished: 'lifecycle',
+  run_setup_started: 'lifecycle', run_setup_finished: 'lifecycle', env_changed: 'lifecycle',
+  node_reset: 'control', node_tombstoned: 'control', concept_tag_edited: 'control', inject_failed: 'control',
+  comment_created: 'control', comment_edited: 'control', comment_resolution_changed: 'control', trust_gate_changed: 'control',
+  holdout_evaluated: 'eval', novelty_graded: 'trust', cross_run_prior: 'research', hypothesis_updated: 'research',
 }
 // Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
 // icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).
@@ -161,13 +182,18 @@ function kindOf(type) {
   return { group: g, glyph: TYPE_GLYPH[type] || GROUP_GLYPH[g] || 'dot' }
 }
 
-// Internal bookkeeping the curated Timeline hides: the finalize state-machine's per-step checklist
-// markers (`finalize_step` {scope, step}) and its exact-finish ack (`finalization_finished` {finish_seq})
-// are DUPLICATES of the real wrap-up effects that already narrate cleanly (diversity archive, distilled
-// lessons, run reflection, run finalized); and `llm_usage` is a per-LLM-call cost delta (one row per
-// call — the aggregate `llm_cost` "LLM: N tokens, $X" is the human-facing total). These render as
-// opaque projected JSON / high-frequency noise, so they stay in the event log but out of the feed.
-const FEED_HIDDEN = new Set(['finalize_step', 'finalization_finished', 'llm_usage'])
+// The curated feed is an ALLOW-LIST: an event shows iff it has a human-readable narration (a NARR
+// entry). Everything else is internal bookkeeping — the finalize state-machine's per-step checklist
+// (`finalize_step` {scope, step}) and exact-finish ack (`finalization_finished` {finish_seq}), the
+// per-LLM-call cost delta `llm_usage` (the aggregate `llm_cost` "LLM: N tokens, $X" is the human total),
+// the concept-cadence read-model sidecars (`node_concepts`, `concept_edge`, `concept_consolidation`,
+// `concept_coverage_snapshot`, `hypothesis_concepts`), internal verifier scores, and resume/restart
+// plumbing. These stay in events.jsonl and the raw Event Explorer, but never leak into the curated
+// timeline as an opaque JSON blob. Promoting a type into the feed = giving it a NARR entry above.
+// (Was an opt-OUT blacklist `FEED_HIDDEN`, which silently leaked every type nobody remembered to add —
+// e.g. `node_concepts` rendered as raw `{"node_id":67,"concepts":[…]}`. The allow-list can't regress
+// that way: a new event type is invisible-until-narrated instead of raw-JSON-until-hidden.)
+const isCuratedType = (type) => Object.hasOwn(NARR, type)
 
 // Events whose row expands to a "why" detail card (reasoning, considered alternatives, context).
 const REASONING_TYPES = new Set(['node_created', 'policy_decision', 'strategy_decision', 'research_completed'])
@@ -322,7 +348,7 @@ function NodeCreatedDetail({ d, trace }) {
   return (
     <div className="ev-detail">
       <div className="section-h">Conclusion — why this experiment next</div>
-      <div className="v">{idea.rationale || '—'}</div>
+      {idea.rationale ? <Markdown className="rationale-md" text={idea.rationale} /> : <div className="v">—</div>}
       <div className="ev-meta">
         <span>operator <b>{idea.operator || d.operator}</b></span>
         {(d.parent_ids || []).length > 0 && <span>built from {d.parent_ids.map(p => '#' + p).join(', ')}</span>}
@@ -782,16 +808,16 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
 
   // The chronological feed: events, filtered + time-scrubbed.
   const feed = useMemo(() =>
-    searchableLog.filter(({ event, search }) => !FEED_HIDDEN.has(event.type)
+    searchableLog.filter(({ event, search }) => isCuratedType(event.type)
       && (atLiveView || event.seq <= viewSeq)
       && kindMatch(event) && (!filterQuery || search.includes(filterQuery))).map(item => item.event),
     [searchableLog, atLiveView, viewSeq, filterQuery, kinds])
-  // High-volume bookkeeping (llm_usage per LLM call, finalize_step gates) is hidden from the feed but
-  // still counted in `timeline.totalEvents`/`timeline.unread` (server counts the raw log). When any such
-  // row is in the loaded window, those counts over-state what actually renders — so the pagebar shows a
-  // separate "shown" figure and the unread badge falls back to the numberless "new activity" affordance
-  // rather than promising a precise count the feed can't honor. See finding: FEED_HIDDEN count desync.
-  const hiddenPresent = useMemo(() => log.some((e) => FEED_HIDDEN.has(e.type)), [log])
+  // Non-curated bookkeeping (per-call cost, finalize gates, concept-cadence sidecars, …) is kept out of
+  // the feed but still counted in `timeline.totalEvents`/`timeline.unread` (server counts the raw log).
+  // When any such row is in the loaded window, those counts over-state what actually renders — so the
+  // pagebar shows a separate "shown" figure and the unread badge falls back to the numberless "new
+  // activity" affordance rather than promising a precise count the feed can't honor (allow-list desync).
+  const hiddenPresent = useMemo(() => log.some((e) => !isCuratedType(e.type)), [log])
   useEffect(() => {
     if (!atLiveView && viewSeq != null) timeline.ensureSeq(viewSeq)
   }, [atLiveView, viewSeq, timeline.revision, timeline.ensureSeq])

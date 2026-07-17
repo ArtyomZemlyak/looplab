@@ -421,10 +421,15 @@ class LLMResearcher:
                                         # active Developer can't run one (system prompt gates too).
                                         ("; optionally a `space` grid for a sweep"
                                          if getattr(self, "offer_sweep", True) else "") + "). The "
-                                        "`rationale` is your conclusion the operator reads: in 1-3 "
-                                        "sentences state WHY this experiment next and WHAT you expect "
-                                        "it to learn/improve given the results so far — not a "
-                                        "restatement of the params. " + _IDEA_SPACE_PLAIN
+                                        "`rationale` is your conclusion the operator reads AND the Developer "
+                                        "builds from — write it as brief GitHub-flavored Markdown (a lead "
+                                        "sentence; **bold** the key lever, add a short bullet or two only if it "
+                                        "helps). State ONLY the DELTA vs the parent: the specific change THIS "
+                                        "experiment makes (enough detail for the Developer to build a "
+                                        "non-numeric/structural change) and the intuition for why it should "
+                                        "help — do NOT restate the params or re-explain the shared setup and "
+                                        "the parent's reasoning that haven't changed (the reader already has the "
+                                        "parent). Keep it to ~1-3 sentences. " + _IDEA_SPACE_PLAIN
                                         + (" The `hypothesis` is the one-line belief this experiment "
                                            "tests (reuse wording across experiments that test the same "
                                            "belief)." if self.track_hypotheses else "")},

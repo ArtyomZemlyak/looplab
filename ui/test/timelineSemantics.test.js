@@ -98,11 +98,12 @@ test('virtual timeline is bounded, variable-height, generation-scoped, and polit
 
 test('feed-hidden bookkeeping keeps the pagebar and unread badge honest about what renders', async () => {
   const dock = await source('Dock.jsx')
-  // The hidden set stays bookkeeping-only (finalize gates + per-call cost); un-hiding these would
-  // flood the feed the user asked to keep clean.
-  assert.match(dock, /const FEED_HIDDEN = new Set\(\['finalize_step', 'finalization_finished', 'llm_usage'\]\)/)
-  // A run carrying any hidden row is detected so the counts can compensate.
-  assert.match(dock, /const hiddenPresent = useMemo\(\(\) => log\.some\(\(e\) => FEED_HIDDEN\.has\(e\.type\)\), \[log\]\)/)
+  // The curated feed is an ALLOW-LIST: only narrated event types render. Everything unnarrated (finalize
+  // gates, per-call cost, the concept-cadence read-model sidecars, verifier scores, resume/restart
+  // plumbing) is kept out — so a new event type can never regress into a raw-JSON blob in the feed.
+  assert.match(dock, /const isCuratedType = \(type\) => Object\.hasOwn\(NARR, type\)/)
+  // A run carrying any non-curated row is detected so the counts can compensate.
+  assert.match(dock, /const hiddenPresent = useMemo\(\(\) => log\.some\(\(e\) => !isCuratedType\(e\.type\)\), \[log\]\)/)
   // Pagebar: whenever the feed is a strict subset of the loaded window (hidden rows or a time-scrub),
   // it names the shown count instead of silently mismatching `${log.length} loaded`.
   assert.match(dock, /feed\.length !== log\.length[\s\S]*?\$\{feed\.length\} \$\{\(filter\.trim\(\) \|\| kinds\.size\) \? 'matching' : 'shown'\}/)
