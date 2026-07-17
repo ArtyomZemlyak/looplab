@@ -1499,8 +1499,10 @@ pre.code.event-json { max-height: 220px; }
 .cs-res .cs-cnt { margin-left: auto; color: var(--fg-mut); font-variant-numeric: tabular-nums; font-size: 11px;
   background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px; padding: 0 7px; }
 .cs-empty { padding: 9px 8px; color: var(--fg-mut); font-size: 12px; }
-.cs mark, .cv-cid mark, .cv-exp mark { background: color-mix(in srgb, var(--best) 74%, transparent);
-  color: var(--accent-solid-ink); border-radius: 3px; padding: 0 1px; }
+/* Match the proven .code-line mark: a translucent highlight that keeps the inherited text color, so it
+   stays legible on either theme (an opaque gold fill with fixed ink fails contrast in the light theme). */
+.cs mark, .cv-cid mark, .cv-exp mark { background: color-mix(in srgb, var(--best) 42%, transparent);
+  color: inherit; border-radius: 3px; padding: 0 1px; }
 /* a chip whose concept is a live search hit (visual only — the graph preview does the dimming) */
 .cb-chip.match { border-color: var(--best); box-shadow: 0 0 0 1px var(--best); }
 /* View 1 tree: a concept row whose own id/label matched the filter, and the no-match message */
