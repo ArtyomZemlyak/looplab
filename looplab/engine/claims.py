@@ -1104,8 +1104,10 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
             "top_concepts": [_claim_text(e.get("concept"), 500) for e in rows[:max_claims]],
-            "helps": [_claim_text(c, 500) for c, _n in tendency["helps"]],
-            "hurts": [_claim_text(c, 500) for c, _n in tendency["hurts"]],
+            # E3: keep the run COUNT (n_helped/n_hurt) in the rendered span — "loss/contrastive (n=7)"
+            # vs "(n=2)" tells the Researcher how strong the multi-run tendency is, not just its direction.
+            "helps": [f"{_claim_text(c, 480)} (n={int(n)})" for c, n in tendency["helps"]],
+            "hurts": [f"{_claim_text(c, 480)} (n={int(n)})" for c, n in tendency["hurts"]],
         }
     return pack
 

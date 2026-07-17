@@ -155,7 +155,8 @@ def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
         {"concept": "loss/b", "n_runs": 2, "n_helped": 1, "n_neutral": 0, "n_hurt": 1},  # mixed -> neither
     ]}
     pack = build_context_pack([], concept_overview=overview)
-    assert pack["coverage"]["helps"] == ["loss/a"] and pack["coverage"]["hurts"] == ["loss/c"]
+    # E3: helps/hurts carry the run count (n_helped/n_hurt) so the tendency's strength is visible.
+    assert pack["coverage"]["helps"] == ["loss/a (n=2)"] and pack["coverage"]["hurts"] == ["loss/c (n=2)"]
     text = render_context_pack(pack)
     assert "RANK BETTER" in text and "loss/a" in text
     assert "RANK WORSE" in text and "loss/c" in text
