@@ -1098,7 +1098,7 @@ def build_router(srv) -> APIRouter:
             return False, event_bytes
         if probe_key is not None and _cached_revision(probe_key) is not None:
             return False, event_bytes
-        if probe_key is None or _cached_omission(probe_key):
+        if probe_key is None:
             return True, event_bytes
         try:
             capture_scope_source(
@@ -1110,8 +1110,10 @@ def build_router(srv) -> APIRouter:
             if after_key is not None:
                 _remember_omission(after_key)
             return True, event_bytes
-        # CODEX AGENT: a formerly omitted run is new evidence even when a permissions repair or
-        # same-stat content repair preserved its cheap probe. Never call the old report current.
+        # CODEX AGENT: a negative cache may skip work only when the answer is already stale. An
+        # omitted receipt needs a current failed-open observation before it can authorize
+        # ``stale:false``: accessibility is not part of the cheap stat key, so a transient lock can
+        # clear without changing that key. A formerly omitted run is therefore always new evidence.
         return False, event_bytes
 
     # CODEX AGENT: scope ids are opaque persisted identities, so the route must preserve legal
@@ -1253,6 +1255,12 @@ def build_router(srv) -> APIRouter:
             for rid in frozen_scope_ids:
                 expected_bytes = frozen_source_sizes.get(rid, 0)
                 before_probe, before_key = _source_probe_receipt(rid, frozen_sig_by_id[rid])
+                # CODEX AGENT: the reservation owns the source probe observed by the POST handler.
+                # Task/config snapshots are intentionally absent from the event-log signature and
+                # size map, so accepting a different first worker probe would silently rebase this
+                # paid job and let a later request reserve a second identity for the same evidence.
+                if before_probe != requested_probe_receipts[rid]:
+                    return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
                 frozen_probe_receipts[rid] = before_probe
                 try:
                     source = capture_scope_source(
