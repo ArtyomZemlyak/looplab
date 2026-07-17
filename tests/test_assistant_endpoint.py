@@ -89,11 +89,13 @@ def test_session_store_rejects_traversal(tmp_path):
 
 def test_expand_mentions(tmp_path):
     # @run:<id> grounds on a real run; @file:<path> injects file contents; both are reported in refs.
-    rd = tmp_path / "demo"; rd.mkdir()
+    rd = tmp_path / "demo"
+    rd.mkdir()
     (rd / "events.jsonl").write_text(
         '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","goal":"g","direction":"max"}}\n',
         encoding="utf-8")
-    f = tmp_path / "note.md"; f.write_text("hello file")
+    f = tmp_path / "note.md"
+    f.write_text("hello file")
     text, refs = expand_mentions(f"look at @run:demo and @file:{f}", tmp_path,
                                  alive_fn=lambda p: False, roots=[tmp_path])
     assert "[@run:demo]" in text and "hello file" in text
@@ -113,7 +115,8 @@ def test_normalize_mode():
 # --------------------------------------------------------------------------- run_turn
 def test_run_turn_uses_read_tool_then_answers(tmp_path):
     # A run on disk so list_runs has something to find.
-    rd = tmp_path / "demo"; rd.mkdir()
+    rd = tmp_path / "demo"
+    rd.mkdir()
     (rd / "events.jsonl").write_text(
         '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t","goal":"g","direction":"max"}}\n',
         encoding="utf-8")
@@ -191,7 +194,8 @@ def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
     from looplab.events.eventstore import EventStore
     from looplab.serve.run_commands import run_generation_token
 
-    rd = tmp_path / "demo"; rd.mkdir()
+    rd = tmp_path / "demo"
+    rd.mkdir()
     events = rd / "events.jsonl"
     events.write_text(
         '{"seq":0,"type":"run_started","data":{"run_id":"demo","task_id":"t",'
@@ -228,7 +232,8 @@ def test_run_turn_threads_commands_into_run_control_tools(tmp_path):
 def test_run_turn_propose_run(tmp_path):
     # propose_run validates the task before proposing (so an unrunnable card is bounced) — a dataset
     # task's data path must EXIST, so point it at a real file under tmp_path.
-    data = tmp_path / "train.csv"; data.write_text("a,b,y\n1,2,0\n")
+    data = tmp_path / "train.csv"
+    data.write_text("a,b,y\n1,2,0\n")
     spec = {"run_id": "titanic-baseline", "task": {"kind": "dataset", "goal": "predict survival",
             "direction": "max", "data_path": str(data)}, "settings": {"max_nodes": 20},
             "setup_steps": ["Confirm the target column", "", "Pin the data version"]}
@@ -260,11 +265,14 @@ def test_cross_run_reads_present_in_every_mode_when_memory_configured(tmp_path):
     from looplab.serve.assistant import build_tools
 
     settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
+    expected = {
+        "cross_run_atlas", "cross_run_claims", "cross_run_concept_map",
+        "cross_run_prior_attempts", "cross_run_search",
+    }
     for mode in ("plan", "auto"):
         tools = build_tools(tmp_path, mode=mode, settings=settings)
-        assert "CrossRunTools" in [type(p).__name__ for p in tools.providers]
-        names = {spec["function"]["name"] for spec in tools.specs()}
-        assert {"cross_run_atlas", "cross_run_prior_attempts", "cross_run_claims"} <= names
+        provider = next(p for p in tools.providers if type(p).__name__ == "CrossRunTools")
+        assert {spec["function"]["name"] for spec in provider.specs()} == expected
 
 
 def test_cross_run_reads_absent_when_flag_off_or_no_memory(tmp_path):
@@ -272,34 +280,80 @@ def test_cross_run_reads_absent_when_flag_off_or_no_memory(tmp_path):
 
     from looplab.serve.assistant import build_tools
 
+    portfolio_names = {
+        "cross_run_atlas", "cross_run_claims", "cross_run_concept_map",
+        "cross_run_prior_attempts", "cross_run_search",
+        "concept_taxonomy", "concept_merge", "concept_purge", "concept_split",
+        "concept_edit_clear",
+    }
     for settings in (
         SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=False),  # flag off
         SimpleNamespace(cross_run_read_tools=True),                                      # no memory_dir
         None,                                                                            # no settings
     ):
-        tools = build_tools(tmp_path, mode="plan", settings=settings)
-        assert "CrossRunTools" not in [type(p).__name__ for p in tools.providers]
+        for mode in ("plan", "auto"):
+            tools = build_tools(tmp_path, mode=mode, settings=settings)
+            provider_types = {type(p).__name__ for p in tools.providers}
+            assert provider_types.isdisjoint({"CrossRunTools", "ConceptGovernanceTools"})
+            names = {spec["function"]["name"] for spec in tools.specs()}
+            assert names.isdisjoint(portfolio_names)
 
 
 def test_concept_governance_tools_wired_read_in_plan_edit_in_mutating(tmp_path):
     # PART V §22.4 Phase 2: the owner assistant edits the shared concept taxonomy. Read (concept_taxonomy)
-    # is present in plan; the mutation verbs appear only in mutating modes. Gated on memory_dir.
+    # is present in plan; the mutation verbs appear only in mutating modes. The portfolio ACL flag and
+    # memory_dir are both required.
     from types import SimpleNamespace
 
     from looplab.serve.assistant import build_tools
 
-    settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"))
+    settings = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
+    mutation_names = {"concept_merge", "concept_purge", "concept_split", "concept_edit_clear"}
     auto = build_tools(tmp_path, mode="auto", settings=settings)
-    assert "ConceptGovernanceTools" in [type(p).__name__ for p in auto.providers]
-    anames = {s["function"]["name"] for s in auto.specs()}
-    assert {"concept_taxonomy", "concept_merge", "concept_purge", "concept_split",
-            "concept_edit_clear"} <= anames
+    auto_provider = next(p for p in auto.providers if type(p).__name__ == "ConceptGovernanceTools")
+    assert {s["function"]["name"] for s in auto_provider.specs()} == {
+        "concept_taxonomy", *mutation_names,
+    }
     plan = build_tools(tmp_path, mode="plan", settings=settings)
-    pnames = {s["function"]["name"] for s in plan.specs()}
-    assert "concept_taxonomy" in pnames                                   # inspect the taxonomy in plan
-    assert "concept_merge" not in pnames and "concept_purge" not in pnames  # but never edit it
-    none = build_tools(tmp_path, mode="auto", settings=SimpleNamespace())  # no memory_dir
+    plan_provider = next(p for p in plan.providers if type(p).__name__ == "ConceptGovernanceTools")
+    assert {s["function"]["name"] for s in plan_provider.specs()} == {"concept_taxonomy"}
+    none = build_tools(
+        tmp_path, mode="auto",
+        settings=SimpleNamespace(cross_run_read_tools=True),  # no memory_dir
+    )
     assert "ConceptGovernanceTools" not in [type(p).__name__ for p in none.providers]
+
+
+def test_cross_run_flag_keeps_assistant_prompt_in_sync_with_portfolio_tools(tmp_path):
+    from types import SimpleNamespace
+
+    enabled = SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=True)
+    for mode, mutation_named in (("plan", False), ("auto", True)):
+        client = _FakeChatClient([_final("done")])
+        result = run_turn(
+            client, tmp_path, [], "inspect the portfolio", mode,
+            settings=enabled, _subagent=True,
+        )
+        assert result["ok"]
+        prompt = client.turns[0][0]["content"]
+        assert "`cross_run_concept_map`" in prompt
+        assert "`concept_taxonomy`" in prompt
+        assert ("concept_merge" in prompt) is mutation_named
+
+    for disabled in (
+        SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=False),
+        SimpleNamespace(cross_run_read_tools=True),
+        None,
+    ):
+        client = _FakeChatClient([_final("done")])
+        result = run_turn(
+            client, tmp_path, [], "inspect the portfolio", "plan",
+            settings=disabled, _subagent=True,
+        )
+        assert result["ok"]
+        prompt = client.turns[0][0]["content"]
+        assert "`cross_run_concept_map`" not in prompt
+        assert "`concept_taxonomy`" not in prompt
 
 
 def test_recovered_turn_exposes_only_reads_todo_and_journaled_run_control(tmp_path):
@@ -583,7 +637,8 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
     for _ in range(100):
         pend = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
         if pend:
-            req = pend[0]; break
+            req = pend[0]
+            break
         time.sleep(0.1)
     assert req and req["action"]["tool"] == "write_file"
     assert client.post(f"/api/assistant/permissions/{req['id']}", json={"decision": "allow_once"}).json()["ok"]
@@ -593,7 +648,8 @@ def test_assistant_permission_pause_resume(tmp_path, monkeypatch):
     for _ in range(100):
         j = client.get(f"/api/jobs/{resp['job_id']}").json()
         if j.get("status") == "done":
-            result = j; break        # GET /api/jobs spreads the result at top level
+            result = j
+            break        # GET /api/jobs spreads the result at top level
         time.sleep(0.1)
     assert result and result["reply"] == "wrote it"
     assert target.read_text() == "yo"
@@ -617,7 +673,8 @@ def test_stale_permission_resolve_is_rejected(tmp_path, monkeypatch):
     for _ in range(100):
         pend = client.get(f"/api/assistant/permissions?session={sid}").json()["pending"]
         if pend:
-            req = pend[0]; break
+            req = pend[0]
+            break
         time.sleep(0.1)
     assert req
     # first resolve succeeds

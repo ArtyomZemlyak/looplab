@@ -294,9 +294,9 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         "produced it). Ground your answers in what you actually read — inspect before you assert. When "
         "the user refers to a run, use list_runs/read_run to find and read it.\n"
         # E1: name the cross-run CONCEPT tools so the model reaches for them — they were wired but unnamed,
-        # so it never used them. GATED on actual availability (build_tools registers CrossRunTools only when
-        # memory_dir + cross_run_read_tools, and the taxonomy tools only when memory_dir), else the prompt
-        # would advertise tools absent from the schema and the model would call a non-existent tool.
+        # so it never used them. GATED on actual availability (both providers require memory_dir +
+        # cross_run_read_tools), else the prompt would advertise tools absent from the schema and the model
+        # would call a non-existent tool.
         + ("For cross-run KNOWLEDGE you have concept tools: `cross_run_concept_map` (the shared concept "
            "taxonomy across runs — which concepts appear most, their hierarchy, which pairs co-occur), "
            "`cross_run_atlas` / `cross_run_prior_attempts` / `cross_run_search` (what prior runs explored "
@@ -400,14 +400,16 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
     mode = normalize_mode(mode)
     roots = [Path.home(), REPO_ROOT, Path(run_root)] + list(extra_roots)
     providers = [RepoScoutTools(roots), MachineRunsTools(run_root, alive_fn=alive_fn)]
+    mdir = getattr(settings, "memory_dir", None) if settings else None
+    cross_run_enabled = bool(mdir and getattr(settings, "cross_run_read_tools", False))
     # Cross-run concept/claims/atlas READS — the same §22 portfolio knowledge the Researcher/Strategist
     # can ASK for mid-loop, now reachable by the owner assistant too (the operator asked for reading
     # tools). PORTFOLIO-WIDE: run_turn binds no single RunState, so the provider stays unbound (see its
     # bind_state docstring) and answers across the whole portfolio. Pure read, no mutation → present in
     # EVERY mode, incl. read-only plan and recovery; gated on the same memory_dir + flag as the roles.
-    if settings and getattr(settings, "memory_dir", None) and getattr(settings, "cross_run_read_tools", False):
+    if cross_run_enabled:
         from looplab.tools.cross_run_tools import CrossRunTools
-        providers.append(CrossRunTools(settings.memory_dir, role="researcher"))
+        providers.append(CrossRunTools(mdir, role="researcher"))
     if mutation_recovery:
         if mode != "plan" and mutation_journal_path is not None and command_key_namespace:
             providers.append(RunControlTools(
@@ -420,21 +422,14 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         return CompositeTools(providers)
 
     providers.append(RunLauncherTools())
-    mdir = getattr(settings, "memory_dir", None) if settings else None
-    if mdir:
+    if cross_run_enabled:
         # PART V §22.4 (Phase 2): edit the shared cross-run concept TAXONOMY (merge/rename/purge/split)
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes
         # only the read `concept_taxonomy` in plan mode and adds the mutation verbs (mode+approver gated,
         # like the KB/write tools) in mutating modes — so it is safe to add in every non-recovery mode.
-        # REVIEW(2026-07-16): this is gated on memory_dir ONLY, while the sibling cross-run READ
-        # provider above additionally requires settings.cross_run_read_tools — the documented
-        # ACL/redaction kill-switch ("deployments that require per-user portfolio ACL/redaction must
-        # explicitly disable it", configuration.md). concept_taxonomy reads the SAME cross-run
-        # ledgers (other runs' LLM-authored slugs), and the mutation verbs rewrite the shared
-        # portfolio taxonomy — a strictly MORE sensitive surface than the reads the flag fences. With
-        # the flag off, cross-run content still reaches assistant prompts (and stays editable)
-        # through this provider, defeating the flag as a trust boundary. Gate this on the same flag
-        # (or a dedicated governance flag defaulting to it).
+        # CODEX AGENT: the documented flag is the owner Assistant's portfolio ACL/redaction
+        # kill-switch. It must gate taxonomy reads and shared governance mutations as well as the
+        # sibling CrossRunTools reads; memory_dir alone is storage configuration, not authorization.
         from looplab.tools.concept_tools import ConceptGovernanceTools
         providers.append(ConceptGovernanceTools(mdir, mode=mode, approver=approver))
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
@@ -504,8 +499,8 @@ def run_turn(client, run_root, messages: list, instruction: str, mode: str = DEF
     grounded, refs = expand_mentions(expand_command(instruction), run_root, alive_fn=alive_fn, roots=roots)
     # Mirror build_tools' gating so the prompt only names tools that are actually registered.
     _mdir = getattr(settings, "memory_dir", None) if settings else None
-    _has_taxonomy = bool(_mdir)
     _has_cross_run = bool(_mdir and getattr(settings, "cross_run_read_tools", False))
+    _has_taxonomy = _has_cross_run
     convo = [{"role": "system", "content": system_prompt(
         mode, knowledge_dir=(getattr(settings, "knowledge_dir", None) if settings else None),
         cross_run_tools=_has_cross_run, taxonomy_tools=_has_taxonomy)}]
