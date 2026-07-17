@@ -6,35 +6,39 @@
 // Two guarantees: canonicalId never reads an inherited property; conceptMap is a null-prototype map so
 // building/reading it with an agent key can never touch the chain.
 
-// Normalize a raw concept id the SAME way the server's concept_frame.py::concept_id() does — trim,
-// case-fold, spaces->hyphens, strip leading/trailing slashes — so the client keys the SAME vocabulary
-// the /concepts frame ships (which is normalized). Without this the graph-tab surfaces (chip bar, on-node
-// Dag tags, highlight matching) key raw-cased ids while the tree/table use the normalized ids, so a
-// Researcher-authored "Regularization/R-Drop" splits into two concepts across the two tabs and a
-// lower-cased chip never highlights an upper-cased-authored node.
+const MAX_ID_CHARS = 256
+const MAX_ID_DEPTH = 12
+const MAX_RENAME_HOPS = 16
+
 export function normalizeConceptId(raw) {
-  return String(raw == null ? '' : raw).trim().toLowerCase().replace(/ /g, '-').replace(/^\/+|\/+$/g, '')
+  if (typeof raw !== 'string' || [...raw].length > MAX_ID_CHARS) return ''
+  const value = raw.trim().toLowerCase().replaceAll(' ', '-').replace(/^\/+|\/+$/g, '')
+  const parts = value.split('/')
+  return value && [...value].length <= MAX_ID_CHARS && parts.length <= MAX_ID_DEPTH
+    && parts.every(Boolean) && !/[\s\p{C}]/u.test(value) ? value : ''
 }
 
-// Canonicalize a raw concept id: normalize it, then resolve the consolidation rename CHAIN exactly as the
-// server's canonical_concept does (try the rename map by the raw id first, then by the normalized id,
-// re-normalizing each hop, bounded to avoid a cycle). Every rename lookup is hasOwnProperty-guarded so an
-// id that names a prototype property ("constructor", "__proto__", …) can never be silently replaced by an
-// inherited value; an empty mapping ends the chain at the current normalized id.
+// Canonicalize exactly like the server ConceptFrame boundary: normalize each hop, follow a bounded
+// raw-or-normalized rename chain, and fail closed on invalid ids/cycles. Every lookup is own-property
+// guarded, so an agent-authored prototype name can never resolve through Object.prototype.
 export function canonicalId(raw, rename = {}) {
-  let current = String(raw == null ? '' : raw)
+  const map = rename && typeof rename === 'object' ? rename : {}
   const seen = new Set()
-  for (let hop = 0; hop < 8; hop++) {                       // MAX_RENAME_HOPS-style bound; cannot loop
-    const canon = normalizeConceptId(current)
-    if (!canon || seen.has(canon)) return canon
-    seen.add(canon)
-    let next
-    if (rename && Object.prototype.hasOwnProperty.call(rename, current)) next = rename[current]
-    else if (rename && current !== canon && Object.prototype.hasOwnProperty.call(rename, canon)) next = rename[canon]
-    if (next == null || next === '') return canon          // no (further) rename -> the normalized id wins
-    current = String(next)
+  let current = raw
+  for (let hop = 0; hop <= MAX_RENAME_HOPS; hop += 1) {
+    const canonical = normalizeConceptId(current)
+    if (!canonical || seen.has(canonical)) return ''
+    seen.add(canonical)
+    // # CODEX AGENT: replay can retain an exact legacy raw key, while current producers store the
+    // normalized key. Mirror the server's lookup order so both surfaces join on one vocabulary.
+    const exact = Object.prototype.hasOwnProperty.call(map, current)
+    const normalized = current !== canonical && Object.prototype.hasOwnProperty.call(map, canonical)
+    if (!exact && !normalized) return canonical
+    const next = map[exact ? current : canonical]
+    if (next == null) return canonical
+    current = next
   }
-  return normalizeConceptId(current)
+  return ''
 }
 
 // A null-prototype object usable as a map with untrusted string keys (no inherited props to shadow or

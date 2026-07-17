@@ -7,6 +7,9 @@ test('canonicalId applies the rename map', () => {
   assert.equal(canonicalId('raw', { raw: 'loss/x' }), 'loss/x')
   assert.equal(canonicalId('loss/x', { raw: 'loss/x' }), 'loss/x')   // unmapped -> itself
   assert.equal(canonicalId('loss/x'), 'loss/x')                       // no rename map
+  assert.equal(canonicalId(' /Regularization/R Drop/ '), 'regularization/r-drop')
+  assert.equal(canonicalId(' Raw ID ', { 'raw-id': ' Canonical/ID ' }), 'canonical/id')
+  assert.equal(canonicalId('a', { a: 'b', b: 'c' }), 'c')
 })
 
 test('canonicalId normalizes exactly like the server concept_id() (one vocabulary)', () => {
@@ -31,10 +34,17 @@ test('canonicalId never reads an inherited rename entry (returns the normalized 
   assert.equal(canonicalId('constructor', rn), 'loss/c')
 })
 
-test('canonicalId is null/empty-safe and a falsy mapping falls back to raw', () => {
+test('canonicalId fails closed on malformed ids and rename chains', () => {
   assert.equal(canonicalId(null), '')
   assert.equal(canonicalId(undefined), '')
-  assert.equal(canonicalId('x', { x: '' }), 'x')     // empty mapping -> keep raw (old `|| raw` intent)
+  assert.equal(canonicalId('x', { x: null }), 'x')
+  assert.equal(canonicalId('x', { x: '' }), '')
+  assert.equal(canonicalId('x', { x: 'y', y: 'x' }), '')
+  assert.equal(canonicalId('x//y'), '')
+  assert.equal(canonicalId(`x${String.fromCharCode(0)}y`), '')
+  assert.equal(canonicalId('a/'.repeat(12) + 'z'), '')
+  const chain = Object.fromEntries(Array.from({ length: 18 }, (_, i) => [`c${i}`, `c${i + 1}`]))
+  assert.equal(canonicalId('c0', chain), '')
 })
 
 test('conceptMap is a null-prototype map', () => {
