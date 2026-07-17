@@ -45,6 +45,21 @@ export function chipsAtPath(nodeConcepts = {}, rename = {}, path = '') {
   return chips
 }
 
+// F2: order chips by which concept led to the best outcome — descending Δbest-from-baseline (the advisory
+// per-concept subtree rollup from the /concepts frame, the same signal the old Directions bar carried,
+// now on concepts). Concepts with no evaluated experiment (null Δ) sort last; ties break by touch count
+// then id for stability. With no rollup available it preserves the given (touch-count) order, so the bar
+// never blocks on the advisory metric fetch. Pure.
+export function orderChipsByDelta(chips, rollup) {
+  if (!rollup || typeof rollup !== 'object') return chips
+  const key = (id) => {
+    const d = rollup[id] && rollup[id].delta_best
+    return typeof d === 'number' ? d : -Infinity
+  }
+  return [...chips].sort((a, b) =>
+    key(b.id) - key(a.id) || b.count - a.count || a.id.localeCompare(b.id))
+}
+
 // Breadcrumb segments for a path: [{id, label}] from root to the full path (inclusive).
 export function breadcrumb(path = '') {
   if (!path) return []

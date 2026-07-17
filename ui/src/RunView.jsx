@@ -1197,7 +1197,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         : <>
       <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
         <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
-          state={state} onHighlight={setConceptHighlight} />
+          state={state} onHighlight={setConceptHighlight} runId={runId} generation={generation} />
       </LazyBoundary>
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>

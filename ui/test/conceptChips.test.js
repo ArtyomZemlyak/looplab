@@ -1,7 +1,30 @@
 // Unit tests for the View 2 concept-chip model. Run with `node --test test/` from ui/.
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { chipsAtPath, breadcrumb, conceptMatches, matchingNodeIds } from '../src/conceptChips.js'
+import { chipsAtPath, breadcrumb, conceptMatches, matchingNodeIds, orderChipsByDelta } from '../src/conceptChips.js'
+
+test('orderChipsByDelta ranks chips by descending Δbest, nulls last, count/id tie-break', () => {
+  const chips = [
+    { id: 'loss/a', label: 'a', count: 3 },
+    { id: 'loss/b', label: 'b', count: 5 },
+    { id: 'loss/c', label: 'c', count: 2 },   // no metric -> null Δ -> last
+    { id: 'loss/d', label: 'd', count: 9 },   // no metric -> null Δ -> last, but higher count than c
+  ]
+  const rollup = {
+    'loss/a': { delta_best: 0.02 },
+    'loss/b': { delta_best: 0.05 },
+    'loss/c': { delta_best: null },
+    // loss/d absent entirely -> also treated as null
+  }
+  const ordered = orderChipsByDelta(chips, rollup).map(c => c.id)
+  assert.deepEqual(ordered, ['loss/b', 'loss/a', 'loss/d', 'loss/c'])   // 0.05, 0.02, then nulls by count desc
+})
+
+test('orderChipsByDelta preserves the given order when no rollup is available', () => {
+  const chips = [{ id: 'x', count: 1 }, { id: 'y', count: 2 }]
+  assert.equal(orderChipsByDelta(chips, null), chips)          // same reference — advisory fetch not blocking
+  assert.equal(orderChipsByDelta(chips, undefined), chips)
+})
 
 const NC = {
   0: ['loss/contrastive/dcl', 'architecture/moe'],
