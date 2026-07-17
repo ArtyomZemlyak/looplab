@@ -910,7 +910,10 @@ def node_concept_delta(state, node_id) -> dict:
     stricter leaf validation of the /concepts frame's `concept_id` is NOT applied). A root (no parents)
     inherits nothing → everything it carries is `added`. Returns {parent_ids, added, removed, inherited}
     with sorted canonical-id lists. Never raises (a non-dict store soft-fails to empty, like the siblings)."""
-    nodes = getattr(state, "nodes", None) or {}
+    # isinstance-guard `nodes` too (not just `or {}`): a truthy non-dict would raise at `.get` below and
+    # break the never-raise contract, same as the consolidation/node_concepts stores guarded further down.
+    nodes = getattr(state, "nodes", None)
+    nodes = nodes if isinstance(nodes, dict) else {}
     node = nodes.get(node_id)
     if node is None:
         return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
