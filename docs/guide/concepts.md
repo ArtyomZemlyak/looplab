@@ -511,6 +511,15 @@ command `concept_tag_edited` (generation-fenced like a comment): it folds with `
 which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5) — a node reset
 clears the override. Operator edits are authoritative for the run's read models but are deliberately **not**
 promoted to independent classifier evidence. Membership is not a metric, independent evidence or a direct champion score.
+The same provenance boundary applies to retro-tagging: `concept-coverage --offline --persist` records exact
+`offline-heuristic` provenance, so its coarse alias matches appear in the UI but cannot feed graded-novelty
+admission or cross-run capsules. Only genuine legacy classifier events (which predate the `mode` field) and
+the exact reviewed `llm` / `agentic` producers fold as `classifier`; explicit malformed or future modes fold
+as `untrusted-source` until reviewed. A later agentic pass upgrades identical heuristic ids exactly once,
+while an offline/future event can never overwrite or downgrade existing classifier evidence.
+Because retro-tagging runs after terminal finalization, classifier tags appended this way are available to
+indexes rebuilt from event logs but do not retroactively rewrite the run's already-emitted cross-run concept
+capsule. Capsule regeneration is a separate maintenance operation; the command never claims it happened.
 When enabled, however, `concept_pivot` coverage and `graded_novelty` deliberately use the recorded concept
 claims to steer exploration/proposal admission; disabling those controls restores the ordinary non-concept
 search path. UI rollups remain descriptive and do not independently verify taxonomy semantics.

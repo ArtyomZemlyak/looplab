@@ -321,6 +321,84 @@ def test_node_concepts_event_round_trips_and_is_replay_safe(tmp_path):
     assert st.node_concept_provenance == {5: "classifier"}
 
 
+@pytest.mark.parametrize(("mode_present", "mode", "expected"), [
+    (False, None, "classifier"),       # genuine legacy cadence event
+    (True, "llm", "classifier"),
+    (True, "agentic", "classifier"),
+    (True, "offline-heuristic", "offline-heuristic"),
+    (True, None, "untrusted-source"),
+    (True, "classifier-v-next", "untrusted-source"),
+    (True, 7, "untrusted-source"),
+])
+def test_node_concept_source_provenance_is_explicit_and_future_safe(
+        tmp_path, mode_present, mode, expected):
+    from looplab.core.models import classifier_verified_node_concepts
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r"}})
+    data = {"node_id": 0, "concepts": ["loss/x"], "at_vocab": 7}
+    if mode_present:
+        data["mode"] = mode
+    s.append("node_concepts", data)
+
+    state = fold(s.read_all())
+    assert state.node_concepts == {0: ["loss/x"]}          # all producers remain displayable
+    assert state.node_concept_provenance == {0: expected}
+    if expected == "classifier":
+        assert classifier_verified_node_concepts(state, 0) == ["loss/x"]
+        assert state.node_concepts_at_vocab == {0: 7}
+    else:
+        assert classifier_verified_node_concepts(state, 0) == []
+        assert state.node_concepts_at_vocab == {}
+
+
+@pytest.mark.parametrize("order", ["offline-first", "classifier-first"])
+def test_classifier_receipt_dominates_offline_replay_in_either_order(tmp_path, order):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r"}})
+    offline = {"node_id": 0, "concepts": ["coarse/x"], "mode": "offline-heuristic"}
+    classifier = {"node_id": 0, "concepts": ["reviewed/y"], "mode": "llm", "at_vocab": 8}
+    for row in ((offline, classifier) if order == "offline-first" else (classifier, offline)):
+        s.append("node_concepts", row)
+
+    state = fold(s.read_all())
+    assert state.node_concepts == {0: ["reviewed/y"]}
+    assert state.node_concept_provenance == {0: "classifier"}
+    assert state.node_concepts_at_vocab == {0: 8}
+
+
+def test_offline_display_receipt_survives_same_idea_rebuild_until_classifier_upgrade(tmp_path):
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    created = {"node_id": 0, "parent_ids": [], "operator": "draft",
+               "idea": {"operator": "draft", "params": {}, "rationale": "same",
+                        "concepts": ["researcher/claim"]}}
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", created)
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": ["offline/display"], "mode": "offline-heuristic",
+        "generation": 0,
+    })
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement", "generation": 0})
+    s.append("node_created", {**created, "generation": 1})
+
+    state = fold(s.read_all())
+    assert state.node_concepts == {0: ["offline/display"]}
+    assert state.node_concept_provenance == {0: "offline-heuristic"}
+    # The next reviewed classifier event replaces the display-only receipt normally.
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": ["classifier/reviewed"], "mode": "llm", "generation": 1,
+    })
+    upgraded = fold(s.read_all())
+    assert upgraded.node_concepts == {0: ["classifier/reviewed"]}
+    assert upgraded.node_concept_provenance == {0: "classifier"}
+
+
 def test_node_concepts_invalidated_on_propose_rerun_only(tmp_path):
     """M1 (§21.18): tags staleify only when the IDEA changes. The snapshot tagger reads only the idea
     (tools=None), so `propose` (re-proposes a new idea) drops the cached tags, while `eval` (re-score) and
