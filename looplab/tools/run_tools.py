@@ -20,13 +20,6 @@ from looplab.tools._base import RESULT_CAP, fn_spec
 from looplab.tools._runcache import RunStateCache
 
 
-# Mirrors serve.concept_frame.MAX_RENAME_HOPS. Kept as a local constant because tools/ must not import
-# serve/ (serve imports tools -> a circular import). The concept read-tools resolve rename chains with
-# the SAME bound + cycle guard + per-hop normalization the /concepts frame and the UI use, so the ids
-# they show JOIN the rendered tree and the shared vocabulary.
-_CONCEPT_RENAME_HOP_CAP = 16
-
-
 def _is_number(v: str) -> bool:
     """True only if the string parses as a FINITE number. Rejects the 'nan'/'inf'/'infinity'
     sentinels (which float() happily accepts) so a column of textual missing-markers reads as
@@ -330,36 +323,12 @@ class RunTools:
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
 
-    @staticmethod
-    def _canonical_concept_id(raw, rename: dict) -> str:
-        """Resolve a bounded, cycle-guarded rename chain, NORMALIZING each hop with the SAME normalizer
-        project_hierarchy / the /concepts frame / the UI use (trim, case-fold, space→hyphen, strip
-        slashes). Mirrors serve.concept_frame.canonical_concept (which tools/ cannot import — serve
-        imports tools). Returns "" for a malformed id, a cycle, or an over-long chain (the concept is
-        dropped, exactly as the server drops it) so the tool never shows an id the tree can't join."""
-        from looplab.search.concept_graph import _normalize_concept_id
-        current = raw
-        seen: set[str] = set()
-        for _hop in range(_CONCEPT_RENAME_HOP_CAP + 1):
-            canonical = _normalize_concept_id(current)
-            if not canonical:
-                return ""
-            if canonical in seen:                       # cycle -> drop (fail closed, like the server)
-                return ""
-            seen.add(canonical)
-            nxt = rename.get(current)                    # the map may be keyed by the raw OR normalized id
-            if nxt is None and current != canonical:
-                nxt = rename.get(canonical)
-            if nxt is None:
-                return canonical
-            current = nxt
-        return ""                                       # hop cap -> drop
-
     def _canon_node_concepts(self, st: RunState) -> dict:
         """This run's per-node concepts, each id collapsed through the consolidation rename AND
         normalized to the SAME canonical vocabulary the /concepts frame ships, so the agent reads/reuses
         REAL ids that join the rendered tree. Both stores are isinstance-guarded (a non-dict field must
         soft-fail, not raise AttributeError out of execute())."""
+        from looplab.search.concept_graph import _canonical_with_rename
         rename = getattr(st, "concept_consolidation", None)
         rename = rename if isinstance(rename, dict) else {}
         raw = getattr(st, "node_concepts", None)
@@ -374,8 +343,8 @@ class RunTools:
                 continue
             canon = []
             for c in ids:
-                cid = self._canonical_concept_id(c, rename)
-                if cid and cid not in canon:            # normalize + dedup within the node
+                cid = _canonical_with_rename(c, rename)   # shared resolver (single source of truth)
+                if cid and cid not in canon:              # normalize + dedup within the node
                     canon.append(cid)
             out[key] = canon
         return out
@@ -423,11 +392,12 @@ class RunTools:
         return text if len(text) <= self.max_chars else text[:self.max_chars].rstrip() + " …(truncated)"
 
     def _concept_nodes(self, st: RunState, concept: str) -> str:
+        from looplab.search.concept_graph import _canonical_with_rename
         rename = getattr(st, "concept_consolidation", None)
         rename = rename if isinstance(rename, dict) else {}
         # Canonicalize the QUERY through the SAME chain+normalizer as the stored ids, so an agent that
         # types the displayed (normalized) id — or a since-renamed id — resolves to the same target.
-        target = self._canonical_concept_id(concept, rename)
+        target = _canonical_with_rename(concept, rename)
         if not target:
             return "(give an axis/slug concept id — see read_concept_tree)"
         nc = self._canon_node_concepts(st)
@@ -460,7 +430,8 @@ class RunTools:
             return f"{label}: {', '.join(ids)}" if ids else ""
         parts = [p for p in (_fmt("+added", d["added"]), _fmt("-removed", d["removed"]),
                              _fmt("=inherited", d["inherited"])) if p]
-        body = "; ".join(parts) if parts else "(no concepts tagged on #%d or its parent)" % nid
+        kin = "parent" if len(parents) <= 1 else "parents"
+        body = "; ".join(parts) if parts else f"(no concepts tagged on #{nid} or its {kin})"
         return f"#{nid} concept delta vs {base}: {body}"
 
     def _research_memo(self, st: RunState) -> str:

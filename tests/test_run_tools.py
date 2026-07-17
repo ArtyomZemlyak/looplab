@@ -201,6 +201,23 @@ def test_node_concept_delta_read_model_and_tool():
     assert "no experiment #99" in rt.execute("node_concept_delta", {"node_id": 99})
 
 
+def test_node_concept_delta_never_raises_on_non_dict_stores():
+    # REVIEW: a truthy non-dict concept_consolidation/node_concepts must soft-fail (empty), not raise
+    # AttributeError out of the LLM-invocable read-model/tool — matching every sibling concept read-path.
+    from looplab.search.concept_graph import node_concept_delta
+    st = RunState(goal="g", direction="max")
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                        status=NodeStatus.evaluated)}
+    st.node_concepts = {0: ["loss/a"]}
+    st.concept_consolidation = ["loss/a"]                        # a list, not a dict
+    assert node_concept_delta(st, 0)["added"] == ["loss/a"]      # rename ignored, no crash
+    st.node_concepts = "loss/a"                                  # a str, not a dict
+    d = node_concept_delta(st, 0)
+    assert isinstance(d, dict) and d["added"] == [] and d["removed"] == []
+    rt = RunTools(); rt.bind_state(st)
+    assert isinstance(rt.execute("node_concept_delta", {"node_id": 0}), str)   # never raises out of execute
+
+
 def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
     from looplab.search.concept_graph import node_concept_delta
     st = RunState(goal="g", direction="max")

@@ -905,17 +905,24 @@ def node_concept_delta(state, node_id) -> dict:
     parent diff), so it is replay-safe and answers "what did this node change relative to its parent".
 
     The inherited base is the UNION of ALL parents' canonical concepts (a merge inherits from every parent);
-    both sides are canonicalized through the consolidation rename so the diff is on the live vocabulary. A
-    root (no parents) inherits nothing → everything it carries is `added`. Returns
-    {parent_ids, added, removed, inherited} with sorted canonical-id lists."""
+    both sides are canonicalized through the consolidation rename chain so the diff is on the live vocabulary
+    (leaf normalization is the lenient `_normalize_concept_id`, matching the run_tools concept family — the
+    stricter leaf validation of the /concepts frame's `concept_id` is NOT applied). A root (no parents)
+    inherits nothing → everything it carries is `added`. Returns {parent_ids, added, removed, inherited}
+    with sorted canonical-id lists. Never raises (a non-dict store soft-fails to empty, like the siblings)."""
     nodes = getattr(state, "nodes", None) or {}
     node = nodes.get(node_id)
     if node is None:
         return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
-    rename = getattr(state, "concept_consolidation", None) or {}
-    node_concepts = getattr(state, "node_concepts", None) or {}
+    # isinstance-guard both stores: a truthy non-dict must soft-fail, not raise AttributeError out of a
+    # read-model an LLM tool invokes (matches serve.concept_frame / run_tools, which guard the same fields).
+    rename = getattr(state, "concept_consolidation", None)
+    rename = rename if isinstance(rename, dict) else {}
+    node_concepts = getattr(state, "node_concepts", None)
+    node_concepts = node_concepts if isinstance(node_concepts, dict) else {}
     own = _canon_set(node_id, node_concepts, rename)
-    parent_ids = [p for p in (getattr(node, "parent_ids", None) or []) if p in nodes]
+    # Dedup parent ids (a torn log can carry [0, 0]) while keeping only existing parents.
+    parent_ids = list(dict.fromkeys(p for p in (getattr(node, "parent_ids", None) or []) if p in nodes))
     inherited_base: set = set()
     for pid in parent_ids:
         inherited_base |= _canon_set(pid, node_concepts, rename)
