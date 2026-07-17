@@ -1078,6 +1078,48 @@ export function reportRefreshIntent(
   } catch (cause) { throw reportStorageError(cause) }
 }
 
+async function paidConceptLensPost(runId, suffix, body, {
+  idempotencyKey, signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+} = {}) {
+  if (!validRunGeneration(body?.expected_generation)) {
+    throw runGenerationError('invalid_run_generation',
+      'A verified run generation is required before paid concept-lens work.',
+      'Reload Concepts before continuing this request.')
+  }
+  if (!safeIdentityText(idempotencyKey)) {
+    throw new Error('A valid saved concept-lens idempotency key is required.')
+  }
+  const path = runApiPath(runId, suffix)
+  assertNotReviewMutation(path)
+  assertRunMutationAllowed(path)
+  try {
+    return await commandFetch(path, {
+      method: 'POST', signal,
+      headers: _authHeaders({
+        'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey,
+      }),
+      body: JSON.stringify(body),
+    }, requestTimeoutMs, async response => {
+      if (!response.ok) await _throw(response, path)
+      return commandResponseJson(response, path, { submission: true })
+    })
+  } catch (error) {
+    if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
+        || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
+    throw error
+  }
+}
+
+export const submitConceptLens = (runId, prompt, expectedGeneration, options) =>
+  paidConceptLensPost(runId, '/concepts/lens', {
+    prompt, expected_generation: expectedGeneration,
+  }, options)
+
+export const abandonConceptLens = (runId, expectedGeneration, requestId, options) =>
+  paidConceptLensPost(runId, '/concepts/lens/abandon', {
+    expected_generation: expectedGeneration, request_id: requestId,
+  }, options)
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.

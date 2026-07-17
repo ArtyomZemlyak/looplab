@@ -13,6 +13,7 @@ const lenses = [
 ]
 const GENERATION_A = 'a'.repeat(64)
 const GENERATION_B = 'b'.repeat(64)
+const GENERATION_C = 'c'.repeat(64)
 const limits = {
   membership_nodes: 2048, concepts_per_node: 64, memberships: 8192,
   tree_nodes: 4096, edges: 2048, edge_endpoints: 4096,
@@ -178,6 +179,10 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
         rows: { 'bad/count': { ...conceptPayload('bad/count').metrics.rows['bad/count'], touched: '1' } },
       },
     }), /Invalid concept projection/)
+    assert.equal(conceptModule.validDerivedLensLabel('By usage'), true)
+    assert.equal(conceptModule.validDerivedLensLabel('x'.repeat(61)), false)
+    assert.equal(conceptModule.validDerivedLensLabel('hidden\u200blabel'), false,
+      'format/control Unicode cannot enter an option label or title')
     const derivedPayload = framePayload({
       id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
       edgesPresent: true, lensEdgesPresent: true,
@@ -476,11 +481,13 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(requests.length, before + 1, 'paid lens derivation has a synchronous single-flight lock')
     const lensPost = requests.at(-1)
     assert.equal(lensPost.options.method, 'POST')
+    assert.match(lensPost.options.headers['Idempotency-Key'],
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
     assert.deepEqual(JSON.parse(lensPost.options.body), {
       prompt: 'group by usage', expected_generation: GENERATION_B,
     })
     assert.match(document.querySelector('#paid-concept-lens-status')?.textContent,
-      /configured model provider.*provider charges may apply/i)
+      /paid request dispatch may have started.*same saved identity/i)
 
     runId = 'lens-scope-run'
     generation = GENERATION_A
@@ -507,9 +514,35 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.deepEqual(JSON.parse(scopedPost.options.body), {
       prompt: 'group by composition', expected_generation: GENERATION_A,
     })
-    await reply(scopedPost, { ok: false, reason: 'no_model' })
+    await reply(scopedPost, {
+      ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
+      ok: false, reason: 'no_model', request_id: '1'.repeat(64),
+    })
     assert.match(document.querySelector('.cv-lenserr')?.textContent, /No model is configured/)
+    assert.equal(document.querySelector('[aria-label="Describe a lens to create"]').value,
+      'group by composition', 'authoritative no-model rejection preserves the recoverable draft')
 
+    await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
+      'group by composition')
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1)
+    await reply(requests.at(-1), {
+      ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
+      ok: false, code: 'job_capacity', reason: 'capacity',
+      generation: GENERATION_A, request_id: '4'.repeat(64),
+    })
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /service is at capacity.*No request was started.*retry later/i)
+    assert.equal(document.querySelector('[aria-label="Describe a lens to create"]').value,
+      'group by composition', 'HTTP-200 capacity terminal clears identity but preserves the draft')
+
+    await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
+      'group by composition')
     before = requests.length
     await act(async () => {
       document.querySelector('.cv-lensnew').dispatchEvent(
@@ -523,6 +556,8 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
       /Run changed.*Reload Concepts.*another paid lens/i)
 
+    await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
+      'group by composition')
     before = requests.length
     await act(async () => {
       document.querySelector('.cv-lensnew').dispatchEvent(
@@ -535,7 +570,43 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       await settle()
     })
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
-      /Outcome unknown.*provider charges may have occurred.*Reload.*new paid request/i)
+      /Outcome unknown.*provider charges may have occurred.*Resume.*same saved request.*another key/i)
+    const unknownPost = requests.at(-1)
+    assert.ok(button('Why no local discard?'),
+      'local-only discard is unavailable before durable server reconciliation')
+    before = requests.length
+    await click(button('Resume paid lens'))
+    assert.equal(requests.length, before + 1)
+    const reconcilePost = requests.at(-1)
+    assert.equal(reconcilePost.options.headers['Idempotency-Key'],
+      unknownPost.options.headers['Idempotency-Key'])
+    await reply(reconcilePost, {
+      ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
+      ok: false, ambiguous: true, code: 'concept_lens_uncertain',
+      generation: GENERATION_A, request_id: '3'.repeat(64),
+    })
+    assert.ok(button('Abandon unknown request'),
+      'server abandonment appears only after same-key reconciliation returns an exact request id')
+    before = requests.length
+    await click(button('Abandon unknown request'))
+    assert.equal(requests.length, before + 1)
+    const abandonPost = requests.at(-1)
+    assert.match(abandonPost.url, /\/api\/runs\/lens-scope-run\/concepts\/lens\/abandon$/)
+    assert.equal(abandonPost.options.headers['Idempotency-Key'],
+      unknownPost.options.headers['Idempotency-Key'])
+    assert.deepEqual(JSON.parse(abandonPost.options.body), {
+      expected_generation: GENERATION_A, request_id: '3'.repeat(64),
+    })
+    await reply(abandonPost, {
+      ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
+      ok: false, code: 'concept_lens_abandoned', reason: 'operator_abandoned', resolved: true,
+      provider_outcome: 'unknown', billing_status: 'unknown',
+      warning: 'Provider may already have completed and billed the request.',
+      generation: GENERATION_A, request_id: '3'.repeat(64), seq: 9,
+    })
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /abandoned on the server.*may already have completed and been billed.*usage.*unavailable/i)
+    assert.ok(button('Create lens · paid'), 'a durable abandon terminal clears the local intent')
 
     runId = 'final-run'
     generation = GENERATION_B
@@ -544,18 +615,24 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
     }))
     const restoredInput = document.querySelector('[aria-label="Describe a lens to create"]')
-    assert.equal(restoredInput.value, '',
-      'replacing the scope discards the old prompt instead of retaining one form per run')
+    assert.equal(restoredInput.value, 'group by usage',
+      'reload restores the exact prompt bound to the saved paid intent')
     assert.equal(restoredInput.disabled, true)
-    assert.equal(document.querySelector('.cv-lenserr'), null,
-      'another run generation cannot leak its lens error')
+    assert.match(button('Resume paid lens')?.textContent || '', /Resume paid lens/)
+    before = requests.length
+    await click(button('Resume paid lens'))
+    assert.equal(requests.length, before + 1)
+    const resumedPost = requests.at(-1)
+    assert.equal(resumedPost.options.headers['Idempotency-Key'],
+      lensPost.options.headers['Idempotency-Key'], 'reload resumes with the exact original key')
 
-    await reply(lensPost, {
+    await reply(resumedPost, {
       ...framePayload({ id: 'derived/root', runId: 'final-run', generation: GENERATION_B,
         requestedLens: 'usage', effectiveLens: 'usage', derived: true,
         capturedSeq: 7, edgesPresent: true, lensEdgesPresent: true }),
       ok: true, spec: { name: 'usage', label: 'By usage', rels: ['uses'],
         kind: 'edge', provenance: 'agent' },
+      request_id: '2'.repeat(64),
     })
     assert.match(requests.at(-1).url,
       /\/api\/runs\/final-run\/concepts\?lens=usage&rels=uses$/)
@@ -577,6 +654,31 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await reply(requests.at(-1), conceptPayload('unverified/root', {
       runId: 'final-run', generation: GENERATION_A,
     }))
+
+    const replacementInput = document.querySelector('[aria-label="Describe a lens to create"]')
+    await setInput(replacementInput, 'old generation grouping')
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1)
+    generation = GENERATION_C
+    await render()
+    await reply(requests.at(-1), conceptPayload('replacement/root', {
+      runId: 'final-run', generation: GENERATION_C,
+    }))
+    const archiveButton = button('Archive old-generation receipt')
+    assert.ok(archiveButton, 'verified generation replacement offers an explicit local archive')
+    before = requests.length
+    await click(archiveButton)
+    assert.equal(requests.length, before, 'archiving an old receipt never calls provider or server')
+    assert.equal(document.querySelector('[aria-label="Describe a lens to create"]').value,
+      'old generation grouping', 'archive retains the recoverable prompt for the replacement run')
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /archived locally.*provider outcome.*billing.*old server claim.*unknown.*replacement generation.*independent/i)
+    assert.ok(button('Create lens · paid'))
 
     generation = null
     await render()
