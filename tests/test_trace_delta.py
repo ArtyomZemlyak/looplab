@@ -130,6 +130,63 @@ def test_span_io_endpoint_reconstructs_bounded_input_with_omission_truth(tmp_pat
     assert "input_carry" not in body["attributes"]
 
 
+def _tool_detail_span(span_id: str, *, output: str) -> dict:
+    return {
+        "name": "tool",
+        "kind": "tool",
+        "trace_id": "shared-trace",
+        "span_id": span_id,
+        "parent_id": None,
+        "run_id": "demo",
+        "attributes": {"node_id": 0, "tool": "read_file", "input": {"path": "a.py"},
+                       "output": output},
+        "events": [],
+        "status": "OK",
+        "start": 1.0,
+        "duration_s": 0.1,
+    }
+
+
+def _span_detail_client(tmp_path, spans):
+    from fastapi.testclient import TestClient
+    from looplab.events.eventstore import EventStore
+    from looplab.serve.server import make_app
+
+    rd = tmp_path / "demo"
+    rd.mkdir()
+    EventStore(rd / "events.jsonl").append(
+        "run_started", {"run_id": "demo", "task_id": "t", "goal": "g", "direction": "min"})
+    (rd / "spans.jsonl").write_text(
+        "".join(json.dumps(span) + "\n" for span in spans), encoding="utf-8")
+    return TestClient(make_app(tmp_path))
+
+
+def test_span_io_distinguishes_complete_detail_from_elided_siblings(tmp_path):
+    pytest.importorskip("fastapi")
+    spans = [
+        _tool_detail_span("tool-a", output="complete a"),
+        {**_tool_detail_span("tool-b", output="complete b"), "start": 2.0},
+    ]
+    body = _span_detail_client(tmp_path, spans).get("/api/runs/demo/spans/tool-a").json()
+
+    assert body["projection"]["detail_truncated"] is False
+    assert body["projection"]["siblings_elided"] is True
+    assert body["projection"]["omitted_trace_spans"] == 1
+    assert body["projection"]["truncated"] is True
+
+
+def test_span_io_reports_selected_span_detail_truncation(tmp_path):
+    pytest.importorskip("fastapi")
+    body = _span_detail_client(
+        tmp_path, [_tool_detail_span("tool-a", output="x" * 20_000)],
+    ).get("/api/runs/demo/spans/tool-a").json()
+
+    assert body["projection"]["detail_truncated"] is True
+    assert body["projection"]["siblings_elided"] is False
+    assert body["projection"]["omitted_trace_spans"] == 0
+    assert body["projection"]["truncated"] is True
+
+
 def test_sub_loop_reset_within_a_trace_keeps_its_request(tmp_path):
     """A trace with TWO sub-loops (implement, then a repair that RESETS the conversation — sharing only
     the system prefix) must show a request for EACH. Regression: delta-chaining across the reset would

@@ -755,6 +755,11 @@ def build_router(srv) -> APIRouter:
                     s = next((h for h in hydrate_inputs(trace_spans) if h.get("span_id") == sid), s)
                 s = _cap_span_io(s)
                 projection = dict(s.get("_projection") or {})
+                # CODEX AGENT: Snapshot the selected span's own omission truth BEFORE folding in
+                # trace cardinality. Hidden siblings make the aggregate response partial, but they
+                # do not make this span's bounded input/output projection incomplete.
+                detail_truncated = projection.get("truncated") is True
+                projection["detail_truncated"] = detail_truncated
                 visible = len(trace_spans) if trace_spans else 1
                 if trace_total is None:
                     projection.update({
@@ -763,11 +768,14 @@ def build_router(srv) -> APIRouter:
                     })
                 else:
                     trace_total = max(visible, trace_total)
+                    omitted_trace_spans = max(0, trace_total - visible)
+                    siblings_elided = omitted_trace_spans > 0
                     projection.update({
                         "trace_total_spans": trace_total,
                         "trace_visible_spans": visible,
-                        "omitted_trace_spans": max(0, trace_total - visible),
-                        "truncated": projection.get("truncated") is True or trace_total > visible,
+                        "omitted_trace_spans": omitted_trace_spans,
+                        "siblings_elided": siblings_elided,
+                        "truncated": detail_truncated or siblings_elided,
                     })
                 return {"schema": TRACE_PROJECTION_SCHEMA, "span_id": s.get("span_id"),
                         "name": s.get("name"), "kind": s.get("kind"),

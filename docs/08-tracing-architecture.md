@@ -77,8 +77,12 @@ called rather than assume that every response has `total_spans` and `visible_spa
 |---|---|
 | run/node trace and node conversation | known total/visible/omitted span counts plus truncated-span or stage/turn omission counters |
 | `trace/by_trace/{trace_id}` | operation `count`, `visible_count`, `omitted_count` plus the corresponding span projection receipt |
-| `spans/{span_id}` | the selected span's `_projection` counters plus `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when known |
+| `spans/{span_id}` | `detail_truncated` for the selected span plus `siblings_elided`, `trace_total_spans`, `trace_visible_spans` and `omitted_trace_spans` when cardinality is known |
 | `trace/tail` | the bounded tail's visible/omitted counts and `source_truncated`; it does not pretend to know a whole-run total |
+
+The span-detail route retains aggregate `truncated` for generic tree/tail consumers, where either a
+bounded selected span or omitted trace siblings makes the envelope partial. A selected-detail notice
+must use only `detail_truncated`; `siblings_elided` is not evidence that the chosen span's I/O was cut.
 
 `trace/tail` is a separate best-effort EOF window for live activity: it may skip malformed rows inside
 that bounded window, and its receipt therefore describes only the inspected tail rather than forward-log

@@ -15,12 +15,27 @@ test('trace detail transport failure stays distinct from a successful empty proj
   assert.deepEqual(traceDetailState({ attributes: {}, projection: {} }), {
     status: 'ready', attributes: {}, partial: false,
   })
-  assert.deepEqual(traceDetailState({ attributes: [], projection: { truncated: true } }), {
+  assert.deepEqual(traceDetailState({ attributes: [], projection: { detail_truncated: true } }), {
     status: 'ready', attributes: {}, partial: true,
   })
   assert.deepEqual(unavailableTraceDetail(), {
     status: 'unavailable', attributes: {}, partial: false,
   })
+})
+
+test('trace detail distinguishes its own truncation from elided siblings', () => {
+  assert.deepEqual(traceDetailState({
+    attributes: { output: 'complete' },
+    projection: {
+      truncated: true, detail_truncated: false, siblings_elided: true, omitted_trace_spans: 1,
+    },
+  }), { status: 'ready', attributes: { output: 'complete' }, partial: false })
+  assert.deepEqual(traceDetailState({
+    attributes: { output: 'bounded' },
+    projection: { truncated: true, detail_truncated: true, siblings_elided: false },
+  }), { status: 'ready', attributes: { output: 'bounded' }, partial: true })
+  assert.equal(traceDetailState({ projection: { truncated: true } }).partial, false,
+    'aggregate or legacy truncation must not claim that selected detail was cut')
 })
 
 test('HTTP-200 unavailable receipt takes precedence over empty or partial detail', () => {
