@@ -67,8 +67,9 @@ def strict_fsync_parent(path: str | os.PathLike) -> None:
     """Durably publish a newly-created file/directory entry on POSIX.
 
     ``fsync(file)`` confirms file contents but not necessarily the parent directory entry that makes
-    a first-created paid-work claim discoverable after power loss. Windows does not support opening a
-    directory through ``os.open``; its file-handle flush remains the strongest portable guarantee here.
+    a first-created paid-work claim discoverable after power loss. Windows publication is performed
+    by the write-through move itself (see :func:`_windows_move_write_through`), so there is no second
+    portable directory-handle operation to perform there.
     """
     if os.name == "nt":
         return
@@ -78,6 +79,58 @@ def strict_fsync_parent(path: str | os.PathLike) -> None:
         strict_fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _windows_move_write_through(
+        source: str | os.PathLike, destination: str | os.PathLike, *, replace: bool) -> None:
+    """Move one Windows path atomically and wait for the rename metadata to reach storage.
+
+    ``os.replace`` is atomic on Windows but exposes no write-through flag. Paid-work claims need the
+    stronger Win32 ``MOVEFILE_WRITE_THROUGH`` contract: returning before the destination name is
+    durable can lose an acknowledged claim after power failure and authorize a duplicate paid call.
+    """
+    import ctypes
+
+    move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong]
+    move_file_ex.restype = ctypes.c_int
+    flags = 0x00000008  # MOVEFILE_WRITE_THROUGH
+    if replace:
+        flags |= 0x00000001  # MOVEFILE_REPLACE_EXISTING
+    src = os.path.abspath(os.fspath(source))
+    dst = os.path.abspath(os.fspath(destination))
+    if not move_file_ex(src, dst, flags):
+        code = ctypes.get_last_error()
+        raise OSError(code, "durable Windows rename failed", dst)
+
+
+def _strict_replace(source: str | os.PathLike, destination: str | os.PathLike) -> None:
+    if os.name == "nt":
+        _windows_move_write_through(source, destination, replace=True)
+    else:
+        os.replace(source, destination)
+
+
+def _strict_publish_directory(directory: Path) -> None:
+    """Create one missing directory with a durably published name."""
+    if os.name != "nt":
+        directory.mkdir(exist_ok=True)
+        strict_fsync_parent(directory)
+        return
+
+    # Windows has no portable Python directory-fsync primitive. Create a unique sibling directory,
+    # then publish the requested name with MOVEFILE_WRITE_THROUGH. Do not accept an unexpected
+    # concurrent destination: its creator may have used a weaker durability policy.
+    temporary = Path(tempfile.mkdtemp(
+        dir=str(directory.parent), prefix=f".{directory.name}.", suffix=".tmp"))
+    try:
+        _windows_move_write_through(temporary, directory, replace=False)
+    except BaseException:
+        try:
+            os.rmdir(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def best_effort_fsync(fileno: int) -> None:
@@ -147,11 +200,10 @@ def _ensure_strict_parent(parent: Path) -> None:
         cursor = ancestor
 
     # Publish top-down: a child is only created after the directory containing its name has received
-    # a strict sync receipt.  ``exist_ok`` makes a concurrent creator harmless; syncing that parent is
-    # still safe and avoids depending on the other process's durability policy.
+    # a strict durability receipt. On Windows an unexpected concurrent creator fails closed because
+    # its weaker publication policy cannot be inferred after the fact.
     for directory in reversed(missing):
-        directory.mkdir(exist_ok=True)
-        strict_fsync_parent(directory)
+        _strict_publish_directory(directory)
 
 
 def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
@@ -174,7 +226,7 @@ def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
             f.write(data)
             f.flush()
             strict_fsync(f.fileno())
-        os.replace(tmpname, p)
+        _strict_replace(tmpname, p)
         strict_fsync_parent(p)
     except BaseException:
         # Once fdopen succeeds it owns the descriptor.  Only close the raw descriptor when fdopen

@@ -14,7 +14,7 @@ def _temp_files(directory) -> list[str]:
 def test_strict_atomic_write_syncs_contents_then_publishes_directory(tmp_path, monkeypatch):
     target = tmp_path / "receipt.json"
     calls: list[tuple[str, object]] = []
-    real_replace = os.replace
+    real_replace = atomicio._strict_replace
 
     def record_file_sync(fileno: int) -> None:
         calls.append(("file", os.fstat(fileno).st_size))
@@ -31,7 +31,7 @@ def test_strict_atomic_write_syncs_contents_then_publishes_directory(tmp_path, m
         assert target.read_bytes() == b'{"ok":true}'
 
     monkeypatch.setattr(atomicio, "strict_fsync", record_file_sync)
-    monkeypatch.setattr(atomicio.os, "replace", record_replace)
+    monkeypatch.setattr(atomicio, "_strict_replace", record_replace)
     monkeypatch.setattr(atomicio, "strict_fsync_parent", record_parent_sync)
 
     atomicio.strict_atomic_write_bytes(target, b'{"ok":true}')
@@ -51,10 +51,11 @@ def test_strict_atomic_write_durably_publishes_new_parent_chain_before_temp(
     target = inner / "receipt.json"
     calls: list[tuple[str, object]] = []
     real_mkstemp = atomicio.tempfile.mkstemp
-    real_replace = atomicio.os.replace
+    real_replace = atomicio._strict_replace
 
-    def record_parent_sync(path) -> None:
-        calls.append(("parent", path))
+    def record_directory(directory) -> None:
+        calls.append(("directory", directory))
+        directory.mkdir(exist_ok=True)
 
     def record_mkstemp(*args, **kwargs):
         calls.append(("temp", kwargs["dir"]))
@@ -67,16 +68,17 @@ def test_strict_atomic_write_durably_publishes_new_parent_chain_before_temp(
         calls.append(("replace", destination))
         real_replace(source, destination)
 
-    monkeypatch.setattr(atomicio, "strict_fsync_parent", record_parent_sync)
+    monkeypatch.setattr(atomicio, "_strict_publish_directory", record_directory)
+    monkeypatch.setattr(atomicio, "strict_fsync_parent", lambda path: calls.append(("parent", path)))
     monkeypatch.setattr(atomicio.tempfile, "mkstemp", record_mkstemp)
     monkeypatch.setattr(atomicio, "strict_fsync", record_file_sync)
-    monkeypatch.setattr(atomicio.os, "replace", record_replace)
+    monkeypatch.setattr(atomicio, "_strict_replace", record_replace)
 
     atomicio.strict_atomic_write_bytes(target, b"durable")
 
     assert calls == [
-        ("parent", outer),
-        ("parent", inner),
+        ("directory", outer),
+        ("directory", inner),
         ("temp", os.fspath(inner)),
         ("file", len(b"durable")),
         ("replace", target),
@@ -122,7 +124,7 @@ def test_strict_atomic_write_replace_failure_is_propagated_and_cleans_temp(
         nonlocal parent_sync_called
         parent_sync_called = True
 
-    monkeypatch.setattr(atomicio.os, "replace", fail_replace)
+    monkeypatch.setattr(atomicio, "_strict_replace", fail_replace)
     monkeypatch.setattr(atomicio, "strict_fsync_parent", record_parent_sync)
 
     with pytest.raises(PermissionError) as caught:
@@ -153,3 +155,50 @@ def test_strict_atomic_write_parent_sync_failure_is_propagated_without_temp(
     assert caught.value is failure
     assert target.read_bytes() == b"published"
     assert _temp_files(tmp_path) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through rename contract")
+def test_windows_strict_replace_requests_write_through(tmp_path, monkeypatch):
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    calls = []
+
+    def record_move(src, dst, *, replace):
+        calls.append((src, dst, replace))
+        os.replace(src, dst)
+
+    source.write_bytes(b"durable")
+    monkeypatch.setattr(atomicio, "_windows_move_write_through", record_move)
+
+    atomicio._strict_replace(source, destination)
+
+    assert calls == [(source, destination, True)]
+    assert destination.read_bytes() == b"durable"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through directory publication")
+def test_windows_missing_directory_is_published_by_write_through_move(tmp_path, monkeypatch):
+    directory = tmp_path / "new"
+    calls = []
+
+    def record_move(src, dst, *, replace):
+        calls.append((dst, replace))
+        os.rename(src, dst)
+
+    monkeypatch.setattr(atomicio, "_windows_move_write_through", record_move)
+
+    atomicio._strict_publish_directory(directory)
+
+    assert calls == [(directory, False)]
+    assert directory.is_dir()
+    assert _temp_files(tmp_path) == []
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows write-through integration")
+def test_windows_strict_atomic_write_publishes_a_missing_parent_chain(tmp_path):
+    target = tmp_path / "new" / "nested" / "receipt.json"
+
+    atomicio.strict_atomic_write_bytes(target, b"durable")
+
+    assert target.read_bytes() == b"durable"
+    assert _temp_files(target.parent) == []
