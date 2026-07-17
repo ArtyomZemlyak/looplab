@@ -1,6 +1,8 @@
-"""Phase 2b: EV_CONCEPT_EDGE folds COMMUTATIVELY into RunState.concept_edges — max-confidence-wins per
-(src,rel,dst) triple, order-tolerant (invariant 5), never last-write. Empty edge set is the default so
-project_hierarchy falls back to the is_a-from-path tree."""
+"""Explicit, non-derived EV_CONCEPT_EDGE assertions fold commutatively into RunState.concept_edges.
+
+``co_occurs`` is intentionally excluded: it is derived from current node memberships by ConceptFrame,
+because a max-only event fold cannot retract a stale count or ghost pair after re-tagging.
+"""
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -23,8 +25,8 @@ def test_single_and_batch_edges(tmp_path):
     ]).read_all())
     edges = st.concept_edges
     assert edges["loss/dcl\tis_a\tloss"]["dst"] == "loss"
-    assert edges["loss/dcl\tco_occurs\treg/r-drop"]["confidence"] == 5.0    # int coerced to float
-    assert all(len(k.split("\t")) == 3 for k in edges) and len(edges) == 3
+    assert "loss/dcl\tco_occurs\treg/r-drop" not in edges
+    assert all(len(k.split("\t")) == 3 for k in edges) and len(edges) == 2
 
 
 def test_max_confidence_wins_commutatively(tmp_path):

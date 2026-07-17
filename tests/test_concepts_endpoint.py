@@ -118,9 +118,7 @@ def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
     assert data["touch"]["loss/contrastive"] == 1
 
 
-def test_concepts_endpoint_accepts_bounded_co_occurrence_weights(tmp_path):
-    from looplab.serve.concept_frame import MAX_EDGE_WEIGHT
-
+def test_concepts_endpoint_uses_current_memberships_not_legacy_cooccurrence_weights(tmp_path):
     rd = tmp_path / "demo"
     rd.mkdir(parents=True, exist_ok=True)
     store = EventStore(rd / "events.jsonl")
@@ -132,31 +130,40 @@ def test_concepts_endpoint_accepts_bounded_co_occurrence_weights(tmp_path):
         "idea": {"operator": "draft", "params": {}, "rationale": "r",
                  "concepts": ["a", "b", "c"]},
     })
+    store.append("node_created", {
+        "node_id": 1, "parent_ids": [0], "operator": "improve",
+        "idea": {"operator": "improve", "params": {}, "rationale": "r",
+                 "concepts": ["a", "b"]},
+    })
+    store.append("node_created", {
+        "node_id": 2, "parent_ids": [0], "operator": "improve",
+        "idea": {"operator": "improve", "params": {}, "rationale": "r",
+                 "concepts": ["a", "c"]},
+    })
+    # Legacy derived receipts are deliberately wrong/stale. Replay ignores them and ConceptFrame
+    # derives a-b=2 and a-c=2 from the current three-node membership snapshot.
     store.append("concept_edge", {"edges": [
         {"src": "a", "rel": "co_occurs", "dst": "b",
-         "confidence": 2.0, "provenance": "evidenced"},
+         "confidence": 999.0, "provenance": "evidenced"},
         {"src": "a", "rel": "co_occurs", "dst": "c",
-         "confidence": MAX_EDGE_WEIGHT + 1, "provenance": "evidenced"},
+         "confidence": 777.0, "provenance": "evidenced"},
     ]})
 
     data = TestClient(make_app(tmp_path)).get(
         "/api/runs/demo/concepts?lens=co_occurs",
     ).json()
 
-    # CODEX AGENT: co-occurrence is a count-weighted typed edge, not a probability. A repeated pair
-    # must select the requested lens.
-    # REVIEW(2026-07-16): a weight BEYOND the public evidence bound SATURATES — the pair is the run's
-    # strongest empirical edge, so its weight is clamped to MAX_EDGE_WEIGHT and the edge is KEPT, never
-    # rejected. Rejection would drop the strongest edge and permanently taint the frame as
-    # non-authoritative (max-wins fold never clears "invalid_edge").
+    # CODEX AGENT: current repeated co-tagging selects the requested lens without trusting the
+    # unretractable max-only cache that older engines wrote.
     assert data["requested_lens"] == data["effective_lens"] == data["lens"] == "co_occurs"
     assert data["edges_present"] is True and data["lens_edges_present"] is True
     assert data["tree"]["nodes"]["b"]["parent"] == "a"
-    assert data["tree"]["nodes"]["c"]["parent"] == "a"       # over-cap edge clamped in, not dropped
+    assert data["tree"]["nodes"]["c"]["parent"] == "a"
     assert data["completeness"]["included"]["edges"] == 2
-    assert data["completeness"]["source"]["edges"] == 2
+    assert data["completeness"]["included"]["derived_edges"] == 2
+    assert data["completeness"]["source"]["edges"] == 0
     assert "invalid_edge" not in data["completeness"]["reasons"]
-    assert data["authoritative"] is True                     # strongest edge kept -> frame stays complete
+    assert data["authoritative"] is True
 
 
 def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_path):

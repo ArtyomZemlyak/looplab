@@ -645,9 +645,10 @@ class RunState(BaseModel):
     concept_consolidation: dict[str, str] = Field(default_factory=dict)
     # PART IV concept-edge substrate: the typed concept graph (src, rel, dst) -> {provenance, confidence},
     # keyed by "src\trel\tdst". Makes hierarchy a swappable projection (project_hierarchy). Folded
-    # COMMUTATIVELY from EV_CONCEPT_EDGE (max-confidence-wins per triple -> order-tolerant). Audit-only,
-    # never touches selection. Additive/reader-defaulted: empty on old logs -> project_hierarchy falls
-    # back to the is_a-from-path tree, byte-identical fold.
+    # COMMUTATIVELY from explicit EV_CONCEPT_EDGE assertions (max-confidence-wins per triple ->
+    # order-tolerant). Derived ``co_occurs`` rows are intentionally omitted and recomputed from current
+    # memberships by ConceptFrame, so stale counts can decrease/disappear. Audit-only, never touches
+    # selection. Additive/reader-defaulted: empty on old logs -> path projection remains available.
     concept_edges: dict[str, dict] = Field(default_factory=dict)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.

@@ -1488,6 +1488,12 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                          str(ed.get("dst") or "").strip())
         if not (src and rel and dst):
             continue
+        if rel == "co_occurs":
+            # CODEX AGENT: this relation is a cache of current node membership, not an immutable
+            # assertion. The old max-wins fold cannot express count decreases or deletion, so retaining
+            # legacy rows creates permanent ghost edges. ConceptFrame derives it from the exact folded
+            # membership snapshot; omit it here so large legacy caches cannot consume live edge budgets.
+            continue
         conf = ed.get("confidence")
         # REVIEW(2026-07-16): the tuple order below can only rank a REAL finite/±inf float. Two agent-
         # supplied values must be neutralized to keep the fold commutative (invariant 5 order-tolerance):

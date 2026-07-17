@@ -517,9 +517,11 @@ search path. UI rollups remain descriptive and do not independently verify taxon
 
 **Hierarchy is a projection, not a stored tree.** Because concepts form a graph, "what is a top-level
 axis" is a *perspective*. A **typed concept-edge log** (`EV_CONCEPT_EDGE` → `RunState.concept_edges`,
-folded commutatively — max-confidence-wins per `(src, rel, dst)` triple) is the only durable substrate;
-the cadence records `is_a` edges (path parents + curated multi-parent) and evidenced `co_occurs` edges
-(concept pairs on a node). A hierarchy is then **computed** by a pure read-model:
+folded commutatively — max-confidence-wins per `(src, rel, dst)` triple) retains asserted relations such
+as `is_a` cross-parents, `uses`, and `part_of`. `co_occurs` is deliberately **not** durable: it is derived
+from the current bounded folded memberships on every ConceptFrame read. That lets its count decrease or
+the pair disappear after re-tagging, and gives online, offline, and legacy runs the same projection; old
+persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** by a pure read-model:
 
 - `project_hierarchy(ids, lens="is_a")` — nests by the concept **path** (the default lens; an empty
   edge set falls back to this, byte-identically to the old axis-prefix tree).
