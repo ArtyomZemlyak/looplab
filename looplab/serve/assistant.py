@@ -411,6 +411,15 @@ def build_tools(run_root, alive_fn: Optional[Callable] = None, mode: str = DEFAU
         # via the append-only, reversible governance ledger. The provider itself gates: it contributes
         # only the read `concept_taxonomy` in plan mode and adds the mutation verbs (mode+approver gated,
         # like the KB/write tools) in mutating modes — so it is safe to add in every non-recovery mode.
+        # REVIEW(2026-07-16): this is gated on memory_dir ONLY, while the sibling cross-run READ
+        # provider above additionally requires settings.cross_run_read_tools — the documented
+        # ACL/redaction kill-switch ("deployments that require per-user portfolio ACL/redaction must
+        # explicitly disable it", configuration.md). concept_taxonomy reads the SAME cross-run
+        # ledgers (other runs' LLM-authored slugs), and the mutation verbs rewrite the shared
+        # portfolio taxonomy — a strictly MORE sensitive surface than the reads the flag fences. With
+        # the flag off, cross-run content still reaches assistant prompts (and stays editable)
+        # through this provider, defeating the flag as a trust boundary. Gate this on the same flag
+        # (or a dedicated governance flag defaulting to it).
         from looplab.tools.concept_tools import ConceptGovernanceTools
         providers.append(ConceptGovernanceTools(mdir, mode=mode, approver=approver))
     kdir = getattr(settings, "knowledge_dir", None) if settings else None
