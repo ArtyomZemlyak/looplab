@@ -433,8 +433,20 @@ class StrategyCadenceMixin:
         # common tech stack. Deterministic (id-sorted). Downstream nodes then author only deltas vs this.
         for node in sorted(state.evaluated_nodes(), key=lambda x: x.id):
             concepts = state.node_concepts.get(node.id)
-            if concepts and prov.get(node.id) == NODE_CONCEPT_PROVENANCE_AUTHORED:
-                self.store.append(EV_RUN_CONCEPTS, {"concepts": list(concepts)})
+            if not concepts or prov.get(node.id) != NODE_CONCEPT_PROVENANCE_AUTHORED:
+                continue
+            # Normalize EXACTLY as _on_run_concepts folds it (drop empty/dup), and only seed a NON-EMPTY
+            # base. Otherwise `["" ]`-style concepts would fold to an empty run_base_concepts, the "base is
+            # empty" gate would never clear, and this cadence would re-emit EV_RUN_CONCEPTS every pass.
+            seen: set[str] = set()
+            base: list[str] = []
+            for c in concepts:
+                s = str(c)
+                if s and s not in seen:
+                    seen.add(s)
+                    base.append(s)
+            if base:
+                self.store.append(EV_RUN_CONCEPTS, {"concepts": base})
                 return fold(self.store.read_all())
         return state
 

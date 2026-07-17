@@ -1328,8 +1328,10 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
 def _materialize_concept_deltas(st: RunState) -> None:
     """PART V (B) fold POST-PASS: resolve every delta-authored node's effective `node_concepts` from the
     run base + its parents. ORDER-TOLERANT (invariant 5): it runs once over the fully-folded DAG, so a
-    reordered/spliced log resolves identically. A node's set = run_base ∪ (union of parents' effective
-    sets) − removed + added. A classifier/operator event that already set node_concepts WINS (provenance
+    reordered/spliced log resolves identically. A node's set = inherited − removed + added, where inherited
+    is the run BASE at a root and the UNION of the node's parents' effective sets otherwise (the base flows
+    in through the roots and down the DAG, so a removal propagates to descendants until one re-adds it). A
+    classifier/operator event that already set node_concepts WINS (provenance
     != authored) — such a node contributes its stored set to its children and is not overwritten here.
     Memoized; a defensive cycle guard keeps an adversarial parent cycle from recursing forever."""
     base = [str(c) for c in (st.run_base_concepts or [])]

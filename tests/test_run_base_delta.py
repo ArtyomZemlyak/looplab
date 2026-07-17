@@ -157,3 +157,17 @@ def test_engine_seed_waits_for_an_evaluated_authored_node(tmp_path):
     st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st)
     assert not st2.run_base_concepts
     assert not [e for e in s.read_all() if e.type == "run_concepts"]
+
+
+def test_engine_seed_skips_a_node_whose_concepts_normalize_empty(tmp_path):
+    # A [""] authored node must NOT emit EV_RUN_CONCEPTS (it would fold to an empty base and the "base is
+    # empty" gate would re-emit every cadence — an engine spin). Seeding waits for a NON-EMPTY normalized set.
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=[""]))        # normalizes to empty
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    s.append("node_created", _created(1, concepts=["loss/dcl"]))
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.9})
+    st = fold(s.read_all())
+    st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st)
+    assert st2.run_base_concepts == ["loss/dcl"]               # seeded from node1, not the empty node0
+    assert len([e for e in s.read_all() if e.type == "run_concepts"]) == 1
