@@ -5,7 +5,7 @@ import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, 
 import { usePoll } from './hooks.js'
 import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
 import { hyperImportance } from './report.js'
-import Markdown from './markdown.jsx'
+import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
 import CodeViewer from './CodeViewer.jsx'
 import { diffLines } from './lineDiff.js'
@@ -459,7 +459,7 @@ export function QueuePanel({ state, runId, onSelect, onClose, onToast }) {
             <td><button className="btn xs ghost" onClick={() => { onSelect && onSelect(n.id); onClose() }}>#{n.id}</button></td>
             <td><span className="op-icon"><OpIcon name={operatorMeta(n.operator).icon} size={12} /></span> {n.operator}</td>
             <td className="muted">{(n.parent_ids || []).map(p => '#' + p).join(', ') || '—'}</td>
-            <td className="muted">{(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
+            <td className="muted">{stripMd(n.idea?.hypothesis || n.idea?.rationale || '').slice(0, 70)}</td>
             <td><button className="btn xs ghost" aria-label={`Cancel experiment ${n.id}`}
               title="cancel this experiment (node_abort)" onClick={() => cancel(n.id)}><OpIcon name="cross" size={11} /></button></td>
           </tr>)}

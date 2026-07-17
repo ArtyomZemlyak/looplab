@@ -15,9 +15,12 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'future_event' }), '{}')
     assert.equal(eventNarration({ type: 'node_created', data: null }),
       'node_created — details could not be summarized')
+    // A non-string rationale (malformed data) no longer throws to the generic fallback: the feed narration
+    // now runs rationale through `stripMd`, which coerces it to a string, so node_created still renders its
+    // node info gracefully (rationale is always a string in practice — models.py Idea.rationale: str).
     assert.equal(eventNarration({ type: 'node_created', data: {
       node_id: 3, operator: 'improve', idea: { rationale: 7 },
-    } }), 'node_created — details could not be summarized')
+    } }), 'node #3 via improve — 7')
     assert.equal(eventNarration({ type: 'node_failed', data: {
       node_id: 4, reason: 'guard against undefined behavior',
     } }), 'node #4 failed (guard against undefined behavior)')

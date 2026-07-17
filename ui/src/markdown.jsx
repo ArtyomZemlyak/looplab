@@ -10,6 +10,23 @@ import { safeMarkdownHref } from './urlSafety.js'
 // boundary. React does not neutralize javascript:/data: links for us.
 export const safeHref = safeMarkdownHref
 
+// Flatten inline Markdown to plain text for the one-line surfaces that show a rationale RAW (not rendered)
+// — DAG card captions, feed row narrations, the pending-experiment queue. Now that the Researcher authors
+// rationale as Markdown, these would otherwise show literal `**`/`` ` ``/`#`/`- ` markers. Keeps the words,
+// drops the markers. Pure/deterministic; slice AFTER calling this so a cut never lands mid-marker.
+export function stripMd(text) {
+  return String(text ?? '')
+    .replace(/```[\s\S]*?```/g, ' ')                     // fenced code block → space
+    .replace(/`([^`]+)`/g, '$1')                         // inline code
+    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, '$1$2')     // bold
+    .replace(/\*([^*]+)\*|(?<!\w)_([^_]+)_(?!\w)/g, '$1$2') // italic (keep intra-word underscores)
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')                  // ATX headings
+    .replace(/^\s*([-*+]|\d+\.)\s+/gm, '')               // list bullets / ordered markers
+    .replace(/^\s*>\s?/gm, '')                           // blockquotes
+    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')             // links → link text
+    .replace(/\s+/g, ' ').trim()                         // collapse whitespace to one line
+}
+
 // --- inline: split a line into bold / italic / code / link spans (escapes are literal text) ---
 function inline(text, keyBase) {
   const out = []

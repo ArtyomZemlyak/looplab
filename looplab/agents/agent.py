@@ -48,9 +48,10 @@ _IDEA_SPACE_TOOL = ("Your idea space is the WHOLE experiment, not just hyperpara
                     "change is the stronger experiment. Numeric knobs go in `params`; describe any non-numeric "
                     "or structural change (a new loss, an architecture tweak, a data-pipeline change) clearly "
                     "in `rationale` so the Developer can build it. Write `rationale` as brief GitHub-flavored "
-                    "Markdown covering ONLY the DELTA vs the parent experiment — the change THIS node makes and "
-                    "the intuition for why it should help — not a restatement of the params or the parent's "
-                    "reasoning that hasn't changed (keep it to ~1-3 sentences).\n"
+                    "Markdown focused on the DELTA — the change THIS node makes and the intuition for why it "
+                    "should help — specified completely enough to build (a structural change is often built "
+                    "from scratch, so include the essential setup it needs); don't pad it with the parent's "
+                    "motivation or repeat reasoning from earlier experiments (keep it to ~1-3 sentences).\n"
                     "Propose WHAT to try and WHY (the concept + expected learning). You do not write the code "
                     "yourself — the Developer owns HOW, and is free to edit the repo's code to realise your "
                     "idea — but you ARE free to direct structural, code-level changes when they're warranted. ")

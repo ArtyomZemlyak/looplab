@@ -424,12 +424,13 @@ class LLMResearcher:
                                         "`rationale` is your conclusion the operator reads AND the Developer "
                                         "builds from — write it as brief GitHub-flavored Markdown (a lead "
                                         "sentence; **bold** the key lever, add a short bullet or two only if it "
-                                        "helps). State ONLY the DELTA vs the parent: the specific change THIS "
-                                        "experiment makes (enough detail for the Developer to build a "
-                                        "non-numeric/structural change) and the intuition for why it should "
-                                        "help — do NOT restate the params or re-explain the shared setup and "
-                                        "the parent's reasoning that haven't changed (the reader already has the "
-                                        "parent). Keep it to ~1-3 sentences. " + _IDEA_SPACE_PLAIN
+                                        "helps). Focus on the DELTA: name the specific change THIS experiment "
+                                        "makes and the intuition for why it should help — and SPECIFY that change "
+                                        "completely enough for the Developer to build it (a structural change is "
+                                        "often built from scratch, so include the essential setup it needs). Do "
+                                        "NOT pad it with the parent's motivation or repeat reasoning you already "
+                                        "wrote on earlier experiments — say what is NEW here, not the shared "
+                                        "story. Keep it to ~1-3 sentences. " + _IDEA_SPACE_PLAIN
                                         + (" The `hypothesis` is the one-line belief this experiment "
                                            "tests (reuse wording across experiments that test the same "
                                            "belief)." if self.track_hypotheses else "")},

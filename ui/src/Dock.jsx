@@ -6,7 +6,7 @@ import { get, fmt, workingId, resetRun, getRunCommand, retryRunCommand, runComma
   clearRunCommandLock, loadRunCommandLock, saveRunCommandLock, subscribeRunCommandLock,
   COMMAND_SUCCEEDED, COMMAND_FAILED, storageGet, storageSet, runApiPath, runNodeApiPath } from './util.js'
 import { usePoll } from './hooks.js'
-import Markdown from './markdown.jsx'
+import Markdown, { stripMd } from './markdown.jsx'
 import { NodeTrace, TraceUnavailable } from './Inspector.jsx'
 import { OpIcon } from './icons.jsx'
 import { runLifecycle } from './runIndex.js'
@@ -23,7 +23,7 @@ import { tracePartial, traceUnavailable } from './traceProjection.js'
 const NARR = {
   run_started: (d) => `run started — ${d.goal || d.task_id} (${d.direction})`,
   node_building: (d) => `building node #${d.node_id} via ${d.operator || 'improve'}…`,
-  node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + d.idea.rationale.slice(0, 80) : ''}`,
+  node_created: (d) => `node #${d.node_id} via ${d.operator}${d.idea?.rationale ? ' — ' + stripMd(d.idea.rationale).slice(0, 80) : ''}`,
   node_evaluated: (d) => `node #${d.node_id} → ${fmt(d.metric)}`,
   node_failed: (d) => `node #${d.node_id} failed (${d.reason})${d.triage_action === 'reject_idea' ? ' — idea rejected' + (d.triage_rationale ? ': ' + String(d.triage_rationale).slice(0, 70) : '') : ''}`,
   node_repaired: (d) => `node #${d.node_id} repaired in place (attempt ${d.attempt})${d.rationale ? ' — ' + String(d.rationale).slice(0, 80) : ''}`,
@@ -66,7 +66,7 @@ const NARR = {
   force_confirm: (d) => `requested a multi-seed confirm of #${d.node_id}`,
   force_ablate: (d) => `requested an ablation probe on #${d.node_id}`,
   fork: (d) => `forked a fresh improve-branch from #${d.from_node_id}`,
-  inject_node: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + String(i.rationale).slice(0, 70) : ''}` },
+  inject_node: (d) => { const i = d.idea || {}; return `added experiment: ${i.operator || 'improve'}${d.parent_id != null ? ' from #' + d.parent_id : ''}${i.rationale ? ' — ' + stripMd(i.rationale).slice(0, 70) : ''}` },
   annotation: (d) => `note on #${d.node_id}: ${String(d.text || '').slice(0, 80)}`,
   run_reopened: () => 'run reopened to keep going',
   resume: () => 'run resumed — continuing',
@@ -108,18 +108,25 @@ const NARR = {
   // narration — the curated feed is now an allow-list (see `isCuratedType`), so anything unnarrated stays
   // out of the feed (still in events.jsonl + the raw Event Explorer) instead of rendering as a JSON blob.
   node_reset: (d) => `re-running node #${d.node_id} from ${d.from_stage || d.stage || 'propose'}`,
-  node_tombstoned: (d) => { const ids = d.node_ids || (d.node_id != null ? [d.node_id] : []); return `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ') || '(subtree)'}` },
+  node_tombstoned: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return ids.length ? `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ')}` : 'deleted a node subtree' },
   holdout_evaluated: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
   novelty_graded: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
-  cross_run_prior: (d) => { const cs = (d.concepts || []).slice(0, 3).join(', '); return `cross-run prior${cs ? ': ' + cs : ''} — tried in an earlier run` },
-  comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.body || d.text || '').slice(0, 80)}`,
+  cross_run_prior: (d) => { const cs = (d.matched_concepts || []).slice(0, 3).join(', '); const runs = d.prior_runs || []; const best = runs[0]; return `cross-run prior${cs ? ': ' + cs : ''} — tried in ${runs.length || 'an'} earlier run${runs.length === 1 ? '' : 's'}${best && best.best_metric != null ? ' (best ' + fmt(best.best_metric) + ')' : ''}` },
+  comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.text || d.body || '').slice(0, 80)}`,
   comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
-  comment_resolution_changed: (d) => `comment ${d.resolved === false ? 'reopened' : 'resolved'} on #${d.node_id ?? '?'}`,
+  comment_resolution_changed: (d) => `comment ${d.resolved === true ? 'resolved' : d.resolved === false ? 'reopened' : 'resolution changed'} on #${d.node_id ?? '?'}`,
   concept_tag_edited: (d) => `operator re-tagged #${d.node_id}: ${(d.concepts || []).slice(0, 4).join(', ') || '(cleared)'}`,
   hypothesis_updated: (d) => `hypothesis updated — ${String(d.statement || '').slice(0, 80)}`,
   trust_gate_changed: (d) => `trust gate changed${d.gate ? ` — ${d.gate}` : ''}`,
   inject_failed: (d) => `experiment injection failed${d.reason ? ' — ' + String(d.reason).slice(0, 80) : ''}`,
   env_changed: () => 'environment changed since run start — re-grounding',
+  // Failure/audit + progress events whose SUCCESS or sibling twins are already narrated — hiding only the
+  // failure/correction case was the wrong asymmetry, so surface them here too (found by the coverage audit).
+  report_refresh_failed: (d) => `report refresh failed${d.reason || d.error || d.message ? ' — ' + String(d.reason || d.error || d.message).slice(0, 80) : ''}`,
+  log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'} records` : ' at a divergence boundary'}`,
+  stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
+  lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
+  restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 
 const ownValue = (value, key) => value !== null && typeof value === 'object'
@@ -182,6 +189,19 @@ const NARR_VALID = {
   run_setup_started: d => Array.isArray(d?.command),
   run_setup_finished: d => ownValue(d, 'exit_code'),
   budget: d => ownValue(d, 'nodes') && ownValue(d, 'elapsed_s'),
+  // Newly narrated types: guard the field that DEFINES the claim so a partial/legacy payload degrades to
+  // the generic line instead of "#undefined"/"level undefined" (the file's documented anti-#undefined rule).
+  node_reset: d => ownValue(d, 'node_id'),
+  node_tombstoned: d => (Array.isArray(d?.node_ids) && d.node_ids.length > 0) || ownValue(d, 'node_id'),
+  holdout_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
+  novelty_graded: d => ownValue(d, 'level'),
+  cross_run_prior: d => Array.isArray(d?.matched_concepts) || Array.isArray(d?.prior_runs),
+  comment_created: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
+  comment_edited: d => ownValue(d, 'node_id'),
+  comment_resolution_changed: d => ownValue(d, 'node_id'),
+  concept_tag_edited: d => ownValue(d, 'node_id') && Array.isArray(d?.concepts),
+  hypothesis_updated: d => ownValue(d, 'statement'),
+  stage_finished: d => ownAny(d, ['name', 'stage']),
 }
 
 // The node an event refers to, if any — lets a feed click drill into that node.
@@ -226,6 +246,8 @@ const TYPE2GROUP = {
   node_reset: 'control', node_tombstoned: 'control', concept_tag_edited: 'control', inject_failed: 'control',
   comment_created: 'control', comment_edited: 'control', comment_resolution_changed: 'control', trust_gate_changed: 'control',
   holdout_evaluated: 'eval', novelty_graded: 'trust', cross_run_prior: 'research', hypothesis_updated: 'research',
+  report_refresh_failed: 'report', log_repaired: 'lifecycle', stage_finished: 'eval',
+  lessons_reconciled: 'research', restart: 'control',
 }
 // Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
 // icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).

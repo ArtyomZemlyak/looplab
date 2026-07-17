@@ -4,6 +4,7 @@ import { ReactFlow, Background, Controls, MiniMap, Handle, Position, Panel,
 import '@xyflow/react/dist/style.css'
 import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERATOR_LEGEND,
   isSweep, sweepInfo, chipFontSize, storageGet, storageSet } from './util.js'
+import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { canonicalId, nodeTheme } from './conceptId.js'
 import { OpIcon } from './icons.jsx'
@@ -191,7 +192,7 @@ function ExpNode({ data }) {
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   // # CODEX AGENT: the tag strip is pointer-transparent and visually caps at two leaves. Put the
   // complete canonical set on the card itself so the +N overflow has a reachable mouse tooltip.
-  const cardTitle = op.label + (node.idea?.rationale ? ' — ' + node.idea.rationale : '')
+  const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
     + (conceptTags.length ? ` · concepts: ${conceptTags.join(', ')}` : '')
   const selectionLabel = [
     `Experiment #${node.id}`, op.label, node.status || 'unknown status',
