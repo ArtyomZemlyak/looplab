@@ -1216,6 +1216,14 @@ def _apply_consolidation(graph: "ConceptGraph", tags: dict, rename: dict) -> tup
         # ensure() keeps the first entry, so replace to carry the merged axes/aliases/key deterministically.
         new._concepts[cid] = Concept(id=cid, label=label, axes=merged_axes, aliases=merged_aliases,
                                      key=merged_key)
+    # Materialize any missing INTERMEDIATE ancestors of a renamed DEEP id (mirrors ensure()'s chain-build).
+    # A rename that DEEPENS an id (`aug/crop` -> `data/augmentation/crop`) would otherwise leave the new
+    # levels (`data/augmentation`, `data`) absent, so children_of/tree projection would have gap nodes.
+    for cid in list(new._concepts):
+        if "/" in cid:
+            parent = cid.rsplit("/", 1)[0]
+            if parent not in new._concepts:
+                new.ensure(parent)   # recursively builds every missing level up to the root
     new_tags = {nid: frozenset(rename.get(x, x) for x in cids) for nid, cids in (tags or {}).items()}
     return new, new_tags
 
