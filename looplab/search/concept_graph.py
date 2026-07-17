@@ -1140,8 +1140,7 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
     # string-hash-dependent (randomized per process via PYTHONHASHSEED), so json.dumps of this
     # projection is not byte-stable across processes despite the "DETERMINISTIC" docstring — the concepts
     # endpoint returns this tree, so byte-instability breaks its HTTP etag/caching and diff-based tests.
-    # (Matches the sibling project_hierarchy fix.) A `root`-focused lens is not yet consumed here; see the
-    # note in derive_lens — the emitted root is validated but wiring the subtree filter is pending.
+    # (Matches the sibling project_hierarchy fix.)
     for cid in sorted(all_ids):
         prim = parent_of.get(cid)
         cross = sorted({p for _, p in cand.get(cid, []) if p != prim and p in all_ids})
@@ -1154,12 +1153,13 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
 def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_call",
                 raise_on_failure: bool = False) -> Optional[dict]:
     """Agentically MINT a lens in the moment from a natural-language request — the "create a lens" tool.
-    A lens is a pure PROJECTION spec (a relation-subset + optional root + labels); it writes NO events
+    A lens is a pure PROJECTION spec (a relation-subset + labels); it writes NO events
     and grows NO edges, so it is entirely view-state and REPLAY-CLEAN. The model picks which of the
-    AVAILABLE relation types (those present in `edges`, plus is_a) count as nesting, and optionally a
-    root concept to focus on. Best-effort: returns None on no client / empty prompt / any failure / an
-    empty-or-invalid choice, so the caller falls back to a default lens. Impure (one LLM call) by
-    design; the returned spec is consumed by project_lens / project_hierarchy."""
+    AVAILABLE relation types (those present in `edges`, plus is_a) count as nesting. Best-effort:
+    returns None on no client / empty prompt / any failure / an empty-or-invalid choice, so the caller
+    falls back to a default lens. Impure (one LLM call) by design; the returned spec is consumed by
+    project_lens / project_hierarchy. Root focus is intentionally absent until projection implements
+    subtree filtering; advertising and persisting a no-op root would be a false product promise."""
     if client is None or not str(prompt or "").strip():
         return None
     try:
@@ -1177,13 +1177,11 @@ def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_cal
             name: str = ""
             label: str = ""
             rels: list[str] = Field(default_factory=list)
-            root: str = ""
 
         system = (
             "You turn a user's request into a LENS over a concept graph — a way to VIEW its hierarchy. A "
             "lens picks which RELATION TYPES count as nesting (the tree follows edges of those types). "
-            "Choose ONLY from the AVAILABLE relations below. Optionally name a ROOT concept to focus the "
-            "view on (from the vocabulary), else leave it empty. Give a short lower-case `name` slug and a "
+            "Choose ONLY from the AVAILABLE relations below. Give a short lower-case `name` slug and a "
             "human `label`. Call `emit` once.\n\nAVAILABLE RELATIONS: " + ", ".join(avail)
             + ("\n\nCONCEPT VOCABULARY (sample):\n" + "\n".join(f"- {c}" for c in vocab[:60])
                if vocab else ""))
@@ -1196,15 +1194,6 @@ def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_cal
         name = _normalize_concept_id(out.name) or "-".join(rels)[:24] or "lens"
         spec = {"name": name, "label": (out.label or name).strip()[:60], "rels": rels,
                 "kind": "path" if rels == ["is_a"] else "edge", "provenance": "agent"}
-        # Validate the root the SAME way rels are validated (against the graph). The prompt tells the
-        # model to pick the root "from the vocabulary"; a hallucinated root that is not an actual concept
-        # is dropped (keep the lens, drop the focus) rather than carried verbatim. NOTE: consuming
-        # `spec["root"]` in the projectors (filter to the subtree) is still pending feature work — until
-        # then a root-bearing spec projects the whole graph — but the emitted value is now guaranteed to
-        # be a real in-graph concept so that wiring can trust it.
-        root = _normalize_concept_id(out.root)
-        if root and root in set(vocab):
-            spec["root"] = root
         return spec
     except Exception:
         if raise_on_failure:

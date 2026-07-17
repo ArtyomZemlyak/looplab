@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 import hashlib
+import hmac
 import json
 import os
 import re
@@ -76,10 +77,64 @@ _CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
 _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
 _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
 })
+def _concept_lens_idempotency_key(raw: str) -> str:
+    """Validate the opaque browser receipt before it becomes an HMAC key.
+
+    Sixteen random visible-ASCII bytes are the minimum supported client contract.  Length alone
+    cannot prove entropy, so callers are explicitly required to generate this value with a CSPRNG;
+    rejecting short/control-bearing keys prevents accidental low-entropy or ambiguous receipts.
+    """
+    if not isinstance(raw, str) or _CONCEPT_LENS_KEY_RE.fullmatch(raw) is None:
+        raise HTTPException(400, {
+            "code": "concept_lens_idempotency_key_invalid",
+            "message": (
+                "Idempotency-Key must be a cryptographically random visible-ASCII value "
+                "between 16 and 512 bytes."
+            ),
+        })
+    return raw
+
+
+def _concept_lens_identity(run_dir: Path, generation: str, idempotency_key: str) -> str:
+    return hashlib.sha256(
+        ("concept_lens\0" + run_directory_identity(run_dir) + "\0" + generation
+         + "\0" + idempotency_key).encode("utf-8")
+    ).hexdigest()
+
+
+def _concept_lens_prompt_digest(idempotency_key: str, prompt: str) -> str:
+    """Bind prompt equality to the unlogged high-entropy request key.
+
+    A plain prompt hash lets anyone who can read the diagnostic log dictionary-test common prompts.
+    HMAC preserves restart-safe equality without turning the event log into a prompt oracle.
+    """
+    return hmac.new(
+        idempotency_key.encode("ascii"), prompt.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+async def _concept_lens_json_body(request: Request) -> dict:
+    """Read either paid-lens command without permitting an unbounded request body."""
+    raw_body = bytearray()
+    async for chunk in request.stream():
+        if len(raw_body) + len(chunk) > _CONCEPT_FRAME_MAX_LENS_BODY_BYTES:
+            raise HTTPException(413, {
+                "code": "concept_lens_body_too_large",
+                "max_bytes": _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
+            })
+        raw_body.extend(chunk)
+    try:
+        body = json.loads(bytes(raw_body).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, TypeError) as exc:
+        raise HTTPException(400, "request body must be valid JSON") from exc
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+    return body
 
 
 def _concept_lens_ledger(events, generation: str):
@@ -127,6 +182,13 @@ def _validated_derived_lens(spec, lens_pack: list[dict], inputs: dict):
     """Return the canonical bounded lens triple, or None for an unusable model result."""
     if not isinstance(spec, dict):
         return None
+    # Older terminals may carry the previously advertised string `root`.  Root filtering was never
+    # implemented, so canonical specs now deliberately drop it.  Replay accepts that one legacy
+    # string field even after consolidation renames/removes the concept; structured roots are
+    # malformed and fail closed rather than reaching a set membership TypeError.
+    legacy_root = spec.get("root")
+    if "root" in spec and not isinstance(legacy_root, str):
+        return None
     raw_relations = spec.get("rels")
     if not isinstance(raw_relations, list):
         return None
@@ -147,9 +209,16 @@ def _validated_derived_lens(spec, lens_pack: list[dict], inputs: dict):
         "label": _bounded_lens_label(spec.get("label"), canonical_name),
         "provenance": "agent",
     })
-    if spec.get("root") in set(inputs["concept_ids"]):
-        validated_spec["root"] = spec["root"]
     return canonical_name, validated_spec, registration
+
+
+def _concept_lens_spec_matches_terminal(raw_spec, canonical_spec: dict) -> bool:
+    """Strictly match a terminal, allowing only the retired legacy string-root field."""
+    if not isinstance(raw_spec, dict):
+        return False
+    if "root" in raw_spec and not isinstance(raw_spec.get("root"), str):
+        return False
+    return {key: value for key, value in raw_spec.items() if key != "root"} == canonical_spec
 
 
 def _concept_event_file_identity(path: Path) -> Optional[tuple]:
@@ -476,8 +545,27 @@ def build_router(srv) -> APIRouter:
                 "error": "Concept lens creation failed before a model request was sent.",
                 "generation": generation,
                 "request_id": identity,
+                "seq": event.seq,
             }
         outcome = data.get("outcome")
+        if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "abandoned":
+            return {
+                **base_frame,
+                "ok": False,
+                "code": "concept_lens_abandoned",
+                "reason": "operator_abandoned",
+                "abandoned": True,
+                "resolved": True,
+                "provider_outcome": "unknown",
+                "billing_status": "unknown",
+                "warning": (
+                    "The provider may already have completed and billed this request; provider-side "
+                    "usage can remain unavailable after operator abandonment."
+                ),
+                "generation": generation,
+                "request_id": identity,
+                "seq": event.seq,
+            }
         if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "declined":
             reason = data.get("reason")
             if reason not in {"declined", "invalid_spec"}:
@@ -488,13 +576,14 @@ def build_router(srv) -> APIRouter:
                 "reason": reason,
                 "generation": generation,
                 "request_id": identity,
+                "seq": event.seq,
             }
         if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "derived":
             inputs = _concept_core_lens_inputs(core)
             prepared = _validated_derived_lens(data.get("spec"), lens_pack, inputs)
             if prepared is not None:
                 canonical_name, validated_spec, registration = prepared
-                if validated_spec == data.get("spec"):
+                if _concept_lens_spec_matches_terminal(data.get("spec"), validated_spec):
                     frame = _project_concept_frame(
                         core, requested_lens=canonical_name, lens_pack=lens_pack,
                         requested_spec=validated_spec, lens_registration=registration)
@@ -504,15 +593,24 @@ def build_router(srv) -> APIRouter:
                         "spec": validated_spec,
                         "generation": generation,
                         "request_id": identity,
+                        "seq": event.seq,
                     }
-        return _concept_lens_uncertain(
-            base_frame, generation, identity,
-            "The saved lens receipt is malformed. Resume only with this same request identity.")
+        return {
+            **_concept_lens_uncertain(
+                base_frame, generation, identity,
+                "The saved lens receipt is malformed. Resume only with this same request identity."),
+            "seq": event.seq,
+        }
 
-    def _record_concept_lens_failure(run_dir: Path, generation: str, identity: str,
-                                     request_digest: str, error_kind: str):
-        safe_kind = (error_kind if error_kind in _CONCEPT_LENS_SAFE_ERROR_KINDS
-                     else "provider_error")
+    def _record_concept_lens_terminal(run_dir: Path, generation: str, identity: str,
+                                      request_digest: str, event_type: str,
+                                      terminal_fields: dict):
+        """Append one terminal iff the exact claim is still unresolved.
+
+        Provider work and explicit operator abandonment can finish in different processes.  The run
+        command sequencer is therefore the only terminal commit point: a late worker observes and
+        replays the winner instead of appending a conflicting second receipt.
+        """
         try:
             with srv.commands.sequence(run_dir):
                 canonical = srv.commands.validate_paths(run_dir)
@@ -528,18 +626,26 @@ def build_router(srv) -> APIRouter:
                 if identity not in unresolved:
                     return None
                 return store.append(
-                    EV_CONCEPT_LENS_FAILED,
+                    event_type,
                     {
                         "lens_request_id": identity,
                         "generation": generation,
                         "request_digest": request_digest,
-                        "error_kind": safe_kind,
+                        **terminal_fields,
                     },
                     require_lock=True,
                     require_durable=True,
                 )
-        except Exception:  # noqa: BLE001 - an unresolved claim must remain fail-closed
+        except Exception:  # noqa: BLE001 - an unresolved paid claim must remain fail-closed
             return None
+
+    def _record_concept_lens_failure(run_dir: Path, generation: str, identity: str,
+                                     request_digest: str, error_kind: str):
+        safe_kind = (error_kind if error_kind in _CONCEPT_LENS_SAFE_ERROR_KINDS
+                     else "provider_error")
+        return _record_concept_lens_terminal(
+            run_dir, generation, identity, request_digest, EV_CONCEPT_LENS_FAILED,
+            {"error_kind": safe_kind})
 
     def _run_concept_lens_worker(settings, run_dir: Path, generation: str, identity: str,
                                  request_digest: str, prompt: str, core: dict,
@@ -576,12 +682,19 @@ def build_router(srv) -> APIRouter:
                         "outcome": "derived",
                         "spec": validated_spec,
                     }
-                event = EventStore(run_dir / "events.jsonl").append(
+                event = _record_concept_lens_terminal(
+                    run_dir, generation, identity, request_digest,
                     EV_CONCEPT_LENS_COMPLETED,
-                    terminal_data,
-                    require_lock=True,
-                    require_durable=True,
+                    {key: value for key, value in terminal_data.items()
+                     if key not in {"lens_request_id", "generation", "request_digest"}},
                 )
+                if event is None:
+                    return _concept_lens_uncertain(
+                        base_frame, generation, identity,
+                        "The paid lens finished, but its generation-fenced durable terminal could "
+                        "not be confirmed. Resume only with this same request identity.")
+                return _concept_lens_terminal_response(
+                    event, core, lens_pack, identity)
         except Exception as exc:  # noqa: BLE001 - provider payloads never cross this boundary
             if provider_started:
                 return _concept_lens_uncertain(
@@ -602,26 +715,7 @@ def build_router(srv) -> APIRouter:
                 "The lens request failed before provider dispatch, but its terminal receipt could "
                 "not be confirmed. Resume only with this same request identity.")
 
-        if terminal_data["outcome"] == "declined":
-            return {
-                **base_frame,
-                "ok": False,
-                "reason": terminal_data["reason"],
-                "generation": generation,
-                "request_id": identity,
-                "seq": event.seq,
-            }
-        frame = _project_concept_frame(
-            core, requested_lens=canonical_name, lens_pack=lens_pack,
-            requested_spec=validated_spec, lens_registration=registration)
-        return {
-            **frame,
-            "ok": True,
-            "spec": validated_spec,
-            "generation": generation,
-            "request_id": identity,
-            "seq": event.seq,
-        }
+        raise AssertionError("unreachable paid-lens worker path")
 
     @router.post("/api/runs/{run_id}/concepts/lens")
     async def derive_concept_lens(run_id: str, request: Request, response: Response):
@@ -629,19 +723,8 @@ def build_router(srv) -> APIRouter:
         from looplab.search.concept_graph import default_lenses
 
         rd = _run_dir(run_id)
-        raw_body = bytearray()
-        async for chunk in request.stream():
-            if len(raw_body) + len(chunk) > _CONCEPT_FRAME_MAX_LENS_BODY_BYTES:
-                raise HTTPException(413, {
-                    "code": "concept_lens_body_too_large",
-                    "max_bytes": _CONCEPT_FRAME_MAX_LENS_BODY_BYTES,
-                })
-            raw_body.extend(chunk)
-        try:
-            body = json.loads(bytes(raw_body).decode("utf-8"))
-        except (ValueError, UnicodeDecodeError, TypeError) as exc:
-            raise HTTPException(400, "request body must be valid JSON") from exc
-        prompt_value = body.get("prompt") if isinstance(body, dict) else None
+        body = await _concept_lens_json_body(request)
+        prompt_value = body.get("prompt")
         prompt = prompt_value.strip() if isinstance(prompt_value, str) else ""
         if not prompt:
             raise HTTPException(400, "prompt is required")
@@ -652,7 +735,7 @@ def build_router(srv) -> APIRouter:
                 "max_chars": _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS,
                 "max_bytes": _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
             })
-        expected_generation = body.get("expected_generation") if isinstance(body, dict) else None
+        expected_generation = body.get("expected_generation")
         if (not isinstance(expected_generation, str)
                 or _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
             raise HTTPException(400, {
@@ -661,10 +744,8 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Refresh the run before creating another paid concept lens.",
             })
 
-        raw_idempotency_key = request.headers.get("Idempotency-Key", "")
-        if not raw_idempotency_key or len(raw_idempotency_key) > 512:
-            raise HTTPException(
-                400, "Idempotency-Key is required and must be at most 512 characters")
+        raw_idempotency_key = _concept_lens_idempotency_key(
+            request.headers.get("Idempotency-Key", ""))
 
         lens_pack = default_lenses()
         core = _materialize_concept_core(rd, run_id, None, lens_pack)
@@ -686,7 +767,7 @@ def build_router(srv) -> APIRouter:
             core, requested_lens="is_a", lens_pack=lens_pack)
         response.headers["Cache-Control"] = "no-store"
         response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
-        request_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        request_digest = _concept_lens_prompt_digest(raw_idempotency_key, prompt)
         reservation = None
         compute = None
         with srv.commands.sequence(rd):
@@ -714,16 +795,23 @@ def build_router(srv) -> APIRouter:
                     "remediation": "Reload the Concepts view and submit a new request intentionally.",
                 })
 
-            job_identity = hashlib.sha256(
-                ("concept_lens\0" + run_directory_identity(rd) + "\0" + current_generation
-                 + "\0" + raw_idempotency_key).encode("utf-8")).hexdigest()
+            job_identity = _concept_lens_identity(
+                rd, current_generation, raw_idempotency_key)
             store = EventStore(rd / "events.jsonl")
             claims, terminals, unresolved, conflicts = _concept_lens_ledger(
                 store.read_all(), current_generation)
-            if conflicts:
+            if job_identity in conflicts:
                 return _concept_lens_uncertain(
                     base_frame, current_generation, job_identity,
-                    "The paid-lens ledger contains conflicting receipts and requires repair.")
+                    "This paid-lens identity has conflicting receipts and requires repair.")
+            if conflicts:
+                # Do not fabricate an ambiguous receipt for a fresh identity that has never claimed
+                # provider work.  The operator must repair the unrelated ledger conflict first.
+                raise HTTPException(409, {
+                    "code": "concept_lens_ledger_conflict",
+                    "message": "Another paid-lens identity has conflicting durable receipts.",
+                    "remediation": "Repair the conflicting receipts before creating new paid work.",
+                })
             existing_digest = claims.get(job_identity)
             if existing_digest is not None and existing_digest != request_digest:
                 raise HTTPException(409, {
@@ -760,9 +848,9 @@ def build_router(srv) -> APIRouter:
                     srv.llm_settings(rd), rd, current_generation, job_identity,
                     request_digest, prompt, core, lens_pack)
             else:
-                # A bounded frame is the same honest substrate already rendered by GET. Only
-                # corruption-adjacent reasons block paid work; explicit cap reasons remain visible
-                # in the derived response instead of permanently disabling lens creation.
+                # A bounded partial frame is the exact safe substrate already rendered by GET.  Only
+                # corruption-adjacent reasons block paid work; cap limitations remain in the eventual
+                # derived response so the operator sees precisely what the model received.
                 blocking = [reason for reason in base_frame["completeness"]["reasons"]
                             if reason not in _TRUNCATION_CAP_REASONS]
                 if blocking:
@@ -787,10 +875,12 @@ def build_router(srv) -> APIRouter:
                         "generation": current_generation,
                         "request_id": job_identity,
                     }
-                reservation = srv.jobs.reserve(job_identity, consume_on_poll=True)
+                reservation = srv.jobs.reserve(job_identity, consume_on_poll=False)
                 if reservation.get("status") != "running":
                     return {
+                        **base_frame,
                         **reservation,
+                        "reason": "capacity",
                         "generation": current_generation,
                         "request_id": job_identity,
                     }
@@ -817,7 +907,7 @@ def build_router(srv) -> APIRouter:
         result = await srv.jobs.run_as_job(
             compute,
             inline_wait=min(0.5, srv.jobs.inline_wait),
-            consume_inline_result=True,
+            consume_inline_result=False,
             reserved_job_id=reservation["job_id"],
         )
         if result.get("status") == "running":
@@ -832,6 +922,120 @@ def build_router(srv) -> APIRouter:
                 "The lens worker ended without a durable terminal receipt. Resume only with this "
                 "same request identity.")
         return result
+
+    @router.post("/api/runs/{run_id}/concepts/lens/abandon")
+    async def abandon_concept_lens(run_id: str, request: Request, response: Response):
+        """Explicitly terminalize an orphaned/uncertain paid claim without provider retry.
+
+        This is deliberately operator-driven and never time-based.  A process-local running worker
+        blocks abandonment, but a worker in an older process may still finish concurrently; the
+        shared command sequencer makes its late terminal lose cleanly to whichever terminal commits
+        first.  Provider-side completion, billing, and usage can remain unknowable after abandonment.
+        """
+        from looplab.search.concept_graph import default_lenses
+
+        rd = _run_dir(run_id)
+        body = await _concept_lens_json_body(request)
+        expected_generation = body.get("expected_generation")
+        if (not isinstance(expected_generation, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from Concepts.",
+            })
+        request_id = body.get("request_id")
+        if not isinstance(request_id, str) or _SHA256_RE.fullmatch(request_id) is None:
+            raise HTTPException(400, {
+                "code": "concept_lens_request_id_invalid",
+                "message": "request_id must be the exact receipt from the paid lens request.",
+            })
+        idempotency_key = _concept_lens_idempotency_key(
+            request.headers.get("Idempotency-Key", ""))
+
+        lens_pack = default_lenses()
+        core = _materialize_concept_core(rd, run_id, None, lens_pack)
+        generation = core[RUN_GENERATION_FIELD]
+        base_frame = _project_concept_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
+        request_digest = None
+        store_path = rd / "events.jsonl"
+
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current_generation = srv.commands.run_generation(rd)
+            if not current_generation or current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation or None,
+                    "message": "The run changed before the paid claim could be abandoned.",
+                    "remediation": "Reload Concepts; never abandon a receipt from another generation.",
+                })
+            if generation != current_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation,
+                    "message": "The run changed while the concept frame was being prepared.",
+                })
+            computed_id = _concept_lens_identity(rd, current_generation, idempotency_key)
+            if not hmac.compare_digest(request_id, computed_id):
+                raise HTTPException(409, {
+                    "code": "concept_lens_request_mismatch",
+                    "message": "request_id is not bound to this run, generation, and Idempotency-Key.",
+                })
+
+            store = EventStore(rd / "events.jsonl")
+            store_path = store.path
+            claims, terminals, unresolved, conflicts = _concept_lens_ledger(
+                store.read_all(), current_generation)
+            if request_id in conflicts:
+                raise HTTPException(409, {
+                    "code": "concept_lens_ledger_conflict",
+                    "message": "The paid-lens claim has conflicting durable receipts and needs repair.",
+                })
+            terminal = terminals.get(request_id)
+            if terminal is not None:
+                if not _confirm_concept_lens_terminal(store.path):
+                    return _concept_lens_uncertain(
+                        base_frame, current_generation, request_id,
+                        "The saved lens terminal is visible but its durability is unconfirmed.")
+                return _concept_lens_terminal_response(
+                    terminal, core, lens_pack, request_id)
+            request_digest = claims.get(request_id)
+            if request_digest is None or request_id not in unresolved:
+                raise HTTPException(409, {
+                    "code": "concept_lens_claim_missing",
+                    "message": "No unresolved paid-lens claim matches this receipt.",
+                    "remediation": "Reload Concepts and keep the original request receipt.",
+                })
+
+            process_receipt = srv.jobs.rejoin(request_id)
+            process_job = (srv.jobs.get(process_receipt["job_id"])
+                           if process_receipt is not None else None)
+            if process_job is not None and process_job.get("status") == "running":
+                raise HTTPException(409, {
+                    "code": "concept_lens_still_running",
+                    "message": "The original paid lens worker is still running in this process.",
+                    "remediation": "Wait for its terminal receipt before choosing abandonment.",
+                })
+
+        # Re-enter the cross-process sequencer at the single terminal commit helper.  A worker from an
+        # older server process can win between the inspection above and this call; in that case the
+        # helper returns its real terminal instead of overwriting it with abandonment.
+        terminal = _record_concept_lens_terminal(
+            rd, expected_generation, request_id, request_digest,
+            EV_CONCEPT_LENS_COMPLETED,
+            {"outcome": "abandoned", "reason": "operator_abandoned", "resolution": "operator"},
+        )
+        if terminal is None or not _confirm_concept_lens_terminal(store_path):
+            return _concept_lens_uncertain(
+                base_frame, expected_generation, request_id,
+                "The operator resolution could not be confirmed durably; no provider retry was sent.")
+        return _concept_lens_terminal_response(
+            terminal, core, lens_pack, request_id)
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
         if expected is None:

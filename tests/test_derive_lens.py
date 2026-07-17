@@ -1,5 +1,5 @@
 """Phase 3b: derive_lens mints a LENS from a natural-language request. A lens is a pure projection
-spec (rel-subset + optional root); it writes no events -> replay-clean. Best-effort: degrades to None
+spec (relation subset + labels); it writes no events -> replay-clean. Best-effort: degrades to None
 so the caller falls back to a default lens. The result feeds project_lens/project_hierarchy."""
 import pytest
 
@@ -10,8 +10,12 @@ class _LensClient:
     """Fake LLM: returns a fixed lens emit (tool_call)."""
     def __init__(self, out):
         self.out = out
+        self.messages = None
+        self.json_schema = None
 
     def complete_tool(self, messages, json_schema):
+        self.messages = messages
+        self.json_schema = json_schema
         return self.out
 
     def complete_text(self, messages):
@@ -57,20 +61,14 @@ def test_filters_out_unavailable_rels():
     assert derive_lens("x", _EDGES, _LensClient({"rels": ["teleports_to"]})) is None
 
 
-def test_root_is_carried_when_valid():
-    spec = derive_lens("focus on llm", _EDGES,
-                       _LensClient({"rels": ["co_occurs"], "root": "LLM"}))
-    assert spec["root"] == "llm"                       # normalized
+def test_root_is_neither_advertised_nor_persisted_until_projection_supports_it():
+    client = _LensClient({"rels": ["co_occurs"], "root": "LLM"})
+    spec = derive_lens("focus on llm", _EDGES, client)
 
-
-def test_hallucinated_root_not_in_vocab_is_dropped():
-    # Regression: a root is validated against the concept vocabulary the same way rels are validated
-    # against `avail`. A model-invented root that is not an actual concept must be dropped (keep the
-    # lens, drop the focus), not carried verbatim — the prompt asks for a root "from the vocabulary".
-    spec = derive_lens("focus on the void", _EDGES,
-                       _LensClient({"rels": ["uses"], "root": "not-a-real-concept"}))
-    assert spec is not None and "root" not in spec     # lens kept, hallucinated focus dropped
-    assert spec["rels"] == ["uses"]
+    assert spec is not None and spec["rels"] == ["co_occurs"]
+    assert "root" not in spec
+    assert "root" not in client.json_schema.get("properties", {})
+    assert "ROOT concept" not in client.messages[0]["content"]
 
 
 def test_failure_degrades_to_none():
