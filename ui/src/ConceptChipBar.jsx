@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { chipsAtPath, breadcrumb, matchingNodeIds } from './conceptChips.js'
-import { searchConcepts, searchHighlightIds } from './conceptSearch.js'
+import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
 
@@ -37,10 +37,13 @@ export default function ConceptChipBar({ state, onHighlight }) {
   // results drive a live graph-highlight preview and, on commit, become an ordinary subtree selection.
   const trimmedQuery = query.trim()
   const searching = hasConcepts && trimmedQuery.length > 0
-  const results = useMemo(
-    () => searching ? searchConcepts(nodeConcepts, rename, query, SEARCH_RESULTS) : [],
+  // Rank ALL matches once (bounded to the model default), then slice for the dropdown and reuse the
+  // same ranked set for the graph preview — one conceptUniverse build per keystroke instead of two.
+  const allResults = useMemo(
+    () => searching ? searchConcepts(nodeConcepts, rename, query) : [],
     [searching, nodeConcepts, rename, query])
-  const matchedIds = useMemo(() => new Set(results.map(r => r.id)), [results])
+  const results = useMemo(() => allResults.slice(0, SEARCH_RESULTS), [allResults])
+  const matchedIds = useMemo(() => new Set(allResults.map(r => r.id)), [allResults])
 
   // The highlighted node set is a pure function of (nodeConcepts, selected, rename). Push it up whenever
   // its VALUE changes — keyed on a stable signature so a live SSE tick that only re-refs node_concepts
@@ -58,8 +61,9 @@ export default function ConceptChipBar({ state, onHighlight }) {
   // While a query is live, the graph previews the SEARCH match instead of the pinned selection (null on
   // no match -> no dimming, never a stuck empty Set); clearing the query reverts to the committed set.
   const preview = useMemo(
-    () => searching ? searchHighlightIds(nodeConcepts, rename, query) : null,
-    [searching, nodeConcepts, rename, query])
+    () => (searching && allResults.length)
+      ? matchingNodeIds(nodeConcepts, allResults.map(result => result.id), rename) : null,
+    [searching, allResults, nodeConcepts, rename])
   const highlight = searching ? preview : committed
   const sig = highlight ? 's:' + [...highlight].sort((a, b) => a - b).join(',') : 'none'
   useEffect(() => { onHighlight && onHighlight(highlight) }, [sig])       // onHighlight is a stable setter

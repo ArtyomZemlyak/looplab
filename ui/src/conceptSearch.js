@@ -6,7 +6,6 @@
 // becomes a map key goes through the prototype-safe helpers in conceptId.js (see its header). The graph
 // highlight reuses matchingNodeIds from conceptChips.js so search and chip selection stay one mechanism.
 import { canonicalId } from './conceptId.js'
-import { matchingNodeIds } from './conceptChips.js'
 
 const DEFAULT_LIMIT = 50   // cap the results list so a 1-char query cannot balloon the dropdown/DOM
 
@@ -88,15 +87,10 @@ export function searchConcepts(nodeConcepts = {}, rename = {}, query = '', limit
   return scored.slice(0, cap).map(({ id, label, count }) => ({ id, label, count }))
 }
 
-// The graph highlight set for a live query preview: union of every node touching a matched concept
-// subtree. No matches (or empty query) -> null, meaning "no dimming" -- the same contract the chip
-// selection uses, so the search preview and a pinned selection drive Dag identically. Reuses
-// matchingNodeIds (subtree/prefix OR match) by handing it the matched ids as the selection.
-export function searchHighlightIds(nodeConcepts = {}, rename = {}, query = '') {
-  const results = searchConcepts(nodeConcepts, rename, query)
-  if (!results.length) return null
-  return matchingNodeIds(nodeConcepts, results.map(result => result.id), rename)
-}
+// The graph highlight for a live preview is the union of nodes touching any matched concept subtree.
+// The chip bar builds it directly from the ranked searchConcepts result via matchingNodeIds (the same
+// subtree/prefix OR match a pinned chip selection uses), so search preview and selection drive Dag
+// identically without this model rebuilding the concept universe a second time per keystroke.
 
 // Does a frame ExperimentRef match the query? Matches the fields the concept frame actually carries per
 // experiment -- the node id (with or without a leading `#`) and the lifecycle status -- not the live

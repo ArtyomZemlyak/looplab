@@ -2,7 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  normalizeQuery, highlightSegments, conceptUniverse, searchConcepts, searchHighlightIds,
+  normalizeQuery, highlightSegments, conceptUniverse, searchConcepts,
   experimentRefMatches, filterConceptTree,
 } from '../src/conceptSearch.js'
 
@@ -78,28 +78,12 @@ test('searchConcepts empty query -> [] and respects the limit', () => {
   assert.equal(searchConcepts(NC, {}, 'loss', 1).length, 1)
 })
 
-test('searchHighlightIds unions matching subtrees; no match -> null', () => {
-  const hi = searchHighlightIds(NC, {}, 'contrastive')
-  assert.ok(hi instanceof Set)
-  assert.deepEqual([...hi].sort((a, b) => a - b), [0, 1])       // dcl + mnr nodes
-  // a coarse query highlights the whole subtree
-  assert.deepEqual([...searchHighlightIds(NC, {}, 'loss')].sort((a, b) => a - b), [0, 1, 2, 4])
-  // no match -> null (no dimming), never an empty Set that would strand the graph fully dimmed
-  assert.equal(searchHighlightIds(NC, {}, 'zzz'), null)
-  assert.equal(searchHighlightIds(NC, {}, ''), null)
-})
-
-test('searchHighlightIds retargets through a live rename', () => {
-  const hi = searchHighlightIds(NC, { 'architecture/moe': 'model/moe' }, 'model')
-  assert.deepEqual([...hi], [0])
-})
-
 test('prototype-named concept ids stay data, never crash', () => {
   const evil = { 0: ['__proto__/x', 'constructor/y'], 1: ['loss'] }
   // must not throw and must not leak Object.prototype keys
   const universe = conceptUniverse(evil, {})
   assert.ok(universe.has('loss'))
-  assert.equal(searchHighlightIds(evil, {}, 'loss') instanceof Set, true)
+  assert.deepEqual(searchConcepts(evil, {}, 'loss').map(r => r.id), ['loss'])
 })
 
 // ── View 1 tree filter ──────────────────────────────────────────────────────
