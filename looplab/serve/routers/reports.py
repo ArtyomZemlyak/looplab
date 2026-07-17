@@ -806,6 +806,13 @@ def build_router(srv) -> APIRouter:
     def _scope_context_digest(scope_type: str, scope_id: str, run_ids: list[str]) -> str:
         project_data = projects.load()
         labels = project_data.get("labels", {}) if isinstance(project_data, dict) else {}
+        # REVIEW(2026-07-16): `projects_revision` embeds the ENTIRE workspace-global projects store in
+        # the digest, so ANY unrelated change — renaming a project this scope never touches, assigning
+        # a run in a different folder, creating an empty project — flips the digest for EVERY scope
+        # and marks every stored report stale. Combined with the quarantine gate below, one unrelated
+        # rename hides all paid reports workspace-wide until each is regenerated. Digest only the
+        # slice that can change THIS scope's meaning: the scope's own ancestry chain (names/parents),
+        # this scope's membership assignments, and the run_labels already included — not the store.
         context = {
             "scope": _scope_identity(scope_type, scope_id),
             "label": _scope_label(scope_type, scope_id),
@@ -1101,6 +1108,11 @@ def build_router(srv) -> APIRouter:
         if probe_key is None:
             return True, event_bytes
         try:
+            # REVIEW(2026-07-16): the SUCCESS path of this capture discards its result — no
+            # _remember_revision, no assignment — so neither closure cache is primed and the next
+            # request repeats the full events.jsonl read+hash+parse for the same unchanged run. Only
+            # the failure path below caches (via _remember_omission). Prime the revision cache with
+            # the successful capture here, matching the fast path this probe exists to feed.
             capture_scope_source(
                 srv.root, run_id, event_budget_bytes=max(1, remaining_bytes))
         except ScopeSourceError:
@@ -1140,6 +1152,13 @@ def build_router(srv) -> APIRouter:
         omitted_runs = rec.get("omitted_runs")
         omitted_source_probes = rec.get("omitted_source_probes")
         expected_context = rec.get("context_digest")
+        # REVIEW(2026-07-16): records persisted BEFORE 0f63c5f have no context_digest at all, so this
+        # gate marks every pre-existing report stale even when all inputs are byte-identical — a
+        # one-way legacy invalidation with no receipt telling the operator WHY (the UI just shows the
+        # stale quarantine + Regenerate, i.e. re-spend). Additive-reader rules elsewhere in this repo
+        # default missing fields, they don't retro-invalidate; if the intent IS to retire pre-v3
+        # records, stamp a distinct reason (e.g. legacy_authority-style) so the UI can say "report
+        # format upgraded — regenerate once" instead of implying the scope changed.
         if (not isinstance(expected_context, str)
                 or _RUN_GENERATION_RE.fullmatch(expected_context) is None
                 or _scope_context_digest(scope_type, scope_id, cur_ids) != expected_context):
@@ -1393,6 +1412,14 @@ def build_router(srv) -> APIRouter:
         # CODEX AGENT: synthesis is paid. Coalesce the exact action while it is running or its result
         # is unobserved; consume the terminal process receipt after inline/poll delivery so a later
         # explicit Regenerate remains a genuinely new action over the same source snapshot.
+        # REVIEW(2026-07-16): consume_on_poll retires the receipt on the FIRST poll that observes the
+        # terminal state — but reserve() rejoins CONCURRENT posts onto the same job_id, so several
+        # observers share ONE receipt: whichever tab/client polls first consumes it, and every other
+        # observer's next poll gets {"status":"unknown"} for a job that finished (they cannot tell
+        # success from failure and their UI falls into the ambiguous-outcome quarantine — see
+        # ScopeReport.jsx generationFlights, where exactly this manifests as a locked Generate). A
+        # shared receipt needs per-observer delivery (consume when ALL joined observers have polled,
+        # or a short retention window), not first-poll destruction.
         reservation = srv.jobs.reserve(generation_identity, consume_on_poll=True)
         if reservation.get("status") != "running":
             return reservation

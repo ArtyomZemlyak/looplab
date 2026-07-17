@@ -19,6 +19,17 @@ const generatedAt = value => Number.isInteger(value?.generated_at) && value.gene
 const reportAdvanced = (value, baseline) => value?.exists === true && generatedAt(value) !== null
   && (baseline === null || generatedAt(value) !== baseline)
 
+// REVIEW(2026-07-16): an `uncertain` flight has NO exit besides a later GET observing generated_at
+// ADVANCE (reportAdvanced) — but the ambiguous outcome this quarantine models is precisely the case
+// where the job may have FAILED and never persists a new report: generated_at never advances, the
+// flight stays in this module-level Map for the rest of the SPA session, generate() early-returns on
+// existing?.uncertain, and both Generate/Regenerate render disabled — the scope's paid feature is
+// locked with no recovery short of a full page reload. Made MORE likely by the backend's
+// consume_on_poll receipt (see reports.py REVIEW note): a concurrent observer's poll retires the
+// shared receipt, this client sees status:"unknown", marks the flight uncertain, and locks. The
+// quarantine needs a resolution path for the not-advanced case too: an explicit "check status /
+// unlock retry" action, a bounded TTL, or a server status probe that distinguishes failed-and-gone
+// from still-running.
 function beginGeneration(key, baseline, start) {
   const existing = generationFlights.get(key)
   if (existing) return existing
