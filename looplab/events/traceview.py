@@ -365,31 +365,31 @@ def _normalize_span(value) -> Optional[dict]:
                 budget.omit("omitted_attributes")
             else:
                 attributes[key] = normalized
-    # REVIEW(2026-07-16): _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
+    # CODEX AGENT: _ATTR_TEXT_FIELDS / _ATTR_BOOL_FIELDS / _ATTR_INT_FIELDS / _ATTR_FLOAT_FIELDS
     # are SETS, so these four loops insert into `attributes` in string-hash order — randomized per
     # process via PYTHONHASHSEED. The serialized projection (and any persisted index record built from
     # it) is therefore not byte-stable across two server runs, the same raw-set-iteration defect this
     # change series fixed in project_hierarchy/project_lens/concept_graph. Iterate sorted(...) (or
     # make the field groups tuples) so identical spans serialize identically everywhere.
-    for key in _ATTR_TEXT_FIELDS:
+    for key in sorted(_ATTR_TEXT_FIELDS):
         if key in raw_attributes:
             attributes[key] = budget.text(
                 raw_attributes.get(key), cap=512 if key in {"reason", "error_reason", "materialized"} else 160,
                 single_line=key not in {"reason", "error_reason"})
-    for key in _ATTR_BOOL_FIELDS:
+    for key in sorted(_ATTR_BOOL_FIELDS):
         if key in raw_attributes:
             if isinstance(raw_attributes.get(key), bool):
                 attributes[key] = raw_attributes[key]
             else:
                 budget.omit("omitted_attributes")
-    for key in _ATTR_INT_FIELDS:
+    for key in sorted(_ATTR_INT_FIELDS):
         if key in raw_attributes:
             item = raw_attributes.get(key)
             if isinstance(item, int) and not isinstance(item, bool) and -(1 << 63) <= item <= (1 << 63) - 1:
                 attributes[key] = item
             else:
                 budget.omit("omitted_attributes")
-    for key in _ATTR_FLOAT_FIELDS:
+    for key in sorted(_ATTR_FLOAT_FIELDS):
         if key in raw_attributes:
             attributes[key] = _finite_number(raw_attributes.get(key))
     if "parent_id" in raw_attributes:

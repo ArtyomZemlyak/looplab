@@ -2,6 +2,10 @@
 from __future__ import annotations
 
 import json
+import os
+from pathlib import Path
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -70,6 +74,44 @@ def test_span_projection_allowlists_redacts_and_reports_every_bound():
     assert meta["omitted_events"] == 24
     assert meta["omitted_fields"] >= 1
     assert meta["omitted_chars"] > 0
+
+
+def test_span_projection_is_byte_stable_across_python_hash_seeds():
+    root = Path(__file__).resolve().parents[1]
+    program = """
+import json
+from looplab.events.traceview import _normalize_span
+
+span = {
+    "name": "tool", "kind": "tool", "trace_id": "trace", "span_id": "span",
+    "parent_id": None, "run_id": "demo", "status": "OK", "start": 1.0,
+    "attributes": {
+        "node_id": 7, "phase": "implement", "model": "m", "op": "chat",
+        "tool": "shell", "level": "info", "stage": "evaluate", "reason": "r",
+        "package": "pkg", "trigger": "manual", "operator": "improve",
+        "error_reason": "none", "materialized": "yes", "handoff_from": "a",
+        "handoff_to": "b", "input_partial": False, "timed_out": False,
+        "reused": True, "sandboxed": True, "proxy_skipped": False, "ok": True,
+        "drift": False, "feasible": True, "input_carry": 2, "exit_code": 0,
+        "seed": 3, "blocks": 4, "attempt": 5, "repair_attempts": 1,
+        "violations": 0, "proxy_score": 0.5, "eval_seconds": 1.25,
+        "metric": 0.75, "robust_metric": 0.7,
+    },
+}
+print(json.dumps(_normalize_span(span), separators=(",", ":"), ensure_ascii=True))
+"""
+    outputs = []
+    for seed in ("1", "2", "3", "4"):
+        env = os.environ.copy()
+        env["PYTHONHASHSEED"] = seed
+        env["PYTHONPATH"] = str(root) + os.pathsep + env.get("PYTHONPATH", "")
+        outputs.append(subprocess.check_output(
+            [sys.executable, "-c", program], cwd=root, env=env, text=True,
+        ))
+
+    # CODEX AGENT: A projection feeds caches and browser diffs; identical raw spans must allocate
+    # their bounded text budget and serialize attributes identically in every interpreter process.
+    assert len(set(outputs)) == 1
 
 
 def test_secret_shaped_identity_is_quarantined_instead_of_rewritten():
