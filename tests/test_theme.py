@@ -71,8 +71,9 @@ def _node_concepts(nid, concepts, theme=None, operator="improve"):
 def test_node_theme_falls_back_to_concept_axis_after_phase0():
     # Regression: Phase 0 (bd816a5) moved authoring from `idea.theme` to `idea.concepts`, but the theme
     # READERS were not migrated — every new-run node was untitled so theme_rollup/coverage zeroed out.
-    # node_theme must fall back to the first concept's coarse AXIS, and legacy `theme` still wins.
-    from looplab.events.digest import node_theme, theme_rollup
+    # node_theme (the single legacy DISPLAY label) must fall back to the first concept's coarse AXIS,
+    # and an explicit legacy `theme` still wins for THAT label.
+    from looplab.events.digest import node_theme
     from looplab.search.coverage import _node_theme
 
     st = fold([_run("max"),
@@ -81,12 +82,45 @@ def test_node_theme_falls_back_to_concept_axis_after_phase0():
                _node_concepts(2, ["reg/r-drop"], theme="legacy-theme"), _eval(2, 0.5),
                _node_concepts(3, [])])                    # neither theme nor concepts -> skipped
     assert node_theme(st.nodes[0]) == "loss"              # first concept's axis
-    assert node_theme(st.nodes[2]) == "legacy-theme"      # explicit theme still takes precedence
+    assert node_theme(st.nodes[2]) == "legacy-theme"      # explicit theme still takes precedence (display glue)
     assert node_theme(st.nodes[3]) is None
-    roll = theme_rollup(st)
-    assert roll["loss"]["count"] == 2                     # nodes 0 and 1 both bucket to axis "loss"
-    assert roll["loss"]["best_metric"] == 0.9             # max direction
-    assert set(roll) == {"loss", "legacy-theme"}
-    # coverage's reader delegates to the SAME derivation — one vocabulary across surfaces.
+    # coverage's legacy reader delegates to the SAME single-label derivation.
     for n in st.nodes.values():
         assert _node_theme(n) == node_theme(n)
+
+
+def test_theme_rollup_is_concept_axis_multi_membership_phase6a():
+    # PART V Phase 6a: theme_rollup / coverage now aggregate over the folded CONCEPT AXES, MULTI-membership
+    # (a node counted under every axis it occupies), reading `state.node_concepts` (post-rename) not the
+    # frozen `idea.theme`. So concepts DRIVE breadth — a node with both a legacy theme and concepts buckets
+    # by its concept axes, and a node on two axes is counted under both.
+    from looplab.events.digest import node_axes, theme_rollup
+
+    st = fold([_run("max"),
+               _node_concepts(0, ["loss/contrastive", "arch/moe"]), _eval(0, 0.9),
+               _node_concepts(1, ["loss/triplet"]), _eval(1, 0.7),
+               _node_concepts(2, ["reg/r-drop"], theme="legacy-theme"), _eval(2, 0.5),
+               _node_concepts(3, [])])                    # no concepts, no theme -> on no axis
+    assert node_axes(st, st.nodes[0]) == {"loss", "arch"}   # multi-membership
+    assert node_axes(st, st.nodes[2]) == {"reg"}            # concepts WIN over the legacy theme in the rollup
+    assert node_axes(st, st.nodes[3]) == set()
+    roll = theme_rollup(st)
+    assert set(roll) == {"loss", "arch", "reg"}             # legacy-theme is NOT an axis; node 0 in both loss & arch
+    assert roll["loss"]["count"] == 2                       # nodes 0 and 1 both touch axis "loss"
+    assert roll["loss"]["best_metric"] == 0.9              # max direction (node 0)
+    assert roll["arch"]["count"] == 1 and roll["arch"]["best_metric"] == 0.9
+    assert roll["reg"]["count"] == 1
+
+
+def test_theme_rollup_legacy_theme_when_no_concepts_phase6a():
+    # A pre-concept run (idea.theme only, no concepts) still groups: node_axes falls back to the single
+    # legacy theme, so old runs keep their breadth signal.
+    from looplab.events.digest import node_axes, theme_rollup
+    st = fold([_run("min"),
+               _node(0, "loss-fn"), _eval(0, 1.0),
+               _node(1, "loss-fn"), _eval(1, 0.3),
+               _node(2, "architecture"), _eval(2, 0.8)])
+    assert node_axes(st, st.nodes[0]) == {"loss-fn"}
+    roll = theme_rollup(st)
+    assert set(roll) == {"loss-fn", "architecture"}
+    assert roll["loss-fn"] == {"count": 2, "best_metric": 0.3}

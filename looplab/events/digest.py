@@ -103,23 +103,50 @@ def node_theme(node) -> Optional[str]:
     return None
 
 
+def node_axes(state, node) -> set:
+    """The DISTINCT coarse concept AXES a node occupies, read from the FOLDED, post-rename/re-tag
+    `state.node_concepts` (NOT the frozen `idea.concepts`): a node tagged
+    `['loss/contrastive', 'data/aug']` occupies `{'loss', 'data'}`. Legacy nodes with no folded
+    concepts fall back to `node_theme`'s single axis (so pre-concept runs still group). Empty when the
+    node carries neither.
+
+    PART V Phase 6a: this MULTI-membership set is the concept-native breadth — `theme_rollup` and
+    `coverage_signal` now count a node under EVERY axis it touches, retiring the first-concept-only
+    distortion `node_theme` alone had (a run diverse on second axes used to read as
+    dominant_theme_frac~1.0 / theme_entropy~0). Reading the FOLDED map means cadence re-tags and
+    consolidation renames reach the breadth signals, so /concepts and the Strategist agree.
+    Deterministic (set membership, order-free)."""
+    axes: set = set()
+    folded = (getattr(state, "node_concepts", None) or {}).get(getattr(node, "id", None)) or []
+    for concept in folded:
+        axis = str(concept).strip().split("/", 1)[0].strip()
+        if axis:
+            axes.add(axis)
+    if axes:
+        return axes
+    t = node_theme(node)                        # legacy display glue: pre-concept runs still group by idea.theme
+    return {t} if t else set()
+
+
 def theme_rollup(state: RunState) -> dict:
-    """Per-theme rollup: {theme: {count, best_metric}}. A node's theme is `node_theme` (legacy
-    `idea.theme`, else its first concept's axis — see that helper); nodes with neither are skipped.
-    `best_metric` is the better value per the run's direction. Audit-only — never read by replay.fold."""
+    """Per-AXIS rollup: {axis: {count, best_metric}}. A node contributes to EVERY concept axis it
+    occupies (`node_axes` over the folded `state.node_concepts`; legacy runs fall back to the single
+    `node_theme` axis); nodes on no axis are skipped. `best_metric` is the better value per the run's
+    direction — a node's metric counts toward every axis it touches. Multi-membership (Phase 6a): a
+    node tagged two axes is counted under both, so `count`s can sum above the node total. Audit-only —
+    never read by replay.fold. The dict KEYS stay the historical `theme` wire-vocabulary the Strategist
+    / UI / /runs API string-match; only the derivation moved from legacy themes to concept axes."""
     better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
     out: dict[str, dict] = {}
     for n in state.nodes.values():
-        if n.tombstoned:                        # §6.3: a logically-deleted node must not skew theme counts/bests
-            continue
-        theme = node_theme(n)
-        if not theme:
+        if n.tombstoned:                        # §6.3: a logically-deleted node must not skew axis counts/bests
             continue
         m = n.robust_metric
-        e = out.setdefault(theme, {"count": 0, "best_metric": None})
-        e["count"] += 1
-        if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
-            e["best_metric"] = m
+        for axis in node_axes(state, n):
+            e = out.setdefault(axis, {"count": 0, "best_metric": None})
+            e["count"] += 1
+            if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):
+                e["best_metric"] = m
     return out
 
 

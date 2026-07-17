@@ -55,22 +55,26 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     additive/reader-defaulted; an empty run yields zeros. `recent` bounds the recency window for the
     trailing "narrowing NOW?" signal.
 
-    The theme VOCABULARY (which themes / their counts) is the CANONICAL one
-    (`events.digest.theme_rollup`), so the themes the Strategist reads here match the digest's theme
-    map and the /runs API exactly. The dominant-* FRACTIONS are over ALL idea-carrying nodes (not
-    just themed ones): an untitled idea is real effort NOT on a named theme, so it DILUTES the
-    fraction — a mostly-untitled run correctly does not read as concentrated, and the fraction shares
-    the same denominator as `_rule_novelty_stance`'s node-count trust guard.
+    PART V Phase 6a: the breadth VOCABULARY is now the folded CONCEPT AXES (`events.digest.theme_rollup`
+    → `node_axes`, MULTI-membership: a node is counted under every axis it occupies, post-rename), so
+    the breadth the Strategist reads matches the /concepts map and the /runs API exactly and no longer
+    depends on the Researcher's first-concept AUTHORING ORDER. The dict keys keep the historical
+    `theme_*` names (a wire contract the Strategist prompt / proposal_cues / UI string-match) — only the
+    derivation moved. The dominant-* FRACTIONS are over ALL idea-carrying nodes (not just tagged ones):
+    an untagged idea is real effort on NO axis, so it DILUTES the fraction — a mostly-untagged run
+    correctly does not read as concentrated, and the fraction shares the same denominator as
+    `_rule_novelty_stance`'s node-count trust guard. Because axes multi-count, `themes` and the counts
+    can exceed the node total; the FRACTIONS stay in [0,1] (a single axis appears at most once per node).
 
     Keys:
       nodes                - ideas proposed so far (nodes that carry an idea)
-      themes               - distinct themes (canonical theme_rollup vocabulary)
+      themes               - distinct concept AXES occupied (canonical theme_rollup vocabulary)
       niches               - distinct parameter-niches among evaluated nodes (DiversityArchive)
       operators            - distinct operator kinds used
-      theme_entropy        - in [0,1], 1 = spread across themes, 0 = single theme (broad<->narrow)
-      dominant_theme_frac  - in [0,1], share of ALL idea-nodes on the most-explored theme (narrowing)
+      theme_entropy        - in [0,1], 1 = spread across axes, 0 = single axis (broad<->narrow)
+      dominant_theme_frac  - in [0,1], share of ALL idea-nodes touching the most-explored axis (narrowing)
       recent_dominant_frac - in [0,1], same over the last `recent` idea-nodes (narrowing NOW?)
-      top_themes           - [[theme, count], ...] top few, so the LLM can name the concentration
+      top_themes           - [[axis, count], ...] top few, so the LLM can name the concentration
     """
     nodes = [n for n in state.nodes.values() if getattr(n, "idea", None) is not None]
     if not nodes:
@@ -94,7 +98,12 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     # nodes-first (not themed-first) keeps this a genuine "narrowing NOW?" measure: a window of fresh
     # UNTITLED drafts reads as un-concentrated (0.0), not as the dominant OLD theme reaching forward.
     recent_nodes = sorted(nodes, key=lambda n: n.id)[-max(1, recent):]
-    recent_dom = Counter(t for t in (_node_theme(n) for n in recent_nodes) if t).most_common(1)
+    from looplab.events.digest import node_axes         # local: Phase 6a multi-membership over folded axes
+    recent_axes: Counter = Counter()
+    for n in recent_nodes:
+        for a in node_axes(state, n):                   # count a recent node under EVERY axis it touches
+            recent_axes[a] += 1
+    recent_dom = recent_axes.most_common(1)
     recent_dom_count = recent_dom[0][1] if recent_dom else 0
     top = sorted(rollup.items(), key=lambda kv: (-kv[1]["count"], kv[0]))[:3]
     return {
