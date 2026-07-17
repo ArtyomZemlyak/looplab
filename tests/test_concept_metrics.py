@@ -35,6 +35,24 @@ def test_bare_single_segment_concepts_produce_metrics_rows(tmp_path):
     assert res["rows"]["agents"]["touched"] == 2 and res["rows"]["agents"]["best"] == 0.9
 
 
+def test_axis_row_rolls_up_descendants_union(tmp_path):
+    # An AXIS/parent row (e.g. `loss`) must aggregate every descendant's experiment so the concept tree
+    # never shows a blank metric where data exists below it. UNION per node: a node tagged loss/dcl AND
+    # loss/triplet counts ONCE for `loss`; the parent's best is the best over all descendants.
+    st, res = _run(tmp_path, [
+        (["loss/dcl", "loss/triplet"], 0.9),    # one node, two loss leaves -> loss touched once
+        (["loss/dcl"], 0.5),
+        (["hyperparameter/temperature"], 0.7),
+    ])
+    rows = res["rows"]
+    assert rows["loss"]["touched"] == 2                       # union: node0 counts once for the axis
+    assert rows["loss/dcl"]["touched"] == 2                   # leaf unchanged
+    assert rows["loss"]["best"] == 0.9                        # best over descendants
+    assert rows["hyperparameter"]["touched"] == 1            # single-child axis still gets a row
+    assert res["baseline"] == 0.7                             # median(0.9,0.5,0.7)
+    assert rows["loss"]["delta_best"] == 0.2                  # 0.9 - 0.7, signed for direction=max
+
+
 def test_median_helper():
     assert _median([]) is None
     assert _median([3.0, 1.0, 2.0]) == 2.0

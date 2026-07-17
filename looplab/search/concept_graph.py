@@ -845,7 +845,18 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
         ok = m is not None and getattr(node, "feasible", True) is not False
         if ok:
             all_metrics.append(float(m))
+        # Expand each tagged LEAF to its id-path ancestor chain so an AXIS/parent row (e.g. `loss`) rolls
+        # up every descendant's experiment — the tree shows these rows, and blank axis metrics read as
+        # "no data" when there IS data below. UNION per node (a set): a node tagged loss/contrastive AND
+        # loss/triplet counts ONCE for `loss`, never double. Leaf rows are unchanged (a leaf's own key is
+        # in its own expansion). The rollup follows the same id-path hierarchy the is_a tree draws.
+        expanded: set[str] = set()
         for cid in tags.get(node.id, frozenset()):
+            c = str(cid)
+            while c:
+                expanded.add(c)
+                c = c.rsplit("/", 1)[0] if "/" in c else ""
+        for cid in expanded:
             touched[cid] = touched.get(cid, 0) + 1
             first.setdefault(cid, idx)
             if ok:
