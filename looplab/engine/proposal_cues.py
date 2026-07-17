@@ -100,13 +100,14 @@ class ProposalCuesMixin:
     def _cross_run_pointer_text(self) -> str:
         """PART V §22 (advisory): a LEAN, static one-line pointer telling the Researcher it holds the
         cross_run_* READ tools and should consult them before proposing. Closes the default-config gap
-        where the tools are wired (cross_run_read_tools ON) but the prompt never mentions them, so the
-        model forgets they exist. Deliberately STATIC — no store I/O on the per-node proposal hot path
-        (that is what the tools themselves are for; the rich pushed pack is `_cross_run_advisory_text`).
-        Suppressed when the full context pack is on (it already primes cross-run thinking, so the pointer
-        would be redundant) and when there is no memory_dir to query. Never touches node selection."""
-        if (not getattr(self, "_cross_run_read_tools", False) or not getattr(self, "memory_dir", "")
-                or getattr(self, "_cross_run_advisory", False)):
+        where the tools are wired (cross_run_read_tools ON) but the prompt never NAMES them, so the model
+        forgets they exist. Deliberately STATIC — no store I/O on the per-node proposal hot path (that is
+        what the tools themselves are for). It fires ALONGSIDE the rich pushed pack (`_cross_run_advisory_text`)
+        rather than deferring to it: the pack injects prior-run CONTENT but never names the pull-tools, so
+        the two are orthogonal (pushed context vs on-demand drill-down) and the pointer must fire in the
+        product default (advisory ON) too, or the tools go permanently unnamed. Gated only on the tools
+        being wired + a memory_dir to query. Never touches node selection."""
+        if not getattr(self, "_cross_run_read_tools", False) or not getattr(self, "memory_dir", ""):
             return ""
         return ("\nCross-run memory may hold prior attempts and evidence for related runs. Before "
                 "proposing, you MAY call cross_run_prior_attempts / cross_run_claims / cross_run_atlas "

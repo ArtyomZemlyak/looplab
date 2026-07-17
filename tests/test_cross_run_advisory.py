@@ -201,17 +201,21 @@ class _PointerHost(ProposalCuesMixin):
         self.memory_dir = str(memory_dir)
 
 
-def test_pointer_present_when_read_tools_on_and_advisory_off():
-    # The default product config: tools wired, rich pack off -> the lean pointer names the tools so the
-    # model actually uses them. Advisory only (mentions the tools, never constrains selection).
+def test_pointer_present_when_read_tools_on_regardless_of_advisory():
+    # The pointer NAMES the pull-tools; it fires whenever the tools are wired + a memory_dir exists.
+    # Advisory only (mentions the tools, never constrains selection).
     txt = _PointerHost(read_tools=True, advisory=False)._cross_run_pointer_text()
     assert "cross_run_prior_attempts" in txt and "cross_run_atlas" in txt
     assert "advisory only" in txt.lower()
 
 
-def test_pointer_suppressed_when_advisory_on():
-    # The rich context pack already primes cross-run thinking, so the lean pointer would be redundant.
-    assert _PointerHost(read_tools=True, advisory=True)._cross_run_pointer_text() == ""
+def test_pointer_fires_alongside_advisory_pack():
+    # The pushed advisory pack injects prior-run CONTENT but never names the cross_run_* pull-tools, so
+    # the two are orthogonal. In the product default (advisory ON) the pointer MUST still fire — else the
+    # tools go permanently unnamed and the model never drills into them on demand.
+    assert _PointerHost(read_tools=True, advisory=True)._cross_run_pointer_text() != ""
+    assert (_PointerHost(read_tools=True, advisory=True)._cross_run_pointer_text()
+            == _PointerHost(read_tools=True, advisory=False)._cross_run_pointer_text())
 
 
 def test_pointer_empty_without_read_tools_or_memory_dir():

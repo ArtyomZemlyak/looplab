@@ -42,6 +42,7 @@ from looplab.serve.concept_frame import (
     lens_request as _concept_lens_request,
     normalized_custom_lens_name as _normalized_custom_lens_name,
     project_frame as _project_concept_frame,
+    TRUNCATION_CAP_REASONS as _TRUNCATION_CAP_REASONS,
 )
 from looplab.serve.engine_proc import _engine_liveness, reconcile_pending_resume
 from looplab.serve.log_pages import (
@@ -432,8 +433,11 @@ def build_router(srv) -> APIRouter:
         # receipts; this gate now matches it: refuse ONLY on corruption-class reasons (torn/invalid
         # source), and mint against the bounded (partial) frame when the only reasons are truncation
         # caps — the SAME bounded frame the GET path serves and the UI already renders. Blocking reasons
-        # ride back on the refusal so the UI can say WHY it is permanent instead of "rephrase".
-        blocking = [r for r in base_frame["completeness"]["reasons"] if not r.endswith("_cap")]
+        # ride back on the refusal so the UI can say WHY it is permanent instead of "rephrase". The cap
+        # class is an EXPLICIT allow-list (TRUNCATION_CAP_REASONS), not an `endswith("_cap")` test, so a
+        # corruption-adjacent reason that merely ends in "_cap" (rename_hop_cap) still blocks.
+        blocking = [r for r in base_frame["completeness"]["reasons"]
+                    if r not in _TRUNCATION_CAP_REASONS]
         if blocking:
             return {**base_frame, "ok": False, "reason": "concept_frame_partial",
                     "blocking_reasons": blocking}

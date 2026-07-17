@@ -553,6 +553,21 @@ def test_derive_lens_mints_against_cap_truncated_partial_frame(tmp_path, monkeyp
     assert "membership_cap" in payload["completeness"]["reasons"]
 
 
+def test_truncation_cap_reasons_exclude_corruption_adjacent_rename_hop():
+    # REVIEW: the POST lens-mint gate classifies "safe to mint against the partial frame" via the EXPLICIT
+    # TRUNCATION_CAP_REASONS set, NOT an endswith("_cap") heuristic. rename_hop_cap ends in "_cap" but is a
+    # corruption-adjacent UNRESOLVED-IDENTITY signal (rename chain over MAX_RENAME_HOPS drops the concept),
+    # classified with its sibling rename_cycle as BLOCKING. This guard catches a suffix-heuristic regression.
+    from looplab.serve.concept_frame import TRUNCATION_CAP_REASONS
+
+    assert "rename_hop_cap" not in TRUNCATION_CAP_REASONS      # ends in _cap but must block
+    assert "rename_cycle" not in TRUNCATION_CAP_REASONS
+    assert "invalid_edge" not in TRUNCATION_CAP_REASONS and "event_log_corruption" not in TRUNCATION_CAP_REASONS
+    assert TRUNCATION_CAP_REASONS == frozenset({
+        "node_membership_cap", "concepts_per_node_cap", "membership_cap", "tree_node_cap",
+        "edge_cap", "edge_endpoint_cap", "experiment_ref_cap"})
+
+
 def test_derive_lens_refuses_corrupt_source(tmp_path):
     # A corruption-class reason (torn/invalid source) DOES block minting BEFORE the model call, and
     # rides back as a blocking_reasons receipt so the UI can explain WHY it is permanent instead of

@@ -168,6 +168,47 @@ def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
     assert "no experiment #99" in rt.execute("node_concepts", {"node_id": 99})
 
 
+def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
+    # REVIEW: the tools must NORMALIZE ids (case/space/slash) the SAME way project_hierarchy + the
+    # /concepts frame + the UI do, or the rendered tree's subtree counts collapse to [0] and a query on
+    # the DISPLAYED (normalized) id misses. An LLM authoring 'loss/InfoNCE'/'architecture/MoE' triggers it.
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: ["loss/InfoNCE", "architecture/MoE"], 1: ["loss/InfoNCE"]}
+    rt = RunTools(); rt.bind_state(st)
+    tree = rt.execute("read_concept_tree", {})
+    assert "loss  [2]" in tree and "infonce  [2]" in tree and "moe  [1]" in tree   # counts join, not [0]
+    # the agent queries the DISPLAYED (normalized) id and finds both nodes
+    assert "#0" in rt.execute("concept_nodes", {"concept": "loss/infonce"})
+    assert "#1" in rt.execute("concept_nodes", {"concept": "loss/infonce"})
+    # node_concepts returns normalized ids
+    assert "loss/infonce" in rt.execute("node_concepts", {"node_id": 0})
+
+
+def test_concept_read_tools_follow_full_rename_chain_and_never_raise(tmp_path):
+    # REVIEW: a MULTI-hop rename chain must resolve fully (server + UI both do bounded-chain + cycle
+    # resolution), and a non-dict consolidation/membership store must soft-fail, never raise out of execute.
+    st = RunState(goal="g", direction="max")
+    st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
+                        status=NodeStatus.evaluated)}
+    st.node_concepts = {0: ["loss/a"]}
+    st.concept_consolidation = {"loss/a": "loss/b", "loss/b": "loss/c"}   # 2-hop chain
+    rt = RunTools(); rt.bind_state(st)
+    assert "loss/c" in rt.execute("node_concepts", {"node_id": 0})        # resolved to the chain END
+    assert "#0" in rt.execute("concept_nodes", {"concept": "loss/c"})     # query the true canonical
+    assert "#0" in rt.execute("concept_nodes", {"concept": "loss/a"})     # or any earlier chain id
+
+    # non-dict stores: must return a string, not raise AttributeError (execute doesn't catch it)
+    st.concept_consolidation = ["loss/a"]                                 # a list, not a dict
+    assert isinstance(rt.execute("read_concept_tree", {}), str)
+    assert isinstance(rt.execute("node_concepts", {"node_id": 0}), str)
+    st.node_concepts = "loss/a"                                           # a str, not a dict
+    assert isinstance(rt.execute("read_concept_tree", {}), str)
+
+
 def test_run_tools_read_and_rank():
     rt = RunTools()
     rt.bind_state(_st())

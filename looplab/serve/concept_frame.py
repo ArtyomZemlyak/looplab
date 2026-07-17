@@ -31,6 +31,18 @@ MAX_LENS_PROMPT_BYTES = 2_048
 MAX_LENS_PROMPT_CHARS = 800
 MAX_LENS_BODY_BYTES = 4_096
 
+# The completeness reasons that are MONOTONE TRUNCATION CAPS: the source data was otherwise valid but
+# exceeded a size bound, so the bounded frame is a faithful (if partial) substrate. Callers that must
+# distinguish "safe to serve/mint against the partial frame" from "torn/malformed source" (the POST
+# lens-mint gate in serve/routers/runs.py) use THIS explicit set, NOT an `endswith("_cap")` heuristic:
+# `rename_hop_cap` ends in "_cap" but is a corruption-adjacent UNRESOLVED-IDENTITY signal (a rename chain
+# over MAX_RENAME_HOPS drops the concept), classified with its sibling `rename_cycle` as blocking. Every
+# reason NOT in this set is corruption-class (torn log / malformed agent-emitted data) and must block.
+TRUNCATION_CAP_REASONS = frozenset({
+    "node_membership_cap", "concepts_per_node_cap", "membership_cap", "tree_node_cap",
+    "edge_cap", "edge_endpoint_cap", "experiment_ref_cap",
+})
+
 
 def concept_id(raw) -> Optional[str]:
     """Return a projection-safe canonical concept id, or ``None``."""
