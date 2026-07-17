@@ -74,6 +74,7 @@ _LAYOUT = {
     "command_eval": "runtime",
     "command_observation": "serve",
     "comparison": "core",
+    "concept_frame": "serve",   # bounded versioned concept frames served to the UI
     "config": "core",
     "confirm": "trust",
     "confirm_phase": "engine",   # engine confirm mixin ("confirm" is taken by trust/confirm.py)
