@@ -78,6 +78,8 @@ _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
+_CONCEPT_LENS_RECOVERY_SCHEMA = 1
+_MAX_SAFE_INTEGER = 9_007_199_254_740_991
 _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
@@ -115,6 +117,33 @@ def _concept_lens_prompt_digest(idempotency_key: str, prompt: str) -> str:
     """
     return hmac.new(
         idempotency_key.encode("ascii"), prompt.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _concept_lens_resolution_key(raw: str) -> str:
+    """Validate a recovery resolution key without aliasing it to the paid request key.
+
+    Recovery is intentionally possible after the browser loses the original idempotency receipt.
+    This second key only deduplicates the operator's resolution decision; it can never reconstruct,
+    resume, or authorize the paid provider request itself.
+    """
+    if not isinstance(raw, str) or _CONCEPT_LENS_KEY_RE.fullmatch(raw) is None:
+        raise HTTPException(400, {
+            "code": "concept_lens_resolution_key_invalid",
+            "message": (
+                "Resolution-Idempotency-Key must be a cryptographically random visible-ASCII "
+                "value between 16 and 512 bytes."
+            ),
+        })
+    return raw
+
+
+def _concept_lens_resolution_identity(run_dir: Path, generation: str, request_id: str,
+                                      resolution_key: str) -> str:
+    """Domain-separated, non-reversible identity for one recovery resolution command."""
+    return hashlib.sha256(
+        ("concept_lens_resolution\0" + run_directory_identity(run_dir) + "\0" + generation
+         + "\0" + request_id + "\0" + resolution_key).encode("utf-8")
     ).hexdigest()
 
 
@@ -166,6 +195,60 @@ def _concept_lens_ledger(events, generation: str):
         terminals.pop(identity, None)
     unresolved = set(claims) - set(terminals)
     return claims, terminals, unresolved, conflicts
+
+
+def _concept_lens_recovery_ledger(events, generation: str):
+    """Strictly fold the current generation into a bounded lost-receipt recovery view.
+
+    The ordinary paid endpoint keeps its legacy-compatible fold above. Recovery has no original
+    browser receipt with which to disambiguate damaged data, so it deliberately fails closed on any
+    malformed, duplicate, out-of-order, or digest-mismatched current-generation paid-lens event.
+    Only bounded sequence metadata survives this fold; prompt digests remain server-private.
+    """
+    claims: dict[str, dict] = {}
+    terminals: dict[str, object] = {}
+    conflict = False
+    for event in events:
+        if event.type not in {
+                EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}:
+            continue
+        data = event.data if isinstance(event.data, dict) else {}
+        if data.get("generation") != generation:
+            continue
+        identity = data.get("lens_request_id")
+        digest = data.get("request_digest")
+        event_seq = event.seq
+        if (not isinstance(identity, str) or _SHA256_RE.fullmatch(identity) is None
+                or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+                or isinstance(event_seq, bool) or not isinstance(event_seq, int)
+                or not 0 <= event_seq <= _MAX_SAFE_INTEGER):
+            conflict = True
+            continue
+        if event.type == EV_CONCEPT_LENS_STARTED:
+            input_seq = data.get("input_seq")
+            if (isinstance(input_seq, bool) or not isinstance(input_seq, int)
+                    or not -1 <= input_seq < event_seq
+                    or input_seq > _MAX_SAFE_INTEGER
+                    or identity in claims or identity in terminals):
+                conflict = True
+                continue
+            claims[identity] = {
+                "request_digest": digest,
+                "started_seq": event_seq,
+                "input_seq": input_seq,
+            }
+            continue
+
+        claim = claims.get(identity)
+        if (claim is None or identity in terminals
+                or event_seq <= claim["started_seq"]
+                or claim["request_digest"] != digest):
+            conflict = True
+            continue
+        terminals[identity] = event
+
+    unresolved = set(claims) - set(terminals)
+    return claims, terminals, unresolved, conflict
 
 
 def _confirm_concept_lens_terminal(path: Path) -> bool:
@@ -549,11 +632,14 @@ def build_router(srv) -> APIRouter:
             }
         outcome = data.get("outcome")
         if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "abandoned":
+            abandon_reason = data.get("reason")
+            if abandon_reason not in {"operator_abandoned", "operator_recovered_abandon"}:
+                abandon_reason = "operator_abandoned"
             return {
                 **base_frame,
                 "ok": False,
                 "code": "concept_lens_abandoned",
-                "reason": "operator_abandoned",
+                "reason": abandon_reason,
                 "abandoned": True,
                 "resolved": True,
                 "provider_outcome": "unknown",
@@ -922,6 +1008,245 @@ def build_router(srv) -> APIRouter:
                 "The lens worker ended without a durable terminal receipt. Resume only with this "
                 "same request identity.")
         return result
+
+    @router.get("/api/runs/{run_id}/concepts/lens/recovery")
+    def recover_concept_lens_receipt(run_id: str, response: Response,
+                                    expected_generation: str = Query(...)):
+        """Discover current-generation paid work after the browser loses its private receipt.
+
+        This owner-plane projection intentionally contains no prompt, digest, paid idempotency key,
+        or resolution key. It is observational only: an orphan remains fenced until the operator
+        submits the separately idempotent recovery-abandon command below.
+        """
+        from looplab.search.concept_graph import default_lenses
+
+        if _RUN_GENERATION_RE.fullmatch(expected_generation) is None:
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from Concepts.",
+            })
+        rd = _run_dir(run_id)
+        lens_pack = default_lenses()
+        core = _materialize_concept_core(rd, run_id, None, lens_pack)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization"
+
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current_generation = srv.commands.run_generation(rd)
+            if not current_generation or current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation or None,
+                    "message": "The run changed before paid-lens recovery was inspected.",
+                    "remediation": "Reload Concepts and inspect only the current generation.",
+                })
+            if core[RUN_GENERATION_FIELD] != current_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation,
+                    "message": "The run changed while its recovery projection was prepared.",
+                })
+
+            store = EventStore(rd / "events.jsonl")
+            claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
+                store.read_all(), current_generation)
+            common = {
+                "schema": _CONCEPT_LENS_RECOVERY_SCHEMA,
+                "generation": current_generation,
+            }
+            if conflict or len(unresolved) > 1:
+                return {
+                    **common,
+                    "state": "conflict",
+                    "code": "concept_lens_recovery_conflict",
+                    "message": (
+                        "Paid-lens receipts are malformed or overlap; recovery is disabled until "
+                        "the durable ledger is repaired."
+                    ),
+                }
+            if unresolved:
+                request_id = next(iter(unresolved))
+                claim = claims[request_id]
+                projection = {
+                    **common,
+                    "request_id": request_id,
+                    "started_seq": claim["started_seq"],
+                    "input_seq": claim["input_seq"],
+                }
+                process_receipt = srv.jobs.rejoin(request_id)
+                if process_receipt is not None:
+                    job_id = process_receipt.get("job_id")
+                    process_job = srv.jobs.get(job_id) if isinstance(job_id, str) else None
+                    if (isinstance(job_id, str) and re.fullmatch(r"[0-9a-f]{16}", job_id)
+                            and process_job is not None
+                            and process_job.get("status") in {"running", "done"}):
+                        return {
+                            **projection,
+                            "state": "running",
+                            "job_id": job_id,
+                            "status": process_job["status"],
+                        }
+                return {**projection, "state": "orphaned"}
+            if terminals:
+                # Multiple completed requests are valid history. The latest claim is the only useful
+                # lost-receipt candidate; only overlapping unresolved work is ambiguous above.
+                request_id = max(
+                    terminals, key=lambda identity: claims[identity]["started_seq"])
+                claim = claims[request_id]
+                terminal = terminals[request_id]
+                if not _confirm_concept_lens_terminal(store.path):
+                    return {
+                        **common,
+                        "state": "conflict",
+                        "code": "concept_lens_recovery_terminal_unconfirmed",
+                        "message": "The visible terminal receipt could not be confirmed durable.",
+                    }
+                return {
+                    **common,
+                    "state": "terminal",
+                    "request_id": request_id,
+                    "started_seq": claim["started_seq"],
+                    "input_seq": claim["input_seq"],
+                    "terminal": _concept_lens_terminal_response(
+                        terminal, core, lens_pack, request_id),
+                }
+            return {**common, "state": "none"}
+
+    @router.post("/api/runs/{run_id}/concepts/lens/recovery/abandon")
+    async def abandon_recovered_concept_lens(run_id: str, request: Request,
+                                             response: Response):
+        """Resolve one exactly identified orphan without possessing or replaying its paid key."""
+        from looplab.search.concept_graph import default_lenses
+
+        rd = _run_dir(run_id)
+        body = await _concept_lens_json_body(request)
+        expected_generation = body.get("expected_generation")
+        if (not isinstance(expected_generation, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from recovery.",
+            })
+        request_id = body.get("request_id")
+        if not isinstance(request_id, str) or _SHA256_RE.fullmatch(request_id) is None:
+            raise HTTPException(400, {
+                "code": "concept_lens_request_id_invalid",
+                "message": "request_id must be the exact identifier from recovery.",
+            })
+        expected_started_seq = body.get("expected_started_seq")
+        if (isinstance(expected_started_seq, bool)
+                or not isinstance(expected_started_seq, int)
+                or not 0 <= expected_started_seq <= _MAX_SAFE_INTEGER):
+            raise HTTPException(400, {
+                "code": "concept_lens_started_seq_invalid",
+                "message": "expected_started_seq must be the exact safe integer from recovery.",
+            })
+        resolution_key = _concept_lens_resolution_key(
+            request.headers.get("Resolution-Idempotency-Key", ""))
+
+        lens_pack = default_lenses()
+        core = _materialize_concept_core(rd, run_id, None, lens_pack)
+        generation = core[RUN_GENERATION_FIELD]
+        base_frame = _project_concept_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Vary"] = (
+            "X-LoopLab-Token, Authorization, Resolution-Idempotency-Key")
+
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current_generation = srv.commands.run_generation(rd)
+            if not current_generation or current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation or None,
+                    "message": "The run changed before the recovered claim could be resolved.",
+                    "remediation": "Reload recovery; never resolve a claim from another generation.",
+                })
+            if generation != current_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation,
+                    "message": "The run changed while its recovery frame was prepared.",
+                })
+
+            store = EventStore(rd / "events.jsonl")
+            claims, terminals, unresolved, conflict = _concept_lens_recovery_ledger(
+                store.read_all(), current_generation)
+            if conflict or len(unresolved) > 1:
+                raise HTTPException(409, {
+                    "code": "concept_lens_recovery_conflict",
+                    "message": "The paid-lens ledger is not safe for automatic recovery.",
+                })
+            claim = claims.get(request_id)
+            if claim is None:
+                raise HTTPException(409, {
+                    "code": "concept_lens_recovery_claim_missing",
+                    "message": "No paid-lens claim matches this run generation and request_id.",
+                })
+            if claim["started_seq"] != expected_started_seq:
+                raise HTTPException(409, {
+                    "code": "concept_lens_started_seq_mismatch",
+                    "expected_started_seq": expected_started_seq,
+                    "current_started_seq": claim["started_seq"],
+                    "message": "The durable claim does not match the inspected recovery receipt.",
+                })
+
+            terminal = terminals.get(request_id)
+            if terminal is not None:
+                if not _confirm_concept_lens_terminal(store.path):
+                    return _concept_lens_uncertain(
+                        base_frame, current_generation, request_id,
+                        "The recovered terminal is visible but its durability is unconfirmed.")
+                return _concept_lens_terminal_response(
+                    terminal, core, lens_pack, request_id)
+            if unresolved != {request_id}:
+                raise HTTPException(409, {
+                    "code": "concept_lens_recovery_claim_missing",
+                    "message": "The inspected claim is no longer the single unresolved paid request.",
+                })
+
+            process_receipt = srv.jobs.rejoin(request_id)
+            process_job = (srv.jobs.get(process_receipt["job_id"])
+                           if process_receipt is not None else None)
+            if process_job is not None and process_job.get("status") == "running":
+                raise HTTPException(409, {
+                    "code": "concept_lens_still_running",
+                    "message": "The original paid lens worker is still running in this process.",
+                    "remediation": "Poll its job receipt instead of resolving it as an orphan.",
+                })
+
+            resolution_id = _concept_lens_resolution_identity(
+                rd, current_generation, request_id, resolution_key)
+            try:
+                terminal = store.append(
+                    EV_CONCEPT_LENS_COMPLETED,
+                    {
+                        "lens_request_id": request_id,
+                        "generation": current_generation,
+                        "request_digest": claim["request_digest"],
+                        "outcome": "abandoned",
+                        "reason": "operator_recovered_abandon",
+                        "resolution": "operator_recovery",
+                        "resolution_id": resolution_id,
+                    },
+                    require_lock=True,
+                    require_durable=True,
+                )
+            except Exception:  # noqa: BLE001 - a possibly visible resolution must not be replayed
+                terminal = None
+            if terminal is None or not _confirm_concept_lens_terminal(store.path):
+                return _concept_lens_uncertain(
+                    base_frame, current_generation, request_id,
+                    "The recovery resolution could not be confirmed durable; no provider retry "
+                    "was sent. Inspect recovery again before retrying this resolution.")
+            return _concept_lens_terminal_response(
+                terminal, core, lens_pack, request_id)
 
     @router.post("/api/runs/{run_id}/concepts/lens/abandon")
     async def abandon_concept_lens(run_id: str, request: Request, response: Response):

@@ -75,6 +75,50 @@ def _abandon(client, key, generation, request_id):
     )
 
 
+def _recover(client, generation, *, headers=None):
+    return client.get(
+        "/api/runs/demo/concepts/lens/recovery",
+        params={"expected_generation": generation},
+        headers=headers,
+    )
+
+
+def _recovery_abandon(client, generation, request_id, started_seq,
+                      resolution="recover-resolution-a", *, headers=None):
+    combined_headers = {
+        "Resolution-Idempotency-Key": _idempotency_key(resolution),
+        **(headers or {}),
+    }
+    return client.post(
+        "/api/runs/demo/concepts/lens/recovery/abandon",
+        json={
+            "expected_generation": generation,
+            "request_id": request_id,
+            "expected_started_seq": started_seq,
+        },
+        headers=combined_headers,
+    )
+
+
+def _write_orphan_claim(run_dir, key, generation, *, prompt="private recovery prompt"):
+    from looplab.serve.routers.runs import (
+        _concept_lens_identity,
+        _concept_lens_prompt_digest,
+    )
+
+    opaque_key = _idempotency_key(key)
+    request_id = _concept_lens_identity(run_dir, generation, opaque_key)
+    request_digest = _concept_lens_prompt_digest(opaque_key, prompt)
+    store = EventStore(run_dir / "events.jsonl")
+    started = store.append(EV_CONCEPT_LENS_STARTED, {
+        "lens_request_id": request_id,
+        "generation": generation,
+        "request_digest": request_digest,
+        "input_seq": store.read_all()[-1].seq,
+    })
+    return request_id, request_digest, started
+
+
 def _wait_job(client, job_id, timeout=5.0):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -555,4 +599,333 @@ def test_job_capacity_is_full_pre_dispatch_terminal_without_durable_claim(
     assert payload["schema"] == 1 and payload["generation"] and payload["request_id"]
     assert calls == []
     assert not any(event.type == EV_CONCEPT_LENS_STARTED
+                   for event in EventStore(run_dir / "events.jsonl").read_all())
+
+
+def test_lost_receipt_discovers_orphan_and_resolution_replays_without_secret_or_provider(
+        tmp_path, monkeypatch):
+    run_dir = _seed_run(tmp_path)
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("recovery must never construct a provider client")),
+    )
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+
+    empty = _recover(client, generation)
+    assert empty.status_code == 200
+    assert empty.json() == {"schema": 1, "generation": generation, "state": "none"}
+
+    prompt = "private recovery prompt containing token-secret-123"
+    request_id, digest, started = _write_orphan_claim(
+        run_dir, "lost-browser-receipt", generation, prompt=prompt)
+    discovered = _recover(client, generation)
+    payload = discovered.json()
+    assert discovered.status_code == 200
+    assert payload == {
+        "schema": 1,
+        "generation": generation,
+        "state": "orphaned",
+        "request_id": request_id,
+        "started_seq": started.seq,
+        "input_seq": started.data["input_seq"],
+    }
+    assert discovered.headers["Cache-Control"] == "no-store"
+    assert {"Authorization", "X-LoopLab-Token"}.issubset(
+        {item.strip() for item in discovered.headers["Vary"].split(",")})
+    for secret in (prompt, "token-secret-123", digest, _idempotency_key("lost-browser-receipt")):
+        assert secret not in discovered.text
+
+    resolved = _recovery_abandon(
+        client, generation, request_id, started.seq, "first-resolution")
+    receipt = resolved.json()
+    assert resolved.status_code == 200
+    assert receipt["code"] == "concept_lens_abandoned"
+    assert receipt["reason"] == "operator_recovered_abandon"
+    assert receipt["provider_outcome"] == receipt["billing_status"] == "unknown"
+    assert receipt["request_id"] == request_id
+    assert "may already have completed and billed" in receipt["warning"]
+    assert "Resolution-Idempotency-Key" in resolved.headers["Vary"]
+
+    same_resolution = _recovery_abandon(
+        client, generation, request_id, started.seq, "first-resolution")
+    other_resolution = _recovery_abandon(
+        client, generation, request_id, started.seq, "different-resolution")
+    assert same_resolution.json()["seq"] == receipt["seq"]
+    assert other_resolution.json()["seq"] == receipt["seq"]
+    terminal_discovery = _recover(client, generation).json()
+    assert terminal_discovery["state"] == "terminal"
+    assert terminal_discovery["request_id"] == request_id
+    assert terminal_discovery["started_seq"] == started.seq
+    assert terminal_discovery["terminal"]["seq"] == receipt["seq"]
+    assert terminal_discovery["terminal"]["reason"] == "operator_recovered_abandon"
+
+    events = EventStore(run_dir / "events.jsonl").read_all()
+    terminals = [event for event in events
+                 if event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
+                 and event.data.get("lens_request_id") == request_id]
+    assert len(terminals) == 1
+    assert terminals[0].data["reason"] == "operator_recovered_abandon"
+    assert terminals[0].data["resolution"] == "operator_recovery"
+    assert len(terminals[0].data["resolution_id"]) == 64
+    assert _idempotency_key("first-resolution") not in str(terminals[0].data)
+    assert sum(event.type == EV_LLM_USAGE for event in events) == 0
+
+
+def test_recovery_rejects_generation_request_seq_and_overlapping_claims(
+        tmp_path, monkeypatch):
+    run_dir = _seed_run(tmp_path)
+    monkeypatch.setattr(
+        "looplab.serve.server.make_llm_client",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("invalid recovery must remain provider-free")),
+    )
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    request_id, _digest, started = _write_orphan_claim(
+        run_dir, "strict-recovery", generation)
+    other_generation = ("f" if generation != "f" * 64 else "e") * 64
+
+    invalid_generation = client.get(
+        "/api/runs/demo/concepts/lens/recovery",
+        params={"expected_generation": "not-a-generation"},
+    )
+    assert invalid_generation.status_code == 400
+    assert invalid_generation.json()["detail"]["code"] == "invalid_run_generation"
+    stale = _recover(client, other_generation)
+    assert stale.status_code == 409
+    assert stale.json()["detail"]["code"] == "run_generation_changed"
+    wrong_request = _recovery_abandon(
+        client, generation, "a" * 64, started.seq, "wrong-request-resolution")
+    assert wrong_request.status_code == 409
+    assert wrong_request.json()["detail"]["code"] == "concept_lens_recovery_claim_missing"
+    wrong_seq = _recovery_abandon(
+        client, generation, request_id, started.seq + 1, "wrong-seq-resolution")
+    assert wrong_seq.status_code == 409
+    assert wrong_seq.json()["detail"]["code"] == "concept_lens_started_seq_mismatch"
+    paid_key_is_not_a_resolution_key = client.post(
+        "/api/runs/demo/concepts/lens/recovery/abandon",
+        json={
+            "expected_generation": generation,
+            "request_id": request_id,
+            "expected_started_seq": started.seq,
+        },
+        headers={"Idempotency-Key": _idempotency_key("strict-recovery")},
+    )
+    assert paid_key_is_not_a_resolution_key.status_code == 400
+    assert (paid_key_is_not_a_resolution_key.json()["detail"]["code"]
+            == "concept_lens_resolution_key_invalid")
+    bool_seq = client.post(
+        "/api/runs/demo/concepts/lens/recovery/abandon",
+        json={
+            "expected_generation": generation,
+            "request_id": request_id,
+            "expected_started_seq": True,
+        },
+        headers={"Resolution-Idempotency-Key": _idempotency_key("bool-seq")},
+    )
+    assert bool_seq.status_code == 400
+    assert bool_seq.json()["detail"]["code"] == "concept_lens_started_seq_invalid"
+
+    _write_orphan_claim(run_dir, "overlapping-recovery", generation)
+    conflicted = _recover(client, generation)
+    assert conflicted.status_code == 200
+    assert conflicted.json()["state"] == "conflict"
+    assert "request_id" not in conflicted.json()
+    rejected = _recovery_abandon(
+        client, generation, request_id, started.seq, "conflict-resolution")
+    assert rejected.status_code == 409
+    assert rejected.json()["detail"]["code"] == "concept_lens_recovery_conflict"
+    events = EventStore(run_dir / "events.jsonl").read_all()
+    assert not any(event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
+                   for event in events)
+    assert sum(event.type == EV_LLM_USAGE for event in events) == 0
+
+
+def test_recovery_fences_live_worker_then_wins_late_cross_process_terminal(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    run_dir = _seed_run(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def factory(*_args, **_kwargs):
+        calls.append(True)
+        return _BlockingLensClient(started, release)
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", factory)
+    original = TestClient(make_app(tmp_path))
+    first = _post(original, "recovery-late-worker")
+    paid = first.json()
+    assert paid["status"] == "running" and started.wait(3)
+
+    live = _recover(original, paid["generation"])
+    live_payload = live.json()
+    assert live_payload["state"] == "running"
+    assert live_payload["status"] == "running"
+    assert live_payload["job_id"] == paid["job_id"]
+    fenced = _recovery_abandon(
+        original, paid["generation"], paid["request_id"], live_payload["started_seq"],
+        "live-worker-resolution")
+    assert fenced.status_code == 409
+    assert fenced.json()["detail"]["code"] == "concept_lens_still_running"
+
+    restarted = TestClient(make_app(tmp_path))
+    orphan = _recover(restarted, paid["generation"]).json()
+    assert orphan["state"] == "orphaned"
+    resolved = _recovery_abandon(
+        restarted, paid["generation"], paid["request_id"], orphan["started_seq"],
+        "cross-process-resolution")
+    assert resolved.status_code == 200
+    assert resolved.json()["reason"] == "operator_recovered_abandon"
+
+    release.set()
+    late = _wait_job(original, paid["job_id"])
+    assert late["code"] == "concept_lens_abandoned"
+    assert late["reason"] == "operator_recovered_abandon"
+    assert late["seq"] == resolved.json()["seq"]
+    assert calls == [True]
+    events = EventStore(run_dir / "events.jsonl").read_all()
+    terminals = [event for event in events
+                 if event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
+                 and event.data.get("lens_request_id") == paid["request_id"]]
+    assert len(terminals) == 1
+    assert sum(event.type == EV_LLM_USAGE for event in events) == 1
+
+
+def test_recovery_projects_retained_done_job_for_fresh_polling(tmp_path):
+    run_dir = _seed_run(tmp_path)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    request_id, _digest, started = _write_orphan_claim(
+        run_dir, "retained-done-recovery", generation)
+    reservation = app.state.looplab.jobs.reserve(request_id, consume_on_poll=False)
+    app.state.looplab.jobs.put(
+        reservation["job_id"],
+        status="done",
+        result={
+            "ok": False,
+            "code": "concept_lens_uncertain",
+            "request_id": request_id,
+        },
+    )
+
+    projection = _recover(client, generation)
+    assert projection.status_code == 200
+    assert projection.json() == {
+        "schema": 1,
+        "generation": generation,
+        "state": "running",
+        "request_id": request_id,
+        "started_seq": started.seq,
+        "input_seq": started.data["input_seq"],
+        "job_id": reservation["job_id"],
+        "status": "done",
+    }
+    polled = client.get(f"/api/jobs/{reservation['job_id']}").json()
+    assert polled["status"] == "done"
+    assert polled["code"] == "concept_lens_uncertain"
+
+
+def test_recovery_partial_append_replay_returns_first_terminal_without_duplicate(
+        tmp_path, monkeypatch):
+    run_dir = _seed_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    request_id, _digest, started = _write_orphan_claim(
+        run_dir, "partial-resolution", generation)
+    real_append = EventStore.append
+    injected = []
+
+    def append_then_raise(self, event_type, data, *args, **kwargs):
+        event = real_append(self, event_type, data, *args, **kwargs)
+        if (event_type == EV_CONCEPT_LENS_COMPLETED
+                and data.get("reason") == "operator_recovered_abandon"
+                and not injected):
+            injected.append(event.seq)
+            raise OSError("simulated response loss after durable append")
+        return event
+
+    monkeypatch.setattr(EventStore, "append", append_then_raise)
+    uncertain = _recovery_abandon(
+        client, generation, request_id, started.seq, "partial-append-resolution")
+    assert uncertain.status_code == 200
+    assert uncertain.json()["code"] == "concept_lens_uncertain"
+    assert uncertain.json()["request_id"] == request_id
+
+    monkeypatch.setattr(EventStore, "append", real_append)
+    replay = _recovery_abandon(
+        client, generation, request_id, started.seq, "partial-append-resolution")
+    competing_replay = _recovery_abandon(
+        client, generation, request_id, started.seq, "different-after-partial")
+    assert replay.json()["code"] == "concept_lens_abandoned"
+    assert replay.json()["reason"] == "operator_recovered_abandon"
+    assert replay.json()["seq"] == injected[0]
+    assert competing_replay.json()["seq"] == injected[0]
+    terminals = [event for event in EventStore(run_dir / "events.jsonl").read_all()
+                 if event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
+                 and event.data.get("lens_request_id") == request_id]
+    assert len(terminals) == 1
+    assert terminals[0].seq == injected[0]
+
+
+def test_recovery_strict_fold_fails_closed_on_duplicate_current_claim(tmp_path):
+    run_dir = _seed_run(tmp_path)
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    request_id, digest, started = _write_orphan_claim(
+        run_dir, "duplicate-recovery", generation)
+    EventStore(run_dir / "events.jsonl").append(EV_CONCEPT_LENS_STARTED, {
+        "lens_request_id": request_id,
+        "generation": generation,
+        "request_digest": digest,
+        "input_seq": started.data["input_seq"],
+    })
+
+    projection = _recover(client, generation)
+    assert projection.status_code == 200
+    assert projection.json()["state"] == "conflict"
+    assert "request_id" not in projection.json()
+    resolution = _recovery_abandon(
+        client, generation, request_id, started.seq, "duplicate-claim-resolution")
+    assert resolution.status_code == 409
+    assert resolution.json()["detail"]["code"] == "concept_lens_recovery_conflict"
+    assert not any(event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
+                   for event in EventStore(run_dir / "events.jsonl").read_all())
+
+
+def test_recovery_is_owner_only_and_review_capability_cannot_translate(
+        tmp_path, monkeypatch):
+    run_dir = _seed_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    owner = {"X-LoopLab-Token": "owner-secret"}
+    client = TestClient(make_app(tmp_path))
+    generation = client.get("/api/runs/demo/concepts", headers=owner).json()["generation"]
+    request_id, _digest, started = _write_orphan_claim(
+        run_dir, "owner-only-recovery", generation)
+    created = client.post(
+        "/api/runs/demo/reviews",
+        headers=owner,
+        json={"ttl_seconds": 3600, "include_evidence": False},
+    )
+    assert created.status_code == 200
+    review = {"X-LoopLab-Review": created.json()["token"]}
+
+    assert _recover(client, generation).status_code == 401
+    owner_read = _recover(client, generation, headers=owner)
+    assert owner_read.status_code == 200 and owner_read.json()["state"] == "orphaned"
+    assert owner_read.headers["Cache-Control"] == "no-store"
+    vary = {item.strip() for item in owner_read.headers["Vary"].split(",")}
+    assert {"Authorization", "X-LoopLab-Token"}.issubset(vary)
+    review_read = _recover(client, generation, headers=review)
+    assert review_read.status_code == 403
+    assert review_read.json()["kind"] == "review_read_only"
+    review_write = _recovery_abandon(
+        client, generation, request_id, started.seq, "review-resolution", headers=review)
+    assert review_write.status_code == 403
+    assert review_write.json()["kind"] == "review_read_only"
+    assert not any(event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}
                    for event in EventStore(run_dir / "events.jsonl").read_all())
