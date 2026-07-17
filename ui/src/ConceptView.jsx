@@ -23,7 +23,12 @@ const conceptId = value => typeof value === 'string' && value.length > 0
 const derivedLensId = value => typeof value === 'string' && value.length <= 64
   && /^[a-z0-9][a-z0-9-]*$/.test(value)
 export const validDerivedLensLabel = value => typeof value === 'string'
-  && value.length >= 1 && value.length <= 60 && !/[\p{C}]/u.test(value)
+  && value.length >= 1 && value.length <= 60 && value === value.trim()
+  && /\S/u.test(value) && !/[\p{C}]/u.test(value)
+const PAID_LENS_CAP_REASONS = new Set([
+  'node_membership_cap', 'concepts_per_node_cap', 'membership_cap', 'tree_node_cap',
+  'edge_cap', 'edge_endpoint_cap', 'experiment_ref_cap',
+])
 const generationId = value => value === null
   || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))
 const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
@@ -236,6 +241,19 @@ export function validateConceptPayload(value, expected = {}) {
         Object.entries(provenanceCounts).sort())) invalidPayload()
 
   return value
+}
+
+// Paid derivation may use the same bounded cap-partial frame the operator can already inspect, but
+// never a corruption/integrity partial. Keep this explicit allow-list aligned with the server gate;
+// validateConceptPayload first proves the complete versioned frame and its consistency receipts.
+export function validatePaidDerivedPayload(value, expected = {}) {
+  const frame = validateConceptPayload(value, expected)
+  const reasons = frame.completeness.reasons
+  if (frame.completeness.source_integrity.complete !== true
+      || (!frame.complete && !reasons.every(reason => PAID_LENS_CAP_REASONS.has(reason)))) {
+    invalidPayload()
+  }
+  return frame
 }
 
 const entries = value => record(value) ? Object.keys(value).sort().map(key => [key, value[key]]) : []
@@ -561,7 +579,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       if (response?.ok === true && record(spec) && conceptId(spec.name)
           && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
           && spec.rels.length && spec.rels.every(conceptId)) {
-        validateConceptPayload(response, {
+        validatePaidDerivedPayload(response, {
           runId,
           ...(generation === undefined ? {} : { generation }),
           requestedSeq: null,
@@ -570,7 +588,6 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           derived: true,
           rels: spec.rels,
         })
-        if (!response.authoritative) invalidPayload()
         let cleared = true
         try { cleared = clearConceptLensIntent(runId, owner.intent.idempotencyKey) }
         catch { cleared = false }
@@ -703,12 +720,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
         && spec.rels.length && spec.rels.every(conceptId)
       if (derived) {
-        validateConceptPayload(response, {
+        validatePaidDerivedPayload(response, {
           runId, generation, requestedSeq: null, requestedLens: spec.name,
           direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
           derived: true, rels: spec.rels,
         })
-        if (!response.authoritative) invalidPayload()
       } else {
         const terminal = response?.ok === false && (response.code === 'concept_lens_abandoned'
           || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',

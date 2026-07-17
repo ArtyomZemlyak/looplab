@@ -135,7 +135,22 @@ const normalizeJobResult = value => {
 }
 const validateReceipt = (value, intent) => {
   const result = normalizeJobResult(value)
-  if (result.ambiguous === true) return result
+  if (result.ambiguous === true) {
+    // Locally generated timeout/contact-loss receipts intentionally omit generation/request identity.
+    // If an ambiguous server/job receipt does carry identity, however, it must be well-formed and
+    // remain bound to the receipt already saved before dispatch; ambiguity is never permission to
+    // replace a known request or job with another one.
+    if ((Object.hasOwn(result, 'generation') && result.generation !== intent.generation)
+        || (Object.hasOwn(result, 'request_id')
+          && (typeof result.request_id !== 'string' || !REQUEST_ID.test(result.request_id)
+            || (intent.requestId && result.request_id !== intent.requestId)
+            || (!intent.requestId && !Object.hasOwn(result, 'generation'))))
+        || (Object.hasOwn(result, 'job_id')
+          && (!safeText(result.job_id) || result.job_id !== intent.jobId))) {
+      throw protocolError('Ambiguous paid concept-lens receipt does not match this request.')
+    }
+    return result
+  }
   if (result.status === 'running') {
     if (!safeText(result.job_id) || result.generation !== intent.generation
         || typeof result.request_id !== 'string' || !REQUEST_ID.test(result.request_id)

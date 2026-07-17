@@ -134,6 +134,48 @@ test('reload polls first, then reconciles an expired job with the exact same key
   } finally { globalThis.fetch = originalFetch }
 })
 
+test('ambiguous receipts cannot replace a saved generation, request, or job identity', async () => {
+  const storage = memoryStorage()
+  const requestId = 'c'.repeat(64)
+  const base = acquireConceptLensIntent('bound', GENERATION, 'group by usage', storage)
+  const intent = updateConceptLensIntent('bound', base.idempotencyKey, {
+    state: 'unknown', requestId,
+  }, storage)
+  const originalFetch = globalThis.fetch
+  try {
+    for (const malformed of [
+      { generation: 'd'.repeat(64), request_id: requestId },
+      { generation: GENERATION, request_id: 'e'.repeat(64) },
+      { generation: GENERATION, request_id: null },
+      { generation: GENERATION, request_id: requestId, job_id: 42 },
+      { generation: GENERATION, request_id: requestId, job_id: 'unexpected-job' },
+    ]) {
+      globalThis.fetch = async () => response({
+        ok: false, code: 'concept_lens_uncertain', ambiguous: true, ...malformed,
+      })
+      await assert.rejects(requestConceptLens('bound', intent),
+        { code: 'CONCEPT_LENS_PROTOCOL_ERROR' })
+      assert.deepEqual(peekConceptLensIntent('bound', storage), intent,
+        'a malformed reply cannot rewrite the saved recovery envelope')
+    }
+
+    const runningBase = acquireConceptLensIntent(
+      'bound-job', GENERATION, 'group by composition', storage)
+    const running = updateConceptLensIntent('bound-job', runningBase.idempotencyKey, {
+      state: 'running', jobId: 'job-one', requestId,
+    }, storage)
+    globalThis.fetch = async () => response({
+      status: 'done', complete: true, ok: false, ambiguous: true,
+      code: 'job_contact_lost', job_id: 'job-two',
+      generation: GENERATION, request_id: requestId,
+    })
+    await assert.rejects(requestConceptLens('bound-job', running, {
+      pollIntervalMs: 0, pollTimeoutMs: 1000,
+    }), { code: 'CONCEPT_LENS_PROTOCOL_ERROR' })
+    assert.deepEqual(peekConceptLensIntent('bound-job', storage), running)
+  } finally { globalThis.fetch = originalFetch }
+})
+
 test('operator abandon is explicit, generation-fenced, and preserves unknown billing truth', async () => {
   const storage = memoryStorage()
   const base = acquireConceptLensIntent('orphan', GENERATION, 'group by usage', storage)

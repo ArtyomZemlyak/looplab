@@ -181,6 +181,9 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }), /Invalid concept projection/)
     assert.equal(conceptModule.validDerivedLensLabel('By usage'), true)
     assert.equal(conceptModule.validDerivedLensLabel('x'.repeat(61)), false)
+    assert.equal(conceptModule.validDerivedLensLabel('   '), false)
+    assert.equal(conceptModule.validDerivedLensLabel(' padded label '), false,
+      'derived labels must match the server-normalized nonblank form')
     assert.equal(conceptModule.validDerivedLensLabel('hidden\u200blabel'), false,
       'format/control Unicode cannot enter an option label or title')
     const derivedPayload = framePayload({
@@ -190,6 +193,34 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.doesNotThrow(() => conceptModule.validateConceptPayload(derivedPayload, {
       requestedLens: 'usage', direction: 'max', derived: true, rels: ['uses'],
     }))
+    const paidDerivedExpected = {
+      requestedLens: 'usage', direction: 'max', derived: true, rels: ['uses'],
+    }
+    const cappedDerivedPayload = framePayload({
+      id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
+      edgesPresent: true, lensEdgesPresent: true,
+      complete: false, truncated: true, reasons: ['membership_cap'],
+    })
+    assert.doesNotThrow(() => conceptModule.validatePaidDerivedPayload(
+      cappedDerivedPayload, paidDerivedExpected))
+    for (const unsafePartial of [
+      framePayload({
+        id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
+        edgesPresent: true, lensEdgesPresent: true, complete: false,
+        sourceAuthoritative: false, reasons: ['event_log_corruption'],
+      }),
+      framePayload({
+        id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
+        edgesPresent: true, lensEdgesPresent: true, complete: false,
+        truncated: true, reasons: ['rename_hop_cap'],
+      }),
+    ]) {
+      assert.doesNotThrow(() => conceptModule.validateConceptPayload(
+        unsafePartial, paidDerivedExpected), 'the base viewer can display a truthful unsafe partial')
+      assert.throws(() => conceptModule.validatePaidDerivedPayload(
+        unsafePartial, paidDerivedExpected), /Invalid concept projection/,
+      'paid success accepts only the server allow-listed size-cap partials')
+    }
     assert.throws(() => conceptModule.validateConceptPayload(derivedPayload, {
       requestedLens: 'usage', direction: 'max', derived: false,
     }), /Invalid concept projection/)
@@ -608,6 +639,74 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       /abandoned on the server.*may already have completed and been billed.*usage.*unavailable/i)
     assert.ok(button('Create lens · paid'), 'a durable abandon terminal clears the local intent')
 
+    await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
+      'group by race outcome')
+    before = requests.length
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    assert.equal(requests.length, before + 1)
+    await act(async () => {
+      requests.at(-1).reject(new TypeError('simulated race response loss'))
+      await settle()
+    })
+    await click(button('Resume paid lens'))
+    await reply(requests.at(-1), {
+      ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
+      ok: false, ambiguous: true, code: 'concept_lens_uncertain',
+      generation: GENERATION_A, request_id: '5'.repeat(64),
+    })
+    await click(button('Abandon unknown request'))
+    const racedAbandon = requests.at(-1)
+    await reply(racedAbandon, {
+      ...framePayload({ id: 'race/root', runId: 'lens-scope-run', generation: GENERATION_A,
+        requestedLens: 'race-usage', effectiveLens: 'race-usage', derived: true,
+        edgesPresent: true, lensEdgesPresent: true,
+        complete: false, truncated: true, reasons: ['membership_cap'] }),
+      ok: true, spec: { name: 'race-usage', label: 'Race usage', rels: ['uses'],
+        kind: 'edge', provenance: 'agent' },
+      request_id: '5'.repeat(64),
+    })
+    assert.match(requests.at(-1).url,
+      /\/api\/runs\/lens-scope-run\/concepts\?lens=race-usage&rels=uses$/,
+      'a provider terminal that wins the abandon race restores its derived lens')
+    await reply(requests.at(-1), linkedEdgePayload({
+      runId: 'lens-scope-run', generation: GENERATION_A,
+      requestedLens: 'race-usage', effectiveLens: 'race-usage',
+      complete: false, truncated: true, reasons: ['membership_cap'],
+    }))
+    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value,
+      'race-usage')
+    assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /provider completed before abandonment.*validated lens was restored/i)
+
+    await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
+      'reject corrupted paid frame')
+    await act(async () => {
+      document.querySelector('.cv-lensnew').dispatchEvent(
+        new dom.window.Event('submit', { bubbles: true, cancelable: true }))
+      await settle()
+    })
+    const corruptedPaidPost = requests.at(-1)
+    await reply(corruptedPaidPost, {
+      ...framePayload({ id: 'corrupt/root', runId: 'lens-scope-run', generation: GENERATION_A,
+        requestedLens: 'corrupt-usage', effectiveLens: 'corrupt-usage', derived: true,
+        edgesPresent: true, lensEdgesPresent: true, complete: false,
+        sourceAuthoritative: false, reasons: ['event_log_corruption'] }),
+      ok: true, spec: { name: 'corrupt-usage', label: 'Corrupt usage', rels: ['uses'],
+        kind: 'edge', provenance: 'agent' },
+      request_id: '6'.repeat(64),
+    })
+    assert.equal(requests.at(-1), corruptedPaidPost,
+      'a corruption-partial paid success cannot launch a derived projection read')
+    assert.ok(button('Resume paid lens'),
+      'a malformed paid terminal remains on its exact saved identity instead of being accepted')
+    assert.match(document.querySelector('.cv-lenserr')?.textContent,
+      /Outcome unknown.*same saved request.*another key/i)
+
     runId = 'final-run'
     generation = GENERATION_B
     await render()
@@ -629,7 +728,8 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await reply(resumedPost, {
       ...framePayload({ id: 'derived/root', runId: 'final-run', generation: GENERATION_B,
         requestedLens: 'usage', effectiveLens: 'usage', derived: true,
-        capturedSeq: 7, edgesPresent: true, lensEdgesPresent: true }),
+        capturedSeq: 7, edgesPresent: true, lensEdgesPresent: true,
+        complete: false, truncated: true, reasons: ['membership_cap'] }),
       ok: true, spec: { name: 'usage', label: 'By usage', rels: ['uses'],
         kind: 'edge', provenance: 'agent' },
       request_id: '2'.repeat(64),
@@ -638,8 +738,11 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       /\/api\/runs\/final-run\/concepts\?lens=usage&rels=uses$/)
     await reply(requests.at(-1), linkedEdgePayload({
       runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
+      complete: false, truncated: true, reasons: ['membership_cap'],
     }))
     assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value, 'usage')
+    assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i,
+      'a fully validated size-cap partial paid result remains visibly partial')
     assert.equal(document.querySelector('.cv-cid[title="loss/contrastive"]')?.textContent,
       'loss/contrastive', 'edge lenses retain the full canonical id instead of an ambiguous leaf')
     const crossLink = document.querySelector('.cv-badge[title^="Secondary uses"]')
