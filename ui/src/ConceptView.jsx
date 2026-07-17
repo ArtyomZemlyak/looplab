@@ -5,13 +5,8 @@ import {
   visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
   CONCEPT_COLUMNS, DEFAULT_COLUMNS,
 } from './conceptViewModel.js'
-import { filterConceptTree, experimentRefMatches, highlightSegments } from './conceptSearch.js'
-
-// Wrap the matched query slice of a label in <mark> (pure segments, no dangerouslySetInnerHTML).
-function Marked({ text, query }) {
-  return highlightSegments(text, query).map((seg, i) =>
-    seg.hit ? <mark key={i}>{seg.text}</mark> : <Fragment key={i}>{seg.text}</Fragment>)
-}
+import { filterConceptTree, experimentRefMatches } from './conceptSearch.js'
+import { Marked } from './Highlight.jsx'
 
 const TIMEOUT_MS = 12_000
 const LENS_PROMPT_MAX_CHARS = 800

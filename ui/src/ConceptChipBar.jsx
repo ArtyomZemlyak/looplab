@@ -1,15 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { chipsAtPath, breadcrumb, matchingNodeIds } from './conceptChips.js'
-import { searchConcepts, searchHighlightIds, highlightSegments } from './conceptSearch.js'
+import { searchConcepts, searchHighlightIds } from './conceptSearch.js'
+import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
 
 const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
-
-// Render a concept label with the matched query slice wrapped in <mark> (pure segments, no innerHTML).
-function Marked({ text, query }) {
-  return highlightSegments(text, query).map((seg, i) =>
-    seg.hit ? <mark key={i}>{seg.text}</mark> : <React.Fragment key={i}>{seg.text}</React.Fragment>)
-}
 
 const SearchIcon = ({ small }) => (
   <svg width={small ? 13 : 15} height={small ? 13 : 15} viewBox="0 0 24 24" fill="none"
@@ -134,7 +129,8 @@ export default function ConceptChipBar({ state, onHighlight }) {
                 <SearchIcon small />
                 <input ref={inputRef} className="cs-input" style={{ width: 150 }} value={query}
                   placeholder="find a concept…" aria-label="Search concepts" autoComplete="off"
-                  role="combobox" aria-expanded={searching} aria-controls="cb-search-results"
+                  role="combobox" aria-expanded={searching}
+                  aria-controls={searching ? 'cb-search-results' : undefined}
                   onChange={e => setQuery(e.target.value)} onKeyDown={onSearchKey}
                   onBlur={() => { if (!query) closeSearch() }} />
                 {query &&
