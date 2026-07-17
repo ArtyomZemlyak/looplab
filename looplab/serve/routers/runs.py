@@ -6,6 +6,7 @@ from __future__ import annotations
 from collections import OrderedDict
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -65,6 +66,7 @@ _OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
 
 _CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
 _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
+_RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _concept_event_file_identity(path: Path) -> Optional[tuple]:
@@ -383,6 +385,14 @@ def build_router(srv) -> APIRouter:
                 "max_chars": _CONCEPT_FRAME_MAX_LENS_PROMPT_CHARS,
                 "max_bytes": _CONCEPT_FRAME_MAX_LENS_PROMPT_BYTES,
             })
+        expected_generation = body.get("expected_generation") if isinstance(body, dict) else None
+        if (not isinstance(expected_generation, str)
+                or _RUN_GENERATION_RE.fullmatch(expected_generation) is None):
+            raise HTTPException(400, {
+                "code": "invalid_run_generation",
+                "message": "expected_generation must be the exact generation from the Concepts response.",
+                "remediation": "Refresh the run before creating another paid concept lens.",
+            })
 
         lens_pack = default_lenses()
         core = _materialize_concept_core(rd, run_id, None, lens_pack)
@@ -391,6 +401,14 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(409, {
                 "code": "run_generation_unavailable",
                 "message": "The run has no durable generation identity.",
+            })
+        if generation != expected_generation:
+            raise HTTPException(409, {
+                "code": "run_generation_changed",
+                "expected_generation": expected_generation,
+                "current_generation": generation,
+                "message": "The run changed before paid lens creation began.",
+                "remediation": "Reload the Concepts view and submit a new request intentionally.",
             })
         base_frame = _project_concept_frame(
             core, requested_lens="is_a", lens_pack=lens_pack)

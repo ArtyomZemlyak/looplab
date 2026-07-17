@@ -143,6 +143,11 @@ class _LensClient:
         return "x"
 
 
+def _lens_body(client, prompt):
+    generation = client.get("/api/runs/demo/concepts").json()["generation"]
+    return {"prompt": prompt, "expected_generation": generation}
+
+
 def _edge_run(root):
     rd = root / "demo"
     rd.mkdir(parents=True, exist_ok=True)
@@ -164,7 +169,8 @@ def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
-    r = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by what uses what"})
+    r = client.post("/api/runs/demo/concepts/lens",
+                    json=_lens_body(client, "group by what uses what"))
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     data = r.json()
@@ -188,7 +194,8 @@ def test_derive_lens_endpoint_soft_fails_when_model_declines(tmp_path, monkeypat
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"rels": ["teleports_to"]}))
     client = TestClient(make_app(tmp_path))
-    data = client.post("/api/runs/demo/concepts/lens", json={"prompt": "nonsense"}).json()
+    data = client.post("/api/runs/demo/concepts/lens",
+                       json=_lens_body(client, "nonsense")).json()
     assert data["ok"] is False and data["reason"] == "declined"
 
 
@@ -200,7 +207,8 @@ def test_derive_lens_endpoint_soft_fails_offline(tmp_path, monkeypatch):
         raise RuntimeError("no model configured")
     monkeypatch.setattr(server_mod, "make_llm_client", _boom)
     client = TestClient(make_app(tmp_path))
-    data = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"}).json()
+    data = client.post("/api/runs/demo/concepts/lens",
+                       json=_lens_body(client, "group by usage")).json()
     assert data["ok"] is False and data["reason"] == "no_model"
 
 
@@ -209,6 +217,34 @@ def test_derive_lens_endpoint_requires_a_prompt(tmp_path):
     client = TestClient(make_app(tmp_path))
     assert client.post("/api/runs/demo/concepts/lens", json={"prompt": "  "}).status_code == 400
     assert client.post("/api/runs/demo/concepts/lens", json={}).status_code == 400
+
+
+def test_derive_lens_fences_generation_before_paid_provider_call(tmp_path, monkeypatch):
+    _edge_run(tmp_path)
+    import looplab.serve.server as server_mod
+
+    called = False
+
+    def _must_not_call(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("generation mismatch reached the paid provider")
+
+    monkeypatch.setattr(server_mod, "make_llm_client", _must_not_call)
+    client = TestClient(make_app(tmp_path))
+    current = client.get("/api/runs/demo/concepts").json()["generation"]
+    stale = "0" * 64 if current != "0" * 64 else "1" * 64
+    response = client.post("/api/runs/demo/concepts/lens", json={
+        "prompt": "group by usage", "expected_generation": stale,
+    })
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "run_generation_changed"
+    assert called is False
+
+    missing = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"})
+    assert missing.status_code == 400
+    assert missing.json()["detail"]["code"] == "invalid_run_generation"
+    assert called is False
 
 
 def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
@@ -221,7 +257,8 @@ def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "make_llm_client",
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
-    assert client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"}).json()["ok"] is True
+    assert client.post("/api/runs/demo/concepts/lens",
+                       json=_lens_body(client, "group by usage")).json()["ok"] is True
     assert log.read_text().count("\n") == before   # no events appended by the projection
 
 
@@ -452,7 +489,8 @@ def test_derive_lens_caps_body_prompt_and_refuses_partial_source(tmp_path, monke
     assert too_large.status_code == 413 and too_large.headers["cache-control"] == "no-store"
 
     monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)
-    partial = client.post("/api/runs/demo/concepts/lens", json={"prompt": "group by usage"})
+    partial = client.post("/api/runs/demo/concepts/lens",
+                          json=_lens_body(client, "group by usage"))
     payload = partial.json()
     assert partial.status_code == 200 and partial.headers["cache-control"] == "no-store"
     assert payload["ok"] is False and payload["reason"] == "concept_frame_partial"
