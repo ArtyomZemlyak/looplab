@@ -41,6 +41,13 @@
 <div class="hint">◱ scroll — the canvas is large (pinch/scroll to pan)</div>
 <div class="scroll"><svg id="d" xmlns="http://www.w3.org/2000/svg"></svg></div>
 
+<!-- REVIEW(2026-07-16): the 25-commit concepts Phase 0-5 series (fd877d0..) added flows this
+diagram does not show: the UI-writable concept_tag_edited command path (operator re-tag -> fold
+provenance), the assistant ConceptGovernanceTools loop (taxonomy merge/purge/split into the shared
+cross-run ledger), the cross_run_concept_map / concept_* RunTools reads, and the Phase 1
+direction-normalized profit signal feeding advisory packs. CLAUDE.md requires the diagram move in
+the SAME change; an engineer tracing how an operator edit reaches the fold or how the assistant
+mutates cross-run state is currently pointed at a flow that predates all of it. -->
 <script>
 const NS="http://www.w3.org/2000/svg",svg=document.getElementById("d");
 const C={r:"#7aa2f7",d:"#e6b062",s:"#c3a6f9",dr:"#f7768e",ev:"#9ece6a",mem:"#f0c675",trust:"#ff9e64",sig:"#34d3bd",mut:"#6b7f92"};
