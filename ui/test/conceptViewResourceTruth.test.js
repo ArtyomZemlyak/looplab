@@ -336,7 +336,9 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
 
     await click(button('Refresh concepts'))
     await reply(requests[2], conceptPayload('loss/a'))
-    assert.match(document.body.textContent, /Concept tree.*2 concepts/s)
+    assert.match(document.body.textContent,
+      /Concept tree.*1 tagged concept.*2 hierarchy nodes.*1 tagged experiment/s,
+      'synthetic ancestors are hierarchy nodes, not mislabeled as tagged concepts')
     await click(button('Expand hierarchy'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a')
     const median = document.querySelector('.cv-baseline')

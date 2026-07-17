@@ -18,6 +18,8 @@ const LENS_PROMPT_MAX_BYTES = 2_048
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const metric = value => value === null || (typeof value === 'number' && Number.isFinite(value))
 const count = value => Number.isSafeInteger(value) && value >= 0
+const counted = (value, singular, plural = `${singular}s`) =>
+  `${value} ${value === 1 ? singular : plural}`
 const sequence = value => Number.isSafeInteger(value) && value >= -1
 const conceptId = value => typeof value === 'string' && value.length > 0
 const derivedLensId = value => typeof value === 'string' && value.length <= 64
@@ -863,6 +865,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   }
   const experimentCount = new Set(Object.values(byConcept).flat()
     .map(ref => `${ref.node_id}:${ref.node_generation}`)).size
+  const taggedConceptCount = Object.keys(byConcept).length
+  const hierarchyNodeCount = Object.keys(data.tree.nodes).length
   const shippedLenses = data.edges_present ? data.lenses : data.lenses.filter(item => item.name === 'is_a')
   const derivedNames = new Set(runDerivedLenses.map(item => item.name))
   const availableLenses = [
@@ -873,7 +877,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   return <div className="concept-view" data-route-main tabIndex={-1} aria-label="Concept tree"
     aria-busy={refreshing}>
     <header className="cv-bar">
-      <div className="cv-heading"><strong>Concept tree</strong><span>{Object.keys(data.tree.nodes).length} concepts · {experimentCount} tagged experiments · frame seq {data.captured_seq}</span></div>
+      <div className="cv-heading"><strong>Concept tree</strong><span>
+        {counted(taggedConceptCount, 'tagged concept')} · {counted(hierarchyNodeCount, 'hierarchy node')} · {counted(experimentCount, 'tagged experiment')} · frame seq {data.captured_seq}
+      </span></div>
       <div className="cv-search cs">
         <div className={'cs-box' + (searching ? ' focus' : '')}>
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
