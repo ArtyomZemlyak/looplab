@@ -4,6 +4,7 @@ traces, provenance, artifacts, config and cost. Handler bodies are verbatim move
 from __future__ import annotations
 
 from collections import OrderedDict
+import hashlib
 import json
 import os
 import re
@@ -16,14 +17,17 @@ import anyio
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, StreamingResponse
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings)
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
 from looplab.events.replay import fold
 from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
-from looplab.events.types import EV_TRUST_GATE_CHANGED
+from looplab.events.types import (
+    EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
+    EV_TRUST_GATE_CHANGED,
+)
 # Per-theme rollup for the cross-run map: {theme: {count, best_metric}}. Now lives in `digest` so the
 # Researcher's working-set digest and this UI endpoint share one definition.
 from looplab.events.digest import theme_rollup as _theme_rollup
@@ -49,6 +53,9 @@ from looplab.serve.log_pages import (
     DEFAULT_BYTES, DEFAULT_ROWS, MAX_BYTES, MAX_ROWS, MIN_BYTES, EventLogPager)
 from looplab.serve.protocol import (
     PHASE_FINALIZING, POLL_SECONDS, RUN_GENERATION_FIELD, SSE_DONE, SSE_STATE)
+from looplab.serve.assistant import safe_provider_failure
+from looplab.serve.paid_work import (
+    RunCostAccountingPending, metered_run_client, run_directory_identity)
 from looplab.serve.run_commands import run_generation_token
 
 # Snapshot-derived OPERATOR stage names, memoized per run DIRECTORY + snapshot VERSION: keyed on
@@ -68,6 +75,81 @@ _OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
 _CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
 _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
+    "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
+    "capacity", "internal",
+})
+
+
+def _concept_lens_ledger(events, generation: str):
+    """Fold durable paid-lens claims without trusting malformed or conflicting receipts."""
+    claims: dict[str, str] = {}
+    terminals: dict[str, object] = {}
+    conflicts: set[str] = set()
+    for event in events:
+        data = event.data if isinstance(event.data, dict) else {}
+        identity = data.get("lens_request_id")
+        digest = data.get("request_digest")
+        if (not isinstance(identity, str) or _SHA256_RE.fullmatch(identity) is None
+                or not isinstance(digest, str) or _SHA256_RE.fullmatch(digest) is None
+                or data.get("generation") != generation):
+            continue
+        if event.type == EV_CONCEPT_LENS_STARTED:
+            if identity in claims or identity in terminals:
+                conflicts.add(identity)
+            else:
+                claims[identity] = digest
+        elif event.type in {EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED}:
+            if identity not in claims:
+                continue
+            if identity in terminals or claims[identity] != digest:
+                conflicts.add(identity)
+            else:
+                terminals[identity] = event
+    for identity in conflicts:
+        terminals.pop(identity, None)
+    unresolved = set(claims) - set(terminals)
+    return claims, terminals, unresolved, conflicts
+
+
+def _confirm_concept_lens_terminal(path: Path) -> bool:
+    """Confirm a visible terminal on the storage descriptor before replaying it."""
+    try:
+        with open(path, "r+b") as handle:
+            strict_fsync(handle.fileno())
+        return True
+    except Exception:  # noqa: BLE001 - an unconfirmed paid receipt remains ambiguous
+        return False
+
+
+def _validated_derived_lens(spec, lens_pack: list[dict], inputs: dict):
+    """Return the canonical bounded lens triple, or None for an unusable model result."""
+    if not isinstance(spec, dict):
+        return None
+    raw_relations = spec.get("rels")
+    if not isinstance(raw_relations, list):
+        return None
+    relations = list(dict.fromkeys(str(rel) for rel in raw_relations))
+    name = _normalized_custom_lens_name(spec.get("name"))
+    shipped_names = {item.get("name") for item in lens_pack if isinstance(item, dict)}
+    if not name or name in shipped_names:
+        name = _normalized_custom_lens_name(
+            "derived-" + (name or "-".join(relations) or "lens"))
+    if not name:
+        return None
+    try:
+        canonical_name, validated_spec, registration = _concept_lens_request(
+            name, ",".join(relations), lens_pack)
+    except HTTPException:
+        return None
+    validated_spec.update({
+        "label": _bounded_lens_label(spec.get("label"), canonical_name),
+        "provenance": "agent",
+    })
+    if spec.get("root") in set(inputs["concept_ids"]):
+        validated_spec["root"] = spec["root"]
+    return canonical_name, validated_spec, registration
 
 
 def _concept_event_file_identity(path: Path) -> Optional[tuple]:
@@ -361,14 +443,190 @@ def build_router(srv) -> APIRouter:
         response.headers["Cache-Control"] = "no-store"
         return frame
 
+    def _concept_lens_uncertain(base_frame: dict, generation: str, identity: str,
+                                message: str) -> dict:
+        return {
+            **base_frame,
+            "ok": False,
+            "code": "concept_lens_uncertain",
+            "error_kind": "uncertain",
+            "error": message,
+            "generation": generation,
+            "request_id": identity,
+            "ambiguous": True,
+        }
+
+    def _concept_lens_terminal_response(event, core: dict, lens_pack: list[dict],
+                                        identity: str) -> dict:
+        generation = core[RUN_GENERATION_FIELD]
+        base_frame = _project_concept_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
+        data = event.data if isinstance(event.data, dict) else {}
+        if event.type == EV_CONCEPT_LENS_FAILED:
+            raw_kind = str(data.get("error_kind") or "")
+            kind = (raw_kind if raw_kind in _CONCEPT_LENS_SAFE_ERROR_KINDS
+                    else "provider_error")
+            reason = "accounting_pending" if kind == "accounting_pending" else "no_model"
+            return {
+                **base_frame,
+                "ok": False,
+                "code": "concept_lens_failed",
+                "reason": reason,
+                "error_kind": kind,
+                "error": "Concept lens creation failed before a model request was sent.",
+                "generation": generation,
+                "request_id": identity,
+            }
+        outcome = data.get("outcome")
+        if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "declined":
+            reason = data.get("reason")
+            if reason not in {"declined", "invalid_spec"}:
+                reason = "declined"
+            return {
+                **base_frame,
+                "ok": False,
+                "reason": reason,
+                "generation": generation,
+                "request_id": identity,
+            }
+        if event.type == EV_CONCEPT_LENS_COMPLETED and outcome == "derived":
+            inputs = _concept_core_lens_inputs(core)
+            prepared = _validated_derived_lens(data.get("spec"), lens_pack, inputs)
+            if prepared is not None:
+                canonical_name, validated_spec, registration = prepared
+                if validated_spec == data.get("spec"):
+                    frame = _project_concept_frame(
+                        core, requested_lens=canonical_name, lens_pack=lens_pack,
+                        requested_spec=validated_spec, lens_registration=registration)
+                    return {
+                        **frame,
+                        "ok": True,
+                        "spec": validated_spec,
+                        "generation": generation,
+                        "request_id": identity,
+                    }
+        return _concept_lens_uncertain(
+            base_frame, generation, identity,
+            "The saved lens receipt is malformed. Resume only with this same request identity.")
+
+    def _record_concept_lens_failure(run_dir: Path, generation: str, identity: str,
+                                     request_digest: str, error_kind: str):
+        safe_kind = (error_kind if error_kind in _CONCEPT_LENS_SAFE_ERROR_KINDS
+                     else "provider_error")
+        try:
+            with srv.commands.sequence(run_dir):
+                canonical = srv.commands.validate_paths(run_dir)
+                if srv.commands.run_generation(canonical) != generation:
+                    return None
+                store = EventStore(canonical / "events.jsonl")
+                claims, terminals, unresolved, conflicts = _concept_lens_ledger(
+                    store.read_all(), generation)
+                if identity in conflicts or claims.get(identity) != request_digest:
+                    return None
+                if identity in terminals:
+                    return terminals[identity]
+                if identity not in unresolved:
+                    return None
+                return store.append(
+                    EV_CONCEPT_LENS_FAILED,
+                    {
+                        "lens_request_id": identity,
+                        "generation": generation,
+                        "request_digest": request_digest,
+                        "error_kind": safe_kind,
+                    },
+                    require_lock=True,
+                    require_durable=True,
+                )
+        except Exception:  # noqa: BLE001 - an unresolved claim must remain fail-closed
+            return None
+
+    def _run_concept_lens_worker(settings, run_dir: Path, generation: str, identity: str,
+                                 request_digest: str, prompt: str, core: dict,
+                                 lens_pack: list[dict]) -> dict:
+        from looplab.search.concept_graph import derive_lens
+
+        base_frame = _project_concept_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
+        inputs = _concept_core_lens_inputs(core)
+        provider_started = False
+        try:
+            with metered_run_client(srv, settings, run_dir, generation) as client:
+                provider_started = True
+                spec = derive_lens(
+                    prompt, inputs["edges"], client, concepts=inputs["concept_ids"],
+                    raise_on_failure=True)
+                prepared = _validated_derived_lens(spec, lens_pack, inputs) if spec else None
+                if prepared is None:
+                    outcome = "declined"
+                    reason = "declined" if not spec else "invalid_spec"
+                    terminal_data = {
+                        "lens_request_id": identity,
+                        "generation": generation,
+                        "request_digest": request_digest,
+                        "outcome": outcome,
+                        "reason": reason,
+                    }
+                else:
+                    canonical_name, validated_spec, registration = prepared
+                    terminal_data = {
+                        "lens_request_id": identity,
+                        "generation": generation,
+                        "request_digest": request_digest,
+                        "outcome": "derived",
+                        "spec": validated_spec,
+                    }
+                event = EventStore(run_dir / "events.jsonl").append(
+                    EV_CONCEPT_LENS_COMPLETED,
+                    terminal_data,
+                    require_lock=True,
+                    require_durable=True,
+                )
+        except Exception as exc:  # noqa: BLE001 - provider payloads never cross this boundary
+            if provider_started:
+                return _concept_lens_uncertain(
+                    base_frame, generation, identity,
+                    "The paid lens attempt may have reached the provider, but its durable receipt "
+                    "is unavailable. Resume only with this same request identity.")
+            if isinstance(exc, RunCostAccountingPending):
+                error_kind = "accounting_pending"
+            else:
+                error_kind = str(safe_provider_failure(exc).get("error_kind") or "provider_error")
+            failure_event = _record_concept_lens_failure(
+                run_dir, generation, identity, request_digest, error_kind)
+            if failure_event is not None:
+                return _concept_lens_terminal_response(
+                    failure_event, core, lens_pack, identity)
+            return _concept_lens_uncertain(
+                base_frame, generation, identity,
+                "The lens request failed before provider dispatch, but its terminal receipt could "
+                "not be confirmed. Resume only with this same request identity.")
+
+        if terminal_data["outcome"] == "declined":
+            return {
+                **base_frame,
+                "ok": False,
+                "reason": terminal_data["reason"],
+                "generation": generation,
+                "request_id": identity,
+                "seq": event.seq,
+            }
+        frame = _project_concept_frame(
+            core, requested_lens=canonical_name, lens_pack=lens_pack,
+            requested_spec=validated_spec, lens_registration=registration)
+        return {
+            **frame,
+            "ok": True,
+            "spec": validated_spec,
+            "generation": generation,
+            "request_id": identity,
+            "seq": event.seq,
+        }
+
     @router.post("/api/runs/{run_id}/concepts/lens")
     async def derive_concept_lens(run_id: str, request: Request, response: Response):
-        """Mint a lens IN THE MOMENT from a natural-language request — the "create a lens" LLM tool the
-        Concept view offers. A lens is a pure PROJECTION spec (a relation-subset + optional root): it
-        writes NO events and grows NO edges, so this stays replay-clean — we derive the spec, immediately
-        project the tree under it, and return both. Soft-fails ({ok:false, reason}) offline / when the
-        model declines or picks nothing usable, so the UI falls back to a default lens rather than 500."""
-        from looplab.search.concept_graph import default_lenses, derive_lens
+        """Create one generation-bound derived lens behind a durable paid-work claim."""
+        from looplab.search.concept_graph import default_lenses
 
         rd = _run_dir(run_id)
         raw_body = bytearray()
@@ -403,6 +661,11 @@ def build_router(srv) -> APIRouter:
                 "remediation": "Refresh the run before creating another paid concept lens.",
             })
 
+        raw_idempotency_key = request.headers.get("Idempotency-Key", "")
+        if not raw_idempotency_key or len(raw_idempotency_key) > 512:
+            raise HTTPException(
+                400, "Idempotency-Key is required and must be at most 512 characters")
+
         lens_pack = default_lenses()
         core = _materialize_concept_core(rd, run_id, None, lens_pack)
         generation = core[RUN_GENERATION_FIELD]
@@ -422,61 +685,153 @@ def build_router(srv) -> APIRouter:
         base_frame = _project_concept_frame(
             core, requested_lens="is_a", lens_pack=lens_pack)
         response.headers["Cache-Control"] = "no-store"
-        # REVIEW(2026-07-16): the old all-or-nothing gate (`if not base_frame["complete"]`) permanently
-        # disabled lens minting on real runs. `complete = not reasons` collapsed EVERY completeness
-        # reason into one refusal, but most reasons derive from IMMUTABLE log contents or monotone caps
-        # that can never clear in an append-only log: the engine's own co_occurs counts once tripped
-        # invalid_edge (now clamped, not rejected — see concept_frame.py), and node_membership_cap/
-        # concepts_per_node_cap/membership_cap/edge_cap only ever ratchet. Refusing before the model
-        # call, forever, while the UI told the operator to "try naming a relation to group by" — a
-        # prompt that could never succeed. The GET path deliberately serves partial frames with itemized
-        # receipts; this gate now matches it: refuse ONLY on corruption-class reasons (torn/invalid
-        # source), and mint against the bounded (partial) frame when the only reasons are truncation
-        # caps — the SAME bounded frame the GET path serves and the UI already renders. Blocking reasons
-        # ride back on the refusal so the UI can say WHY it is permanent instead of "rephrase". The cap
-        # class is an EXPLICIT allow-list (TRUNCATION_CAP_REASONS), not an `endswith("_cap")` test, so a
-        # corruption-adjacent reason that merely ends in "_cap" (rename_hop_cap) still blocks.
-        blocking = [r for r in base_frame["completeness"]["reasons"]
-                    if r not in _TRUNCATION_CAP_REASONS]
-        if blocking:
-            return {**base_frame, "ok": False, "reason": "concept_frame_partial",
-                    "blocking_reasons": blocking}
-        inputs = _concept_core_lens_inputs(core)
-        # The LLM call (client build + one structured turn) runs off the event loop; both offline client
-        # construction and any model failure fall through derive_lens' own best-effort None / this guard.
-        def _mint():
-            client = srv.make_llm_client(srv.llm_settings(rd))
-            return derive_lens(prompt, inputs["edges"], client, concepts=inputs["concept_ids"])
-        try:
-            spec = await anyio.to_thread.run_sync(_mint)
-        except Exception:  # noqa: BLE001 — offline / no model -> soft fail, UI keeps its current lens
-            return {**base_frame, "ok": False, "reason": "no_model"}
-        if not spec:
-            return {**base_frame, "ok": False, "reason": "declined"}
+        response.headers["Vary"] = "X-LoopLab-Token, Authorization, Idempotency-Key"
+        request_digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+        reservation = None
+        compute = None
+        with srv.commands.sequence(rd):
+            rd = srv.commands.validate_paths(rd)
+            current_generation = srv.commands.run_generation(rd)
+            if not current_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_unavailable",
+                    "message": "The run has no durable generation identity.",
+                })
+            if current_generation != expected_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation,
+                    "message": "The run changed before paid lens creation began.",
+                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
+                })
+            if core[RUN_GENERATION_FIELD] != current_generation:
+                raise HTTPException(409, {
+                    "code": "run_generation_changed",
+                    "expected_generation": expected_generation,
+                    "current_generation": current_generation,
+                    "message": "The run changed while the concept frame was being prepared.",
+                    "remediation": "Reload the Concepts view and submit a new request intentionally.",
+                })
 
-        relations = list(dict.fromkeys(str(rel) for rel in (spec.get("rels") or [])))
-        name = _normalized_custom_lens_name(spec.get("name"))
-        shipped_names = {item.get("name") for item in lens_pack if isinstance(item, dict)}
-        if not name or name in shipped_names:
-            name = _normalized_custom_lens_name(
-                "derived-" + (name or "-".join(relations) or "lens"))
-        if not name:
-            return {**base_frame, "ok": False, "reason": "invalid_spec"}
-        try:
-            canonical_name, validated_spec, registration = _concept_lens_request(
-                name, ",".join(relations), lens_pack)
-        except HTTPException:
-            return {**base_frame, "ok": False, "reason": "invalid_spec"}
-        validated_spec.update({
-            "label": _bounded_lens_label(spec.get("label"), canonical_name),
-            "provenance": "agent",
-        })
-        if spec.get("root") in set(inputs["concept_ids"]):
-            validated_spec["root"] = spec["root"]
-        frame = _project_concept_frame(
-            core, requested_lens=canonical_name, lens_pack=lens_pack,
-            requested_spec=validated_spec, lens_registration=registration)
-        return {**frame, "ok": True, "spec": validated_spec}
+            job_identity = hashlib.sha256(
+                ("concept_lens\0" + run_directory_identity(rd) + "\0" + current_generation
+                 + "\0" + raw_idempotency_key).encode("utf-8")).hexdigest()
+            store = EventStore(rd / "events.jsonl")
+            claims, terminals, unresolved, conflicts = _concept_lens_ledger(
+                store.read_all(), current_generation)
+            if conflicts:
+                return _concept_lens_uncertain(
+                    base_frame, current_generation, job_identity,
+                    "The paid-lens ledger contains conflicting receipts and requires repair.")
+            existing_digest = claims.get(job_identity)
+            if existing_digest is not None and existing_digest != request_digest:
+                raise HTTPException(409, {
+                    "code": "idempotency_key_reused",
+                    "message": "This Idempotency-Key already belongs to a different lens prompt.",
+                    "remediation": "Reuse it only for the exact request, or create a new key.",
+                })
+            terminal = terminals.get(job_identity)
+            if terminal is not None:
+                if not _confirm_concept_lens_terminal(store.path):
+                    return _concept_lens_uncertain(
+                        base_frame, current_generation, job_identity,
+                        "The saved lens terminal is visible but its durable receipt is unconfirmed. "
+                        "Resume only with this same request identity.")
+                return _concept_lens_terminal_response(
+                    terminal, core, lens_pack, job_identity)
+            if unresolved:
+                if unresolved != {job_identity}:
+                    if job_identity in unresolved:
+                        return _concept_lens_uncertain(
+                            base_frame, current_generation, job_identity,
+                            "Multiple paid-lens claims overlap this run generation and require repair.")
+                    raise HTTPException(409, {
+                        "code": "concept_lens_in_progress",
+                        "message": "Another concept lens already owns this run generation.",
+                        "remediation": "Wait for its receipt or reload before trying again.",
+                    })
+                reservation = srv.jobs.rejoin(job_identity)
+                if reservation is None:
+                    return _concept_lens_uncertain(
+                        base_frame, current_generation, job_identity,
+                        "The earlier paid lens attempt has no live process receipt.")
+                compute = lambda: _run_concept_lens_worker(  # noqa: E731
+                    srv.llm_settings(rd), rd, current_generation, job_identity,
+                    request_digest, prompt, core, lens_pack)
+            else:
+                # A bounded frame is the same honest substrate already rendered by GET. Only
+                # corruption-adjacent reasons block paid work; explicit cap reasons remain visible
+                # in the derived response instead of permanently disabling lens creation.
+                blocking = [reason for reason in base_frame["completeness"]["reasons"]
+                            if reason not in _TRUNCATION_CAP_REASONS]
+                if blocking:
+                    return {
+                        **base_frame,
+                        "ok": False,
+                        "reason": "concept_frame_partial",
+                        "blocking_reasons": blocking,
+                        "generation": current_generation,
+                        "request_id": job_identity,
+                    }
+                try:
+                    settings = srv.llm_settings(rd)
+                except Exception as exc:  # noqa: BLE001 - no claim/provider exists yet
+                    failure = safe_provider_failure(exc)
+                    return {
+                        **base_frame,
+                        "ok": False,
+                        "reason": "no_model",
+                        "error_kind": failure["error_kind"],
+                        "error": failure["message"],
+                        "generation": current_generation,
+                        "request_id": job_identity,
+                    }
+                reservation = srv.jobs.reserve(job_identity, consume_on_poll=True)
+                if reservation.get("status") != "running":
+                    return {
+                        **reservation,
+                        "generation": current_generation,
+                        "request_id": job_identity,
+                    }
+                compute = lambda: _run_concept_lens_worker(  # noqa: E731
+                    settings, rd, current_generation, job_identity,
+                    request_digest, prompt, core, lens_pack)
+                try:
+                    store.append(
+                        EV_CONCEPT_LENS_STARTED,
+                        {
+                            "lens_request_id": job_identity,
+                            "generation": current_generation,
+                            "request_digest": request_digest,
+                            "input_seq": core["captured_seq"],
+                        },
+                        require_lock=True,
+                        require_durable=True,
+                    )
+                    srv.jobs.start_reserved(reservation["job_id"], compute)
+                except Exception:
+                    srv.jobs.discard_reservation(str(reservation.get("job_id") or ""))
+                    raise
+
+        result = await srv.jobs.run_as_job(
+            compute,
+            inline_wait=min(0.5, srv.jobs.inline_wait),
+            consume_inline_result=True,
+            reserved_job_id=reservation["job_id"],
+        )
+        if result.get("status") == "running":
+            return {
+                **result,
+                "generation": expected_generation,
+                "request_id": job_identity,
+            }
+        if result.get("code") == "job_failed":
+            return _concept_lens_uncertain(
+                base_frame, expected_generation, job_identity,
+                "The lens worker ended without a durable terminal receipt. Resume only with this "
+                "same request identity.")
+        return result
 
     def _assert_historical_generation(rd: Path, expected: Optional[str]) -> str:
         if expected is None:

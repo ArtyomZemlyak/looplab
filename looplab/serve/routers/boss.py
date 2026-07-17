@@ -5,12 +5,7 @@ their control-event mapping. Bodies are verbatim moves from `serve/server.py` (B
 historical `looplab.server._Action` import path keeps working for tests and callers."""
 from __future__ import annotations
 
-from contextlib import contextmanager
 import hashlib
-import os
-import sys
-import threading
-import unicodedata
 from typing import Optional
 
 import anyio
@@ -24,8 +19,6 @@ except ModuleNotFoundError as e:  # allow importing pure action models/mappers w
     APIRouter = HTTPException = Request = Response = JSONResponse = None  # type: ignore[assignment,misc]
 
 from looplab.core.atomicio import best_effort_fsync, strict_fsync
-from looplab.engine.costs import (
-    bind_run_client_cost, reconcile_cost_accountants, reconcile_usage_outbox)
 from looplab.events.eventstore import EventStore, iter_jsonl
 from looplab.events.types import (
     EV_APPROVAL_GRANTED, EV_BUDGET_EXTEND, EV_COMMENT_CREATED, EV_DEEP_RESEARCH,
@@ -36,12 +29,17 @@ from looplab.events.types import (
     EV_SPEC_APPROVED)
 from looplab.serve.assistant import safe_provider_failure
 from looplab.serve.llm_context import _boss_context, _client_tokens, _node_context
+from looplab.serve.paid_work import (
+    RunCostAccountingPending as _RunCostAccountingPending,
+    flush_durable_run_costs as _flush_durable_run_costs,
+    flush_pending_run_costs as _flush_pending_run_costs,
+    metered_run_client as _metered_run_client,
+    pending_run_cost_key as _pending_run_cost_key,  # noqa: F401 - compatibility seam
+    pending_run_cost_state as _pending_run_cost_state,  # noqa: F401 - compatibility seam
+    run_directory_identity as _report_run_identity,
+)
 from looplab.serve.protocol import EXPECTED_RUN_GENERATION_FIELD
 from looplab.serve.serve_prompts import CHAT_SYSTEM, COMMAND_SYSTEM, COMPACT_SYSTEM
-
-
-class _RunCostAccountingPending(RuntimeError):
-    """A prior paid call cannot yet be durably attributed to this run."""
 
 
 def _safe_boss_failure(exc: Exception) -> dict:
@@ -60,151 +58,6 @@ def _safe_boss_failure(exc: Exception) -> dict:
 # (boss mode auto-applies them in order, then reopens/resumes the run ONCE if any step needs the
 # engine). An empty actions list = pure conversation (only the reply is shown).
 from pydantic import BaseModel  # noqa: E402
-
-
-_PENDING_RUN_COST_INIT = threading.Lock()
-
-
-def _pending_run_cost_state(
-        srv) -> tuple[threading.Lock, dict[str, list[dict]], dict[str, threading.Lock]]:
-    """Return the app-owned registry for paid deltas awaiting a durable event append.
-
-    The registry deliberately lives on ``srv`` rather than in module-global run state: each FastAPI
-    app/test instance has an independent run root and command service.  Initialization itself is
-    serialized because two first-time boss requests may arrive concurrently.
-    """
-    with _PENDING_RUN_COST_INIT:
-        lock = getattr(srv, "_pending_run_cost_lock", None)
-        pending = getattr(srv, "_pending_run_costs", None)
-        flush_locks = getattr(srv, "_pending_run_cost_flush_locks", None)
-        if lock is None or not isinstance(pending, dict) or not isinstance(flush_locks, dict):
-            lock = threading.Lock()
-            pending = {}
-            flush_locks = {}
-            setattr(srv, "_pending_run_cost_lock", lock)
-            setattr(srv, "_pending_run_costs", pending)
-            setattr(srv, "_pending_run_cost_flush_locks", flush_locks)
-        return lock, pending, flush_locks
-
-
-def _pending_run_cost_key(run_dir) -> str:
-    # Match the command service's case-insensitive identity discipline on Windows/default macOS: two
-    # request spellings for the same directory must share one pending ledger + per-run flush lock.
-    return os.path.normcase(str(run_dir.resolve()))
-
-
-def _retain_pending_run_cost(srv, run_dir, generation: str, ledger, activity_ctx) -> None:
-    lock, pending, _flush_locks = _pending_run_cost_state(srv)
-    entry = {
-        "generation": generation,
-        "ledger": ledger,
-        "activity_ctx": activity_ctx,
-    }
-    with lock:
-        pending.setdefault(_pending_run_cost_key(run_dir), []).append(entry)
-
-
-def _flush_durable_run_costs_unlocked(run_dir) -> bool:
-    """Drain prior-process usage into this generation's event log without touching activities."""
-    try:
-        return reconcile_usage_outbox(EventStore(run_dir / "events.jsonl"))
-    except Exception:  # noqa: BLE001 - every destructive caller must fail closed
-        return False
-
-
-def _flush_durable_run_costs(srv, run_dir) -> bool:
-    """Serialize a store-only drain with every in-process full-ledger flush for this run."""
-    key = _pending_run_cost_key(run_dir)
-    lock, _pending, flush_locks = _pending_run_cost_state(srv)
-    with lock:
-        flush_lock = flush_locks.setdefault(key, threading.Lock())
-    # Destructive callers already own the command sequencer. A full flush can close a retained
-    # activity context and need that sequencer, so waiting here would invert the two locks. Refuse
-    # this destructive attempt instead; its pre-sequence full flush or a retry will drain safely.
-    if not flush_lock.acquire(blocking=False):
-        return False
-    try:
-        return _flush_durable_run_costs_unlocked(run_dir)
-    finally:
-        flush_lock.release()
-
-
-def _flush_pending_run_costs(srv, run_dir) -> bool:
-    """Retry retained same-ID deltas for one run without issuing another provider request.
-
-    A failed sink append leaves its ``run_activity`` context entered, so reset/delete remains blocked
-    and this usage can never drift into a replacement generation.  Successful reconciliation closes
-    that exact context and releases its activity claim.  Failed entries are put back for an explicit
-    later flush or the next metered boss request; there is intentionally no retry loop/background
-    provider work here.
-    """
-    key = _pending_run_cost_key(run_dir)
-    lock, pending, flush_locks = _pending_run_cost_state(srv)
-    with lock:
-        # I/O is serialized only per run. Without this second lock, temporarily popping the entries
-        # below lets a concurrent request observe an empty registry and start another paid provider
-        # call while the first delta is still nondurable.
-        flush_lock = flush_locks.setdefault(key, threading.Lock())
-    with flush_lock:
-        # The run-local outbox survives a server restart, while ``pending`` deliberately does not.
-        # Drain it before the RAM-registry fast path so a fresh AppState cannot reset/delete past a
-        # paid delta whose original process died after the atomic outbox write.
-        if not _flush_durable_run_costs_unlocked(run_dir):
-            return False
-        with lock:
-            entries = pending.pop(key, [])
-        if not entries:
-            return True
-
-        retained = []
-        for entry in entries:
-            try:
-                same_generation = srv.commands.run_generation(run_dir) == entry["generation"]
-                durable = same_generation and reconcile_cost_accountants(entry["ledger"])
-            except Exception:  # noqa: BLE001 - retain known usage and its destructive-operation lease
-                durable = False
-            if not durable:
-                retained.append(entry)
-                continue
-            # ``run_activity`` owns best-effort cleanup of its claim under the command sequencer. Its
-            # generator holds no lock across yield, so exiting it from this request thread is safe.
-            entry["activity_ctx"].__exit__(None, None, None)
-
-        if retained:
-            with lock:
-                # A concurrent metered call may have retained another ledger after our initial pop.
-                pending.setdefault(key, []).extend(retained)
-        with lock:
-            return not pending.get(key)
-
-
-@contextmanager
-def _metered_run_client(srv, settings, run_dir, generation):
-    """Attribute one UI-side model client to the same durable run ledger as engine roles."""
-    # Flush known prior deltas before incurring another provider charge.  If storage is still
-    # unavailable, fail this new call before client construction while the old generation lease stays
-    # live; the caller's normal offline/degraded response path handles the exception.
-    if not _flush_pending_run_costs(srv, run_dir):
-        raise _RunCostAccountingPending
-
-    activity_ctx = srv.commands.run_activity(run_dir, "ui_llm", generation=generation)
-    activity_ctx.__enter__()
-    retained = False
-    try:
-        client = srv.make_llm_client(settings)
-        ledger = bind_run_client_cost(client, EventStore(run_dir / "events.jsonl"))
-        try:
-            yield client
-        finally:
-            # Normal sinks are synchronous; this retries only a known, same-ID telemetry append and
-            # never repeats the provider call. The route's primary result remains best-effort/offline.
-            if not reconcile_cost_accountants(ledger):
-                _retain_pending_run_cost(
-                    srv, run_dir, generation, ledger, activity_ctx)
-                retained = True
-    finally:
-        if not retained:
-            activity_ctx.__exit__(None, None, None)
 
 
 _DOMAIN_HTTP_FAILURES = {
@@ -339,16 +192,6 @@ def _record_report_refresh_failure(srv, run_dir, generation: str, identity: str,
         return True
     except Exception:  # noqa: BLE001 - an unresolved claim remains fail-closed after storage failure
         return False
-
-
-def _report_run_identity(run_dir) -> str:
-    """Stable direct-child identity with desktop filesystem case/Unicode semantics."""
-    identity = run_dir.name
-    if os.name == "nt":
-        return os.path.normcase(identity)
-    if sys.platform == "darwin":
-        return unicodedata.normalize("NFD", identity).casefold()
-    return identity
 
 
 def _run_report_refresh_worker(srv, settings, run_dir, generation: str,

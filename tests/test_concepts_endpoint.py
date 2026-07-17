@@ -196,6 +196,10 @@ def _lens_body(client, prompt):
     return {"prompt": prompt, "expected_generation": generation}
 
 
+def _lens_headers(key="concept-lens-test"):
+    return {"Idempotency-Key": key}
+
+
 def _edge_run(root):
     rd = root / "demo"
     rd.mkdir(parents=True, exist_ok=True)
@@ -218,7 +222,8 @@ def test_derive_lens_endpoint_mints_and_projects(tmp_path, monkeypatch):
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
     r = client.post("/api/runs/demo/concepts/lens",
-                    json=_lens_body(client, "group by what uses what"))
+                    json=_lens_body(client, "group by what uses what"),
+                    headers=_lens_headers())
     assert r.status_code == 200
     assert r.headers["cache-control"] == "no-store"
     data = r.json()
@@ -243,7 +248,8 @@ def test_derive_lens_endpoint_soft_fails_when_model_declines(tmp_path, monkeypat
                         lambda *a, **k: _LensClient({"rels": ["teleports_to"]}))
     client = TestClient(make_app(tmp_path))
     data = client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "nonsense")).json()
+                       json=_lens_body(client, "nonsense"),
+                       headers=_lens_headers()).json()
     assert data["ok"] is False and data["reason"] == "declined"
 
 
@@ -256,7 +262,8 @@ def test_derive_lens_endpoint_soft_fails_offline(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mod, "make_llm_client", _boom)
     client = TestClient(make_app(tmp_path))
     data = client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "group by usage")).json()
+                       json=_lens_body(client, "group by usage"),
+                       headers=_lens_headers()).json()
     assert data["ok"] is False and data["reason"] == "no_model"
 
 
@@ -284,7 +291,7 @@ def test_derive_lens_fences_generation_before_paid_provider_call(tmp_path, monke
     stale = "0" * 64 if current != "0" * 64 else "1" * 64
     response = client.post("/api/runs/demo/concepts/lens", json={
         "prompt": "group by usage", "expected_generation": stale,
-    })
+    }, headers=_lens_headers())
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "run_generation_changed"
     assert called is False
@@ -295,9 +302,9 @@ def test_derive_lens_fences_generation_before_paid_provider_call(tmp_path, monke
     assert called is False
 
 
-def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
-    # A lens is a pure PROJECTION — deriving one must append ZERO events (invariant 3: every side effect
-    # is gated on a domain event; the lens writes none, so replay is unaffected). Lock it in.
+def test_derive_lens_endpoint_writes_only_diagnostic_receipts(tmp_path, monkeypatch):
+    # The projection remains domain-replay-clean while paid-work claim and terminal receipts survive
+    # process loss in the diagnostic event channel.
     rd = _edge_run(tmp_path)
     log = rd / "events.jsonl"
     before = log.read_text().count("\n")
@@ -306,8 +313,12 @@ def test_derive_lens_endpoint_is_replay_clean(tmp_path, monkeypatch):
                         lambda *a, **k: _LensClient({"name": "Usage", "label": "By usage", "rels": ["uses"]}))
     client = TestClient(make_app(tmp_path))
     assert client.post("/api/runs/demo/concepts/lens",
-                       json=_lens_body(client, "group by usage")).json()["ok"] is True
-    assert log.read_text().count("\n") == before   # no events appended by the projection
+                       json=_lens_body(client, "group by usage"),
+                       headers=_lens_headers()).json()["ok"] is True
+    events = EventStore(log).read_all()
+    assert log.read_text().count("\n") == before + 2
+    assert [event.type for event in events[-2:]] == [
+        "concept_lens_started", "concept_lens_completed"]
 
 
 def test_concepts_get_rejects_malformed_rels_without_500(tmp_path):
@@ -534,7 +545,6 @@ def test_derive_lens_caps_body_prompt(tmp_path):
     too_large = client.post("/api/runs/demo/concepts/lens", json={"prompt": "x" * 5_000})
     assert too_large.status_code == 413 and too_large.headers["cache-control"] == "no-store"
 
-
 def test_derive_lens_mints_against_cap_truncated_partial_frame(tmp_path, monkeypatch):
     # REVIEW(2026-07-16): a cap-truncated (partial) frame is a faithful minting substrate — the SAME
     # bounded frame the GET path serves and the UI renders. A monotone cap must NOT permanently refuse
@@ -551,7 +561,8 @@ def test_derive_lens_mints_against_cap_truncated_partial_frame(tmp_path, monkeyp
     monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 1)  # force a monotone membership_cap
     client = TestClient(make_app(tmp_path))
     body = _lens_body(client, "group by usage")
-    resp = client.post("/api/runs/demo/concepts/lens", json=body)
+    resp = client.post("/api/runs/demo/concepts/lens", json=body,
+                       headers=_lens_headers("cap-truncated-mint"))
     payload = resp.json()
     assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
     assert payload["ok"] is True and payload["lens"] == "usage"       # minted, not refused
@@ -585,7 +596,8 @@ def test_derive_lens_refuses_corrupt_source(tmp_path):
     body = _lens_body(client, "group by usage")
     with (tmp_path / "demo" / "events.jsonl").open("ab") as stream:
         stream.write(b"{not-json}\n")
-    resp = client.post("/api/runs/demo/concepts/lens", json=body)
+    resp = client.post("/api/runs/demo/concepts/lens", json=body,
+                       headers=_lens_headers("corrupt-frame-refusal"))
     payload = resp.json()
     assert resp.status_code == 200 and resp.headers["cache-control"] == "no-store"
     assert payload["ok"] is False and payload["reason"] == "concept_frame_partial"

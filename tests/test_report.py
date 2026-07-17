@@ -1396,6 +1396,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
     from looplab.core.llm import CostAccountant
     from looplab.events.types import EV_LLM_USAGE
     import looplab.serve.routers.boss as boss_router
+    import looplab.serve.paid_work as paid_work
 
     run_dir = tmp_path / "run"
     generation = "generation-a"
@@ -1449,7 +1450,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
         return client
 
     srv = SimpleNamespace(commands=commands, make_llm_client=make_client)
-    monkeypatch.setattr(boss_router, "EventStore", lambda _path: store)
+    monkeypatch.setattr(paid_work, "EventStore", lambda _path: store)
 
     # The original provider result is known, but both its synchronous sink append and context-exit
     # reconciliation fail. Its ledger + activity context must therefore remain retained.
@@ -1458,7 +1459,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
             "prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7})
     assert len(clients) == 1 and commands.active == 1 and store.usage_attempts == 2
 
-    original_reconcile = boss_router.reconcile_cost_accountants
+    original_reconcile = paid_work.reconcile_cost_accountants
     flush_entered = threading.Event()
     release_flush = threading.Event()
 
@@ -1467,7 +1468,7 @@ def test_pending_cost_flush_serializes_same_run_before_new_provider(tmp_path, mo
         assert release_flush.wait(5), "test did not release the retained-ledger flush"
         return original_reconcile(ledger)
 
-    monkeypatch.setattr(boss_router, "reconcile_cost_accountants", blocked_reconcile)
+    monkeypatch.setattr(paid_work, "reconcile_cost_accountants", blocked_reconcile)
 
     def start_second_metered_call():
         with boss_router._metered_run_client(srv, object(), run_dir, generation):

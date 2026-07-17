@@ -1151,7 +1151,8 @@ def project_lens(concept_ids, edges, lens="co_occurs", *, touch=None) -> dict:
     return {"lens": lens_name, "roots": roots, "nodes": nodes}
 
 
-def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_call") -> Optional[dict]:
+def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_call",
+                raise_on_failure: bool = False) -> Optional[dict]:
     """Agentically MINT a lens in the moment from a natural-language request — the "create a lens" tool.
     A lens is a pure PROJECTION spec (a relation-subset + optional root + labels); it writes NO events
     and grows NO edges, so it is entirely view-state and REPLAY-CLEAN. The model picks which of the
@@ -1205,7 +1206,11 @@ def derive_lens(prompt, edges, client, *, concepts=None, parser: str = "tool_cal
         if root and root in set(vocab):
             spec["root"] = root
         return spec
-    except Exception:  # noqa: BLE001 — minting a lens is best-effort; fall back to a default lens
+    except Exception:
+        if raise_on_failure:
+            raise
+        # Non-HTTP callers remain deliberately best-effort. The paid endpoint opts into the strict
+        # path so a transport failure can never be reported as an authoritative model decline.
         return None
 
 

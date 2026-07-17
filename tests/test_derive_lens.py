@@ -1,6 +1,8 @@
 """Phase 3b: derive_lens mints a LENS from a natural-language request. A lens is a pure projection
 spec (rel-subset + optional root); it writes no events -> replay-clean. Best-effort: degrades to None
 so the caller falls back to a default lens. The result feeds project_lens/project_hierarchy."""
+import pytest
+
 from looplab.search.concept_graph import derive_lens, project_lens
 
 
@@ -73,3 +75,8 @@ def test_hallucinated_root_not_in_vocab_is_dropped():
 
 def test_failure_degrades_to_none():
     assert derive_lens("x", _EDGES, _BoomClient()) is None
+
+
+def test_strict_failure_is_visible_to_paid_protocol():
+    with pytest.raises(RuntimeError, match="boom"):
+        derive_lens("x", _EDGES, _BoomClient(), raise_on_failure=True)

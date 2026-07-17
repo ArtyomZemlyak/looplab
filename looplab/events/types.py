@@ -234,6 +234,9 @@ EV_COMMAND_ACK = "command_ack"                  # engine folded a server command
 EV_FINALIZE_STEP = "finalize_step"              # one logical finalize's replay-safe step gate
 EV_REPORT_REFRESH_STARTED = "report_refresh_started"  # durable paid-work/idempotency claim
 EV_REPORT_REFRESH_FAILED = "report_refresh_failed"    # sanitized terminal receipt; no report written
+EV_CONCEPT_LENS_STARTED = "concept_lens_started"      # durable paid projection/idempotency claim
+EV_CONCEPT_LENS_COMPLETED = "concept_lens_completed"  # validated spec or authoritative decline
+EV_CONCEPT_LENS_FAILED = "concept_lens_failed"        # retry-safe pre-provider terminal failure
 EV_SETUP_STARTED = "setup_started"
 EV_SETUP_STEP = "setup_step"
 EV_SETUP_FINISHED = "setup_finished"
@@ -279,6 +282,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_READMODEL_SKIPPED, EV_DEPS_INSTALLED, EV_WORKSPACE_SEEDED, EV_RUN_SETUP_STARTED,
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
+    EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
 })
