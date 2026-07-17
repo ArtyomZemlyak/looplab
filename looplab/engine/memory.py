@@ -653,6 +653,18 @@ def _valid_capsule_record(capsule) -> bool:
                and _finite_metric(value) for key, value in outcomes.items())
 
 
+def _dedup_valid_capsules(capsules) -> list[dict]:
+    """Quarantine + deterministically de-duplicate a raw capsule sequence: keep only valid records, collapse
+    duplicate run ids (the LAST durable row wins, matching the store's upsert contract), and return them in
+    sorted-run-id order. Shared by the portfolio read-models, which a caller may feed raw decoded rows rather
+    than routing through ConceptCapsuleStore — so each must apply the same quarantine consistently."""
+    by_run: dict[str, dict] = {}
+    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
+        if _valid_capsule_record(capsule):
+            by_run[capsule["run_id"]] = capsule
+    return [by_run[run_id] for run_id in sorted(by_run)]
+
+
 # A concept whose outcome sits within this fraction of the run's own outcome SPREAD around the median is
 # scored NEUTRAL, not forced onto a side. Without it a median split labels ~half the concepts helped and
 # half hurt every run (a weak, self-balancing signal); the band lets only concepts that clearly out- or
@@ -851,14 +863,7 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     concept per that run's OWN sibling concepts. The raw per-run tags are untouched (non-destructive)."""
     from looplab.engine.concept_registry import canonicalize_concept, canonicalize_concepts
 
-    # A caller may pass raw decoded rows rather than going through ConceptCapsuleStore. Apply the same
-    # quarantine here, and collapse duplicate run ids deterministically (the last durable row wins, as the
-    # store's upsert contract specifies).
-    by_run = {}
-    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
-        if _valid_capsule_record(capsule):
-            by_run[capsule["run_id"]] = capsule
-    valid_capsules = [by_run[run_id] for run_id in sorted(by_run)]
+    valid_capsules = _dedup_valid_capsules(capsules)
 
     per_concept: dict[str, dict] = {}
     for c in valid_capsules:
@@ -949,11 +954,7 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
     run's siblings). Everything is bounded; omission counters describe the full validated snapshot."""
     from looplab.engine.concept_registry import canonicalize_concepts
 
-    by_run: dict[str, dict] = {}
-    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
-        if _valid_capsule_record(capsule):
-            by_run[capsule["run_id"]] = capsule
-    valid_capsules = [by_run[run_id] for run_id in sorted(by_run)]
+    valid_capsules = _dedup_valid_capsules(capsules)
 
     concept_runs: dict[str, set] = {}
     pair_runs: dict[tuple, set] = {}
