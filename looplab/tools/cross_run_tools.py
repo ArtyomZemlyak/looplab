@@ -26,6 +26,7 @@ _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
+    "cross_run_concept_map",
 })
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 _MAX_TOOL_RESULT_CHARS = 16_000
@@ -122,6 +123,13 @@ class CrossRunTools:
                 "worse half of their run across similar runs — advisory, not a rule), concepts observed in "
                 "one returned run, and mixed-evidence claim records. It has no frozen scope or coverage "
                 "denominator, so one-run observations are not proof of a gap.",
+                {}, []),
+            fn_spec("cross_run_concept_map",
+                "The GLOBAL cross-run concept MAP: the shared concept taxonomy across returned runs — which "
+                "concepts appear most, their path hierarchy (is_a), and which concept PAIRS reliably "
+                "co-occur across MULTIPLE runs (evidence of related directions). Use it to see the big "
+                "picture of what the portfolio has explored and how concepts relate, before proposing. "
+                "Advisory map, never a rule.",
                 {}, []),
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
@@ -292,6 +300,30 @@ class CrossRunTools:
                 lines.append("Mixed-evidence claim records: "
                              + "; ".join(f"UNTRUSTED_MEMORY={_safe_text(c.get('statement'), 160)!r}"
                                          for c in atlas["contradictions"][:4]))
+            return "\n".join(lines)
+
+        if name == "cross_run_concept_map":
+            # PART V Phase 4/5: the global cross-run concept graph. Scoped to this run's task family when
+            # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
+            # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
+            from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+            from looplab.engine.memory import portfolio_concept_graph
+            graph = portfolio_concept_graph(self._scoped_capsules(),
+                                            aliases=load_concept_aliases(self.dir),
+                                            splits=load_concept_splits(self.dir))
+            if not graph["concepts"]:
+                return "(no cross-run concepts yet)"
+            lines = [f"Global concept map: {graph['n_concepts']} concept(s) across {graph['n_runs']} run(s)."]
+            top = graph["concepts"][:12]
+            lines.append("Most explored: " + ", ".join(
+                f"UNTRUSTED_MEMORY={_safe_text(e['concept'], 120)!r}(×{e['n_runs']})" for e in top))
+            cooc = [e for e in graph["edges"] if e["rel"] == "co_occurs"][:8]
+            if cooc:
+                lines.append("Concept pairs that co-occur across runs: " + "; ".join(
+                    f"{_safe_text(e['src'], 80)!r}+{_safe_text(e['dst'], 80)!r}(×{e['n_runs']})" for e in cooc))
+            if graph["concepts_omitted"] or graph["edges_omitted"]:
+                lines.append(f"(+{graph['concepts_omitted']} concept(s), {graph['edges_omitted']} edge(s) "
+                             "beyond the display cap)")
             return "\n".join(lines)
 
         if name == "cross_run_search":

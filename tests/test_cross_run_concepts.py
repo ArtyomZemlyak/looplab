@@ -95,6 +95,42 @@ def test_portfolio_overview_net_combines_opposite_signs_on_canonical_collapse():
     assert "loss/x" in rows and rows["loss/x"]["n_helped"] == 1 and rows["loss/x"]["n_hurt"] == 0
 
 
+def test_portfolio_concept_graph_builds_cross_run_cooccurrence_and_paths():
+    # PART V Phase 4/5: the GLOBAL cross-run concept map — nodes with run counts, is_a path spine, and
+    # co_occurs edges weighted by DISTINCT runs a pair appeared together in (min_cooccurrence gate).
+    from looplab.engine.memory import portfolio_concept_graph
+    caps = [
+        build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                              concepts=["loss/contrastive/dcl", "arch/moe"], concept_outcomes={}),
+        build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
+                              concepts=["loss/contrastive/dcl", "arch/moe"], concept_outcomes={}),
+        build_concept_capsule(run_id="r3", fingerprint=["k"], direction="max",
+                              concepts=["loss/contrastive/dcl", "data/aug"], concept_outcomes={}),
+    ]
+    g = portfolio_concept_graph(caps, min_cooccurrence=2)
+    cruns = {c["concept"]: c["n_runs"] for c in g["concepts"]}
+    assert cruns["loss/contrastive/dcl"] == 3 and cruns["arch/moe"] == 2
+    edges = {(e["src"], e["rel"], e["dst"]) for e in g["edges"]}
+    assert ("loss/contrastive/dcl", "is_a", "loss/contrastive") in edges     # path spine
+    assert ("loss/contrastive", "is_a", "loss") in edges                     # materialized ancestor
+    assert ("arch/moe", "is_a", "arch") in edges
+    cooc = {(e["src"], e["dst"]): e["n_runs"] for e in g["edges"] if e["rel"] == "co_occurs"}
+    assert cooc[("arch/moe", "loss/contrastive/dcl")] == 2                   # co-occurred in r1 + r2 (sorted pair)
+    assert ("data/aug", "loss/contrastive/dcl") not in cooc                  # only 1 run -> below min_cooccurrence
+
+
+def test_portfolio_concept_graph_honors_alias_governance_and_is_deterministic():
+    from looplab.engine.memory import portfolio_concept_graph
+    caps = [build_concept_capsule(run_id=f"r{i}", fingerprint=["k"], direction="max",
+                                  concepts=["loss/a", "loss/b"], concept_outcomes={}) for i in range(3)]
+    aliases = {"loss/b": "loss/a"}                          # merge b into a -> the pair collapses to one node
+    g = portfolio_concept_graph(caps, aliases=aliases, min_cooccurrence=2)
+    names = {c["concept"] for c in g["concepts"]}
+    assert "loss/a" in names and "loss/b" not in names     # aliased away
+    # deterministic: same input -> byte-identical result
+    assert g == portfolio_concept_graph(caps, aliases=aliases, min_cooccurrence=2)
+
+
 def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
     from looplab.engine.memory import portfolio_concept_overview
     caps = [

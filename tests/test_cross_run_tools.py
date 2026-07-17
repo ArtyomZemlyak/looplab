@@ -41,7 +41,8 @@ def test_no_memory_dir_offers_no_tools():
 def test_specs_are_read_only():
     t = CrossRunTools("/tmp/whatever")
     names = {s["function"]["name"] for s in t.specs()}
-    assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search"}
+    assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
+                     "cross_run_concept_map"}
     # no create/update/delete/ratify tool is exposed — advisory only (§22.4)
     assert not any(re for re in names if any(w in re for w in ("write", "edit", "add", "ratify", "delete")))
 
@@ -150,6 +151,20 @@ def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
     assert "rank tendency" in out and "not a rule" in out
     assert "RANK BETTER" in out and "loss/win" in out
     assert "RANK WORSE" in out and "loss/lose" in out
+
+
+def test_concept_map_tool_renders_global_graph(tmp_path):
+    # PART V Phase 4/5: the global cross-run concept map — most-explored concepts + cross-run co-occurrences.
+    _seed(tmp_path, capsules=[
+        _cap("r1", ["loss/dcl", "arch/moe"], {}),
+        _cap("r2", ["loss/dcl", "arch/moe"], {}),
+    ])
+    out = CrossRunTools(tmp_path).execute("cross_run_concept_map", {})
+    assert "Global concept map:" in out
+    assert "loss/dcl" in out and "arch/moe" in out
+    assert "co-occur across runs" in out and "×2" in out       # the pair appeared together in 2 runs
+    assert isinstance(CrossRunTools(tmp_path).specs(), list)
+    assert "cross_run_concept_map" in {s["function"]["name"] for s in CrossRunTools(tmp_path).specs()}
 
 
 def test_execute_never_raises_on_junk(tmp_path):

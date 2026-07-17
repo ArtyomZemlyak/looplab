@@ -927,6 +927,79 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     return result
 
 
+_MAX_GRAPH_CONCEPTS = 512
+_MAX_GRAPH_EDGES = 2_048
+_MAX_GRAPH_PER_CONCEPT_CONCEPTS = 256   # cap a single run's concept set before the O(k^2) pairing
+
+
+def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = None,
+                            splits: Optional[dict] = None, min_cooccurrence: int = 2) -> dict:
+    """PART V Phase 4/5: the GLOBAL cross-run concept MAP — a portfolio-level graph aggregated over concept
+    capsules. Pure/deterministic, no LLM/IO, drillable. This is the 'мега общая карта концептов': a shared
+    taxonomy view across every returned run. ADVISORY — a read-model, never a selection input.
+
+    Nodes: each canonical concept seen across runs, with `n_runs` (how many runs explored it). Edges:
+      - `is_a` : the concept's immediate PATH parent (`a/b/c` -> `a/b`), so the map has a spine even with
+                 one run — asserted structure, `n_runs` = runs where the child appears.
+      - `co_occurs` : an UNORDERED concept PAIR that appeared TOGETHER in the same run's capsule, weighted by
+                 the number of DISTINCT runs the pair co-occurred in (cross-run evidence — the same reason
+                 the profit sign aggregates: a per-run boolean counted across runs). Only pairs meeting
+                 `min_cooccurrence` (default 2 runs) are kept, so a single-run coincidence is not an edge.
+    Canonicalized through aliases/splits like the overview (purged concepts drop; a split re-tags per that
+    run's siblings). Everything is bounded; omission counters describe the full validated snapshot."""
+    from looplab.engine.concept_registry import canonicalize_concepts
+
+    by_run: dict[str, dict] = {}
+    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
+        if _valid_capsule_record(capsule):
+            by_run[capsule["run_id"]] = capsule
+    valid_capsules = [by_run[run_id] for run_id in sorted(by_run)]
+
+    concept_runs: dict[str, set] = {}
+    pair_runs: dict[tuple, set] = {}
+    for c in valid_capsules:
+        rid = str(c.get("run_id") or "")
+        canon = sorted(set(canonicalize_concepts(
+            (c.get("concepts") or [])[:_MAX_GRAPH_PER_CONCEPT_CONCEPTS], aliases=aliases, splits=splits)))
+        for cid in canon:
+            concept_runs.setdefault(cid, set()).add(rid)
+        for i, a in enumerate(canon):                       # unordered pairs (sorted -> a < b), one run each
+            for b in canon[i + 1:]:
+                pair_runs.setdefault((a, b), set()).add(rid)
+
+    # is_a spine from the concept PATHS (materialize each ancestor prefix as a node too).
+    prefixes: set[str] = set()
+    for cid in list(concept_runs):
+        parts = cid.split("/")
+        for depth in range(1, len(parts)):
+            prefixes.add("/".join(parts[:depth]))
+    for pfx in prefixes:
+        concept_runs.setdefault(pfx, set())
+
+    concepts = sorted(concept_runs, key=lambda cid: (-len(concept_runs[cid]), cid))
+    kept = set(concepts[:_MAX_GRAPH_CONCEPTS])
+    edges: list[dict] = []
+    for cid in sorted(kept):
+        parent = cid.rsplit("/", 1)[0] if "/" in cid else ""
+        if parent and parent in kept:
+            edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": len(concept_runs[cid])})
+    cooc = sorted(((a, b, runs) for (a, b), runs in pair_runs.items()
+                   if len(runs) >= max(1, int(min_cooccurrence)) and a in kept and b in kept),
+                  key=lambda t: (-len(t[2]), t[0], t[1]))
+    for a, b, runs in cooc:
+        if len(edges) >= _MAX_GRAPH_EDGES:
+            break
+        edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": len(runs)})
+    return {
+        "n_runs": len(valid_capsules),
+        "n_concepts": len(concepts),
+        "concepts": [{"concept": cid, "n_runs": len(concept_runs[cid])} for cid in concepts[:_MAX_GRAPH_CONCEPTS]],
+        "edges": edges[:_MAX_GRAPH_EDGES],
+        "concepts_omitted": max(0, len(concepts) - _MAX_GRAPH_CONCEPTS),
+        "edges_omitted": max(0, len(cooc) + sum(1 for e in edges if e["rel"] == "is_a") - len(edges)),
+    }
+
+
 def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
                      splits: Optional[dict] = None) -> dict:
     """PART IV cross-run Step 7 (lean, GATED): a flat, display-only rollup above the concept overview.
