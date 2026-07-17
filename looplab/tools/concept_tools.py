@@ -356,14 +356,18 @@ class ConceptGovernanceTools:
         if kind not in ("alias", "split"):
             return "(concept_edit_clear needs kind='alias' (merge/purge) or kind='split')"
         from looplab.engine.concept_registry import (
-            _TOMBSTONE, clear_concept_alias, clear_concept_split,
-            concept_governance_snapshot, prepare_concept_source)
+            clear_concept_alias, clear_concept_split,
+            concept_governance_snapshot, prepare_concept_source, resolve_slug)
         source = prepare_concept_source(concept)
         payload = {"from": source, "kind": kind, "action": "clear"}
         preview = (f"clear {kind} policy for {_memory(source)}; "
                    f"exact_payload_sha256={_semantic_digest(payload)}")
         snapshot = concept_governance_snapshot(self.dir)
-        is_unpurge = kind == "alias" and snapshot["aliases"].get(source) == _TOMBSTONE
+        # CODEX AGENT: a source may be purged directly or through an alias chain. Clearing either
+        # active source edge re-exposes content, so both paths receive the central HIGH action identity;
+        # exact CAS keeps this classification valid through the approval pause.
+        is_unpurge = (kind == "alias"
+                      and resolve_slug(source, snapshot["aliases"]) is None)
         tool_name = "concept_unpurge" if is_unpurge else "concept_edit_clear"
         operation = "unpurge" if is_unpurge else f"clear_{kind}"
         ledger = "aliases" if kind == "alias" else "splits"
