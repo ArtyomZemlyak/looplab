@@ -136,6 +136,7 @@ class EngineOptions:
     capability_expansion: bool = False   # PART IV 2b: D7 capability-expansion forced-jump directive on lock-in
     fingerprint_universal: bool = False  # PART IV CR Step 0: universal (any-script) task-fingerprint tokens
     cross_run_concepts: bool = False     # PART IV CR Step 2: surface prior-run concept outcomes (audit-only)
+    concept_run_base: bool = False        # PART V B: run-base + node-delta concept authoring (opt-in)
     cross_run_advisory: bool = False     # PART IV CR Step 5: fold the cross-run context pack into the prompt
     cross_run_structured_claims: bool = False  # PART IV CR §21.20.13: scope+polarity-safe structured claim key
     cross_run_curation: bool = False     # PART IV §22.4: agentic taxonomy steward proposes merge/split/purge

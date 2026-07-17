@@ -42,6 +42,7 @@ EXPECTED = {
     "concept_pivot": (True, False),
     "graded_novelty": (True, False),
     "cross_run_concepts": (True, False),
+    "concept_run_base": (True, False),
     "cross_run_structured_claims": (True, False),
     "cross_run_curation": (True, False),
     "cross_run_advisory": (True, False),

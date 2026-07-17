@@ -21,13 +21,14 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        validate_strategy)
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS,
-                                  EV_NODE_CONCEPTS, EV_STRATEGY_DECISION, EV_VERIFIER_GROUP_SCORED)
+                                  EV_NODE_CONCEPTS, EV_RUN_CONCEPTS, EV_STRATEGY_DECISION,
+                                  EV_VERIFIER_GROUP_SCORED)
 from looplab.search.coverage import coverage_signal
 from looplab.search.policy import available_policies, make_policy, operator_yields
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
@@ -417,6 +418,25 @@ class StrategyCadenceMixin:
             return state
         self.store.append(EV_CONCEPT_COVERAGE_SNAPSHOT, {"at_node": n, **snap})
         return fold(self.store.read_all())
+
+    def _maybe_seed_run_base_concepts(self, state: RunState) -> RunState:
+        """PART V (B): seed `run_base_concepts` ONCE from the first evaluated node's AUTHORED concepts when
+        `concept_run_base` is on. Idempotent + replay-safe: the gate is "base is empty", so once the
+        EV_RUN_CONCEPTS is in the log every resume folds a populated base and this never re-emits. Only the
+        main task appends it (invariant 1). No-op while off or until a node has authored concepts."""
+        if not getattr(self, "_concept_run_base", False):
+            return state
+        if state.run_base_concepts:                       # already seeded -> never re-emit (idempotent)
+            return state
+        prov = getattr(state, "node_concept_provenance", None) or {}
+        # First evaluated node whose concepts the RESEARCHER authored (not a classifier tag) — the run's
+        # common tech stack. Deterministic (id-sorted). Downstream nodes then author only deltas vs this.
+        for node in sorted(state.evaluated_nodes(), key=lambda x: x.id):
+            concepts = state.node_concepts.get(node.id)
+            if concepts and prov.get(node.id) == NODE_CONCEPT_PROVENANCE_AUTHORED:
+                self.store.append(EV_RUN_CONCEPTS, {"concepts": list(concepts)})
+                return fold(self.store.read_all())
+        return state
 
     def _concept_coverage_snapshot(self, state: RunState) -> Optional[dict]:
         """The compact concept-coverage record (uncovered regions + top-concentration + lock-in).

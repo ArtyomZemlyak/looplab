@@ -5,8 +5,16 @@ the fold POST-PASS materializes node_concepts = run_base ∪ inherited − remov
 is a topological read over the fully-folded DAG, so `fold` stays ORDER-TOLERANT (invariant 5). A
 classifier/operator event still wins over an authored delta.
 """
+from types import SimpleNamespace
+
+from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+
+
+def _seed_host(store, *, concept_run_base=True):
+    """Minimal host for the engine's base-seeding cadence method (reads _concept_run_base + store)."""
+    return SimpleNamespace(_concept_run_base=concept_run_base, store=store)
 
 
 def _store(tmp_path):
@@ -112,3 +120,40 @@ def test_overridden_delta_parent_contributes_its_real_set_to_children(tmp_path):
     # node1 inherits the PARENT's effective set (the classifier's {z}, not the raw delta), then adds c.
     # Base `a` does NOT reappear: base flows through roots, and node0's classifier override replaced it.
     assert st.node_concepts[1] == ["c", "z"]
+
+
+def test_engine_seeds_run_base_from_first_authored_node_once(tmp_path):
+    # The cadence seeds run_base_concepts from the first EVALUATED node's authored concepts, exactly once.
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=["loss/dcl", "hyperparameter/temperature"]))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    st = fold(s.read_all())
+    assert not st.run_base_concepts                             # not seeded yet
+    st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st)
+    assert st2.run_base_concepts == ["loss/dcl", "hyperparameter/temperature"]
+    runc = [e for e in s.read_all() if e.type == "run_concepts"]
+    assert len(runc) == 1
+    # Idempotent: with the base now set, a second cadence pass must NOT re-emit.
+    st3 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st2)
+    assert st3.run_base_concepts == st2.run_base_concepts
+    assert len([e for e in s.read_all() if e.type == "run_concepts"]) == 1
+
+
+def test_engine_seed_is_gated_off_by_flag(tmp_path):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=["loss/dcl"]))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    st = fold(s.read_all())
+    st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s, concept_run_base=False), st)
+    assert not st2.run_base_concepts
+    assert not [e for e in s.read_all() if e.type == "run_concepts"]
+
+
+def test_engine_seed_waits_for_an_evaluated_authored_node(tmp_path):
+    # No evaluated node yet -> nothing to seed from (a created-but-unevaluated node does not seed).
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=["loss/dcl"]))
+    st = fold(s.read_all())
+    st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st)
+    assert not st2.run_base_concepts
+    assert not [e for e in s.read_all() if e.type == "run_concepts"]

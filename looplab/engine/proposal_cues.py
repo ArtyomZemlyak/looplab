@@ -81,6 +81,20 @@ class ProposalCuesMixin:
         hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
         hint += self._cross_run_advisory_text(state)   # §21.20 Step 5: cross-run context pack (empty unless enabled)
         hint += self._cross_run_pointer_text()         # lean "you have cross_run_* tools" nudge (advisory-off default)
+        # PART V (B): once the run has a BASE concept set, ask for the DELTA instead of the full list, so
+        # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
+        # system prompt keeps authoring the full set when no base exists — a base-absent run is unchanged).
+        if getattr(self, "_concept_run_base", False) and state.run_base_concepts:
+            base = ", ".join(str(c) for c in state.run_base_concepts[:40])
+            parent_concepts = state.node_concepts.get(parent.id) if parent is not None else None
+            parent_line = (f" Your parent experiment's concepts are [{', '.join(str(c) for c in parent_concepts[:40])}]."
+                           if parent is not None and parent_concepts else "")
+            hint += (
+                f"\nConcept authoring — this run has a BASE concept set [{base}]." + parent_line
+                + " Do NOT re-list the full set. Author only the CHANGE vs the base + parent: put concepts"
+                  " this experiment INTRODUCES in `concepts_added`, and any inherited concept it DROPS"
+                  " (e.g. swapping one technology for another) in `concepts_removed`. Leave `concepts`"
+                  " empty when you author a delta — the run base and parent inheritance fill the rest.")
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001

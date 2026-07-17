@@ -169,6 +169,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         capability_expansion = _opt("capability_expansion")
         fingerprint_universal = _opt("fingerprint_universal")
         cross_run_concepts = _opt("cross_run_concepts")
+        concept_run_base = _opt("concept_run_base")
         cross_run_advisory = _opt("cross_run_advisory")
         cross_run_structured_claims = _opt("cross_run_structured_claims")
         cross_run_curation = _opt("cross_run_curation")
@@ -353,6 +354,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._capability_expansion = bool(capability_expansion)
         self._fingerprint_universal = bool(fingerprint_universal)
         self._cross_run_concepts = bool(cross_run_concepts)
+        self._concept_run_base = bool(concept_run_base)
         self._cross_run_advisory = bool(cross_run_advisory)
         self._cross_run_structured_claims = bool(cross_run_structured_claims)
         self._cross_run_curation = bool(cross_run_curation)
@@ -1336,6 +1338,11 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         # pivot signal). Deterministic, replay-safe (at_node gate); no-op when concept_pivot is off or
         # the task has no curated concept skeleton. Feeds the explore-stance novelty hint below.
         state = self._maybe_snapshot_concept_coverage(state)
+
+        # PART V (B): seed the RUN BASE concept set from the first evaluated node's authored concepts, once.
+        # Idempotent (fires only while run_base_concepts is empty), replay-safe. Turns on per-node DELTA
+        # authoring downstream (proposal_cues injects the base + a "author concepts_added/removed" directive).
+        state = self._maybe_seed_run_base_concepts(state)
 
         # R1-c: calibrated §12-verifier metric-tie-break. When select_verifier is on and eligible nodes
         # TIE on the ranked metric, verify the tied nodes (grounded on their realized result) so the

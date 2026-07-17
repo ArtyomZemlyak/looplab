@@ -562,6 +562,13 @@ class Settings(BaseSettings):
     # tokens are dropped and its fingerprint over-matches on kind/dir/metric alone (the novelty direction
     # gate narrows this, but goal-word similarity is still lost).
     cross_run_concepts: bool = True
+    # PART V (B): run-base + node-DELTA concept authoring. When on, once the first evaluated node has
+    # authored concepts the engine seeds RunState.run_base_concepts from them (a one-shot EV_RUN_CONCEPTS,
+    # idempotent because it only fires while the base is empty), and the Researcher's proposal hint tells it
+    # to author only `concepts_added`/`concepts_removed` vs the run base + its parent — minimal per-node
+    # annotations that inherit down the DAG (a swap propagates). Off -> every node authors its full concept
+    # set as before. Product-on; the bare EngineOptions mirror defaults off (test_options_divergence).
+    concept_run_base: bool = True
     # PART IV cross-run Step 5 advisory (§21.20.5). Fold the bounded cross-run CONTEXT PACK — evidence-
     # grounded claims with BOTH support and counter-evidence (Step 4) + a portfolio-coverage line (Step 3) —
     # into the Researcher's proposal prompt, exactly like the E4 cross-run prior note. Advisory ONLY: it is
