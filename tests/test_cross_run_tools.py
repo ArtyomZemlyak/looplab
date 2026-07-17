@@ -137,6 +137,21 @@ def test_atlas_reports_explored_thin_and_contradictions(tmp_path):
             and "Mixed-evidence claim records" in out)
 
 
+def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
+    # PART V Phase 1: a concept that reliably beats the run median across >=2 runs surfaces as "tended to
+    # HELP"; the reliable under-performer as "tended to HURT". Advisory tendency, never a rule/selection.
+    _seed(tmp_path, capsules=[
+        _cap("r1", ["loss/win", "loss/mid", "loss/lose"],
+             {"loss/win": 0.9, "loss/mid": 0.5, "loss/lose": 0.3}),
+        _cap("r2", ["loss/win", "loss/mid", "loss/lose"],
+             {"loss/win": 0.8, "loss/mid": 0.5, "loss/lose": 0.2}),
+    ])
+    out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
+    assert "profit tendency" in out and "not a rule" in out
+    assert "tended to HELP" in out and "loss/win" in out
+    assert "tended to HURT" in out and "loss/lose" in out
+
+
 def test_execute_never_raises_on_junk(tmp_path):
     _seed(tmp_path, lessons=[])
     t = CrossRunTools(tmp_path)

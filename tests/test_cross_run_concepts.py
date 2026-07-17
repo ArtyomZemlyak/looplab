@@ -53,6 +53,65 @@ def test_store_concept_capsule_writes_best_per_concept_outcome(tmp_path):
     assert c["concept_outcomes"]["data/hard-negative-mining"] == 0.90   # best-of, not last-of
 
 
+def test_concept_capsule_records_direction_normalized_profit_signs():
+    # PART V Phase 1: each concept gets a SCALE-FREE, direction-normalized sign vs the run's OWN median
+    # outcome (+1 helped / 0 neutral / -1 hurt) — the per-run signal that legitimately aggregates cross-run.
+    max_cap = build_concept_capsule(run_id="r", fingerprint=["k"], direction="max",
+                                    concepts=["loss/a", "loss/b", "loss/c"],
+                                    concept_outcomes={"loss/a": 0.9, "loss/b": 0.5, "loss/c": 0.3})
+    assert max_cap["concept_signs"] == {"loss/a": 1, "loss/b": 0, "loss/c": -1}   # median 0.5, higher=better
+    min_cap = build_concept_capsule(run_id="r2", fingerprint=["k"], direction="min",
+                                    concepts=["loss/a", "loss/b", "loss/c"],
+                                    concept_outcomes={"loss/a": 0.9, "loss/b": 0.5, "loss/c": 0.3})
+    assert min_cap["concept_signs"] == {"loss/a": -1, "loss/b": 0, "loss/c": 1}   # direction flips the sign
+    one = build_concept_capsule(run_id="r3", fingerprint=["k"], direction="max",
+                                concepts=["loss/a"], concept_outcomes={"loss/a": 0.9})
+    assert one["concept_signs"] == {}                                            # <2 outcomes -> no signal
+
+
+def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
+    from looplab.engine.memory import portfolio_concept_overview
+    caps = [
+        build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                              concepts=["loss/a", "loss/b", "loss/c"],
+                              concept_outcomes={"loss/a": 0.9, "loss/b": 0.5, "loss/c": 0.3}),
+        build_concept_capsule(run_id="r2", fingerprint=["k"], direction="max",
+                              concepts=["loss/a", "loss/b", "loss/c"],
+                              concept_outcomes={"loss/a": 0.8, "loss/b": 0.5, "loss/c": 0.2}),
+    ]
+    rows = {e["concept"]: e for e in portfolio_concept_overview(caps)["concepts"]}
+    assert rows["loss/a"]["n_helped"] == 2 and rows["loss/a"]["n_hurt"] == 0     # consistent helper
+    assert rows["loss/c"]["n_hurt"] == 2 and rows["loss/c"]["n_helped"] == 0     # consistent hurter
+    assert rows["loss/b"]["n_neutral"] == 2                                      # always the median
+
+
+def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
+    from looplab.engine.claims import build_context_pack, render_context_pack
+    overview = {"n_runs": 2, "n_concepts": 3, "concepts": [
+        {"concept": "loss/a", "n_runs": 2, "n_helped": 2, "n_neutral": 0, "n_hurt": 0},
+        {"concept": "loss/c", "n_runs": 2, "n_helped": 0, "n_neutral": 0, "n_hurt": 2},
+        {"concept": "loss/b", "n_runs": 2, "n_helped": 1, "n_neutral": 0, "n_hurt": 1},  # mixed -> neither
+    ]}
+    pack = build_context_pack([], concept_overview=overview)
+    assert pack["coverage"]["helps"] == ["loss/a"] and pack["coverage"]["hurts"] == ["loss/c"]
+    text = render_context_pack(pack)
+    assert "tended to HELP" in text and "loss/a" in text
+    assert "tended to HURT" in text and "loss/c" in text
+    assert "advisory tendency, NOT a rule" in text          # never a selection input
+
+
+def test_capsule_validation_guards_profit_signs():
+    from looplab.engine.memory import _valid_capsule_record
+    good = build_concept_capsule(run_id="r", fingerprint=["k"], direction="max",
+                                 concepts=["a", "b"], concept_outcomes={"a": 1.0, "b": 0.0})
+    assert good["concept_signs"] == {"a": 1, "b": -1} and _valid_capsule_record(good)
+    legacy = {k: v for k, v in good.items() if k != "concept_signs"}    # old v2 capsule, no field
+    assert _valid_capsule_record(legacy)                                # additive -> still valid
+    assert not _valid_capsule_record({**good, "concept_signs": {"a": 2}})      # out of range
+    assert not _valid_capsule_record({**good, "concept_signs": {"a": True}})   # bool (int subclass)
+    assert not _valid_capsule_record({**good, "concept_signs": "nope"})        # not a dict
+
+
 def test_concept_outcomes_use_selection_eligible_nodes_but_keep_attempt_coverage(tmp_path):
     mem = tmp_path / "mem"
     mem.mkdir()

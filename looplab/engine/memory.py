@@ -629,6 +629,9 @@ def _valid_capsule_record(capsule) -> bool:
     fingerprint = capsule.get("fingerprint")
     concepts = capsule.get("concepts")
     outcomes = capsule.get("concept_outcomes", {})
+    # Phase 1 profit signs are ADDITIVE over v2: a missing field defaults to {} (old capsules stay valid);
+    # a present one must be a bounded dict of {concept -> -1|0|1} (bool excluded — it is an int subclass).
+    signs = capsule.get("concept_signs", {})
     if (version != CONCEPT_CAPSULE_VERSION
             or capsule.get("concept_evidence") != NODE_CONCEPT_PROVENANCE_CLASSIFIER
             or not isinstance(run_id, str) or not run_id or len(run_id) > _MAX_CAPSULE_ID_CHARS
@@ -637,13 +640,46 @@ def _valid_capsule_record(capsule) -> bool:
             or not _finite_metric(capsule.get("best_metric"))
             or not isinstance(fingerprint, list) or len(fingerprint) > _MAX_CAPSULE_FINGERPRINT
             or not isinstance(concepts, list) or len(concepts) > _MAX_CAPSULE_CONCEPTS
-            or not isinstance(outcomes, dict) or len(outcomes) > _MAX_CAPSULE_OUTCOMES):
+            or not isinstance(outcomes, dict) or len(outcomes) > _MAX_CAPSULE_OUTCOMES
+            or not isinstance(signs, dict) or len(signs) > _MAX_CAPSULE_OUTCOMES):
         return False
     if any(not isinstance(value, str) or not value or len(value) > _MAX_CAPSULE_TOKEN_CHARS
            for value in fingerprint + concepts):
         return False
+    if any(not isinstance(key, str) or not key or len(key) > _MAX_CAPSULE_TOKEN_CHARS
+           or isinstance(value, bool) or value not in (-1, 0, 1) for key, value in signs.items()):
+        return False
     return all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
                and _finite_metric(value) for key, value in outcomes.items())
+
+
+def _concept_profit_signs(outcomes: dict, direction: str) -> dict:
+    """PART V Phase 1: a direction-normalized, SCALE-FREE profit sign per concept.
+
+    Raw metrics do NOT compare across runs/tasks (the portfolio overview refuses to aggregate them), but
+    "was this concept's best outcome in the BETTER or WORSE half of THIS run's own outcomes, judged in
+    THIS run's direction" is a per-run trichotomy that DOES aggregate cleanly cross-run — that is the whole
+    reason a later reader can roll signs up into n_helped/n_neutral/n_hurt. The baseline is the run's own
+    MEDIAN concept outcome; a concept beating it (in-direction) is +1 (helped), below it -1 (hurt), equal
+    0 (neutral). Fewer than two outcomes → no signal (empty), because one point has no better/worse half.
+    Pure/deterministic; keys mirror `outcomes` (already bounded by the caller)."""
+    values = sorted(v for v in outcomes.values() if isinstance(v, (int, float))
+                    and not isinstance(v, bool) and math.isfinite(v))
+    if len(values) < 2:
+        return {}
+    n = len(values)
+    baseline = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2.0
+    signs: dict[str, int] = {}
+    for concept, metric in outcomes.items():
+        if not (isinstance(metric, (int, float)) and not isinstance(metric, bool) and math.isfinite(metric)):
+            continue
+        if metric == baseline:
+            signs[concept] = 0
+        elif (metric < baseline) if direction == "min" else (metric > baseline):
+            signs[concept] = 1
+        else:
+            signs[concept] = -1
+    return signs
 
 
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
@@ -672,6 +708,7 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     normalized_direction = str(direction or "min")
     if normalized_direction not in ("min", "max"):
         normalized_direction = "min"
+    concept_signs = _concept_profit_signs(bounded_outcomes, normalized_direction)
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
@@ -682,6 +719,9 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "concepts": bounded_concepts,
         "best_metric": best_metric if _finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
+        # PART V Phase 1: a direction-normalized, SCALE-FREE profit SIGN per concept (+1 helped / 0
+        # neutral / -1 hurt) — additive over v2 (old capsules simply lack it, readers default {}).
+        "concept_signs": concept_signs,
     }
 
 
@@ -786,6 +826,7 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     for c in valid_capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
+        signs = c.get("concept_signs") or {}         # Phase 1: direction-normalized profit sign per concept
         direction = str(c.get("direction") or "min")
         raw = list(c.get("concepts") or [])
         # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug through the shared
@@ -802,12 +843,20 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
             by_canon.setdefault(key, []).append(concept)
         for key, raws in by_canon.items():
             metric = next((oc.get(r) for r in sorted(raws) if oc.get(r) is not None), None)
+            # Mirror the metric tie-break: the sign of the sorted-first raw that HAS one (signs share
+            # concept_outcomes' keys, so the same raw carries both). None when this run gave no signal.
+            sign = next((signs.get(r) for r in sorted(raws) if signs.get(r) is not None), None)
             e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
-            e["_runs"][rid] = {"run_id": rid, "metric": metric, "direction": direction}
+            e["_runs"][rid] = {"run_id": rid, "metric": metric, "direction": direction, "sign": sign}
     concepts = []
     for e in per_concept.values():
         all_runs = [e["_runs"][run_id] for run_id in sorted(e["_runs"])]
+        # Phase 1 profit rollup: signs are direction-normalized, so counting them ACROSS runs is legitimate
+        # even though raw metrics above are deliberately NOT aggregated (§21.20.1). Runs with no signal omit.
         row = {"concept": e["concept"], "n_runs": len(all_runs),
+               "n_helped": sum(1 for r in all_runs if r.get("sign") == 1),
+               "n_neutral": sum(1 for r in all_runs if r.get("sign") == 0),
+               "n_hurt": sum(1 for r in all_runs if r.get("sign") == -1),
                "runs": all_runs[:_MAX_OVERVIEW_RUNS_PER_CONCEPT]}
         if len(all_runs) > len(row["runs"]):
             row["runs_omitted"] = len(all_runs) - len(row["runs"])
