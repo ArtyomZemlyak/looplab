@@ -738,11 +738,12 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
 
         def _fin(args):
             try:
-                raw = _AggNarrative(**{k: v for k, v in (args or {}).items()
-                                       if k in _AggNarrative.model_fields}).model_dump()
-                box["r"] = _sanitize_content(raw, briefs, coverage)
+                box["r"] = _AggNarrative(**{
+                    k: v for k, v in (args or {}).items()
+                    if k in _AggNarrative.model_fields
+                }).model_dump()
             except Exception:  # noqa: BLE001 - malformed emit -> fall back to the metrics rollup
-                box["r"] = _deterministic(label, briefs, coverage)
+                box["r"] = None
             return box["r"]
 
         def _force(_messages):
@@ -751,9 +752,7 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
             try:
                 from looplab.core.parse import parse_structured
                 r = parse_structured(client, messages, _AggNarrative, parser)
-                raw = r.model_dump() if hasattr(r, "model_dump") else None
-                box["forced"] = (
-                    _sanitize_content(raw, briefs, coverage) if raw is not None else None)
+                box["forced"] = r.model_dump() if hasattr(r, "model_dump") else None
                 return box["forced"]
             except Exception:  # noqa: BLE001 - no synthesis either -> deterministic below
                 return None
@@ -774,13 +773,11 @@ def generate_scope_report(scope: dict, briefs: list, client, *, parser: str = "t
                                  finalize=_fin, fallback=_force)
         # Prefer a SUBSTANTIVE agent report; a blank/all-default emit (or empty forced synthesis) drops
         # through to the honest metrics rollup rather than persisting an empty report.
-        for cand in (result, box.get("r")):
+        for cand in (result, box.get("r"), box.get("forced")):
             if _has_content(cand):
-                # CODEX AGENT: trust only the exact objects produced by our finalize/fallback closures.
-                # Production exits avoid a second sanitize (and duplicate structural caveats), while
-                # alternate/test loop implementations returning a raw dict still cross the boundary.
-                if cand is box.get("r") or cand is box.get("forced"):
-                    return cand
+                # CODEX AGENT: every model path stays raw until this single persisted-content boundary.
+                # Copies/wrappers can no longer turn object identity into a second sanitize pass that
+                # duplicates structural caveats and crowds model caveats out of the bounded receipt.
                 return _sanitize_content(cand, briefs, coverage)
         return _deterministic(label, briefs, coverage)
     except Exception:  # noqa: BLE001 - any model/loop failure -> deterministic, still useful
