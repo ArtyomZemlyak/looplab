@@ -135,6 +135,67 @@ def atomic_write_text(path: str | os.PathLike, text: str) -> None:
     atomic_write_bytes(path, text.encode("utf-8"))
 
 
+def _ensure_strict_parent(parent: Path) -> None:
+    """Create and durably publish every missing directory in *parent*'s path."""
+    missing: list[Path] = []
+    cursor = parent
+    while not cursor.exists():
+        missing.append(cursor)
+        ancestor = cursor.parent
+        if ancestor == cursor:
+            break
+        cursor = ancestor
+
+    # Publish top-down: a child is only created after the directory containing its name has received
+    # a strict sync receipt.  ``exist_ok`` makes a concurrent creator harmless; syncing that parent is
+    # still safe and avoids depending on the other process's durability policy.
+    for directory in reversed(missing):
+        directory.mkdir(exist_ok=True)
+        strict_fsync_parent(directory)
+
+
+def strict_atomic_write_bytes(path: str | os.PathLike, data: bytes) -> None:
+    """Atomically replace *path* only after confirming durable publication.
+
+    Unlike :func:`atomic_write_bytes`, this helper is deliberately fail-closed.  It is intended for
+    paid-work claims and other records whose visibility must survive a crash before an external side
+    effect starts.  Both the temporary file contents and, after ``os.replace``, the destination's
+    parent directory entry must receive a successful strict sync receipt.  Any newly-created parent
+    directories are also durably published before the temporary file is opened.
+    """
+    p = Path(path)
+    _ensure_strict_parent(p.parent)
+    fd, tmpname = tempfile.mkstemp(dir=str(p.parent), prefix=f".{p.name}.", suffix=".tmp")
+    raw_fd: int | None = fd
+    try:
+        stream = os.fdopen(fd, "wb")
+        raw_fd = None  # stream owns the descriptor now; never close a possibly-reused fd number.
+        with stream as f:
+            f.write(data)
+            f.flush()
+            strict_fsync(f.fileno())
+        os.replace(tmpname, p)
+        strict_fsync_parent(p)
+    except BaseException:
+        # Once fdopen succeeds it owns the descriptor.  Only close the raw descriptor when fdopen
+        # itself failed; closing the old integer later could race with another thread reusing it.
+        if raw_fd is not None:
+            try:
+                os.close(raw_fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmpname)
+        except OSError:
+            pass
+        raise
+
+
+def strict_atomic_write_text(path: str | os.PathLike, text: str) -> None:
+    """UTF-8 text variant of :func:`strict_atomic_write_bytes`."""
+    strict_atomic_write_bytes(path, text.encode("utf-8"))
+
+
 def append_jsonl_bytes_locked(path: str | os.PathLike, payload: bytes) -> None:
     """Durably append one or more already-encoded JSONL records.
 
