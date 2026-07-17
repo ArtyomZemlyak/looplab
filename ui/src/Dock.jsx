@@ -436,6 +436,13 @@ export function eventNarration(event) {
   try {
     const render = NARR[event?.type]
     const value = render ? render(event?.data ?? {}) : JSON.stringify(event?.data ?? {}).slice(0, 80)
+    // REVIEW(2026-07-16): the `\bundefined\b` heuristic can't tell template-interpolation bugs from
+    // DATA that legitimately contains the word: a rationale/reason/label like "guard against
+    // undefined behavior" or "params.x was undefined at eval" trips it and the event renders as
+    // "details could not be summarized" — hiding a perfectly narratable event. Interpolation bugs
+    // produce the word from JS coercion at build time; catch them where they originate (have NARR
+    // renderers return null on missing fields, which the !value branch already handles) instead of
+    // pattern-matching the OUTPUT where model-authored prose is expected.
     if (!value || /\bundefined\b/.test(String(value))) throw new TypeError('incomplete event narration')
     return String(value || event?.type || 'event')
   } catch {

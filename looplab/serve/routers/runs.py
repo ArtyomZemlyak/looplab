@@ -220,6 +220,14 @@ def build_router(srv) -> APIRouter:
         # A read raced by an append/replacement is still a coherent prefix, but it has no stat identity
         # we can safely reuse. Retry a few times for a cacheable stable view, then serve one uncached
         # coherent snapshot rather than delaying a busy live run indefinitely.
+        # REVIEW(2026-07-16): on a LIVE run this cache is near-useless by construction — the key is the
+        # exact stat identity (mtime_ns/size), so EVERY append invalidates it, and get() even evicts
+        # all older versions for the path before lookup. The expensive miss path (full read + fold +
+        # core build) therefore runs on every ConceptView refetch tick of an active run, which is
+        # exactly when the endpoint is hottest; only finished runs ever hit. Pair it with the
+        # ConceptView projectionKey note below: the client refetches per node-status flip while the
+        # server recomputes per append — the two multiply. A generation+max_seq-keyed core (valid for
+        # any longer prefix via incremental fold, like the SSE state cache) would serve live runs too.
         for _attempt in range(3):
             identity = _concept_event_file_identity(path)
             if identity is not None:

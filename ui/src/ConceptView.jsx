@@ -236,6 +236,14 @@ const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 // Mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
 // lifecycle/status/provenance changes, champion changes, typed edges,
 // feasibility and robust metrics refresh; an engine-liveness-only SSE tick does not.
+// REVIEW(2026-07-16): on a LIVE run this key changes on essentially every SSE tick (any node's
+// status/metric/attempt flip is in it), and the fetch effect it drives ABORTS the in-flight request
+// as its first act — so while nodes are being built/evaluated faster than the /concepts round-trip,
+// the view can livelock: each tick cancels the previous fetch before it resolves and the table shows
+// "refreshing" indefinitely. Server-side the same tick invalidates the stat-keyed concept-core cache
+// (see the REVIEW note in serve/routers/runs.py), so every retry is a full recompute — the two
+// multiply into the hottest path on an active run. Debounce the key (trailing-edge, ~1-2s) and let a
+// completed response render even if a newer key is already pending, instead of abort-first.
 export function conceptProjectionKey(state) {
   const nodes = entries(state?.nodes).map(([key, node]) => [
     key, node?.id, node?.attempt, node?.status, node?.metric, node?.confirmed_mean,
