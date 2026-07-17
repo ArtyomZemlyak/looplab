@@ -19,7 +19,8 @@ import unicodedata
 from typing import Optional
 
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, NodeStatus, RunState
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                                  NODE_CONCEPT_PROVENANCE_OPERATOR, Idea, NodeStatus, RunState)
 from looplab.events.types import EV_CROSS_RUN_PRIOR, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED
 
 
@@ -289,12 +290,22 @@ class NoveltyGateMixin:
             if nid in all_node_concepts
             and concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
         }
+        # An operator-edited node has an authoritative human/assistant-asserted tag set, so it counts as
+        # COVERED for the completeness check below — but its tags never enter `node_concepts` (the graded
+        # channel stays classifier-only). Without this, a single operator edit leaves that node forever
+        # outside `classifier_ids`, so the coverage gate below trips on every subsequent cadence and
+        # disables the agentic graded-novelty path for the WHOLE run.
+        operator_ids = {
+            nid for nid in experiment_ids
+            if concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR
+        }
         # CODEX AGENT: a partial cadence is UNKNOWN coverage, not evidence that the remaining nodes
-        # touch no concepts. Once any classifier receipt exists, every experiment must have one (an
-        # explicit empty list is valid) before this precheck may issue an L4/L5 admission override.
-        # Otherwise a post-cadence near-repeat or win could disappear from the grade; defer to the
-        # ordinary flat gate without mixing proposer-authored labels into the trusted channel.
-        if classifier_ids and classifier_ids != experiment_ids:
+        # touch no concepts. Once any classifier receipt exists, every experiment must be covered (a
+        # classifier receipt — an explicit empty list is valid — or an operator assertion) before this
+        # precheck may issue an L4/L5 admission override. Otherwise a post-cadence near-repeat or win
+        # could disappear from the grade; defer to the ordinary flat gate without mixing
+        # proposer-authored labels into the trusted channel.
+        if classifier_ids and (classifier_ids | operator_ids) != experiment_ids:
             return None
         node_concepts = {
             nid: all_node_concepts[nid]

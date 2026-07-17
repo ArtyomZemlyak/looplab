@@ -135,6 +135,34 @@ def test_partial_classifier_cache_defers_instead_of_treating_new_nodes_as_concep
     assert fold(s.read_all()).novelty_grades == []
 
 
+def test_operator_edited_node_counts_as_covered_for_the_completeness_gate(tmp_path):
+    """PART V cross-phase: an operator concept edit gives a node an authoritative tag set, so it counts
+    as COVERED for the completeness gate — a single operator edit no longer disables the agentic
+    graded-novelty path for the WHOLE run. The graded channel still reads ONLY classifier tags (the
+    operator node's tags never enter the grade)."""
+    s = _run(tmp_path, task_id="totally-unknown-task")
+    s.append("node_concepts", {"node_id": 0,
+                                "concepts": ["encoderarch/adapter-tuning"], "mode": "llm"})
+    # node 1 (the FAILED experiment node) gets an authoritative OPERATOR tag rather than a classifier receipt
+    s.append("concept_tag_edited", {"node_id": 1, "concepts": ["someaxis/hand-labeled"]})
+    state = fold(s.read_all())
+    assert state.node_concept_provenance == {0: "classifier", 1: "operator-edited"}
+
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a different adapter bottleneck size")
+
+    # coverage complete (classifier {0} ∪ operator {1} == experiments {0,1}) -> the precheck RUNS and
+    # grades a level-4 ALLOW instead of deferring as in the partial-cadence case above.
+    out = eng._graded_novelty_precheck(state, candidate)
+    assert out is candidate
+    g = fold(s.read_all()).novelty_grades[-1]
+    assert g["level"] == 4 and "encoderarch/adapter-tuning" in g["shared_concepts"]
+    # the operator node's tag never entered the graded vocabulary (grade reads classifier tags only)
+    assert "someaxis/hand-labeled" not in g["shared_concepts"]
+
+
 def test_researcher_authored_concepts_cannot_certify_agentic_bypass(tmp_path):
     """The proposer cannot self-author the classifier evidence that lets its next proposal bypass dedup."""
     s = EventStore(tmp_path / "events.jsonl")

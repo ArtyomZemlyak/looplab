@@ -191,3 +191,53 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
     assert any(row["node_id"] == 0 and row["generation"] == 0 for row in emitted)
+
+
+def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
+    # PART V cross-phase: an operator-edited node's tags are authoritative for THIS node, so the coverage
+    # cadence must treat them as KNOWN and never re-tag. Two paths would otherwise leak: (1) the node is
+    # excluded from `all_known` (fixed by including OPERATOR provenance), and (2) an operator node has NO
+    # at_vocab receipt (fold pops it), so it reads as maximally stale (at_vocab=0) and is dropped from
+    # `known` whenever any classifier node has a higher at_vocab — re-tagged every cadence, and the fold
+    # then REJECTS the re-tag (never converges). Node 1 below carries at_vocab=4 precisely to trip that
+    # staleness path for the un-versioned operator node 0 unless it is excluded from the stale candidates.
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, None))
+    s.append("node_created", _created(1, None))
+    s.append("node_concepts", {"node_id": 1, "concepts": ["classifier/known"], "at_vocab": 4})
+    s.append("concept_tag_edited", {"node_id": 0, "concepts": ["operator/hand-tag"]})
+    state = fold(s.read_all())
+    assert state.node_concept_provenance == {1: "classifier", 0: "operator-edited"}
+    captured = {}
+
+    from looplab.search import concept_graph as cg
+    graph = cg.dense_retrieval_skeleton()
+    tags = {0: frozenset({"operator/hand-tag"}), 1: frozenset({"classifier/known"})}
+
+    def fake_build(*args, known_tags=None, **kwargs):
+        captured["known_tags"] = dict(known_tags or {})
+        return {
+            "graph": graph,
+            "tags": tags,
+            "raw_tags": tags,
+            "coverage": cg.concept_coverage(state, graph, tags),
+            "important_uncovered": [],
+            "consolidated": {},
+            "mode": "llm",
+        }
+
+    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+
+    class CaptureStore:
+        def __init__(self): self.events = []
+        def append(self, event_type, data): self.events.append((event_type, data))
+
+    store = CaptureStore()
+    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
+    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+
+    # The operator node (0) AND the classifier node (1) are both KNOWN — the operator node survives the
+    # staleness filter despite its at_vocab=0, so neither enters the LLM todo set.
+    assert captured["known_tags"] == {0: ["operator/hand-tag"], 1: ["classifier/known"]}
+    emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
+    assert not any(row["node_id"] == 0 for row in emitted)   # operator node never re-tagged

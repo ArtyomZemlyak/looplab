@@ -21,7 +21,8 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
                                        validate_strategy)
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
-from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER, RunState
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
@@ -461,18 +462,30 @@ class StrategyCadenceMixin:
                 # CODEX AGENT: Researcher-authored Idea.concepts are visible read-model claims, not an
                 # independent tagging result. Reusing them as known_tags would prevent the classifier from
                 # ever examining that node and would later let the claim masquerade as classifier evidence.
+                # Operator-edited tags ARE authoritative for THIS node (a human/assistant asserted them via
+                # the concept_tag_edited control event), so treat them as known too — otherwise the cadence
+                # re-tags an operator node every pass forever (the fold guard rejects the re-tag, so it never
+                # converges: wasted LLM calls + no-op log growth). This keeps operator tags out of the
+                # classifier-only cross-run/novelty EVIDENCE channel (still gated on CLASSIFIER provenance).
                 all_known = {
                     int(k): v
                     for k, v in (getattr(state, "node_concepts", None) or {}).items()
-                    if provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                    if provenance.get(int(k)) in (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                                                  NODE_CONCEPT_PROVENANCE_OPERATOR)
                 }
                 at_vocab = {int(k): int(v)
                             for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}
                 # B1 (§21.18): re-tag the most-stale nodes — those tagged against a much smaller vocabulary
                 # than the latest (a concept minted later may now apply to them). Bounded per cadence, and
                 # a strict no-op until the vocabulary has actually grown. Excluding a stale node from `known`
-                # makes build_concept_map re-tag it against the grown vocab.
-                stale = set(stale_tagged_nodes(list(all_known), at_vocab,
+                # makes build_concept_map re-tag it against the grown vocab. Staleness is a CLASSIFIER-only
+                # notion — only classifier receipts carry an `at_vocab`. An operator-edited node has its
+                # at_vocab receipt popped (fold), so passing it here would read as at_vocab=0 (maximally
+                # stale) and re-tag it every cadence — a re-tag the fold then rejects (never converges).
+                # Restrict the stale candidates to classifier nodes so operator tags are left untouched.
+                classifier_known = [nid for nid in all_known
+                                    if provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER]
+                stale = set(stale_tagged_nodes(classifier_known, at_vocab,
                                                growth=_RETAG_GROWTH, cap=_RETAG_CAP))
                 known = {nid: v for nid, v in all_known.items() if nid not in stale}
                 known_renames = {str(k): str(v)
