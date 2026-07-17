@@ -122,3 +122,38 @@ def test_never_raises_on_bad_input(tmp_path):
 def test_empty_taxonomy_reads_cleanly(tmp_path):
     assert "no taxonomy edits yet" in ConceptGovernanceTools(tmp_path, mode="auto").execute(
         "concept_taxonomy", {})
+
+
+def test_clear_nonexistent_policy_is_an_error_not_false_success(tmp_path):
+    # REVIEW: clearing a concept with NO active policy must be an error (matching the endpoints), not a
+    # spurious clear record + false "cleared" receipt. require_existing=True enforces it.
+    _seed_portfolio(tmp_path, ["loss/keep"])
+    out = ConceptGovernanceTools(tmp_path, mode="auto").execute(
+        "concept_edit_clear", {"concept": "loss/keep", "kind": "alias"})
+    assert "no active" in out.lower()                                   # error, not "cleared"
+    assert load_concept_aliases(tmp_path) == {}                         # no spurious record appended
+
+
+def test_taxonomy_renders_merges_purges_splits_distinctly(tmp_path):
+    _seed_portfolio(tmp_path, ["loss/a", "loss/b", "loss/junk",
+                               "data/coarse", "data/fine-a", "data/fine-b"])
+    t = ConceptGovernanceTools(tmp_path, mode="auto", approver=lambda a: "allow_once")
+    t.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
+    t.execute("concept_purge", {"concept": "loss/junk"})
+    t.execute("concept_split", {"from_concept": "data/coarse",
+                                "rules": [{"to": "data/fine-a", "when_any": ["a"]},
+                                          {"to": "data/fine-b", "when_any": ["b"]}]})
+    tax = t.execute("concept_taxonomy", {})
+    merges_line = next(line for line in tax.splitlines() if line.startswith("Merges"))
+    purged_line = next(line for line in tax.splitlines() if line.startswith("Purged"))
+    assert "loss/a -> loss/b" in merges_line and "loss/junk" not in merges_line   # purge != merge
+    assert "loss/junk" in purged_line
+    assert any(line.startswith("Splits") and "data/coarse" in line for line in tax.splitlines())
+
+
+def test_non_string_args_coerced_safely(tmp_path):
+    # A junk model may pass a list/int; execute() str()-coerces, so the tool soft-fails, never raises.
+    t = _auto(tmp_path)
+    assert isinstance(t.execute("concept_merge", {"from_concept": ["x"], "to_concept": 5}), str)
+    assert isinstance(t.execute("concept_purge", {"concept": {"bad": 1}}), str)
+    assert isinstance(t.execute("concept_split", {"from_concept": 3, "rules": "notalist"}), str)

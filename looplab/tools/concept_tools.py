@@ -23,8 +23,6 @@ from looplab.tools._base import fn_spec
 from looplab.tools.perm_modes import (
     DEFAULT_MODE, approval_allows, decide_action, default_approver)
 
-_MUTATIONS = frozenset({"concept_merge", "concept_purge", "concept_split", "concept_edit_clear"})
-
 
 class ConceptGovernanceTools:
     """Cross-run concept-taxonomy governance for the assistant tool-loop. Reads always; mutations are
@@ -122,8 +120,9 @@ class ConceptGovernanceTools:
         try:
             if name == "concept_taxonomy":
                 return self._taxonomy()
-            if name in _MUTATIONS and self.mode == "plan":
-                return f"({name} is unavailable in read-only plan mode)"
+            # Plan mode is enforced in ONE place — each mutation calls _gate first, and decide_action
+            # denies a concept_edit in plan (specs() also hides the verbs from the schema). No separate
+            # plan-check here, so there is a single consistent refusal path/message.
             if name == "concept_merge":
                 return self._merge(str(args.get("from_concept") or ""), str(args.get("to_concept") or ""))
             if name == "concept_purge":
@@ -167,7 +166,8 @@ class ConceptGovernanceTools:
         from looplab.engine.concept_registry import record_concept_alias
         rec = record_concept_alias(self.dir, from_concept=src, to_concept=dst, by=self.actor,
                                    at=self._now(), require_existing=True)
-        return f"merged '{rec.get('from')}' -> '{rec.get('to')}' (governance revision {rec.get('governance_revision')})"
+        return (f"merged '{rec.get('from')}' -> '{rec.get('to')}' "
+                f"(governance revision {rec.get('governance_revision')})")
 
     def _purge(self, concept: str) -> str:
         if not concept.strip():
@@ -193,7 +193,8 @@ class ConceptGovernanceTools:
                                    by=self.actor, at=self._now(), require_existing=True)
         # Report the STORED rule count (the registry drops inert rules), not the raw input count.
         n_stored = len(rec.get("rules") or [])
-        return f"split '{rec.get('from')}' into {n_stored} rule(s) (governance revision {rec.get('governance_revision')})"
+        return (f"split '{rec.get('from')}' into {n_stored} rule(s) "
+                f"(governance revision {rec.get('governance_revision')})")
 
     def _clear(self, concept: str, kind: str) -> str:
         if not concept.strip():
@@ -206,5 +207,8 @@ class ConceptGovernanceTools:
             return gate
         from looplab.engine.concept_registry import clear_concept_alias, clear_concept_split
         clearer = clear_concept_alias if kind == "alias" else clear_concept_split
-        rec = clearer(self.dir, from_concept=concept, by=self.actor, at=self._now())
-        return f"cleared {kind} policy for '{rec.get('from')}' (governance revision {rec.get('governance_revision')})"
+        # require_existing: clearing a concept with NO active policy is an operator error (a spurious clear
+        # record + a false "cleared" receipt otherwise) — matches the /cross-run clear endpoints.
+        rec = clearer(self.dir, from_concept=concept, by=self.actor, at=self._now(), require_existing=True)
+        return (f"cleared {kind} policy for '{rec.get('from')}' "
+                f"(governance revision {rec.get('governance_revision')})")
