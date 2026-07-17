@@ -21,8 +21,21 @@ const generationId = value => value === null
 const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
 const countRecord = value => record(value) && Object.values(value).every(item => count(item))
 const validList = (value, test) => Array.isArray(value) && value.every(test)
+const uniqueList = (value, test) => validList(value, test) && new Set(value).size === value.length
+const fieldNames = names => names.split(' ')
+const fields = (value, names, test) => fieldNames(names).every(name => test(value[name]))
+const exactRecord = (value, names, test) => {
+  const required = fieldNames(names)
+  return record(value) && Object.keys(value).length === required.length
+    && required.every(name => Object.hasOwn(value, name) && (!test || test(value[name])))
+}
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
-const sortedKeys = value => Object.keys(value).sort()
+const bool = value => typeof value === 'boolean'
+const KINDS = ['path', 'edge']
+const METRIC_FIELDS = 'best mean worst delta_best delta_mean'
+const LIMIT_FIELDS = 'concepts_per_node edge_endpoints edges membership_nodes memberships tree_nodes'
+const SOURCE_FIELDS = 'edges membership_nodes'
+const INCLUDED_FIELDS = 'concepts edges experiment_refs membership_nodes memberships tree_nodes'
 
 // HTTP 200 is transport success, not projection truth. Require the versioned frame,
 // lifecycle identity, authority receipt, bounds receipt, and self-contained experiment references
@@ -41,18 +54,19 @@ export function validateConceptPayload(value, expected = {}) {
       || typeof runId !== 'string' || !generationId(generation)
       || !(requestedSeq === null || sequence(requestedSeq))
       || !sequence(capturedSeq) || !sequence(maxSeq) || capturedSeq > maxSeq
-      || typeof historical !== 'boolean' || historical !== (capturedSeq < maxSeq)
+      || !fields(value, 'historical edges_present lens_edges_present authoritative complete', bool)
+      || historical !== (capturedSeq < maxSeq)
       || !conceptId(lens) || !conceptId(effectiveLens) || lens !== effectiveLens
       || !conceptId(requestedLens) || !Array.isArray(lenses) || !lenses.length
-      || typeof edgesPresent !== 'boolean' || typeof lensEdgesPresent !== 'boolean'
-      || !record(touch) || !record(experimentRefs) || !record(tree) || tree.lens !== lens
-      || !validList(tree.roots, conceptId) || !record(tree.nodes)
-      || !record(metrics) || !record(metrics.rows) || !metric(metrics.baseline)
-      || !['min', 'max'].includes(metrics.direction)
-      || typeof authoritative !== 'boolean' || typeof complete !== 'boolean'
-      || !record(authority) || !record(provenance) || !record(completeness)
-      || !record(spec) || !record(contract)) invalidPayload()
+      || !fields(value, 'touch experiment_refs tree metrics authority provenance completeness '
+        + 'requested_lens_spec lens_contract', record)
+      || tree.lens !== lens || !validList(tree.roots, conceptId) || !record(tree.nodes)
+      || !record(metrics.rows) || !metric(metrics.baseline)
+      || !['min', 'max'].includes(metrics.direction)) invalidPayload()
 
+  const nodes = tree.nodes
+  const roots = tree.roots
+  const metricRows = metrics.rows
   const unidentifiedHistoricalPrefix = requestedSeq !== null && generation === null
   if ((expected.runId != null && runId !== String(expected.runId))
       || (Object.hasOwn(expected, 'generation') && generation !== expected.generation
@@ -64,28 +78,23 @@ export function validateConceptPayload(value, expected = {}) {
   const shippedByName = new Map()
   for (const item of lenses) {
     if (!record(item) || !conceptId(item.name) || typeof item.label !== 'string'
-        || !validList(item.rels, conceptId) || !item.rels.length
-        || item.rels.length > 8 || new Set(item.rels).size !== item.rels.length
-        || !['path', 'edge'].includes(item.kind) || lensNames.has(item.name)) invalidPayload()
+        || !uniqueList(item.rels, conceptId) || !item.rels.length || item.rels.length > 8
+        || !KINDS.includes(item.kind) || lensNames.has(item.name)) invalidPayload()
     lensNames.add(item.name)
     shippedByName.set(item.name, item)
   }
   const derived = expected.derived === true
   if (!conceptId(spec.name) || spec.name !== requestedLens
-      || !validList(spec.rels, conceptId) || !spec.rels.length
-      || spec.rels.length > 8 || new Set(spec.rels).size !== spec.rels.length
-      || !['path', 'edge'].includes(spec.kind)
-      || !['shipped', 'ephemeral-validated'].includes(spec.registration)
+      || !uniqueList(spec.rels, conceptId) || !spec.rels.length || spec.rels.length > 8
+      || !KINDS.includes(spec.kind)
       || spec.registration !== (derived ? 'ephemeral-validated' : 'shipped')
       || (derived && Array.isArray(expected.rels) && !same(spec.rels, expected.rels))
       || contract.requested !== requestedLens || contract.effective !== effectiveLens
       || contract.registration !== spec.registration
-      || !(contract.fallback === null || contract.fallback === 'no_matching_edges')
-      || (contract.fallback === null) !== (requestedLens === effectiveLens)
+      || contract.fallback !== (requestedLens === effectiveLens ? null : 'no_matching_edges')
       || !lensNames.has('is_a') || (!derived && !lensNames.has(requestedLens))
       || (!lensNames.has(effectiveLens) && effectiveLens !== requestedLens)
-      || (lensEdgesPresent && effectiveLens !== requestedLens)
-      || (lensEdgesPresent && !edgesPresent)
+      || (lensEdgesPresent && (effectiveLens !== requestedLens || !edgesPresent))
       || (spec.kind === 'path' && (!same(spec.rels, ['is_a'])
         || lensEdgesPresent || effectiveLens !== requestedLens))
       || (spec.kind === 'edge'
@@ -105,136 +114,107 @@ export function validateConceptPayload(value, expected = {}) {
   }
 
   const hierarchyTree = spec.kind === 'path' || contract.fallback === 'no_matching_edges'
-  const nodeIds = Object.keys(tree.nodes)
-  const rootIds = new Set(tree.roots)
-  if (rootIds.size !== tree.roots.length) invalidPayload()
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    if (!conceptId(id) || !record(node) || !(node.parent === null || conceptId(node.parent))
-        || !count(node.depth) || typeof node.tagged !== 'boolean'
-        || !validList(node.children, conceptId)
-        || new Set(node.children).size !== node.children.length
-        || (hierarchyTree && Object.hasOwn(node, 'cross_parents'))
-        || (!hierarchyTree && (!validList(node.cross_parents, conceptId)
-          || new Set(node.cross_parents).size !== node.cross_parents.length))) invalidPayload()
-  }
-  for (const id of tree.roots) {
-    if (!Object.hasOwn(tree.nodes, id)) invalidPayload()
-  }
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    const isRoot = rootIds.has(id)
-    if ((node.parent === null) !== isRoot || (isRoot && node.depth !== 0)) invalidPayload()
-    if (node.parent !== null) {
-      const parent = tree.nodes[node.parent]
-      if (!record(parent) || !parent.children.includes(id) || node.depth !== parent.depth + 1) {
-        invalidPayload()
-      }
-    }
-    for (const childId of node.children) {
-      if (!record(tree.nodes[childId]) || tree.nodes[childId].parent !== id) invalidPayload()
-    }
+  const nodeIds = Object.keys(nodes)
+  let treeReferences = roots.length
+  if (nodeIds.length > 10_000 || treeReferences > nodeIds.length) invalidPayload()
+  // # CODEX AGENT: One bounded walk proves ownership, topology, reachability and tagged receipts;
+  // the reference budget prevents an invalid fan-out from allocating an unbounded pending stack.
+  const seenNodes = new Set()
+  const pending = roots.map(id => [id, null, 0])
+  while (pending.length) {
+    const [id, parent, depth] = pending.pop()
+    const node = nodes[id]
+    if (seenNodes.has(id) || !conceptId(id) || !Object.hasOwn(nodes, id) || !record(node)
+        || node.parent !== parent || node.depth !== depth || depth > 256
+        || !Array.isArray(node.children)
+        || node.tagged !== Object.hasOwn(experimentRefs, id)) invalidPayload()
+    seenNodes.add(id)
     if (hierarchyTree) {
       const parts = id.split('/')
       const pathParent = parts.length === 1 ? null : parts.slice(0, -1).join('/')
-      if (node.parent !== pathParent || node.depth !== parts.length - 1) invalidPayload()
-    } else if (node.cross_parents.some(parentId => parentId === id || parentId === node.parent
-        || !Object.hasOwn(tree.nodes, parentId))) invalidPayload()
-  }
-  for (const [id, valueCount] of Object.entries(touch)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !count(valueCount)) invalidPayload()
-  }
-  for (const [id, row] of Object.entries(metrics.rows)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !record(row)
-        || !count(row.touched) || !count(row.evaluated) || row.evaluated > row.touched
-        || !(row.first_touch === null || count(row.first_touch))
-        || !['best', 'mean', 'worst', 'delta_best', 'delta_mean'].every(key => metric(row[key]))) {
-      invalidPayload()
+      if (parent !== pathParent || depth !== parts.length - 1
+          || Object.hasOwn(node, 'cross_parents')) invalidPayload()
+    } else if (!uniqueList(node.cross_parents, conceptId)
+        || node.cross_parents.some(parentId => parentId === id || parentId === parent
+        || !Object.hasOwn(nodes, parentId))) invalidPayload()
+    for (const child of node.children) {
+      treeReferences += 1
+      if (treeReferences > nodeIds.length) invalidPayload()
+      pending.push([child, id, depth + 1])
     }
   }
+  if (seenNodes.size !== nodeIds.length) invalidPayload()
 
   let referenceCount = 0
   const provenanceCounts = Object.create(null)
   const lifecycleByNode = new Map()
-  const membershipCountsByNode = new Map()
+  const lifecycleMemberships = new Map()
   for (const [id, refs] of Object.entries(experimentRefs)) {
-    if (!conceptId(id) || !Object.hasOwn(tree.nodes, id) || !Array.isArray(refs) || !refs.length
-        || touch[id] !== refs.length || !Object.hasOwn(metrics.rows, id)
-        || metrics.rows[id].touched !== refs.length) invalidPayload()
+    if (!conceptId(id) || !Object.hasOwn(nodes, id) || !Array.isArray(refs) || !refs.length
+        || !Object.hasOwn(touch, id) || !count(touch[id]) || touch[id] !== refs.length
+        || !Object.hasOwn(metricRows, id) || !record(metricRows[id])
+        || !fields(metricRows[id], 'touched evaluated', count)
+        || metricRows[id].evaluated > metricRows[id].touched
+        || !(metricRows[id].first_touch === null || count(metricRows[id].first_touch))
+        || !fields(metricRows[id], METRIC_FIELDS, metric)
+        || metricRows[id].touched !== refs.length) invalidPayload()
     const lifecycle = new Set()
     let evaluated = 0
     for (const ref of refs) {
-      if (!record(ref) || !count(ref.node_id) || !count(ref.node_generation)
+      if (!record(ref) || !fields(ref, 'node_id node_generation', count)
           || !metric(ref.metric) || ref.metric_kind !== 'robust_metric' || !conceptId(ref.status)
           || !(ref.feasible === null || typeof ref.feasible === 'boolean')
-          || typeof ref.is_best !== 'boolean' || !conceptId(ref.membership_provenance)) invalidPayload()
+          || !bool(ref.is_best) || !conceptId(ref.membership_provenance)) invalidPayload()
       const key = `${ref.node_id}:${ref.node_generation}`
       if (lifecycle.has(key)) invalidPayload()
       lifecycle.add(key)
       const signature = JSON.stringify([ref.node_generation, ref.metric, ref.metric_kind, ref.status,
         ref.feasible, ref.is_best, ref.membership_provenance])
-      if (lifecycleByNode.has(ref.node_id) && lifecycleByNode.get(ref.node_id) !== signature) {
+      const prior = lifecycleByNode.get(ref.node_id)
+      if (prior && prior !== signature) {
         invalidPayload()
       }
       lifecycleByNode.set(ref.node_id, signature)
-      membershipCountsByNode.set(ref.node_id, (membershipCountsByNode.get(ref.node_id) || 0) + 1)
+      lifecycleMemberships.set(ref.node_id, (lifecycleMemberships.get(ref.node_id) || 0) + 1)
       if (ref.metric !== null && ref.feasible !== false) evaluated += 1
       referenceCount += 1
       provenanceCounts[ref.membership_provenance]
         = (provenanceCounts[ref.membership_provenance] || 0) + 1
     }
-    if (metrics.rows[id].evaluated !== evaluated) invalidPayload()
-  }
-  for (const [id, node] of Object.entries(tree.nodes)) {
-    if (node.tagged !== Object.hasOwn(experimentRefs, id)) invalidPayload()
+    if (metricRows[id].evaluated !== evaluated) invalidPayload()
   }
 
-  const reasons = completeness.reasons
-  const sourceIntegrity = completeness.source_integrity
-  const limitKeys = ['concepts_per_node', 'edge_endpoints', 'edges', 'membership_nodes',
-    'memberships', 'tree_nodes']
-  const sourceKeys = ['edges', 'membership_nodes']
-  const includedKeys = ['concepts', 'edges', 'experiment_refs', 'membership_nodes',
-    'memberships', 'tree_nodes']
-  if (typeof completeness.complete !== 'boolean' || completeness.complete !== complete
-      || typeof completeness.truncated !== 'boolean' || !Array.isArray(reasons)
-      || !reasons.every(conceptId) || new Set(reasons).size !== reasons.length
+  const { reasons, limits, source, included, source_integrity: sourceIntegrity } = completeness
+  const integrityFields = sourceIntegrity?.complete
+    ? 'complete generation_identified'
+    : 'complete corrupt_line dropped_lines generation_identified'
+  if (!fields(completeness, 'complete truncated', bool)
+      || completeness.complete !== complete || !uniqueList(reasons, conceptId)
       || !same(reasons, [...reasons].sort())
       || completeness.truncated !== reasons.some(reason => reason.endsWith('_cap'))
       || status !== (complete ? 'complete' : 'partial') || complete !== (reasons.length === 0)
-      || !countRecord(completeness.limits) || !countRecord(completeness.source)
-      || !countRecord(completeness.included) || !record(sourceIntegrity)
-      || !same(sortedKeys(completeness.limits), limitKeys)
-      || limitKeys.some(key => completeness.limits[key] <= 0)
-      || !same(sortedKeys(completeness.source), sourceKeys)
-      || !same(sortedKeys(completeness.included), includedKeys)
-      || typeof sourceIntegrity.complete !== 'boolean'
-      || typeof sourceIntegrity.generation_identified !== 'boolean'
+      || !exactRecord(limits, LIMIT_FIELDS, count)
+      || fieldNames(LIMIT_FIELDS).some(key => limits[key] <= 0)
+      || !exactRecord(source, SOURCE_FIELDS, count)
+      || !exactRecord(included, INCLUDED_FIELDS, count)
+      || !exactRecord(sourceIntegrity, integrityFields)
+      || !fields(sourceIntegrity, 'complete generation_identified', bool)
       || sourceIntegrity.generation_identified !== (generation !== null)
-      || (sourceIntegrity.complete
-        ? !same(sortedKeys(sourceIntegrity), ['complete', 'generation_identified'])
-        : !same(sortedKeys(sourceIntegrity),
-          ['complete', 'corrupt_line', 'dropped_lines', 'generation_identified']))
       || (!sourceIntegrity.complete
-        && (!count(sourceIntegrity.corrupt_line) || !count(sourceIntegrity.dropped_lines)))
-      || completeness.included.tree_nodes !== nodeIds.length
-      || completeness.included.membership_nodes !== lifecycleByNode.size
-      || completeness.included.concepts !== Object.keys(experimentRefs).length
-      || completeness.included.experiment_refs !== referenceCount
-      || completeness.included.memberships !== referenceCount
-      || edgesPresent !== (completeness.included.edges > 0)
-      || completeness.included.membership_nodes > completeness.limits.membership_nodes
-      || completeness.included.memberships > completeness.limits.memberships
-      || completeness.included.tree_nodes > completeness.limits.tree_nodes
-      || completeness.included.edges > completeness.limits.edges
-      || completeness.source.membership_nodes < completeness.included.membership_nodes
-      || completeness.source.edges < completeness.included.edges
-      || [...membershipCountsByNode.values()]
-        .some(valueCount => valueCount > completeness.limits.concepts_per_node)
-      || !same(sortedKeys(touch), sortedKeys(experimentRefs))
-      || !same(sortedKeys(metrics.rows), sortedKeys(experimentRefs))) invalidPayload()
+        && !fields(sourceIntegrity, 'corrupt_line dropped_lines', count))
+      || included.tree_nodes !== nodeIds.length
+      || included.membership_nodes !== lifecycleByNode.size
+      || included.concepts !== Object.keys(experimentRefs).length
+      || included.experiment_refs !== referenceCount || included.memberships !== referenceCount
+      || edgesPresent !== (included.edges > 0)
+      || fieldNames('membership_nodes memberships tree_nodes edges')
+        .some(key => included[key] > limits[key])
+      || fieldNames(SOURCE_FIELDS).some(key => source[key] < included[key])
+      || [...lifecycleMemberships.values()].some(valueCount => valueCount > limits.concepts_per_node)
+      || Object.keys(touch).length !== Object.keys(experimentRefs).length
+      || Object.keys(metricRows).length !== Object.keys(experimentRefs).length) invalidPayload()
 
-  if (typeof authority.authoritative !== 'boolean'
-      || typeof authority.source_authoritative !== 'boolean'
-      || typeof authority.complete !== 'boolean'
+  if (!fields(authority, 'authoritative source_authoritative complete', bool)
       || authority.authoritative !== authoritative || authority.complete !== complete
       || authoritative !== (authority.source_authoritative && complete)
       || authority.source_authoritative !== (sourceIntegrity.complete
@@ -247,9 +227,6 @@ export function validateConceptPayload(value, expected = {}) {
       || !same(Object.entries(provenance.membership_counts).sort(),
         Object.entries(provenanceCounts).sort())) invalidPayload()
 
-  const completeProjection = visibleConceptRows(tree, new Set(nodeIds))
-  if (completeProjection.projectionStatus.state !== 'current'
-      || completeProjection.length !== nodeIds.length) invalidPayload()
   return value
 }
 

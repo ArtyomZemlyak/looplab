@@ -210,6 +210,33 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       ...conceptPayload('loss/a'),
       tree: { ...conceptPayload('loss/a').tree, roots: ['loss/a'] },
     }), /Invalid concept projection/, 'path topology must agree with parent/depth/children receipts')
+    const topology = conceptPayload('loss/a')
+    const topologyRoot = topology.tree.roots[0]
+    const taggedId = 'loss/a'
+    for (const [label, malformed] of [
+      ['duplicate roots', {
+        ...topology, tree: { ...topology.tree, roots: [topologyRoot, topologyRoot] },
+      }],
+      ['duplicate children', { ...topology, tree: { ...topology.tree, nodes: {
+        ...topology.tree.nodes,
+        [topologyRoot]: { ...topology.tree.nodes[topologyRoot], children: [taggedId, taggedId] },
+      } } }],
+      ['disconnected nodes', { ...topology, tree: { ...topology.tree, nodes: {
+        ...topology.tree.nodes,
+        orphan: { parent: null, depth: 0, children: [], tagged: false },
+      } } }],
+      ['tagged receipt mismatch', { ...topology, tree: { ...topology.tree, nodes: {
+        ...topology.tree.nodes,
+        [taggedId]: { ...topology.tree.nodes[taggedId], tagged: false },
+      } } }],
+      ['touch key-set mismatch', { ...topology, touch: { ...topology.touch, orphan: 1 } }],
+      ['metric key-set mismatch', { ...topology, metrics: { ...topology.metrics, rows: {
+        ...topology.metrics.rows, orphan: topology.metrics.rows[taggedId],
+      } } }],
+    ]) {
+      assert.throws(() => conceptModule.validateConceptPayload(malformed),
+        /Invalid concept projection/, `${label} must fail closed`)
+    }
     assert.throws(() => conceptModule.validateConceptPayload({
       ...conceptPayload('loss/a'), completeness: {
         ...conceptPayload('loss/a').completeness,
