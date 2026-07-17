@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import anyio
+import pytest
 
 from looplab.serve.jobs import JobRegistry
 
@@ -112,6 +114,97 @@ def test_worker_spawn_failure_is_terminal_and_redacted(monkeypatch):
         "error": "background job failed",
     }
     assert "thread-secret" not in json.dumps(result)
+
+
+def test_nonconforming_thread_start_cancels_target_before_compute(monkeypatch):
+    """A runtime that starts the target and then raises must not run paid work."""
+    import looplab.serve.jobs as jobs_module
+
+    registry = JobRegistry()
+    target_exited = threading.Event()
+    compute_calls = []
+
+    class StartThenRaiseThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            def invoke():
+                try:
+                    self.target()
+                finally:
+                    target_exited.set()
+
+            threading.Thread(target=invoke, daemon=self.daemon).start()
+            raise RuntimeError("non-conforming runtime failed after target launch")
+
+    monkeypatch.setattr(
+        jobs_module, "threading", SimpleNamespace(Thread=StartThenRaiseThread))
+
+    result = _run(
+        registry, lambda: compute_calls.append("compute") or {"ok": True},
+        inline_wait=1, idempotency_key="start-then-raise",
+    )
+
+    assert target_exited.wait(3), "cancelled target did not exit"
+    assert compute_calls == []
+    assert result == {
+        "ok": False,
+        "code": "job_failed",
+        "error_kind": "internal",
+        "error": "background job failed",
+    }
+
+
+def test_baseexception_before_thread_start_cleans_up_then_reraises(monkeypatch):
+    """Process-control exceptions still leave the reservation terminal and replayable."""
+    import looplab.serve.jobs as jobs_module
+
+    class LaunchAbort(BaseException):
+        pass
+
+    class AbortedThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            raise LaunchAbort("test-only launch abort")
+
+    registry = JobRegistry()
+    reserved = registry.reserve("baseexception-before-start")
+    compute_calls = []
+    cleanup_calls = []
+    cleanup_result = {
+        "ok": False,
+        "code": "launch_aborted",
+        "error_kind": "internal",
+        "error": "background job launch was aborted",
+    }
+
+    def on_start_failure():
+        cleanup_calls.append("cleanup")
+        return cleanup_result
+
+    async def invoke():
+        return await registry.run_reserved(
+            reserved["job_id"],
+            lambda: compute_calls.append("compute") or {"ok": True},
+            inline_wait=1,
+            on_start_failure=on_start_failure,
+        )
+
+    monkeypatch.setattr(jobs_module, "threading", SimpleNamespace(Thread=AbortedThread))
+    with pytest.raises(LaunchAbort, match="test-only launch abort"):
+        anyio.run(invoke)
+
+    assert compute_calls == []
+    assert cleanup_calls == ["cleanup"]
+    receipt = registry.get(reserved["job_id"])
+    assert receipt is not None
+    assert receipt["status"] == "done"
+    assert receipt["result"] == cleanup_result
 
 
 def test_completed_receipt_outlives_the_ten_minute_client_deadline(monkeypatch):

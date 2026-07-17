@@ -7,6 +7,7 @@ Bodies are verbatim moves from
 from __future__ import annotations
 
 import hashlib
+import errno
 import json
 import os
 import re
@@ -18,9 +19,9 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException
 
-from looplab.core.atomicio import atomic_write_text
+from looplab.core.atomicio import atomic_write_text, strict_atomic_write_text
 from looplab.core.comparison import (
     canonical_comparison_contract,
     comparison_measurement,
@@ -52,9 +53,20 @@ from looplab.trust.redact import redact_persisted_text
 _SCOPE_TYPES = frozenset({"project", "task", "supertask"})
 _SCOPE_STORAGE_ERROR = {
     "code": "scope_report_storage_conflict",
-    "message": "The stored scope report has no matching scope identity.",
-    "error": "Scope report storage is unavailable or belongs to another scope.",
-    "remediation": "Quarantine the conflicting report file before generating this scope again.",
+    "error_kind": "storage",
+    "ambiguous": True,
+    "message": "Durable scope-report storage could not be safely confirmed.",
+    "error": "The action ledger, required filesystem sync, or cross-process lock is unavailable.",
+    "remediation": (
+        "Keep the same action UUID, restore durable filesystem/locking support, and reconcile again."
+    ),
+}
+_SCOPE_PUBLICATION_UNCONFIRMED = {
+    "code": "scope_report_publication_unconfirmed",
+    "error_kind": "indeterminate",
+    "ambiguous": True,
+    "error": "The visible paid report has no matching confirmed durable action terminal.",
+    "remediation": "Reconcile the exact action UUID; do not treat this report as authoritative.",
 }
 _SCOPE_INPUTS_CHANGED = {
     "code": "scope_report_inputs_changed",
@@ -81,13 +93,60 @@ _PRIOR_REPORT_MAX_NEXT_DIRECTIONS = 2
 _PRIOR_REPORT_MAX_BYTES = 8 * 1024
 _PRIOR_REPORT_PARSE_MAX_BYTES = 16 * 1024 * 1024
 _SCOPE_REPORT_RECORD_MAX_BYTES = 512 * 1024
+_SCOPE_ACTION_RECORD_MAX_BYTES = 16 * 1024
+_SCOPE_ACTION_FENCE_MAX_BYTES = 8 * 1024
+_SCOPE_ACTION_FENCE_SCHEMA = 1
+_SCOPE_ACTION_LEASE_MARKER_MAX_BYTES = 8 * 1024
+_SCOPE_ACTION_LEASE_MARKER_SCHEMA = 1
 _SCOPE_REVISION_CACHE_MAX = 256
 _SCOPE_REVISION_CACHE_TTL_S = 60.0
 _SCOPE_CONTEXT_SCHEMA = 2
+_SCOPE_ACTION_SCHEMA = 1
+_SCOPE_ACTION_ID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+_SCOPE_JOB_ID_RE = re.compile(r"^[0-9a-f]{16}$")
+_SCOPE_ACTION_REQUIRED = {
+    "code": "scope_report_idempotency_required",
+    "error_kind": "precondition",
+    "error": "A UUIDv4 Idempotency-Key is required for paid scope-report generation.",
+    "remediation": "Retry this exact action with one stable UUIDv4 Idempotency-Key.",
+}
+_SCOPE_ACTION_CONFLICT = {
+    "code": "scope_report_action_conflict",
+    "error_kind": "conflict",
+    "error": "This scope-report action identity belongs to a different scope or receipt.",
+    "remediation": "Reuse an action UUID only for the exact scope where it was created.",
+}
+_SCOPE_ACTION_ACTIVE = {
+    "code": "scope_report_action_in_progress",
+    "error_kind": "conflict",
+    "error": "Another paid scope-report action is still unresolved for this scope.",
+    "remediation": "Reconcile or explicitly abandon that action before starting a new one.",
+}
+_SCOPE_ACTION_INDETERMINATE = {
+    "code": "scope_report_action_indeterminate",
+    "error_kind": "indeterminate",
+    "error": "The paid action has no live exact worker and no confirmed durable terminal.",
+    "remediation": (
+        "Check this action again, or explicitly abandon it before creating a new action UUID."
+    ),
+}
+_SCOPE_ACTION_ABANDONED = {
+    "code": "scope_report_action_abandoned",
+    "error_kind": "abandoned",
+    "error": "The unresolved paid action was explicitly abandoned.",
+    "remediation": "Create a new UUID only for an intentional new generation attempt.",
+}
 
 
 class _ScopeReportStorageConflict(RuntimeError):
     """An existing scope-report path cannot be proven to belong to the requested scope."""
+
+
+class _ScopeReportActionConflict(_ScopeReportStorageConflict):
+    """A client action UUID names a corrupt receipt or an action owned by another scope."""
 
 
 def _scope_identity(scope_type: str, scope_id: str) -> dict[str, str]:
@@ -194,6 +253,47 @@ def _scope_report_path(reports_dir: Path, scope_type: str, scope_id: str) -> Pat
         reports_dir, f"{readable or 'scope'}-{digest}.json")
 
 
+def _confined_scope_root_path(reports_dir: Path, filename: str) -> Path:
+    """Confine durable action authority to the stable run root, outside ``reports/`` swaps."""
+    root = _validated_reports_dir(reports_dir).parent
+    candidate = root / filename
+    try:
+        entry = candidate.lstat()
+    except FileNotFoundError:
+        return candidate
+    except OSError as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action root path could not be inspected") from exc
+    if not stat.S_ISREG(entry.st_mode) or _is_link_or_reparse(entry):
+        raise _ScopeReportStorageConflict(
+            "scope report action root path is not a trusted regular file")
+    try:
+        if candidate.resolve(strict=True) != candidate:
+            raise _ScopeReportStorageConflict(
+                "scope report action root path escaped its store")
+    except _ScopeReportStorageConflict:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action root path could not be resolved") from exc
+    return candidate
+
+
+def _scope_action_path(reports_dir: Path, action_id: str) -> Path:
+    """Map a global client action UUID to one permanent root-level receipt path."""
+    digest = hashlib.sha256(action_id.encode("ascii")).hexdigest()
+    return _confined_scope_root_path(
+        reports_dir, f".scope-action-{digest}.receipt")
+
+
+def _scope_identity_hash(scope_type: str, scope_id: str) -> str:
+    encoded = json.dumps(
+        _scope_identity(scope_type, scope_id), ensure_ascii=False,
+        sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _legacy_scope_report_path(reports_dir: Path, scope_type: str, scope_id: str) -> Path:
     """The pre-hash filename, used only for exact-identity upgrade reads."""
     safe = re.sub(r"[^A-Za-z0-9._-]", "_", f"{scope_type}-{scope_id}")[:120]
@@ -208,7 +308,338 @@ def _stat_identity(entry: os.stat_result) -> tuple[int, ...]:
     )
 
 
-def _read_bounded_report_bytes(path: Path) -> bytes | None:
+_SCOPE_ACTION_LEASES_LOCK = threading.Lock()
+_SCOPE_ACTION_LEASES: set[str] = set()
+
+
+def _scope_action_lease_path(reports_dir: Path, action_id: str) -> Path:
+    """Return a stable lock path outside the replaceable reports directory."""
+    digest = hashlib.sha256(action_id.encode("ascii")).hexdigest()
+    return _confined_scope_root_path(
+        reports_dir, f".scope-action-{digest}.live.lock")
+
+
+def _scope_action_scope_lease_path(
+        reports_dir: Path, scope_type: str, scope_id: str) -> Path:
+    """Return the permanent OS-lease marker for one exact scope identity."""
+    return _confined_scope_root_path(
+        reports_dir,
+        f".scope-action-scope-{_scope_identity_hash(scope_type, scope_id)}.live.lock",
+    )
+
+
+def _action_lease_marker(
+        scope_type: str, scope_id: str, action_id: str) -> dict[str, Any]:
+    return {
+        "schema": _SCOPE_ACTION_LEASE_MARKER_SCHEMA,
+        "kind": "action",
+        "scope_identity": _scope_identity(scope_type, scope_id),
+        "action_id": action_id,
+        "phase": "claimed",
+    }
+
+
+def _scope_lease_marker(scope_type: str, scope_id: str) -> dict[str, Any]:
+    return {
+        "schema": _SCOPE_ACTION_LEASE_MARKER_SCHEMA,
+        "kind": "scope",
+        "scope_identity": _scope_identity(scope_type, scope_id),
+        "phase": "authority",
+    }
+
+
+def _read_lease_marker(path: Path) -> dict[str, Any] | None:
+    marker = _read_json_record(path, max_bytes=_SCOPE_ACTION_LEASE_MARKER_MAX_BYTES)
+    if marker is not None and not isinstance(marker, dict):
+        raise _ScopeReportStorageConflict(
+            "scope report action lease marker is corrupt")
+    return marker
+
+
+def _ensure_lease_marker(path: Path, expected: dict[str, Any]) -> None:
+    """Strictly create one immutable, scope-bound lease marker before paid work."""
+    current = _read_lease_marker(path)
+    if current is not None:
+        if current != expected:
+            raise _ScopeReportActionConflict(
+                "scope report action lease marker belongs to another identity")
+        # A strict replace may become visible just before its parent-directory sync fails. A live
+        # lock proves the original inode must not be replaced; an unlocked equal marker is instead
+        # re-published strictly so a restart never blesses an unconfirmed scope/UUID binding.
+        if _lease_path_is_live(path):
+            return
+    encoded = json.dumps(
+        expected, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > _SCOPE_ACTION_LEASE_MARKER_MAX_BYTES:
+        raise _ScopeReportStorageConflict(
+            "scope report action lease marker exceeds its byte limit")
+    try:
+        strict_atomic_write_text(path, encoded)
+        verified = _read_lease_marker(path)
+    except (_ScopeReportActionConflict, _ScopeReportStorageConflict):
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action lease marker could not be durably published") from exc
+    if verified != expected:
+        raise _ScopeReportStorageConflict(
+            "scope report action lease marker changed during publication")
+
+
+def _read_scope_action_lease_marker(
+        reports_dir: Path, action_id: str) -> dict[str, Any] | None:
+    marker = _read_lease_marker(_scope_action_lease_path(reports_dir, action_id))
+    if marker is None:
+        return None
+    if (set(marker) != {"schema", "kind", "scope_identity", "action_id", "phase"}
+            or marker.get("schema") != _SCOPE_ACTION_LEASE_MARKER_SCHEMA
+            or marker.get("kind") != "action"
+            or marker.get("action_id") != action_id
+            or marker.get("phase") != "claimed"
+            or not isinstance(marker.get("scope_identity"), dict)):
+        raise _ScopeReportStorageConflict(
+            "scope report action lease marker is conflicting or corrupt")
+    return marker
+
+
+def _read_scope_lease_marker(
+        reports_dir: Path, scope_type: str, scope_id: str) -> dict[str, Any] | None:
+    marker = _read_lease_marker(
+        _scope_action_scope_lease_path(reports_dir, scope_type, scope_id))
+    expected = _scope_lease_marker(scope_type, scope_id)
+    if marker is not None and marker != expected:
+        raise _ScopeReportStorageConflict(
+            "scope report scope lease marker is conflicting or corrupt")
+    return marker
+
+
+def _scope_action_lease_marker_exists(reports_dir: Path, action_id: str) -> bool:
+    return _read_scope_action_lease_marker(reports_dir, action_id) is not None
+
+
+def _open_scope_action_lease(path: Path, *, create: bool) -> int:
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    if create:
+        flags |= os.O_CREAT
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _is_link_or_reparse(opened):
+            raise _ScopeReportStorageConflict(
+                "scope report action lease changed before it was opened")
+        if opened.st_size == 0:
+            os.write(descriptor, b"\0")
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        after = path.lstat()
+        if (_is_link_or_reparse(after)
+                or _stat_identity(after) != _stat_identity(os.fstat(descriptor))):
+            raise _ScopeReportStorageConflict(
+                "scope report action lease changed while it was opened")
+        return descriptor
+    except BaseException:
+        if "descriptor" in locals():
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+
+
+def _try_lock_scope_action_descriptor(descriptor: int) -> bool:
+    try:
+        # Windows byte locks deny reads of the locked region. Keep the lock byte beyond the bounded
+        # immutable JSON marker so sibling processes can validate scope/action ownership while work
+        # is live; locking past EOF does not extend the file.
+        os.lseek(descriptor, _SCOPE_ACTION_LEASE_MARKER_MAX_BYTES + 1, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as exc:
+        if (exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK}
+                or getattr(exc, "winerror", None) in {33, 36, 158}):
+            return False
+        raise _ScopeReportStorageConflict(
+            "scope report action lease lock is unavailable") from exc
+
+
+def _unlock_scope_action_descriptor(descriptor: int) -> None:
+    try:
+        os.lseek(descriptor, _SCOPE_ACTION_LEASE_MARKER_MAX_BYTES + 1, os.SEEK_SET)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+    except OSError:
+        # Closing the descriptor below is the authoritative OS-level release backstop.
+        pass
+
+
+class _ScopeActionLease:
+    def __init__(self, key: str, descriptor: int):
+        self._key = key
+        self._descriptor = descriptor
+
+    def release(self) -> None:
+        descriptor = self._descriptor
+        if descriptor < 0:
+            return
+        self._descriptor = -1
+        try:
+            _unlock_scope_action_descriptor(descriptor)
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            finally:
+                with _SCOPE_ACTION_LEASES_LOCK:
+                    _SCOPE_ACTION_LEASES.discard(self._key)
+
+
+_RETAINED_SCOPE_ACTION_LEASES: dict[
+    str, tuple[_ScopeActionLease, _ScopeActionLease]
+] = {}
+
+
+def _retained_scope_action_key(reports_dir: Path, action_id: str) -> str:
+    return os.path.normcase(os.path.abspath(os.fspath(
+        _scope_action_lease_path(reports_dir, action_id))))
+
+
+def _retain_scope_action_leases(
+        reports_dir: Path, action_id: str, action_lease: _ScopeActionLease,
+        scope_lease: _ScopeActionLease) -> None:
+    """Keep both live handles as an in-process quarantine after ambiguous strict writes."""
+    key = _retained_scope_action_key(reports_dir, action_id)
+    with _SCOPE_ACTION_LEASES_LOCK:
+        existing = _RETAINED_SCOPE_ACTION_LEASES.get(key)
+        if existing is not None and existing != (action_lease, scope_lease):
+            raise _ScopeReportStorageConflict(
+                "scope report action has conflicting retained leases")
+        _RETAINED_SCOPE_ACTION_LEASES[key] = (action_lease, scope_lease)
+
+
+def _scope_action_leases_are_retained(reports_dir: Path, action_id: str) -> bool:
+    key = _retained_scope_action_key(reports_dir, action_id)
+    with _SCOPE_ACTION_LEASES_LOCK:
+        return key in _RETAINED_SCOPE_ACTION_LEASES
+
+
+def _release_retained_scope_action_leases(
+        reports_dir: Path, action_id: str) -> None:
+    key = _retained_scope_action_key(reports_dir, action_id)
+    with _SCOPE_ACTION_LEASES_LOCK:
+        leases = _RETAINED_SCOPE_ACTION_LEASES.pop(key, None)
+    if leases is None:
+        return
+    action_lease, scope_lease = leases
+    # Release the per-scope gate first. Until the action gate is released, exact reconciliation still
+    # sees the old UUID as live and no different UUID can race through the hand-off.
+    scope_lease.release()
+    action_lease.release()
+
+
+def _acquire_lease_path(path: Path) -> _ScopeActionLease | None:
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _SCOPE_ACTION_LEASES_LOCK:
+        if key in _SCOPE_ACTION_LEASES:
+            return None
+    try:
+        descriptor = _open_scope_action_lease(path, create=False)
+        if not _try_lock_scope_action_descriptor(descriptor):
+            os.close(descriptor)
+            return None
+    except _ScopeReportStorageConflict:
+        raise
+    except OSError as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action lease could not be acquired") from exc
+    with _SCOPE_ACTION_LEASES_LOCK:
+        # The store lock serializes same-process acquisition, while this registry makes liveness
+        # explicit even on platforms whose byte locks are process-scoped rather than handle-scoped.
+        if key in _SCOPE_ACTION_LEASES:
+            _unlock_scope_action_descriptor(descriptor)
+            os.close(descriptor)
+            return None
+        _SCOPE_ACTION_LEASES.add(key)
+    return _ScopeActionLease(key, descriptor)
+
+
+def _lease_path_is_live(path: Path) -> bool:
+    key = os.path.normcase(os.path.abspath(os.fspath(path)))
+    with _SCOPE_ACTION_LEASES_LOCK:
+        if key in _SCOPE_ACTION_LEASES:
+            return True
+    try:
+        descriptor = _open_scope_action_lease(path, create=False)
+    except FileNotFoundError as exc:
+        # A claimed action created this path before its receipt and the server never deletes it.
+        # Missing therefore means external corruption (and, on POSIX, may hide a still-locked
+        # unlinked inode); treating it as dead could authorize overlapping paid work.
+        raise _ScopeReportStorageConflict(
+            "scope report action lease disappeared") from exc
+    except _ScopeReportStorageConflict:
+        raise
+    except OSError as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action lease could not be probed") from exc
+    try:
+        if not _try_lock_scope_action_descriptor(descriptor):
+            return True
+        _unlock_scope_action_descriptor(descriptor)
+        return False
+    finally:
+        os.close(descriptor)
+
+
+def _acquire_scope_action_lease(
+        reports_dir: Path, scope_type: str, scope_id: str,
+        action_id: str) -> _ScopeActionLease | None:
+    path = _scope_action_lease_path(reports_dir, action_id)
+    expected = _action_lease_marker(scope_type, scope_id, action_id)
+    _ensure_lease_marker(path, expected)
+    # Re-read through the typed validator so malformed-but-equal-looking dictionaries cannot become
+    # global UUID authority and so a dead marker can never be rebound by a caller-supplied scope.
+    marker = _read_scope_action_lease_marker(reports_dir, action_id)
+    if marker != expected:
+        raise _ScopeReportActionConflict(
+            "scope report action lease marker belongs to another scope")
+    return _acquire_lease_path(path)
+
+
+def _acquire_scope_action_scope_lease(
+        reports_dir: Path, scope_type: str, scope_id: str) -> _ScopeActionLease | None:
+    path = _scope_action_scope_lease_path(reports_dir, scope_type, scope_id)
+    expected = _scope_lease_marker(scope_type, scope_id)
+    _ensure_lease_marker(path, expected)
+    if _read_scope_lease_marker(reports_dir, scope_type, scope_id) != expected:
+        raise _ScopeReportStorageConflict(
+            "scope report scope lease marker changed during acquisition")
+    return _acquire_lease_path(path)
+
+
+def _scope_action_lease_is_live(reports_dir: Path, action_id: str) -> bool:
+    return _lease_path_is_live(_scope_action_lease_path(reports_dir, action_id))
+
+
+def _scope_action_scope_lease_is_live(
+        reports_dir: Path, scope_type: str, scope_id: str) -> bool:
+    return _lease_path_is_live(
+        _scope_action_scope_lease_path(reports_dir, scope_type, scope_id))
+
+
+def _read_bounded_report_bytes(
+        path: Path, *, max_bytes: int = _SCOPE_REPORT_RECORD_MAX_BYTES) -> bytes | None:
     """Read one immutable regular-file snapshot without following a swapped link."""
     try:
         before = path.lstat()
@@ -217,7 +648,7 @@ def _read_bounded_report_bytes(path: Path) -> bytes | None:
     except OSError as exc:
         raise _ScopeReportStorageConflict("scope report could not be inspected") from exc
     if (not stat.S_ISREG(before.st_mode) or _is_link_or_reparse(before)
-            or before.st_size > _SCOPE_REPORT_RECORD_MAX_BYTES):
+            or before.st_size > max_bytes):
         raise _ScopeReportStorageConflict("scope report is not a bounded regular file")
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -226,11 +657,11 @@ def _read_bounded_report_bytes(path: Path) -> bytes | None:
         try:
             opened = os.fstat(descriptor)
             if (not stat.S_ISREG(opened.st_mode) or _is_link_or_reparse(opened)
-                    or opened.st_size > _SCOPE_REPORT_RECORD_MAX_BYTES
+                    or opened.st_size > max_bytes
                     or _stat_identity(opened) != _stat_identity(before)):
                 raise _ScopeReportStorageConflict("scope report changed before it was read")
             chunks: list[bytes] = []
-            remaining = _SCOPE_REPORT_RECORD_MAX_BYTES + 1
+            remaining = max_bytes + 1
             while remaining:
                 chunk = os.read(descriptor, min(64 * 1024, remaining))
                 if not chunk:
@@ -247,7 +678,7 @@ def _read_bounded_report_bytes(path: Path) -> bytes | None:
     raw = b"".join(chunks)
     if (not stat.S_ISREG(after.st_mode) or _is_link_or_reparse(after)
             or len(raw) != opened.st_size
-            or len(raw) > _SCOPE_REPORT_RECORD_MAX_BYTES
+            or len(raw) > max_bytes
             or _stat_identity(after) != _stat_identity(opened)):
         raise _ScopeReportStorageConflict("scope report changed or exceeded its byte limit")
     return raw
@@ -392,6 +823,8 @@ def _record_payload_matches_scope(rec: object, scope_type: str, scope_id: str) -
         and _valid_source_receipt(
             run_ids, sig, source_revisions, rec.get("omitted_runs"),
             rec.get("omitted_source_probes"))
+        and (rec.get("action_id") is None
+             or _scope_action_id(rec.get("action_id")) == rec.get("action_id"))
         and isinstance(rec.get("content"), dict)
     )
 
@@ -405,10 +838,11 @@ def _record_matches_scope(rec: object, scope_type: str, scope_id: str) -> bool:
     )
 
 
-def _read_json_record(path: Path) -> dict[str, Any] | None:
+def _read_json_record(
+        path: Path, *, max_bytes: int = _SCOPE_REPORT_RECORD_MAX_BYTES) -> dict[str, Any] | None:
     """Read one already-confined regular file; missing is distinct from corrupt."""
     try:
-        encoded = _read_bounded_report_bytes(path)
+        encoded = _read_bounded_report_bytes(path, max_bytes=max_bytes)
         if encoded is None:
             return None
         raw = encoded.decode("utf-8")
@@ -421,6 +855,233 @@ def _read_json_record(path: Path) -> dict[str, Any] | None:
     if not isinstance(rec, dict):
         raise _ScopeReportStorageConflict("scope report is not a JSON object")
     return rec
+
+
+def _scope_action_id(value: object) -> str | None:
+    if not isinstance(value, str) or _SCOPE_ACTION_ID_RE.fullmatch(value) is None:
+        return None
+    return value.lower()
+
+
+def _scope_action_failure(result: object, action_id: str) -> dict[str, Any]:
+    """Project only server-owned diagnostics; provider exceptions/prose never cross."""
+    source = result if isinstance(result, dict) else {}
+    code = source.get("code")
+    if code == _SCOPE_INPUTS_CHANGED["code"]:
+        safe = {**_SCOPE_INPUTS_CHANGED, "stale": True}
+    elif code == _SCOPE_SOURCE_TOO_LARGE["code"]:
+        safe = _SCOPE_SOURCE_TOO_LARGE
+    elif code == _SCOPE_STORAGE_ERROR["code"]:
+        safe = _SCOPE_STORAGE_ERROR
+    elif code == _SCOPE_ACTION_CONFLICT["code"]:
+        safe = _SCOPE_ACTION_CONFLICT
+    elif code == _SCOPE_ACTION_INDETERMINATE["code"]:
+        safe = _SCOPE_ACTION_INDETERMINATE
+    elif code == _SCOPE_ACTION_ABANDONED["code"]:
+        safe = _SCOPE_ACTION_ABANDONED
+    else:
+        safe = {
+            "code": "job_failed",
+            "error_kind": "internal",
+            "error": "background job failed",
+        }
+    return {"ok": False, "action_id": action_id, **safe}
+
+
+def _scope_action_success(action_id: str) -> dict[str, Any]:
+    """Keep the action ledger compact; the canonical report file owns the paid payload."""
+    return {
+        "ok": True,
+        "action_id": action_id,
+        "authoritative": True,
+        "published": True,
+    }
+
+
+def _valid_scope_action_result(
+        result: object, scope_type: str, scope_id: str, action_id: str) -> bool:
+    if (not isinstance(result, dict) or type(result.get("ok")) is not bool
+            or result.get("action_id") != action_id):
+        return False
+    if result["ok"]:
+        # The exact report is read from its canonical scope path and must independently carry this
+        # action id. Duplicating a model-sized payload in every receipt made the ledger unbounded and
+        # allowed an old action replay to masquerade as the current canonical scope report.
+        return result == _scope_action_success(action_id)
+    # Exact equality makes the receipt a server-owned vocabulary, not a durable echo channel for
+    # arbitrary provider/internal prose that happened to resemble a failure object.
+    return result == _scope_action_failure(result, action_id)
+
+
+def _valid_scope_action_receipt(
+        rec: object, scope_type: str, scope_id: str, action_id: str) -> bool:
+    if not isinstance(rec, dict):
+        return False
+    status = rec.get("status")
+    generation_identity = rec.get("generation_identity")
+    return (
+        set(rec) == {
+            "schema", "scope_identity", "action_id", "generation_identity", "job_id",
+            "status", "updated_at", "result",
+        }
+        and rec.get("schema") == _SCOPE_ACTION_SCHEMA
+        and rec.get("scope_identity") == _scope_identity(scope_type, scope_id)
+        and rec.get("action_id") == action_id
+        and _scope_action_id(action_id) == action_id
+        and isinstance(generation_identity, str)
+        and re.fullmatch(r"scope-report:[0-9a-f]{64}", generation_identity) is not None
+        and isinstance(rec.get("job_id"), str)
+        and _SCOPE_JOB_ID_RE.fullmatch(rec["job_id"]) is not None
+        and status in {"running", "done", "indeterminate", "abandoned"}
+        and type(rec.get("updated_at")) is int and rec["updated_at"] >= 0
+        and ((status == "running" and rec.get("result") is None)
+             or (status == "done" and _valid_scope_action_result(
+                 rec.get("result"), scope_type, scope_id, action_id)
+                 and rec["result"] != _scope_action_failure(
+                     _SCOPE_ACTION_INDETERMINATE, action_id)
+                 and rec["result"] != _scope_action_failure(
+                     _SCOPE_ACTION_ABANDONED, action_id))
+             or (status == "indeterminate" and rec.get("result")
+                 == _scope_action_failure(_SCOPE_ACTION_INDETERMINATE, action_id))
+             or (status == "abandoned" and rec.get("result")
+                 == _scope_action_failure(_SCOPE_ACTION_ABANDONED, action_id)))
+    )
+
+
+def _read_scope_action_receipt(
+        reports_dir: Path, scope_type: str, scope_id: str,
+        action_id: str) -> dict[str, Any] | None:
+    rec = _read_json_record(
+        _scope_action_path(reports_dir, action_id), max_bytes=_SCOPE_ACTION_RECORD_MAX_BYTES)
+    if rec is None:
+        return None
+    if not _valid_scope_action_receipt(rec, scope_type, scope_id, action_id):
+        raise _ScopeReportActionConflict(
+            "scope report action identity is conflicting or corrupt")
+    return rec
+
+
+def _serialize_scope_action_receipt(receipt: dict[str, Any]) -> str:
+    try:
+        encoded = json.dumps(receipt, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise _ScopeReportStorageConflict("scope report action receipt is not serializable") from exc
+    if len(encoded.encode("utf-8")) > _SCOPE_ACTION_RECORD_MAX_BYTES:
+        raise _ScopeReportStorageConflict("scope report action receipt exceeds its byte limit")
+    return encoded
+
+
+def _write_scope_action_receipt(
+        reports_dir: Path, scope_type: str, scope_id: str,
+        receipt: dict[str, Any]) -> dict[str, Any]:
+    """Publish and verify one receipt while the caller owns ``_scope_store_lock``."""
+    action_id = receipt.get("action_id")
+    if (not isinstance(action_id, str)
+            or not _valid_scope_action_receipt(receipt, scope_type, scope_id, action_id)):
+        raise _ScopeReportStorageConflict("scope report action receipt is invalid")
+    try:
+        _validated_reports_dir(reports_dir, create=True)
+        path = _scope_action_path(reports_dir, action_id)
+        # CODEX AGENT: claims and terminals gate an external paid side effect. Best-effort fsync is
+        # insufficient here: the worker may start only after the exact receipt survived strict sync.
+        strict_atomic_write_text(path, _serialize_scope_action_receipt(receipt))
+        verified = _read_scope_action_receipt(
+            reports_dir, scope_type, scope_id, action_id)
+    except _ScopeReportStorageConflict:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action receipt could not be durably published") from exc
+    if verified is None:
+        raise _ScopeReportStorageConflict("scope report action receipt disappeared")
+    if verified != receipt:
+        raise _ScopeReportStorageConflict(
+            "scope report action receipt changed during publication")
+    return verified
+
+
+def _missing_scope_action_receipt(
+        scope_type: str, scope_id: str, action_id: str) -> dict[str, Any]:
+    """Permanent fail-closed tombstone for an indexed receipt lost outside the server."""
+    return {
+        "schema": _SCOPE_ACTION_SCHEMA,
+        "scope_identity": _scope_identity(scope_type, scope_id),
+        "action_id": action_id,
+        "generation_identity": "scope-report:" + "0" * 64,
+        "job_id": "0" * 16,
+        "status": "indeterminate",
+        "updated_at": int(time.time() * 1000),
+        "result": _scope_action_failure(_SCOPE_ACTION_INDETERMINATE, action_id),
+    }
+
+
+def _scope_action_fence_path(
+        reports_dir: Path, scope_type: str, scope_id: str) -> Path:
+    return _confined_scope_root_path(
+        reports_dir,
+        f".scope-action-scope-{_scope_identity_hash(scope_type, scope_id)}.fence",
+    )
+
+
+def _valid_scope_action_fence(
+        value: object, scope_type: str, scope_id: str) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value) == {
+            "schema", "scope_identity", "action_id", "status", "updated_at",
+        }
+        and value.get("schema") == _SCOPE_ACTION_FENCE_SCHEMA
+        and value.get("scope_identity") == _scope_identity(scope_type, scope_id)
+        and _scope_action_id(value.get("action_id")) == value.get("action_id")
+        and value.get("status") in {"active", "clear"}
+        and type(value.get("updated_at")) is int
+        and value["updated_at"] >= 0
+    )
+
+
+def _read_scope_action_fence(
+        reports_dir: Path, scope_type: str, scope_id: str) -> dict[str, Any] | None:
+    rec = _read_json_record(
+        _scope_action_fence_path(reports_dir, scope_type, scope_id),
+        max_bytes=_SCOPE_ACTION_FENCE_MAX_BYTES)
+    if rec is None:
+        return None
+    if not _valid_scope_action_fence(rec, scope_type, scope_id):
+        raise _ScopeReportStorageConflict(
+            "scope report action fence is conflicting or corrupt")
+    return rec
+
+
+def _write_scope_action_fence(
+        reports_dir: Path, scope_type: str, scope_id: str,
+        action_id: str, status: str) -> dict[str, Any]:
+    fence = {
+        "schema": _SCOPE_ACTION_FENCE_SCHEMA,
+        "scope_identity": _scope_identity(scope_type, scope_id),
+        "action_id": action_id,
+        "status": status,
+        "updated_at": int(time.time() * 1000),
+    }
+    if not _valid_scope_action_fence(fence, scope_type, scope_id):
+        raise _ScopeReportStorageConflict("scope report action fence is invalid")
+    encoded = json.dumps(
+        fence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    if len(encoded.encode("utf-8")) > _SCOPE_ACTION_FENCE_MAX_BYTES:
+        raise _ScopeReportStorageConflict(
+            "scope report action fence exceeds its byte limit")
+    try:
+        strict_atomic_write_text(
+            _scope_action_fence_path(reports_dir, scope_type, scope_id), encoded)
+        verified = _read_scope_action_fence(reports_dir, scope_type, scope_id)
+    except _ScopeReportStorageConflict:
+        raise
+    except (OSError, RuntimeError) as exc:
+        raise _ScopeReportStorageConflict(
+            "scope report action fence could not be durably published") from exc
+    if verified != fence:
+        raise _ScopeReportStorageConflict(
+            "scope report action fence changed during publication")
+    return verified
 
 
 def _read_scope_record(path: Path, scope_type: str, scope_id: str) -> dict[str, Any] | None:
@@ -634,6 +1295,46 @@ def _public_scope_record(rec: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     return {**rec, "content": content, "authoritative": False}, True
 
 
+def _action_bound_scope_record_is_confirmed(
+        reports_dir: Path, rec: dict[str, Any],
+        scope_type: str, scope_id: str) -> bool:
+    """Gate paid canonical content on an independently strict exact action terminal."""
+    if "action_id" not in rec:
+        # Explicit legacy path: pre-action records are still handled by their content-authority rules.
+        return True
+    action_id = _scope_action_id(rec.get("action_id"))
+    if action_id is None or action_id != rec.get("action_id"):
+        return False
+    try:
+        receipt = _read_scope_action_receipt(
+            reports_dir, scope_type, scope_id, action_id)
+        if (receipt is None or receipt.get("status") != "done"
+                or receipt.get("result") != _scope_action_success(action_id)):
+            return False
+        marker = _read_scope_action_lease_marker(reports_dir, action_id)
+        if marker is not None:
+            if marker != _action_lease_marker(scope_type, scope_id, action_id):
+                return False
+            if _scope_action_lease_is_live(reports_dir, action_id):
+                return False
+        else:
+            fence = _read_scope_action_fence(reports_dir, scope_type, scope_id)
+            scope_marker = _read_scope_lease_marker(
+                reports_dir, scope_type, scope_id)
+            if (fence is not None and fence["status"] == "active"
+                    and fence["action_id"] == action_id
+                    and scope_marker is not None
+                    and _scope_action_scope_lease_is_live(
+                        reports_dir, scope_type, scope_id)):
+                return False
+        # Strictly re-publish before treating a visible terminal as cross-process authority. This
+        # repairs the replace-visible/parent-sync-failed window without trusting process-local flags.
+        return _write_scope_action_receipt(
+            reports_dir, scope_type, scope_id, receipt) == receipt
+    except (_ScopeReportActionConflict, _ScopeReportStorageConflict):
+        return False
+
+
 def _prior_learnings_index(reports_dir: Path) -> str:
     """Return a bounded JSON projection of untrusted prior-report evidence for Genesis."""
     try:
@@ -701,6 +1402,13 @@ def _prior_learnings_index(reports_dir: Path) -> str:
                     and _legacy_scope_report_path(base, scope_type, scope_id) == p
                 )
             if not valid:
+                continue
+            # Confirmation performs a strict receipt repair, so Genesis scanning obeys the same
+            # cross-process store discipline as HTTP report reads and action reconciliation.
+            with _scope_store_lock(base):
+                confirmed = _action_bound_scope_record_is_confirmed(
+                    base, rec, scope_type, scope_id)
+            if not confirmed:
                 continue
             content = rec.get("content") or {}
             raw_directions = content.get("next_directions")
@@ -780,9 +1488,6 @@ def build_router(srv) -> APIRouter:
     revision_cache_lock = threading.Lock()
     revision_cache: OrderedDict[tuple, tuple[float, dict[str, Any]]] = OrderedDict()
     omission_cache: OrderedDict[tuple, float] = OrderedDict()
-    generation_jobs_lock = threading.Lock()
-    generation_jobs: dict[str, str] = {}
-
     def _scope_label_from_data(data: dict[str, Any], scope_type: str, scope_id: str) -> str:
         if scope_type == "project":
             p = next((x for x in data["projects"] if x["id"] == scope_id), None)
@@ -1175,6 +1880,518 @@ def build_router(srv) -> APIRouter:
         # clear without changing that key. A formerly omitted run is therefore always new evidence.
         return False, event_bytes
 
+    def _action_response(receipt: dict[str, Any]) -> dict[str, Any]:
+        action_id = receipt["action_id"]
+        if receipt["status"] == "running":
+            return {"status": "running", "action_id": action_id,
+                    "job_id": receipt["job_id"]}
+        return {**receipt["result"], "status": receipt["status"], "action_id": action_id}
+
+    def _indeterminate_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        return {
+            **receipt,
+            "status": "indeterminate",
+            "updated_at": int(time.time() * 1000),
+            "result": _scope_action_failure(
+                _SCOPE_ACTION_INDETERMINATE, receipt["action_id"]),
+        }
+
+    def _reconcile_running_action(
+            scope_type: str, scope_id: str,
+            receipt: dict[str, Any]) -> dict[str, Any]:
+        """Turn an orphaned/done-without-ledger running claim into a durable unknown terminal.
+
+        The volatile result is deliberately ignored. A successful paid payload is authoritative only
+        after the worker strictly published both the canonical report and the compact action terminal.
+        """
+        if receipt["status"] != "running":
+            return receipt
+        retained_leases = _scope_action_leases_are_retained(
+            _reports_dir, receipt["action_id"])
+        marker = _read_scope_action_lease_marker(
+            _reports_dir, receipt["action_id"])
+        expected_marker = _action_lease_marker(
+            scope_type, scope_id, receipt["action_id"])
+        if marker is None:
+            fence = _read_scope_action_fence(_reports_dir, scope_type, scope_id)
+            if (fence is None or fence["status"] != "active"
+                    or fence["action_id"] != receipt["action_id"]):
+                raise _ScopeReportStorageConflict(
+                    "running scope report action marker disappeared without its exact fence")
+            if _read_scope_lease_marker(
+                    _reports_dir, scope_type, scope_id) is None:
+                raise _ScopeReportStorageConflict(
+                    "running scope report lease markers disappeared")
+            if (not retained_leases
+                    and _scope_action_scope_lease_is_live(
+                        _reports_dir, scope_type, scope_id)):
+                # The scope lease is the independent proof that a worker may still hold an unlinked
+                # action-lock inode. Never recreate that marker while paid work can be live.
+                return receipt
+            _ensure_lease_marker(
+                _scope_action_lease_path(_reports_dir, receipt["action_id"]),
+                expected_marker,
+            )
+        elif marker != expected_marker:
+            raise _ScopeReportActionConflict(
+                "running scope report action marker belongs to another scope")
+        if _read_scope_lease_marker(_reports_dir, scope_type, scope_id) is None:
+            if (not retained_leases
+                    and _scope_action_lease_is_live(
+                        _reports_dir, receipt["action_id"])):
+                return receipt
+            fence = _read_scope_action_fence(_reports_dir, scope_type, scope_id)
+            if (fence is None or fence["status"] != "active"
+                    or fence["action_id"] != receipt["action_id"]):
+                raise _ScopeReportStorageConflict(
+                    "running scope report scope marker disappeared without its exact fence")
+            _ensure_lease_marker(
+                _scope_action_scope_lease_path(
+                    _reports_dir, scope_type, scope_id),
+                _scope_lease_marker(scope_type, scope_id),
+            )
+        if retained_leases:
+            # The provider already returned, but neither its terminal nor fallback tombstone could
+            # be strictly confirmed. A later exact reconciliation may retry the conservative write;
+            # only after it succeeds are both quarantining handles released.
+            reconciled = _write_scope_action_receipt(
+                _reports_dir, scope_type, scope_id, _indeterminate_receipt(receipt))
+            _release_retained_scope_action_leases(
+                _reports_dir, receipt["action_id"])
+            return reconciled
+        # CODEX AGENT: JobRegistry is process-local, but deployments may run multiple ASGI workers.
+        # The OS lease is the cross-process liveness authority; a sibling must not orphan live paid
+        # work merely because it cannot see this worker's in-memory job receipt.
+        if _scope_action_lease_is_live(_reports_dir, receipt["action_id"]):
+            return receipt
+        # The existing marker was successfully locked, so no process owns the paid worker anymore.
+        # Volatile JobRegistry state may itself be orphaned (for example a BaseException escaped its
+        # worker); it cannot override the cross-process liveness authority.
+        reconciled = _write_scope_action_receipt(
+            _reports_dir, scope_type, scope_id, _indeterminate_receipt(receipt))
+        srv.jobs.discard_orphaned_running(receipt["job_id"])
+        return reconciled
+
+    def _read_reconciled_action(
+            scope_type: str, scope_id: str, action_id: str) -> dict[str, Any] | None:
+        receipt = _read_scope_action_receipt(
+            _reports_dir, scope_type, scope_id, action_id)
+        if receipt is None:
+            marker = _read_scope_action_lease_marker(_reports_dir, action_id)
+            fence = _read_scope_action_fence(_reports_dir, scope_type, scope_id)
+            retained_leases = _scope_action_leases_are_retained(
+                _reports_dir, action_id)
+            fence_binds_action = (
+                fence is not None and fence["action_id"] == action_id)
+            if marker is None:
+                if not fence_binds_action:
+                    return None
+                if fence["status"] == "clear":
+                    # A clear fence is permanent exact evidence that this UUID was already consumed
+                    # for this scope. Return a conservative tombstone so deletion cannot rebill it.
+                    return _missing_scope_action_receipt(scope_type, scope_id, action_id)
+                scope_marker = _read_scope_lease_marker(
+                    _reports_dir, scope_type, scope_id)
+                if scope_marker is None:
+                    raise _ScopeReportStorageConflict(
+                        "active scope report lease markers disappeared")
+                if (not retained_leases
+                        and _scope_action_scope_lease_is_live(
+                            _reports_dir, scope_type, scope_id)):
+                    # The still-live scope inode proves provider work may be active. Do not recreate
+                    # the deleted action-lock path and accidentally bypass its unlinked lock.
+                    return {
+                        **_missing_scope_action_receipt(scope_type, scope_id, action_id),
+                        "status": "running",
+                        "result": None,
+                    }
+                # Both paid-work leases are now proven dead and the active fence supplies the exact
+                # scope binding. It is safe to recreate only the immutable marker, then persist an
+                # indeterminate tombstone; explicit abandon remains required to clear the fence.
+                _ensure_lease_marker(
+                    _scope_action_lease_path(_reports_dir, action_id),
+                    _action_lease_marker(scope_type, scope_id, action_id),
+                )
+                marker = _read_scope_action_lease_marker(_reports_dir, action_id)
+            expected_marker = _action_lease_marker(scope_type, scope_id, action_id)
+            if marker != expected_marker:
+                raise _ScopeReportActionConflict(
+                    "scope report action marker belongs to another scope")
+            if fence is not None and not fence_binds_action:
+                # Never replace another UUID's scope authority. A dead scope-bound marker can still
+                # own its own conservative tombstone, which lets the stale tab reconcile/discard A
+                # without touching a live or clear fence for B.
+                retained_leases = _scope_action_leases_are_retained(
+                    _reports_dir, action_id)
+                if (not retained_leases
+                        and _scope_action_lease_is_live(_reports_dir, action_id)):
+                    raise _ScopeReportStorageConflict(
+                        "live scope report action conflicts with another action fence")
+                receipt = _write_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id,
+                    _missing_scope_action_receipt(scope_type, scope_id, action_id))
+                if retained_leases:
+                    _release_retained_scope_action_leases(_reports_dir, action_id)
+                return receipt
+            if (not retained_leases
+                    and _scope_action_lease_is_live(_reports_dir, action_id)):
+                # The provider may still be running even though external corruption removed its
+                # receipt. Exact retries can safely rejoin by action UUID, but may not mint work.
+                return {
+                    **_missing_scope_action_receipt(scope_type, scope_id, action_id),
+                    "status": "running",
+                    "result": None,
+                }
+            # The immutable marker supplies the missing scope binding. Rebuild a conservative durable
+            # tombstone and active fence; explicit abandon is then the only operation that can reopen
+            # this scope for a new paid UUID.
+            receipt = _write_scope_action_receipt(
+                _reports_dir, scope_type, scope_id,
+                _missing_scope_action_receipt(scope_type, scope_id, action_id))
+            if retained_leases:
+                _release_retained_scope_action_leases(_reports_dir, action_id)
+            if fence is None:
+                scope_marker = _read_scope_lease_marker(
+                    _reports_dir, scope_type, scope_id)
+                if scope_marker is None:
+                    _ensure_lease_marker(
+                        _scope_action_scope_lease_path(
+                            _reports_dir, scope_type, scope_id),
+                        _scope_lease_marker(scope_type, scope_id),
+                    )
+                elif _scope_action_scope_lease_is_live(
+                        _reports_dir, scope_type, scope_id):
+                    raise _ScopeReportStorageConflict(
+                        "scope report action fence disappeared while a worker is live")
+                _write_scope_action_fence(
+                    _reports_dir, scope_type, scope_id, action_id, "active")
+        if (receipt["status"] == "indeterminate"
+                and _scope_action_leases_are_retained(_reports_dir, action_id)):
+            # The fallback replace may itself have become visible before parent sync failed. Strictly
+            # confirm that conservative tombstone before releasing the quarantining handles.
+            receipt = _write_scope_action_receipt(
+                _reports_dir, scope_type, scope_id, receipt)
+            _release_retained_scope_action_leases(_reports_dir, action_id)
+        if receipt["status"] in {"done", "abandoned"}:
+            marker = _read_scope_action_lease_marker(_reports_dir, action_id)
+            if _scope_action_leases_are_retained(_reports_dir, action_id):
+                receipt = _write_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id,
+                    _indeterminate_receipt(receipt))
+                _release_retained_scope_action_leases(
+                    _reports_dir, action_id)
+            elif marker is not None:
+                if marker != _action_lease_marker(scope_type, scope_id, action_id):
+                    raise _ScopeReportActionConflict(
+                        "scope report action marker belongs to another scope")
+                if _scope_action_lease_is_live(_reports_dir, action_id):
+                    # The worker writes terminal before releasing its leases. Treat a visible terminal
+                    # as running until the cross-process hand-off completes.
+                    return {**receipt, "status": "running", "result": None}
+            else:
+                fence = _read_scope_action_fence(
+                    _reports_dir, scope_type, scope_id)
+                scope_marker = _read_scope_lease_marker(
+                    _reports_dir, scope_type, scope_id)
+                if (fence is not None and fence["status"] == "active"
+                        and fence["action_id"] == action_id
+                        and scope_marker is not None
+                        and _scope_action_scope_lease_is_live(
+                            _reports_dir, scope_type, scope_id)):
+                    # A worker writes terminal before releasing both handles. If its action marker
+                    # was unlinked, the independent scope lease still quarantines that visible file.
+                    return {**receipt, "status": "running", "result": None}
+            # Confirmation cannot be process-local: a strict replace may be visible even though its
+            # parent sync failed. Re-publish every authority-granting terminal before returning it.
+            try:
+                receipt = _write_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id, receipt)
+            except _ScopeReportStorageConflict:
+                return _indeterminate_receipt(receipt)
+        receipt = _reconcile_running_action(scope_type, scope_id, receipt)
+        if receipt["status"] in {"done", "abandoned", "indeterminate"}:
+            # A strict read-back is itself sufficient durable confirmation. This also closes the
+            # narrow window where publication succeeded but the worker was interrupted before it
+            # could flip the process-local receipt's consumption policy.
+            srv.jobs.mark_consumable(receipt["job_id"])
+            srv.jobs.poll(receipt["job_id"])
+        return receipt
+
+    def _active_scope_action(
+            scope_type: str, scope_id: str) -> dict[str, Any] | None:
+        scope_marker = _read_scope_lease_marker(
+            _reports_dir, scope_type, scope_id)
+        fence = _read_scope_action_fence(_reports_dir, scope_type, scope_id)
+        if scope_marker is None:
+            if fence is None:
+                return None
+            if fence["status"] != "clear":
+                raise _ScopeReportStorageConflict(
+                    "active scope report scope lease marker disappeared")
+            action_marker = _read_scope_action_lease_marker(
+                _reports_dir, fence["action_id"])
+            if (action_marker != _action_lease_marker(
+                    scope_type, scope_id, fence["action_id"])
+                    or _scope_action_lease_is_live(
+                        _reports_dir, fence["action_id"])):
+                raise _ScopeReportStorageConflict(
+                    "scope report scope lease marker cannot be safely reconstructed")
+            # A clear exact fence plus the dead immutable action marker proves no paid worker can
+            # still own this scope. Strictly reconstruct the deterministic scope marker so one lost
+            # metadata file does not brick all future actions.
+            _ensure_lease_marker(
+                _scope_action_scope_lease_path(
+                    _reports_dir, scope_type, scope_id),
+                _scope_lease_marker(scope_type, scope_id),
+            )
+            scope_marker = _read_scope_lease_marker(
+                _reports_dir, scope_type, scope_id)
+            if scope_marker is None:
+                raise _ScopeReportStorageConflict(
+                    "scope report scope lease marker reconstruction failed")
+        scope_live = _scope_action_scope_lease_is_live(
+            _reports_dir, scope_type, scope_id)
+        if fence is None:
+            # Once the permanent scope marker exists the permanent fence must exist too. Missing is
+            # external corruption, including the unlink-while-live case; never fail open to paid work.
+            raise _ScopeReportStorageConflict(
+                "scope report action fence disappeared")
+        if fence["status"] == "clear":
+            if scope_live:
+                raise _ScopeReportStorageConflict(
+                    "scope report action fence cleared while its worker is live")
+            return None
+        receipt = _read_reconciled_action(
+            scope_type, scope_id, fence["action_id"])
+        if receipt is None:
+            raise _ScopeReportStorageConflict(
+                "active scope report action receipt disappeared")
+        if receipt["status"] in {"done", "abandoned"}:
+            _write_scope_action_fence(
+                _reports_dir, scope_type, scope_id,
+                fence["action_id"], "clear")
+            return None
+        return receipt
+
+    # CODEX AGENT: action observation has its own namespace because scope ids are opaque paths. A
+    # suffix route under ``/scope-report/...`` would steal a legitimate scope such as
+    # ``family/actions/<uuid>`` from the catch-all report GET. The expected scope stays explicit in
+    # the query and is verified against the durable receipt before any result is disclosed.
+    @router.get("/api/scope-report-actions/{action_id}")
+    def get_scope_report_action(scope_type: str, scope_id: str, action_id: str):
+        if scope_type not in _SCOPE_TYPES:
+            raise HTTPException(400, "bad scope type")
+        normalized = _scope_action_id(action_id)
+        if normalized is None:
+            raise HTTPException(400, "bad scope report action id")
+        try:
+            with _scope_store_lock(_reports_dir):
+                receipt = _read_reconciled_action(scope_type, scope_id, normalized)
+        except _ScopeReportActionConflict as exc:
+            raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
+        except _ScopeReportStorageConflict as exc:
+            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+        if receipt is None:
+            # CODEX AGENT: unknown means no durable claim exists. The client may safely retry only the
+            # same UUID; it must never mint a replacement action merely because a volatile job vanished.
+            return {"status": "unknown", "action_id": normalized}
+        return _action_response(receipt)
+
+    @router.post("/api/scope-report-actions/{action_id}/abandon")
+    def abandon_scope_report_action(scope_type: str, scope_id: str, action_id: str):
+        """Explicitly release an indeterminate paid-action fence without erasing its identity.
+
+        Abandon is intentionally never automatic: after a process crash the provider outcome cannot
+        be proven. The old UUID remains a durable tombstone, and only an explicit new UUID may bill a
+        new attempt. A process-local running worker always wins the race and makes abandon a conflict.
+        """
+        if scope_type not in _SCOPE_TYPES:
+            raise HTTPException(400, "bad scope type")
+        normalized = _scope_action_id(action_id)
+        if normalized is None:
+            raise HTTPException(400, "bad scope report action id")
+        try:
+            with _scope_store_lock(_reports_dir):
+                fence = _read_scope_action_fence(_reports_dir, scope_type, scope_id)
+                receipt = _read_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id, normalized)
+                fence_active_exact = (
+                    fence is not None and fence["status"] == "active"
+                    and fence["action_id"] == normalized)
+                scope_worker_live = False
+                if fence_active_exact:
+                    scope_marker = _read_scope_lease_marker(
+                        _reports_dir, scope_type, scope_id)
+                    if scope_marker is None:
+                        action_marker = _read_scope_action_lease_marker(
+                            _reports_dir, normalized)
+                        if action_marker != _action_lease_marker(
+                                scope_type, scope_id, normalized):
+                            raise _ScopeReportStorageConflict(
+                                "active scope report lease markers disappeared")
+                        if _scope_action_lease_is_live(_reports_dir, normalized):
+                            raise HTTPException(409, {
+                                **_SCOPE_ACTION_ACTIVE,
+                                "action_id": normalized,
+                            })
+                        _ensure_lease_marker(
+                            _scope_action_scope_lease_path(
+                                _reports_dir, scope_type, scope_id),
+                            _scope_lease_marker(scope_type, scope_id),
+                        )
+                    scope_worker_live = _scope_action_scope_lease_is_live(
+                        _reports_dir, scope_type, scope_id)
+                if receipt is None:
+                    marker = _read_scope_action_lease_marker(
+                        _reports_dir, normalized)
+                    expected_marker = _action_lease_marker(
+                        scope_type, scope_id, normalized)
+                    fence_binds_action = (
+                        fence is not None and fence["action_id"] == normalized)
+                    marker_lease: _ScopeActionLease | None = None
+                    repair_missing_fence = False
+                    retained_leases = _scope_action_leases_are_retained(
+                        _reports_dir, normalized)
+                    if marker is not None:
+                        if marker != expected_marker:
+                            raise _ScopeReportActionConflict(
+                                "scope report action marker belongs to another scope")
+                        if (not retained_leases
+                                and _scope_action_lease_is_live(
+                                    _reports_dir, normalized)):
+                            raise HTTPException(409, {
+                                **_SCOPE_ACTION_ACTIVE,
+                                "action_id": normalized,
+                            })
+                        if (not retained_leases
+                                and fence_active_exact and scope_worker_live):
+                            raise HTTPException(409, {
+                                **_SCOPE_ACTION_ACTIVE,
+                                "action_id": normalized,
+                            })
+                        if fence is None:
+                            scope_marker = _read_scope_lease_marker(
+                                _reports_dir, scope_type, scope_id)
+                            if (scope_marker is not None
+                                    and _scope_action_scope_lease_is_live(
+                                        _reports_dir, scope_type, scope_id)):
+                                raise HTTPException(409, {
+                                    **_SCOPE_ACTION_ACTIVE,
+                                    "action_id": normalized,
+                                })
+                            if scope_marker is None:
+                                _ensure_lease_marker(
+                                    _scope_action_scope_lease_path(
+                                        _reports_dir, scope_type, scope_id),
+                                    _scope_lease_marker(scope_type, scope_id),
+                                )
+                            repair_missing_fence = True
+                    else:
+                        if not fence_binds_action:
+                            # Server-unknown UUIDs own no durable action and require no tombstone.
+                            # Rejecting the no-op also prevents arbitrary abandon calls from growing
+                            # permanent root-level marker/receipt files without paid work.
+                            return {"status": "unknown", "action_id": normalized}
+                        if (not retained_leases and fence["status"] == "active"
+                                and scope_worker_live):
+                            raise HTTPException(409, {
+                                **_SCOPE_ACTION_ACTIVE,
+                                "action_id": normalized,
+                            })
+                        # The exact fence supplies the deleted marker's scope binding. With the scope
+                        # lease proven dead (or already clear), strict recreation is safe.
+                        if retained_leases:
+                            _ensure_lease_marker(
+                                _scope_action_lease_path(_reports_dir, normalized),
+                                expected_marker,
+                            )
+                        else:
+                            marker_lease = _acquire_scope_action_lease(
+                                _reports_dir, scope_type, scope_id, normalized)
+                            if marker_lease is None:
+                                raise HTTPException(409, {
+                                    **_SCOPE_ACTION_ACTIVE,
+                                    "action_id": normalized,
+                                })
+                    base = _missing_scope_action_receipt(
+                        scope_type, scope_id, normalized)
+                    try:
+                        receipt = _write_scope_action_receipt(
+                            _reports_dir, scope_type, scope_id, {
+                                **base,
+                                "status": "abandoned",
+                                "result": _scope_action_failure(
+                                    _SCOPE_ACTION_ABANDONED, normalized),
+                            })
+                    finally:
+                        if marker_lease is not None:
+                            marker_lease.release()
+                    if ((fence_binds_action and fence["status"] == "active")
+                            or repair_missing_fence):
+                        _write_scope_action_fence(
+                            _reports_dir, scope_type, scope_id, normalized, "clear")
+                    if retained_leases:
+                        _release_retained_scope_action_leases(
+                            _reports_dir, normalized)
+                    return _action_response(receipt)
+                receipt = _read_reconciled_action(scope_type, scope_id, normalized)
+                assert receipt is not None
+                repair_missing_fence = False
+                if fence is None:
+                    scope_marker = _read_scope_lease_marker(
+                        _reports_dir, scope_type, scope_id)
+                    if (scope_marker is not None
+                            and _scope_action_scope_lease_is_live(
+                                _reports_dir, scope_type, scope_id)):
+                        raise HTTPException(409, {
+                            **_SCOPE_ACTION_ACTIVE,
+                            "action_id": normalized,
+                        })
+                    if scope_marker is None:
+                        _ensure_lease_marker(
+                            _scope_action_scope_lease_path(
+                                _reports_dir, scope_type, scope_id),
+                            _scope_lease_marker(scope_type, scope_id),
+                        )
+                    repair_missing_fence = True
+                if receipt["status"] in {"done", "abandoned"}:
+                    if (repair_missing_fence
+                            or (fence is not None and fence["status"] == "active"
+                                and fence["action_id"] == normalized)):
+                        _write_scope_action_fence(
+                            _reports_dir, scope_type, scope_id, normalized, "clear")
+                    return _action_response(receipt)
+                if receipt["status"] == "running":
+                    raise HTTPException(409, {
+                        **_SCOPE_ACTION_ACTIVE,
+                        "action_id": normalized,
+                    })
+                abandoned = {
+                    **receipt,
+                    "status": "abandoned",
+                    "updated_at": int(time.time() * 1000),
+                    "result": _scope_action_failure(
+                        _SCOPE_ACTION_ABANDONED, normalized),
+                }
+                receipt = _write_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id, abandoned)
+                if (repair_missing_fence
+                        or (fence is not None and fence["status"] == "active"
+                            and fence["action_id"] == normalized)):
+                    _write_scope_action_fence(
+                        _reports_dir, scope_type, scope_id, normalized, "clear")
+                # A local done receipt is now backed by a durable tombstone and may be retired. Its
+                # result remains deliberately unread: only the strict ledger controls reconciliation.
+                srv.jobs.mark_consumable(receipt["job_id"])
+                srv.jobs.poll(receipt["job_id"])
+        except HTTPException:
+            raise
+        except _ScopeReportActionConflict as exc:
+            raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
+        except _ScopeReportStorageConflict as exc:
+            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+        return _action_response(receipt)
+
     # CODEX AGENT: scope ids are opaque persisted identities, so the route must preserve legal
     # task/project ids containing ``/`` instead of truncating or rejecting them at the HTTP boundary.
     @router.get("/api/scope-report/{scope_type}/{scope_id:path}")
@@ -1182,15 +2399,31 @@ def build_router(srv) -> APIRouter:
         if scope_type not in _SCOPE_TYPES:
             raise HTTPException(400, "bad scope type")
         cur_ids = _scope_run_ids(scope_type, scope_id)
+        publication_quarantined = False
         try:
             with _scope_store_lock(_reports_dir):
                 rec = _read_or_migrate_scope_record(
                     _reports_dir, scope_type, scope_id)
+                if (rec is not None
+                        and not _action_bound_scope_record_is_confirmed(
+                            _reports_dir, rec, scope_type, scope_id)):
+                    # Never expose uncommitted paid prose, but keep the endpoint usable after reload:
+                    # a safe logical-missing projection preserves the Generate affordance. The old
+                    # canonical bytes stay quarantined until a later confirmed action replaces them.
+                    publication_quarantined = True
+                    rec = None
         except _ScopeReportStorageConflict as exc:
             raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
         if rec is None:
-            return {"exists": False, "run_count": len(cur_ids),
-                    "label": _scope_label(scope_type, scope_id)}
+            response = {"exists": False, "run_count": len(cur_ids),
+                        "label": _scope_label(scope_type, scope_id)}
+            if publication_quarantined:
+                response.update({
+                    "quarantined": True,
+                    "stale": True,
+                    **_SCOPE_PUBLICATION_UNCONFIRMED,
+                })
+            return response
         added = sorted(set(cur_ids) - set(rec.get("run_ids", [])))
         rec, legacy_authority = _public_scope_record(rec)
         current_sig = _scope_sig(cur_ids)
@@ -1253,7 +2486,9 @@ def build_router(srv) -> APIRouter:
                 "current_run_count": len(cur_ids), "added": added}
 
     @router.post("/api/scope-report/{scope_type}/{scope_id:path}/generate")
-    async def generate_scope_report_ep(scope_type: str, scope_id: str):
+    async def generate_scope_report_ep(
+            scope_type: str, scope_id: str,
+            idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")):
         """Generate (or regenerate) the cross-run report for a scope. On-demand only — the agent reads
         a bounded/redacted projection of at most ``MAX_SCOPE_REPORT_RUNS`` runs and may request a
         bounded node drill. Degrades to a metrics rollup offline. Runs as a BACKGROUND JOB: reading +
@@ -1261,6 +2496,21 @@ def build_router(srv) -> APIRouter:
         back a job_id the UI polls (a fast/offline one still returns inline within the wait — no 504)."""
         if scope_type not in _SCOPE_TYPES:
             raise HTTPException(400, "bad scope type")
+        action_id = _scope_action_id(idempotency_key)
+        if action_id is None:
+            raise HTTPException(428 if idempotency_key is None else 400, _SCOPE_ACTION_REQUIRED)
+        try:
+            with _scope_store_lock(_reports_dir):
+                existing_action = _read_reconciled_action(
+                    scope_type, scope_id, action_id)
+        except _ScopeReportActionConflict as exc:
+            raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
+        except _ScopeReportStorageConflict as exc:
+            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+        if existing_action is not None:
+            # Durable replay happens before current-scope preflight: an old action remains observable
+            # after its inputs change, its report is superseded, or its volatile job receipt is consumed.
+            return _action_response(existing_action)
         run_ids = sorted(set(_scope_run_ids(scope_type, scope_id)))
         if not run_ids:
             raise HTTPException(400, "no runs in this scope")
@@ -1436,6 +2686,7 @@ def build_router(srv) -> APIRouter:
             if not _inputs_unchanged():
                 return {"ok": False, **_SCOPE_INPUTS_CHANGED, "stale": True}
             rec = {"scope_identity": _scope_identity(scope_type, scope_id), "scope": scope,
+                   "action_id": action_id,
                    "generated_at": int(time.time() * 1000), "run_ids": frozen_scope_ids,
                    # CODEX AGENT: sig and run_ids use the complete scope vocabulary even when one
                    # source is unreadable. omitted_runs says exactly which members supplied no brief.
@@ -1459,45 +2710,236 @@ def build_router(srv) -> APIRouter:
                     _validated_reports_dir(_reports_dir, create=True)
                     _read_or_migrate_scope_record(_reports_dir, scope_type, scope_id)
                     dst = _scope_report_path(_reports_dir, scope_type, scope_id)
-                    atomic_write_text(dst, _serialize_scope_record(rec))
+                    # The canonical report is the sole paid payload. Confirm its contents and first
+                    # directory publication before the action ledger may claim terminal success.
+                    strict_atomic_write_text(dst, _serialize_scope_record(rec))
                     dst = _scope_report_path(_reports_dir, scope_type, scope_id)
-                    _read_scope_record(dst, scope_type, scope_id)
-            except (OSError, _ScopeReportStorageConflict):
+                    if _read_scope_record(dst, scope_type, scope_id) != rec:
+                        raise _ScopeReportStorageConflict(
+                            "scope report changed during strict publication")
+            except (OSError, RuntimeError, _ScopeReportStorageConflict):
                 return {"ok": False, **_SCOPE_STORAGE_ERROR}
             return {"ok": True, **rec, "authoritative": True,
                     "stale": False, "added": []}
 
-        # Synthesis is paid. Coalesce only the exact work that is still RUNNING, while retaining each
-        # terminal process receipt for the registry's bounded observer window. This separates two
-        # contracts that a consume-on-first-poll identity cannot satisfy at once: every joined tab can
-        # observe the shared terminal, and a later explicit Regenerate over unchanged evidence is a
-        # genuinely new action rather than a replay of an old narrative.
-        with generation_jobs_lock:
-            for identity, job_id in list(generation_jobs.items()):
-                job = srv.jobs.get(job_id)
-                if job is None or job.get("status") != "running":
-                    generation_jobs.pop(identity, None)
-            joined_job_id = generation_jobs.get(generation_identity)
-            if joined_job_id is not None:
-                reservation = {"status": "running", "job_id": joined_job_id}
-            else:
-                # REVIEW(2026-07-16): retaining every terminal receipt (consume_on_poll=False +
-                # consume_inline_result=False below) fixed the concurrent-observer loss, but the old
-                # consume-on-delivery behavior ALSO protected registry capacity, and that clause was
-                # not re-established: the shared JobRegistry (_MAX_JOBS=64) refuses to evict receipts
-                # younger than the 660s retention window, and EVERY generation — including the
-                # fast inline offline rollups that return in milliseconds — now parks one. ~64
-                # generations in 11 minutes (a script regenerating per-scope, several tabs) exhaust
-                # the ONE registry shared with genesis, boss commands, and report refresh: reserve()
-                # fails closed with job_capacity WORKSPACE-WIDE until receipts age out. Inline-
-                # delivered results should still consume their receipt (the observer already has the
-                # value), or scope-report receipts need their own bounded pool.
-                reservation = srv.jobs.reserve(consume_on_poll=False)
-                if reservation.get("status") == "running":
-                    generation_jobs[generation_identity] = reservation["job_id"]
-        if reservation.get("status") != "running":
-            return reservation
-        return await srv.jobs.run_as_job(
-            _compute, reserved_job_id=reservation["job_id"], consume_inline_result=False)
+        job_identity = "scope-report-action:" + hashlib.sha256(
+            action_id.encode("ascii")).hexdigest()
+        reservation: dict[str, Any] | None = None
+        action_lease: _ScopeActionLease | None = None
+        scope_lease: _ScopeActionLease | None = None
+
+        def _cleanup_workerless_claim() -> None:
+            nonlocal action_lease, scope_lease
+            if reservation is not None and isinstance(reservation.get("job_id"), str):
+                srv.jobs.discard_reservation(reservation["job_id"])
+            if scope_lease is not None:
+                scope_lease.release()
+                scope_lease = None
+            if action_lease is not None:
+                action_lease.release()
+                action_lease = None
+
+        try:
+            # CODEX AGENT: reserve and durably claim under the same interprocess store fence. No
+            # worker can start before this receipt exists, so a lost initial POST can always rejoin
+            # by UUID and never needs to guess whether paid work was accepted.
+            with _scope_store_lock(_reports_dir):
+                existing_action = _read_reconciled_action(
+                    scope_type, scope_id, action_id)
+                if existing_action is not None:
+                    return _action_response(existing_action)
+                active = _active_scope_action(scope_type, scope_id)
+                if active is not None:
+                    raise HTTPException(409, {
+                        **_SCOPE_ACTION_ACTIVE,
+                        "action_id": active["action_id"],
+                    })
+                # Check volatile capacity before creating a permanent UUID marker. A rejected fresh
+                # action must not leave an orphan identity merely because the shared job pool is full.
+                reservation = srv.jobs.reserve(job_identity, consume_on_poll=False)
+                if reservation.get("status") != "running":
+                    return {**reservation, "action_id": action_id}
+                action_lease = _acquire_scope_action_lease(
+                    _reports_dir, scope_type, scope_id, action_id)
+                if action_lease is None:
+                    raise HTTPException(409, {
+                        **_SCOPE_ACTION_ACTIVE,
+                        "action_id": action_id,
+                    })
+                scope_lease = _acquire_scope_action_scope_lease(
+                    _reports_dir, scope_type, scope_id)
+                if scope_lease is None:
+                    raise HTTPException(409, {
+                        **_SCOPE_ACTION_ACTIVE,
+                        "action_id": action_id,
+                    })
+                running_receipt = {
+                    "schema": _SCOPE_ACTION_SCHEMA,
+                    "scope_identity": _scope_identity(scope_type, scope_id),
+                    "action_id": action_id,
+                    "generation_identity": generation_identity,
+                    "job_id": reservation["job_id"],
+                    "status": "running",
+                    "updated_at": int(time.time() * 1000),
+                    "result": None,
+                }
+                _write_scope_action_receipt(
+                    _reports_dir, scope_type, scope_id, running_receipt)
+                # The root-level per-scope fence is strict before the worker starts. It survives a
+                # regular ``reports/`` directory replacement and blocks every different UUID.
+                _write_scope_action_fence(
+                    _reports_dir, scope_type, scope_id, action_id, "active")
+        except HTTPException:
+            _cleanup_workerless_claim()
+            raise
+        except _ScopeReportActionConflict as exc:
+            _cleanup_workerless_claim()
+            raise HTTPException(409, _SCOPE_ACTION_CONFLICT) from exc
+        except _ScopeReportStorageConflict as exc:
+            _cleanup_workerless_claim()
+            raise HTTPException(409, _SCOPE_STORAGE_ERROR) from exc
+        except BaseException:
+            _cleanup_workerless_claim()
+            raise
+
+        def _indeterminate_response() -> dict[str, Any]:
+            return {
+                **_scope_action_failure(_SCOPE_ACTION_INDETERMINATE, action_id),
+                "status": "indeterminate",
+            }
+
+        lease_release_allowed = True
+
+        def _persist_terminal(public_result: dict[str, Any]) -> dict[str, Any]:
+            nonlocal lease_release_allowed
+            durable_result = (_scope_action_success(action_id)
+                              if public_result.get("ok") is True
+                              else _scope_action_failure(public_result, action_id))
+            done_receipt = {
+                **running_receipt,
+                "status": "done",
+                "updated_at": int(time.time() * 1000),
+                "result": durable_result,
+            }
+
+            def _persist_indeterminate_or_retain() -> None:
+                nonlocal lease_release_allowed
+                try:
+                    _write_scope_action_receipt(
+                        _reports_dir, scope_type, scope_id,
+                        _indeterminate_receipt(running_receipt))
+                except _ScopeReportStorageConflict:
+                    lease_release_allowed = False
+                    assert action_lease is not None and scope_lease is not None
+                    _retain_scope_action_leases(
+                        _reports_dir, action_id, action_lease, scope_lease)
+                    raise
+                srv.jobs.mark_consumable(running_receipt["job_id"])
+
+            try:
+                with _scope_store_lock(_reports_dir):
+                    current = _read_scope_action_receipt(
+                        _reports_dir, scope_type, scope_id, action_id)
+                    if current is None:
+                        return _indeterminate_response()
+                    if (current["job_id"] != running_receipt["job_id"]
+                            or (current["status"] == "running"
+                                and current != running_receipt)):
+                        _persist_indeterminate_or_retain()
+                        return _indeterminate_response()
+                    if current["status"] == "done":
+                        if current != done_receipt:
+                            _persist_indeterminate_or_retain()
+                            return _indeterminate_response()
+                        # Re-confirm even an exact visible terminal across the parent-sync failure
+                        # window before it can clear the scope or disagree with durable replay.
+                        _write_scope_action_receipt(
+                            _reports_dir, scope_type, scope_id, current)
+                        _write_scope_action_fence(
+                            _reports_dir, scope_type, scope_id, action_id, "clear")
+                        srv.jobs.mark_consumable(running_receipt["job_id"])
+                        return public_result
+                    if current["status"] != "running":
+                        if current["status"] in {"indeterminate", "abandoned"}:
+                            srv.jobs.mark_consumable(running_receipt["job_id"])
+                        return _indeterminate_response()
+                    # The durable terminal is committed before JobRegistry may expose a consumable
+                    # terminal. Lost inline bodies and one-shot job polls replay from this ledger.
+                    try:
+                        _write_scope_action_receipt(
+                            _reports_dir, scope_type, scope_id, done_receipt)
+                    except _ScopeReportStorageConflict:
+                        # The replace may be visible even if strict parent sync failed. Publish a
+                        # conservative strict tombstone before either lease can be released.
+                        _persist_indeterminate_or_retain()
+                        raise
+                    _write_scope_action_fence(
+                        _reports_dir, scope_type, scope_id, action_id, "clear")
+                    srv.jobs.mark_consumable(running_receipt["job_id"])
+            except _ScopeReportStorageConflict:
+                # Keep the strict running claim as a no-rebill fence. Once JobRegistry becomes done,
+                # reconciliation turns it into an explicit indeterminate state; its volatile payload
+                # is neither returned as authoritative nor consumed as if it were durable.
+                return _indeterminate_response()
+            return public_result
+
+        def _compute_durable() -> dict[str, Any]:
+            try:
+                try:
+                    result = _compute()
+                except Exception:  # noqa: BLE001 - never persist raw provider/internal detail
+                    result = {"ok": False, "code": "job_failed", "error_kind": "internal",
+                              "error": "background job failed"}
+                public_result = ({**result, "action_id": action_id}
+                                 if isinstance(result, dict) and result.get("ok") is True
+                                 else _scope_action_failure(result, action_id))
+                return _persist_terminal(public_result)
+            finally:
+                assert action_lease is not None
+                if lease_release_allowed:
+                    assert scope_lease is not None
+                    scope_lease.release()
+                    action_lease.release()
+
+        def _spawn_failure_terminal() -> dict[str, Any]:
+            # Thread creation failed before ``_compute`` could run, so this path must never construct
+            # a provider client. It still owns an exact strict terminal for safe replay.
+            try:
+                return _persist_terminal(_scope_action_failure({}, action_id))
+            finally:
+                assert action_lease is not None
+                if lease_release_allowed:
+                    assert scope_lease is not None
+                    scope_lease.release()
+                    action_lease.release()
+
+        assert (reservation is not None and isinstance(reservation.get("job_id"), str)
+                and action_lease is not None and scope_lease is not None)
+        response = await srv.jobs.run_as_job(
+            _compute_durable, reserved_job_id=reservation["job_id"],
+            consume_inline_result=False,
+            on_start_failure=_spawn_failure_terminal)
+        if response.get("code") == "job_unknown":
+            response = _indeterminate_response()
+        elif response.get("status") != "running":
+            if response.get("action_id") != action_id:
+                # A generic JobRegistry fallback is volatile and cannot become an exact paid-action
+                # terminal merely because this endpoint can echo the UUID. Reconcile the ledger after
+                # the worker released its leases; BaseException or spawn-callback failures become a
+                # durable indeterminate action, never a definitive client-side clear.
+                try:
+                    with _scope_store_lock(_reports_dir):
+                        durable = _read_reconciled_action(
+                            scope_type, scope_id, action_id)
+                except (_ScopeReportActionConflict, _ScopeReportStorageConflict):
+                    durable = None
+                response = (_action_response(durable) if durable is not None
+                            else _indeterminate_response())
+            # Inline terminals have no future UI poll. Retire only when ``_persist_terminal`` marked
+            # them consumable after strict publication; a failed durable terminal stays inspectable.
+            srv.jobs.poll(reservation["job_id"])
+        # ``run_as_job`` owns only the generic job vocabulary. Echo the durable endpoint action on
+        # every initial response too, especially the running hand-off that has no compute result yet.
+        return {**response, "action_id": action_id}
 
     return router

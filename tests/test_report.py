@@ -18,6 +18,35 @@ ROOT = Path(__file__).resolve().parents[1]
 TASK = ROOT / "examples" / "toy_task.json"
 
 
+def _hold_scope_report_leases_in_spawned_process(
+        root_text: str, scope_type: str, scope_id: str, action_id: str,
+        ready, release) -> None:
+    """Spawn-safe helper proving byte-lock liveness outside the module-global registry."""
+    from pathlib import Path as _Path
+
+    from looplab.serve.routers import reports
+
+    reports_dir = _Path(root_text) / "reports"
+    action_lease = None
+    scope_lease = None
+    try:
+        with reports._scope_store_lock(reports_dir):
+            action_lease = reports._acquire_scope_action_lease(
+                reports_dir, scope_type, scope_id, action_id)
+            scope_lease = reports._acquire_scope_action_scope_lease(
+                reports_dir, scope_type, scope_id)
+            if action_lease is None or scope_lease is None:
+                raise RuntimeError("spawned process could not acquire exact leases")
+        ready.set()
+        if not release.wait(30):
+            raise RuntimeError("parent did not release spawned lease probe")
+    finally:
+        if scope_lease is not None:
+            scope_lease.release()
+        if action_lease is not None:
+            action_lease.release()
+
+
 def test_generate_report_degrades_offline():
     """No usable client -> a minimal report (never raises), with at_node/trigger stamped."""
     st = fold([Event(seq=0, type="run_started",
@@ -2205,6 +2234,56 @@ def _boom_client(_s):
     raise RuntimeError("no model")
 
 
+def _generate_scope_report(client, url: str, *, action_id: str | None = None):
+    import uuid
+
+    endpoint = url if url.endswith("/generate") else url + "/generate"
+    return client.post(
+        endpoint, headers={"Idempotency-Key": action_id or str(uuid.uuid4())})
+
+
+def _scope_report_action_url(scope_type: str, scope_id: str, action_id: str) -> str:
+    from urllib.parse import quote, urlencode
+
+    return (
+        f"/api/scope-report-actions/{quote(action_id, safe='')}?"
+        + urlencode({"scope_type": scope_type, "scope_id": scope_id})
+    )
+
+
+def _seed_scope_action_claim(
+        root, scope_type: str, scope_id: str, action_id: str, job_id: str,
+        *, hold_leases: bool = False):
+    from looplab.serve.routers import reports
+
+    reports_dir = root / "reports"
+    receipt = {
+        "schema": reports._SCOPE_ACTION_SCHEMA,
+        "scope_identity": {"type": scope_type, "id": scope_id},
+        "action_id": action_id,
+        "generation_identity": "scope-report:" + "a" * 64,
+        "job_id": job_id,
+        "status": "running",
+        "updated_at": 1,
+        "result": None,
+    }
+    with reports._scope_store_lock(reports_dir):
+        action_lease = reports._acquire_scope_action_lease(
+            reports_dir, scope_type, scope_id, action_id)
+        scope_lease = reports._acquire_scope_action_scope_lease(
+            reports_dir, scope_type, scope_id)
+        assert action_lease is not None and scope_lease is not None
+        reports._write_scope_action_receipt(
+            reports_dir, scope_type, scope_id, receipt)
+        reports._write_scope_action_fence(
+            reports_dir, scope_type, scope_id, action_id, "active")
+    if hold_leases:
+        return receipt, action_lease, scope_lease
+    scope_lease.release()
+    action_lease.release()
+    return receipt
+
+
 def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     _build_run(tmp_path, "r1", writer=None)
     _build_run(tmp_path, "r2", writer=None)
@@ -2214,13 +2293,1528 @@ def test_scope_report_generate_and_get_task_scope(tmp_path, monkeypatch):
     assert task_id and all(r["task_id"] == task_id for r in runs)
     # offline → the endpoint still generates + persists the deterministic rollup over BOTH runs
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    g = client.post(f"/api/scope-report/task/{task_id}/generate").json()
+    g = _generate_scope_report(client, f"/api/scope-report/task/{task_id}").json()
     assert g["ok"] is True and g["authoritative"] is True
     assert set(g["run_ids"]) == {"r1", "r2"}
     assert "runs" in g["content"]["headline"]
     got = client.get(f"/api/scope-report/task/{task_id}").json()
     assert got["exists"] is True and got["authoritative"] is True
     assert got["stale"] is False and got["current_run_count"] == 2
+
+
+def test_scope_report_paid_action_requires_uuidv4_before_provider(tmp_path, monkeypatch):
+    task_id = "required-paid-action"
+    _seed_scope_run(tmp_path, "required-action-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+    endpoint = f"/api/scope-report/task/{task_id}/generate"
+
+    missing = client.post(endpoint)
+    invalid = client.post(endpoint, headers={"Idempotency-Key": "../../not-a-uuid"})
+    invalid_status = client.get(_scope_report_action_url("task", task_id, "not-a-uuid"))
+
+    assert missing.status_code == 428
+    assert missing.json()["detail"]["code"] == "scope_report_idempotency_required"
+    assert invalid.status_code == 400
+    assert invalid.json()["detail"]["code"] == "scope_report_idempotency_required"
+    assert invalid_status.status_code == 400
+    assert provider_calls == 0
+    assert not (tmp_path / "reports").exists()
+
+
+def test_scope_report_action_replays_inline_terminal_and_new_uuid_regenerates(
+        tmp_path, monkeypatch):
+    task_id = "durable-inline-action"
+    _seed_scope_run(tmp_path, "inline-action-run", task_id)
+    action_a = "11111111-1111-4111-8111-111111111111"
+    action_b = "22222222-2222-4222-8222-222222222222"
+    client_calls = 0
+
+    def offline_client(_settings):
+        nonlocal client_calls
+        client_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline_client)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    assert client.get(_scope_report_action_url("task", task_id, action_a)).json() == {
+        "status": "unknown", "action_id": action_a,
+    }
+    first = _generate_scope_report(client, url, action_id=action_a).json()
+    # Simulate losing the entire successful inline response: disk status is the sole recovery source.
+    durable = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    replay = _generate_scope_report(client, url, action_id=action_a).json()
+    stored = client.get(url).json()
+
+    assert first["ok"] is True and first["action_id"] == action_a
+    assert durable["status"] == "done" and durable["ok"] is True
+    assert durable["action_id"] == action_a
+    assert durable["published"] is True and "content" not in durable
+    assert replay == durable
+    assert stored["content"] == first["content"]
+    assert stored["action_id"] == action_a
+    assert client_calls == 1
+
+    second = _generate_scope_report(client, url, action_id=action_b).json()
+    old_after_overwrite = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+
+    assert second["ok"] is True and second["action_id"] == action_b
+    assert client_calls == 2, "a new UUID is a genuinely new explicit regenerate action"
+    assert old_after_overwrite["published"] is True
+    assert "content" not in old_after_overwrite
+    assert old_after_overwrite["action_id"] == action_a
+    assert client.get(url).json()["action_id"] == action_b
+
+
+def test_scope_report_action_survives_consumed_terminal_job_poll(tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    from looplab.serve import scope_report
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "durable-polled-action"
+    _seed_scope_run(tmp_path, "polled-action-run", task_id)
+    action_id = "33333333-3333-4333-8333-333333333333"
+    entered = threading.Event()
+    release = threading.Event()
+    generation_calls = 0
+    real_generate = scope_report.generate_scope_report
+
+    def blocked_generate(scope, briefs, _client, **_kwargs):
+        nonlocal generation_calls
+        generation_calls += 1
+        entered.set()
+        assert release.wait(5), "test did not release paid scope generation"
+        return real_generate(scope, briefs, None)
+
+    monkeypatch.setattr(scope_report, "generate_scope_report", blocked_generate)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    first = _generate_scope_report(client, url, action_id=action_id).json()
+    assert first["status"] == "running" and first["action_id"] == action_id
+    assert entered.wait(3)
+    assert client.get(_scope_report_action_url("task", task_id, action_id)).json() == first
+    assert _generate_scope_report(client, url, action_id=action_id).json() == first
+    assert generation_calls == 1
+
+    release.set()
+    terminal = None
+    for _ in range(100):
+        terminal = client.get(f"/api/jobs/{first['job_id']}").json()
+        if terminal.get("status") == "done":
+            break
+        _time.sleep(0.05)
+    assert terminal and terminal["ok"] is True
+    assert terminal["action_id"] == action_id
+    assert client.get(f"/api/jobs/{first['job_id']}").json() == {"status": "unknown"}
+
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    replay = _generate_scope_report(client, url, action_id=action_id).json()
+    assert durable["status"] == "done" and durable["action_id"] == action_id
+    assert durable["published"] is True and "content" not in durable
+    assert replay == durable
+    assert client.get(url).json()["content"] == terminal["content"]
+    assert generation_calls == 1
+
+
+def test_scope_report_action_durably_replays_failure_without_reentering_provider(
+        tmp_path, monkeypatch):
+    from looplab.events.eventstore import EventStore
+
+    task_id = "durable-failed-action"
+    run_id = "failed-action-run"
+    _seed_scope_run(tmp_path, run_id, task_id)
+    action_id = "44444444-4444-4444-8444-444444444444"
+    event_path = tmp_path / run_id / "events.jsonl"
+    synthesis_calls = 0
+
+    def mutate_during_synthesis(_scope, _briefs, _client, **_kwargs):
+        nonlocal synthesis_calls
+        synthesis_calls += 1
+        EventStore(event_path).append("annotation", {"text": "changed during paid action"})
+        return {"headline": "must not publish"}
+
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report", mutate_during_synthesis)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    first = _generate_scope_report(client, url, action_id=action_id).json()
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    replay = _generate_scope_report(client, url, action_id=action_id).json()
+
+    assert first["ok"] is False and first["code"] == "scope_report_inputs_changed"
+    assert first["action_id"] == action_id
+    assert durable["status"] == "done" and durable["code"] == first["code"]
+    assert replay["status"] == "done" and replay["code"] == first["code"]
+    assert synthesis_calls == 1
+    assert not list((tmp_path / "reports").glob("*.json"))
+
+
+def test_scope_report_action_uuid_is_scope_bound_and_slash_route_is_unambiguous(
+        tmp_path, monkeypatch):
+    action_id = "55555555-5555-4555-8555-555555555555"
+    suffix_uuid = "66666666-6666-4666-8666-666666666666"
+    slash_task = f"family/actions/{suffix_uuid}"
+    _seed_scope_run(tmp_path, "slash-action-run", slash_task)
+    _seed_scope_run(tmp_path, "other-action-run", "other-task")
+    provider_calls = 0
+
+    def offline_client(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline_client)
+    client = TestClient(make_app(tmp_path))
+    slash_url = f"/api/scope-report/task/{slash_task}"
+
+    generated = _generate_scope_report(client, slash_url, action_id=action_id)
+    status = client.get(_scope_report_action_url("task", slash_task, action_id))
+    wrong_status = client.get(_scope_report_action_url("task", "other-task", action_id))
+    wrong_post = _generate_scope_report(
+        client, "/api/scope-report/task/other-task", action_id=action_id)
+
+    assert generated.status_code == 200 and generated.json()["action_id"] == action_id
+    assert status.status_code == 200 and status.json()["status"] == "done"
+    assert status.json()["published"] is True and "scope" not in status.json()
+    plain_scope = client.get(slash_url)
+    assert plain_scope.status_code == 200 and plain_scope.json()["exists"] is True
+    assert plain_scope.json()["scope"]["id"] == slash_task
+    assert wrong_status.status_code == 409
+    assert wrong_status.json()["detail"]["code"] == "scope_report_action_conflict"
+    assert wrong_post.status_code == 409
+    assert provider_calls == 1
+
+
+def test_scope_report_running_claim_is_durable_before_worker_start(tmp_path, monkeypatch):
+    import json as _json
+
+    task_id = "claim-before-worker"
+    _seed_scope_run(tmp_path, "claim-run", task_id)
+    action_id = "77777777-7777-4777-8777-777777777777"
+    app = make_app(tmp_path)
+    observed = []
+    original = app.state.looplab.jobs.run_reserved
+
+    async def inspect_claim(job_id, compute, **kwargs):
+        receipts = list(tmp_path.glob(".scope-action-*.receipt"))
+        assert len(receipts) == 1
+        claim = _json.loads(receipts[0].read_text(encoding="utf-8"))
+        observed.append(claim)
+        assert claim["status"] == "running" and claim["job_id"] == job_id
+        return await original(job_id, compute, **kwargs)
+
+    monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", inspect_claim)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    response = _generate_scope_report(
+        TestClient(app), f"/api/scope-report/task/{task_id}", action_id=action_id)
+
+    assert response.status_code == 200 and response.json()["ok"] is True
+    assert observed and observed[0]["action_id"] == action_id
+
+
+def test_scope_report_action_terminal_never_persists_raw_provider_prose(
+        tmp_path, monkeypatch):
+    task_id = "provider-prose-action"
+    _seed_scope_run(tmp_path, "provider-prose-run", task_id)
+    action_id = "88888888-8888-4888-8888-888888888888"
+    secret = "RAW_PROVIDER_PROSE_MUST_NOT_CROSS"
+    generation_calls = 0
+
+    def explode(_scope, _briefs, _client, **_kwargs):
+        nonlocal generation_calls
+        generation_calls += 1
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", explode)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+
+    first = _generate_scope_report(client, url, action_id=action_id).json()
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    replay = _generate_scope_report(client, url, action_id=action_id).json()
+    receipt_text = next(tmp_path.glob(".scope-action-*.receipt")).read_text(
+        encoding="utf-8")
+
+    for response in (first, durable, replay):
+        assert response["code"] == "job_failed"
+        assert response["error"] == "background job failed"
+        assert secret not in str(response)
+    assert secret not in receipt_text
+    assert generation_calls == 2, "the paid path and its offline fallback each failed only once"
+
+
+def test_scope_report_action_strictly_publishes_claim_report_and_terminal(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "strict-paid-ledger"
+    action_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    _seed_scope_run(tmp_path, "strict-paid-run", task_id)
+    writes = []
+    real_write = reports.strict_atomic_write_text
+
+    def observe(path, text):
+        writes.append((path.name, text))
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", observe)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    result = _generate_scope_report(
+        TestClient(make_app(tmp_path)),
+        f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+
+    assert result["ok"] is True
+    assert [name.endswith(".receipt") for name, _text in writes] == [
+        False, False, True, False, False, True, False,
+    ]
+    assert writes[0][0].endswith(".live.lock")
+    assert writes[1][0].endswith(".live.lock")
+    assert writes[3][0].endswith(".fence")
+    assert writes[-1][0].endswith(".fence")
+    assert '"status":"running"' in writes[2][1]
+    assert '"status":"done"' in writes[-2][1]
+    assert len(writes[-2][1].encode("utf-8")) < reports._SCOPE_ACTION_RECORD_MAX_BYTES
+    assert '"content"' not in writes[-2][1]
+
+
+def test_scope_report_action_claim_sync_failure_never_starts_provider(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "claim-sync-failure"
+    action_id = "abababab-abab-4bab-8bab-abababababab"
+    _seed_scope_run(tmp_path, "claim-sync-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    monkeypatch.setattr(
+        reports, "strict_atomic_write_text",
+        lambda _path, _text: (_ for _ in ()).throw(OSError("sync unavailable")))
+    app = make_app(tmp_path)
+    response = _generate_scope_report(
+        TestClient(app), f"/api/scope-report/task/{task_id}", action_id=action_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "scope_report_storage_conflict"
+    assert provider_calls == 0
+    assert app.state.looplab.jobs._jobs == {}
+
+
+def test_scope_report_action_preworker_fence_failure_recovers_through_abandon(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "preworker-fence-failure"
+    action_a = "a0a0a0a0-a0a0-40a0-80a0-a0a0a0a0a0a0"
+    action_b = "a1a1a1a1-a1a1-41a1-81a1-a1a1a1a1a1a1"
+    _seed_scope_run(tmp_path, "preworker-fence-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    failed = False
+    provider_calls = 0
+
+    def fail_first_fence(path, text):
+        nonlocal failed
+        if path.name.endswith(".fence") and not failed:
+            failed = True
+            raise OSError("scope fence sync unavailable")
+        return real_write(path, text)
+
+    def offline(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_first_fence)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    initial = _generate_scope_report(client, url, action_id=action_a)
+    assert initial.status_code == 409
+    assert initial.json()["detail"]["ambiguous"] is True
+    assert provider_calls == 0
+
+    status = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    assert status["status"] == "indeterminate"
+    abandoned = client.post(
+        f"/api/scope-report-actions/{action_a}/abandon"
+        f"?scope_type=task&scope_id={task_id}").json()
+    assert abandoned["status"] == "abandoned"
+    fresh = _generate_scope_report(client, url, action_id=action_b).json()
+    assert fresh["ok"] is True and provider_calls == 1
+
+
+def test_scope_report_action_terminal_sync_failure_persists_indeterminate_and_retires_job(
+        tmp_path, monkeypatch):
+    import json as _json
+
+    from looplab.serve.routers import reports
+
+    task_id = "terminal-sync-failure"
+    action_id = "acacacac-acac-4cac-8cac-acacacacacac"
+    _seed_scope_run(tmp_path, "terminal-sync-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    receipt_writes = 0
+
+    def fail_one_terminal(path, text):
+        nonlocal receipt_writes
+        if path.name.endswith(".receipt"):
+            receipt_writes += 1
+            if receipt_writes == 2:
+                raise OSError("terminal sync unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_one_terminal)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    receipt_path = next(tmp_path.glob(".scope-action-*.receipt"))
+    running = _json.loads(receipt_path.read_text(encoding="utf-8"))
+    volatile = app.state.looplab.jobs.get(running["job_id"])
+
+    assert initial["status"] == "indeterminate"
+    assert running["status"] == "indeterminate"
+    assert volatile is None, "strict tombstone allows immediate volatile receipt retirement"
+    status = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert status["status"] == "indeterminate"
+    assert status["code"] == "scope_report_action_indeterminate"
+    canonical = client.get(f"/api/scope-report/task/{task_id}").json()
+    assert canonical["exists"] is False and canonical["quarantined"] is True
+
+
+def test_scope_report_action_double_terminal_failure_releases_retained_leases_on_reconcile(
+        tmp_path, monkeypatch):
+    import json as _json
+
+    from looplab.serve.routers import reports
+
+    task_id = "retained-terminal-leases"
+    action_id = "a2a2a2a2-a2a2-42a2-82a2-a2a2a2a2a2a2"
+    _seed_scope_run(tmp_path, "retained-terminal-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    receipt_writes = 0
+
+    def publish_then_fail_terminal_and_fallback(path, text):
+        nonlocal receipt_writes
+        result = real_write(path, text)
+        if path.name.endswith(".receipt"):
+            receipt_writes += 1
+            if receipt_writes in {2, 3}:
+                raise OSError("parent sync confirmation unavailable")
+        return result
+
+    monkeypatch.setattr(
+        reports, "strict_atomic_write_text", publish_then_fail_terminal_and_fallback)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    raw = _json.loads(next(tmp_path.glob(".scope-action-*.receipt")).read_text(
+        encoding="utf-8"))
+    assert initial["status"] == raw["status"] == "indeterminate"
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is True
+
+    reconciled = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert reconciled["status"] == "indeterminate"
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is False
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_lease_is_live(
+            tmp_path / "reports", action_id) is False
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is False
+
+
+def test_scope_report_mismatched_done_tombstone_failure_stays_quarantined(
+        tmp_path, monkeypatch):
+    import json as _json
+    import threading
+
+    from looplab.serve import scope_report
+    from looplab.serve.routers import reports
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "mismatched-done-tombstone-failure"
+    action_id = "aa0aa0aa-aa0a-4a0a-8a0a-aa0aa0aa0aa0"
+    _seed_scope_run(tmp_path, "mismatched-done-run", task_id)
+    entered = threading.Event()
+    release = threading.Event()
+    real_generate = scope_report.generate_scope_report
+
+    def blocked(scope, briefs, _client, **_kwargs):
+        entered.set()
+        assert release.wait(5)
+        return real_generate(scope, briefs, None)
+
+    monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    url = f"/api/scope-report/task/{task_id}"
+    initial = _generate_scope_report(client, url, action_id=action_id).json()
+    assert initial["status"] == "running" and entered.wait(3)
+    receipt_path = next(tmp_path.glob(".scope-action-*.receipt"))
+    running = _json.loads(receipt_path.read_text(encoding="utf-8"))
+    with reports._scope_store_lock(tmp_path / "reports"):
+        reports._write_scope_action_receipt(
+            tmp_path / "reports", "task", task_id, {
+                **running,
+                "status": "done",
+                "updated_at": running["updated_at"] + 1,
+                "result": reports._scope_action_failure({}, action_id),
+            })
+
+    real_write = reports.strict_atomic_write_text
+    failed = False
+    tombstone_attempted = threading.Event()
+
+    def fail_first_indeterminate(path, text):
+        nonlocal failed
+        if (path.name.endswith(".receipt") and '"status":"indeterminate"' in text
+                and not failed):
+            failed = True
+            tombstone_attempted.set()
+            raise OSError("indeterminate tombstone sync unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_first_indeterminate)
+    release.set()
+    assert tombstone_attempted.wait(3), "worker did not attempt the strict tombstone"
+    assert failed is True
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_leases_are_retained(
+            tmp_path / "reports", action_id) is True
+        assert reports._scope_action_lease_is_live(
+            tmp_path / "reports", action_id) is True
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is True
+        still_mismatched = _json.loads(receipt_path.read_text(encoding="utf-8"))
+        assert still_mismatched["status"] == "done"
+        assert still_mismatched["updated_at"] == running["updated_at"] + 1
+
+    durable = client.get(
+        _scope_report_action_url("task", task_id, action_id)).json()
+    assert durable["status"] == "indeterminate"
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is False
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_lease_is_live(
+            tmp_path / "reports", action_id) is False
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is False
+    quarantined = client.get(url).json()
+    assert quarantined["exists"] is False and quarantined["quarantined"] is True
+
+
+@pytest.mark.parametrize("visible_terminal", [False, True])
+def test_scope_report_retained_recovery_survives_deleted_action_marker(
+        tmp_path, monkeypatch, visible_terminal):
+    import hashlib as _hashlib
+    import json as _json
+
+    from looplab.serve.routers import reports
+
+    task_id = f"retained-deleted-marker-{visible_terminal}"
+    action_id = (
+        "a7a7a7a7-a7a7-47a7-87a7-a7a7a7a7a7a7" if visible_terminal
+        else "a8a8a8a8-a8a8-48a8-88a8-a8a8a8a8a8a8"
+    )
+    _seed_scope_run(tmp_path, f"retained-marker-run-{visible_terminal}", task_id)
+    real_write = reports.strict_atomic_write_text
+    receipt_writes = 0
+
+    def fail_both_terminal_confirmations(path, text):
+        nonlocal receipt_writes
+        if path.name.endswith(".receipt"):
+            receipt_writes += 1
+            if receipt_writes == 2:
+                if visible_terminal:
+                    real_write(path, text)
+                raise OSError("terminal confirmation unavailable")
+            if receipt_writes == 3:
+                raise OSError("tombstone confirmation unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(
+        reports, "strict_atomic_write_text", fail_both_terminal_confirmations)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    assert initial["status"] == "indeterminate"
+    raw = _json.loads(next(tmp_path.glob(".scope-action-*.receipt")).read_text(
+        encoding="utf-8"))
+    assert raw["status"] == ("done" if visible_terminal else "running")
+    digest = _hashlib.sha256(action_id.encode("ascii")).hexdigest()
+    marker_path = tmp_path / f".scope-action-{digest}.live.lock"
+    try:
+        marker_path.unlink()
+    except PermissionError:
+        # Windows correctly prevents unlinking an open locked file. Simulate the same first lookup
+        # loss to exercise retained-state ordering; POSIX runs the actual unlinked-inode case above.
+        real_read_marker = reports._read_scope_action_lease_marker
+        first_lookup = True
+
+        def miss_once(reports_dir, requested_action):
+            nonlocal first_lookup
+            if requested_action == action_id and first_lookup:
+                first_lookup = False
+                return None
+            return real_read_marker(reports_dir, requested_action)
+
+        monkeypatch.setattr(reports, "_read_scope_action_lease_marker", miss_once)
+
+    reconciled = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert reconciled["status"] == "indeterminate"
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is False
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is False
+
+
+def test_scope_report_retained_missing_receipt_can_be_directly_abandoned(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "retained-missing-receipt-abandon"
+    action_id = "a9a9a9a9-a9a9-49a9-89a9-a9a9a9a9a9a9"
+    _seed_scope_run(tmp_path, "retained-missing-receipt-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    receipt_writes = 0
+
+    def fail_terminal_before_visibility(path, text):
+        nonlocal receipt_writes
+        if path.name.endswith(".receipt"):
+            receipt_writes += 1
+            if receipt_writes in {2, 3}:
+                raise OSError("terminal storage unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_terminal_before_visibility)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    assert initial["status"] == "indeterminate"
+    next(tmp_path.glob(".scope-action-*.receipt")).unlink()
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is True
+
+    abandoned = client.post(
+        f"/api/scope-report-actions/{action_id}/abandon"
+        f"?scope_type=task&scope_id={task_id}").json()
+    assert abandoned["status"] == "abandoned"
+    assert reports._scope_action_leases_are_retained(
+        tmp_path / "reports", action_id) is False
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is False
+
+
+def test_scope_report_action_baseexception_orphan_is_retired_after_durable_reconcile(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from looplab.serve import jobs as jobs_module
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "baseexception-orphan"
+    action_id = "a3a3a3a3-a3a3-43a3-83a3-a3a3a3a3a3a3"
+    _seed_scope_run(tmp_path, "baseexception-run", task_id)
+
+    def raise_baseexception(*_args, **_kwargs):
+        raise SystemExit("test-only worker escape")
+
+    real_threading = jobs_module.threading
+    worker_exited = real_threading.Event()
+
+    class BackgroundCatchingThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            def invoke():
+                try:
+                    self.target()
+                except BaseException:
+                    pass
+                finally:
+                    worker_exited.set()
+
+            real_threading.Thread(target=invoke, daemon=self.daemon).start()
+
+    monkeypatch.setattr(
+        "looplab.serve.scope_report.generate_scope_report", raise_baseexception)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    app = make_app(tmp_path)
+    monkeypatch.setattr(
+        jobs_module, "threading", SimpleNamespace(Thread=BackgroundCatchingThread))
+    client = TestClient(app)
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    assert initial["status"] == "running"
+    assert app.state.looplab.jobs.get(initial["job_id"])["status"] == "running"
+    assert worker_exited.wait(3), "escaped worker did not exit"
+
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert durable["status"] == "indeterminate"
+    assert app.state.looplab.jobs.get(initial["job_id"]) is None
+
+
+def test_scope_report_action_canonical_report_sync_failure_is_durable_failure(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "canonical-sync-failure"
+    action_id = "acdcacdc-acdc-4cdc-8cdc-acdcacdcacdc"
+    _seed_scope_run(tmp_path, "canonical-sync-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    def fail_report(path, text):
+        if path.name.endswith(".json"):
+            raise OSError("canonical sync unavailable")
+        return real_write(path, text)
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", fail_report)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    canonical = client.get(f"/api/scope-report/task/{task_id}").json()
+
+    assert initial["code"] == "scope_report_storage_conflict"
+    assert durable["status"] == "done"
+    assert durable["code"] == "scope_report_storage_conflict"
+    assert canonical["exists"] is False
+    assert provider_calls == 1
+
+
+def test_scope_report_visible_canonical_without_success_terminal_is_quarantined_and_replaceable(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "visible-unconfirmed-canonical"
+    action_a = "a4a4a4a4-a4a4-44a4-84a4-a4a4a4a4a4a4"
+    action_b = "a5a5a5a5-a5a5-45a5-85a5-a5a5a5a5a5a5"
+    _seed_scope_run(tmp_path, "visible-canonical-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    failed = False
+    provider_calls = 0
+
+    def publish_canonical_then_fail(path, text):
+        nonlocal failed
+        result = real_write(path, text)
+        if path.name.endswith(".json") and not failed:
+            failed = True
+            raise OSError("canonical parent sync confirmation was lost")
+        return result
+
+    def offline(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", publish_canonical_then_fail)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    first = _generate_scope_report(client, url, action_id=action_a).json()
+    action = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    quarantined = client.get(url).json()
+
+    assert first["code"] == action["code"] == "scope_report_storage_conflict"
+    assert action["status"] == "done"
+    assert quarantined["exists"] is False and quarantined["quarantined"] is True
+    assert quarantined["code"] == "scope_report_publication_unconfirmed"
+    assert "content" not in quarantined
+
+    replacement = _generate_scope_report(client, url, action_id=action_b).json()
+    stored = client.get(url).json()
+    assert replacement["ok"] is True and replacement["action_id"] == action_b
+    assert stored["exists"] is True and stored["action_id"] == action_b
+    assert provider_calls == 2
+
+
+def test_scope_report_done_receipt_remains_authoritative_after_action_marker_loss(
+        tmp_path, monkeypatch):
+    import hashlib as _hashlib
+
+    task_id = "terminal-action-marker-loss"
+    action_id = "a6a6a6a6-a6a6-46a6-86a6-a6a6a6a6a6a6"
+    _seed_scope_run(tmp_path, "terminal-marker-loss-run", task_id)
+    calls = 0
+
+    def offline(_settings):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert _generate_scope_report(client, url, action_id=action_id).json()["ok"] is True
+    digest = _hashlib.sha256(action_id.encode("ascii")).hexdigest()
+    (tmp_path / f".scope-action-{digest}.live.lock").unlink()
+
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    replay = _generate_scope_report(client, url, action_id=action_id).json()
+    stored = client.get(url).json()
+    assert durable["status"] == "done" and durable["published"] is True
+    assert replay == durable
+    assert stored["exists"] is True and stored["action_id"] == action_id
+    assert calls == 1
+
+
+def test_scope_report_action_visible_unconfirmed_terminal_is_quarantined_by_tombstone(
+        tmp_path, monkeypatch):
+    import json as _json
+
+    from looplab.serve.routers import reports
+
+    task_id = "visible-unconfirmed-terminal"
+    action_id = "acedaced-aced-4ced-8ced-acedacedaced"
+    _seed_scope_run(tmp_path, "visible-unconfirmed-run", task_id)
+    real_write = reports.strict_atomic_write_text
+    receipt_writes = 0
+
+    def publish_then_fail_once(path, text):
+        nonlocal receipt_writes
+        result = real_write(path, text)
+        if path.name.endswith(".receipt"):
+            receipt_writes += 1
+            if receipt_writes == 2:
+                raise OSError("parent sync result was lost")
+        return result
+
+    monkeypatch.setattr(reports, "strict_atomic_write_text", publish_then_fail_once)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    raw = _json.loads(next(tmp_path.glob(".scope-action-*.receipt")).read_text(
+        encoding="utf-8"))
+
+    assert initial["status"] == "indeterminate"
+    assert raw["status"] == "indeterminate"
+    assert app.state.looplab.jobs.get(raw["job_id"]) is None
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert durable["status"] == "indeterminate"
+    canonical = client.get(f"/api/scope-report/task/{task_id}").json()
+    assert canonical["exists"] is False and canonical["quarantined"] is True
+
+
+def test_scope_report_action_thread_spawn_failure_is_durable_and_never_calls_provider(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from looplab.serve import jobs as jobs_module
+
+    task_id = "worker-spawn-failure"
+    action_id = "adadadad-adad-4dad-8dad-adadadadadad"
+    _seed_scope_run(tmp_path, "worker-spawn-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    class FailedThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("thread unavailable")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    app = make_app(tmp_path)
+    monkeypatch.setattr(jobs_module, "threading", SimpleNamespace(Thread=FailedThread))
+    client = TestClient(app)
+    initial = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+    durable = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+
+    assert initial["code"] == "job_failed" and initial["action_id"] == action_id
+    assert durable["status"] == "done" and durable["code"] == "job_failed"
+    assert provider_calls == 0
+    assert app.state.looplab.jobs._jobs == {}
+
+
+def test_scope_report_action_started_then_start_raises_cancels_and_releases_scope(
+        tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from looplab.serve import jobs as jobs_module
+    from looplab.serve.routers import reports
+
+    task_id = "worker-started-then-failed"
+    action_a = "ad0ad0ad-ad0a-4d0a-8d0a-ad0ad0ad0ad0"
+    action_b = "ad1ad1ad-ad1a-4d1a-8d1a-ad1ad1ad1ad1"
+    _seed_scope_run(tmp_path, "worker-started-then-failed-run", task_id)
+    provider_calls = 0
+
+    def offline(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    real_threading = jobs_module.threading
+    target_exited = real_threading.Event()
+
+    class StartedThenFailedThread:
+        def __init__(self, *, target, daemon):
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            def invoke():
+                try:
+                    self.target()
+                finally:
+                    target_exited.set()
+
+            real_threading.Thread(target=invoke, daemon=self.daemon).start()
+            raise RuntimeError("test runtime failed after target launch")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    app = make_app(tmp_path)
+    monkeypatch.setattr(
+        jobs_module, "threading", SimpleNamespace(Thread=StartedThenFailedThread))
+    client = TestClient(app)
+    url = f"/api/scope-report/task/{task_id}"
+    initial = _generate_scope_report(client, url, action_id=action_a).json()
+
+    assert target_exited.wait(3), "cancelled target did not exit"
+    assert initial["code"] == "job_failed" and initial["action_id"] == action_a
+    assert provider_calls == 0
+    durable = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    assert durable["status"] == "done" and durable["code"] == "job_failed"
+    with reports._scope_store_lock(tmp_path / "reports"):
+        assert reports._scope_action_lease_is_live(
+            tmp_path / "reports", action_a) is False
+        assert reports._scope_action_scope_lease_is_live(
+            tmp_path / "reports", "task", task_id) is False
+
+    monkeypatch.setattr(jobs_module, "threading", real_threading)
+    fresh = _generate_scope_report(client, url, action_id=action_b).json()
+    assert fresh["ok"] is True and fresh["action_id"] == action_b
+    assert provider_calls == 1
+
+
+def test_scope_report_action_fences_scope_until_explicit_safe_abandon(
+        tmp_path, monkeypatch):
+    task_id = "scope-paid-fence"
+    action_a = "aeaeaeae-aeae-4eae-8eae-aeaeaeaeaeae"
+    action_b = "afafafaf-afaf-4faf-8faf-afafafafafaf"
+    _seed_scope_run(tmp_path, "scope-paid-fence-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    app = make_app(tmp_path)
+    client = TestClient(app)
+    url = f"/api/scope-report/task/{task_id}"
+    reserved = app.state.looplab.jobs.reserve("test-scope-fence")
+    first, action_lease, scope_lease = _seed_scope_action_claim(
+        tmp_path, "task", task_id, action_a, reserved["job_id"], hold_leases=True)
+
+    abandon_url = (
+        f"/api/scope-report-actions/{action_a}/abandon"
+        f"?scope_type=task&scope_id={task_id}"
+    )
+    live_abandon = client.post(abandon_url)
+    blocked = _generate_scope_report(client, url, action_id=action_b)
+
+    assert first["status"] == "running"
+    assert live_abandon.status_code == 409
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "scope_report_action_in_progress"
+    assert blocked.json()["detail"]["action_id"] == action_a
+    assert provider_calls == 0
+
+    # A volatile done result without a strict action terminal is not authority.
+    scope_lease.release()
+    action_lease.release()
+    app.state.looplab.jobs.put(
+        first["job_id"], status="done", result={"ok": True, "private": "ignore"})
+    indeterminate = client.get(
+        _scope_report_action_url("task", task_id, action_a)).json()
+    assert indeterminate["status"] == "indeterminate"
+    assert _generate_scope_report(client, url, action_id=action_b).status_code == 409
+
+    abandoned = client.post(abandon_url).json()
+    replay = _generate_scope_report(client, url, action_id=action_a).json()
+    assert abandoned["status"] == "abandoned" and abandoned["action_id"] == action_a
+    assert replay == abandoned
+
+    fresh = _generate_scope_report(client, url, action_id=action_b).json()
+    assert fresh["ok"] is True and fresh["action_id"] == action_b
+    assert provider_calls == 1
+
+
+def test_scope_report_missing_action_marker_cannot_authorize_visible_terminal_while_scope_live(
+        tmp_path, monkeypatch):
+    from looplab.serve.routers import reports
+
+    task_id = "live-scope-visible-terminal"
+    action_id = "ae0ae0ae-ae0a-4e0a-8e0a-ae0ae0ae0ae0"
+    _seed_scope_run(tmp_path, "live-visible-terminal-run", task_id)
+    receipt, action_lease, scope_lease = _seed_scope_action_claim(
+        tmp_path, "task", task_id, action_id, "ae" * 8, hold_leases=True)
+    try:
+        with reports._scope_store_lock(tmp_path / "reports"):
+            reports._write_scope_action_receipt(
+                tmp_path / "reports", "task", task_id, {
+                    **receipt,
+                    "status": "done",
+                    "updated_at": 2,
+                    "result": reports._scope_action_success(action_id),
+                })
+        real_read_marker = reports._read_scope_action_lease_marker
+
+        def hide_action_marker(reports_dir, requested_action):
+            if requested_action == action_id:
+                return None
+            return real_read_marker(reports_dir, requested_action)
+
+        monkeypatch.setattr(
+            reports, "_read_scope_action_lease_marker", hide_action_marker)
+        client = TestClient(make_app(tmp_path))
+        status = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+        abandon = client.post(
+            f"/api/scope-report-actions/{action_id}/abandon"
+            f"?scope_type=task&scope_id={task_id}")
+        assert status["status"] == "running"
+        assert abandon.status_code == 409
+        assert abandon.json()["detail"]["code"] == "scope_report_action_in_progress"
+    finally:
+        scope_lease.release()
+        action_lease.release()
+
+
+def test_scope_report_action_restart_orphan_becomes_indeterminate(
+        tmp_path, monkeypatch):
+    task_id = "restart-paid-fence"
+    action_id = "b0b0b0b0-b0b0-40b0-80b0-b0b0b0b0b0b0"
+    _seed_scope_run(tmp_path, "restart-paid-run", task_id)
+    _seed_scope_action_claim(
+        tmp_path, "task", task_id, action_id, "b0" * 8)
+
+    # A fresh process has no exact local JobRegistry receipt. It must not claim running forever or
+    # guess from a volatile result; the durable UUID remains fenced until explicit abandon.
+    second = TestClient(make_app(tmp_path)).get(
+        _scope_report_action_url("task", task_id, action_id)).json()
+    assert second["status"] == "indeterminate"
+    assert second["code"] == "scope_report_action_indeterminate"
+
+
+def test_scope_report_action_cross_process_lease_fences_live_worker(
+        tmp_path, monkeypatch):
+    import threading
+    import time as _time
+
+    from looplab.serve import scope_report
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "multi-worker-paid-fence"
+    action_a = "b3b3b3b3-b3b3-43b3-83b3-b3b3b3b3b3b3"
+    action_b = "b4b4b4b4-b4b4-44b4-84b4-b4b4b4b4b4b4"
+    _seed_scope_run(tmp_path, "multi-worker-paid-run", task_id)
+    entered = threading.Event()
+    release = threading.Event()
+    generation_calls = 0
+    real_generate = scope_report.generate_scope_report
+
+    def blocked_generate(scope, briefs, _client, **_kwargs):
+        nonlocal generation_calls
+        generation_calls += 1
+        entered.set()
+        assert release.wait(5), "test did not release live paid action"
+        return real_generate(scope, briefs, None)
+
+    monkeypatch.setattr(scope_report, "generate_scope_report", blocked_generate)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    app_a = make_app(tmp_path)
+    app_b = make_app(tmp_path)
+    client_a = TestClient(app_a)
+    client_b = TestClient(app_b)
+    url = f"/api/scope-report/task/{task_id}"
+    abandon_url = (
+        f"/api/scope-report-actions/{action_a}/abandon"
+        f"?scope_type=task&scope_id={task_id}"
+    )
+
+    try:
+        first = _generate_scope_report(client_a, url, action_id=action_a).json()
+        assert first["status"] == "running" and entered.wait(3)
+        sibling_status = client_b.get(
+            _scope_report_action_url("task", task_id, action_a)).json()
+        sibling_abandon = client_b.post(abandon_url)
+        sibling_new = _generate_scope_report(client_b, url, action_id=action_b)
+
+        assert sibling_status == first
+        assert sibling_abandon.status_code == 409
+        assert sibling_new.status_code == 409
+        assert sibling_new.json()["detail"]["code"] == "scope_report_action_in_progress"
+        assert generation_calls == 1
+    finally:
+        release.set()
+
+    terminal = None
+    for _ in range(100):
+        terminal = client_b.get(
+            _scope_report_action_url("task", task_id, action_a)).json()
+        if terminal.get("status") == "done":
+            break
+        _time.sleep(0.05)
+    assert terminal and terminal["status"] == "done" and terminal["published"] is True
+    assert generation_calls == 1
+
+
+def test_scope_report_action_and_scope_leases_are_live_across_spawned_process(
+        tmp_path):
+    import multiprocessing
+
+    from looplab.serve.routers import reports
+
+    scope_type = "task"
+    scope_id = "spawned-os-lease"
+    action_id = "b7b7b7b7-b7b7-47b7-87b7-b7b7b7b7b7b7"
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    ctx = multiprocessing.get_context("spawn")
+    ready = ctx.Event()
+    release = ctx.Event()
+    process = ctx.Process(
+        target=_hold_scope_report_leases_in_spawned_process,
+        args=(str(tmp_path), scope_type, scope_id, action_id, ready, release),
+    )
+    process.start()
+    try:
+        assert ready.wait(30), "spawned lease holder did not become ready"
+        with reports._scope_store_lock(reports_dir):
+            assert reports._scope_action_lease_is_live(reports_dir, action_id) is True
+            assert reports._scope_action_scope_lease_is_live(
+                reports_dir, scope_type, scope_id) is True
+            assert reports._acquire_scope_action_lease(
+                reports_dir, scope_type, scope_id, action_id) is None
+            assert reports._acquire_scope_action_scope_lease(
+                reports_dir, scope_type, scope_id) is None
+    finally:
+        release.set()
+        process.join(15)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+    assert process.exitcode == 0
+    with reports._scope_store_lock(reports_dir):
+        assert reports._scope_action_lease_is_live(reports_dir, action_id) is False
+        assert reports._scope_action_scope_lease_is_live(
+            reports_dir, scope_type, scope_id) is False
+
+
+def test_scope_report_live_scope_lease_blocks_after_fence_deletion(
+        tmp_path, monkeypatch):
+    import threading
+
+    from looplab.serve import scope_report
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "deleted-live-scope-fence"
+    action_a = "b8b8b8b8-b8b8-48b8-88b8-b8b8b8b8b8b8"
+    action_b = "b9b9b9b9-b9b9-49b9-89b9-b9b9b9b9b9b9"
+    _seed_scope_run(tmp_path, "deleted-live-fence-run", task_id)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    real_generate = scope_report.generate_scope_report
+
+    def blocked(scope, briefs, _client, **_kwargs):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(5)
+        return real_generate(scope, briefs, None)
+
+    monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    try:
+        first = _generate_scope_report(client, url, action_id=action_a).json()
+        assert first["status"] == "running" and entered.wait(3)
+        next(tmp_path.glob(".scope-action-scope-*.fence")).unlink()
+
+        blocked_new = _generate_scope_report(client, url, action_id=action_b)
+        abandon = client.post(
+            f"/api/scope-report-actions/{action_a}/abandon"
+            f"?scope_type=task&scope_id={task_id}")
+        assert blocked_new.status_code == 409
+        assert blocked_new.json()["detail"]["code"] == "scope_report_storage_conflict"
+        assert abandon.status_code == 409
+        assert calls == 1
+    finally:
+        release.set()
+
+
+def test_scope_report_live_action_survives_regular_reports_directory_replacement(
+        tmp_path, monkeypatch):
+    import threading
+
+    from looplab.serve import scope_report
+
+    monkeypatch.setenv("LOOPLAB_JOB_INLINE_WAIT", "0")
+    task_id = "replaced-reports-dir-fence"
+    action_a = "bababaab-baba-4aba-8aba-bababaababaa"
+    action_b = "cbcbcbcb-cbcb-4bcb-8bcb-cbcbcbcbcbcb"
+    _seed_scope_run(tmp_path, "replaced-reports-dir-run", task_id)
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+    real_generate = scope_report.generate_scope_report
+
+    def blocked(scope, briefs, _client, **_kwargs):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(5)
+        return real_generate(scope, briefs, None)
+
+    monkeypatch.setattr(scope_report, "generate_scope_report", blocked)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    try:
+        first = _generate_scope_report(client, url, action_id=action_a).json()
+        assert first["status"] == "running" and entered.wait(3)
+        reports_dir = tmp_path / "reports"
+        reports_dir.rename(tmp_path / "reports-old")
+        reports_dir.mkdir()
+
+        blocked_new = _generate_scope_report(client, url, action_id=action_b)
+        assert blocked_new.status_code == 409
+        assert blocked_new.json()["detail"]["code"] == "scope_report_action_in_progress"
+        assert calls == 1
+    finally:
+        release.set()
+
+
+def test_scope_report_action_indexed_missing_receipt_never_becomes_unknown(
+        tmp_path, monkeypatch):
+    task_id = "deleted-paid-receipt"
+    action_id = "b5b5b5b5-b5b5-45b5-85b5-b5b5b5b5b5b5"
+    _seed_scope_run(tmp_path, "deleted-paid-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert _generate_scope_report(client, url, action_id=action_id).json()["ok"] is True
+    next(tmp_path.glob(".scope-action-*.receipt")).unlink()
+
+    status = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    replay = _generate_scope_report(client, url, action_id=action_id).json()
+
+    assert status["status"] == "indeterminate"
+    assert status["code"] == "scope_report_action_indeterminate"
+    assert replay == status
+    assert provider_calls == 1
+
+
+def test_scope_report_clear_fence_prevents_rebill_after_receipt_and_marker_loss(
+        tmp_path, monkeypatch):
+    import hashlib as _hashlib
+
+    task_id = "clear-fence-deleted-ledger"
+    action_a = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+    action_b = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"
+    _seed_scope_run(tmp_path, "clear-fence-run", task_id)
+    provider_calls = 0
+
+    def offline(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert _generate_scope_report(client, url, action_id=action_a).json()["ok"] is True
+    digest = _hashlib.sha256(action_a.encode("ascii")).hexdigest()
+    (tmp_path / f".scope-action-{digest}.receipt").unlink()
+    (tmp_path / f".scope-action-{digest}.live.lock").unlink()
+
+    exact = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    replay = _generate_scope_report(client, url, action_id=action_a).json()
+    assert exact["status"] == "indeterminate"
+    assert replay == exact
+    assert provider_calls == 1
+
+    fresh = _generate_scope_report(client, url, action_id=action_b).json()
+    assert fresh["ok"] is True and fresh["action_id"] == action_b
+    assert provider_calls == 2
+
+
+def test_scope_report_missing_receipt_marker_cannot_be_rebound_by_wrong_scope(
+        tmp_path, monkeypatch):
+    task_id = "marker-bound-original-scope"
+    other_task = "marker-bound-wrong-scope"
+    action_id = "dededede-dede-4ede-8ede-dededededede"
+    _seed_scope_run(tmp_path, "marker-bound-run", task_id)
+    _seed_scope_run(tmp_path, "marker-bound-other-run", other_task)
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    assert _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()["ok"] is True
+    next(tmp_path.glob(".scope-action-*.receipt")).unlink()
+
+    wrong_status = client.get(_scope_report_action_url("task", other_task, action_id))
+    wrong_abandon = client.post(
+        f"/api/scope-report-actions/{action_id}/abandon"
+        f"?scope_type=task&scope_id={other_task}")
+    assert wrong_status.status_code == wrong_abandon.status_code == 409
+    assert wrong_status.json()["detail"]["code"] == "scope_report_action_conflict"
+    assert wrong_abandon.json()["detail"]["code"] == "scope_report_action_conflict"
+
+    exact = client.get(_scope_report_action_url("task", task_id, action_id)).json()
+    assert exact["status"] == "indeterminate"
+
+
+def test_scope_report_dead_active_fence_reconstructs_missing_action_marker(
+        tmp_path, monkeypatch):
+    import hashlib as _hashlib
+
+    task_id = "active-fence-missing-marker"
+    action_a = "e0e0e0e0-e0e0-40e0-80e0-e0e0e0e0e0e0"
+    action_b = "e1e1e1e1-e1e1-41e1-81e1-e1e1e1e1e1e1"
+    _seed_scope_run(tmp_path, "active-fence-marker-run", task_id)
+    _seed_scope_action_claim(tmp_path, "task", task_id, action_a, "e0" * 8)
+    digest = _hashlib.sha256(action_a.encode("ascii")).hexdigest()
+    (tmp_path / f".scope-action-{digest}.live.lock").unlink()
+    client = TestClient(make_app(tmp_path))
+
+    status = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    assert status["status"] == "indeterminate"
+    assert (tmp_path / f".scope-action-{digest}.live.lock").is_file()
+    abandoned = client.post(
+        f"/api/scope-report-actions/{action_a}/abandon"
+        f"?scope_type=task&scope_id={task_id}").json()
+    assert abandoned["status"] == "abandoned"
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    fresh = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_b).json()
+    assert fresh["ok"] is True
+
+
+def test_scope_report_clear_fence_reconstructs_missing_scope_marker(
+        tmp_path, monkeypatch):
+    task_id = "clear-fence-missing-scope-marker"
+    action_a = "e2e2e2e2-e2e2-42e2-82e2-e2e2e2e2e2e2"
+    action_b = "e3e3e3e3-e3e3-43e3-83e3-e3e3e3e3e3e3"
+    _seed_scope_run(tmp_path, "scope-marker-loss-run", task_id)
+    calls = 0
+
+    def offline(_settings):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", offline)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert _generate_scope_report(client, url, action_id=action_a).json()["ok"] is True
+    next(tmp_path.glob(".scope-action-scope-*.live.lock")).unlink()
+
+    fresh = _generate_scope_report(client, url, action_id=action_b).json()
+    assert fresh["ok"] is True and fresh["action_id"] == action_b
+    assert calls == 2
+
+
+def test_scope_report_dead_active_fence_reconstructs_missing_scope_marker(
+        tmp_path, monkeypatch):
+    task_id = "active-fence-missing-scope-marker"
+    action_a = "e4e4e4e4-e4e4-44e4-84e4-e4e4e4e4e4e4"
+    action_b = "e5e5e5e5-e5e5-45e5-85e5-e5e5e5e5e5e5"
+    _seed_scope_run(tmp_path, "active-scope-marker-loss-run", task_id)
+    _seed_scope_action_claim(tmp_path, "task", task_id, action_a, "e4" * 8)
+    next(tmp_path.glob(".scope-action-scope-*.live.lock")).unlink()
+    client = TestClient(make_app(tmp_path))
+
+    status = client.get(_scope_report_action_url("task", task_id, action_a)).json()
+    assert status["status"] == "indeterminate"
+    assert next(tmp_path.glob(".scope-action-scope-*.live.lock")).is_file()
+    abandoned = client.post(
+        f"/api/scope-report-actions/{action_a}/abandon"
+        f"?scope_type=task&scope_id={task_id}").json()
+    assert abandoned["status"] == "abandoned"
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    fresh = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_b).json()
+    assert fresh["ok"] is True
+
+
+def test_scope_report_action_unknown_abandon_is_noop_without_inode_growth(
+        tmp_path, monkeypatch):
+    task_id = "unknown-paid-abandon"
+    action_id = "b6b6b6b6-b6b6-46b6-86b6-b6b6b6b6b6b6"
+    _seed_scope_run(tmp_path, "unknown-paid-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        return object()
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+    action_url = _scope_report_action_url("task", task_id, action_id)
+    abandon_url = (
+        f"/api/scope-report-actions/{action_id}/abandon"
+        f"?scope_type=task&scope_id={task_id}"
+    )
+    assert client.get(action_url).json() == {"status": "unknown", "action_id": action_id}
+    authority_before = set(tmp_path.glob(".scope-action-*"))
+
+    discarded = client.post(abandon_url).json()
+    authority_after = set(tmp_path.glob(".scope-action-*"))
+    status = client.get(action_url).json()
+    accepted = _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}", action_id=action_id).json()
+
+    assert discarded == status == {"status": "unknown", "action_id": action_id}
+    assert authority_after == authority_before
+    assert accepted["ok"] is True and accepted["action_id"] == action_id
+    assert provider_calls == 1
+
+
+def test_scope_report_action_unknown_noop_and_status_are_cache_safe(
+        tmp_path, monkeypatch):
+    task_id = "bounded-paid-ledger"
+    action_a = "b1b1b1b1-b1b1-41b1-81b1-b1b1b1b1b1b1"
+    action_b = "b2b2b2b2-b2b2-42b2-82b2-b2b2b2b2b2b2"
+    _seed_scope_run(tmp_path, "bounded-paid-run", task_id)
+    provider_calls = 0
+
+    def provider(_settings):
+        nonlocal provider_calls
+        provider_calls += 1
+        raise RuntimeError("test-only offline")
+
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
+    client = TestClient(make_app(tmp_path))
+    url = f"/api/scope-report/task/{task_id}"
+    assert _generate_scope_report(client, url, action_id=action_a).json()["ok"] is True
+    receipts_before = list(tmp_path.glob(".scope-action-*.receipt"))
+    abandoned_unknown = client.post(
+        f"/api/scope-report-actions/{action_b}/abandon"
+        f"?scope_type=task&scope_id={task_id}")
+    receipts_after = list(tmp_path.glob(".scope-action-*.receipt"))
+    unknown = client.get(_scope_report_action_url("task", task_id, action_b))
+    existing = client.get(_scope_report_action_url("task", task_id, action_a))
+
+    assert abandoned_unknown.json() == {
+        "status": "unknown", "action_id": action_b,
+    }
+    assert receipts_after == receipts_before
+    assert existing.status_code == 200 and existing.json()["status"] == "done"
+    assert provider_calls == 1
+    for response in (abandoned_unknown, unknown):
+        assert response.headers["Cache-Control"] == "no-store"
+        vary = {item.strip().lower() for item in response.headers["Vary"].split(",")}
+        assert {"authorization", "x-looplab-token", "idempotency-key"} <= vary
+
+
+def test_scope_report_action_status_rejects_tampered_and_oversized_receipts(
+        tmp_path, monkeypatch):
+    import hashlib as _hashlib
+    import json as _json
+
+    from looplab.serve.routers import reports
+
+    task_id = "bounded-action-receipt"
+    _seed_scope_run(tmp_path, "bounded-receipt-run", task_id)
+    action_id = "99999999-9999-4999-8999-999999999999"
+    raw_prose = "RAW_FORGED_PROVIDER_PROSE"
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    digest = _hashlib.sha256(action_id.encode("ascii")).hexdigest()
+    receipt_path = tmp_path / f".scope-action-{digest}.receipt"
+    forged = {
+        "schema": 1,
+        "scope_identity": {"type": "task", "id": task_id},
+        "action_id": action_id,
+        "generation_identity": "scope-report:" + "a" * 64,
+        "job_id": "a" * 16,
+        "status": "done",
+        "updated_at": 1,
+        "result": {
+            "ok": False,
+            "action_id": action_id,
+            "code": "job_failed",
+            "error_kind": "internal",
+            "error": raw_prose,
+        },
+    }
+    receipt_path.write_text(_json.dumps(forged), encoding="utf-8")
+    monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
+    client = TestClient(make_app(tmp_path))
+    url = _scope_report_action_url("task", task_id, action_id)
+
+    tampered = client.get(url)
+    assert tampered.status_code == 409
+    assert tampered.json()["detail"]["code"] == "scope_report_action_conflict"
+    assert raw_prose not in tampered.text
+
+    receipt_path.write_bytes(b"x" * (reports._SCOPE_ACTION_RECORD_MAX_BYTES + 1))
+    oversized = client.get(url)
+    assert oversized.status_code == 409
+    assert oversized.json()["detail"]["code"] == "scope_report_storage_conflict"
+    assert raw_prose not in oversized.text
 
 
 def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
@@ -2243,7 +3837,7 @@ def test_scope_report_persists_uncapturable_members_without_permanent_staleness(
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
 
-    generated = client.post(url + "/generate").json()
+    generated = _generate_scope_report(client, url).json()
     stored = client.get(url).json()
 
     for record in (generated, stored):
@@ -2283,7 +3877,7 @@ def test_scope_report_rechecks_transient_omission_even_when_probe_is_unchanged(
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
 
-    generated = client.post(url + "/generate").json()
+    generated = _generate_scope_report(client, url).json()
     assert generated["ok"] is True
     assert generated["omitted_runs"] == ["temporarily-locked"]
     available = True
@@ -2306,7 +3900,7 @@ def test_scope_report_get_reuses_stable_revision_but_rechecks_snapshot_identity(
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
-    assert client.post(url + "/generate").json()["ok"] is True
+    assert _generate_scope_report(client, url).json()["ok"] is True
 
     real_capture = reports.capture_scope_source
     captures = 0
@@ -2343,7 +3937,7 @@ def test_scope_report_context_digest_is_scoped_to_relevant_project_semantics(
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/project/{root.id}"
 
-    generated = client.post(url + "/generate").json()
+    generated = _generate_scope_report(client, url).json()
     assert generated["ok"] is True
     assert client.get(url).json()["stale"] is False
 
@@ -2369,7 +3963,7 @@ def test_scope_report_missing_context_receipt_has_explicit_upgrade_reason(
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
-    assert client.post(url + "/generate").json()["ok"] is True
+    assert _generate_scope_report(client, url).json()["ok"] is True
     report_path = next((tmp_path / "reports").glob("*.json"))
     record = json.loads(report_path.read_text(encoding="utf-8"))
     record.pop("context_schema")
@@ -2405,10 +3999,11 @@ def test_scope_report_routes_preserve_encoded_slashes_and_disable_caching(
     url = f"/api/scope-report/task/{encoded_id}"
     raw_path_url = f"/api/scope-report/task/{task_id}"
 
-    generated = client.post(url + "/generate")
+    generated = _generate_scope_report(client, url)
     current = client.get(raw_path_url)
     missing = client.get("/api/scope-report/task/missing%2Fscope")
-    invalid = client.post("/api/scope-report/bogus/invalid%2Fscope/generate")
+    invalid = _generate_scope_report(
+        client, "/api/scope-report/bogus/invalid%2Fscope/generate")
 
     monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
     protected_client = TestClient(make_app(tmp_path))
@@ -2440,7 +4035,7 @@ def test_scope_report_run_change_during_synthesis_preserves_last_good(
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    baseline = client.post(url + "/generate").json()
+    baseline = _generate_scope_report(client, url).json()
     assert baseline["ok"] is True
     report_path = next((tmp_path / "reports").glob("*.json"))
     last_good = report_path.read_bytes()
@@ -2463,7 +4058,7 @@ def test_scope_report_run_change_during_synthesis_preserves_last_good(
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", mutate_during_synthesis)
-    changed = client.post(url + "/generate").json()
+    changed = _generate_scope_report(client, url).json()
 
     assert changed["ok"] is False
     assert changed["code"] == "scope_report_inputs_changed"
@@ -2495,8 +4090,8 @@ def test_scope_report_drill_refuses_replaced_frozen_generation(tmp_path, monkeyp
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr("looplab.agents.agent.drive_tool_loop", replace_then_drill)
-    response = TestClient(make_app(tmp_path)).post(
-        f"/api/scope-report/task/{task_id}/generate").json()
+    response = _generate_scope_report(
+        TestClient(make_app(tmp_path)), f"/api/scope-report/task/{task_id}").json()
 
     assert observed == ["(drill unavailable: frozen run changed)"]
     assert response["ok"] is False and response["code"] == "scope_report_inputs_changed"
@@ -2512,7 +4107,7 @@ def test_scope_report_staleness_detects_same_size_same_mtime_replacement(
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    assert client.post(url + "/generate").json()["ok"] is True
+    assert _generate_scope_report(client, url).json()["ok"] is True
 
     events_path = tmp_path / "fingerprinted-run" / "events.jsonl"
     before = events_path.stat()
@@ -2559,9 +4154,8 @@ def test_scope_report_revalidates_frozen_sources_before_provider(tmp_path, monke
 
     monkeypatch.setattr(reports, "capture_scope_source", capture_then_mutate)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
-    response = TestClient(make_app(tmp_path)).post(
-        f"/api/scope-report/task/{task_id}/generate"
-    )
+    response = _generate_scope_report(
+        TestClient(make_app(tmp_path)), f"/api/scope-report/task/{task_id}")
 
     assert response.status_code == 200
     assert response.json()["code"] == "scope_report_inputs_changed"
@@ -2597,8 +4191,8 @@ def test_scope_report_rejects_task_snapshot_changed_after_job_reservation(
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
     monkeypatch.setattr(app.state.looplab.jobs, "run_reserved", mutate_before_worker)
-    response = TestClient(app).post(
-        f"/api/scope-report/task/{task_id}/generate")
+    response = _generate_scope_report(
+        TestClient(app), f"/api/scope-report/task/{task_id}")
 
     assert response.status_code == 200
     assert response.json()["code"] == "scope_report_inputs_changed"
@@ -2631,27 +4225,33 @@ def test_scope_report_terminal_receipt_is_shared_by_concurrent_observers(
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", slow_synthesis)
     client = TestClient(app)
-    url = f"/api/scope-report/task/{task_id}/generate"
+    url = f"/api/scope-report/task/{task_id}"
+    action_id = "c1c1c1c1-c1c1-41c1-81c1-c1c1c1c1c1c1"
 
-    first = client.post(url).json()
+    first = _generate_scope_report(client, url, action_id=action_id).json()
     assert first["status"] == "running" and started.wait(timeout=2)
-    second = client.post(url).json()
+    second = _generate_scope_report(client, url, action_id=action_id).json()
     assert second == first
     release.set()
 
     terminal = None
     for _ in range(200):
-        terminal = client.get(f"/api/jobs/{first['job_id']}").json()
+        terminal = client.get(
+            _scope_report_action_url("task", task_id, action_id)).json()
         if terminal.get("status") == "done":
             break
         time.sleep(0.01)
     assert terminal is not None and terminal["status"] == "done"
     assert terminal["ok"] is True
-    # A second tab polling the same joined job receives the same bounded retained terminal receipt;
-    # first observation must not consume it.
-    observed_again = client.get(f"/api/jobs/{first['job_id']}").json()
-    assert observed_again["status"] == "done"
-    assert observed_again["generated_at"] == terminal["generated_at"]
+    # CODEX AGENT: process-local /api/jobs receipts are deliberately consumable once the strict action
+    # ledger exists. Concurrent tabs reconcile the exact UUID instead, whose durable terminal is replayable.
+    observed_again = client.get(
+        _scope_report_action_url("task", task_id, action_id)).json()
+    assert observed_again == terminal
+    canonical = client.get(url).json()
+    assert canonical["exists"] is True
+    assert canonical["action_id"] == action_id
+    assert canonical.get("quarantined") is not True
     assert synthesis_calls == 1
 
 
@@ -2677,8 +4277,8 @@ def test_scope_report_lossy_names_cannot_collide_or_escape_store(tmp_path, monke
     first_url = f"/api/scope-report/task/{quote(first_id, safe='')}"
     second_url = f"/api/scope-report/task/{quote(second_id, safe='')}"
 
-    first = client.post(first_url + "/generate").json()
-    second = client.post(second_url + "/generate").json()
+    first = _generate_scope_report(client, first_url).json()
+    second = _generate_scope_report(client, second_url).json()
     assert first["ok"] is True and first["run_ids"] == ["colon-run"]
     assert second["ok"] is True and second["run_ids"] == ["star-run"]
     assert first["scope_identity"] == {"type": "task", "id": first_id}
@@ -2855,7 +4455,8 @@ def test_scope_report_rejects_external_report_directory_symlink(tmp_path):
 
     client = TestClient(make_app(root))
     assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
-    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}").status_code == 409
     assert list(outside.iterdir()) == []
 
 
@@ -2892,7 +4493,8 @@ def test_scope_report_rejects_oversized_record_before_provider(
     client = TestClient(make_app(tmp_path))
 
     assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
-    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}").status_code == 409
     assert provider_calls == 0
     assert report_path.read_bytes() == hostile
     assert _prior_learnings_index(reports_dir) == ""
@@ -2914,9 +4516,8 @@ def test_scope_report_rejects_oversized_source_before_provider(tmp_path, monkeyp
 
     monkeypatch.setattr(scope_sources, "MAX_SCOPE_EVENT_BYTES", event_size - 1)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", provider)
-    response = TestClient(make_app(tmp_path)).post(
-        f"/api/scope-report/task/{task_id}/generate"
-    )
+    response = _generate_scope_report(
+        TestClient(make_app(tmp_path)), f"/api/scope-report/task/{task_id}")
 
     assert response.status_code == 413
     assert response.json()["detail"]["code"] == "scope_report_source_too_large"
@@ -2951,7 +4552,8 @@ def test_scope_report_bounded_json_parse_failures_are_storage_conflicts(
     client = TestClient(make_app(tmp_path))
 
     assert client.get(f"/api/scope-report/task/{task_id}").status_code == 409
-    assert client.post(f"/api/scope-report/task/{task_id}/generate").status_code == 409
+    assert _generate_scope_report(
+        client, f"/api/scope-report/task/{task_id}").status_code == 409
     assert provider_calls == 0
     assert report_path.read_bytes() == raw
 
@@ -2965,7 +4567,7 @@ def test_scope_report_oversized_publication_preserves_last_good(
     _seed_scope_run(tmp_path, "owner-run", task_id)
     client = TestClient(make_app(tmp_path))
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    first = client.post(f"/api/scope-report/task/{task_id}/generate")
+    first = _generate_scope_report(client, f"/api/scope-report/task/{task_id}")
     assert first.status_code == 200 and first.json()["ok"] is True
     report_path = next((tmp_path / "reports").glob("*.json"))
     last_good = report_path.read_bytes()
@@ -2977,7 +4579,7 @@ def test_scope_report_oversized_publication_preserves_last_good(
             "headline": "x" * (_SCOPE_REPORT_RECORD_MAX_BYTES + 1),
         },
     )
-    refused = client.post(f"/api/scope-report/task/{task_id}/generate")
+    refused = _generate_scope_report(client, f"/api/scope-report/task/{task_id}")
 
     assert refused.status_code == 200
     assert refused.json()["ok"] is False
@@ -3001,13 +4603,14 @@ def test_scope_report_revalidates_store_after_slow_generation(tmp_path, monkeypa
         pytest.skip(f"directory symlinks unavailable: {exc}")
 
     def swap_store(_scope, _briefs, _client, **_kwargs):
+        (root / "reports").rename(root / "reports.before-swap")
         (root / "reports").symlink_to(outside, target_is_directory=True)
         return {"headline": "must not publish"}
 
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
     monkeypatch.setattr("looplab.serve.scope_report.generate_scope_report", swap_store)
-    result = TestClient(make_app(root)).post(
-        f"/api/scope-report/task/{task_id}/generate").json()
+    result = _generate_scope_report(
+        TestClient(make_app(root)), f"/api/scope-report/task/{task_id}").json()
 
     assert result["ok"] is False
     assert result["code"] == "scope_report_storage_conflict"
@@ -3026,7 +4629,7 @@ def test_scope_report_refuses_legacy_or_substituted_storage(
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
     client = TestClient(make_app(tmp_path))
     url = f"/api/scope-report/task/{task_id}"
-    generated = client.post(url + "/generate")
+    generated = _generate_scope_report(client, url)
     assert generated.status_code == 200 and generated.json()["ok"] is True
 
     report_path = next((tmp_path / "reports").glob("*.json"))
@@ -3043,7 +4646,7 @@ def test_scope_report_refuses_legacy_or_substituted_storage(
     assert "PRIVATE OTHER-SCOPE CONTENT" not in refused_read.text
     assert _prior_learnings_index(tmp_path / "reports") == ""
 
-    refused_write = client.post(url + "/generate")
+    refused_write = _generate_scope_report(client, url)
     assert refused_write.status_code == 409
     assert refused_write.json()["detail"]["code"] == "scope_report_storage_conflict"
     assert "PRIVATE OTHER-SCOPE CONTENT" in report_path.read_text(encoding="utf-8")
@@ -3079,7 +4682,8 @@ def test_scope_report_brief_marks_both_incomplete_finalization_protocols(
     monkeypatch.setattr(
         "looplab.serve.scope_report.generate_scope_report", capture_briefs)
     monkeypatch.setattr("looplab.serve.server.make_llm_client", lambda _settings: object())
-    response = TestClient(make_app(tmp_path)).post("/api/scope-report/task/t/generate")
+    response = _generate_scope_report(
+        TestClient(make_app(tmp_path)), "/api/scope-report/task/t")
 
     assert response.status_code == 200, response.text
     assert response.json()["ok"] is True
@@ -3092,7 +4696,7 @@ def test_scope_report_absent_then_stale_on_new_run(tmp_path, monkeypatch):
     task_id = client.get("/api/runs").json()[0]["task_id"]
     assert client.get(f"/api/scope-report/task/{task_id}").json()["exists"] is False   # nothing yet
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    client.post(f"/api/scope-report/task/{task_id}/generate")
+    _generate_scope_report(client, f"/api/scope-report/task/{task_id}")
     _build_run(tmp_path, "r2", writer=None)                # a new run joins the scope
     got = client.get(f"/api/scope-report/task/{task_id}").json()
     assert got["exists"] is True and got["stale"] is True and "r2" in got["added"]
@@ -3108,14 +4712,16 @@ def test_scope_report_project_scope_includes_descendants(tmp_path, monkeypatch):
     client.post("/api/runs/r1/project", json={"project_id": parent["id"]})
     client.post("/api/runs/r2/project", json={"project_id": child["id"]})
     monkeypatch.setattr("looplab.serve.server.make_llm_client", _boom_client)
-    g = client.post(f"/api/scope-report/project/{parent['id']}/generate").json()
+    g = _generate_scope_report(
+        client, f"/api/scope-report/project/{parent['id']}").json()
     assert set(g["run_ids"]) == {"r1", "r2"}              # nested run r2 included
 
 
 def test_scope_report_empty_scope_rejected(tmp_path):
     client = TestClient(make_app(tmp_path))
-    assert client.post("/api/scope-report/task/nope/generate").status_code == 400
-    assert client.post("/api/scope-report/bogus/x/generate").status_code == 400  # bad scope type
+    assert _generate_scope_report(client, "/api/scope-report/task/nope").status_code == 400
+    assert _generate_scope_report(
+        client, "/api/scope-report/bogus/x").status_code == 400  # bad scope type
 
 
 def test_prior_learnings_index_is_bounded_redacted_json(tmp_path):

@@ -539,6 +539,10 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         # generation result can claim authority for a scope snapshot that no longer exists.
         is_scope_report = (route_path == "/api/scope-report"
                            or route_path.startswith("/api/scope-report/"))
+        is_scope_report_action = (
+            route_path == "/api/scope-report-actions"
+            or route_path.startswith("/api/scope-report-actions/")
+        )
         is_job = len(parts) == 4 and parts[1] == "api" and parts[2] == "jobs"
         is_comments = (route_path == "/api/review/comments"
                        or (len(parts) >= 5 and parts[1] == "api" and parts[2] == "runs"
@@ -550,7 +554,7 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
                        and parts[4] == "concepts")
         is_attention = route_path in {"/api/attention", "/api/assistant/permissions"}
         if (is_command or is_start_status or is_log_page or is_report_refresh or is_scope_report
-                or is_job or is_comments or is_concepts or is_attention):
+                or is_scope_report_action or is_job or is_comments or is_concepts or is_attention):
             response.headers["Cache-Control"] = "no-store"
             vary = {item.strip() for item in response.headers.get("Vary", "").split(",") if item.strip()}
             vary.update({"X-LoopLab-Token", "Authorization"})

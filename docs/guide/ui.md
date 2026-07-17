@@ -219,6 +219,56 @@ server-derived; narrative sections are separately labelled model-authored adviso
 before schema 5 / verdict authority v3 are quarantined and show neither legacy outcome-bearing narrative nor
 comparison rows until regeneration. Old stored `best_runs` remain unverified and are not rendered.
 
+Cross-run generation is a paid, explicitly idempotent action. `POST
+/api/scope-report/{type}/{scope-id}/generate` requires one caller-persisted UUIDv4 in
+`Idempotency-Key`; a retry for the same user action must reuse that UUID. The server strictly persists the
+claim before starting provider work and fences each scope to one unresolved action, so a second UUID cannot
+race the first publication. Clients reconcile through `GET /api/scope-report-actions/{action-id}` with the
+expected `scope_type` and `scope_id` query values; status reconciliation never starts paid work.
+
+```mermaid
+stateDiagram-v2
+    [*] --> unknown: no durable action evidence
+    unknown --> running: confirmed POST of this UUID
+    unknown --> unknown: discard local recovery state only
+    running --> done: strict terminal commit
+    running --> indeterminate: worker or outcome cannot be proved
+    indeterminate --> abandoned: explicit abandon
+    done --> [*]: reread canonical report
+    abandoned --> [*]: a new UUID may be submitted
+```
+
+`unknown` means the server found no durable action claim. Discarding that recovery entry is local-only: the
+server does not create a receipt or tombstone for an unknown UUID. A separately confirmed retry may reuse
+that same UUID, but the client must not silently mint a replacement action. `running` is protected by
+cross-process action and scope OS leases. `done` is a durably committed bounded terminal; after observing it,
+the UI rereads the canonical scope report so an older action cannot replace a newer publication on screen.
+`indeterminate` means paid work may have happened but its exact outcome cannot be proved; that UUID is never
+executed again. The warned **Abandon recovery lock** transition strictly writes a bounded `abandoned`
+terminal and then clears the matching scope fence before a new UUID is allowed.
+
+Paid-action authority is stored as hidden regular files directly in the run root, outside the replaceable
+`reports/` directory:
+
+- `.scope-action-<sha256(uuid)>.receipt` stores the bounded action state and terminal result.
+- `.scope-action-<sha256(uuid)>.live.lock` is the immutable action marker and advisory byte-lock target.
+- `.scope-action-scope-<sha256(scope identity)>.live.lock` is the per-scope lease marker and byte-lock target.
+- `.scope-action-scope-<sha256(scope identity)>.fence` records the scope's exact active or cleared action.
+- `reports/` separately contains the canonical report JSON; an action terminal never substitutes for it.
+
+There is no fixed-capacity global action manifest. Recovery is based only on the authority files that remain,
+and deletion is not a supported lifecycle operation. In particular, deleting both an action receipt and its
+action `.live.lock` marker removes the two per-action evidence files and is outside the idempotency guarantee;
+depending on the surviving scope evidence, the server may return `unknown` or fail closed. Do not expect
+automatic recovery after deleting any authority file, and never manually remove or repair these files.
+
+Back up or migrate a run root only while every LoopLab UI/server/worker process that can use it is stopped.
+Use a metadata-preserving copy of the complete root, including hidden dotfiles; never copy a live root and
+never copy only `reports/`. The destination filesystem must support strict file and parent-directory rename
+durability plus cross-process advisory byte locks. Object-store and FUSE mounts may not provide those
+semantics, so paid scope actions can fail closed there even when ordinary file reads and writes appear to
+work.
+
 The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
 `looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence

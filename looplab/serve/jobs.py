@@ -9,6 +9,7 @@ import os
 import secrets
 import threading
 import time
+from threading import Lock as _ThreadLock
 
 import anyio
 from fastapi import APIRouter
@@ -152,7 +153,27 @@ class JobRegistry:
             if job is not None and not job.get("worker_started"):
                 self._remove_locked(job_id)
 
-    def start_reserved(self, job_id: str, compute, *, with_progress: bool = False) -> None:
+    def mark_consumable(self, job_id: str) -> None:
+        """Allow retirement only after an endpoint confirmed its independent durable terminal."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job["consume_on_poll"] = True
+
+    def discard_orphaned_running(self, job_id: str) -> None:
+        """Retire an exact running receipt after its owner proved the worker cannot still exist.
+
+        This is deliberately narrower than cancellation: the background registry cannot prove thread
+        liveness itself. Durable endpoints may call it only after their cross-process lease is dead and
+        a strict indeterminate tombstone has replaced the paid-action claim.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None and job.get("status") == JOB_RUNNING:
+                self._remove_locked(job_id)
+
+    def start_reserved(self, job_id: str, compute, *, with_progress: bool = False,
+                       on_start_failure=None) -> None:
         """Start an existing reservation once; safe for same-identity concurrent callers."""
         with self._lock:
             job = self._jobs.get(job_id)
@@ -160,7 +181,17 @@ class JobRegistry:
                 return
             job["worker_started"] = True
 
+        launch_lock = _ThreadLock()
+        launch_state = "pending"
+
         def _worker():
+            # CODEX AGENT: ``Thread.start`` is allowed to fail only before a target begins, but custom
+            # runtimes can violate that convention by starting and then raising. Never let paid work
+            # cross this boundary until start() returned and authorization was atomically committed.
+            with launch_lock:
+                authorized = launch_state == "authorized"
+            if not authorized:
+                return
             try:
                 res = compute(lambda p: self.put(job_id, progress=p)) if with_progress else compute()
             except Exception:  # noqa: BLE001 - raw provider/internal errors must never cross /api/jobs
@@ -172,20 +203,49 @@ class JobRegistry:
                 }
             self.put(job_id, status=JOB_DONE, result=res, ts=time.time())
 
-        try:
-            threading.Thread(target=_worker, daemon=True).start()
-        except Exception:  # noqa: BLE001 - a failed spawn must not leave a permanent running claim
-            self.put(job_id, status=JOB_DONE, result={
-                "ok": False,
-                "code": "job_failed",
-                "error_kind": "internal",
-                "error": "background job failed",
-            }, ts=time.time())
+        start_exc: BaseException | None = None
+        with launch_lock:
+            try:
+                threading.Thread(target=_worker, daemon=True).start()
+                # Authorization belongs inside this protected region: an asynchronous exception
+                # anywhere after start() returned but before this commit must still cancel the target.
+                launch_state = "authorized"
+            except BaseException as exc:
+                # The target, if a non-conforming start() already launched it, is blocked on this
+                # lock until the cancelled state is visible and therefore cannot call the provider.
+                launch_state = "cancelled"
+                start_exc = exc
+
+        if start_exc is not None:
+            callback_exc: BaseException | None = None
+            try:
+                result = on_start_failure() if on_start_failure is not None else {
+                    "ok": False,
+                    "code": "job_failed",
+                    "error_kind": "internal",
+                    "error": "background job failed",
+                }
+            except BaseException as exc:
+                callback_exc = exc
+                result = {
+                    "ok": False,
+                    "code": "job_failed",
+                    "error_kind": "internal",
+                    "error": "background job failed",
+                }
+            self.put(job_id, status=JOB_DONE, result=result, ts=time.time())
+            if not isinstance(start_exc, Exception):
+                raise start_exc.with_traceback(start_exc.__traceback__)
+            if callback_exc is not None and not isinstance(callback_exc, Exception):
+                raise callback_exc
 
     async def run_reserved(self, job_id: str, compute, *, inline_wait: float | None = None,
-                           with_progress: bool = False, consume: bool = False):
+                           with_progress: bool = False, consume: bool = False,
+                           on_start_failure=None):
         """Start/wait for an exact receipt; never create replacement work if it disappeared."""
-        self.start_reserved(job_id, compute, with_progress=with_progress)
+        self.start_reserved(
+            job_id, compute, with_progress=with_progress,
+            on_start_failure=on_start_failure)
         deadline = time.monotonic() + (self._inline_wait if inline_wait is None else inline_wait)
         while time.monotonic() < deadline:
             done, result = self._completed_result(job_id, consume=consume)
@@ -205,7 +265,8 @@ class JobRegistry:
                          with_progress: bool = False,
                          idempotency_key: str | None = None,
                          consume_inline_result: bool = False,
-                         reserved_job_id: str | None = None):
+                         reserved_job_id: str | None = None,
+                         on_start_failure=None):
         """Run `compute` (a 0-arg callable returning the final response dict) in a worker thread; return
         its result inline when it finishes within the inline wait, else {status:'running', job_id}. The
         thread keeps a blocking LLM/agent call off the event loop AND off the request's critical path,
@@ -227,14 +288,16 @@ class JobRegistry:
         if reserved_job_id is not None:
             return await self.run_reserved(
                 reserved_job_id, compute, inline_wait=inline_wait,
-                with_progress=with_progress, consume=consume_inline_result)
+                with_progress=with_progress, consume=consume_inline_result,
+                on_start_failure=on_start_failure)
         receipt = self.reserve(idempotency_key)
         if receipt.get("status") != JOB_RUNNING:
             return receipt
         return await self.run_reserved(
             receipt["job_id"], compute, inline_wait=inline_wait,
             with_progress=with_progress,
-            consume=idempotency_key is None or consume_inline_result)
+            consume=idempotency_key is None or consume_inline_result,
+            on_start_failure=on_start_failure)
 
 
 def build_router(srv) -> APIRouter:
