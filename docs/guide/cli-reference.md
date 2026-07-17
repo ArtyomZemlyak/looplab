@@ -247,8 +247,11 @@ research **concepts** it touches over a concept **axis-DAG** (multi-label — on
 concept / axis-clique **concentration**, and the standing **uncovered-region alarm** — the regions the
 search footprint never entered (e.g. *"0 coverage in {negatives/external-mining, distillation/teacher-distill,
 data/synthetic-queries} across all N experiments — direct the next proposals there (not just 'broaden')"*),
-which fires from the first node rather than waiting for narrowing to accumulate. Read-only; never touches
-selection.
+which fires from the first node rather than waiting for narrowing to accumulate. The default is read-only
+and never touches selection. The explicit `--persist` exception retro-tags only a fully finalized,
+non-running run; it owns `engine.lock`, revalidates the terminal protocol, and CASes the exact event-log
+snapshot it analyzed. A run that is stopped, finalizing, resume-pending, still holding `engine.lock`, or
+changed during analysis is rejected rather than receiving stale tags.
 
 **Agentic by default** (agentic-first concept): the LLM builds the map — it grows the concept vocabulary
 from the actual experiments (reading each node's code/logs), so **it sends node code/logs to the configured
@@ -260,6 +263,7 @@ because its agentic path is a heavier full tool-loop.
 
 ```bash
 looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--model ID] [--repo PATH]
+                         [--jobs N] [--persist]
 ```
 
 | Option | Default | Description |
@@ -268,6 +272,8 @@ looplab concept-coverage RUN_DIR [--task-type dense-retrieval] [--offline] [--mo
 | `--task-type NAME` | inferred from the run's `task_id` | Concept pack to SEED the agent's build (e.g. `dense-retrieval`); the LLM verifies/expands it, or builds from scratch when no pack matches |
 | `--offline` | off (**default is the agentic build**) | Skip the LLM/network and use only the deterministic alias heuristic over the curated seed pack — a fast local fallback (needs a pack; no per-task importance) |
 | `--model ID` | configured model | Override the model for the agentic build |
+| `--jobs N` | `8` | Concurrent node-tagging calls in the agentic build |
+| `--persist` | off | Append generation-fenced memberships to an exact, fully finalized finished snapshot. Repeated same-source results are idempotent. Agentic/LLM results carry reviewed `classifier` provenance, become visible to replay-derived indexes, and can upgrade identical earlier heuristic ids; the command does **not** rebuild a capsule already emitted during finalization. Exact `--offline` results carry `offline-heuristic` provenance and remain display-only. Operator edits and existing classifier evidence cannot be downgraded. There is no live-run override. |
 | `--repo PATH` | — | Task repo to ground the per-task uncovered-region derivation with a D1 prior-art brief |
 
 ---

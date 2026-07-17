@@ -680,11 +680,17 @@ def concept_governance_snapshot(memory_dir) -> dict:
     approval receipt and pass them back to the next append; any intervening alias *or* split mutation then
     fails the global CAS instead of silently changing what the approval meant.
     """
+    empty = {
+        "aliases": {}, "splits": {}, "alias_revision": 0,
+        "split_revision": 0, "governance_revision": 0,
+    }
     if not memory_dir:
-        return {
-            "aliases": {}, "splits": {}, "alias_revision": 0,
-            "split_revision": 0, "governance_revision": 0,
-        }
+        return empty
+    # A directory that did not exist at this observation point is a coherent empty snapshot. Do not make
+    # a read create the governance lock's parent; a writer racing immediately afterwards advances the
+    # revisions and makes the eventual assistant append fail CAS.
+    if not Path(memory_dir).exists():
+        return empty
     with _concept_governance_transaction(memory_dir):
         return {
             "aliases": load_concept_aliases(memory_dir),

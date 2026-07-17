@@ -81,6 +81,15 @@ def test_governance_snapshot_returns_states_and_revisions_from_one_receipt(tmp_p
     assert snapshot["governance_revision"] == 2
 
 
+def test_governance_snapshot_of_missing_directory_is_empty_and_read_only(tmp_path):
+    missing = tmp_path / "not-created"
+    assert concept_governance_snapshot(missing) == {
+        "aliases": {}, "splits": {}, "alias_revision": 0,
+        "split_revision": 0, "governance_revision": 0,
+    }
+    assert not missing.exists()
+
+
 def test_uid_follows_canonical_identity_not_display():
     aliases = {"hn": "hard-neg"}
     assert concept_uid("hn", aliases) == concept_uid("hard-neg", aliases)   # aliased -> same identity

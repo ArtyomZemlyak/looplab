@@ -43,6 +43,14 @@ MAX_LESSON_NODE_COUNT = (1 << 31) - 1
 # malformed / missing value as untrusted until that producer is reviewed.
 NODE_CONCEPT_PROVENANCE_AUTHORED = "researcher-authored"
 NODE_CONCEPT_PROVENANCE_CLASSIFIER = "classifier"
+# ``concept-coverage --offline --persist`` restores a useful display taxonomy on old runs, but its
+# alias matcher is not an independent semantic classifier.  Keep the exact producer visible while
+# excluding it from evidence consumers through ``classifier_verified_node_concepts``.
+NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC = "offline-heuristic"
+# A future/malformed ``node_concepts.mode`` must not inherit classifier trust merely because replay
+# understands the event type.  Preserve memberships for forward-compatible read models while
+# collapsing the unknown producer to one explicit, permanently non-evidence label.
+NODE_CONCEPT_PROVENANCE_UNTRUSTED = "untrusted-source"
 # PART V Phase 2b: an OPERATOR manually re-tagged this node's concepts. Authoritative for the run's
 # READ MODELS (UI/tools) and NOT clobbered by the classifier re-tag cadence — but deliberately NOT treated
 # as independent classifier EVIDENCE (classifier_verified_node_concepts stays classifier-only), so a human
@@ -63,6 +71,28 @@ def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
         return []
     memberships = getattr(state, "node_concepts", None) or {}
     return list(memberships.get(node_id) or [])
+
+
+def node_concept_event_provenance(data: Any) -> str:
+    """Resolve a durable ``node_concepts`` producer without guessing.
+
+    Historical cadence events predate ``mode`` and were emitted only by the reviewed classifier,
+    so an *absent* field retains classifier trust.  Current classifier writers use one of the two
+    exact modes below.  The exact offline fallback is display-only, and every explicit unknown,
+    malformed, or future value fails closed as untrusted until that producer is reviewed.
+    """
+    if not isinstance(data, dict):
+        return NODE_CONCEPT_PROVENANCE_UNTRUSTED
+    if "mode" not in data:
+        return NODE_CONCEPT_PROVENANCE_CLASSIFIER
+    mode = data.get("mode")
+    if mode in ("llm", "agentic"):
+        return NODE_CONCEPT_PROVENANCE_CLASSIFIER
+    if mode == "offline-heuristic":
+        return NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC
+    # CODEX AGENT: explicit-but-unknown is not legacy. Treating it like an absent legacy field would
+    # let a typo or future producer silently enter graded-novelty and cross-run evidence.
+    return NODE_CONCEPT_PROVENANCE_UNTRUSTED
 
 
 def safe_lesson_node_count(value) -> int | None:
@@ -645,9 +675,10 @@ class RunState(BaseModel):
     concept_consolidation: dict[str, str] = Field(default_factory=dict)
     # PART IV concept-edge substrate: the typed concept graph (src, rel, dst) -> {provenance, confidence},
     # keyed by "src\trel\tdst". Makes hierarchy a swappable projection (project_hierarchy). Folded
-    # COMMUTATIVELY from EV_CONCEPT_EDGE (max-confidence-wins per triple -> order-tolerant). Audit-only,
-    # never touches selection. Additive/reader-defaulted: empty on old logs -> project_hierarchy falls
-    # back to the is_a-from-path tree, byte-identical fold.
+    # COMMUTATIVELY from explicit EV_CONCEPT_EDGE assertions (max-confidence-wins per triple ->
+    # order-tolerant). Derived ``co_occurs`` rows are intentionally omitted and recomputed from current
+    # memberships by ConceptFrame, so stale counts can decrease/disappear. Audit-only, never touches
+    # selection. Additive/reader-defaulted: empty on old logs -> path projection remains available.
     concept_edges: dict[str, dict] = Field(default_factory=dict)
     # RepoTask onboarding (Phase 3, ADR-7): the agent proposes a trusted eval spec + metric
     # adapter; a human ratifies it once; then the loop trusts it.

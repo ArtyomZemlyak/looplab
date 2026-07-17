@@ -540,80 +540,37 @@ class StrategyCadenceMixin:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": mode, "at_vocab": v_now,
                                                              "generation": node.attempt})
-                # DESIGN NOTE (2026-07-17 critique): every edge here is DERIVED — is_a from the id path,
-                # co_occurs from co-tagging — yet it is PERSISTED to the event log, which bought the offline
-                # emit gap (#5), the co_occurs ratchet-with-no-decay (#9) and the is_a flatten (#12) at once.
-                # Consider dropping the persisted substrate entirely and RECOMPUTING edges from folded
-                # node_concepts at /concepts read time (as the tree projection already does): that removes
-                # #5/#9/#12, the concept_edge fold+commutativity surface, and the "never cache the tree"
-                # worry, for no loss of durability (nothing consumes edges except a read-time projection).
-                # PART IV concept-edge substrate: record the typed graph so hierarchy becomes a swappable
-                # projection. is_a = each concept's immediate PATH parent (the full chain) plus any curated
-                # extra parent AXIS the id-prefix alone misses (asserted, conf 1.0); co_occurs = concept
-                # pairs seen together on a node (evidenced, integer weight). Emit-only-if-new vs the folded
-                # edges -> no per-cadence churn; the commutative fold keeps it order-tolerant. Deterministic
-                # (sorted; no LLM) so it also records on the offline heuristic path. Audit-only.
-                # REVIEW(2026-07-16): the "also records on the offline heuristic path" claim above is
-                # FALSE — this whole block sits inside `if client is not None:`, so the heuristic
-                # fallback (which sets `graph, tags = seed, None` further down) never reaches it: an
-                # offline/no-reflect-client run emits NO concept_edge events, concept_edges stays {}
-                # forever, and every typed lens in /concepts silently falls back to is_a with
-                # edges_present=false. Worse, if the block were moved as-is, the heuristic path's
-                # `tags is None` would raise at `tags.values()` and vanish into the blanket
-                # `except: pass` below. Either move the emission after the branch join (guarding
-                # `tags or {}` and deriving heuristic tags first), or fix the comment to state the
-                # substrate is LLM-cadence-only — as written it points a debugger of "why are lenses
-                # empty offline" away from the actual gate.
+                # CODEX AGENT: do not persist co-tag edges. They can decrease or disappear after
+                # re-tagging, while the commutative max ledger can only ratchet upward and therefore
+                # leaves ghost co-occurrences. ConceptFrame derives that relation from its exact bounded
+                # membership snapshot for online, offline and legacy runs. Explicit is_a assertions remain
+                # durable: path/curated parent structure is still the typed graph's audit substrate.
                 try:
-                    from collections import Counter as _Counter
-                    from itertools import combinations as _comb
                     prior_edges = getattr(state, "concept_edges", None) or {}
                     fresh_edges: list[dict] = []
-                    _seen_edge: set[str] = set()
-
-                    def _edge(src, rel, dst, prov, conf):
-                        if not (src and dst) or src == dst:
-                            return
-                        k = "\t".join((src, rel, dst))
-                        if k in _seen_edge:
-                            return
-                        cur = prior_edges.get(k)
-                        if cur is None or conf > float(cur.get("confidence", 0.0)):
-                            _seen_edge.add(k)
-                            fresh_edges.append({"src": src, "rel": rel, "dst": dst,
-                                                "provenance": prov, "confidence": conf})
-                    for c in graph.concepts():
-                        if c.id.endswith("/*"):
+                    seen: set[str] = set()
+                    for concept in graph.concepts():
+                        if concept.id.endswith("/*"):
                             continue
-                        prefix_parent = c.id.rsplit("/", 1)[0] if "/" in c.id else None
+                        prefix_parent = (
+                            concept.id.rsplit("/", 1)[0] if "/" in concept.id else None)
+                        parents = set(graph.parents_of(concept.id))
                         if prefix_parent:
-                            _edge(c.id, "is_a", prefix_parent, "asserted", 1.0)
-                        # Emit the concept's ACTUAL immediate parents (parents_of), not the top-level roots
-                        # (axes_of): a curated cross-link like Concept("x/y", axes=("loss/contrastive",))
-                        # must record `x/y is_a loss/contrastive`, keeping the intermediate level, or the
-                        # typed-edge substrate would represent LESS structure than the graph it mirrors.
-                        # The id-prefix parent is already emitted above, so skip it here to avoid a dup.
-                        for parent in graph.parents_of(c.id):
-                            if parent and parent != prefix_parent:
-                                _edge(c.id, "is_a", parent, "asserted", 1.0)
-                    pair: _Counter = _Counter()
-                    for cids in tags.values():
-                        for a, b in _comb(sorted(cids), 2):
-                            pair[(a, b)] += 1
-                    # REVIEW(2026-07-16): co_occurs weights can only ever RATCHET UP: the fold is
-                    # max-confidence-wins and this guard emits only on conf > folded, so when a re-tag
-                    # (B1 staleness refresh) or a consolidation rename SHRINKS a pair's true count — or
-                    # removes the pair entirely — the substrate keeps the stale higher weight forever
-                    # (ghost edges with inflated confidence, no tombstone/decay path exists). Phase 3a's
-                    # co_occurs lens picks primary parents by that confidence, so stale maxima bias the
-                    # projected tree long after the vocabulary moved on. The substrate needs a way to
-                    # represent evidence going DOWN — e.g. a generation/at_vocab field on the edge event
-                    # with latest-generation-wins-then-max folding — before any lens is user-facing.
-                    for (a, b), cnt in sorted(pair.items()):
-                        _edge(a, "co_occurs", b, "evidenced", float(cnt))
+                            parents.add(prefix_parent)
+                        for parent in sorted(parents):
+                            if not parent or parent == concept.id:
+                                continue
+                            key = "\t".join((concept.id, "is_a", parent))
+                            if key in seen or key in prior_edges:
+                                continue
+                            seen.add(key)
+                            fresh_edges.append({
+                                "src": concept.id, "rel": "is_a", "dst": parent,
+                                "provenance": "asserted", "confidence": 1.0,
+                            })
                     if fresh_edges:
                         self.store.append(EV_CONCEPT_EDGE, {"edges": fresh_edges, "mode": mode})
-                except Exception:  # noqa: BLE001 — the edge substrate is audit-only; never break the cadence
+                except Exception:  # noqa: BLE001 - audit enrichment must not break the cadence
                     pass
                 # HT (§21.18): agentically tag any UNtagged hypotheses against the SAME graph and record
                 # them, so taxonomy dedup reuses the agentic tags instead of the tag_text alias heuristic.

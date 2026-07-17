@@ -14,23 +14,41 @@ from typing import Optional
 import orjson
 import typer
 
-from looplab.events.eventstore import EventStore
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                                 NODE_CONCEPT_PROVENANCE_OPERATOR,
+                                 NODE_CONCEPT_PROVENANCE_UNTRUSTED,
+                                 node_concept_event_provenance)
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
 from looplab.events.replay import fold
-from looplab.events.types import EV_NODE_CONCEPTS
-from looplab.cli import _print_result, _require_run_dir, app
+from looplab.events.types import EV_FINALIZE_STEP, EV_NODE_CONCEPTS, EV_RUN_FINISHED
+from looplab.cli import _engine_singleton, _print_result, _require_run_dir, app
 
 
-def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int) -> int:
+def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,
+                           expected_last_seq: int | None = None,
+                           require_lock: bool = False) -> int:
     """A2 (retro-tag): append `EV_NODE_CONCEPTS` per node so the built tags FOLD into
     `state.node_concepts` and the UI (ConceptChipBar/ConceptView) + cross-run readers see them —
     otherwise `concept-coverage` computes exactly these tags and throws them away after printing.
 
     This is the one MUTATING affordance in this module, gated behind `--persist`, and is intended for
     FINISHED runs (retro-tagging a run created before Phase 0, or refreshing a stale map). Events carry
-    CLASSIFIER provenance and are generation-fenced (`generation == node.attempt`), exactly like the live
-    engine's `concept_pivot` cadence emits — so a later fold/resume is idempotent, and any operator
-    re-tag (`EV_CONCEPT_TAG_EDITED`) still wins (invariant 5). Returns the number of nodes tagged."""
-    known = getattr(state, "node_concepts", {}) or {}
+    exact producer provenance and are generation-fenced (`generation == node.attempt`). Offline heuristic
+    membership is display-only; agentic/LLM membership is classifier evidence. Same-source replay is a
+    no-op, while an agentic replay upgrades identical heuristic ids once. Operator edits still win.
+    Returns the number of nodes tagged."""
+    requested_provenance = node_concept_event_provenance({"mode": mode})
+    if requested_provenance == NODE_CONCEPT_PROVENANCE_UNTRUSTED:
+        raise ValueError(f"unsupported node-concept producer mode: {mode!r}")
+    events = store.read_all()
+    tail = events[-1].seq if events else -1
+    if expected_last_seq is not None and tail != expected_last_seq:
+        raise EventStoreConcurrencyError(store.path, expected_last_seq, tail)
+    # CODEX AGENT: re-fold inside the mutation transaction. The caller's pre-analysis state can be
+    # minutes old after an agentic build and must never choose provenance/idempotency on its own.
+    state = fold(events)
+    known = dict(getattr(state, "node_concepts", {}) or {})
+    provenance = dict(getattr(state, "node_concept_provenance", {}) or {})
     count = 0
     for nid, ft in (raw_tags or {}).items():
         nid = int(nid)
@@ -40,15 +58,68 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int) -
         ids = sorted(str(c) for c in ft)
         if not ids:
             continue
-        # Skip a node whose folded tags already equal these — mirrors the live cadence's
-        # `nid not in known or known != new_ids`, so re-running --persist is idempotent (no duplicate
-        # events, no needless log growth) and an operator/classifier tag that already matches is untouched.
-        if known.get(nid) == ids:
+        current_provenance = provenance.get(nid)
+        if current_provenance == NODE_CONCEPT_PROVENANCE_OPERATOR:
             continue
-        store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": ids, "mode": mode,
-                                        "at_vocab": int(vocab_size), "generation": node.attempt})
+        # A coarse fallback can fill an authored/empty display, but it must never replace or downgrade
+        # reviewed classifier evidence. Conversely, identical agentic ids append once when the current
+        # receipt is heuristic: value equality cannot stand in for provenance equality.
+        if (current_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                and requested_provenance != NODE_CONCEPT_PROVENANCE_CLASSIFIER):
+            continue
+        if known.get(nid) == ids and current_provenance == requested_provenance:
+            continue
+        event = store.append(
+            EV_NODE_CONCEPTS,
+            {"node_id": nid, "concepts": ids, "mode": mode,
+             "at_vocab": int(vocab_size), "generation": node.attempt},
+            expected_last_seq=tail,
+            require_lock=require_lock,
+        )
+        tail = event.seq
+        known[nid] = ids
+        provenance[nid] = requested_provenance
         count += 1
     return count
+
+
+def _retro_tag_finished(events, state) -> bool:
+    """Whether a folded run is at a durable, quiescent terminal boundary.
+
+    ``finished`` flips at ``run_finished`` before the engine performs its finalization checklist.
+    Modern runs additionally require the exact ``finalization_finished`` acknowledgement and no
+    recoverable scoped checklist. Markerless legacy finishes remain compatible because replay
+    explicitly maps that historical protocol to ``finalized_finish_seq == last_finish_seq``.
+    """
+    if (not getattr(state, "finished", False)
+            or getattr(state, "last_finish_seq", -1) < 0
+            or state.resume_pending()
+            or state.finalization_pending()):
+        return False
+    finish = next(
+        (event for event in events
+         if event.seq == state.last_finish_seq and event.type == EV_RUN_FINISHED),
+        None,
+    )
+    if finish is None or state.finalized_finish_seq != state.last_finish_seq:
+        return False
+    finish_data = finish.data or {}
+    if "finalize_scope" in finish_data:
+        scope = finish_data.get("finalize_scope")
+        if not isinstance(scope, str) or not scope:
+            return False
+        # CODEX AGENT: ``incomplete_finalize_scope`` intentionally forgets a scope invalidated by a
+        # later foreign event. Absence from that recovery queue is therefore not proof that the modern
+        # terminal checklist completed; the accepted finish itself must have its durable success marker.
+        if not any(
+            event.type == EV_FINALIZE_STEP
+            and (event.data or {}).get("scope") == scope
+            and (event.data or {}).get("step") == "complete"
+            for event in events
+        ):
+            return False
+    from looplab.engine.finalize import incomplete_finalize_scope
+    return incomplete_finalize_scope(events) is None
 
 
 @app.command()
@@ -202,6 +273,7 @@ def _concept_map_for(state, resolved_type, *, offline, model=None, repo=None, ru
     from looplab.search.concept_graph import (build_concept_map, skeleton_for, tag_nodes_heuristic)
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
+
     # Agentic-BY-DEFAULT (the agentic-first concept, §21.13/§21.15): the map is LLM-built unless the caller
     # passes --offline, so this path DOES send node code/logs to the configured endpoint by default. The
     # cost/privacy contract is stated up front in each command's --offline help + docs/guide/cli-reference.md
@@ -255,13 +327,10 @@ def concept_coverage(
                                 "grows between batches and consolidation dedups synonyms."),
     persist: bool = typer.Option(
         False, "--persist", help="RETRO-TAG: append the built tags as generation-fenced EV_NODE_CONCEPTS "
-                                 "events so they FOLD into node_concepts and show in the UI + feed cross-run "
-                                 "(otherwise the tags are printed and discarded). Intended for FINISHED runs "
-                                 "created before Phase 0. Operator re-tags still win."),
-    force: bool = typer.Option(
-        False, "--force", help="Allow --persist on a run that has not reached finalization (the engine may "
-                               "still be live). Only pass this when you are sure no engine is running — two "
-                               "writers of EV_NODE_CONCEPTS can clobber good agentic tags or tear the log."),
+                                 "events so they FOLD into node_concepts and show in the UI. Agentic tags "
+                                 "become eligible for replay-derived cross-run indexes; this command does "
+                                 "not rebuild finalized capsule memory. --offline tags are display-only. "
+                                 "Requires a fully finalized, non-running FINISHED run."),
 ):
     """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
     the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
@@ -271,21 +340,70 @@ def concept_coverage(
     from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for,
                                               tag_nodes_heuristic)
     store = _require_run_dir(run_dir)
-    state = fold(store.read_all())
-    # Single-writer guard: the live engine emits the SAME EV_NODE_CONCEPTS during a run, so persisting
-    # onto a still-live run can clobber good agentic tags with coarse offline ones or tear the log under a
-    # geesefs no-op flock. A run that reached finalization is terminal (its engine is gone); require --force
-    # otherwise. `finished` alone is unreliable for pre-Phase-0 logs, so accept a finalized_finish_seq too.
-    if persist and not force and not (getattr(state, "finished", False)
-                                      or getattr(state, "finalized_finish_seq", 0)):
-        typer.echo("refusing --persist: this run has not reached finalization, so an engine may still be "
-                   "writing EV_NODE_CONCEPTS. Stop the run first, or pass --force if you are sure it is dead.")
-        raise typer.Exit(code=2)
+    snapshot_events = store.read_all()
+    state = fold(snapshot_events)
+    snapshot_tail = snapshot_events[-1].seq if snapshot_events else -1
+    if persist:
+        if not _retro_tag_finished(snapshot_events, state):
+            typer.echo("refusing --persist: the run is not at a fully finalized FINISHED boundary. "
+                       "Wait for terminal wrap-up to complete; stopped, finalizing, or resume-pending "
+                       "runs cannot be retro-tagged.")
+            raise typer.Exit(code=2)
+        # ``finished=True`` precedes terminal write-out. Probe the same singleton the engine owns so a
+        # still-live driver cannot race the expensive analysis; reacquire it for the actual CAS below.
+        try:
+            with _engine_singleton(run_dir) as available:
+                if not available:
+                    typer.echo("refusing --persist: the finished run's engine is still writing terminal "
+                               "artifacts; wait for engine.lock to be released.")
+                    raise typer.Exit(code=2)
+        except typer.Exit:
+            raise
+        except RuntimeError as exc:
+            typer.echo(f"refusing --persist: cannot prove exclusive run ownership: {exc}")
+            raise typer.Exit(code=2) from exc
     resolved_type = task_type or state.task_id or ""
     # A curated pack is only a SEED / starting vocabulary the agent expands (like agentic_asset_brief's
     # seed_scan); None => the LLM builds the graph from scratch (works on any task).
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
+
+    def _persist_exact(raw_tags, mode: str, vocab_size: int) -> int:
+        """Commit tags only against the exact finished snapshot the analysis inspected."""
+        try:
+            with _engine_singleton(run_dir) as owned:
+                if not owned:
+                    typer.echo("refusing --persist: the engine reacquired engine.lock while concept tags "
+                               "were being built; discard this stale analysis and retry after it exits.")
+                    raise typer.Exit(code=2)
+                current_events = store.read_all()
+                current = fold(current_events)
+                if not _retro_tag_finished(current_events, current):
+                    typer.echo("refusing --persist: the run left its finalized FINISHED boundary while "
+                               "concept tags were being built; discard this stale analysis and retry.")
+                    raise typer.Exit(code=2)
+                current_tail = current_events[-1].seq if current_events else -1
+                if current_tail != snapshot_tail:
+                    typer.echo("refusing --persist: events.jsonl changed while concept tags were being "
+                               "built; re-run against the new exact snapshot.")
+                    raise typer.Exit(code=2)
+                return _persist_node_concepts(
+                    store,
+                    current,
+                    raw_tags,
+                    mode,
+                    vocab_size,
+                    expected_last_seq=snapshot_tail,
+                    require_lock=True,
+                )
+        except typer.Exit:
+            raise
+        except EventStoreConcurrencyError as exc:
+            typer.echo(f"refusing --persist: events.jsonl changed during the CAS append: {exc}")
+            raise typer.Exit(code=2) from exc
+        except RuntimeError as exc:
+            typer.echo(f"refusing --persist: cannot prove exclusive durable mutation: {exc}")
+            raise typer.Exit(code=2) from exc
 
     client = None
     if not offline:
@@ -309,7 +427,7 @@ def concept_coverage(
                        "ambiguous concepts). Drop --offline for the agentic, code-reading build + per-task "
                        "importance.")
         if persist:
-            n = _persist_node_concepts(store, state, tags, "offline-heuristic", len(graph.concepts()))
+            n = _persist_exact(tags, "offline-heuristic", len(graph.concepts()))
             typer.echo(f"\n  persisted {n} node_concepts events (offline-heuristic) -> this run now shows "
                        "concepts in the UI. (coarse; re-run without --offline for code-read tags.)")
         return
@@ -331,10 +449,11 @@ def concept_coverage(
     if persist:
         # raw_tags are the tagger's pre-consolidation ids (what the live cadence records); the fold
         # re-derives consolidation/coverage from them, so persisting these keeps parity with a live run.
-        n = _persist_node_concepts(store, state, cmap.get("raw_tags"), cmap.get("mode", "agentic"),
-                                   len(cmap["graph"].concepts()))
-        typer.echo(f"  persisted {n} node_concepts events -> this run now shows concepts in the UI + "
-                   "feeds cross-run memory.")
+        n = _persist_exact(cmap.get("raw_tags"), cmap.get("mode", "agentic"),
+                           len(cmap["graph"].concepts()))
+        typer.echo(f"  persisted {n} node_concepts events -> this run now shows concepts in the UI and "
+                   "exposes classifier tags to replay-derived indexes. Existing finalized capsule memory "
+                   "is not rebuilt by this command.")
     typer.echo("  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
     if cmap["important_uncovered"]:
         for m in cmap["important_uncovered"]:

@@ -32,7 +32,8 @@ def _fake_engine(memory_dir, *, goal="dense retrieval reviews"):
 
 
 def test_store_concept_capsule_writes_best_per_concept_outcome(tmp_path):
-    mem = tmp_path / "mem"; mem.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
     s = EventStore(tmp_path / "events.jsonl")
     s.append("run_started", {"run_id": "r-now", "task_id": "t", "goal": "dense retrieval reviews",
                              "direction": "max"})
@@ -215,7 +216,8 @@ def test_concept_outcomes_use_selection_eligible_nodes_but_keep_attempt_coverage
 
 
 def test_store_concept_capsule_noop_without_tags(tmp_path):
-    mem = tmp_path / "mem"; mem.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
     s = EventStore(tmp_path / "events.jsonl")
     s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
     s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
@@ -237,6 +239,28 @@ def test_store_concept_capsule_ignores_researcher_authored_claims(tmp_path):
     s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
 
     LessonMemory(_fake_engine(mem)).store_concept_capsule(fold(s.read_all()))
+
+    assert not (mem / "concept_capsules.jsonl").exists()
+
+
+def test_store_concept_capsule_ignores_offline_heuristic_memberships(tmp_path):
+    """A local alias match is useful UI taxonomy, not independent cross-run evidence."""
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "contrastive temperature"},
+    })
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": ["claimed/by-alias"], "mode": "offline-heuristic",
+    })
+
+    state = fold(s.read_all())
+    assert state.node_concepts[0] == ["claimed/by-alias"]
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(state)
 
     assert not (mem / "concept_capsules.jsonl").exists()
 
@@ -290,7 +314,8 @@ _CONCEPT = "data/hard-negative-mining"
 
 
 def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
-    mem = tmp_path / "mem"; mem.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
     _seed_prior(mem, _CONCEPT)
     s = _run_with_cached_concept(tmp_path, _CONCEPT)               # node 0 tagged _CONCEPT
     eng = _GateEngine(s, mem)
@@ -318,7 +343,8 @@ def test_cross_run_prior_never_changes_the_gate_decision(tmp_path):
     idea = Idea(operator="improve", params={"rank": 8.0}, rationale="a materially different hard-neg scheme")
 
     def _decide(with_prior):
-        mem = tmp_path / ("w" if with_prior else "wo"); mem.mkdir()
+        mem = tmp_path / ("w" if with_prior else "wo")
+        mem.mkdir()
         if with_prior:
             _seed_prior(mem, _CONCEPT)
         eng = _GateEngine(s, mem)
@@ -329,7 +355,8 @@ def test_cross_run_prior_never_changes_the_gate_decision(tmp_path):
 
 
 def test_cross_run_flag_off_is_a_no_op(tmp_path):
-    mem = tmp_path / "mem"; mem.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
     _seed_prior(mem, _CONCEPT)
     s = _run_with_cached_concept(tmp_path, _CONCEPT)
     eng = _GateEngine(s, mem)
@@ -341,7 +368,8 @@ def test_cross_run_flag_off_is_a_no_op(tmp_path):
 
 
 def test_dissimilar_prior_does_not_surface(tmp_path):
-    mem = tmp_path / "mem"; mem.mkdir()
+    mem = tmp_path / "mem"
+    mem.mkdir()
     # prior capsule with the concept but a WILDLY different fingerprint (goal keywords disjoint + different
     # metric) -> below the similarity floor -> not loaded -> no surface.
     fp = task_fingerprint("dataset", "min", "forecast electricity demand timeseries", "rmse", universal=True)
@@ -362,8 +390,10 @@ def test_cross_run_direction_gate_suppresses_opposite_direction_prior(tmp_path):
     # the gate must drop it. Same run + concept; ONLY the prior's direction differs, and that alone flips
     # surface on/off (test_dissimilar_prior_does_not_surface can't pin this — it fails the sim floor first).
     def _n_surfaced(prior_direction):
-        d = tmp_path / prior_direction; d.mkdir()
-        mem = d / "mem"; mem.mkdir()
+        d = tmp_path / prior_direction
+        d.mkdir()
+        mem = d / "mem"
+        mem.mkdir()
         fp = task_fingerprint("dataset", prior_direction, "dense retrieval", "recall", universal=True)
         ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(build_concept_capsule(
             run_id="prior-dir", fingerprint=fp, direction=prior_direction, concepts=[_CONCEPT],

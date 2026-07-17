@@ -11,6 +11,8 @@ from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is
                                   verifier_evidence_digest)
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
+                     NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+                     node_concept_event_provenance,
                      Event, Hypothesis, Idea, Node, NodeStatus,
                      RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
 from looplab.events.comment_projection import apply_comment_event
@@ -316,12 +318,14 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         and current.idea.model_dump(exclude={"concepts"}) == n.idea.model_dump(exclude={"concepts"})
     )
     # A same-idea re-emission (an implement/eval reset re-emits node_created for the UNCHANGED idea) must
-    # NOT downgrade an existing independent CLASSIFIER receipt NOR an operator's deliberate OPERATOR edit —
-    # both describe the unchanged idea and stand. Only a subject CHANGE (a propose reset already cleared
-    # the receipt) or a fresh classifier/operator event supersedes them. (Phase 2b added OPERATOR here: an
-    # operator re-tag survives a re-run of the same idea's code/eval, matching the "the edit sticks" contract.)
+    # NOT downgrade an existing independent CLASSIFIER receipt, an operator's deliberate OPERATOR edit,
+    # or a persisted OFFLINE display receipt — all describe the unchanged idea and stand. Only a subject
+    # CHANGE (a propose reset already cleared the receipt) or a fresh tag event supersedes them. The offline
+    # receipt remains non-evidence and is excluded from the cadence's known-tag cache, so the next classifier
+    # pass upgrades it rather than treating the coarse result as complete.
     receipt_protected = bool(concept_subject_unchanged and current_provenance in (
-        NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR))
+        NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
+        NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC))
     st.nodes[n.id] = n
     # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
     # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
@@ -1384,12 +1388,20 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Unknown nodes and explicit stale/invalid generations remain fail-closed.
     if node is None:
         return
+    incoming_provenance = node_concept_event_provenance(d)
+    current_provenance = st.node_concept_provenance.get(nid)
     # Phase 2b: an OPERATOR edit is authoritative and must not be clobbered by the classifier cadence.
     # Checked BEFORE the generation gate so the classifier yields regardless of arrival order (invariant 5):
     # {classifier, operator} folds to the operator's tags either way. A PROPOSE reset (the idea changed)
     # clears node_concepts/provenance so the classifier re-tags the fresh node — the intended way to drop
     # an operator override; an implement/eval re-run keeps the same idea, so the operator tags rightly stand.
-    if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR:
+    if current_provenance == NODE_CONCEPT_PROVENANCE_OPERATOR:
+        return
+    # A coarse/future producer may enrich an authored/empty display, but must never overwrite or
+    # downgrade a reviewed classifier receipt. This makes classifier/offline replay order-safe:
+    # once independent evidence exists, a later local fallback cannot replace its tags or provenance.
+    if (current_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+            and incoming_provenance != NODE_CONCEPT_PROVENANCE_CLASSIFIER):
         return
     if generation is _MISSING:
         # CODEX AGENT: lifecycle generation != concept-subject generation. Preserve legacy replay
@@ -1400,11 +1412,14 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     concepts = d.get("concepts")
     st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
-    st.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_CLASSIFIER
+    st.node_concept_provenance[nid] = incoming_provenance
     # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
     # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> no receipt (oldest).
     av = d.get("at_vocab")
-    if isinstance(av, int) and not isinstance(av, bool) and av >= 0:   # bool is an int subclass — reject
+    # CODEX AGENT: only classifier vocabulary receipts may delay the classifier refresh cadence.
+    # An offline/future producer's integer is display metadata, not proof of semantic classification.
+    if (incoming_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+            and isinstance(av, int) and not isinstance(av, bool) and av >= 0):
         st.node_concepts_at_vocab[nid] = av
     else:
         st.node_concepts_at_vocab.pop(nid, None)
@@ -1487,6 +1502,12 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         src, rel, dst = (str(ed.get("src") or "").strip(), str(ed.get("rel") or "").strip(),
                          str(ed.get("dst") or "").strip())
         if not (src and rel and dst):
+            continue
+        if rel == "co_occurs":
+            # CODEX AGENT: this relation is a cache of current node membership, not an immutable
+            # assertion. The old max-wins fold cannot express count decreases or deletion, so retaining
+            # legacy rows creates permanent ghost edges. ConceptFrame derives it from the exact folded
+            # membership snapshot; omit it here so large legacy caches cannot consume live edge budgets.
             continue
         conf = ed.get("confidence")
         # REVIEW(2026-07-16): the tuple order below can only rank a REAL finite/±inf float. Two agent-

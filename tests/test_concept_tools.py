@@ -298,6 +298,23 @@ def test_unpurge_is_high_in_auto_while_normal_alias_clear_remains_inline(tmp_pat
     assert "cleared" in normal
 
 
+def test_clear_of_alias_chain_into_purge_is_also_high_risk(tmp_path):
+    _seed_portfolio(tmp_path, ["loss/source", "loss/tombstone"])
+    record_concept_alias(
+        tmp_path, from_concept="loss/source", to_concept="loss/tombstone",
+        require_existing=True)
+    record_concept_alias(
+        tmp_path, from_concept="loss/tombstone", to_concept="",
+        require_existing=True)
+    assert resolve_slug("loss/source", load_concept_aliases(tmp_path)) is None
+
+    out = _auto(tmp_path).execute(
+        "concept_edit_clear", {"concept": "loss/source", "kind": "alias"})
+
+    assert "declined" in out
+    assert load_concept_aliases(tmp_path)["loss/source"] == "loss/tombstone"
+
+
 def test_registry_exception_text_never_crosses_tool_boundary(tmp_path, monkeypatch):
     _seed_portfolio(tmp_path, ["loss/a", "loss/b"])
     secret = "sk-abcdefghijklmnopqrstuvwxyz012345"

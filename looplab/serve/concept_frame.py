@@ -244,9 +244,14 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         if not isinstance(edge, dict):
             reasons.add("invalid_edge")
             continue
+        relation = edge.get("rel")
+        if relation == "co_occurs":
+            # CODEX AGENT: co-occurrence is a materialized observation of CURRENT memberships, not an
+            # immutable assertion. Legacy max-folded receipts cannot represent a lower count/removal
+            # after re-tagging, so they are audit history only; the live projection is derived below.
+            continue
         src, src_problem = canonical_concept(edge.get("src"), rename)
         dst, dst_problem = canonical_concept(edge.get("dst"), rename)
-        relation = edge.get("rel")
         confidence = finite_metric(edge.get("confidence"))
         # CODEX AGENT: ``confidence`` is the replay field for both normalized confidence and the
         # integer co-occurrence evidence emitted by strategy.py. Bound the weight by the largest
@@ -283,13 +288,33 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         if previous is None or edge_rank(candidate) > edge_rank(previous):
             edges[key] = candidate
 
-    # F3: an OFFLINE / retro-tagged run emits no EV_CONCEPT_EDGE, so `edges` is empty and every typed lens
-    # silently fell back to is_a. `co_occurs` is DETERMINISTIC from co-tagging — the very thing the live
-    # cadence records — so when nothing was persisted, derive it here from the bounded canonical memberships.
-    # That gives offline runs a real co_occurs lens with no new events, and matches what a live run stored.
-    # Only a fallback (live runs keep their persisted edges); bounded by MAX_EDGES + the shared endpoint
-    # budget; a pair seen on <2 nodes is noise; weight = #co-tagging nodes, clamped like a persisted edge.
-    if not edges and "co_occurs" in registered_rels:
+    derived_edge_count = 0
+
+    def add_derived(src: str, relation: str, dst: str, confidence: float,
+                    provenance: str) -> bool:
+        """Add one deterministic edge within the same public edge/node budgets."""
+        nonlocal derived_edge_count
+        key = (src, relation, dst)
+        if key in edges:
+            return True
+        if len(edges) >= MAX_EDGES:
+            reasons.add("edge_cap")
+            return False
+        new_endpoints = {src, dst} - edge_endpoints
+        if (len(edge_endpoints) + len(new_endpoints) > MAX_EDGE_ENDPOINTS
+                or len(accepted_prefixes | edge_endpoints | new_endpoints) > MAX_TREE_NODES):
+            reasons.add("edge_endpoint_cap")
+            return True
+        edge_endpoints.update(new_endpoints)
+        edges[key] = {"src": src, "rel": relation, "dst": dst,
+                      "confidence": confidence, "provenance": provenance}
+        derived_edge_count += 1
+        return True
+
+    # CODEX AGENT: co-occurrence is a projection of the bounded CURRENT membership snapshot.
+    # Recompute it on every core build for online, offline and legacy runs alike; persisting monotone
+    # max receipts made stale weights and removed pairs impossible to retract.
+    if "co_occurs" in registered_rels and len(edges) < MAX_EDGES:
         pair_counts: dict[tuple[str, str], int] = {}
         for node_concepts in memberships.values():
             cs = sorted(set(node_concepts))
@@ -299,18 +324,10 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         for (src, dst), cnt in sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0])):
             if cnt < 2:
                 continue
-            if len(edges) >= MAX_EDGES:
-                reasons.add("edge_cap")
+            if not add_derived(
+                    src, "co_occurs", dst, float(min(cnt, MAX_EDGE_WEIGHT)),
+                    "co-tag (derived)"):
                 break
-            new_endpoints = {src, dst} - edge_endpoints
-            if (len(edge_endpoints) + len(new_endpoints) > MAX_EDGE_ENDPOINTS
-                    or len(accepted_prefixes | edge_endpoints | new_endpoints) > MAX_TREE_NODES):
-                reasons.add("edge_endpoint_cap")
-                continue
-            edge_endpoints.update(new_endpoints)
-            edges[(src, "co_occurs", dst)] = {
-                "src": src, "rel": "co_occurs", "dst": dst,
-                "confidence": float(min(cnt, MAX_EDGE_WEIGHT)), "provenance": "co-tag (derived)"}
 
     return {
         "memberships": memberships,
@@ -323,6 +340,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         "membership_count": membership_count,
         "source_membership_nodes": len(raw_memberships),
         "source_edges": len(raw_edges),
+        "derived_edges": derived_edge_count,
     }
 
 
@@ -418,6 +436,7 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
         "source_authoritative": source_authoritative,
         "source_membership_nodes": inputs["source_membership_nodes"],
         "source_edges": inputs["source_edges"],
+        "derived_edges": inputs["derived_edges"],
         "included_membership_nodes": len(memberships),
         "membership_count": inputs["membership_count"],
         "reference_count": reference_count,
@@ -485,6 +504,7 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
             "concepts": len(concept_ids),
             "tree_nodes": len(tree.get("nodes") or {}),
             "edges": len(edges),
+            "derived_edges": core["derived_edges"],
             "experiment_refs": core["reference_count"],
         },
         "source_integrity": core["source_integrity"],

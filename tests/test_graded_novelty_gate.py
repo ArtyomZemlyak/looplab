@@ -216,6 +216,28 @@ def test_unknown_concept_provenance_fails_closed(tmp_path):
     assert fold(s.read_all()).novelty_grades == []
 
 
+def test_offline_heuristic_membership_cannot_certify_agentic_bypass(tmp_path):
+    """Offline aliases remain visible but cannot create an L4/L5 classifier-only admission override."""
+    s = _run(tmp_path, task_id="totally-unknown-task")
+    for node_id in (0, 1):
+        s.append("node_concepts", {
+            "node_id": node_id,
+            "concepts": ["encoderarch/adapter-tuning"],
+            "mode": "offline-heuristic",
+        })
+    state = fold(s.read_all())
+    assert state.node_concept_provenance == {
+        0: "offline-heuristic", 1: "offline-heuristic"}
+
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a materially different adapter bottleneck")
+
+    assert eng._graded_novelty_precheck(state, candidate) is None
+    assert fold(s.read_all()).novelty_grades == []
+
+
 def test_f2_no_cache_no_client_is_the_heuristic_fallback(tmp_path):
     """With no node_concepts cache and no reflect client, F2 degrades to the skeleton + heuristic path —
     byte-identical behaviour to pre-F2 (a level-4 on the curated DCL branch still fires)."""
