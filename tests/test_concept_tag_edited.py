@@ -85,6 +85,24 @@ def test_reset_clears_operator_override_so_classifier_can_retag(tmp_path):
     assert st2.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_CLASSIFIER
 
 
+def test_operator_edit_survives_implement_reset_and_node_created_reemit(tmp_path):
+    # REVIEW (HIGH): an implement/eval reset keeps the SAME idea and does NOT clear tags; the engine then
+    # re-emits node_created for that idea. The operator override must SURVIVE that re-emission (it describes
+    # the unchanged idea) — it must not be downgraded to researcher-authored. The re-emit guard in
+    # _on_node_created protects OPERATOR provenance, not just CLASSIFIER.
+    s = _base(tmp_path)
+    s.append("concept_tag_edited", {"node_id": 0, "concepts": ["operator/tag"]})
+    s.append("node_reset", {"node_id": 0, "from_stage": "implement"})           # same idea, tags NOT cleared
+    st = fold(s.read_all())
+    assert st.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_OPERATOR     # survived the reset
+    # the engine re-emits node_created for the SAME idea at the bumped generation
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "concepts": ["loss/a"]}})
+    st2 = fold(s.read_all())
+    assert st2.node_concepts[0] == ["operator/tag"]                             # NOT clobbered to ['loss/a']
+    assert st2.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_OPERATOR   # NOT downgraded to authored
+
+
 def test_unknown_node_and_malformed_concepts_are_safe(tmp_path):
     s = _base(tmp_path)
     s.append("concept_tag_edited", {"node_id": 99, "concepts": ["x"]})          # unknown node -> no-op

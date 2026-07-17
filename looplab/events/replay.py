@@ -315,24 +315,26 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         and current.operator == n.operator
         and current.idea.model_dump(exclude={"concepts"}) == n.idea.model_dump(exclude={"concepts"})
     )
-    classifier_subject_unchanged = bool(
-        current_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER and concept_subject_unchanged)
+    # A same-idea re-emission (an implement/eval reset re-emits node_created for the UNCHANGED idea) must
+    # NOT downgrade an existing independent CLASSIFIER receipt NOR an operator's deliberate OPERATOR edit —
+    # both describe the unchanged idea and stand. Only a subject CHANGE (a propose reset already cleared
+    # the receipt) or a fresh classifier/operator event supersedes them. (Phase 2b added OPERATOR here: an
+    # operator re-tag survives a re-run of the same idea's code/eval, matching the "the edit sticks" contract.)
+    receipt_protected = bool(concept_subject_unchanged and current_provenance in (
+        NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR))
     st.nodes[n.id] = n
     # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
     # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
     # independent classifier evidence. A later `node_concepts` event overrides both, last-write-wins.
-    # An implement/eval reset may re-emit node_created for the same idea. Do not let its embedded
-    # proposer claims downgrade an existing classifier receipt. If a malformed re-emission changes the
-    # classifier's actual subject without a propose reset, discard that stale receipt fail-closed.
     if current is not None and not concept_subject_unchanged:
         # CODEX AGENT: a replacement node_created is a new tagging subject even if a malformed writer
         # skipped the propose reset. Clear every old receipt symmetrically: an authored mapping is just
-        # as stale as a classifier mapping when the replacement Idea carries no concepts of its own.
+        # as stale as a classifier/operator mapping when the replacement Idea carries no concepts of its own.
         st.node_concepts.pop(n.id, None)
         st.node_concept_provenance.pop(n.id, None)
         st.node_concepts_at_vocab.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
-    if n.idea.concepts and not classifier_subject_unchanged:
+    if n.idea.concepts and not receipt_protected:
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
@@ -1316,8 +1318,9 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     # Phase 2b: an OPERATOR edit is authoritative and must not be clobbered by the classifier cadence.
     # Checked BEFORE the generation gate so the classifier yields regardless of arrival order (invariant 5):
-    # {classifier, operator} folds to the operator's tags either way. A node RESET clears the provenance
-    # (so the classifier re-tags the fresh node), which is the intended way to drop an operator override.
+    # {classifier, operator} folds to the operator's tags either way. A PROPOSE reset (the idea changed)
+    # clears node_concepts/provenance so the classifier re-tags the fresh node — the intended way to drop
+    # an operator override; an implement/eval re-run keeps the same idea, so the operator tags rightly stand.
     if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR:
         return
     if generation is _MISSING:
@@ -1346,7 +1349,9 @@ def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
     node.attempt) before it is appended, so the fold trusts a recorded edit and only re-checks the node
     exists. Last operator edit in log order wins (like the classifier cadence). A `node_generation`, when
     present, is honored the same way as the classifier's generation gate so a stale edit from a since-reset
-    node is dropped. Concepts are a bounded list of strings; NOT independent evidence (provenance sidecar)."""
+    node is dropped. The override survives an implement/eval re-run of the SAME idea (see the re-emit guard
+    in _on_node_created); only a PROPOSE reset (idea change) clears it. Concepts are a bounded list of
+    strings; NOT independent evidence (provenance sidecar)."""
     nid = _coerce_node_id(d, "node_id")
     if nid is None:
         return
