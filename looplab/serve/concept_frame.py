@@ -18,6 +18,7 @@ CONCEPT_FRAME_SCHEMA = 1
 MAX_NODE_MEMBERSHIPS = 2_048
 MAX_CONCEPTS_PER_NODE = 64
 MAX_MEMBERSHIPS = 8_192
+MAX_EDGE_WEIGHT = MAX_MEMBERSHIPS
 MAX_TREE_NODES = 4_096
 MAX_EDGES = 2_048
 MAX_EDGE_ENDPOINTS = 4_096
@@ -235,9 +236,12 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         dst, dst_problem = canonical_concept(edge.get("dst"), rename)
         relation = edge.get("rel")
         confidence = finite_metric(edge.get("confidence"))
+        # CODEX AGENT: ``confidence`` is the replay field for both normalized confidence and the
+        # integer co-occurrence evidence emitted by strategy.py. Bound the weight by the largest
+        # self-contained evidence receipt instead of silently discarding every repeated pairing.
         if (src_problem or dst_problem or not src or not dst or src == dst
                 or relation not in registered_rels or confidence is None
-                or not 0.0 <= confidence <= 1.0):
+                or not 0.0 <= confidence <= MAX_EDGE_WEIGHT):
             reasons.add(src_problem or dst_problem or "invalid_edge")
             continue
         new_endpoints = {src, dst} - edge_endpoints

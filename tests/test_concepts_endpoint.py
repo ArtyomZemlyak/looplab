@@ -118,6 +118,41 @@ def test_concepts_endpoint_typed_lens_canonicalizes_edge_endpoints(tmp_path):
     assert data["touch"]["loss/contrastive"] == 1
 
 
+def test_concepts_endpoint_accepts_bounded_co_occurrence_weights(tmp_path):
+    from looplab.serve.concept_frame import MAX_EDGE_WEIGHT
+
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max",
+    })
+    store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                 "concepts": ["a", "b", "c"]},
+    })
+    store.append("concept_edge", {"edges": [
+        {"src": "a", "rel": "co_occurs", "dst": "b",
+         "confidence": 2.0, "provenance": "evidenced"},
+        {"src": "a", "rel": "co_occurs", "dst": "c",
+         "confidence": MAX_EDGE_WEIGHT + 1, "provenance": "evidenced"},
+    ]})
+
+    data = TestClient(make_app(tmp_path)).get(
+        "/api/runs/demo/concepts?lens=co_occurs",
+    ).json()
+
+    # CODEX AGENT: co-occurrence is a count-weighted typed edge, not a probability. A repeated pair
+    # must select the requested lens, while a weight beyond the public evidence bound fails closed.
+    assert data["requested_lens"] == data["effective_lens"] == data["lens"] == "co_occurs"
+    assert data["edges_present"] is True and data["lens_edges_present"] is True
+    assert data["tree"]["nodes"]["b"]["parent"] == "a"
+    assert data["completeness"]["included"]["edges"] == 1
+    assert data["completeness"]["source"]["edges"] == 2
+    assert "invalid_edge" in data["completeness"]["reasons"]
+
+
 def test_concepts_endpoint_typed_lens_without_edges_falls_back_and_signals(tmp_path):
     # ?lens=uses on a run with no edges honestly reports the EFFECTIVE is_a projection while echoing the
     # requested lens, so the client can tell a fallback from a genuine is_a request.
