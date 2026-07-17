@@ -177,8 +177,10 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   launch snapshot for the next restart (not the global UI defaults). Five holdout/verifier fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
   `trust_gate` is changed through a durable event as well as the snapshot, so its effective state is replayable.
-- **Settings page** — every engine knob, grouped into tabs (Search, Strategist & operators,
-  Resilience, Budgets, LLM, Developer agent, Safety & trust, Knowledge & memory). The **API key**
+- **Settings page** — a versioned, server-owned editor catalogue with 141 of the 164 direct
+  `Settings` fields in 10 groups. It is intentionally curated, not an exhaustive mirror: fields outside
+  the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.
+  The **API key**
   field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
   to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
   via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it. Global Save sends only
@@ -195,7 +197,7 @@ questions; the Atlas preview is deliberately **not** another force/DAG graph:
 | Surface | What its nodes/regions mean | What it does **not** mean |
 |---|---|---|
 | **Runs → Map** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the map topology. |
-| **Run → Search** | The experiment DAG for one run. `group by` can project nodes into `theme`, `operator`, metric tercile, or parameter `niche` regions. The **concept chip bar** above the graph is the Part-IV surface: breadcrumb-navigable, multi-select (OR) concept chips that highlight every node touching a selected concept (or a descendant); zoomed-in cards show their authored concepts as tags. The separate **Concepts** view (`[Concepts]` toggle) is the concept tree/table with per-concept Δ-from-baseline metrics and a lens switcher. | `theme` grouping and the legacy direction chips key on the per-node `idea.theme` proposer label, which is **empty on concept-authored runs** (authoring moved to `idea.concepts`), so those nodes fall into one ungrouped bridge — use the concept chip bar / Concepts view instead. A theme is not the Part-IV concept ID/taxonomy, and theme grouping does not show cross-run concept coverage or claim evidence. |
+| **Run → Search** | The experiment DAG for one run. `group by` can project nodes into Direction, operator, metric tercile, or parameter `niche` regions. The **concept chip bar** above the graph is the Part-IV surface: breadcrumb-navigable, multi-select (OR) concept chips that highlight every node touching a selected concept (or a descendant); zoomed-in cards show their authored concepts as tags. The separate **Concepts** view (`[Concepts]` toggle) is a bounded, generation/sequence-fenced per-run concept tree/table with experiment references, per-concept outcome rollups and typed hierarchy lenses. | Direction uses legacy `idea.theme` when present; otherwise it deterministically falls back to the top-level axis of the first authored concept. That compatibility projection is run-local and lossy: it ignores additional concepts and deeper paths, and is not governed taxonomy or cross-run identity. The bounded Concepts view is not the complete Research Space, Direction×Concept crosswalk, release-pinned taxonomy/assignment graph or portfolio Atlas. |
 | **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration paging/health receipt, interactive concept topology or governance workbench. |
 
 The project/task/super-task **Cross-run report** is a separate on-demand narrative over a deterministic
@@ -221,8 +223,10 @@ The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 `GET /api/cross-run/curation-log`, and `GET /api/cross-run/claim-curation-log`; the CLI equivalents are `looplab atlas`, `looplab claims`, and
 `looplab cross-run-search`. See the [CLI reference](cli-reference.md#atlas) for their scope and evidence
 limitations. The owner React route does not turn those bounded whole-store summaries into the complete
-Part-IV Research Space/Atlas contract, and no interactive concept graph is shipped. Do not interpret the
-home Map, run theme grouping, or Atlas preview as the canonical concept/evidence UI specified in
+Part-IV Research Space/Atlas contract. A bounded per-run Concepts tree/table is shipped, but the canonical
+Research Space, focused multi-relation concept map and cross-run interactive concept graph are not. Do not
+interpret the home Map, Direction grouping, per-run Concepts table, or Atlas preview as the complete
+concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
 
 Those two curation endpoints can contain legacy finalize v1 rows, action-ID-keyed on-demand HTTP v1 rows,

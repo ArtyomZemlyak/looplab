@@ -506,8 +506,10 @@ Every experiment carries a **set** of research concepts — multi-label `axis/sl
 `loss/contrastive/dcl` — instead of a single free-text grouping slug. The Researcher **authors** a
 node's concepts on the `Idea` (`concepts: list[str]`); they fold into `RunState.node_concepts` at
 `node_created` (deterministic, offline — no tagging cadence required), and the strategist cadence may
-later consolidate/enrich them. This is the grouping substrate; concepts are audit-only and never touch
-search or selection.
+later consolidate/enrich them. Membership is not a metric, independent evidence or a direct champion score.
+When enabled, however, `concept_pivot` coverage and `graded_novelty` deliberately use the recorded concept
+claims to steer exploration/proposal admission; disabling those controls restores the ordinary non-concept
+search path. UI rollups remain descriptive and do not independently verify taxonomy semantics.
 
 **Hierarchy is a projection, not a stored tree.** Because concepts form a graph, "what is a top-level
 axis" is a *perspective*. A **typed concept-edge log** (`EV_CONCEPT_EDGE` → `RunState.concept_edges`,
