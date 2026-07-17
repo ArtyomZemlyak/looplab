@@ -168,6 +168,55 @@ def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
     assert "no experiment #99" in rt.execute("node_concepts", {"node_id": 99})
 
 
+def test_node_concept_delta_read_model_and_tool():
+    # PART V Phase 3 (Layer 2): a node's concepts as a DELTA vs its parent(s) — added / removed / inherited.
+    from looplab.search.concept_graph import node_concept_delta
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
+        1: Node(id=1, parent_ids=[0], operator="improve", idea=Idea(operator="improve", params={}),
+                status=NodeStatus.evaluated),
+        2: Node(id=2, parent_ids=[0, 1], operator="merge", idea=Idea(operator="merge", params={}),
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {0: ["loss/a", "arch/moe"], 1: ["loss/a", "loss/b"], 2: ["loss/b", "data/aug"]}
+
+    # node 1 vs its parent 0: dropped arch/moe, added loss/b, kept loss/a
+    d1 = node_concept_delta(st, 1)
+    assert d1 == {"parent_ids": [0], "added": ["loss/b"], "removed": ["arch/moe"], "inherited": ["loss/a"]}
+    # node 0 is a root -> everything it carries is 'added', nothing inherited
+    d0 = node_concept_delta(st, 0)
+    assert d0["parent_ids"] == [] and set(d0["added"]) == {"loss/a", "arch/moe"} and d0["inherited"] == []
+    # node 2 is a MERGE -> inherits from the UNION of parents {loss/a, arch/moe, loss/b}
+    d2 = node_concept_delta(st, 2)
+    assert d2["parent_ids"] == [0, 1] and d2["added"] == ["data/aug"] and d2["inherited"] == ["loss/b"]
+    assert set(d2["removed"]) == {"arch/moe", "loss/a"}
+
+    rt = RunTools(); rt.bind_state(st)
+    assert "node_concept_delta" in {f["function"]["name"] for f in rt.specs()}
+    out = rt.execute("node_concept_delta", {"node_id": 1})
+    assert "#1 concept delta vs parent #0" in out
+    assert "+added: loss/b" in out and "-removed: arch/moe" in out and "=inherited: loss/a" in out
+    assert "root (no parent)" in rt.execute("node_concept_delta", {"node_id": 0})
+    assert "no experiment #99" in rt.execute("node_concept_delta", {"node_id": 99})
+
+
+def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
+    from looplab.search.concept_graph import node_concept_delta
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
+        1: Node(id=1, parent_ids=[0], operator="improve", idea=Idea(operator="improve", params={}),
+                status=NodeStatus.evaluated),
+    }
+    # parent tagged with a RETIRED raw id; child with its canonical -> after rename they are the SAME concept
+    # (inherited), not a spurious add/remove.
+    st.node_concepts = {0: ["loss/contrast/dcl"], 1: ["loss/contrastive/dcl", "loss/new"]}
+    st.concept_consolidation = {"loss/contrast/dcl": "loss/contrastive/dcl"}
+    d = node_concept_delta(st, 1)
+    assert d["inherited"] == ["loss/contrastive/dcl"] and d["added"] == ["loss/new"] and d["removed"] == []
+
+
 def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
     # REVIEW: the tools must NORMALIZE ids (case/space/slash) the SAME way project_hierarchy + the
     # /concepts frame + the UI do, or the rendered tree's subtree counts collapse to [0] and a query on

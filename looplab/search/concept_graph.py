@@ -869,6 +869,64 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
             "direction": direction, "rows": rows}
 
 
+_CONCEPT_RENAME_HOP_CAP = 16   # mirrors serve.concept_frame.MAX_RENAME_HOPS (kept local; no serve import)
+
+
+def _canonical_with_rename(raw, rename: dict) -> str:
+    """Normalize `raw` and resolve a bounded, cycle-guarded consolidation rename chain (the same shape the
+    /concepts frame's canonical_concept uses). "" for a malformed id, a cycle, or an over-long chain."""
+    current = raw
+    seen: set[str] = set()
+    for _hop in range(_CONCEPT_RENAME_HOP_CAP + 1):
+        canonical = _normalize_concept_id(current)
+        if not canonical or canonical in seen:
+            return ""
+        seen.add(canonical)
+        nxt = rename.get(current)
+        if nxt is None and current != canonical:
+            nxt = rename.get(canonical)
+        if nxt is None:
+            return canonical
+        current = nxt
+    return ""
+
+
+def _canon_set(node_id, node_concepts: dict, rename: dict) -> set:
+    ids = node_concepts.get(node_id)
+    if not isinstance(ids, (list, tuple)):
+        return set()
+    return {c for c in (_canonical_with_rename(x, rename) for x in ids) if c}
+
+
+def node_concept_delta(state, node_id) -> dict:
+    """PART V Phase 3 (Layer 2): present ONE node's concepts as a DELTA vs its parent(s) — what this
+    experiment conceptually ADDED, REMOVED, or INHERITED. Pure/deterministic read-model over the folded
+    per-node `node_concepts` full-sets (NO new storage; concepts stay full-sets, this only PROJECTS the
+    parent diff), so it is replay-safe and answers "what did this node change relative to its parent".
+
+    The inherited base is the UNION of ALL parents' canonical concepts (a merge inherits from every parent);
+    both sides are canonicalized through the consolidation rename so the diff is on the live vocabulary. A
+    root (no parents) inherits nothing → everything it carries is `added`. Returns
+    {parent_ids, added, removed, inherited} with sorted canonical-id lists."""
+    nodes = getattr(state, "nodes", None) or {}
+    node = nodes.get(node_id)
+    if node is None:
+        return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
+    rename = getattr(state, "concept_consolidation", None) or {}
+    node_concepts = getattr(state, "node_concepts", None) or {}
+    own = _canon_set(node_id, node_concepts, rename)
+    parent_ids = [p for p in (getattr(node, "parent_ids", None) or []) if p in nodes]
+    inherited_base: set = set()
+    for pid in parent_ids:
+        inherited_base |= _canon_set(pid, node_concepts, rename)
+    return {
+        "parent_ids": sorted(parent_ids),
+        "added": sorted(own - inherited_base),
+        "removed": sorted(inherited_base - own),
+        "inherited": sorted(own & inherited_base),
+    }
+
+
 def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,
                       edges=None, lens: str = "is_a") -> dict:
     """Project a HIERARCHY (tree) from a SET of concept ids under a chosen LENS — the pure read-model

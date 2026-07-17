@@ -118,6 +118,11 @@ class RunTools:
             fn_spec("node_concepts",
                 "The canonical concept ids one experiment is tagged with (after consolidation).",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
+            fn_spec("node_concept_delta",
+                "How one experiment's concepts DIFFER from its parent(s): what it ADDED, REMOVED, or "
+                "INHERITED. Use it to see the conceptual change a node made relative to where it came from "
+                "(a merge inherits from every parent; a root's concepts are all 'added').",
+                {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_research_memo",
                 "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
                 "evidence-cited claims. The run periodically does a 'think hard' review over all "
@@ -150,6 +155,8 @@ class RunTools:
                 return self._concept_nodes(st, str(args.get("concept") or ""))
             if name == "node_concepts":
                 return self._node_concepts_tool(st, int(args.get("node_id")))
+            if name == "node_concept_delta":
+                return self._node_concept_delta_tool(st, int(args.get("node_id")))
             if name == "read_research_memo":
                 return self._research_memo(st)
             return f"(unknown tool: {name})"
@@ -440,6 +447,21 @@ class RunTools:
         if not ids:
             return f"#{nid}: (no concepts tagged)"
         return f"#{nid} concepts: " + ", ".join(sorted(set(ids)))
+
+    def _node_concept_delta_tool(self, st: RunState, nid: int) -> str:
+        if not st.nodes.get(nid):
+            return f"(no experiment #{nid})"
+        from looplab.search.concept_graph import node_concept_delta
+        d = node_concept_delta(st, nid)
+        parents = d["parent_ids"]
+        base = ("root (no parent)" if not parents
+                else "parent" + ("s " if len(parents) > 1 else " ") + ", ".join(f"#{p}" for p in parents))
+        def _fmt(label, ids):
+            return f"{label}: {', '.join(ids)}" if ids else ""
+        parts = [p for p in (_fmt("+added", d["added"]), _fmt("-removed", d["removed"]),
+                             _fmt("=inherited", d["inherited"])) if p]
+        body = "; ".join(parts) if parts else "(no concepts tagged on #%d or its parent)" % nid
+        return f"#{nid} concept delta vs {base}: {body}"
 
     def _research_memo(self, st: RunState) -> str:
         """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top

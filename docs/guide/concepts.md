@@ -533,6 +533,11 @@ the cadence records `is_a` edges (path parents + curated multi-parent) and evide
   delta_mean, first_touch}`; a multi-membership node's metric counts **fully in every concept it
   carries** (never divided), and `delta_*` is signed vs the run's median baseline. See
   `looplab/search/concept_graph.py`.
+- `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
+  `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
+  are all `added`). Pure projection over the full-set `node_concepts` — no new storage — canonicalized
+  through the consolidation rename on both sides, so it shows what each experiment conceptually changed
+  relative to where it came from. Surfaced to the Researcher/Strategist via the `node_concept_delta` tool.
 
 These are surfaced at `GET /api/runs/{id}/concepts?lens=…` (per-lens tree + metrics + the lens pack)
 and drive two run-view surfaces: the **Concepts** view (a concept tree/table — concepts as folders at
