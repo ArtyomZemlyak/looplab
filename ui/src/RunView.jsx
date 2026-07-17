@@ -32,7 +32,6 @@ const lazyNamed = (load, name) => lazy(() => load().then(module => ({
 const Dag = lazy(() => import('./Dag.jsx'))
 const Dock = lazy(() => import('./Dock.jsx'))
 const ReportView = lazy(() => import('./Report.jsx'))
-const DirectionsOverview = lazy(() => import('./DirectionsOverview.jsx'))
 const ConceptView = lazy(() => import('./ConceptView.jsx'))
 const ConceptChipBar = lazy(() => import('./ConceptChipBar.jsx'))
 
@@ -1195,9 +1194,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
         <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
           state={state} onHighlight={setConceptHighlight} />
-      </LazyBoundary>
-      <LazyBoundary label="direction overview" resetKey={`${runId}:${generation || 'pending'}`}>
-        <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
       </LazyBoundary>
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
