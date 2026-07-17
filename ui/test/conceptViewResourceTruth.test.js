@@ -307,24 +307,33 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(experiment?.tagName, 'BUTTON')
     assert.equal(experiment?.getAttribute('role'), null, 'native button owns Enter and Space semantics')
     assert.match(experiment.textContent, /Experiment #0 · attempt 0.*evaluated/s)
+    assert.match(experiment.textContent, /feasible.*membership · researcher-authored.*rollup · eligible/s,
+      'constraint, membership provenance, and rollup eligibility must be visible without a tooltip')
     assert.match(experiment.getAttribute('title'), /membership researcher-authored.*included in the concept rollup/i)
     await click(experiment)
     assert.equal(picked, 0)
     state = { ...state, nodes: { 0: { ...state.nodes[0], attempt: undefined } } }
     await render()
+    const unboundProjectionRequest = requests.at(-1)
     const unboundExperiment = document.querySelector(
       'button[aria-label*="not in the displayed run snapshot"]')
     assert.equal(unboundExperiment?.disabled, true,
       'a missing attempt identity must not bind a frame ref to a same-number live node')
     state = { ...state, nodes: { 0: { ...state.nodes[0], attempt: 0 } } }
     await render()
+    assert.equal(requests.at(-1), unboundProjectionRequest,
+      'a same-scope projection tick coalesces behind the request already in flight')
+    assert.equal(unboundProjectionRequest.options.signal.aborted, false)
+    await reply(unboundProjectionRequest, conceptPayload('loss/a'))
+    const reboundProjectionRequest = requests.at(-1)
+    assert.notEqual(reboundProjectionRequest, unboundProjectionRequest)
     const excludedPayload = conceptPayload('loss/a')
     excludedPayload.experiment_refs['loss/a'][0].feasible = false
     Object.assign(excludedPayload.metrics.rows['loss/a'], {
       evaluated: 0, best: null, mean: null, worst: null, delta_best: null, delta_mean: null,
     })
-    await reply(requests.at(-1), excludedPayload)
-    assert.match(document.querySelector('.cv-exp-button')?.textContent, /infeasible/)
+    await reply(reboundProjectionRequest, excludedPayload)
+    assert.match(document.querySelector('.cv-exp-button')?.textContent, /infeasible.*rollup · excluded/s)
     assert.match(document.querySelector('.cv-exp-button')?.getAttribute('title'),
       /excluded from the concept rollup because it is infeasible/i)
     assert.match(document.querySelector('.cv-expmetric')?.textContent, /excluded/i)
@@ -353,17 +362,33 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     state = { ...state, nodes: { 0: { ...state.nodes[0], metric: 0.9 } } }
     await render()
     assert.equal(requests.length, before + 1, 'metric-only changes refresh baseline and rollups')
-    const obsoleteSemanticRequest = requests.at(-1)
-    state = { ...state, nodes: { 0: { ...state.nodes[0], metric: 0.95 } } }
-    await render()
+    const coalescedRequest = requests.at(-1)
+    for (const metric of [0.95, 0.96, 0.97, 0.98]) {
+      state = { ...state, nodes: { 0: { ...state.nodes[0], metric } } }
+      await render()
+    }
+    assert.equal(requests.length, before + 1,
+      'continuous rapid projection ticks cannot restart or starve the active request')
+    assert.equal(coalescedRequest.options.signal.aborted, false)
+    await reply(coalescedRequest, conceptPayload('coalesced/settled'))
+    assert.equal(requests.length, before + 2,
+      'settling the active request immediately launches exactly the newest pending projection')
     const currentSemanticRequest = requests.at(-1)
-    assert.notEqual(currentSemanticRequest, obsoleteSemanticRequest)
-    await reply(obsoleteSemanticRequest, conceptPayload('late/semantic'))
-    assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'architecture/moe',
-      'a superseded semantic projection cannot become current before effect cleanup')
-    await reply(currentSemanticRequest, { ...emptyPayload, metrics: {} })
+    assert.notEqual(currentSemanticRequest, coalescedRequest)
+    assert.equal(coalescedRequest.options.signal.aborted, false)
+    assert.match(document.body.textContent, /Refreshing concepts/,
+      'a superseded response remains visibly non-current while the newest projection loads')
+    await reply(currentSemanticRequest, conceptPayload('coalesced/latest'))
+    await click(button('Expand hierarchy'))
+    assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'),
+      'coalesced/latest')
+
+    state = { ...state, nodes: { 0: { ...state.nodes[0], metric: 0.99 } } }
+    await render()
+    await reply(requests.at(-1), { ...emptyPayload, metrics: {} })
     assert.match(document.querySelector('[role="alert"]').textContent, /last loaded concept view; refresh failed/i)
-    assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'architecture/moe')
+    assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'),
+      'coalesced/latest')
     assert.doesNotMatch(document.body.textContent, /No concepts have been tagged yet/,
       'malformed HTTP 200 never masquerades as an authoritative empty result')
 

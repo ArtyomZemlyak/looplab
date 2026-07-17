@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { chipsAtPath, breadcrumb, matchingNodeIds } from './conceptChips.js'
+import { canonicalId } from './conceptId.js'
 
 // View 2 — the concept chip bar riding OVER the lineage graph. Breadcrumb-navigable (drill into a
 // concept to reveal its next level) and multi-selectable (OR): selecting concepts highlights every
@@ -51,9 +52,9 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const clearSelection = () => setSelected([])
 
   if (!hasConcepts) return null
-  const leaf = (id) => String(id).split('/').pop()
   // Display a selection key: strip the `=` exact marker for the label, keep a hint that it's level-exact.
-  const keyLabel = (key) => leaf(key[0] === '=' ? key.slice(1) : key)
+  const keyValue = (key) => key[0] === '=' ? key.slice(1) : key
+  const keyLabel = (key) => canonicalId(keyValue(key), rename) || keyValue(key)
   const keyExact = (key) => key[0] === '='
 
   return (
@@ -78,13 +79,17 @@ export default function ConceptChipBar({ state, onHighlight }) {
 
       {selected.length > 0 &&
         <div className="cb-selected" aria-label="Selected concepts">
-          {selected.map(key => <button key={key} type="button" className="cb-pill"
-            onClick={() => removeSelected(key)}
-            title={`${keyExact(key) ? key.slice(1) + ' (exactly)' : key} — click to remove`}>
-            {keyExact(key) && <span className="cb-here" aria-hidden="true">·</span>}
-            {keyLabel(key)}<span className="cb-x" aria-hidden="true">×</span>
-            <span className="sr-only"> remove filter {keyExact(key) ? key.slice(1) : key}</span>
-          </button>)}
+          {selected.map(key => {
+            const label = keyLabel(key)
+            return <button key={key} type="button" className="cb-pill"
+              onClick={() => removeSelected(key)}
+              title={`${label}${keyExact(key) ? ' (exactly)' : ''} — click to remove`}>
+              {keyExact(key) && <span className="cb-here" aria-hidden="true">·</span>}
+              <span className="cb-pill-label">{label}</span>
+              <span className="cb-x" aria-hidden="true">×</span>
+              <span className="sr-only"> remove filter {label}</span>
+            </button>
+          })}
         </div>}
 
       <div className="cb-chips" aria-label={path ? `Concepts under ${path}` : 'Top-level concepts'}>

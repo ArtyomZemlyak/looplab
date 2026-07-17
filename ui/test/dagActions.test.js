@@ -18,14 +18,22 @@ test('every mutable DAG experiment exposes a named native menu trigger', async (
   assert.match(dag, /onClick=\{\(\) => onSelect\(nodeId\)\}/)
   assert.doesNotMatch(dag, /className=\{cardCls[^\n]*role="button"/,
     'the card content must not flatten its nested provenance link under button semantics')
-  assert.match(runView, /<Dag state=\{state\} selectedId=\{selectedId\} onSelect=\{onCanvasSelect\}/,
+  assert.match(runView, /<Dag key=\{`experiment-graph:\$\{runId\}:\$\{generation \|\| 'pending'\}`\}/,
+    'a semantic generation boundary remounts the DAG and closes any same-id stale action menu')
+  assert.match(runView, /state=\{state\} selectedId=\{selectedId\} onSelect=\{onCanvasSelect\}/,
     'keyboard node selection must use the same merge-arm aware handler as pointer selection')
+  assert.match(runView, /<ConceptChipBar key=\{`concept-filter:\$\{runId\}:\$\{generation \|\| 'pending'\}`\}/,
+    'concept selection cannot leak across semantic generations')
   assert.match(dag, /focusable: false,/, 'React Flow must not add a second anonymous tab stop around the card')
   assert.match(dag, /onOpenActions: onNodeAction \? openActions : null/)
   assert.match(runView, /onNodeAction=\{readOnlyMode \? null : onNodeAction\}/,
     'history and review modes must not expose mutating node actions')
   assert.match(groups, /<button type="button" className="grp-pill"/)
-  assert.match(groups, /aria-label=\{`Collapse group \$\{label\}`\}/)
+  assert.match(groups, /aria-label=\{`Collapse group \$\{label\}; \$\{countDescription\}`\}/)
+  assert.match(dag, /totalCount: groups\.get\(cell\.key\)\?\.length \?\? cell\.ids\.length/)
+  assert.match(groups, /\$\{count\}\/\$\{totalCount\} · split/,
+    'a group repeated in topology bands must disclose cell subtotal versus whole-group total')
+  assert.match(groups, /experiments in this topology band/)
 })
 
 test('DAG action popup follows the ARIA menu keyboard pattern and restores focus', async () => {

@@ -103,6 +103,31 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     const hi = calls.at(-1)
     assert.ok(hi instanceof Set)
     assert.deepEqual([...hi].sort((a, b) => a - b), [0])
+    assert.equal(document.querySelector('.cb-pill-label')?.textContent, 'architecture')
+
+    // A nested selection must retain its full path: duplicate leaves are otherwise indistinguishable.
+    await act(async () => {
+      arch.querySelector('.cb-drill').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    const moe = [...document.querySelectorAll('.cb-chip')].find(
+      c => c.querySelector('.cb-name')?.textContent === 'moe')
+    await act(async () => {
+      moe.querySelector('.cb-chip-main').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+    assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
+      ['architecture', 'architecture/moe'])
+
+    // A live consolidation rename also updates an already-selected legacy key's visible identity.
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: { ...STATE, concept_consolidation: { 'architecture/moe': 'model/moe' } },
+      onHighlight: v => calls.push(v),
+    })))
+    assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
+      ['architecture', 'model/moe'])
 
     // A live reset that removes the last concept must clear graph dimming before hiding the bar.
     await act(async () => root.render(React.createElement(ConceptChipBar, {

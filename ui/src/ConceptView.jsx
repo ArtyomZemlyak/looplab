@@ -303,61 +303,92 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const currentLensScope = useRef(lensScope)
   currentLensScope.current = lensScope
   const request = useRef(null)
+  const pendingRequest = useRef(null)
+  const latestRequest = useRef(null)
+  const launchLatest = useRef(null)
   const projectionKey = useMemo(() => conceptProjectionKey(state), [state])
   const requestedSeq = displayedSequence == null ? null : displayedSequence
   const runDerivedLenses = derivedLenses.filter(item => item.scope === lensScope)
   const activeDerived = runDerivedLenses.find(item => item.name === lens)
   const activeRels = activeDerived ? (activeDerived.rels || []).join(',') : ''
   const scope = JSON.stringify([runKey, generation ?? null, requestedSeq, lens])
-  const requestVersion = JSON.stringify([scope, activeRels, projectionKey])
-  const expectedVersion = useRef(requestVersion)
-  expectedVersion.current = requestVersion
+  const transportScope = JSON.stringify([scope, activeRels])
+  const requestVersion = JSON.stringify([transportScope, projectionKey])
+  const expectedTransportScope = useRef(transportScope)
+  expectedTransportScope.current = transportScope
+  latestRequest.current = {
+    transportScope, scope, requestVersion, runId, generation, requestedSeq, lens, activeRels,
+    direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
+    derived: !!activeDerived, rels: activeDerived?.rels ? [...activeDerived.rels] : undefined,
+  }
 
-  useEffect(() => {
-    request.current?.controller.abort()
-    const query = new URLSearchParams({ lens })
-    if (activeRels) query.set('rels', activeRels)
-    if (requestedSeq !== null) query.set('seq', String(requestedSeq))
-    const timed = deadlineRequest(signal => get(`${runApiPath(runId, '/concepts')}?${query}`, {
-      signal, cache: 'no-store',
-    }), TIMEOUT_MS)
-    const owner = { ...timed, scope, requestVersion }
+  // Projection ticks coalesce behind one bounded request. A semantic navigation boundary still
+  // aborts immediately, but a busy live run cannot starve the concept view by cancelling every
+  // request before it completes: the current flight settles, then the newest pending projection runs.
+  launchLatest.current = () => {
+    if (request.current) return
+    const target = pendingRequest.current
+    if (!target || expectedTransportScope.current !== target.transportScope) return
+    pendingRequest.current = null
+    const query = new URLSearchParams({ lens: target.lens })
+    if (target.activeRels) query.set('rels', target.activeRels)
+    if (target.requestedSeq !== null) query.set('seq', String(target.requestedSeq))
+    const timed = deadlineRequest(signal => get(
+      `${runApiPath(target.runId, '/concepts')}?${query}`, { signal, cache: 'no-store' }), TIMEOUT_MS)
+    const owner = { ...timed, ...target }
     request.current = owner
-    setResource(previous => previous.scope === scope && previous.data
-      ? { ...previous, requestVersion, status: 'refreshing', timeout: false }
-      : { scope, requestVersion, status: 'loading', data: null, timeout: false })
+    setResource(previous => previous.scope === target.scope && previous.data
+      ? { ...previous, requestVersion: target.requestVersion, status: 'refreshing', timeout: false }
+      : { scope: target.scope, requestVersion: target.requestVersion,
+          status: 'loading', data: null, timeout: false })
 
     let done = false
     const finish = (ok, data = null) => {
       if (done) return
       done = true
-      // Render-time semantic identity closes the gap before effect cleanup; owner
-      // identity fences late results from a superseded semantic projection.
-      if (request.current !== owner || expectedVersion.current !== requestVersion) return
+      if (request.current !== owner) return
       request.current = null
+      if (expectedTransportScope.current !== owner.transportScope) return
+      const superseded = latestRequest.current?.requestVersion !== owner.requestVersion
       setResource(previous => {
-        if (previous.scope !== scope || previous.requestVersion !== requestVersion) return previous
-        if (ok) return { scope, requestVersion, status: 'ready', data, timeout: false }
+        if (previous.scope !== owner.scope) return previous
+        if (ok) return { scope: owner.scope, requestVersion: owner.requestVersion,
+          status: superseded ? 'refreshing' : 'ready', data, timeout: false }
+        if (superseded) return previous.data
+          ? { ...previous, status: 'refreshing', timeout: false } : previous
         return previous.data
           ? { ...previous, status: 'stale', timeout: timed.timedOut() }
-          : { scope, requestVersion, status: 'error', data: null, timeout: timed.timedOut() }
+          : { scope: owner.scope, requestVersion: owner.requestVersion,
+              status: 'error', data: null, timeout: timed.timedOut() }
       })
+      launchLatest.current?.()
     }
     timed.promise.then(value => validateConceptPayload(value, {
-      runId,
-      ...(generation === undefined ? {} : { generation }),
-      requestedSeq,
-      requestedLens: lens,
-      direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
-      derived: !!activeDerived,
-      rels: activeDerived?.rels,
+      runId: target.runId,
+      ...(target.generation === undefined ? {} : { generation: target.generation }),
+      requestedSeq: target.requestedSeq,
+      requestedLens: target.lens,
+      direction: target.direction,
+      derived: target.derived,
+      rels: target.rels,
     })).then(data => finish(true, data), () => finish(false))
-    return () => {
-      done = true
-      timed.controller.abort()
-      if (request.current === owner) request.current = null
+  }
+
+  useEffect(() => {
+    pendingRequest.current = latestRequest.current
+    const owner = request.current
+    if (owner && owner.transportScope !== transportScope) {
+      request.current = null
+      owner.controller.abort()
     }
-  }, [runId, generation, requestedSeq, lens, activeRels, projectionKey, retry])
+    launchLatest.current?.()
+  }, [transportScope, requestVersion, retry])
+  useEffect(() => () => {
+    pendingRequest.current = null
+    const owner = request.current
+    request.current = null
+    owner?.controller.abort()
+  }, [])
 
   const current = resource.scope !== scope ? initial
     : resource.requestVersion === requestVersion ? resource
@@ -613,6 +644,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
             const rollup = ref.metric === null ? 'not included in the concept rollup: robust metric unavailable'
               : ref.feasible === false ? 'excluded from the concept rollup because it is infeasible'
                 : 'included in the concept rollup under the current eligibility rule'
+            const rollupLabel = ref.metric === null ? 'unavailable'
+              : ref.feasible === false ? 'excluded' : 'eligible'
             const refSummary = `Experiment #${ref.node_id}, attempt ${ref.node_generation}, ${ref.status}, ${constraint}, membership ${ref.membership_provenance}, ${rollup}`
             return <tr key={`${id}:${ref.node_id}:${ref.node_generation}`} className="cv-erow"><td className="cv-name" style={{ paddingLeft: 12 + (depth + 1) * 18 }}>
               <button type="button" className="cv-exp-button" disabled={!lifecycleMatches}
@@ -622,8 +655,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                   : 'This attempt is not in the displayed run snapshot'}`}>
                 <span className="cv-exp">Experiment #{ref.node_id} · attempt {ref.node_generation}</span>
                 <span className="badge">{ref.status}</span>
+                {ref.feasible === true && <span className="badge">feasible</span>}
                 {ref.feasible === false && <span className="badge reason">infeasible</span>}
                 {ref.feasible === null && <span className="badge">constraint?</span>}
+                <span className="badge">membership · {ref.membership_provenance}</span>
+                <span className={'badge' + (rollupLabel === 'excluded' ? ' reason' : '')}>
+                  rollup · {rollupLabel}
+                </span>
                 {ref.is_best
                   && <span className="cv-best" title="Frame champion" aria-label="Frame champion">★</span>}</button></td>
               <td className="cv-num cv-expmetric" colSpan={cols.length} title={rollup}>

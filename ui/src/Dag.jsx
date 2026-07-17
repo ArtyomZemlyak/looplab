@@ -288,8 +288,9 @@ function ExpNode({ data }) {
 // Group region behind an EXPANDED cluster (round-8): a faint band + a compact label pill (replaces
 // the round-6 full-width lane bar that stretched across the cluster). Click the pill to collapse.
 function GroupLane({ data }) {
-  const { w, h, label, count, tint, onToggle } = data
-  return <GroupRegion w={w} h={h} label={label} count={count} tint={tint} onToggle={onToggle} />
+  const { w, h, label, count, totalCount, tint, onToggle } = data
+  return <GroupRegion w={w} h={h} label={label} count={count} totalCount={totalCount}
+    tint={tint} onToggle={onToggle} />
 }
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
@@ -487,7 +488,11 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       rfNodes.push({
         id: `region:${cell.band ?? 'g'}:${cell.key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
-        data: { w: geo.w, h: geo.h, label: cell.key, count: cell.ids.length, tint: tintOf(cell.key), onToggle: onToggleGroup },
+        data: {
+          w: geo.w, h: geo.h, label: cell.key, count: cell.ids.length,
+          totalCount: groups.get(cell.key)?.length ?? cell.ids.length,
+          tint: tintOf(cell.key), onToggle: onToggleGroup,
+        },
       })
     })
 

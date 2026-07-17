@@ -1193,7 +1193,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
           </LazyBoundary></div>
         : <>
       <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
-        <ConceptChipBar state={state} onHighlight={setConceptHighlight} />
+        <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
+          state={state} onHighlight={setConceptHighlight} />
       </LazyBoundary>
       <LazyBoundary label="direction overview" resetKey={`${runId}:${generation || 'pending'}`}>
         <DirectionsOverview state={state} active={themeFilter} onPick={setThemeFilter} />
@@ -1202,7 +1203,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
         <div className={'canvas-wrap' + (emptyPresentation ? ' dag-empty' : '')}>
           <LazyBoundary label="experiment graph" resetKey={`${runId}:${generation || 'pending'}`}>
-            <Dag state={state} selectedId={selectedId} onSelect={onCanvasSelect}
+            <Dag key={`experiment-graph:${runId}:${generation || 'pending'}`}
+              state={state} selectedId={selectedId} onSelect={onCanvasSelect}
               groupMode={groupMode} collapsed={collapsed} onToggleGroup={toggleGroup} onSetMode={changeMode}
               onCollapseAll={collapseAllGroups} onExpandAll={expandAllGroups}
               onAutoCollapse={autoCollapse} onNodeAction={readOnlyMode ? null : onNodeAction}

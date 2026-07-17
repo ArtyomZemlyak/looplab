@@ -1450,6 +1450,7 @@ pre.code.event-json { max-height: 220px; }
 .cb-pill { display: inline-flex; align-items: center; gap: 5px; padding: 2px 8px; border-radius: 999px;
   background: color-mix(in srgb, var(--accent) 16%, var(--bg-2)); border: 1px solid var(--accent);
   color: var(--fg); cursor: pointer; font-size: 11px; }
+.cb-pill-label { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cb-pill:hover { background: color-mix(in srgb, var(--accent) 26%, var(--bg-2)); }
 .cb-pill .cb-x { color: var(--fg-mut); font-size: 13px; line-height: 1; }
 .cb-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 88px; min-width: 0; overflow: auto; }
@@ -2400,7 +2401,9 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-num.d-up { color: var(--ok); }
 .cv-num.d-down { color: var(--fail); }
 .cv-erow { height: 38px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 58%, transparent); }
-.cv-exp-button { display: inline-flex; min-height: 30px; padding: 0 8px; align-items: center; cursor: pointer; border: 0; border-radius: 6px; background: transparent; color: inherit; }
+.cv-exp-button { display: inline-flex; min-height: 30px; padding: 3px 8px; align-items: center;
+  flex-wrap: wrap; gap: 5px; cursor: pointer; border: 0; border-radius: 6px;
+  background: transparent; color: inherit; }
 .cv-exp-button:hover, .cv-exp-button:focus-visible { background: var(--bg-3); outline: 2px solid transparent; }
 .cv-exp-button:disabled { cursor: not-allowed; opacity: .58; }
 .cv-exp { color: var(--fg-dim); font-family: ui-monospace, Menlo, Consolas, monospace; }
