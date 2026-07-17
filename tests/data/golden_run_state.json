@@ -275,8 +275,9 @@
     }
   ],
   "llm_cost": null,
-  "node_concepts": {},
+  "node_concept_deltas": {},
   "node_concept_provenance": {},
+  "node_concepts": {},
   "node_concepts_at_vocab": {},
   "nodes": {
     "0": {
@@ -299,6 +300,8 @@
       "id": 0,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -347,6 +350,8 @@
       "id": 1,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -395,6 +400,8 @@
       "id": 2,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -446,6 +453,8 @@
       "id": 3,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -499,6 +508,8 @@
       "id": 4,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -549,6 +560,8 @@
       "id": 5,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -602,6 +615,8 @@
       "id": 6,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -656,6 +671,8 @@
       "id": 7,
       "idea": {
         "concepts": [],
+        "concepts_added": [],
+        "concepts_removed": [],
         "eval_profile": null,
         "eval_timeout": null,
         "hypothesis": null,
@@ -748,6 +765,7 @@
   "research_requests": [],
   "research_served": 0,
   "reward_hacks": [],
+  "run_base_concepts": [],
   "run_id": "golden",
   "run_setup_done": [],
   "rungs": [],

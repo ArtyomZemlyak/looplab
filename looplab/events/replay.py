@@ -27,7 +27,7 @@ from looplab.events.types import (
     EV_HYPOTHESIS_RANKED, EV_HYPOTHESIS_UPDATED, EV_INJECT_DONE, EV_INJECT_NODE, EV_LESSONS_DISTILLED,
     EV_LESSONS_REFRESHED, EV_LLM_COST, EV_LLM_USAGE, EV_NODE_ABORT, EV_NODE_BUILDING, EV_NODE_CONFIRMED,
     EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_EDGE, EV_CONCEPT_TAG_EDITED,
-    EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS,
+    EV_HYPOTHESIS_CONCEPTS, EV_NODE_CONCEPTS, EV_RUN_CONCEPTS,
     EV_NODE_CREATED, EV_NODE_EVALUATED, EV_NODE_FAILED, EV_NODE_REPAIRED, EV_NODE_RESET,
     EV_CROSS_RUN_PRIOR,
     EV_NODE_TOMBSTONED, EV_NODE_VERIFIED, EV_NOVELTY_GRADED, EV_NOVELTY_REJECTED, EV_PAUSE, EV_STAGE_FINISHED,
@@ -333,8 +333,19 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts.pop(n.id, None)
         st.node_concept_provenance.pop(n.id, None)
         st.node_concepts_at_vocab.pop(n.id, None)
+        st.node_concept_deltas.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
-    if n.idea.concepts and not receipt_protected:
+    _delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
+    _delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
+    if (_delta_added or _delta_removed) and not receipt_protected:
+        # PART V (B): the node authored a DELTA vs the run base + its parents. Store it RAW; the fold
+        # post-pass (`_materialize_concept_deltas`) resolves node_concepts topologically over the complete
+        # DAG, so fold stays order-tolerant. Provenance stays `authored` so a classifier/operator event
+        # still wins (the post-pass fills only nodes that keep the authored delta).
+        st.node_concept_deltas[n.id] = {"added": _delta_added, "removed": _delta_removed}
+        st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
+        st.node_concepts_at_vocab.pop(n.id, None)
+    elif n.idea.concepts and not receipt_protected:
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
@@ -1295,6 +1306,63 @@ def _clean_llm_totals(d: dict | None) -> dict:
     return out
 
 
+def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
+    """PART V (B): set the RUN's BASE concept set (last-write-wins). Nodes may then author only deltas vs
+    this base; the fold post-pass materializes their node_concepts. Additive; malformed input -> ignored."""
+    concepts = d.get("concepts")
+    if isinstance(concepts, list):
+        seen: set[str] = set()
+        base: list[str] = []
+        for c in concepts:
+            s = str(c)
+            if s and s not in seen:
+                seen.add(s)
+                base.append(s)
+        st.run_base_concepts = base
+
+
+def _materialize_concept_deltas(st: RunState) -> None:
+    """PART V (B) fold POST-PASS: resolve every delta-authored node's effective `node_concepts` from the
+    run base + its parents. ORDER-TOLERANT (invariant 5): it runs once over the fully-folded DAG, so a
+    reordered/spliced log resolves identically. A node's set = run_base ∪ (union of parents' effective
+    sets) − removed + added. A classifier/operator event that already set node_concepts WINS (provenance
+    != authored) — such a node contributes its stored set to its children and is not overwritten here.
+    Memoized; a defensive cycle guard keeps an adversarial parent cycle from recursing forever."""
+    base = [str(c) for c in (st.run_base_concepts or [])]
+    memo: dict[int, set] = {}
+
+    def resolve(nid: int, seen: frozenset) -> set:
+        cached = memo.get(nid)
+        if cached is not None:
+            return cached
+        if nid in seen:                      # defensive: the node DAG is acyclic; a spliced cycle -> {}
+            return set()
+        node = st.nodes.get(nid)
+        parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
+        if parents:
+            # A non-root inherits the UNION of its parents' EFFECTIVE sets — the run base flows in through
+            # the roots and down the DAG, so a removal PROPAGATES (a node that swaps transformer->diffusion
+            # keeps descendants on diffusion until one of them changes it again).
+            child_seen = seen | {nid}
+            inherited = set()
+            for pid in parents:
+                inherited |= resolve(pid, child_seen)
+        else:
+            inherited = set(base)                # a root seeds from the run base
+        delta = st.node_concept_deltas.get(nid)
+        if delta is not None and st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED:
+            eff = (inherited - set(delta.get("removed") or [])) | set(delta.get("added") or [])
+        else:
+            # non-delta node, or a delta node a classifier/operator overrode -> use its stored membership.
+            eff = set(st.node_concepts.get(nid) or [])
+        memo[nid] = eff
+        return eff
+
+    for nid in list(st.node_concept_deltas):
+        if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED:
+            st.node_concepts[nid] = sorted(resolve(nid, frozenset()))
+
+
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # PART IV Phase 2a: audit-only concept-graph coverage / uncovered-region curve; the at_node gate
     # dedups on resume. NEVER touches selection (mirrors _on_coverage_snapshot).
@@ -2182,6 +2250,7 @@ _HANDLERS = {
     EV_COVERAGE_SNAPSHOT: _on_coverage_snapshot,
     EV_CONCEPT_COVERAGE_SNAPSHOT: _on_concept_coverage_snapshot,
     EV_NODE_CONCEPTS: _on_node_concepts,
+    EV_RUN_CONCEPTS: _on_run_concepts,
     EV_CONCEPT_TAG_EDITED: _on_concept_tag_edited,
     EV_HYPOTHESIS_CONCEPTS: _on_hypothesis_concepts,
     EV_CONCEPT_CONSOLIDATION: _on_concept_consolidation,
@@ -2245,6 +2314,11 @@ def fold(events: Iterable[Event]) -> RunState:
         # unknown event types (e.g. "budget") are ignored for state — forward-compat
         if h is not None:
             h(st, e, e.data, ctx)
+
+    # PART V (B): materialize delta-authored node concepts topologically once the whole DAG is folded
+    # (order-tolerant; no-op unless a node authored a delta). Before any downstream read-model derivation.
+    if st.node_concept_deltas:
+        _materialize_concept_deltas(st)
 
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)

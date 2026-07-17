@@ -96,6 +96,11 @@ EV_CONCEPT_COVERAGE_SNAPSHOT = "concept_coverage_snapshot"
 # purely each cadence). Recorded only when `concept_pivot` is on; additive, reader-defaulted; folds into
 # RunState.node_concepts. See looplab/search/concept_graph.py::tag_nodes_llm (known_tags).
 EV_NODE_CONCEPTS = "node_concepts"
+# PART V (B): the RUN's BASE concept set — the common technologies every node uses unless it authors a
+# delta otherwise. Set once (typically at a run-start preliminary stage) and may be re-set; folds to
+# RunState.run_base_concepts (last-write-wins). Additive, reader-defaulted; absent -> nodes author full
+# sets as before. The base + per-node deltas are materialized topologically in a fold post-pass.
+EV_RUN_CONCEPTS = "run_concepts"
 # PART IV D4 (§21.18 HT): the LLM tagger's concept ids for ONE hypothesis on the board, recorded the first
 # time it is tagged so later cadences REUSE it (incremental, ~O(hypotheses) not per-cadence) — the agentic
 # replacement for the `tag_text` alias heuristic in taxonomy dedup. Hypothesis-scoped (keyed by the

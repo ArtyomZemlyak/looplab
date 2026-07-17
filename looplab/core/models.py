@@ -137,6 +137,13 @@ class Idea(BaseModel):
     # explicit and a later classifier event may consolidate/enrich them.
     # Flows through the event log automatically (idea.model_dump → node_created → Idea(**d["idea"])).
     concepts: list[str] = Field(default_factory=list)
+    # PART V (B) run-base + node-DELTA authoring: instead of re-stating the full `concepts` set, a node may
+    # author only what CHANGES vs the run base + its parents — `concepts_added` (new this node) and
+    # `concepts_removed` (dropped this node, e.g. "swapped transformer -> diffusion"). When either is set,
+    # the fold post-pass materializes node_concepts = run_base ∪ inherited − removed + added; `concepts`
+    # (full set) is then ignored for that node. Empty (the default) keeps the legacy full-set path.
+    concepts_added: list[str] = Field(default_factory=list)
+    concepts_removed: list[str] = Field(default_factory=list)
     # Intra-node sweep: instead of a single point in `params`, the Researcher may attach a discrete
     # search GRID here {name: [values...]}. When non-empty, the Developer renders code that runs
     # every grid point in ONE process (shared data load / warm GPU) and reports all results back as
@@ -602,6 +609,17 @@ class RunState(BaseModel):
     # event; the last writer wins for read-model compatibility. Consumers that can affect admission MUST
     # consult node_concept_provenance rather than assuming every membership came from the classifier.
     node_concepts: dict[int, list[str]] = Field(default_factory=dict)
+    # PART V (B): the RUN's BASE concept set — the common technologies every node uses unless a node
+    # states otherwise (folded from `run_concepts` events). A node may then author only the DELTA vs this
+    # base + its parents (see `node_concept_deltas`), keeping per-node annotations minimal. Additive /
+    # reader-defaulted; empty on runs that never set a base (every node then authors its own full set).
+    run_base_concepts: list[str] = Field(default_factory=list)
+    # PART V (B): raw per-node concept DELTAS {node_id -> {"added": [...], "removed": [...]}} authored on
+    # the Idea. Stored raw during replay; a deterministic POST-PASS in `fold` materializes each such node's
+    # effective `node_concepts` = run_base ∪ (union of parents' effective sets) − removed + added. Kept as a
+    # topological read-time resolution (not folded in event order) so `fold` stays ORDER-TOLERANT
+    # (invariant 5): the post-pass sees the complete DAG, so a spliced/reordered log resolves identically.
+    node_concept_deltas: dict[int, dict] = Field(default_factory=dict)
     # CODEX AGENT: proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
     # replay-derived sidecar records the producer of the CURRENT last-write-wins membership. Missing and
     # unknown values are deliberately untrusted; legacy generation-zero `node_concepts` events replay as
