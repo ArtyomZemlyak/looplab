@@ -2012,6 +2012,23 @@ def test_explicit_remote_host_allowlist(tmp_path, monkeypatch):
     assert response.status_code == 200
 
 
+def test_configured_host_is_trusted_as_mutation_origin_behind_a_proxy(tmp_path, monkeypatch):
+    # A jupyter-server-proxy deployment rewrites the Host to the internal backend (127.0.0.1), so the
+    # server's request.base_url is internal while the browser's Origin stays the PUBLIC host. A host in
+    # LOOPLAB_UI_HOSTS must therefore be trusted as a mutation Origin too — else every POST 403s ("Could
+    # not start the chat") even though GETs (unguarded) pass. Host defaults to testserver here (the
+    # in-process exception), standing in for the internal Host the proxy supplies.
+    _build_run(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_HOSTS", "research.example")
+    client = TestClient(make_app(tmp_path))
+    ok = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
+                     headers={"Origin": "https://research.example"})
+    assert ok.status_code == 200
+    evil = client.post("/api/runs/demo/control", json={"type": "pause", "data": {}},
+                       headers={"Origin": "https://evil.example"})
+    assert evil.status_code == 403          # a non-configured origin is still rejected
+
+
 def test_sse_emits_state_snapshot(tmp_path):
     _build_run(tmp_path)
     client = TestClient(make_app(tmp_path))
