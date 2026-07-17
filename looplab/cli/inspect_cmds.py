@@ -2,7 +2,9 @@
 
 Split verbatim out of the flat `looplab/cli.py` (docs/15 §P5.2). Read-only over a run: pure folds of
 the event log, viewers over run-dir sidecars, and (the Part IV concept/novelty diagnostics) offline
-analyses that may invoke an LLM to tag/grade — but nothing here mutates a run.
+analyses that may invoke an LLM to tag/grade. Read-only EXCEPT for `concept-coverage --persist`, which
+retro-tags a run by appending generation-fenced `EV_NODE_CONCEPTS` (the one opt-in mutation; see
+`_persist_node_concepts`).
 """
 from __future__ import annotations
 
@@ -14,7 +16,33 @@ import typer
 
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
+from looplab.events.types import EV_NODE_CONCEPTS
 from looplab.cli import _print_result, _require_run_dir, app
+
+
+def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int) -> int:
+    """A2 (retro-tag): append `EV_NODE_CONCEPTS` per node so the built tags FOLD into
+    `state.node_concepts` and the UI (ConceptChipBar/ConceptView) + cross-run readers see them —
+    otherwise `concept-coverage` computes exactly these tags and throws them away after printing.
+
+    This is the one MUTATING affordance in this module, gated behind `--persist`, and is intended for
+    FINISHED runs (retro-tagging a run created before Phase 0, or refreshing a stale map). Events carry
+    CLASSIFIER provenance and are generation-fenced (`generation == node.attempt`), exactly like the live
+    engine's `concept_pivot` cadence emits — so a later fold/resume is idempotent, and any operator
+    re-tag (`EV_CONCEPT_TAG_EDITED`) still wins (invariant 5). Returns the number of nodes tagged."""
+    count = 0
+    for nid, ft in (raw_tags or {}).items():
+        nid = int(nid)
+        node = state.nodes.get(nid)
+        if node is None:
+            continue
+        ids = sorted(str(c) for c in ft)
+        if not ids:
+            continue
+        store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": ids, "mode": mode,
+                                        "at_vocab": int(vocab_size), "generation": node.attempt})
+        count += 1
+    return count
 
 
 @app.command()
@@ -219,13 +247,19 @@ def concept_coverage(
                                 "independently; retro-tagging a large finished run is ~O(nodes) sequential "
                                 "otherwise). 1 = sequential. Quality is unchanged — the vocabulary still "
                                 "grows between batches and consolidation dedups synonyms."),
+    persist: bool = typer.Option(
+        False, "--persist", help="RETRO-TAG: append the built tags as generation-fenced EV_NODE_CONCEPTS "
+                                 "events so they FOLD into node_concepts and show in the UI + feed cross-run "
+                                 "(otherwise the tags are printed and discarded). Intended for FINISHED runs "
+                                 "created before Phase 0. Operator re-tags still win."),
 ):
     """PART IV D5 (§21.11): the concept-graph coverage + uncovered-region diagnostic. **The LLM agent builds
     the map** by default — it grows the concept vocabulary from the actual experiments (reading each node's
     code/logs), computes the coverage, and derives the important-but-uncovered directions per task (universal:
     no hardcoded winning region; grounded in `--repo`'s prior-art brief when given). `--offline` forces the
     deterministic alias-heuristic fallback (needs a curated `--task-type` pack, no importance derivation)."""
-    from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for)
+    from looplab.search.concept_graph import (build_concept_map, concept_report, skeleton_for,
+                                              tag_nodes_heuristic)
     store = _require_run_dir(run_dir)
     state = fold(store.read_all())
     resolved_type = task_type or state.task_id or ""
@@ -249,11 +283,16 @@ def concept_coverage(
             typer.echo(f"note: no curated concept pack for task-type '{resolved_type or 'unknown'}', so the "
                        "offline heuristic can't tag experiments. Drop --offline to let the agent build the "
                        "graph, or pass --task-type <known-pack> (e.g. dense-retrieval).")
-        typer.echo(concept_report(state, graph, None))
+        tags = tag_nodes_heuristic(state, graph)
+        typer.echo(concept_report(state, graph, tags))
         if graph.concepts():
             typer.echo("\nnote: --offline alias tagging is coarse (over-reports coverage on semantically-"
                        "ambiguous concepts). Drop --offline for the agentic, code-reading build + per-task "
                        "importance.")
+        if persist:
+            n = _persist_node_concepts(store, state, tags, "offline-heuristic", len(graph.concepts()))
+            typer.echo(f"\n  persisted {n} node_concepts events (offline-heuristic) -> this run now shows "
+                       "concepts in the UI. (coarse; re-run without --offline for code-read tags.)")
         return
 
     # PRIMARY: the LLM agent builds the whole map (grows vocab, tags agentically, derives importance).
@@ -270,6 +309,13 @@ def concept_coverage(
     typer.echo(concept_report(state, cmap["graph"], cmap["tags"]))
     typer.echo(f"\n  (built by the LLM agent — mode={cmap['mode']}, "
                f"{len(cmap['graph'].concepts())} concepts grown)")
+    if persist:
+        # raw_tags are the tagger's pre-consolidation ids (what the live cadence records); the fold
+        # re-derives consolidation/coverage from them, so persisting these keeps parity with a live run.
+        n = _persist_node_concepts(store, state, cmap.get("raw_tags"), cmap.get("mode", "agentic"),
+                                   len(cmap["graph"].concepts()))
+        typer.echo(f"  persisted {n} node_concepts events -> this run now shows concepts in the UI + "
+                   "feeds cross-run memory.")
     typer.echo("  IMPORTANT-BUT-UNCOVERED (derived per task — universal, no hardcoded winning region):")
     if cmap["important_uncovered"]:
         for m in cmap["important_uncovered"]:
