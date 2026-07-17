@@ -146,13 +146,19 @@ class ConceptGraph:
 
     # -- hierarchy (arbitrary-depth DAG) traversal ----------------------------
     def parents_of(self, concept_id: str) -> tuple[str, ...]:
-        """Immediate parent concept ids (the DAG edges: id-prefix parent + any explicit cross-links)."""
+        """Immediate parent concept ids (the DAG edges: id-prefix parent + any explicit cross-links).
+        A top-level root carries itself in `axes` (so `axes()` sees it) but is NOT its own parent — the
+        self-reference is filtered out here, matching `ancestors_of`/`descendants_of`."""
         c = self._concepts.get(concept_id)
-        return c.axes if c is not None else ()
+        if c is None:
+            return ()
+        return tuple(p for p in c.axes if p != concept_id)
 
     def children_of(self, concept_id: str) -> list[str]:
-        """Immediate children — concepts that name `concept_id` among their parents."""
-        return sorted(c.id for c in self._concepts.values() if concept_id in c.axes)
+        """Immediate children — concepts that name `concept_id` among their parents. Excludes the concept
+        itself (a top-level root lists itself in `axes` but is not its own child)."""
+        return sorted(c.id for c in self._concepts.values()
+                      if concept_id in c.axes and c.id != concept_id)
 
     def ancestors_of(self, concept_id: str) -> list[str]:
         """All ancestors up every parent path to the roots (deduped, deterministic BFS order)."""
