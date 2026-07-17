@@ -303,18 +303,24 @@ def test_abandon_fences_live_worker_and_wins_late_cross_process_terminal_race(
 def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(tmp_path, monkeypatch):
     _seed_run(tmp_path)
     calls = []
+    provider_calls = []
 
     class FailingClient:
         def __init__(self):
             self.accountant = CostAccountant()
 
         def complete_tool(self, _messages, _schema):
+            provider_calls.append("tool")
             self.accountant.add(0.5, {
                 "prompt_tokens": 8,
                 "completion_tokens": 0,
                 "total_tokens": 8,
             })
             raise RuntimeError("provider failure containing secret-token-123")
+
+        def complete_text(self, _messages):
+            provider_calls.append("text")
+            raise AssertionError("paid lens parsing must never fall back to a second provider call")
 
     def factory(*_args, **_kwargs):
         calls.append(True)
@@ -327,6 +333,7 @@ def test_provider_failure_after_dispatch_stays_unresolved_and_is_never_rebilled(
     assert failed.json()["code"] == "concept_lens_uncertain"
     assert failed.json()["ambiguous"] is True
     assert "secret-token-123" not in failed.text
+    assert provider_calls == ["tool"]
     events = EventStore(tmp_path / "demo" / "events.jsonl").read_all()
     assert sum(event.type == EV_CONCEPT_LENS_STARTED for event in events) == 1
     assert sum(event.type == EV_LLM_USAGE for event in events) == 1

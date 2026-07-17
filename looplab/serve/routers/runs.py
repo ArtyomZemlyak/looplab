@@ -661,7 +661,7 @@ def build_router(srv) -> APIRouter:
                 provider_started = True
                 spec = derive_lens(
                     prompt, inputs["edges"], client, concepts=inputs["concept_ids"],
-                    raise_on_failure=True)
+                    parser="tool_call_once", raise_on_failure=True)
                 prepared = _validated_derived_lens(spec, lens_pack, inputs) if spec else None
                 if prepared is None:
                     outcome = "declined"
