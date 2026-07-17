@@ -159,6 +159,9 @@ def test_settings_defaults():
     assert s.foresight_verify is True and s.foresight_verify_samples == 3
 
 
-def test_settings_reject_unbounded_foresight_verifier_samples():
-    with pytest.raises(ValueError):
-        Settings(foresight_verify_samples=MAX_FORESIGHT_VERIFY_SAMPLES + 1)
+def test_settings_clamp_unbounded_foresight_verifier_samples():
+    # RESUME-critical field: an over-range persisted/env value is CLAMPED into [1, MAX], not rejected,
+    # so an old snapshot stays loadable (see config.py). The runtime cap is still enforced.
+    assert Settings(foresight_verify_samples=MAX_FORESIGHT_VERIFY_SAMPLES + 1).foresight_verify_samples \
+        == MAX_FORESIGHT_VERIFY_SAMPLES
+    assert Settings(foresight_verify_samples=0).foresight_verify_samples == 1
