@@ -23,6 +23,13 @@ export function highlightSegments(text, query) {
   const value = text == null ? '' : String(text)
   const q = normalizeQuery(query)
   if (!q) return [{ text: value, hit: false }]
+  // REVIEW(2026-07-16): the match index is computed in value.toLowerCase() but the slice below cuts
+  // the ORIGINAL string at that index. For characters whose lowercase mapping changes length
+  // ('İ' U+0130 -> 'i' + U+0307), indexes in the lowered string shift relative to the original, so
+  // the <mark> is misaligned ('İnit loss' + query 'loss' marks 'oss…' off by the expansion). Low
+  // likelihood today (concept ids are pre-lowercased) but Highlight.jsx made this THE shared <mark>
+  // renderer for arbitrary display strings. Walk the original with a per-character casefold
+  // comparison, or reject highlight (hit:false) when lowered length differs from the original.
   const index = value.toLowerCase().indexOf(q)
   if (index < 0) return [{ text: value, hit: false }]
   const segments = []
@@ -148,6 +155,14 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
     // itself a match (its id contains the query), so it is already added via its own ancestor walk — the
     // filter needs no explicit subtree pass. A concept matched ONLY by a tagged experiment keeps just its
     // own row + evidence; the component suppresses its expander since no child concept is visible.
+    // REVIEW(2026-07-16): that rationale holds ONLY for the is_a PATH hierarchy, where child ids
+    // extend the parent id. Under an EDGE lens (spec.kind === 'edge' — nodes carry cross_parents,
+    // children are arbitrary src/dst pairs), a child's id does NOT contain the parent's id, so
+    // descendants of a matched concept are filtered OUT and the component then suppresses the
+    // matched row's expander — the user cannot see or reach anything under the match without
+    // clearing the filter, with no hint children exist. Same query under is_a shows the full
+    // subtree, so behavior is lens-inconsistent (the unit test covers only the path lens). Edge-lens
+    // filtering needs an explicit subtree pass (mark descendants of concept-id matches visible).
   }
   return result
 }

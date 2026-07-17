@@ -26,6 +26,15 @@ const validList = (value, test) => Array.isArray(value) && value.every(test)
 const uniqueList = (value, test) => validList(value, test) && new Set(value).size === value.length
 const fieldNames = names => names.split(' ')
 const fields = (value, names, test) => fieldNames(names).every(name => test(value[name]))
+// REVIEW(2026-07-16): exactRecord's key-COUNT equality makes the validator reject ADDITIVE server
+// evolution — the exact class of change this series ships constantly (this window alone added
+// blocking_reasons to the POST path). One new server field in completeness.limits / .source /
+// .included / source_integrity (or an additive cross_parents:[] on path nodes) makes EVERY
+// /concepts GET throw 'Invalid concept projection': the view degrades to a permanent
+// "Concepts are unavailable — retry" whose Retry can never succeed until the UI bundle is
+// redeployed, while the server data is valid the whole time. The repo's own rule is reader-side
+// defaults for additive fields; validate that REQUIRED keys exist and are well-typed, and ignore
+// (or count-and-receipt) unknown keys instead of hard-failing on them.
 const exactRecord = (value, names, test) => {
   const required = fieldNames(names)
   return record(value) && Object.keys(value).length === required.length
@@ -642,6 +651,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         // narrowed to the matching refs; a concept-id match (or a manual toggle) shows all its refs.
         const conceptHit = searching && filter.conceptHit.has(id)
         const evidenceOpen = evidenceExpanded.has(id) || (searching && filter.evidenceOpen.has(id))
+        // REVIEW(2026-07-16): this narrowing ignores a MANUAL evidence toggle, contradicting the
+        // comment above ("a concept-id match (or a manual toggle) shows all its refs") and the
+        // badge: with a query matching 1 of 5 refs, the auto-opened list shows 1 row, the badge
+        // still reads "5 refs", and clicking it (evidenceExpanded.has(id) becomes true) changes
+        // nothing because this condition never consults evidenceExpanded — the other 4 refs are
+        // unreachable until the filter is cleared. Add `&& !evidenceExpanded.has(id)` so the manual
+        // toggle widens to the full list as documented.
         const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit)
           ? experiments.filter(ref => experimentRefMatches(ref, query))
           : experiments

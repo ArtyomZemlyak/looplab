@@ -49,6 +49,14 @@ function ResourceNotice({ state, label, retry }) {
   </div>
 }
 
+// REVIEW(2026-07-16): the timeout message says "Refresh before retrying", but NOTHING refreshes and
+// nothing fences the retry: the lock frees at the 12s deadline while the un-abortable transport
+// (send() has no AbortSignal) stays in flight for minutes, and no useMutation caller reconciles
+// projects/supertasks on timeout (those stores load only on mount/success — no poll covers them).
+// Rename to 'A' (stalls, times out) then retry with 'B' (lands first): the stalled 'A' lands LAST,
+// the server ends at 'A' while the UI shows 'B' — silent divergence until a full page reload. The
+// timeout path needs what useListMutation's contract mandates: an automatic reconcile read of the
+// affected store before the operator can retry.
 const mutationMessage = (error, timedOut = false) => timedOut
   ? 'Save timed out; its outcome is unknown. Refresh before retrying.'
   : error?.status === 409

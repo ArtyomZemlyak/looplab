@@ -72,6 +72,13 @@ export default function ConceptChipBar({ state, onHighlight }) {
     setSearchOpen(value => value ? false : value)
   }, [hasConcepts])
   // Keep the keyboard cursor inside the current result list as the query narrows/widens.
+  // REVIEW(2026-07-16): the deps cover only [query], but `results` also changes under an UNCHANGED
+  // query on live SSE ticks (new tags arrive, a consolidation rename shrinks the list). Growing
+  // 0->n leaves cursor at -1: the dropdown shows options but Enter no-ops and nothing is
+  // aria-selected until the user edits the query; shrinking leaves cursor past the end with the
+  // same dead-Enter symptom. Re-clamp on results.length too:
+  // useEffect(() => { setCursor(c => results.length ? Math.min(Math.max(c, 0), results.length - 1) : -1) },
+  //            [query, results.length]).
   useEffect(() => { setCursor(results.length ? 0 : -1) }, [query])
 
   // A chip's SELECTION KEY: a normal chip selects its subtree (plain id, prefix match); the "· here"

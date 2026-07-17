@@ -442,6 +442,13 @@ export function eventNarration(event) {
     const value = render ? render(data) : JSON.stringify(data ?? {}).slice(0, 80)
     // # CODEX AGENT: Narration contains agent/user prose. Validate its structured input and renderer
     // result; never infer a template failure from a legitimate word inside the rendered data.
+    // REVIEW(2026-07-16): the REVIEW spec that removed the \bundefined\b heuristic asked for its
+    // REPLACEMENT — "have NARR renderers return null on missing fields, which the !value branch
+    // already handles" — and that half was never implemented: the renderers still interpolate
+    // fields directly, so an event from an older/partial log missing one field (additive-evolution
+    // logs are expected per invariant 5) now renders coerced garbage like "building node #undefined
+    // via improve…" where the pre-fix code degraded to "details could not be summarized". Guard the
+    // interpolated fields inside each renderer (return null when a required field is absent).
     if (!value) throw new TypeError('incomplete event narration')
     return String(value || event?.type || 'event')
   } catch {
