@@ -924,6 +924,13 @@ def node_concept_delta(state, node_id) -> dict:
     node_concepts = getattr(state, "node_concepts", None)
     node_concepts = node_concepts if isinstance(node_concepts, dict) else {}
     own = _canon_set(node_id, node_concepts, rename)
+    # REVIEW(2026-07-16): _canon_set returns set() BOTH for "tagged with nothing" AND for "not yet
+    # tagged" (no node_concepts entry — the classifier cadence hasn't reached the node), and the diff
+    # below cannot tell them apart: a fresh child of a tagged parent reports every parent concept
+    # under `removed`, asserting the experiment conceptually abandoned all parent directions when
+    # tagging simply hasn't happened. The Researcher steers its next proposal off a fabricated
+    # removal signal. When `node_id not in node_concepts` (and idea authored no concepts), the delta
+    # should return a distinct `untagged: true` receipt with empty lists — never a `removed` claim.
     # Dedup parent ids (a torn log can carry [0, 0]) while keeping only existing parents.
     parent_ids = list(dict.fromkeys(p for p in (getattr(node, "parent_ids", None) or []) if p in nodes))
     inherited_base: set = set()

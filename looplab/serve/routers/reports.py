@@ -1481,6 +1481,17 @@ def build_router(srv) -> APIRouter:
             if joined_job_id is not None:
                 reservation = {"status": "running", "job_id": joined_job_id}
             else:
+                # REVIEW(2026-07-16): retaining every terminal receipt (consume_on_poll=False +
+                # consume_inline_result=False below) fixed the concurrent-observer loss, but the old
+                # consume-on-delivery behavior ALSO protected registry capacity, and that clause was
+                # not re-established: the shared JobRegistry (_MAX_JOBS=64) refuses to evict receipts
+                # younger than the 660s retention window, and EVERY generation — including the
+                # fast inline offline rollups that return in milliseconds — now parks one. ~64
+                # generations in 11 minutes (a script regenerating per-scope, several tabs) exhaust
+                # the ONE registry shared with genesis, boss commands, and report refresh: reserve()
+                # fails closed with job_capacity WORKSPACE-WIDE until receipts age out. Inline-
+                # delivered results should still consume their receipt (the observer already has the
+                # value), or scope-report receipts need their own bounded pool.
                 reservation = srv.jobs.reserve(consume_on_poll=False)
                 if reservation.get("status") == "running":
                     generation_jobs[generation_identity] = reservation["job_id"]

@@ -408,6 +408,12 @@ class RunTools:
                 hits.append(self._line(n) if n else f"#{nid}")
         if not hits:
             return f"(no experiments tagged '{target}')"
+        # REVIEW(2026-07-16): the header advertises the FULL hit count but the listing silently caps
+        # at 60 rows with no omission marker — unlike the sibling _concept_tree in the same change,
+        # which appends an explicit "(tree truncated ...)" receipt. On a 90-hit concept the
+        # Researcher reads "90 experiment(s)" + 60 lines, treats the listing as exhaustive, and
+        # re-proposes duplicates of the 30 hidden (most-recent) experiments. Append the same
+        # truncation receipt: f"... (+{len(hits) - 60} more, not shown)".
         return f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(hits[:60])
 
     def _node_concepts_tool(self, st: RunState, nid: int) -> str:
