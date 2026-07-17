@@ -282,6 +282,36 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         previous = edges.get(key)
         if previous is None or edge_rank(candidate) > edge_rank(previous):
             edges[key] = candidate
+
+    # F3: an OFFLINE / retro-tagged run emits no EV_CONCEPT_EDGE, so `edges` is empty and every typed lens
+    # silently fell back to is_a. `co_occurs` is DETERMINISTIC from co-tagging — the very thing the live
+    # cadence records — so when nothing was persisted, derive it here from the bounded canonical memberships.
+    # That gives offline runs a real co_occurs lens with no new events, and matches what a live run stored.
+    # Only a fallback (live runs keep their persisted edges); bounded by MAX_EDGES + the shared endpoint
+    # budget; a pair seen on <2 nodes is noise; weight = #co-tagging nodes, clamped like a persisted edge.
+    if not edges and "co_occurs" in registered_rels:
+        pair_counts: dict[tuple[str, str], int] = {}
+        for node_concepts in memberships.values():
+            cs = sorted(set(node_concepts))
+            for i in range(len(cs)):
+                for j in range(i + 1, len(cs)):
+                    pair_counts[(cs[i], cs[j])] = pair_counts.get((cs[i], cs[j]), 0) + 1
+        for (src, dst), cnt in sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            if cnt < 2:
+                continue
+            if len(edges) >= MAX_EDGES:
+                reasons.add("edge_cap")
+                break
+            new_endpoints = {src, dst} - edge_endpoints
+            if (len(edge_endpoints) + len(new_endpoints) > MAX_EDGE_ENDPOINTS
+                    or len(accepted_prefixes | edge_endpoints | new_endpoints) > MAX_TREE_NODES):
+                reasons.add("edge_endpoint_cap")
+                continue
+            edge_endpoints.update(new_endpoints)
+            edges[(src, "co_occurs", dst)] = {
+                "src": src, "rel": "co_occurs", "dst": dst,
+                "confidence": float(min(cnt, MAX_EDGE_WEIGHT)), "provenance": "co-tag (derived)"}
+
     return {
         "memberships": memberships,
         "concept_ids": concept_ids,
