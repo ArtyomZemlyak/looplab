@@ -5,6 +5,13 @@ import {
   visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
   CONCEPT_COLUMNS, DEFAULT_COLUMNS,
 } from './conceptViewModel.js'
+import { filterConceptTree, experimentRefMatches, highlightSegments } from './conceptSearch.js'
+
+// Wrap the matched query slice of a label in <mark> (pure segments, no dangerouslySetInnerHTML).
+function Marked({ text, query }) {
+  return highlightSegments(text, query).map((seg, i) =>
+    seg.hit ? <mark key={i}>{seg.text}</mark> : <Fragment key={i}>{seg.text}</Fragment>)
+}
 
 const TIMEOUT_MS = 12_000
 const LENS_PROMPT_MAX_CHARS = 800
@@ -287,6 +294,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const [expanded, setExpanded] = useState(() => new Set())
   const [evidenceExpanded, setEvidenceExpanded] = useState(() => new Set())
   const [columns, setColumns] = useState(DEFAULT_COLUMNS)
+  const [query, setQuery] = useState('')                 // live concept/experiment tree filter
   // Derived lenses are view-state specs: the paid derivation happens once, then GET replays their
   // exact relation subset so ordinary semantic refreshes remain deterministic and read-only.
   const [derivedLenses, setDerivedLenses] = useState([])
@@ -415,7 +423,17 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     }
     return out
   }, [data])
-  const rows = useMemo(() => visibleConceptRows(data?.tree, expanded), [data, expanded])
+  // Free-text filter: match concept ids/labels and (per-experiment) the frame's node id + status. The
+  // matched rows keep every ancestor on their path and force it open, so a nested match stays reachable
+  // in the same DFS visibleConceptRows already runs — search only widens `expanded` and trims the result.
+  const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query), [data, byConcept, query])
+  const searching = query.trim().length > 0 && !!filter
+  const effectiveExpanded = useMemo(
+    () => searching ? new Set([...expanded, ...filter.expand]) : expanded,
+    [searching, expanded, filter])
+  const allRows = useMemo(
+    () => visibleConceptRows(data?.tree, effectiveExpanded), [data, effectiveExpanded])
+  const rows = searching ? allRows.filter(row => filter.visible.has(row.id)) : allRows
   const projectionStatus = useMemo(() => data
     ? visibleConceptRows(data.tree, new Set(Object.keys(data.tree.nodes))).projectionStatus
     : { state: 'unavailable', reasons: [] }, [data])
@@ -561,6 +579,18 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     aria-busy={refreshing}>
     <header className="cv-bar">
       <div className="cv-heading"><strong>Concept tree</strong><span>{Object.keys(data.tree.nodes).length} concepts · {experimentCount} tagged experiments · frame seq {data.captured_seq}</span></div>
+      <div className="cv-search cs">
+        <div className={'cs-box' + (searching ? ' focus' : '')}>
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+            <circle cx="11" cy="11" r="7" /><path d="M21 21l-4.3-4.3" /></svg>
+          <input className="cs-input" style={{ width: 210 }} value={query} autoComplete="off"
+            placeholder="filter concepts & experiments…" aria-label="Filter concepts and experiments"
+            onChange={event => setQuery(event.target.value)}
+            onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setQuery('') } }} />
+          {query &&
+            <button type="button" className="cs-clear" aria-label="Clear filter" onClick={() => setQuery('')}>×</button>}
+        </div>
+      </div>
       <div className="cv-lensctl">
         <label className="cv-lenspick"><span>Hierarchy lens</span><select className="text" value={lens}
           onChange={event => { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
@@ -607,19 +637,25 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const node = data.tree.nodes[id]
         const experiments = byConcept[id] || []
         const open = expanded.has(id)
-        const evidenceOpen = evidenceExpanded.has(id)
+        // A search that matched an EXPERIMENT (not the concept id) auto-opens that concept's evidence,
+        // narrowed to the matching refs; a concept-id match (or a manual toggle) shows all its refs.
+        const conceptHit = searching && filter.conceptHit.has(id)
+        const evidenceOpen = evidenceExpanded.has(id) || (searching && filter.evidenceOpen.has(id))
+        const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit)
+          ? experiments.filter(ref => experimentRefMatches(ref, query))
+          : experiments
         const crossParents = Array.isArray(node?.cross_parents) ? node.cross_parents : []
         const edgeProjection = Array.isArray(node?.cross_parents)
         const conceptLabel = edgeProjection ? id : conceptLeaf(id)
         const crossParentSummary = crossParents.length
           ? `Secondary ${linkKind} ${crossParents.length === 1 ? 'parent' : 'parents'}: ${crossParents.join(', ')}`
           : ''
-        return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost')}>
+        return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost') + (conceptHit ? ' hit' : '')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>
             {hasChildren ? <button type="button" className="cv-chev" onClick={() => toggle(id)}
               aria-expanded={open} aria-label={`${open ? 'Collapse' : 'Expand'} ${id}`}>{open ? '▾' : '▸'}</button>
               : <span className="cv-chev-placeholder" aria-hidden="true">·</span>}
-            <span className="cv-cid" title={id}>{conceptLabel}</span>
+            <span className="cv-cid" title={id}><Marked text={conceptLabel} query={searching ? query : ''} /></span>
             {!!crossParents.length && <span className="cv-badge" title={crossParentSummary}
               aria-label={crossParentSummary}>+{crossParents.length} links</span>}
             {!!experiments.length && <button type="button" className="cv-badge btn xs"
@@ -634,7 +670,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           })}</tr>
           {/* Render the frame's generation-bound refs, never a live-state join that can
               attach historical concepts to a replaced node with the same numeric id. */}
-          {evidenceOpen && experiments.map(ref => {
+          {evidenceOpen && shownExperiments.map(ref => {
             const displayed = state.nodes?.[ref.node_id]
             const lifecycleMatches = !!displayed
               && Number.isSafeInteger(displayed.attempt)
@@ -653,8 +689,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 aria-label={`${refSummary}. ${lifecycleMatches
                   ? 'Open in Inspector'
                   : 'This attempt is not in the displayed run snapshot'}`}>
-                <span className="cv-exp">Experiment #{ref.node_id} · attempt {ref.node_generation}</span>
-                <span className="badge">{ref.status}</span>
+                <span className="cv-exp"><Marked text={`Experiment #${ref.node_id} · attempt ${ref.node_generation}`} query={searching ? query : ''} /></span>
+                <span className="badge"><Marked text={ref.status} query={searching ? query : ''} /></span>
                 {ref.feasible === true && <span className="badge">feasible</span>}
                 {ref.feasible === false && <span className="badge reason">infeasible</span>}
                 {ref.feasible === null && <span className="badge">constraint?</span>}
@@ -668,6 +704,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 {ref.metric === null ? 'metric unavailable' : `${fmt(ref.metric)}${ref.feasible === false ? ' · excluded' : ''}`}</td></tr>
           })}</Fragment>
       })}
+      {searching && rows.length === 0 &&
+        <tr><td className="cv-name cv-nomatch" colSpan={cols.length + 1}>
+          No concept or experiment matches “{query.trim()}”.</td></tr>}
     </tbody></table></div>
   </div>
 }

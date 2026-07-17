@@ -1503,6 +1503,10 @@ pre.code.event-json { max-height: 220px; }
   color: var(--accent-solid-ink); border-radius: 3px; padding: 0 1px; }
 /* a chip whose concept is a live search hit (visual only — the graph preview does the dimming) */
 .cb-chip.match { border-color: var(--best); box-shadow: 0 0 0 1px var(--best); }
+/* View 1 tree: a concept row whose own id/label matched the filter, and the no-match message */
+.cv-crow.hit > td { background: color-mix(in srgb, var(--best) 9%, transparent); }
+.cv-nomatch { color: var(--fg-mut); font-size: 12.5px; padding: 16px 12px; }
+.cv-search { flex: none; }
 
 /* ── Panel bar (Workstream D): grouped by importance + process ─────────────────── */
 .panel-bar .menu { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
