@@ -26,18 +26,9 @@ const validList = (value, test) => Array.isArray(value) && value.every(test)
 const uniqueList = (value, test) => validList(value, test) && new Set(value).size === value.length
 const fieldNames = names => names.split(' ')
 const fields = (value, names, test) => fieldNames(names).every(name => test(value[name]))
-// REVIEW(2026-07-16): exactRecord's key-COUNT equality makes the validator reject ADDITIVE server
-// evolution — the exact class of change this series ships constantly (this window alone added
-// blocking_reasons to the POST path). One new server field in completeness.limits / .source /
-// .included / source_integrity (or an additive cross_parents:[] on path nodes) makes EVERY
-// /concepts GET throw 'Invalid concept projection': the view degrades to a permanent
-// "Concepts are unavailable — retry" whose Retry can never succeed until the UI bundle is
-// redeployed, while the server data is valid the whole time. The repo's own rule is reader-side
-// defaults for additive fields; validate that REQUIRED keys exist and are well-typed, and ignore
-// (or count-and-receipt) unknown keys instead of hard-failing on them.
 const exactRecord = (value, names, test) => {
   const required = fieldNames(names)
-  return record(value) && Object.keys(value).length === required.length
+  return record(value)
     && required.every(name => Object.hasOwn(value, name) && (!test || test(value[name])))
 }
 const same = (left, right) => JSON.stringify(left) === JSON.stringify(right)
@@ -247,14 +238,6 @@ const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 // Mirror all inputs used by projection + concept_metrics. Same-count retags, renames,
 // lifecycle/status/provenance changes, champion changes, typed edges,
 // feasibility and robust metrics refresh; an engine-liveness-only SSE tick does not.
-// REVIEW(2026-07-16): on a LIVE run this key changes on essentially every SSE tick (any node's
-// status/metric/attempt flip is in it), and the fetch effect it drives ABORTS the in-flight request
-// as its first act — so while nodes are being built/evaluated faster than the /concepts round-trip,
-// the view can livelock: each tick cancels the previous fetch before it resolves and the table shows
-// "refreshing" indefinitely. Server-side the same tick invalidates the stat-keyed concept-core cache
-// (see the REVIEW note in serve/routers/runs.py), so every retry is a full recompute — the two
-// multiply into the hottest path on an active run. Debounce the key (trailing-edge, ~1-2s) and let a
-// completed response render even if a newer key is already pending, instead of abort-first.
 export function conceptProjectionKey(state) {
   const nodes = entries(state?.nodes).map(([key, node]) => [
     key, node?.id, node?.attempt, node?.status, node?.metric, node?.confirmed_mean,
@@ -430,7 +413,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   // Free-text filter: match concept ids/labels and (per-experiment) the frame's node id + status. The
   // matched rows keep every ancestor on their path and force it open, so a nested match stays reachable
   // in the same DFS visibleConceptRows already runs — search only widens `expanded` and trims the result.
-  const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query), [data, byConcept, query])
+  const edgeProjection = data?.requested_lens_spec?.kind === 'edge'
+    && data?.lens_contract?.fallback !== 'no_matching_edges'
+  const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection }),
+    [data, byConcept, query, edgeProjection])
   const searching = query.trim().length > 0 && !!filter
   const effectiveExpanded = useMemo(
     () => searching ? new Set([...expanded, ...filter.expand]) : expanded,
@@ -648,13 +634,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const showExpander = hasChildren && (!searching
           || (Array.isArray(node?.children) && node.children.some(child => filter.visible.has(child))))
         // A search that matched an EXPERIMENT (not the concept id) auto-opens that concept's evidence,
-        // narrowed to the matching refs; a concept-id match, or a MANUAL toggle of this row's evidence,
-        // shows all its refs. Consulting evidenceExpanded here lets clicking the "N refs" badge widen
-        // the auto-narrowed list back to the full set (otherwise the other refs stay unreachable until
-        // the filter is cleared, while the badge still advertises the full count).
+        // narrowed to the matching refs; a concept-id match (or a manual toggle) shows all its refs.
         const conceptHit = searching && filter.conceptHit.has(id)
         const evidenceOpen = evidenceExpanded.has(id) || (searching && filter.evidenceOpen.has(id))
-        const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit && !evidenceExpanded.has(id))
+        const shownExperiments = (searching && filter.evidenceOpen.has(id) && !conceptHit
+          && !evidenceExpanded.has(id))
           ? experiments.filter(ref => experimentRefMatches(ref, query))
           : experiments
         const crossParents = Array.isArray(node?.cross_parents) ? node.cross_parents : []

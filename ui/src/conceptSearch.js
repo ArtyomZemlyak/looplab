@@ -21,22 +21,35 @@ export function normalizeQuery(query) {
 // (the CodeViewer `highlighted` helper does the same by hand; this keeps it testable and id-safe).
 export function highlightSegments(text, query) {
   const value = text == null ? '' : String(text)
-  const raw = typeof query === 'string' ? query.trim() : ''
-  if (!raw) return [{ text: value, hit: false }]
-  // The slice below cuts the ORIGINAL string at the match index, so that index must be aligned to the
-  // original. A case-insensitive `toLowerCase().indexOf` is only aligned when lowercasing preserves
-  // length; some characters expand ('İ' U+0130 -> 'i' + U+0307), shifting lowered-string indexes. When
-  // that happens, fall back to an exact-case match on the original (aligned by construction) rather than
-  // marking the wrong slice — a case-differing match inside such a string simply isn't highlighted.
-  const lowered = value.toLowerCase()
-  const aligned = lowered.length === value.length
-  const needle = aligned ? raw.toLowerCase() : raw
-  const index = aligned ? lowered.indexOf(needle) : value.indexOf(needle)
+  const q = normalizeQuery(query)
+  if (!q) return [{ text: value, hit: false }]
+  // Lower-casing can expand one original character (for example İ -> i + combining dot), so an
+  // index in the folded string is not necessarily an index in `value`. Keep a code-unit map while
+  // folding and translate the matched span back before slicing the original display text.
+  let folded = ''
+  const foldedStarts = []
+  const foldedEnds = []
+  let originalIndex = 0
+  for (const character of value) {
+    const lower = character.toLowerCase()
+    const originalEnd = originalIndex + character.length
+    folded += lower
+    for (let offset = 0; offset < lower.length; offset += 1) {
+      foldedStarts.push(originalIndex)
+      foldedEnds.push(originalEnd)
+    }
+    originalIndex = originalEnd
+  }
+  const index = folded.indexOf(q)
   if (index < 0) return [{ text: value, hit: false }]
-  const end = index + needle.length
+  const start = foldedStarts[index]
+  const end = foldedEnds[index + q.length - 1]
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end)) {
+    return [{ text: value, hit: false }]
+  }
   const segments = []
-  if (index > 0) segments.push({ text: value.slice(0, index), hit: false })
-  segments.push({ text: value.slice(index, end), hit: true })
+  if (start > 0) segments.push({ text: value.slice(0, start), hit: false })
+  segments.push({ text: value.slice(start, end), hit: true })
   if (end < value.length) segments.push({ text: value.slice(end), hit: false })
   return segments
 }
@@ -148,21 +161,20 @@ export function filterConceptTree(tree, experimentRefs = {}, query = '', opts = 
       result.expand.add(parent)
       current = parent
     }
-    // For a CONCEPT-id match, mark its whole subtree visible (collapsed) so the row's children are
-    // reachable when expanded. Under the is_a PATH lens every descendant id already contains the query
-    // (so each is self-visible and this is redundant), but under an EDGE lens child ids are arbitrary
-    // src/dst pairs that need NOT contain the parent id — without this pass their rows are filtered out
-    // and the component suppresses the match's expander, making edge-lens filtering inconsistent with
-    // the path lens (the user could neither see nor reach anything under the match). A concept matched
-    // ONLY by a tagged experiment keeps just its own row + evidence. Bounded via `visible` dedup + budget.
-    if (selfHit && Array.isArray(node.children)) {
-      const stack = [...node.children]
-      for (let budget = MAX_SUBTREE; stack.length && budget > 0; budget -= 1) {
-        const childId = stack.pop()
-        if (!has(nodes, childId) || result.visible.has(childId)) continue
-        result.visible.add(childId)
-        const child = nodes[childId]
-        if (child && Array.isArray(child.children)) for (const grandchild of child.children) stack.push(grandchild)
+    // Path descendants include the matched id and therefore match on their own. Edge-lens children
+    // are arbitrary relation endpoints, so explicitly retain and force-open the matched subtree.
+    if (selfHit && opts.edgeProjection === true) {
+      const pending = [id]
+      const visited = new Set()
+      while (pending.length && visited.size < MAX_SUBTREE) {
+        const current = pending.pop()
+        if (visited.has(current) || !has(nodes, current)) continue
+        visited.add(current)
+        result.visible.add(current)
+        const children = Array.isArray(nodes[current]?.children) ? nodes[current].children : []
+        const ownedChildren = children.filter(child => typeof child === 'string' && has(nodes, child))
+        if (ownedChildren.length) result.expand.add(current)
+        pending.push(...ownedChildren)
       }
     }
   }

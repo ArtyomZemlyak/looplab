@@ -191,6 +191,19 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.doesNotThrow(() => conceptModule.validateConceptPayload(framePayload({
       requestedLens: 'usage', effectiveLens: 'is_a', derived: true,
     }), { requestedLens: 'usage', direction: 'max', derived: true, rels: ['uses'] }))
+    const additiveReceipts = framePayload()
+    additiveReceipts.completeness = {
+      ...additiveReceipts.completeness,
+      limits: { ...additiveReceipts.completeness.limits, future_limit: 7 },
+      source: { ...additiveReceipts.completeness.source, future_source_count: 0 },
+      included: { ...additiveReceipts.completeness.included, future_included_count: 0 },
+      source_integrity: {
+        ...additiveReceipts.completeness.source_integrity,
+        future_integrity_receipt: true,
+      },
+    }
+    assert.doesNotThrow(() => conceptModule.validateConceptPayload(additiveReceipts),
+      'additive receipt fields must not brick an otherwise valid projection')
     const derivedPath = framePayload({
       id: 'taxonomy/root', requestedLens: 'taxonomy', effectiveLens: 'taxonomy', derived: true,
       requestedRels: ['is_a'], requestedKind: 'path',

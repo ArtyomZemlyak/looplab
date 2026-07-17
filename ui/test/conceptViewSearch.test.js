@@ -122,9 +122,21 @@ test('ConceptView tree search filters, auto-expands, marks, and matches experime
     })
     // answer the /concepts fetch with a valid 3-level path frame
     assert.ok(requests.length >= 1, 'expected a /concepts request')
+    const payload = framePayload('loss/contrastive/dcl')
+    payload.experiment_refs['loss/contrastive/dcl'].push({
+      node_id: 1, node_generation: 0, metric: null, metric_kind: 'robust_metric',
+      status: 'failed', feasible: null, is_best: false, membership_provenance: 'classifier-v1',
+    })
+    payload.touch['loss/contrastive/dcl'] = 2
+    payload.metrics.rows['loss/contrastive/dcl'].touched = 2
+    payload.completeness.source.membership_nodes = 2
+    payload.completeness.included.membership_nodes = 2
+    payload.completeness.included.memberships = 2
+    payload.completeness.included.experiment_refs = 2
+    payload.provenance.membership_counts['classifier-v1'] = 1
     await act(async () => {
       requests[0].resolve({ ok: true, status: 200, headers: { get: () => null },
-        json: async () => framePayload('loss/contrastive/dcl') })
+        json: async () => payload })
       await settle()
     })
     assert.ok(searchInput(), 'search input rendered in the tree header')
@@ -140,9 +152,18 @@ test('ConceptView tree search filters, auto-expands, marks, and matches experime
     assert.ok(document.querySelector('.cv-crow.hit'), 'the matched concept row is emphasized')
 
     // search a status -> matches the experiment, auto-opens its evidence under the path
-    await setInput(searchInput(), 'evaluated')
+    await setInput(searchInput(), 'failed')
     assert.ok(document.querySelector('.cv-erow'), 'the matching experiment row is shown')
+    assert.equal(document.querySelectorAll('.cv-erow').length, 1,
+      'automatic evidence opening narrows to the matching reference')
     assert.equal(conceptRows().length, 3, 'the path to the tagged concept stays visible')
+    await act(async () => {
+      document.querySelector('.cv-badge.btn').dispatchEvent(
+        new dom.window.MouseEvent('click', { bubbles: true }))
+      await settle()
+    })
+    assert.equal(document.querySelectorAll('.cv-erow').length, 2,
+      'manual expansion widens filtered evidence to every reference behind the badge')
 
     // no match -> explicit empty state, no concept rows
     await setInput(searchInput(), 'zzznope')

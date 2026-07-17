@@ -209,6 +209,29 @@ test('search previews a graph highlight and commits a concept on result click', 
       document.querySelector('.cs-icon').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
       await Promise.resolve()
     })
+    // A live SSE update can add results without changing the query. The keyboard cursor must move
+    // from -1 into the new list so Enter works and aria-selected names the active option.
+    await act(async () => { setValue(document.querySelector('.cs-input'), 'fresh'); await Promise.resolve() })
+    assert.equal(document.querySelector('.cs-res'), null)
+    await act(async () => {
+      root.render(React.createElement(ConceptChipBar, {
+        state: { node_concepts: { ...STATE.node_concepts, 5: ['fresh/axis'] } },
+        onHighlight: v => calls.push(v),
+      }))
+      await Promise.resolve()
+    })
+    assert.equal(document.querySelector('.cs-res')?.getAttribute('aria-selected'), 'true')
+    await act(async () => {
+      document.querySelector('.cs-input').dispatchEvent(
+        new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+      await Promise.resolve()
+    })
+    assert.equal(document.querySelector('.cb-pill-label')?.textContent, 'fresh')
+    await act(async () => {
+      document.querySelector('.cb-pill').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true }))
+      await Promise.resolve()
+    })
+
     await act(async () => { setValue(document.querySelector('.cs-input'), 'loss'); await Promise.resolve() })
     const previewHi = calls.at(-1)
     assert.ok(previewHi instanceof Set)

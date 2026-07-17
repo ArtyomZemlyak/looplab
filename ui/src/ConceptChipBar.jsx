@@ -75,13 +75,14 @@ export default function ConceptChipBar({ state, onHighlight }) {
     setQuery(value => value ? '' : value)
     setSearchOpen(value => value ? false : value)
   }, [hasConcepts])
-  // Keep the keyboard cursor inside the current result list. Re-clamp on results.length too, not just
-  // [query]: on a live run `results` also changes under an UNCHANGED query (new tags arrive, a
-  // consolidation rename shrinks the list). Depending on [query] alone would strand the cursor at -1
-  // when the list grows 0->n (Enter no-ops, nothing aria-selected) or past the end when it shrinks.
+  // A new query starts at the first result; live SSE/consolidation changes under the same query
+  // re-clamp the existing cursor so Enter and aria-selected never point outside the visible list.
+  useEffect(() => { setCursor(results.length ? 0 : -1) }, [query])
   useEffect(() => {
-    setCursor(c => results.length ? Math.min(Math.max(c, 0), results.length - 1) : -1)
-  }, [query, results.length])
+    setCursor(current => results.length
+      ? Math.min(Math.max(current, 0), results.length - 1)
+      : -1)
+  }, [results.length])
 
   // A chip's SELECTION KEY: a normal chip selects its subtree (plain id, prefix match); the "· here"
   // chip selects EXACTLY the nodes tagged at `path` (an `=`-prefixed key, exact match) so its count and
