@@ -647,39 +647,76 @@ def _valid_capsule_record(capsule) -> bool:
            for value in fingerprint + concepts):
         return False
     if any(not isinstance(key, str) or not key or len(key) > _MAX_CAPSULE_TOKEN_CHARS
-           or isinstance(value, bool) or value not in (-1, 0, 1) for key, value in signs.items()):
-        return False
+           or type(value) is not int or value not in (-1, 0, 1) for key, value in signs.items()):
+        return False   # `type(value) is not int` rejects bool (int subclass) AND float 1.0 in one test
     return all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
                and _finite_metric(value) for key, value in outcomes.items())
 
 
-def _concept_profit_signs(outcomes: dict, direction: str) -> dict:
-    """PART V Phase 1: a direction-normalized, SCALE-FREE profit sign per concept.
+# A concept whose outcome sits within this fraction of the run's own outcome SPREAD around the median is
+# scored NEUTRAL, not forced onto a side. Without it a median split labels ~half the concepts helped and
+# half hurt every run (a weak, self-balancing signal); the band lets only concepts that clearly out- or
+# under-performed their run's field carry a sign, so the cross-run rollup is sparser and more meaningful.
+_CONCEPT_NEUTRAL_BAND_FRAC = 0.10
 
-    Raw metrics do NOT compare across runs/tasks (the portfolio overview refuses to aggregate them), but
-    "was this concept's best outcome in the BETTER or WORSE half of THIS run's own outcomes, judged in
-    THIS run's direction" is a per-run trichotomy that DOES aggregate cleanly cross-run — that is the whole
-    reason a later reader can roll signs up into n_helped/n_neutral/n_hurt. The baseline is the run's own
-    MEDIAN concept outcome; a concept beating it (in-direction) is +1 (helped), below it -1 (hurt), equal
-    0 (neutral). Fewer than two outcomes → no signal (empty), because one point has no better/worse half.
-    Pure/deterministic; keys mirror `outcomes` (already bounded by the caller)."""
+
+def _concept_profit_signs(outcomes: dict, direction: str) -> dict:
+    """PART V Phase 1: a direction-normalized, scale-free RANK-WITHIN-RUN profit sign per concept.
+
+    Raw metrics do NOT compare across runs/tasks (the portfolio overview refuses to aggregate them), so the
+    sign is deliberately RELATIVE, not a fixed-baseline profit: "did this concept's best outcome land in the
+    BETTER or WORSE part of THIS run's own field of concepts, judged in THIS run's direction". That per-run
+    rank IS direction-/scale-normalized, so it aggregates across runs into an advisory tendency (a concept
+    that consistently ranks well across many DIFFERENT sibling sets is a decent bet) — but it is a rank, not
+    causal proof, and the baseline-stable "did ADDING this concept beat the parent" signal is Phase 3's
+    per-node delta. Baseline is the run's own MEDIAN outcome; a NEUTRAL BAND (a fraction of the run's outcome
+    spread) around it keeps near-median concepts off both sides, so the split is not forced ~50/50. +1 = clearly
+    better half, -1 = clearly worse half, 0 = neutral. Fewer than two outcomes → no signal (empty). Pure/
+    deterministic; keys mirror `outcomes` (already bounded by the caller)."""
     values = sorted(v for v in outcomes.values() if isinstance(v, (int, float))
                     and not isinstance(v, bool) and math.isfinite(v))
     if len(values) < 2:
         return {}
     n = len(values)
     baseline = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2.0
+    band = _CONCEPT_NEUTRAL_BAND_FRAC * (values[-1] - values[0])   # within-run, scale-relative neutral zone
     signs: dict[str, int] = {}
     for concept, metric in outcomes.items():
         if not (isinstance(metric, (int, float)) and not isinstance(metric, bool) and math.isfinite(metric)):
             continue
-        if metric == baseline:
+        if abs(metric - baseline) <= band:
             signs[concept] = 0
         elif (metric < baseline) if direction == "min" else (metric > baseline):
             signs[concept] = 1
         else:
             signs[concept] = -1
     return signs
+
+
+def concept_profit_tendencies(concept_rows, *, limit: Optional[int] = None) -> dict:
+    """Split rolled-up concept rows (each with n_helped/n_neutral/n_hurt, from `portfolio_concept_overview`)
+    into CONSISTENT, multi-run help/hurt tendencies — the SINGLE source of truth for every advisory surface
+    (the context pack, the cross_run_atlas tool, any future one), so the threshold can never silently diverge
+    between them. A concept qualifies when it carried a sign in ≥2 runs, landed on ONE side in ≥2 of them, and
+    net that way (n_helped>n_hurt for help, mirror for hurt) — so a concept can never be in both, and a
+    mixed/thin one is in neither. Returns {"helps": [(concept, n_helped), …], "hurts": [(concept, n_hurt), …]},
+    each ranked by that count desc then name. Pure/deterministic; ADVISORY tendency, never a selection input."""
+    rows = concept_rows if isinstance(concept_rows, (list, tuple)) else []
+
+    def _pick(is_help: bool) -> list:
+        out = []
+        for e in rows:
+            if not isinstance(e, dict):
+                continue
+            h, t = e.get("n_helped", 0), e.get("n_hurt", 0)
+            if h + e.get("n_neutral", 0) + t < 2:
+                continue
+            if (h >= 2 and h > t) if is_help else (t >= 2 and t > h):
+                out.append((str(e.get("concept") or ""), h if is_help else t))
+        out.sort(key=lambda kv: (-kv[1], kv[0]))
+        return out[:limit] if limit else out
+
+    return {"helps": _pick(True), "hurts": _pick(False)}
 
 
 def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str,
@@ -719,8 +756,9 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "concepts": bounded_concepts,
         "best_metric": best_metric if _finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
-        # PART V Phase 1: a direction-normalized, SCALE-FREE profit SIGN per concept (+1 helped / 0
-        # neutral / -1 hurt) — additive over v2 (old capsules simply lack it, readers default {}).
+        # PART V Phase 1: a direction-normalized RANK-WITHIN-RUN sign per concept (+1 clearly-better-half /
+        # 0 neutral / -1 clearly-worse-half vs this run's own field) — additive over v2 (old capsules lack
+        # it, readers default {}). Relative rank, not causal profit; the per-node delta is Phase 3.
         "concept_signs": concept_signs,
     }
 
@@ -843,9 +881,12 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
             by_canon.setdefault(key, []).append(concept)
         for key, raws in by_canon.items():
             metric = next((oc.get(r) for r in sorted(raws) if oc.get(r) is not None), None)
-            # Mirror the metric tie-break: the sign of the sorted-first raw that HAS one (signs share
-            # concept_outcomes' keys, so the same raw carries both). None when this run gave no signal.
-            sign = next((signs.get(r) for r in sorted(raws) if signs.get(r) is not None), None)
+            # When several raw slugs collapse to ONE canonical (operator alias/split), COMBINE their signs
+            # by NET rather than taking the sorted-first — else a merge silently drops the loser when two
+            # raws landed on opposite sides of the run's median. sign(sum): majority side, tie -> neutral.
+            run_signs = [signs.get(r) for r in sorted(raws) if signs.get(r) is not None]
+            total = sum(run_signs)
+            sign = None if not run_signs else (1 if total > 0 else -1 if total < 0 else 0)
             e = per_concept.setdefault(key, {"concept": key, "_runs": {}})
             e["_runs"][rid] = {"run_id": rid, "metric": metric, "direction": direction, "sign": sign}
     concepts = []

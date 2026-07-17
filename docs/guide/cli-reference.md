@@ -434,10 +434,11 @@ from finalized opt-in runs: which raw concept slugs appear and in which recorded
 metric-bearing outcome. Missing, malformed, untagged or non-opt-in runs are absent without a completeness
 receipt, and outcome eligibility/trust/split is not fully contracted. Raw metrics are deliberately **not** compared across tasks (different
 task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
-fabricated "best". Each concept also carries a **direction-normalized profit rollup** (`+helped/~neutral/-hurt`
-sign counts): unlike raw metrics, a per-run "was this concept's outcome in the better or worse half of THIS
-run, in THIS direction" sign IS comparable, so it aggregates across runs into an advisory tendency (never a
-selection input). Pure read of `<memory_dir>/concept_capsules.jsonl` — no LLM/endpoint.
+fabricated "best". Each concept also carries a **direction-normalized rank rollup** (`+better/~neutral/-worse`
+half sign counts, with a within-run neutral band around the median): unlike raw metrics, a per-run "did this
+concept land in the better or worse half of THIS run's own field, in THIS direction" rank IS comparable, so it
+aggregates across runs into an advisory tendency (a relative rank, not causal profit, and never a selection
+input). Pure read of `<memory_dir>/concept_capsules.jsonl` — no LLM/endpoint.
 
 ```bash
 looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]

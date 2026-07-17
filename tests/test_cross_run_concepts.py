@@ -69,6 +69,32 @@ def test_concept_capsule_records_direction_normalized_profit_signs():
     assert one["concept_signs"] == {}                                            # <2 outcomes -> no signal
 
 
+def test_profit_signs_neutral_band_keeps_near_median_concepts_off_both_sides():
+    # REVIEW: without a neutral band a median split forces ~half the concepts onto each side every run (a
+    # weak, self-balancing signal). A concept within a fraction of the run's SPREAD around the median is 0.
+    # Field: 0.0 .. 1.0 (spread 1.0, band 0.1); the two mid concepts at 0.48/0.52 sit inside the band.
+    cap = build_concept_capsule(run_id="r", fingerprint=["k"], direction="max",
+                                concepts=["hi", "midlo", "midhi", "lo"],
+                                concept_outcomes={"hi": 1.0, "midhi": 0.52, "midlo": 0.48, "lo": 0.0})
+    signs = cap["concept_signs"]
+    assert signs["hi"] == 1 and signs["lo"] == -1                 # clearly better / worse half
+    assert signs["midhi"] == 0 and signs["midlo"] == 0           # within the neutral band -> no forced side
+
+
+def test_portfolio_overview_net_combines_opposite_signs_on_canonical_collapse():
+    # REVIEW: when aliased raws collapse to ONE canonical in a run, opposite signs must COMBINE by net, not
+    # let the sorted-first raw silently win. Two raws alias to loss/x; in r1 both help (net +) -> helped.
+    from looplab.engine.memory import portfolio_concept_overview
+
+    caps = [build_concept_capsule(run_id="r1", fingerprint=["k"], direction="max",
+                                  concepts=["loss/a", "loss/b", "loss/lo"],
+                                  concept_outcomes={"loss/a": 0.9, "loss/b": 0.8, "loss/lo": 0.1})]
+    # alias loss/a and loss/b -> loss/x (both landed in the better half -> net helped)
+    aliases = {"loss/a": "loss/x", "loss/b": "loss/x"}
+    rows = {e["concept"]: e for e in portfolio_concept_overview(caps, aliases=aliases)["concepts"]}
+    assert "loss/x" in rows and rows["loss/x"]["n_helped"] == 1 and rows["loss/x"]["n_hurt"] == 0
+
+
 def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
     from looplab.engine.memory import portfolio_concept_overview
     caps = [
@@ -95,9 +121,9 @@ def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
     pack = build_context_pack([], concept_overview=overview)
     assert pack["coverage"]["helps"] == ["loss/a"] and pack["coverage"]["hurts"] == ["loss/c"]
     text = render_context_pack(pack)
-    assert "tended to HELP" in text and "loss/a" in text
-    assert "tended to HURT" in text and "loss/c" in text
-    assert "advisory tendency, NOT a rule" in text          # never a selection input
+    assert "RANK BETTER" in text and "loss/a" in text
+    assert "RANK WORSE" in text and "loss/c" in text
+    assert "advisory, NOT a rule" in text                   # never a selection input
 
 
 def test_capsule_validation_guards_profit_signs():

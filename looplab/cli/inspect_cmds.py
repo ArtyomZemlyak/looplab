@@ -549,7 +549,8 @@ def cross_run_concepts_cmd(
         typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
         return
     typer.echo(f"Cross-run portfolio: {ov['n_runs']} run(s), {ov['n_concepts']} concept(s)")
-    typer.echo("  (profit = direction-normalized +helped/~neutral/-hurt sign counts; advisory tendency)")
+    typer.echo("  (rank = RAW per-concept +better/~neutral/-worse-half sign counts across its runs; "
+               "advisory, relative rank not causal profit)")
     for e in ov["concepts"][: max(0, top)]:
         def _fmt(r: dict) -> str:
             m = r.get("metric")

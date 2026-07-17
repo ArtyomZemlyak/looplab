@@ -147,9 +147,9 @@ def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
              {"loss/win": 0.8, "loss/mid": 0.5, "loss/lose": 0.2}),
     ])
     out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
-    assert "profit tendency" in out and "not a rule" in out
-    assert "tended to HELP" in out and "loss/win" in out
-    assert "tended to HURT" in out and "loss/lose" in out
+    assert "rank tendency" in out and "not a rule" in out
+    assert "RANK BETTER" in out and "loss/win" in out
+    assert "RANK WORSE" in out and "loss/lose" in out
 
 
 def test_execute_never_raises_on_junk(tmp_path):

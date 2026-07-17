@@ -1094,28 +1094,18 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
             1 for c in picked if c.get("maturity") == "operator-pinned")),
     }
     if concept_overview:
+        from looplab.engine.memory import concept_profit_tendencies
         rows = [e for e in (concept_overview.get("concepts") or []) if isinstance(e, dict)]
-        # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN directional tendency
-        # (advisory only — prompts, never selection). "helps" = signalled in ≥2 runs, helped in ≥2, and
-        # net-positive (n_helped > n_hurt); "hurts" is the mirror. Direction-normalized signs make counting
-        # across runs legitimate. A concept with mixed/thin evidence appears in neither list.
-        def _signal(e):
-            return e.get("n_helped", 0) + e.get("n_neutral", 0) + e.get("n_hurt", 0)
-
-        def _tendency(is_help):
-            picked = [e for e in rows if _signal(e) >= 2 and (
-                (e.get("n_helped", 0) >= 2 and e.get("n_helped", 0) > e.get("n_hurt", 0)) if is_help
-                else (e.get("n_hurt", 0) >= 2 and e.get("n_hurt", 0) > e.get("n_helped", 0)))]
-            picked.sort(key=lambda e: (-(e.get("n_helped", 0) if is_help else e.get("n_hurt", 0)),
-                                       e.get("concept", "")))
-            return [_claim_text(e.get("concept"), 500) for e in picked[:max_claims]]
-
+        # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN rank tendency (advisory
+        # only — prompts, never selection). The threshold lives in ONE shared helper so the context pack and
+        # the cross_run_atlas tool can never diverge; a concept with mixed/thin evidence appears in neither.
+        tendency = concept_profit_tendencies(rows, limit=max_claims)
         pack["coverage"] = {
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
             "top_concepts": [_claim_text(e.get("concept"), 500) for e in rows[:max_claims]],
-            "helps": _tendency(True),
-            "hurts": _tendency(False),
+            "helps": [_claim_text(c, 500) for c, _n in tendency["helps"]],
+            "hurts": [_claim_text(c, 500) for c, _n in tendency["hurts"]],
         }
     return pack
 
@@ -1466,12 +1456,15 @@ def render_context_pack(pack: dict) -> str:
         lines.append(f"Bounded live concept observations (not coverage): {cov.get('n_runs', 0)} returned "
                      f"run(s), {cov.get('n_concepts', 0)} concept(s)"
                      f"{'; UNTRUSTED_MEMORY_CONCEPTS=' + top if top else ''}.")
-        # Phase 1 profit signal: a direction-normalized help/hurt tendency across similar runs. ADVISORY —
-        # a prior tendency, never a rule, and never a selection input; the agent may weigh but must not obey.
+        # Phase 1 profit signal: a direction-normalized RANK tendency across similar runs — which concepts
+        # tended to land in the better vs worse half of their run's own field. ADVISORY — a prior rank
+        # tendency, never causal proof, never a rule, and never a selection input; weigh but do not obey.
         helps = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("helps") or [])[:6])
         hurts = ", ".join(repr(_safe_text(x, 100)) for x in (cov.get("hurts") or [])[:6])
         if helps or hurts:
-            parts = ([f"tended to HELP={helps}"] if helps else []) + ([f"tended to HURT={hurts}"] if hurts else [])
-            lines.append("Cross-run concept profit (direction-normalized sign counts; advisory tendency, "
-                         "NOT a rule — consider toward the first, scrutinize the second): " + "; ".join(parts) + ".")
+            parts = ([f"tended to RANK BETTER={helps}"] if helps else []) + (
+                [f"tended to RANK WORSE={hurts}"] if hurts else [])
+            lines.append("Cross-run concept rank tendency (better/worse half of each run vs its sibling "
+                         "concepts; advisory, NOT a rule — consider toward the first, scrutinize the "
+                         "second): " + "; ".join(parts) + ".")
     return "\n".join(lines)

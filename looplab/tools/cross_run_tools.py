@@ -118,10 +118,10 @@ class CrossRunTools:
                 []),
             fn_spec("cross_run_atlas",
                 "A bounded live portfolio summary: observed concepts and their returned run counts, a "
-                "direction-normalized profit tendency (which concepts reliably HELPED vs HURT across similar "
-                "runs — advisory, not a rule), concepts observed in one returned run, and mixed-evidence "
-                "claim records. It has no frozen scope or coverage denominator, so one-run observations are "
-                "not proof of a gap.",
+                "direction-normalized RANK tendency (which concepts consistently landed in the better vs "
+                "worse half of their run across similar runs — advisory, not a rule), concepts observed in "
+                "one returned run, and mixed-evidence claim records. It has no frozen scope or coverage "
+                "denominator, so one-run observations are not proof of a gap.",
                 {}, []),
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
@@ -267,29 +267,23 @@ class CrossRunTools:
                 lines.append("Most explored: "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(e.get('concept'), 120)!r}"
                                          f"(×{e['n_runs']})" for e in atlas["explored"][:6]))
-            # PART V Phase 1: direction-normalized profit tendency — concepts that reliably HELPED/HURT
-            # across similar runs (signalled in >=2 runs, >=2 in one direction, net that way). ADVISORY
-            # tendency, never a rule/selection input; the agent may weigh it, not obey it.
-            def _consistent(is_help):
-                out = []
-                for e in atlas["explored"]:
-                    h, t = e.get("n_helped", 0), e.get("n_hurt", 0)
-                    if h + e.get("n_neutral", 0) + t < 2:
-                        continue
-                    if (h >= 2 and h > t) if is_help else (t >= 2 and t > h):
-                        out.append((e.get("concept"), h if is_help else t))
-                out.sort(key=lambda kv: (-kv[1], str(kv[0])))
-                return out
-            helps, hurts = _consistent(True), _consistent(False)
+            # PART V Phase 1: direction-normalized RANK tendency — concepts that consistently landed in the
+            # better vs worse half of their run's own field across similar runs. The qualifying threshold is
+            # the SHARED `concept_profit_tendencies` helper (identical to the researcher advisory pack, so the
+            # two surfaces cannot diverge). ADVISORY rank tendency, never a rule/selection input.
+            from looplab.engine.memory import concept_profit_tendencies
+            tendency = concept_profit_tendencies(atlas["explored"])
+            helps, hurts = tendency["helps"], tendency["hurts"]
             if helps or hurts:
                 seg = []
                 if helps:
-                    seg.append("tended to HELP: " + ", ".join(
+                    seg.append("tended to RANK BETTER: " + ", ".join(
                         f"UNTRUSTED_MEMORY={_safe_text(c, 120)!r}(+{n})" for c, n in helps[:6]))
                 if hurts:
-                    seg.append("tended to HURT: " + ", ".join(
+                    seg.append("tended to RANK WORSE: " + ", ".join(
                         f"UNTRUSTED_MEMORY={_safe_text(c, 120)!r}(-{n})" for c, n in hurts[:6]))
-                lines.append("Direction-normalized profit tendency (advisory, not a rule): " + "; ".join(seg))
+                lines.append("Cross-run rank tendency (better/worse half of each run; advisory, not a rule): "
+                             + "; ".join(seg))
             if atlas["thin_coverage"]:
                 lines.append("Observed in one returned run (not a coverage gap): "
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(x, 120)!r}"
