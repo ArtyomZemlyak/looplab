@@ -153,6 +153,8 @@ class ConceptGovernanceTools:
         # into the transcript and can steer subsequent gated edits. Also unbounded in aggregate:
         # 3×40 entries × ~500 chars ≈ 60K exceeds the 16K tool-result convention. Route every slug
         # through the shared sanitizer + UNTRUSTED_MEMORY framing and bound the total.
+        lines = [f"Cross-run concept taxonomy: {len(merges)} merge(s), {len(purges)} purge(s), "
+                 f"{len(splits)} split(s)."]
         if merges:
             lines.append("Merges (from -> to): " + ", ".join(f"{f} -> {t}" for f, t in merges[:40]))
         if purges:
