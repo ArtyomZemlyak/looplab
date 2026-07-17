@@ -112,6 +112,31 @@ def test_theme_rollup_is_concept_axis_multi_membership_phase6a():
     assert roll["reg"]["count"] == 1
 
 
+def test_folded_empty_entry_is_untagged_not_resurrected_authored_axis():
+    # PART V mega-review M1: an EXPLICIT empty folded entry (operator retag_node [] or a classifier that
+    # returned zero tags) means the node is deliberately UNTAGGED — the digest surfaces must NOT resurrect
+    # the frozen idea.concepts axis (which would keep the cleared node under its old axis while /concepts
+    # shows it untagged, and leak it from list_experiments theme=<old-axis>). A node with NO folded entry
+    # at all still falls back to the legacy authored axis.
+    from looplab.core.models import Node, NodeStatus, RunState
+    from looplab.events.digest import node_axes, node_theme, theme_rollup
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft", concepts=["loss/contrastive"]),
+                metric=0.9, status=NodeStatus.evaluated),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft", concepts=["loss/triplet"]),
+                metric=0.7, status=NodeStatus.evaluated),
+    }
+    st.node_concepts[0] = []          # explicit empty entry = deliberately untagged (was cleared)
+    # node 1 has NO folded entry -> legacy fallback to its authored axis
+    assert node_axes(st, st.nodes[0]) == set()          # untagged, NOT {"loss"}
+    assert node_theme(st.nodes[0], st) is None          # untagged, NOT "loss"
+    assert node_axes(st, st.nodes[1]) == {"loss"}       # no folded entry -> authored fallback
+    roll = theme_rollup(st)
+    assert set(roll) == {"loss"} and roll["loss"]["count"] == 1   # only node 1, node 0 cleared out
+
+
 def test_theme_rollup_legacy_theme_when_no_concepts_phase6a():
     # A pre-concept run (idea.theme only, no concepts) still groups: node_axes falls back to the single
     # legacy theme, so old runs keep their breadth signal.

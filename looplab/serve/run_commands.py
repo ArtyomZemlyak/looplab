@@ -672,6 +672,13 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
                 raise HTTPException(400, f"invalid concept id: {raw!r}")
             if cid not in canonical:
                 canonical.append(cid)
+        # Mega-review L1: reject a clear-to-empty base. With `concept_run_base` on, an empty base re-arms the
+        # engine's `_maybe_seed_run_base_concepts` (its gate is "base is empty"), which silently re-populates
+        # it from the first authored node next cadence — the operator's clear would be undone. Empty is thus
+        # indistinguishable from "never seeded"; to remove base concepts, disable `concept_run_base` instead.
+        # Matches the RunControlTools.set_run_concepts tool, which rejects the same.
+        if not canonical:
+            raise HTTPException(400, "run base concepts cannot be empty — set a real base or disable concept_run_base")
         data = {"concepts": canonical}
 
     if event_type == EV_NODE_RESET:

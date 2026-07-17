@@ -64,27 +64,37 @@ def param_distance(a: dict, b: dict) -> float:
     return math.sqrt(sum((a[k] - b[k]) ** 2 for k in keys)) / math.sqrt(len(keys))
 
 
-# DESIGN NOTE (2026-07-17 critique): "theme" is not actually gone — this helper is a LOSSY parallel view
-# (first-axis only, reads frozen idea.concepts not folded state.node_concepts, #7), so the /runs theme map
-# can disagree with /concepts in the same UI. That is an acceptable TRANSITION state, but it should be
-# FINISHED, not left: complete Phase 6a (coverage_signal/theme_rollup aggregate natively over the folded
-# per-node concept AXES, multi-membership, post-rename) so there is genuinely one source of truth.
-def _folded_axes(state, node) -> set:
-    """The DISTINCT coarse concept AXES a node occupies per the FOLDED, post-rename/re-tag
-    `state.node_concepts` (the canonical current set — NOT the frozen `idea.concepts`). Consolidation
-    renames are applied (read-time overlay), so the axis matches the /concepts vocabulary. Empty when the
-    node has no folded concepts (a genuinely legacy / not-yet-classified node). Never raises."""
+# DESIGN NOTE (Phase 6a, DONE): the concept-axis surfaces now share ONE source of truth. `_folded_axes`
+# reads the FOLDED, post-rename `state.node_concepts` (multi-membership); `node_axes`/`theme_rollup`/
+# `coverage_signal`/the list tools/`/runs` all derive from it, so the theme map agrees with /concepts. A
+# node with an explicit folded entry (even empty) is authoritative — the frozen `idea.theme`/`idea.concepts`
+# path below is a fallback used ONLY for genuinely legacy / not-yet-folded nodes (no `node_concepts` record).
+def _folded_axes(state, node):
+    """`(has_entry, axes)` for a node's FOLDED, post-rename concept membership.
+
+    `has_entry` is True iff `state.node_concepts` carries an EXPLICIT entry for this node — INCLUDING an
+    empty list, which means a deliberately-untagged node (an operator `retag_node []`, or a classifier
+    that returned zero tags). When True the folded set is AUTHORITATIVE and callers must NOT resurrect the
+    frozen `idea.concepts`: doing so would keep classifying a just-cleared node under its old authored axis
+    while the /concepts frame (which reads the same `node_concepts`) correctly shows it untagged — the two
+    surfaces would disagree and `list_experiments theme=<old-axis>` would still return the cleared node.
+    `has_entry` is False only for a node with NO folded record at all (a genuinely legacy / not-yet-folded
+    node) — there the caller falls back to the legacy `idea.theme` / first authored axis. `axes` are the
+    distinct coarse axes (consolidation renames applied, read-time overlay). Never raises."""
     nc = getattr(state, "node_concepts", None)
     nc = nc if isinstance(nc, dict) else {}          # soft-fail on a malformed read-model (never raise)
+    nid = getattr(node, "id", None)
+    if nid not in nc:
+        return (False, set())
     rename = getattr(state, "concept_consolidation", None)
     rename = rename if isinstance(rename, dict) else {}   # read-time overlay: a merged concept may move axis
     axes: set = set()
-    for concept in (nc.get(getattr(node, "id", None)) or []):
+    for concept in (nc.get(nid) or []):
         concept = rename.get(str(concept), str(concept))  # apply consolidation so the axis matches /concepts
         axis = concept.strip().split("/", 1)[0].strip()
         if axis:
             axes.add(axis)
-    return axes
+    return (True, axes)
 
 
 def node_theme(node, state=None) -> Optional[str]:
@@ -101,9 +111,11 @@ def node_theme(node, state=None) -> Optional[str]:
     Deterministic + replay-stable. Returns None only when the node carries no folded concept, no theme
     and no authored concept. Callers WITHOUT run state get the legacy authored/theme behavior (2→3)."""
     if state is not None:
-        folded = _folded_axes(state, node)
-        if folded:
-            return sorted(folded)[0]                # canonical current axis (deterministic representative)
+        has_entry, folded = _folded_axes(state, node)
+        if has_entry:
+            # Authoritative: a folded entry (even empty) wins over the frozen authoring. Empty -> untagged
+            # (None), NOT the stale authored axis, so this agrees with the /concepts frame.
+            return sorted(folded)[0] if folded else None
     idea = getattr(node, "idea", None)
     theme = getattr(idea, "theme", None)
     if theme:
@@ -125,11 +137,13 @@ def node_axes(state, node) -> set:
     under EVERY axis it touches, retiring the first-concept-only distortion `node_theme` alone had (a run
     diverse on second axes used to read as dominant_theme_frac~1.0 / theme_entropy~0). Reading the FOLDED
     map means cadence re-tags and consolidation renames reach the breadth signals, so /concepts, the list
-    tools and the Strategist all agree. Deterministic (set membership, order-free)."""
-    axes = _folded_axes(state, node)
-    if axes:
-        return axes
-    t = node_theme(node)                        # legacy display glue: pre-concept runs still group by idea.theme
+    tools and the Strategist all agree. A node with an EXPLICIT folded entry (even empty = deliberately
+    untagged) is authoritative — no frozen-`idea.concepts` fallback, matching the /concepts frame.
+    Deterministic (set membership, order-free)."""
+    has_entry, axes = _folded_axes(state, node)
+    if has_entry:
+        return axes                             # authoritative (empty folded entry -> genuinely no axis)
+    t = node_theme(node)                        # no folded record: legacy glue, pre-concept runs group by idea.theme
     return {t} if t else set()
 
 
