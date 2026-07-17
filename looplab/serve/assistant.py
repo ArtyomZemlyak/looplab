@@ -292,6 +292,17 @@ def system_prompt(mode: str, *, repo_root: Path = REPO_ROOT, knowledge_dir: str 
         "node's agent trace as a linear conversation (the LLM's reasoning, outputs and tool calls that "
         "produced it). Ground your answers in what you actually read — inspect before you assert. When "
         "the user refers to a run, use list_runs/read_run to find and read it.\n"
+        # E1: name the cross-run CONCEPT tools so the model reaches for them — they were wired but unnamed,
+        # so it never used them (the same 'wired but forgotten' gap the Researcher's pointer text fixed).
+        "For cross-run KNOWLEDGE you have concept tools: `cross_run_concept_map` (the shared concept "
+        "taxonomy across runs — which concepts appear most, their hierarchy, and which pairs co-occur), "
+        "`cross_run_atlas` / `cross_run_prior_attempts` / `cross_run_search` (what prior runs explored and "
+        "found), and `concept_taxonomy` to READ the editable shared taxonomy. Use these when a question "
+        "spans runs or is about the concept graph itself.\n"
+        + ("" if mode == "plan" else
+           "You can CURATE the shared concept taxonomy: concept_merge (fold a near-duplicate/rename), "
+           "concept_split (a coarse concept into finer ones), concept_purge (tombstone), and "
+           "concept_edit_clear (undo) — appended, reversible, and mode/approver-gated.\n")
         + ("" if mode == "plan" else
            "You can also drive a run's LIFECYCLE directly: finalize_run (stop + wrap-up: report, "
            "lessons, cost), stop_run (freeze, no wrap-up), resume_run, reset_node (re-run a node in "
