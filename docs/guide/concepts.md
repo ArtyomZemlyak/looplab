@@ -536,9 +536,11 @@ genuine absence on historical events instead of serializing it as an invented fu
 Replay records bounded, canonical integrity envelopes in
 `RunState.node_concept_materialization_receipts[node_id]` with `status` (`partial` or `unavailable`) and an
 ordered closed list of `reasons`. Invalid ids, rename failures and the 64-concept cap preserve the valid
-subset as partial. Unsupported modes, invalid consolidation maps, missing/unknown parent membership and
-active dependency cycles are unavailable; they fail closed to an empty effective set and propagate to
-active descendants. `RunState.run_base_concept_receipt` applies the same distinction to the run base and
+subset as partial. Unsupported modes, invalid consolidation maps, a delta root whose `run_concepts` base
+event has not arrived, missing/unknown parent membership and active dependency cycles are unavailable; they
+fail closed to an empty effective set and propagate to active descendants. An explicit `run_concepts` event
+with `concepts=[]` is a known-empty base, distinct from an absent event; a late valid base clears the
+unavailable prefix receipt. `RunState.run_base_concept_receipt` applies the same distinction to the run base and
 disables new delta authoring unless inheritance is exact. `ConceptFrame` becomes incomplete and
 non-authoritative whenever an active receipt exists, so the UI cannot mistake a fallback for an explicitly
 authored empty set. Current frames ignore node receipts belonging only to tombstoned or aborted nodes;

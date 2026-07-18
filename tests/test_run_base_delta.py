@@ -88,6 +88,67 @@ def test_delta_materialization_is_order_tolerant(tmp_path):
     assert _events(base_last=True) == expected       # base set AFTER every node -> identical (post-pass)
 
 
+def test_delta_prefix_without_run_base_fails_closed_and_late_base_recovers():
+    events = [
+        Event(seq=0, type="run_started", data={
+            "run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"}),
+        Event(seq=1, type="node_created", data=_created(
+            0, mode="delta", added=["root/addition"])),
+        Event(seq=2, type="node_created", data=_created(
+            1, parent_ids=[0], mode="delta", added=["child/addition"])),
+    ]
+    late_base = Event(seq=3, type="run_concepts", data={"concepts": ["base/exact"]})
+    missing = {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
+
+    cursor = FoldCursor()
+    cursor.extend(events)
+    prefix = cursor.snapshot()
+    # CODEX AGENT: the order-tolerant final fold does not make its pre-base live prefix exact. Until the
+    # base event exists, both the root and every dependent delta fail closed instead of laundering additions.
+    assert prefix.run_base_concept_receipt == missing
+    assert prefix.node_concepts == {0: [], 1: []}
+    assert prefix.node_concept_materialization_receipts == {0: missing, 1: missing}
+
+    cursor.extend([late_base])
+    recovered = cursor.snapshot()
+    expected = fold([*events, late_base])
+    assert recovered.model_dump(mode="json") == expected.model_dump(mode="json")
+    assert recovered.run_base_concept_receipt is None
+    assert recovered.node_concept_materialization_receipts == {}
+    assert recovered.node_concepts == {
+        0: ["base/exact", "root/addition"],
+        1: ["base/exact", "child/addition", "root/addition"],
+    }
+
+
+def test_explicit_empty_run_base_is_known_while_malformed_base_stays_missing():
+    root = Event(seq=2, type="node_created", data=_created(
+        0, mode="delta", added=["root/addition"]))
+    explicit_empty = fold([
+        Event(seq=1, type="run_concepts", data={"concepts": []}),
+        root,
+    ])
+    assert explicit_empty.run_base_concepts == []
+    assert explicit_empty.run_base_concept_receipt is None
+    assert explicit_empty.node_concepts == {0: ["root/addition"]}
+    assert explicit_empty.node_concept_materialization_receipts == {}
+
+    malformed = fold([
+        Event(seq=1, type="run_concepts", data={"concepts": "not-a-list"}),
+        root,
+    ])
+    missing = {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
+    assert malformed.run_base_concept_receipt == missing
+    assert malformed.node_concepts == {0: []}
+    assert malformed.node_concept_materialization_receipts == {0: missing}
+
+
 def test_active_delta_cycle_fails_closed_independently_of_event_order():
     started = Event(seq=0, type="run_started", data={
         "run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"})

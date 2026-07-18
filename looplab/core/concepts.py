@@ -19,6 +19,7 @@ ConceptMaterializationReason = Literal[
     "concept_mode_unsupported",
     "concepts_per_node_cap",
     "delta_dependency_cycle",
+    "delta_dependency_missing_run_base",
     "delta_dependency_missing_parent",
     "delta_dependency_unknown_parent_membership",
     "invalid_consolidation_map",
@@ -38,6 +39,9 @@ class ConceptMaterializationReceipt(TypedDict):
 CONCEPT_MODE_UNSUPPORTED_REASON: ConceptMaterializationReason = "concept_mode_unsupported"
 CONCEPTS_PER_NODE_CAP_REASON: ConceptMaterializationReason = "concepts_per_node_cap"
 CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON: ConceptMaterializationReason = "delta_dependency_cycle"
+CONCEPT_DELTA_MISSING_RUN_BASE_REASON: ConceptMaterializationReason = (
+    "delta_dependency_missing_run_base"
+)
 CONCEPT_DELTA_MISSING_PARENT_REASON: ConceptMaterializationReason = (
     "delta_dependency_missing_parent"
 )
@@ -53,6 +57,7 @@ CONCEPT_MATERIALIZATION_REASONS = frozenset({
     CONCEPT_MODE_UNSUPPORTED_REASON,
     CONCEPTS_PER_NODE_CAP_REASON,
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+    CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
     CONCEPT_DELTA_MISSING_PARENT_REASON,
     CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON,
     CONCEPT_INVALID_CONSOLIDATION_MAP_REASON,
@@ -72,6 +77,7 @@ def concept_materialization_reason(raw: Any) -> ConceptMaterializationReason | N
 _REASON_PRIORITY = {
     reason: rank for rank, reason in enumerate((
         CONCEPT_MODE_UNSUPPORTED_REASON,
+        CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
         CONCEPT_DELTA_MISSING_PARENT_REASON,
         CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON,
         CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
@@ -85,6 +91,7 @@ _REASON_PRIORITY = {
 
 _UNAVAILABLE_REASONS = frozenset({
     CONCEPT_MODE_UNSUPPORTED_REASON,
+    CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
     CONCEPT_DELTA_MISSING_PARENT_REASON,
     CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON,
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,

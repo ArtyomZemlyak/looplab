@@ -540,6 +540,44 @@ def test_concept_frame_empty_is_authoritative_not_unavailable(tmp_path):
     _assert_frame_parity(data)
 
 
+def test_concept_frame_marks_pre_base_delta_prefix_unavailable_then_recovers(tmp_path):
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append(
+        "run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    store.append("node_created", {
+        "node_id": 0,
+        "parent_ids": [],
+        "operator": "draft",
+        "idea": {
+            "operator": "draft",
+            "params": {},
+            "rationale": "r",
+            "concept_mode": "delta",
+            "concepts_added": ["root/addition"],
+            "concepts_removed": [],
+        },
+    })
+    client = TestClient(make_app(tmp_path))
+
+    # CODEX AGENT: the UI adapter must not turn an order-tolerant pre-base replay prefix into an
+    # authoritative one-concept graph. Its inherited membership source does not exist yet.
+    prefix = client.get("/api/runs/demo/concepts").json()
+    assert prefix["tree"]["nodes"] == {}
+    assert prefix["status"] == "partial" and prefix["authoritative"] is False
+    assert prefix["completeness"]["truncated"] is False
+    assert prefix["completeness"]["reasons"] == ["delta_dependency_missing_run_base"]
+    _assert_frame_parity(prefix)
+
+    store.append("run_concepts", {"concepts": ["base/exact"]})
+    recovered = client.get("/api/runs/demo/concepts").json()
+    assert recovered["status"] == "complete" and recovered["authoritative"] is True
+    assert set(recovered["touch"]) == {"base/exact", "root/addition"}
+    assert recovered["completeness"]["reasons"] == []
+    _assert_frame_parity(recovered)
+
+
 def test_concept_frame_marks_delta_cycle_empty_as_corrupt_but_respects_current_lifecycle(tmp_path):
     rd = tmp_path / "demo"
     rd.mkdir(parents=True)

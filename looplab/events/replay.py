@@ -10,6 +10,7 @@ from typing import Iterable
 
 from looplab.core.concepts import (
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+    CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
     CONCEPT_DELTA_MISSING_PARENT_REASON,
     CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON,
     CONCEPT_INVALID_ID_REASON,
@@ -170,7 +171,7 @@ class _FoldCtx:
         "charged_terminal_generations", "charged_confirm_seeds", "charged_ablation_ids",
         "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
         "concept_input_capped", "concept_input_invalid", "run_base_capped",
-        "run_base_invalid", "event_index",
+        "run_base_invalid", "run_base_seen", "event_index",
     )
 
     def __init__(self):
@@ -202,6 +203,9 @@ class _FoldCtx:
         self.concept_input_invalid: set[int] = set()
         self.run_base_capped = False
         self.run_base_invalid = False
+        # A zero-length base is valid and distinct from no base event. Delta roots need this fold-only
+        # presence bit because RunState.run_base_concepts alone represents both states as ``[]``.
+        self.run_base_seen = False
         self.event_index = -1
 
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -1421,6 +1425,7 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.run_base_concepts = list(dict.fromkeys(base))
         ctx.run_base_capped = overflow
         ctx.run_base_invalid = invalid
+        ctx.run_base_seen = True
 
 
 def _materialize_concept_deltas(
@@ -1431,6 +1436,7 @@ def _materialize_concept_deltas(
     invalid_inputs: set[int] | None = None,
     base_capped: bool = False,
     base_invalid: bool = False,
+    run_base_seen: bool = True,
 ) -> None:
     """Iteratively materialize delta memberships with typed partial/unavailable receipts.
 
@@ -1459,10 +1465,19 @@ def _materialize_concept_deltas(
     if renames.endpoint_problem:
         # Invalid unused endpoints do not erase resolvable ids, but the projection is only partial.
         base_reasons.add(CONCEPT_INVALID_ID_REASON)
-    st.run_base_concept_receipt = concept_materialization_receipt(base_reasons)
-
     active = {nid for nid in st.node_concept_deltas
               if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED}
+    needs_run_base = any(
+        node is not None and not (getattr(node, "parent_ids", None) or [])
+        for nid in active if (node := st.nodes.get(nid)) is not None
+    )
+    if needs_run_base and not run_base_seen:
+        # CODEX AGENT: an absent EV_RUN_CONCEPTS is not an exact empty base. Order-tolerant logs may append
+        # the base after their nodes, so a live prefix must fail closed until that inheritance source exists;
+        # an explicit ``run_concepts: []`` sets ``run_base_seen`` and remains a valid known-empty base.
+        base_reasons.add(CONCEPT_DELTA_MISSING_RUN_BASE_REASON)
+    st.run_base_concept_receipt = concept_materialization_receipt(base_reasons)
+
     dependencies: dict[int, set[int]] = {}
     children: dict[int, set[int]] = {nid: set() for nid in active}
     for nid in active:
@@ -2642,6 +2657,7 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
         invalid_inputs=ctx.concept_input_invalid,
         base_capped=ctx.run_base_capped,
         base_invalid=ctx.run_base_invalid,
+        run_base_seen=ctx.run_base_seen,
     )
 
     flagged = _apply_trust_gate(st)
