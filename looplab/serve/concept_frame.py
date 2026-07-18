@@ -11,6 +11,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
+from looplab.core.models import valid_concept_id
 from looplab.serve.protocol import RUN_GENERATION_FIELD
 
 
@@ -53,7 +54,10 @@ def concept_id(raw) -> Optional[str]:
         return None
     parts = value.split("/")
     if (len(parts) > MAX_ID_DEPTH or any(not part for part in parts)
-            or any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value)):
+            or any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value)
+            # Enforce the shared CHARSET rule (letters/digits + -._ per segment): reject base64/hash
+            # garbage, symbols, emoji, `<script>`, `a/..` that the depth/length/control checks miss.
+            or not valid_concept_id(value)):
         return None
     return value
 
@@ -486,7 +490,10 @@ def project_frame(core: dict, *, requested_lens: str, lens_pack: list[dict],
     authoritative = core["source_authoritative"] and complete
     completeness = {
         "complete": complete,
-        "truncated": any(reason.endswith("_cap") for reason in reasons),
+        # Use the explicit TRUNCATION_CAP_REASONS set, NOT an endswith("_cap") heuristic: `rename_hop_cap`
+        # also ends in "_cap" but is a corruption-adjacent UNRESOLVED-IDENTITY signal (see the set's
+        # docstring), so the heuristic would mislabel a >16-hop rename chain as a benign size truncation.
+        "truncated": bool(reasons & TRUNCATION_CAP_REASONS),
         "reasons": sorted(reasons),
         "limits": {
             "membership_nodes": MAX_NODE_MEMBERSHIPS,

@@ -322,6 +322,10 @@ def test_concept_governance_tools_wired_read_in_plan_edit_in_mutating(tmp_path):
         settings=SimpleNamespace(cross_run_read_tools=True),  # no memory_dir
     )
     assert "ConceptGovernanceTools" not in [type(p).__name__ for p in none.providers]
+    # Kill-switch: memory_dir set but cross_run_read_tools OFF → no cross-run taxonomy read OR edit.
+    off = build_tools(tmp_path, mode="auto",
+                      settings=SimpleNamespace(memory_dir=str(tmp_path / "mem"), cross_run_read_tools=False))
+    assert "ConceptGovernanceTools" not in [type(p).__name__ for p in off.providers]
 
 
 def test_cross_run_flag_keeps_assistant_prompt_in_sync_with_portfolio_tools(tmp_path):

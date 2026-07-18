@@ -137,6 +137,32 @@ class NodeStatus(str, Enum):
     failed = "failed"        # ran but produced no usable metric
 
 
+_MAX_CONCEPT_ID_CHARS = 256      # mirrors serve.concept_frame.MAX_ID_CHARS (the frame projection gate)
+_MAX_CONCEPT_ID_DEPTH = 12       # mirrors serve.concept_frame.MAX_ID_DEPTH
+
+
+def valid_concept_id(raw: Any) -> bool:
+    """True iff ``raw`` is a well-formed concept id: ``<seg>[/<seg>...]`` where each ``/``-segment is a
+    bounded token of unicode letters/digits plus ``-``, ``.``, ``_`` and contains at least one letter/digit.
+
+    LLM-authored English/Cyrillic/German slugs pass (``loss/decoupled-contrastive``, ``данные/размер``);
+    base64/hash garbage, symbols, emoji, control chars and pure-punctuation segments are rejected
+    (``a/b#c==``, ``loss/💥``, ``<script>``, ``a/..``). Pure/deterministic (no I/O) so every concept-id
+    WRITE path can gate on it — the shared CHARSET owner the three per-layer canonicalizers (serve
+    ``concept_id``, search ``_normalize_concept_id``, engine ``normalize_key``) lacked. Normalizes like the
+    per-run canonicalizers (lower + space→dash + strip surrounding slashes) before checking."""
+    if not isinstance(raw, str):
+        return False
+    s = raw.strip().lower().replace(" ", "-").strip("/")
+    if not s or len(s) > _MAX_CONCEPT_ID_CHARS:
+        return False
+    parts = s.split("/")
+    if len(parts) > _MAX_CONCEPT_ID_DEPTH:
+        return False
+    return all(any(ch.isalnum() for ch in part) and all(ch.isalnum() or ch in "-._" for ch in part)
+               for part in parts)
+
+
 class Idea(BaseModel):
     """A proposed experiment: which operator, what parameters, why."""
     operator: str
@@ -193,6 +219,16 @@ class Idea(BaseModel):
     @property
     def is_sweep(self) -> bool:
         return bool(self.space)
+
+    @field_validator("concepts", mode="after")
+    @classmethod
+    def _drop_malformed_concepts(cls, v):
+        # Concept ids are a bounded axis/slug taxonomy. Silently drop malformed AUTHORED ids (base64/hash
+        # garbage, symbols, emoji — e.g. an observed real-run tag) so a proposer/LLM hallucination never
+        # pollutes node_concepts, the /concepts tree, or (via the classifier) cross-run capsules. Runs at
+        # fold too — the Idea is rebuilt via Idea(**d["idea"]) — so it deterministically heals old logs;
+        # legitimate ids (incl. non-ASCII letters) pass unchanged.
+        return [c for c in v if valid_concept_id(c)] if isinstance(v, list) else v
 
     @model_validator(mode="after")
     def _backfill_rationale(self) -> "Idea":

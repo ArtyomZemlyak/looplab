@@ -58,10 +58,12 @@ _ACTION_RISK = {
     ("write", "revert_file"): RISK_HIGH,
     ("knowledge_write", "remember"): RISK_CONSEQUENTIAL,
     # Cross-run concept-taxonomy edits change SHARED durable portfolio state (aliases/splits), like a KB
-    # note — append-only + reversible (concept_edit_clear), so the MODIFY verbs are CONSEQUENTIAL (Auto
-    # proceeds, default/acceptEdits ask, plan denies). concept_purge is the REMOVAL verb — it tombstones a
-    # concept out of ALL portfolio views — so it is HIGH (asks even in Auto), matching the table's
-    # convention that removal verbs (delete_file/delete_node/delete_run) escalate above their modify peers.
+    # note — append-only + reversible, so the MODIFY verbs (merge/split) and an ordinary clear (reverting a
+    # merge/split) are CONSEQUENTIAL (Auto proceeds, default/acceptEdits ask, plan denies). concept_purge is
+    # the REMOVAL verb — it tombstones a concept out of ALL portfolio views — so it is HIGH (asks even in
+    # Auto), matching the convention that removal verbs (delete_file/delete_node/delete_run) escalate above
+    # their modify peers. UN-PURGING (a clear that re-exposes a tombstoned concept) is the inverse of that
+    # HIGH removal, dispatched as the distinct `concept_unpurge` action so it too is HIGH.
     ("concept_edit", "concept_merge"): RISK_CONSEQUENTIAL,
     ("concept_edit", "concept_purge"): RISK_HIGH,
     ("concept_edit", "concept_split"): RISK_CONSEQUENTIAL,

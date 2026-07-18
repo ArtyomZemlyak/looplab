@@ -49,6 +49,32 @@ def test_at_vocab_rejects_bool(tmp_path):
     assert fold(s.read_all()).node_concepts_at_vocab == {}   # bool rejected, no receipt
 
 
+def test_valid_concept_id_charset_gate():
+    from looplab.core.models import valid_concept_id
+    for ok in ["loss/decoupled-contrastive", "hyperparameter/learning-rate", "данные/размер",
+               "architecture/resnet50", "loss/r-drop", "a/b_c.d", "loss/x y"]:  # space→dash normalizes
+        assert valid_concept_id(ok), ok
+    for bad in ["a/b#c==", "loss/💥", "<script>", "a/..", "", "a//b", "   ", 7, None,
+                "B3czR8YJ74OGBOyfVzhZ#Ea5og4_Pq3dkVsLy9ooaIRjQffav"]:
+        assert not valid_concept_id(bad), repr(bad)
+
+
+def test_idea_drops_malformed_authored_concepts():
+    idea = Idea(operator="draft", params={}, rationale="r",
+                concepts=["loss/good", "arch/moe", "loss/💥", "junk#base64=="])
+    assert idea.concepts == ["loss/good", "arch/moe"]      # garbage dropped, order preserved
+
+
+def test_authored_garbage_concept_dropped_at_fold(tmp_path):
+    # The Idea field-validator runs at fold too (Idea rebuilt via Idea(**d)), so authored garbage never
+    # reaches node_concepts / the /concepts tree even in an already-written log.
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, ["loss/keep", "junk#base64==", "loss/💥"]))
+    st = fold(s.read_all())
+    assert st.node_concepts[0] == ["loss/keep"]
+    assert st.node_concept_provenance[0] == "researcher-authored"
+
+
 def test_idea_concepts_round_trip():
     idea = Idea(operator="draft", params={"seed": 1.0}, rationale="try dcl",
                 concepts=["loss/contrastive/dcl", "regularization/r-drop"])

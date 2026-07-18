@@ -110,7 +110,8 @@ def test_reapply_after_clear_takes_effect_no_false_success(tmp_path):
     # REVIEW (action_id): merge A->B, clear A, merge A->B again MUST leave A merged (not silently no-op).
     # Omitting the registry idempotency token makes each call append fresh (last-write-wins in effect).
     _seed_portfolio(tmp_path, ["loss/a", "loss/b"])
-    t = _auto(tmp_path)
+    # concept_edit_clear is HIGH (it can un-purge) → it asks even in auto, so give an allowing approver.
+    t = ConceptGovernanceTools(tmp_path, mode="auto", approver=lambda a: "allow_once")
     t.execute("concept_merge", {"from_concept": "loss/a", "to_concept": "loss/b"})
     t.execute("concept_edit_clear", {"concept": "loss/a", "kind": "alias"})
     from looplab.engine.concept_registry import resolve_slug
@@ -140,7 +141,8 @@ def test_clear_nonexistent_policy_is_an_error_not_false_success(tmp_path):
     # CODEX AGENT: clearing a concept with NO active policy must be an error (matching the endpoints), not a
     # spurious clear record + false "cleared" receipt. require_existing=True enforces it.
     _seed_portfolio(tmp_path, ["loss/keep"])
-    out = ConceptGovernanceTools(tmp_path, mode="auto").execute(
+    # edit_clear is HIGH (can un-purge) → asks even in auto; allow it so we reach the require_existing check.
+    out = ConceptGovernanceTools(tmp_path, mode="auto", approver=lambda a: "allow_once").execute(
         "concept_edit_clear", {"concept": "loss/keep", "kind": "alias"})
     assert "rejected" in out.lower()                                    # stable error, not "cleared"
     assert load_concept_aliases(tmp_path) == {}                         # no spurious record appended

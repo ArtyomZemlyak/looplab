@@ -22,7 +22,7 @@ from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState)
+                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState, valid_concept_id)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
@@ -563,7 +563,10 @@ class StrategyCadenceMixin:
                     node = state.nodes.get(nid)
                     if node is None:
                         continue
-                    new_ids = sorted(str(c) for c in ft)
+                    # Charset-gate the classifier's tags before they become durable node_concepts (the one
+                    # write path that carries CLASSIFIER provenance into cross-run capsules): drop garbage
+                    # ids so a misbehaving tagger can't pollute the trusted channel.
+                    new_ids = sorted(str(c) for c in ft if valid_concept_id(str(c)))
                     if nid not in known or known.get(nid) != new_ids:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
                                                              "mode": mode, "at_vocab": v_now,

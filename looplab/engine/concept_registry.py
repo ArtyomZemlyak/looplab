@@ -584,9 +584,12 @@ def canonicalize_concepts(concepts, aliases: Optional[dict] = None,
     No rules ({}/None) still applies the versioned normalization contract. Non-destructive: the input list
     is never mutated.
     """
+    from looplab.core.models import valid_concept_id
     raw = list(concepts or [])
     out: set = set()
     for i, c in enumerate(raw):
+        if not valid_concept_id(c):        # drop base64/hash garbage before it enters the cross-run set
+            continue
         canonical = canonicalize_concept(c, sibling_concepts=raw[:i] + raw[i + 1:],
                                          aliases=aliases, splits=splits)
         if canonical:
