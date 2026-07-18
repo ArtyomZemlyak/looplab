@@ -185,6 +185,23 @@ def test_graph_from_node_concepts_rebuilds_deterministically():
     assert "badnoslash" in g2 and "axis/ok" in g2
 
 
+def test_graph_from_node_concepts_uses_the_shared_concept_charset_gate():
+    from looplab.search.concept_graph import graph_from_node_concepts
+
+    valid = ["loss/decoupled-contrastive", "hyperparameter/learning-rate", "данные/размер",
+             "architecture/resnet50", "loss/r-drop", "a/b_c.d", "loss/x y"]
+    invalid = ["a/b#c==", "loss/💥", "<script>", "a/..", "", "a//b", "   ",
+               "B3czR8YJ74OGBOyfVzhZ#Ea5og4_Pq3dkVsLy9ooaIRjQffav", 7, None]
+    graph, tags = graph_from_node_concepts({0: [*valid, *invalid]})
+
+    expected = frozenset({"loss/decoupled-contrastive", "hyperparameter/learning-rate",
+                          "данные/размер", "architecture/resnet50", "loss/r-drop",
+                          "a/b_c.d", "loss/x-y"})
+    assert tags == {0: expected}
+    assert all(concept in graph for concept in expected)
+    assert not any(str(value) in graph for value in invalid)
+
+
 class _IdeaTagClient:
     """Fake LLM idea-tagger returning a fixed id set (tool_call)."""
     def __init__(self, ids):

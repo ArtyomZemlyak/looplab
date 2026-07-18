@@ -14,8 +14,12 @@ export function normalizeConceptId(raw) {
   if (typeof raw !== 'string' || [...raw].length > MAX_ID_CHARS) return ''
   const value = raw.trim().toLowerCase().replaceAll(' ', '-').replace(/^\/+|\/+$/g, '')
   const parts = value.split('/')
+  // CODEX AGENT: mirror core.models.valid_concept_id, not just ConceptFrame's old whitespace gate.
+  // Every segment needs a Unicode letter/number and may otherwise contain only -._; this keeps the
+  // DAG/report vocabulary identical to replay/search for emoji, markup and punctuation-only ids.
+  const validSegment = /^(?=[\p{L}\p{N}._-]*[\p{L}\p{N}])[\p{L}\p{N}._-]+$/u
   return value && [...value].length <= MAX_ID_CHARS && parts.length <= MAX_ID_DEPTH
-    && parts.every(Boolean) && !/[\s\p{C}]/u.test(value) ? value : ''
+    && parts.every(part => validSegment.test(part)) ? value : ''
 }
 
 // Canonicalize exactly like the server ConceptFrame boundary: normalize each hop, follow a bounded

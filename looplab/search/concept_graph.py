@@ -667,8 +667,13 @@ def stale_tagged_nodes(node_ids, at_vocab: dict, *, growth: float = 0.7, cap: in
 
 
 def _normalize_concept_id(raw) -> str:
-    s = str(raw or "").strip().lower().replace(" ", "-")
-    return s.strip("/")
+    # CODEX AGENT: search used to accept markup, emoji and punctuation-only path segments that replay
+    # and ConceptFrame reject, creating a vocabulary visible to coverage/digests but absent in Concepts.
+    # Keep the charset contract owned by core.models and normalize only after that shared gate passes.
+    from looplab.core.models import valid_concept_id
+    if not valid_concept_id(raw):
+        return ""
+    return raw.strip().lower().replace(" ", "-").strip("/")
 
 
 def _describe_node(node) -> str:

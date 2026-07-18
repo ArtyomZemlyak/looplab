@@ -23,6 +23,20 @@ test('canonicalId normalizes exactly like the server concept_id() (one vocabular
   assert.equal(canonicalId('Loss/Old', { 'loss/old': 'loss/new' }), 'loss/new')
 })
 
+test('concept id charset matches the replay and search gates', () => {
+  for (const value of ['loss/decoupled-contrastive', 'hyperparameter/learning-rate',
+    'данные/размер', 'architecture/resnet50', 'loss/r-drop', 'a/b_c.d', 'loss/x y']) {
+    assert.ok(normalizeConceptId(value), value)
+  }
+  for (const value of ['a/b#c==', 'loss/💥', '<script>', 'a/..', '', 'a//b', '   ',
+    'B3czR8YJ74OGBOyfVzhZ#Ea5og4_Pq3dkVsLy9ooaIRjQffav']) {
+    assert.equal(normalizeConceptId(value), '', value)
+    assert.equal(canonicalId(value), '', value)
+  }
+  assert.equal(normalizeConceptId(7), '')
+  assert.equal(normalizeConceptId(null), '')
+})
+
 test('canonicalId never reads an inherited rename entry (returns the normalized id, not an Object member)', () => {
   // "constructor"/"toString"/"__proto__" are inherited members of every plain object; the guard must
   // return the NORMALIZED id string, never Object.prototype.constructor/toString.
