@@ -654,33 +654,47 @@ class CrossRunTools:
             for _cap, concepts in canonical_caps:
                 global_vocab |= concepts
 
-            # Resolve the input to a known canonical concept: exact-canonical first, then the SAME fuzzy
-            # match find_concept_slugs uses (so `rdrop` decodes `regularization/r-drop`). A slug whose alias
-            # chain ends at a tombstone is purged — say so instead of pretending it is new.
+            # Resolve the input to a known canonical concept. Exact-canonical first; then, only for an
+            # ESSENTIALLY-EXACT respelling (`rdrop` -> `regularization/r-drop`), decode it directly. A weaker
+            # fuzzy neighbour is NOT rendered as an authoritative card (that would print CNN's whole track
+            # record for `nn`); it is offered as a ranked "did you mean" list, mirroring find_concept_slugs,
+            # so the agent picks the exact slug. Purge is checked BEFORE any fuzzy step: a slug whose alias
+            # chain ends at a tombstone is deliberately retired and must never resolve to a live look-alike.
             cc = canonicalize_concepts([slug_in], aliases=aliases, splits=splits)
             canon = None
             resolution = "exact"
             if cc and cc[0] in global_vocab:
                 canon = cc[0]
+            elif normalize_key(slug_in) in aliases and resolve_slug(slug_in, aliases) is None:
+                return (f"Concept {_safe_text(slug_in, 120)!r} has been PURGED from the taxonomy — "
+                        "do not reuse it; mint a fresh `axis/name` if you need the idea.")
             else:
                 qn = _slug_norm(slug_in)
-                best, best_score = None, 0.0
-                # A set's iteration order is process-randomized. Stable lexical traversal makes equal-score
-                # fuzzy spellings resolve to one card on every worker instead of arbitrary evidence.
+                scored = []
+                # Stable lexical traversal (set order is process-randomized) so equal-score spellings
+                # resolve to ONE card on every worker. Scoring mirrors find_concept_slugs exactly:
+                # exact-normalized = 1.0, substring = 0.9, else the SequenceMatcher ratio (surface >= 0.55).
                 for s in sorted(global_vocab):
                     sn, ln = _slug_norm(s), _slug_norm(s.split("/")[-1])
-                    score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
-                                difflib.SequenceMatcher(None, qn, ln).ratio())
                     if qn and (qn == sn or qn == ln):
                         score = 1.0
-                    if score > best_score:
-                        best, best_score = s, score
-                if best is not None and best_score >= 0.55:
-                    canon, resolution = best, "fuzzy"
+                    elif qn and (qn in sn or sn in qn):
+                        score = 0.9
+                    else:
+                        score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
+                                    difflib.SequenceMatcher(None, qn, ln).ratio())
+                    if score >= 0.55:
+                        scored.append((score, s))
+                scored.sort(key=lambda t: (-t[0], t[1]))
+                if scored and scored[0][0] >= 0.97:
+                    canon, resolution = scored[0][1], "fuzzy"       # essentially the same slug -> decode it
+                elif scored:
+                    lines = [f"No exact concept card for {_safe_text(slug_in, 120)!r}; the closest existing "
+                             "slug(s) — call concept_card again with the exact one you mean:"]
+                    for sc, s in scored[:5]:
+                        lines.append(f"  UNTRUSTED_MEMORY_CONCEPT={_safe_text(s, 160)!r} match={sc:.0%}")
+                    return "\n".join(lines)
             if canon is None:
-                if normalize_key(slug_in) in aliases and resolve_slug(slug_in, aliases) is None:
-                    return (f"Concept {_safe_text(slug_in, 120)!r} has been PURGED from the taxonomy — "
-                            "do not reuse it; mint a fresh `axis/name` if you need the idea.")
                 from looplab.core.models import valid_concept_id
                 if not valid_concept_id(slug_in):
                     return (f"No concept card for {_safe_text(slug_in, 120)!r}; that text is not a valid "

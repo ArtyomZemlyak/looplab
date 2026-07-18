@@ -739,6 +739,20 @@ def test_concept_card_fuzzy_resolves_respelling(tmp_path):
     assert "resolved by fuzzy match" in out
 
 
+def test_concept_card_weak_fuzzy_suggests_not_fabricates(tmp_path):
+    # A LOOSE fuzzy match must NOT print an authoritative card for a look-alike (concept_card('nn') must
+    # not render architecture/cnn's whole track record). It is offered as a ranked "did you mean" list so
+    # the agent picks the exact slug — this is the review finding the card auto-committed to one 0.55 match.
+    _seed(tmp_path, capsules=[
+        _cap_scoped("a", "t", concepts=["architecture/cnn", "loss/plain"], fingerprint=["kind:dataset"]),
+    ])
+    out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "nn"})
+    assert "No exact concept card" in out and "closest existing" in out
+    assert "UNTRUSTED_MEMORY_CONCEPT='architecture/cnn'" in out and "match=" in out
+    assert "CONCEPT CARD:" not in out            # NOT rendered as an authoritative card
+    assert "track record" not in out
+
+
 def test_concept_card_lists_alias_spellings(tmp_path):
     from looplab.engine.concept_registry import record_concept_alias
     _seed(tmp_path, capsules=[
