@@ -449,8 +449,18 @@ class NoveltyGateMixin:
                     for source in sorted(raw_outcomes, key=str):
                         target = canonicalize_concept(source, sibling_concepts=raw,
                                                       aliases=aliases, splits=splits)
-                        if target and target in concepts and target not in outcomes:
-                            outcomes[target] = raw_outcomes[source]
+                        if not target or target not in concepts:
+                            continue
+                        candidate, current = raw_outcomes[source], outcomes.get(target)
+                        # CODEX AGENT: several raw aliases can collapse to one canonical concept. Mirror
+                        # portfolio_concept_overview: retain the best observation in this run's direction,
+                        # never the value of whichever raw spelling sorts first.
+                        better = (current is None and candidate is not None) or (
+                            current is not None and candidate is not None
+                            and ((candidate < current) if my_dir == "min" else (candidate > current))
+                        )
+                        if target not in outcomes or better:
+                            outcomes[target] = candidate
                 # CODEX AGENT: canonicalization can merge/purge retained labels, so completeness cannot be
                 # recomputed from the transformed list. Freeze the already-validated raw capsule receipt
                 # before replacing membership with its governed projection.

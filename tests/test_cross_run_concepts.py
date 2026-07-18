@@ -511,6 +511,31 @@ def test_cross_run_prior_completeness_includes_partial_nonmatching_capsules(tmp_
     }
 
 
+def test_cross_run_prior_uses_direction_best_outcome_after_alias_collapse(tmp_path):
+    from looplab.engine.concept_registry import record_concept_alias
+
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    fp = task_fingerprint("dataset", "max", "dense retrieval", "recall", universal=True)
+    ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(build_concept_capsule(
+        run_id="aliased", fingerprint=fp, direction="max",
+        concepts=["method/a", "method/b"],
+        concept_outcomes={"method/a": 0.1, "method/b": 0.9},
+    ))
+    record_concept_alias(mem, from_concept="method/a", to_concept="method/canonical")
+    record_concept_alias(mem, from_concept="method/b", to_concept="method/canonical")
+    s = _run_with_cached_concept(tmp_path, "method/canonical")
+    eng = _GateEngine(s, mem)
+    eng._reflect_client = lambda: _IdeaReflectClient(["method/canonical"])
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="different implementation")
+
+    assert eng._graded_novelty_precheck(fold(s.read_all()), idea) is idea
+
+    run = fold(s.read_all()).cross_run_priors[0]["prior_runs"][0]
+    assert run["matched_concept_outcomes"] == [{
+        "concept": "method/canonical", "outcome_retained": True, "outcome": 0.9}]
+
+
 def test_cross_run_prior_never_changes_the_gate_decision(tmp_path):
     # §21.7 / CODEX #13: the SELECTION decision must be byte-identical whether or not a matching prior
     # capsule exists — cross-run is audit-only. Same run + idea; only the presence of a prior differs.
