@@ -14,6 +14,7 @@ from typing import Optional
 import orjson
 import typer
 
+from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                  NODE_CONCEPT_PROVENANCE_OPERATOR,
                                  NODE_CONCEPT_PROVENANCE_UNTRUSTED,
@@ -26,7 +27,8 @@ from looplab.cli import _engine_singleton, _print_result, _require_run_dir, app
 
 def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,
                            expected_last_seq: int | None = None,
-                           require_lock: bool = False) -> int:
+                           require_lock: bool = False,
+                           node_modes: Optional[dict[int | str, str]] = None) -> int:
     """A2 (retro-tag): append `EV_NODE_CONCEPTS` per node so the built tags FOLD into
     `state.node_concepts` and the UI (ConceptChipBar/ConceptView) + cross-run readers see them —
     otherwise `concept-coverage` computes exactly these tags and throws them away after printing.
@@ -36,9 +38,12 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
     exact producer provenance and are generation-fenced (`generation == node.attempt`). Offline heuristic
     membership is display-only; agentic/LLM membership is classifier evidence. Same-source replay is a
     no-op, while an agentic replay upgrades identical heuristic ids once. Operator edits still win.
+    `node_modes` preserves per-node fallback provenance for mixed batches. Classifier `[]` is durable
+    known-empty evidence; empty heuristic output stays absent. Every persisted row is canonicalized,
+    deduplicated, and lexically capped to the replay membership bound.
     Returns the number of nodes tagged."""
-    requested_provenance = node_concept_event_provenance({"mode": mode})
-    if requested_provenance == NODE_CONCEPT_PROVENANCE_UNTRUSTED:
+    default_provenance = node_concept_event_provenance({"mode": mode})
+    if default_provenance == NODE_CONCEPT_PROVENANCE_UNTRUSTED:
         raise ValueError(f"unsupported node-concept producer mode: {mode!r}")
     events = store.read_all()
     tail = events[-1].seq if events else -1
@@ -55,8 +60,26 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
         node = state.nodes.get(nid)
         if node is None:
             continue
-        ids = sorted(str(c) for c in ft)
-        if not ids:
+        # CODEX AGENT: preserve mixed-batch provenance through retro-tag persistence too; a heuristic
+        # fallback row must remain display-only even when the command's default mode is agentic.
+        modes = node_modes or {}
+        row_mode = modes.get(nid, modes.get(str(nid), mode))
+        requested_provenance = node_concept_event_provenance({"mode": row_mode})
+        if requested_provenance == NODE_CONCEPT_PROVENANCE_UNTRUSTED:
+            raise ValueError(f"unsupported node-concept producer mode: {row_mode!r}")
+        raw_ids = list(ft)
+        normalized = [normalize_concept_id(c) for c in raw_ids]
+        if (requested_provenance == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                and (any(cid is None for cid in normalized)
+                     or len(raw_ids) > MAX_MATERIALIZED_CONCEPTS)):
+            # CODEX AGENT: retro-tagging is the same evidence boundary as the live cadence. A malformed
+            # or over-wide classifier row is at most a bounded display fallback, never a trusted subset.
+            row_mode = "offline-heuristic"
+            requested_provenance = node_concept_event_provenance({"mode": row_mode})
+        ids = sorted({cid for cid in normalized if cid})[:MAX_MATERIALIZED_CONCEPTS]
+        # A successful classifier `[]` is durable known-empty evidence and prevents endless re-tagging.
+        # An empty heuristic fallback says nothing independently, so keep it absent/pending.
+        if not ids and requested_provenance != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
             continue
         current_provenance = provenance.get(nid)
         if current_provenance == NODE_CONCEPT_PROVENANCE_OPERATOR:
@@ -71,7 +94,7 @@ def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *
             continue
         event = store.append(
             EV_NODE_CONCEPTS,
-            {"node_id": nid, "concepts": ids, "mode": mode,
+            {"node_id": nid, "concepts": ids, "mode": row_mode,
              "at_vocab": int(vocab_size), "generation": node.attempt},
             expected_last_seq=tail,
             require_lock=require_lock,
@@ -368,7 +391,8 @@ def concept_coverage(
     seed = skeleton_for(resolved_type)
     seed = seed if seed.concepts() else None
 
-    def _persist_exact(raw_tags, mode: str, vocab_size: int) -> int:
+    def _persist_exact(raw_tags, mode: str, vocab_size: int,
+                       node_modes: Optional[dict[int | str, str]] = None) -> int:
         """Commit tags only against the exact finished snapshot the analysis inspected."""
         try:
             with _engine_singleton(run_dir) as owned:
@@ -395,6 +419,7 @@ def concept_coverage(
                     vocab_size,
                     expected_last_seq=snapshot_tail,
                     require_lock=True,
+                    node_modes=node_modes,
                 )
         except typer.Exit:
             raise
@@ -450,7 +475,7 @@ def concept_coverage(
         # raw_tags are the tagger's pre-consolidation ids (what the live cadence records); the fold
         # re-derives consolidation/coverage from them, so persisting these keeps parity with a live run.
         n = _persist_exact(cmap.get("raw_tags"), cmap.get("mode", "agentic"),
-                           len(cmap["graph"].concepts()))
+                           len(cmap["graph"].concepts()), cmap.get("raw_tag_modes"))
         typer.echo(f"  persisted {n} node_concepts events -> this run now shows concepts in the UI and "
                    "exposes classifier tags to replay-derived indexes. Existing finalized capsule memory "
                    "is not rebuilt by this command.")

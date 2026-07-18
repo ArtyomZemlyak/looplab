@@ -83,6 +83,77 @@ def test_same_agentic_ids_upgrade_heuristic_once_then_deduplicate(tmp_path):
     assert state.node_concepts_at_vocab[0] == 9
 
 
+def test_mixed_agentic_persist_keeps_fallback_rows_display_only(tmp_path):
+    s = _store(tmp_path)
+    tags = {
+        0: frozenset({"loss/coarse-fallback"}),
+        1: frozenset({"loss/reviewed"}),
+    }
+    n = _persist_node_concepts(
+        s,
+        fold(s.read_all()),
+        tags,
+        "agentic",
+        9,
+        node_modes={0: "offline-heuristic", 1: "agentic"},
+    )
+
+    assert n == 2
+    events = [event.data for event in s.read_all() if event.type == "node_concepts"]
+    assert [event["mode"] for event in events] == ["offline-heuristic", "agentic"]
+    state = fold(s.read_all())
+    assert classifier_verified_node_concepts(state, 0) == []
+    assert classifier_verified_node_concepts(state, 1) == ["loss/reviewed"]
+    assert 0 not in state.node_concepts_at_vocab
+    assert state.node_concepts_at_vocab[1] == 9
+
+
+def test_classifier_empty_is_durable_but_empty_fallback_stays_pending(tmp_path):
+    s = _store(tmp_path)
+    n = _persist_node_concepts(
+        s,
+        fold(s.read_all()),
+        {0: frozenset(), 1: frozenset()},
+        "agentic",
+        9,
+        # JSON-shaped maps use string keys; persistence intentionally accepts both spellings.
+        node_modes={"0": "llm", "1": "offline-heuristic"},
+    )
+
+    assert n == 1
+    state = fold(s.read_all())
+    assert state.node_concepts[0] == []
+    assert state.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+    assert state.node_concepts_at_vocab[0] == 9
+    assert 1 not in state.node_concepts
+
+
+def test_malformed_overwide_classifier_row_is_bounded_and_downgraded(tmp_path):
+    s = _store(tmp_path)
+    tags = {0: frozenset([None, *(f"axis/c{i:03d}" for i in range(70))])}
+
+    assert _persist_node_concepts(s, fold(s.read_all()), tags, "llm", 70) == 1
+
+    event = [event for event in s.read_all() if event.type == "node_concepts"][0]
+    assert event.data["mode"] == "offline-heuristic"
+    assert event.data["concepts"] == [f"axis/c{i:03d}" for i in range(64)]
+    state = fold(s.read_all())
+    assert classifier_verified_node_concepts(state, 0) == []
+    assert state.node_concept_provenance[0] == NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC
+
+
+def test_duplicate_overflow_cannot_bypass_classifier_row_bound(tmp_path):
+    s = _store(tmp_path)
+
+    assert _persist_node_concepts(
+        s, fold(s.read_all()), {0: ["loss/repeated"] * 65}, "llm", 1) == 1
+
+    event = [event for event in s.read_all() if event.type == "node_concepts"][0]
+    assert event.data["mode"] == "offline-heuristic"
+    assert event.data["concepts"] == ["loss/repeated"]
+    assert classifier_verified_node_concepts(fold(s.read_all()), 0) == []
+
+
 def test_offline_repeat_is_idempotent_and_cannot_downgrade_classifier(tmp_path):
     s = _store(tmp_path)
     initial = {0: frozenset({"loss/agentic"})}

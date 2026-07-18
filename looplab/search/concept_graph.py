@@ -44,7 +44,12 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Optional
 
-from looplab.core.concepts import normalize_concept_id, normalized_concept_renames, resolve_concept
+from looplab.core.concepts import (
+    MAX_MATERIALIZED_CONCEPTS,
+    normalize_concept_id,
+    normalized_concept_renames,
+    resolve_concept,
+)
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_AUTHORED, RunState
 
 
@@ -469,13 +474,18 @@ def tag_nodes_heuristic(state: RunState, graph: ConceptGraph) -> dict[int, froze
     tags: dict[int, frozenset[str]] = {}
     for n in _experiment_nodes(state):
         low = _node_text(n)
-        tags[n.id] = frozenset(cid for pat, cid in index if pat.search(low))
+        # CODEX AGENT: this is a coarse display projection, not independent evidence. Bound it at the
+        # producer with the same deterministic lexical cap as replay so a wide alias graph cannot create
+        # an enormous event that replay later truncates to a different-looking membership.
+        matches = sorted({cid for pat, cid in index if pat.search(low)})
+        tags[n.id] = frozenset(matches[:MAX_MATERIALIZED_CONCEPTS])
     return tags
 
 
 def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str = "tool_call",
                   grow: bool = True, tools=None, known_tags=None,
-                  max_workers: int = 8) -> dict[int, frozenset[str]]:
+                  max_workers: int = 8,
+                  producer_modes: Optional[dict[int, str]] = None) -> dict[int, frozenset[str]]:
     """The PRIMARY (intelligent) tagger: ask the LLM to assign each experiment a SET of concept ids from
     the vocabulary — the §21.11 "multi-label tagging by deepseek" — proposing new ones when `grow` and
     GROWING the graph so it works on ANY task, not a hardcoded vocabulary. When read-only run `tools` are
@@ -489,16 +499,30 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     prior cadence, recorded as `node_concepts` events). Those nodes are NOT re-sent to the LLM — their
     tags are reused and their concept ids re-`ensure`d into the graph — so a repeated strategist cadence
     only pays for the NEW nodes' tagging (~O(new) not ~O(all) LLM calls). A node's tags are stable, so
-    reuse is exact; consolidation still runs afterwards over the merged set to normalize synonyms."""
-    from pydantic import BaseModel, Field
+    reuse is exact; consolidation still runs afterwards over the merged set to normalize synonyms.
+
+    When supplied, `producer_modes` receives the actual producer for each freshly-tagged node. It is
+    intentionally sparse for reused nodes: no producer ran in this invocation. A failed or schema-invalid
+    response records `offline-heuristic`; a validated response records `llm`/`agentic`, including `[]`."""
+    from pydantic import BaseModel, Field, field_validator
 
     from looplab.core.parse import parse_structured
 
     class TagOut(BaseModel):
-        concept_ids: list[str] = Field(default_factory=list)
+        concept_ids: list[str] = Field(default_factory=list, max_length=MAX_MATERIALIZED_CONCEPTS)
+
+        @field_validator("concept_ids")
+        @classmethod
+        def _valid_concept_ids(cls, value: list[str]) -> list[str]:
+            # CODEX AGENT: classifier provenance is all-or-nothing for one response. Silently retaining
+            # only the valid subset would turn a malformed classifier output into trusted evidence.
+            if any(normalize_concept_id(raw) is None for raw in value):
+                raise ValueError("concept_ids contains an invalid concept id")
+            return value
 
     known_tags = known_tags or {}
     heuristic = tag_nodes_heuristic(state, graph)
+    classifier_mode = "agentic" if tools is not None else "llm"
 
     def _ensure_ids(ids) -> frozenset[str]:
         # Re-materialize a reused node's concepts into the graph WITHOUT an LLM call (mirrors the grow
@@ -511,7 +535,7 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
                 continue
             if cid in graph:
                 got.add(cid)
-            elif grow and "/" in cid:
+            elif grow:
                 graph.ensure(cid)
                 got.add(cid)
         return frozenset(got)
@@ -547,10 +571,11 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
     todo = []
     for n in _experiment_nodes(state):
         if n.id in known_tags:
-            # REUSE a previously-recorded node's tags — no LLM call. Empty recorded tags fall back to the
-            # node's heuristic tags (a recorded empty means "the tagger found nothing", still valid).
+            # REUSE a previously-recorded node's tags without another model call.
             reused = _ensure_ids(known_tags[n.id])
-            tags[n.id] = reused if reused else heuristic.get(n.id, frozenset())
+            # CODEX AGENT: an explicit empty result is valid classifier evidence. Replacing it with an
+            # alias match launders heuristic output through the already-verified classifier channel.
+            tags[n.id] = reused
         else:
             todo.append(n)
 
@@ -580,21 +605,35 @@ def tag_nodes_llm(state: RunState, graph: ConceptGraph, client, *, parser: str =
         # record the node's final tag set.
         if raw_ids is None:
             tags[nid] = heuristic.get(nid, frozenset())
+            if producer_modes is not None:
+                producer_modes[nid] = "offline-heuristic"
             return
         got: set[str] = set()
         for raw in raw_ids:
             cid = _normalize_concept_id(raw)
             if not cid:
-                continue
+                tags[nid] = heuristic.get(nid, frozenset())
+                if producer_modes is not None:
+                    producer_modes[nid] = "offline-heuristic"
+                return
             if cid in graph:
                 got.add(cid)
             # A grown concept's parent is its IMMEDIATE id-prefix; `ensure` materializes the whole ancestor
             # chain so an arbitrarily deep `axis/family/method/variant` id nests correctly. Extra cross-axis
             # DAG membership remains a CURATED-skeleton affordance.
-            elif grow and "/" in cid:
+            elif grow:
                 graph.ensure(cid)
                 got.add(cid)
-        tags[nid] = frozenset(got) if got else heuristic.get(nid, frozenset())
+            else:
+                tags[nid] = heuristic.get(nid, frozenset())
+                if producer_modes is not None:
+                    producer_modes[nid] = "offline-heuristic"
+                return
+        # CODEX AGENT: empty is a legitimate successful classifier answer. Preserve it and its
+        # classifier provenance instead of substituting a heuristic tag.
+        tags[nid] = frozenset(got)
+        if producer_modes is not None:
+            producer_modes[nid] = classifier_mode
 
     # Tag the remaining nodes in PARALLEL BATCHES: independent LLM calls run concurrently (the wall-clock
     # win — retro-tagging a finished N-node run was ~O(N) SEQUENTIAL agentic loops), while graph growth is
@@ -1480,8 +1519,9 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
     This mirrors `asset_brief.agentic_asset_brief` being THE D1 primitive: the LLM AGENT is the builder, and
     the deterministic alias heuristic is only the no-LLM FALLBACK (used when `client is None`, and then a
     curated `seed_graph` is needed for it to localize anything). Returns
-    `{graph, tags, coverage, important_uncovered, mode}`. Impure (LLM) on the primary path; the coverage it
-    returns is pure and fold-safe. In the live engine the built tags/graph/importance are recorded as events
+    `{graph, tags, raw_tags, raw_tag_modes, coverage, important_uncovered, mode}`. Impure (LLM) on the
+    primary path; the coverage it returns is pure and fold-safe. In the live engine the built
+    tags/graph/importance are recorded as events
     and read deterministically by `fold` (Phase 1/2 wiring) — this primitive is the producer, not the writer."""
     graph = seed_graph if seed_graph is not None else ConceptGraph(
         task_type=getattr(state, "task_id", "") or "")
@@ -1490,11 +1530,13 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
         # localize; a curated seed_graph is required for a useful offline map). No importance derivation.
         tags = tag_nodes_heuristic(state, graph)
         return {"graph": graph, "tags": tags, "raw_tags": tags,
+                "raw_tag_modes": {nid: "offline-heuristic" for nid in tags},
                 "coverage": concept_coverage(state, graph, tags),
                 "important_uncovered": [], "mode": "offline-heuristic"}
     # `known_tags` lets a repeated cadence reuse already-recorded node tags and only LLM-tag NEW nodes.
+    raw_tag_modes: dict[int, str] = {}
     raw = tag_nodes_llm(state, graph, client, parser=parser, tools=tools, grow=True, known_tags=known_tags,
-                        max_workers=max_workers)
+                        max_workers=max_workers, producer_modes=raw_tag_modes)
     # CONSOLIDATE the freely-grown vocabulary before measuring, so synonym fragmentation
     # (`augmentation` vs `data-augmentation`) doesn't split the concentration signal (§21.11 follow-up).
     graph, tags, renamed = consolidate_concepts(graph, dict(raw), client=client, parser=parser,
@@ -1504,7 +1546,8 @@ def build_concept_map(state: RunState, task_goal: str = "", *, client=None, tool
                                           client=client, asset_brief=asset_brief, parser=parser)
     # `raw_tags` are the tagger's PRE-consolidation ids (stable per node) — the caller records THESE as
     # `node_concepts` events so a later cadence reuses them and re-derives consolidation/coverage cheaply.
-    return {"graph": graph, "tags": tags, "raw_tags": raw, "coverage": cov, "important_uncovered": important,
+    return {"graph": graph, "tags": tags, "raw_tags": raw, "raw_tag_modes": raw_tag_modes,
+            "coverage": cov, "important_uncovered": important,
             "consolidated": renamed, "mode": "agentic" if tools is not None else "llm"}
 
 

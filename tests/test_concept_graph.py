@@ -15,9 +15,9 @@ import pytest
 from looplab.core.models import RunState
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
-from looplab.search.concept_graph import (concept_coverage, concept_report, dense_retrieval_skeleton,
-                                          skeleton_for, tag_nodes_heuristic, tag_nodes_llm,
-                                          uncovered_regions)
+from looplab.search.concept_graph import (Concept, ConceptGraph, concept_coverage, concept_report,
+                                          dense_retrieval_skeleton, skeleton_for, tag_nodes_heuristic,
+                                          tag_nodes_llm, uncovered_regions)
 
 
 def _store(tmp_path, nodes, direction="max") -> EventStore:
@@ -101,6 +101,17 @@ def test_heuristic_tagger_keys_on_lineage(tmp_path):
     for nid in range(5):
         assert "loss/decoupled-contrastive" in tags[nid]
     assert {"loss/decoupled-contrastive"} <= set().union(*tags.values())
+
+
+def test_heuristic_tagger_is_a_deterministic_bounded_display_projection(tmp_path):
+    st = fold(_store(tmp_path, [("shared", "shared method", 0.5)]).read_all())
+    graph = ConceptGraph([
+        Concept(f"axis/c{i:03d}", aliases=("shared",), axes=("axis",)) for i in range(70)
+    ])
+
+    tags = tag_nodes_heuristic(st, graph)
+
+    assert tags[0] == frozenset(f"axis/c{i:03d}" for i in range(64))
 
 
 def test_untagged_nodes_are_tracked(tmp_path):
@@ -701,14 +712,69 @@ def test_build_concept_map_exposes_raw_tags_for_recording():
     from looplab.search.concept_graph import build_concept_map
     m = build_concept_map(st, client=None, seed_graph=dense_retrieval_skeleton())
     assert "raw_tags" in m and isinstance(m["raw_tags"], dict)
+    assert m["raw_tag_modes"] == {0: "offline-heuristic"}
 
 
 def test_llm_tagger_degrades_to_heuristic_on_failure(tmp_path):
     # a node whose text DOES match a heuristic alias: on LLM failure it must fall back to that tag
     st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
     g = dense_retrieval_skeleton()
-    tags = tag_nodes_llm(st, g, _BadClient())
+    modes = {}
+    tags = tag_nodes_llm(st, g, _BadClient(), producer_modes=modes)
     assert "loss/decoupled-contrastive" in tags[0]   # heuristic fallback, harness never crashed
+    assert modes == {0: "offline-heuristic"}
+
+
+def test_llm_tagger_preserves_successful_and_reused_empty_results(tmp_path):
+    st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
+
+    fresh_modes = {}
+    fresh = tag_nodes_llm(
+        st, dense_retrieval_skeleton(), _TagClient([]), producer_modes=fresh_modes)
+    assert fresh == {0: frozenset()}
+    assert fresh_modes == {0: "llm"}
+
+    reused_client = _TagClient(["loss/decoupled-contrastive"])
+    reused_modes = {}
+    reused = tag_nodes_llm(
+        st,
+        dense_retrieval_skeleton(),
+        reused_client,
+        known_tags={0: []},
+        producer_modes=reused_modes,
+    )
+    assert reused == {0: frozenset()}
+    assert reused_client.calls == 0
+    assert reused_modes == {}
+
+
+def test_llm_tagger_rejects_mixed_invalid_output_as_untrusted_fallback(tmp_path):
+    st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
+    modes = {}
+    tags = tag_nodes_llm(
+        st,
+        dense_retrieval_skeleton(),
+        _TagClient(["loss/decoupled-contrastive", "bad!"]),
+        producer_modes=modes,
+    )
+    assert "loss/decoupled-contrastive" in tags[0]
+    assert "bad!" not in tags[0]
+    assert modes == {0: "offline-heuristic"}
+
+
+def test_llm_tagger_rejects_duplicate_overflow_as_untrusted_fallback(tmp_path):
+    st = fold(_store(tmp_path, [("dcl", "decoupled contrastive loss run", 0.5)]).read_all())
+    modes = {}
+
+    tags = tag_nodes_llm(
+        st,
+        dense_retrieval_skeleton(),
+        _TagClient(["loss/decoupled-contrastive"] * 65),
+        producer_modes=modes,
+    )
+
+    assert "loss/decoupled-contrastive" in tags[0]
+    assert modes == {0: "offline-heuristic"}
 
 
 ROOT = Path(__file__).resolve().parents[1]  # sanity: importable package layout
@@ -756,7 +822,8 @@ def test_build_concept_map_offline_fallback(tmp_path):
                                 ("temperature", "tune the contrastive temperature", 0.82)]).read_all())
     out = build_concept_map(st, "dense retrieval", client=None, seed_graph=dense_retrieval_skeleton())
     assert out["mode"] == "offline-heuristic"
-    assert set(out) == {"graph", "tags", "raw_tags", "coverage", "important_uncovered", "mode"}
+    assert set(out) == {
+        "graph", "tags", "raw_tags", "raw_tag_modes", "coverage", "important_uncovered", "mode"}
     assert out["important_uncovered"] == []          # no importance derivation without a client
     assert out["coverage"]["experiments"] == 3
 

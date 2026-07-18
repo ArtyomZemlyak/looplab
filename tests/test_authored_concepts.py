@@ -320,6 +320,54 @@ def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, 
                for row in emitted)
 
 
+def test_cadence_persists_per_node_fallback_provenance(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, None))
+    s.append("node_created", _created(1, None))
+    s.append("node_created", _created(2, None))
+    state = fold(s.read_all())
+
+    from looplab.search import concept_graph as cg
+    graph = cg.dense_retrieval_skeleton()
+    for i in range(70):
+        graph.ensure(f"axis/c{i:03d}")
+    tags = {
+        0: frozenset({"loss/decoupled-contrastive"}),
+        1: frozenset({"hyperparameter/temperature"}),
+        2: frozenset(f"axis/c{i:03d}" for i in range(70)),
+    }
+
+    def fake_build(*args, **kwargs):
+        return {
+            "graph": graph,
+            "tags": tags,
+            "raw_tags": tags,
+            # Exercise both JSON/string keys and a defensive over-wide classifier row.
+            "raw_tag_modes": {"0": "offline-heuristic", "1": "llm", "2": "llm"},
+            "coverage": cg.concept_coverage(state, graph, tags),
+            "important_uncovered": [],
+            "consolidated": {},
+            "mode": "llm",
+        }
+
+    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+
+    class CaptureStore:
+        def __init__(self): self.events = []
+        def append(self, event_type, data): self.events.append((event_type, data))
+
+    store = CaptureStore()
+    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
+    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+
+    emitted = {data["node_id"]: data for event_type, data in store.events
+               if event_type == "node_concepts"}
+    assert emitted[0]["mode"] == "offline-heuristic"
+    assert emitted[1]["mode"] == "llm"
+    assert emitted[2]["mode"] == "offline-heuristic"
+    assert emitted[2]["concepts"] == [f"axis/c{i:03d}" for i in range(64)]
+
+
 def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):
     # PART V cross-phase: an operator-edited node's tags are authoritative for THIS node, so the coverage
     # cadence must treat them as KNOWN and never re-tag. Two paths would otherwise leak: (1) the node is

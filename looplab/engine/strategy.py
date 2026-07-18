@@ -19,10 +19,12 @@ from typing import Optional
 from looplab.agents.strategist import (NOVELTY_STANCES, StrategyContext, failure_rate,
                                        improves_since_best, is_numeric_space, run_phase,
                                        validate_strategy)
+from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, verifier_evidence_digest,
                                   verifier_evidence_snapshot)
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState, valid_concept_id)
+                                  NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
+                                  node_concept_event_provenance)
 from looplab.engine.costs import bind_cost_accountants
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
@@ -564,6 +566,7 @@ class StrategyCadenceMixin:
                 cov, important = cmap["coverage"], cmap["important_uncovered"]
                 mode = cmap.get("mode", "llm")
                 v_now = len(graph.concepts())    # the vocabulary size THESE tags were produced against
+                raw_tag_modes = cmap.get("raw_tag_modes") or {}
                 # Record a node's RAW tags + at_vocab when it is NEW/re-tagged (not in `known`) OR its tags
                 # changed. Re-recording a staleness-refreshed node even when its tags are unchanged updates
                 # its at_vocab, so it isn't flagged stale (and re-tagged) every cadence — no churn.
@@ -572,13 +575,30 @@ class StrategyCadenceMixin:
                     node = state.nodes.get(nid)
                     if node is None:
                         continue
-                    # Charset-gate the classifier's tags before they become durable node_concepts (the one
-                    # write path that carries CLASSIFIER provenance into cross-run capsules): drop garbage
-                    # ids so a misbehaving tagger can't pollute the trusted channel.
-                    new_ids = sorted(str(c) for c in ft if valid_concept_id(str(c)))
+                    # CODEX AGENT: one classifier batch may contain per-node heuristic fallbacks. Stamp
+                    # the actual producer so those rows cannot enter admission/capsules as independent
+                    # classifier evidence merely because their successful siblings used the LLM.
+                    producer_mode = raw_tag_modes.get(
+                        nid, raw_tag_modes.get(str(nid), mode))
+                    # Canonicalize and bound tags before the durable node_concepts trust boundary.
+                    raw_ids = list(ft)
+                    normalized = [normalize_concept_id(c) for c in raw_ids]
+                    classifier_row = (node_concept_event_provenance({"mode": producer_mode})
+                                      == NODE_CONCEPT_PROVENANCE_CLASSIFIER)
+                    if classifier_row and (
+                            any(cid is None for cid in normalized)
+                            or len(raw_ids) > MAX_MATERIALIZED_CONCEPTS):
+                        # CODEX AGENT: a classifier row outside its reviewed schema is only a bounded
+                        # display fallback. Never persist a filtered subset as independent evidence.
+                        producer_mode = "offline-heuristic"
+                    new_ids = sorted({cid for cid in normalized if cid})[:MAX_MATERIALIZED_CONCEPTS]
+                    final_classifier_row = (node_concept_event_provenance({"mode": producer_mode})
+                                            == NODE_CONCEPT_PROVENANCE_CLASSIFIER)
+                    if not new_ids and not final_classifier_row:
+                        continue
                     if nid not in known or known.get(nid) != new_ids:
                         self.store.append(EV_NODE_CONCEPTS, {"node_id": nid, "concepts": new_ids,
-                                                             "mode": mode, "at_vocab": v_now,
+                                                             "mode": producer_mode, "at_vocab": v_now,
                                                              "generation": node.attempt})
                 # CODEX AGENT: do not persist co-tag edges. They can decrease or disappear after
                 # re-tagging, while the commutative max ledger can only ratchet upward and therefore
