@@ -190,7 +190,7 @@
     position: static !important;
     background: #fff !important;
   }
-  .app > .topbar, .panel-bar, .directions-overview, .why-strip, .dock,
+  .app > .topbar, .panel-bar, .concept-bar, .why-strip, .dock,
   .cmdbar-wrap, .asst-side-panel, .asst-view, .attention-trigger, .attention-layer,
   .toast { display: none !important; }
   .report-view .report-toolbar { display: none; }

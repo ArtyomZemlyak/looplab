@@ -64,20 +64,16 @@ test('large graph starts bounded and preserves exact deep links', async () => {
 })
 
 test('compact graph controls remain named and vertically bounded', async () => {
-  const [runView, directions, css] = await Promise.all([
-    source('RunView.jsx'), source('DirectionsOverview.jsx'), source('styles.css'),
+  const [runView, concepts, css] = await Promise.all([
+    source('RunView.jsx'), source('ConceptChipBar.jsx'), source('styles.css'),
   ])
   assert.match(runView, /copy-view-btn[\s\S]*?aria-label=\{reviewMode/)
-  assert.match(directions, /role="group" aria-label="Research directions"/)
-  assert.match(directions, /type="button" aria-pressed=\{sel\}/)
-  assert.match(directions, /best observed/)
-  assert.match(directions, /difference from run baseline/)
-  assert.match(directions, /Δ from baseline/)
-  assert.match(directions, /not a causal effect or winner claim/)
-  assert.doesNotMatch(directions, /var\(--ok\)|var\(--alarm\)|gain vs baseline/)
-  assert.match(css, /\.do-chips \{ flex-wrap: nowrap; max-height: none; overflow-x: auto/)
-  assert.match(css, /\.do-chip \{ flex: 0 0 auto; max-width: min\(78vw, 320px\); min-height: 44px/)
-  assert.match(css, /\.do-chip \.do-meta \{ min-width: 0; overflow: hidden;/)
+  assert.match(concepts, /role="group" aria-label="Concept filter"/)
+  assert.match(concepts, /className="cb-chip-main" aria-pressed=\{on\}/)
+  assert.match(concepts, /aria-label=\{`Open \$\{chip\.id\}`\}/)
+  assert.match(css, /\.cb-chips \{ flex-wrap: nowrap; max-height: none; overflow-x: auto/)
+  assert.match(css, /\.cb-chip \{ flex: 0 0 auto; max-width: min\(78vw, 320px\); min-height: 44px/)
+  assert.match(css, /\.cb-chip-main, \.cb-drill \{ min-height: 44px; \}/)
 })
 
 test('collapsed group drill-down preserves the active direction projection', async () => {

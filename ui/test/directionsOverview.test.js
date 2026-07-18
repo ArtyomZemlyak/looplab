@@ -1,21 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { fileURLToPath } from 'node:url'
-
-import { JSDOM } from 'jsdom'
-import React from 'react'
-import { renderToStaticMarkup } from 'react-dom/server'
-import { createServer } from 'vite'
 
 import { directionProfit, optimizationLabel, toMarkdown } from '../src/report.js'
 import { GROUP_MODES, computeGroups } from '../src/grouping.js'
 
-const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 const node = (id, metric, direction, parentIds = []) => ({
   id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
   idea: { theme: direction, params: {} },
 })
-
 const conceptNode = (id, metric, concept, parentIds = []) => ({
   id, metric, parent_ids: parentIds, feasible: true, status: 'evaluated', operator: 'improve',
   idea: { theme: null, concepts: [concept], params: {} },
@@ -69,28 +61,4 @@ test('optimization and grouping labels use user-facing language without changing
   assert.equal(optimizationLabel('legacy'), 'unknown')
   assert.deepEqual(GROUP_MODES[0], ['theme', 'direction'])
   assert.match(toMarkdown({ direction: 'max', nodes: {}, task_id: 't', run_id: 'r' }), /\*\*Optimization orientation:\*\* maximize/)
-})
-
-test('Directions renders a persistent, programmatically linked non-causal caveat', async () => {
-  const vite = await createServer({
-    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
-    server: { middlewareMode: true },
-  })
-  try {
-    const { default: DirectionsOverview } = await vite.ssrLoadModule('/src/DirectionsOverview.jsx')
-    const markup = renderToStaticMarkup(React.createElement(DirectionsOverview, {
-      state: { direction: 'max', nodes: { 1: node(1, 1, 'Explore retrieval') } },
-      active: null, onPick() {},
-    }))
-    const document = new JSDOM(markup).window.document
-    assert.equal(document.querySelector('.do-head strong')?.textContent, 'Directions')
-    const group = document.querySelector('[role="group"]')
-    const caveat = document.getElementById(group?.getAttribute('aria-describedby'))
-    assert.ok(caveat, 'aria-describedby must resolve to persistent visible copy')
-    assert.match(caveat.textContent, /Optimization: maximize/)
-    assert.match(caveat.textContent, /descriptive only; not a causal effect or winner claim/i)
-    assert.equal(group.querySelector('.do-name')?.textContent, 'Explore retrieval')
-  } finally {
-    await vite.close()
-  }
 })

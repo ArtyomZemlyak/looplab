@@ -1425,21 +1425,6 @@ pre.code.event-json { max-height: 220px; }
   line-height: 16px; text-align: center; }
 .node-card.dim { opacity: .28; filter: saturate(.5); }
 
-.directions-overview { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }
-.do-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
-.do-head .muted { flex: 1 1 280px; min-width: 0; font-weight: 400; }
-/* round-6: compact theme chips replace the screen-eating treemap */
-.do-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 62px; min-width: 0; overflow: auto; }
-.do-chip { display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 999px;
-  max-width: 100%; min-width: 0; white-space: nowrap; background: var(--bg-2); border: 1px solid var(--line-2);
-  color: var(--fg); cursor: pointer; font-size: 12px; }
-.do-chip:hover { background: var(--bg-3); border-color: color-mix(in srgb, var(--tone) 70%, var(--line-2)); }
-.do-chip.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
-.do-chip .do-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tone); flex: none; }
-.do-chip .do-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-weight: 600; }
-.do-chip .do-meta { min-width: 0; overflow: hidden; color: var(--fg-mut);
-  font-variant-numeric: tabular-nums; text-overflow: ellipsis; }
-
 /* ── View 2: the concept chip bar over the lineage graph ──────────────────────── */
 .concept-bar { border-bottom: 1px solid var(--line); background: var(--bg-1); padding: 6px 12px 7px; flex: none; }
 .cb-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 6px; }
@@ -2200,9 +2185,10 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
   .run-head button, .history-banner .btn, .run-resource-state .btn { min-height: 44px; }
   .copy-view-label { display: none; }
   .copy-view-btn { min-width: 44px; justify-content: center; }
-  .directions-overview { padding-block: 6px; }
-  .do-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
-  .do-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
+  .concept-bar { padding-block: 6px; }
+  .cb-chips { flex-wrap: nowrap; max-height: none; overflow-x: auto; overflow-y: hidden; scrollbar-width: thin; }
+  .cb-chip { flex: 0 0 auto; max-width: min(78vw, 320px); min-height: 44px; }
+  .cb-chip-main, .cb-drill { min-height: 44px; }
   .panel-bar { overflow-x: auto; flex-wrap: nowrap; scrollbar-width: thin; }
   .panel-bar.hub-open { overflow: visible; }
   .panel-bar .menu { flex-wrap: nowrap; min-width: max-content; }

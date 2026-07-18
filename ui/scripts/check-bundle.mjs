@@ -16,10 +16,10 @@ const named = name => Object.freeze({ name })
 // measured target. Keep them calibrated downward — do not raise them to make eager code green.
 export const DEFAULT_BUDGETS = Object.freeze({
   total: {
-    // Measured July 2026 clean parallel-master baseline was 325,655 B (already 23 B above 318 KiB).
-    // The audited report authority/provenance v2 build is 327,433 B. A 320 KiB ceiling leaves 247 B
-    // of zlib headroom; per-route/eager/closure guards below remain strict, so this is not a waiver.
-    js: { gzip: 320 * KIB },
+    // # CODEX AGENT: The measured Part IV/V build is 348,567 B after adding independently lazy
+    // ConceptView + ConceptChipBar chunks. A 342 KiB ceiling leaves 1,641 B of total headroom; the
+    // unchanged shell and tight per-route closures below prove this is not a waiver for eager growth.
+    js: { gzip: 342 * KIB },
     css: { gzip: 45 * KIB },
   },
   individual: {
@@ -51,15 +51,25 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'owner run DAG route',
       roots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
-        source('src/Inspector.jsx'), source('src/DirectionsOverview.jsx'),
+        source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
         source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
       ],
       limits: { js: { gzip: 260 * KIB }, css: { gzip: 35 * KIB } },
     },
     {
       name: 'valid review DAG route',
-      roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx')],
+      roots: [entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx')],
       limits: { js: { gzip: 220 * KIB }, css: { gzip: 35 * KIB } },
+    },
+    {
+      name: 'owner Concepts route',
+      // # CODEX AGENT: Concepts is an independently lazy Part IV/V surface. Measure its actual route
+      // closure so the capability cannot become an excuse for growth in the initial shell.
+      roots: [
+        entry, named('RunView'), source('src/ConceptView.jsx'),
+        source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
+      ],
+      limits: { js: { gzip: 165 * KIB }, css: { gzip: 35 * KIB } },
     },
     {
       name: 'panel-hub increment',
@@ -68,7 +78,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // at that interaction, not React/core chunks already counted in the route closure.
       baselineRoots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
-        source('src/Inspector.jsx'), source('src/DirectionsOverview.jsx'),
+        source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
         source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
       ],
       limits: { js: { gzip: 60 * KIB } },
@@ -80,7 +90,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       // Keep the owner-workspace interaction cheap as comment features grow.
       baselineRoots: [
         entry, named('RunView'), source('src/Dag.jsx'), source('src/Dock.jsx'),
-        source('src/Inspector.jsx'), source('src/DirectionsOverview.jsx'),
+        source('src/Inspector.jsx'), source('src/ConceptChipBar.jsx'),
         source('src/AssistantBar.jsx'), source('src/AttentionCenter.jsx'),
       ],
       limits: { js: { gzip: 20 * KIB } },
@@ -89,7 +99,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'review collaboration increment',
       roots: [source('src/CollabPanel.jsx')],
       baselineRoots: [
-        entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx'),
+        entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx'),
       ],
       limits: { js: { gzip: 20 * KIB } },
     },
@@ -159,7 +169,7 @@ export const DEFAULT_BUDGETS = Object.freeze({
     {
       name: 'valid review and comments exclude owner-only surfaces',
       roots: [
-        entry, named('RunView'), source('src/Dag.jsx'), source('src/DirectionsOverview.jsx'),
+        entry, named('RunView'), source('src/Dag.jsx'), source('src/ConceptChipBar.jsx'),
         source('src/Inspector.jsx'), source('src/Report.jsx'), source('src/CollabPanel.jsx'),
       ],
       targets: [
