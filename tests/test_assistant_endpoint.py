@@ -268,6 +268,7 @@ def test_cross_run_reads_present_in_every_mode_when_memory_configured(tmp_path):
     expected = {
         "cross_run_atlas", "cross_run_claims", "cross_run_concept_map",
         "cross_run_prior_attempts", "cross_run_search", "similar_runs", "find_concept_slugs",
+        "concept_card",
     }
     for mode in ("plan", "auto"):
         tools = build_tools(tmp_path, mode=mode, settings=settings)

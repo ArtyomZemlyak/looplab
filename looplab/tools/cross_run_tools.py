@@ -26,7 +26,7 @@ _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
-    "cross_run_concept_map", "similar_runs", "find_concept_slugs",
+    "cross_run_concept_map", "similar_runs", "find_concept_slugs", "concept_card",
 })
 
 
@@ -186,6 +186,17 @@ class CrossRunTools:
                                           "own→cross→global. Default all."},
                  "limit": {"type": "integer", "description": "Max matches (default 12)."}},
                 []),
+            fn_spec("concept_card",
+                "DECODE a concept slug and see its evidence at a glance: what it is (axis / name + known "
+                "alternative spellings), its cross-run TRACK RECORD in your task family (how many runs used "
+                "it and whether it consistently helped or hurt), how many runs used it globally, which "
+                "concepts it is usually paired with, and any lessons that mentioned it. Use it when a slug "
+                "from find_concept_slugs / the concept map is cryptic, or before betting a node on a "
+                "technique — to learn what the portfolio already knows about it. Advisory, never a rule.",
+                {"slug": {"type": "string", "description": "The concept slug to decode (any spelling — "
+                          "'rdrop' resolves to 'regularization/r-drop'). A full `axis/name` or a bare name "
+                          "both work."}},
+                ["slug"]),
         ]
 
     def _load(self, fname: str) -> list[dict]:
@@ -598,12 +609,145 @@ class CrossRunTools:
             scored.sort()                            # own before cross before global; then best match first
             _label = {"own": "this run", "cross": "cross-run", "global": "global map"}
             lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
-                     "(own→cross→global) — REUSE the closest, don't respell:"]
+                     "(own→cross→global) — REUSE the closest, don't respell "
+                     "(call concept_card('<slug>') to decode one + see its track record):"]
             for _r, negscore, slug, meta in scored[:limit]:
                 lines.append(f"  [{_label[_scope(meta)]}] "
                              f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
                              f"[{_run_count(meta)} run(s)] match={-negscore:.0%}")
             lines.append(_receipt(candidates=len(scored), returned=min(len(scored), limit)))
+            return "\n".join(lines)
+
+        if name == "concept_card":
+            import difflib
+            raw_slug = args.get("slug")
+            if not isinstance(raw_slug, str) or not raw_slug.strip():
+                return "(cross-run tool error: slug must be a non-empty string)"
+            if len(raw_slug) > 256:
+                return "(cross-run tool error: slug exceeds 256 characters)"
+            slug_in = raw_slug.strip()
+            from looplab.engine.concept_registry import (canonicalize_concepts,
+                                                         concept_governance_snapshot,
+                                                         normalize_key, resolve_slug)
+            from looplab.engine.memory import (ConceptCapsuleStore, concept_profit_tendencies,
+                                               portfolio_concept_graph, portfolio_concept_overview)
+
+            taxonomy = concept_governance_snapshot(self.dir)
+            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
+            p = self.dir / "concept_capsules.jsonl"
+            caps = ConceptCapsuleStore(p).all() if p.exists() else []
+            prior_caps = [c for c in caps
+                          if not self._run_id or str(c.get("run_id") or "") != self._run_id]
+            # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
+            # "world concept map"); the trustworthy help/hurt TENDENCY below is scoped to the task family.
+            mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
+            global_vocab: set[str] = set(mine)
+            for cap in prior_caps:
+                global_vocab |= set(canonicalize_concepts(
+                    cap.get("concepts") or [], aliases=aliases, splits=splits))
+
+            # Resolve the input to a known canonical concept: exact-canonical first, then the SAME fuzzy
+            # match find_concept_slugs uses (so `rdrop` decodes `regularization/r-drop`). A slug whose alias
+            # chain ends at a tombstone is purged — say so instead of pretending it is new.
+            cc = canonicalize_concepts([slug_in], aliases=aliases, splits=splits)
+            canon = None
+            resolution = "exact"
+            if cc and cc[0] in global_vocab:
+                canon = cc[0]
+            else:
+                qn = _slug_norm(slug_in)
+                best, best_score = None, 0.0
+                for s in global_vocab:
+                    sn, ln = _slug_norm(s), _slug_norm(s.split("/")[-1])
+                    score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
+                                difflib.SequenceMatcher(None, qn, ln).ratio())
+                    if qn and (qn == sn or qn == ln):
+                        score = 1.0
+                    if score > best_score:
+                        best, best_score = s, score
+                if best is not None and best_score >= 0.55:
+                    canon, resolution = best, "fuzzy"
+            if canon is None:
+                if normalize_key(slug_in) in aliases and resolve_slug(slug_in, aliases) is None:
+                    return (f"Concept {_safe_text(slug_in, 120)!r} has been PURGED from the taxonomy — "
+                            "do not reuse it; mint a fresh `axis/name` if you need the idea.")
+                return (f"No concept card for {_safe_text(slug_in, 120)!r} — no run has used it, so it "
+                        "looks NEW. Mint it as `axis/name` (call find_concept_slugs with no query to reuse "
+                        "an existing axis).")
+
+            axis, _, cname = canon.partition("/")
+            lines = [f"CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT={_safe_text(canon, 160)!r}"
+                     + ("" if resolution == "exact"
+                        else f"  (you asked for {_safe_text(slug_in, 80)!r} — resolved by fuzzy match)")]
+            lines.append(f"  axis={_safe_text(axis, 80)!r}"
+                         + (f"  name={_safe_text(cname, 120)!r}" if cname else "  (no axis prefix)"))
+
+            # Alternative spellings: every alias SOURCE whose chain resolves to this canonical.
+            alt = sorted({src for src in aliases
+                          if resolve_slug(src, aliases) == canon
+                          and normalize_key(src) != normalize_key(canon)})
+            if alt:
+                lines.append("  also seen as: "
+                             + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in alt[:6]))
+
+            # Track record: SCOPED overview = the trustworthy tendency; global count = portfolio context.
+            scoped_caps = [c for c in prior_caps if self._in_scope(c)]
+            ov_scoped = portfolio_concept_overview(scoped_caps, aliases=aliases, splits=splits)
+            row = next((r for r in ov_scoped["concepts"] if r["concept"] == canon), None)
+            ov_global = portfolio_concept_overview(prior_caps, aliases=aliases, splits=splits)
+            grow = next((r for r in ov_global["concepts"] if r["concept"] == canon), None)
+            if row:
+                lines.append(f"  track record (your task family): {row['n_runs']} run(s) — "
+                             f"helped {row['n_helped']} / neutral {row['n_neutral']} / hurt {row['n_hurt']}")
+                _sym = {1: "helped", 0: "neutral", -1: "hurt"}
+                for r in row["runs"][:6]:
+                    m = r.get("metric")
+                    lines.append(f"    - run {_safe_text(r.get('run_id'), 60)!r} "
+                                 f"[{_sym.get(r.get('sign'), 'no-signal')}]"
+                                 + (f" metric={m}" if m is not None else "")
+                                 + f" ({_safe_text(r.get('direction'), 8)})")
+            if canon in mine:
+                lines.append("  NOTE: THIS run is already using this concept.")
+            lines.append(f"  globally used in {grow['n_runs'] if grow else 0} prior run(s) "
+                         "across the whole portfolio.")
+
+            # Cross-run tendency verdict — the same help/hurt source cross_run_atlas uses.
+            tend = concept_profit_tendencies(ov_global["concepts"])
+            if any(c == canon for c, _ in tend["helps"]):
+                lines.append("  cross-run tendency: consistently HELPED (advisory rank across runs, "
+                             "not causal proof).")
+            elif any(c == canon for c, _ in tend["hurts"]):
+                lines.append("  cross-run tendency: consistently HURT across runs — only revisit with a "
+                             "specific new hypothesis for why it would differ here.")
+
+            # Co-occurrence: concepts this one is usually paired with (scoped graph).
+            graph = portfolio_concept_graph(scoped_caps, aliases=aliases, splits=splits)
+            partners: list[tuple] = []
+            for e in graph["edges"]:
+                if e.get("rel") != "co_occurs":
+                    continue
+                if e.get("src") == canon:
+                    partners.append((e.get("dst"), e.get("n_runs", 0)))
+                elif e.get("dst") == canon:
+                    partners.append((e.get("src"), e.get("n_runs", 0)))
+            partners.sort(key=lambda kv: (-kv[1], str(kv[0])))
+            if partners:
+                lines.append("  usually paired with: " + ", ".join(
+                    f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
+
+            # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
+            name_tok = _slug_norm(cname or canon)
+            notes = [lz for lz in self._role_lessons()
+                     if name_tok and name_tok in _slug_norm(str(lz.get("statement") or ""))]
+            if notes:
+                lines.append("  what runs noted:")
+                for lz in notes[:3]:
+                    out = _safe_text(str(lz.get("outcome") or "noted"), 20)
+                    lines.append(f"    [{out}] "
+                                 f"UNTRUSTED_MEMORY={_safe_text(lz.get('statement'), 200)!r}")
+
+            lines.append("  (No authored prose/paper overview yet — this card is assembled from cross-run "
+                         "evidence; deep-research summarization is future work.)")
             return "\n".join(lines)
 
         return "(unknown cross-run tool)"
