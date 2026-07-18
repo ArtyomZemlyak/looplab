@@ -121,6 +121,15 @@ test('zero-node DAG presentation is lifecycle-aware and read-only contexts win',
   const ids = value => value.actions.map(item => item.id)
 
   assert.equal(present({ nodes: { 0: { id: 0 } }, engine_running: true }), null)
+  assert.equal(present({
+    nodes: { 0: { id: 0, tombstoned: true } }, finished: true, engine_running: false,
+  }).kind, 'finished', 'a tombstone-only projection needs an empty state instead of a blank canvas')
+  assert.equal(present({
+    nodes: { 0: { id: 0 } }, aborted_nodes: [0], phase: 'search', engine_running: false,
+  }).kind, 'stalled', 'run-level aborts are excluded by the same projection as the DAG')
+  assert.equal(present({
+    nodes: { 0: { id: 0 }, 1: { id: 1, tombstoned: true } }, engine_running: true,
+  }), null, 'one active node still suppresses the empty state')
   assert.equal(dagEmptyPresentation({ displayed: {}, resourceStatus: 'error' }), null,
     'resource failures are handled by RunView and must never masquerade as successful empty')
   assert.equal(dagEmptyPresentation({
