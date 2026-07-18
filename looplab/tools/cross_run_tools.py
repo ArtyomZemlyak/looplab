@@ -161,8 +161,10 @@ class CrossRunTools:
                 ["query"]),
             fn_spec("similar_runs",
                 "The prior runs MOST similar to THIS one by shared concepts (Jaccard overlap of concept "
-                "sets), ranked. Use it to find which past experiments explored the same directions before "
-                "you propose — then read_run / cross_run_concept_map to dig into a specific one. Advisory.",
+                "sets), ranked within the bound task family and objective direction. Operator concept "
+                "aliases, splits, and purges are applied before comparison. Use it to find which past "
+                "experiments explored the same directions before you propose — then read_run / "
+                "cross_run_concept_map to dig into a specific one. Advisory.",
                 {"limit": {"type": "integer", "description": "How many similar runs to return (default 10)."}},
                 []),
             fn_spec("find_concept_slugs",
@@ -423,31 +425,56 @@ class CrossRunTools:
             except (TypeError, ValueError):
                 limit = 10
             limit = max(1, min(limit, 50))
-            if not self._concepts:
-                return "(this run has no concepts yet — similar_runs ranks by shared concept overlap)"
-            from looplab.engine.memory import ConceptCapsuleStore
-            p = self.dir / "concept_capsules.jsonl"
-            caps = ConceptCapsuleStore(p).all() if p.exists() else []      # portfolio-wide (not task-scoped)
-            mine = self._concepts
+            from looplab.engine.concept_registry import (canonicalize_concepts,
+                                                         concept_governance_snapshot)
+
+            # CODEX AGENT: visibility and identity are one retrieval boundary. A bound model may compare
+            # only `_scoped_capsules()` (task family + compatible direction), and both sides must use the
+            # SAME locked taxonomy snapshot so an alias/split/purge cannot change just one Jaccard operand.
+            taxonomy = concept_governance_snapshot(self.dir)
+            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
+            mine = set(canonicalize_concepts(
+                sorted(self._concepts), aliases=aliases, splits=splits))
+            caps = self._scoped_capsules()
+            prior_caps = [cap for cap in caps
+                          if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
+            scope = "bound_task_family" if self._bound else "portfolio"
+            direction = self._direction if self._bound else "any"
+
+            def _receipt(*, matched: int, returned: int) -> str:
+                return (f"[receipt scope={scope} direction={direction or 'invalid'} "
+                        f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
+                        f"taxonomy_revision={taxonomy['governance_revision']}]")
+
+            if not mine:
+                return ("(this run has no concepts yet after canonical taxonomy governance — "
+                        "similar_runs ranks by shared concept overlap)\n"
+                        + _receipt(matched=0, returned=0))
             ranked = []
-            for cap in caps:
+            for cap in prior_caps:
                 rid = str(cap.get("run_id") or "")
-                if not rid or (self._run_id and rid == self._run_id):     # skip self
+                if not rid:
                     continue
-                theirs = {str(c) for c in (cap.get("concepts") or []) if str(c)}
+                theirs = set(canonicalize_concepts(
+                    cap.get("concepts") or [], aliases=aliases, splits=splits))
                 shared = mine & theirs
                 if not shared:
                     continue
                 jac = len(shared) / len(mine | theirs)
                 ranked.append((jac, len(shared), rid, sorted(shared)))
             if not ranked:
-                return "(no prior run shares a concept with this one)"
+                return "(no prior run shares a concept with this one)\n" + _receipt(matched=0, returned=0)
             ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
-            lines = [f"{min(len(ranked), limit)} prior run(s) most similar by shared concepts (advisory):"]
+            returned = min(len(ranked), limit)
+            lines = [f"{returned} prior run(s) most similar by shared concepts (advisory):"]
             for jac, n, rid, shared in ranked[:limit]:
-                preview = ", ".join(shared[:8]) + ("…" if len(shared) > 8 else "")
-                lines.append(f"  {rid}: {n} shared ({jac:.0%}) — {preview}")
+                preview = ", ".join(
+                    f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
+                    for concept in shared[:8]) + ("…" if len(shared) > 8 else "")
+                lines.append(f"  UNTRUSTED_MEMORY_RUN={_safe_text(rid, 100)!r}: "
+                             f"{n} shared ({jac:.0%}) — {preview}")
             lines.append("Dig into one with cross_run_concept_map / cross_run_search.")
+            lines.append(_receipt(matched=len(ranked), returned=returned))
             return "\n".join(lines)
 
         if name == "find_concept_slugs":
