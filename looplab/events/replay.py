@@ -1467,16 +1467,43 @@ def _materialize_concept_deltas(
         base_reasons.add(CONCEPT_INVALID_ID_REASON)
     active = {nid for nid in st.node_concept_deltas
               if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED}
-    needs_run_base = any(
+    any_component_needs_run_base = any(
         node is not None and not (getattr(node, "parent_ids", None) or [])
         for nid in active if (node := st.nodes.get(nid)) is not None
     )
-    if needs_run_base and not run_base_seen:
+    public_base_reasons = set(base_reasons)
+    if any_component_needs_run_base and not run_base_seen:
         # CODEX AGENT: an absent EV_RUN_CONCEPTS is not an exact empty base. Order-tolerant logs may append
         # the base after their nodes, so a live prefix must fail closed until that inheritance source exists;
         # an explicit ``run_concepts: []`` sets ``run_base_seen`` and remains a valid known-empty base.
         base_reasons.add(CONCEPT_DELTA_MISSING_RUN_BASE_REASON)
-    st.run_base_concept_receipt = concept_materialization_receipt(base_reasons)
+
+        # The node receipt remains on historical tombstoned/aborted roots, but the public run-base receipt
+        # must poison today's ConceptFrame only when a CURRENT delta component actually reaches such a root.
+        # Walk current nodes' authored-delta ancestors iteratively so an inactive root with a live descendant
+        # still fails closed, while a disconnected deleted component cannot corrupt an honestly exact frame.
+        pending = [nid for nid in active
+                   if (node := st.nodes.get(nid)) is not None
+                   and nid not in st.aborted_nodes and not node.tombstoned]
+        visited: set[int] = set()
+        current_needs_run_base = False
+        while pending and not current_needs_run_base:
+            nid = pending.pop()
+            if nid in visited:
+                continue
+            visited.add(nid)
+            node = st.nodes.get(nid)
+            if node is None:
+                continue
+            parents = getattr(node, "parent_ids", None) or []
+            if not parents:
+                current_needs_run_base = True
+                break
+            pending.extend(parent_id for parent_id in parents
+                           if parent_id in active and parent_id not in visited)
+        if current_needs_run_base:
+            public_base_reasons.add(CONCEPT_DELTA_MISSING_RUN_BASE_REASON)
+    st.run_base_concept_receipt = concept_materialization_receipt(public_base_reasons)
 
     dependencies: dict[int, set[int]] = {}
     children: dict[int, set[int]] = {nid: set() for nid in active}

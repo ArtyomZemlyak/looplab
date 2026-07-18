@@ -578,6 +578,43 @@ def test_concept_frame_marks_pre_base_delta_prefix_unavailable_then_recovers(tmp
     _assert_frame_parity(recovered)
 
 
+def test_concept_frame_missing_base_receipt_respects_current_lifecycle(tmp_path):
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append(
+        "run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+    store.append("node_created", {
+        "node_id": 0,
+        "parent_ids": [],
+        "operator": "draft",
+        "idea": {
+            "operator": "draft",
+            "params": {},
+            "rationale": "r",
+            "concept_mode": "delta",
+            "concepts_added": ["deleted/root"],
+            "concepts_removed": [],
+        },
+    })
+    prefix_seq = store.read_all()[-1].seq
+    store.append("node_tombstoned", {"node_ids": [0]})
+    client = TestClient(make_app(tmp_path))
+
+    historical = client.get(
+        "/api/runs/demo/concepts", params={"seq": prefix_seq}).json()
+    assert historical["status"] == "partial" and historical["authoritative"] is False
+    assert historical["completeness"]["reasons"] == ["delta_dependency_missing_run_base"]
+    _assert_frame_parity(historical)
+
+    # The append-only prefix stays inspectable, but a deleted-only dependency cannot poison today's empty map.
+    current = client.get("/api/runs/demo/concepts").json()
+    assert current["tree"]["nodes"] == {}
+    assert current["status"] == "complete" and current["authoritative"] is True
+    assert current["completeness"]["reasons"] == []
+    _assert_frame_parity(current)
+
+
 def test_concept_frame_marks_delta_cycle_empty_as_corrupt_but_respects_current_lifecycle(tmp_path):
     rd = tmp_path / "demo"
     rd.mkdir(parents=True)

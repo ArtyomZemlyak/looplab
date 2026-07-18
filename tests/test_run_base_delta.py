@@ -149,6 +149,48 @@ def test_explicit_empty_run_base_is_known_while_malformed_base_stays_missing():
     assert malformed.node_concept_materialization_receipts == {0: missing}
 
 
+def test_deleted_missing_base_component_does_not_poison_current_unrelated_projection():
+    events = [
+        Event(seq=0, type="node_created", data=_created(
+            0, mode="delta", added=["deleted/root"])),
+        Event(seq=1, type="node_tombstoned", data={"node_ids": [0]}),
+        Event(seq=2, type="node_created", data=_created(
+            1, mode="full", concepts=["current/full"])),
+        Event(seq=3, type="node_created", data=_created(
+            2, parent_ids=[1], mode="delta", added=["current/child"])),
+    ]
+    state = fold(events)
+    missing = {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
+
+    # Historical node receipts remain auditable, but only a CURRENT component may make the global base
+    # receipt incomplete. Node 2 inherits from an exact full parent and never consults the absent run base.
+    assert state.node_concept_materialization_receipts == {0: missing}
+    assert state.run_base_concept_receipt is None
+    assert state.node_concepts[2] == ["current/child", "current/full"]
+
+
+def test_current_descendant_of_deleted_delta_root_still_requires_run_base():
+    state = fold([
+        Event(seq=0, type="node_created", data=_created(
+            0, mode="delta", added=["deleted/root"])),
+        Event(seq=1, type="node_created", data=_created(
+            1, parent_ids=[0], mode="delta", added=["current/child"])),
+        # Adversarial raw log: owner commands tombstone the whole subtree, but replay must remain safe if a
+        # hand-edited/imported row removes only the ancestor while leaving its dependent child current.
+        Event(seq=2, type="node_tombstoned", data={"node_ids": [0]}),
+    ])
+    missing = {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
+    assert state.run_base_concept_receipt == missing
+    assert state.node_concepts == {0: [], 1: []}
+    assert state.node_concept_materialization_receipts == {0: missing, 1: missing}
+
+
 def test_active_delta_cycle_fails_closed_independently_of_event_order():
     started = Event(seq=0, type="run_started", data={
         "run_id": "t", "task_id": "toy", "goal": "g", "direction": "max"})
