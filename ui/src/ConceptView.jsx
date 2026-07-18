@@ -30,7 +30,11 @@ const derivedLensId = value => typeof value === 'string' && value.length <= 64
 export const validDerivedLensLabel = value => typeof value === 'string'
   && value.length >= 1 && value.length <= 60 && value === value.trim()
   && /\S/u.test(value) && !/[\p{C}]/u.test(value)
-const PAID_LENS_CAP_REASONS = new Set([
+// # CODEX AGENT: Keep this contract explicit and aligned with
+// concept_frame.TRUNCATION_CAP_REASONS.
+// A reason merely ending in "_cap" is not necessarily monotone truncation:
+// rename_hop_cap, for example, means taxonomy resolution could not be trusted.
+const TRUNCATION_CAP_REASONS = new Set([
   'node_membership_cap', 'concepts_per_node_cap', 'membership_cap', 'tree_node_cap',
   'edge_cap', 'edge_endpoint_cap', 'experiment_ref_cap',
 ])
@@ -214,7 +218,7 @@ export function validateConceptPayload(value, expected = {}) {
   if (!fields(completeness, 'complete truncated', bool)
       || completeness.complete !== complete || !uniqueList(reasons, conceptId)
       || !same(reasons, [...reasons].sort())
-      || completeness.truncated !== reasons.some(reason => reason.endsWith('_cap'))
+      || completeness.truncated !== reasons.some(reason => TRUNCATION_CAP_REASONS.has(reason))
       || status !== (complete ? 'complete' : 'partial') || complete !== (reasons.length === 0)
       || !exactRecord(limits, LIMIT_FIELDS, count)
       || fieldNames(LIMIT_FIELDS).some(key => limits[key] <= 0)
@@ -260,7 +264,7 @@ export function validatePaidDerivedPayload(value, expected = {}) {
   const frame = validateConceptPayload(value, expected)
   const reasons = frame.completeness.reasons
   if (frame.completeness.source_integrity.complete !== true
-      || (!frame.complete && !reasons.every(reason => PAID_LENS_CAP_REASONS.has(reason)))) {
+      || (!frame.complete && !reasons.every(reason => TRUNCATION_CAP_REASONS.has(reason)))) {
     invalidPayload()
   }
   return frame
