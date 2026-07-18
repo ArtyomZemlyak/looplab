@@ -1168,7 +1168,10 @@ def _eligible(kind: str, meta: dict, intent: str) -> bool:
 
 _INTENTS = ("failed", "contested", "worked", "explore")
 
-_RETRIEVAL_CORPUS_VERSION = 2
+# Document ids are a stable identity for the same searchable statement/concept.  The corpus digest has a
+# separate schema because it also commits to aggregate source receipts that do not belong in every doc id.
+_RETRIEVAL_DOCUMENT_VERSION = 2
+_RETRIEVAL_CORPUS_VERSION = 3
 _INTENT_SCORE_BONUS = 0.001
 _CAVEAT_SCORE_RATIO = 0.50
 _CAVEAT_QUERY_COVERAGE = 0.10
@@ -1193,7 +1196,7 @@ def _json_digest(value, *, length: int = 20) -> str:
 
 
 def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
-    identity = {"v": _RETRIEVAL_CORPUS_VERSION, "kind": kind,
+    identity = {"v": _RETRIEVAL_DOCUMENT_VERSION, "kind": kind,
                 "claim_uid": str(meta.get("claim_uid") or ""),
                 "metric": str(meta.get("metric") or ""),
                 "text": " ".join(unicodedata.normalize("NFKC", str(text or "")).casefold().split())}
@@ -1201,10 +1204,12 @@ def _retrieval_doc(kind: str, text: str, meta: dict) -> tuple[str, str, dict]:
     return kind, str(text or ""), {**meta, "stable_id": stable_id}
 
 
-def _retrieval_corpus_digest(docs) -> str:
+def _retrieval_corpus_digest(docs, *, concept_source: dict) -> str:
     canonical = [{"kind": kind, "text": text, "meta": meta}
                  for kind, text, meta in sorted(docs, key=lambda d: d[2]["stable_id"])]
-    return _json_digest({"v": _RETRIEVAL_CORPUS_VERSION, "docs": canonical}, length=20)
+    envelope = {"v": _RETRIEVAL_CORPUS_VERSION, "docs": canonical,
+                "concept_source": concept_source}
+    return _json_digest(envelope, length=20)
 
 
 def _preselect_retrieval_docs(docs, query: str, limit: int):
@@ -1268,6 +1273,18 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
               if c.get("maturity") != "operator-rejected"]
     overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir),
                                           splits=load_concept_splits(memory_dir))
+    # CODEX AGENT: source completeness is part of the retrieval corpus, even when a query happens to match
+    # only claims or the same retained concept rows.  Aggregate it across every eligible capsule before
+    # query preselection so legacy/omitted concepts cannot masquerade as authoritative absence or exact
+    # frequency, and a partial->complete transition changes the auditable corpus identity.
+    concept_source = {
+        "n_capsules": overview["n_runs"],
+        "source_complete": overview.get("source_complete") is True,
+        "partial_capsules": int(overview.get("partial_capsules", 0) or 0),
+        "source_unknown_capsules": int(overview.get("source_unknown_capsules", 0) or 0),
+        "source_concepts_omitted": int(overview.get("source_concepts_omitted", 0) or 0),
+        "source_outcomes_omitted": int(overview.get("source_outcomes_omitted", 0) or 0),
+    }
     docs: list[tuple[str, str, dict]] = []
     for c in claims:
         evidence_digest = _json_digest({"support": c.get("support", []), "oppose": c.get("oppose", []),
@@ -1290,7 +1307,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "evidence_digest": _json_digest(e["runs"])}))
 
     n_total = len(docs)
-    corpus_digest = _retrieval_corpus_digest(docs)
+    corpus_digest = _retrieval_corpus_digest(docs, concept_source=concept_source)
     max_corpus = max(1, min(int(max_corpus), _MAX_RETRIEVAL_CORPUS))
     indexed_docs = _preselect_retrieval_docs(docs, str(query or ""), max_corpus)
     truncated = n_total - len(indexed_docs)
@@ -1314,13 +1331,15 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                "channels": ["lexical", "bm25", "vector"], "intent": intent,
                "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
                "corpus_digest": corpus_digest,
-               "retrieval_digest": _retrieval_corpus_digest(indexed_docs), "truncated": truncated,
+               "retrieval_digest": _retrieval_corpus_digest(
+                   indexed_docs, concept_source=concept_source), "truncated": truncated,
                "preselection": "query-overlap+one-per-source/v1",
                "contradiction_quota": round(base_quota, 3),
                "effective_quota": round(q, 3), "caveat_target": target,
                "caveat_score_ratio": _CAVEAT_SCORE_RATIO,
                "caveat_query_coverage": _CAVEAT_QUERY_COVERAGE,
-               "intent_score_bonus": _INTENT_SCORE_BONUS}
+               "intent_score_bonus": _INTENT_SCORE_BONUS,
+               **concept_source}
     if not indexed_docs or not str(query or "").strip():
         return {"results": [], "receipt": {**receipt, "n_hits": 0, "n_caveats": 0}}
 

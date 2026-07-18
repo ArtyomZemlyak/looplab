@@ -444,9 +444,21 @@ class CrossRunTools:
                                    research_claims=self._role_research_claims(),
                                    intent=intent, structured=True)
             hits = r["results"][:8]
+            rc = r.get("receipt") or {}
+            source_complete = rc.get("source_complete") is True
             if not hits:
-                return "(no cross-run knowledge matched)"
-            lines = []
+                lines = [("(no retained cross-run knowledge matched; the partial concept source is not "
+                          "proof that no matching concept exists)") if not source_complete
+                         else "(no cross-run knowledge matched)"]
+                if not source_complete:
+                    # CODEX AGENT: a legacy/capped capsule may have omitted the matching concept entirely;
+                    # an empty retrieval is only absence from retained records, never proof of novelty.
+                    lines.append(_partial_source_warning(rc))
+                lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
+                             f"intent={_safe_text(rc.get('intent'), 20)} hits=0 "
+                             f"source_complete={str(source_complete).lower()}]")
+                return "\n".join(lines)
+            lines = [_partial_source_warning(rc)] if not source_complete else []
             for h in hits:
                 if h["kind"] == "claim":
                     contradicts = "; ".join(
@@ -456,11 +468,13 @@ class CrossRunTools:
                                  f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
                                  + (f"; contradicts={contradicts}" if contradicts else ""))
                 else:
-                    lines.append(f"[concept ×{h['n_runs']} run(s); score={h.get('score')}] "
+                    count = (f"×{h['n_runs']} run(s)" if source_complete
+                             else f"retained in at least {h['n_runs']} run(s)")
+                    lines.append(f"[concept {count}; score={h.get('score')}] "
                                  f"UNTRUSTED_MEMORY={_safe_text(h['text'], 120)!r}")
-            rc = r.get("receipt") or {}
             lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
-                         f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))}]")
+                         f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))} "
+                         f"source_complete={str(source_complete).lower()}]")
             return "\n".join(lines)
 
         if name == "similar_runs":

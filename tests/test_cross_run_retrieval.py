@@ -167,9 +167,30 @@ def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
         _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
     second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
         _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
-    assert first["receipt"]["corpus_digest_version"] == 2
+    assert first["receipt"]["corpus_digest_version"] == 3
     assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
     assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
+
+
+def test_receipt_digest_commits_to_aggregate_capsule_completeness():
+    complete = build_concept_capsule(
+        run_id="r1", fingerprint=["k"], direction="max",
+        concepts=["distillation"], concept_outcomes={})
+    legacy = dict(complete)
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy.pop(f"{stem}_{suffix}")
+
+    partial = cross_run_retrieve("", "distillation", capsules=[legacy], lessons=[])
+    exact = cross_run_retrieve("", "distillation", capsules=[complete], lessons=[])
+
+    receipt = partial["receipt"]
+    assert receipt["n_capsules"] == receipt["partial_capsules"] == 1
+    assert receipt["source_complete"] is False
+    assert receipt["source_unknown_capsules"] == 1
+    assert receipt["corpus_digest"] != exact["receipt"]["corpus_digest"]
+    assert receipt["retrieval_digest"] != exact["receipt"]["retrieval_digest"]
+    assert partial["results"][0]["stable_id"] == exact["results"][0]["stable_id"]
 
 
 def test_quota_does_not_inject_an_unrelated_caveat(tmp_path):
@@ -202,6 +223,46 @@ def test_tool_and_cli(tmp_path):
     assert "hard negative" in out.lower() and "claim" in out
     res = CliRunner().invoke(app, ["cross-run-search", str(tmp_path), "hard negatives"])
     assert res.exit_code == 0 and "cross-run search" in res.stdout and "hard negative" in res.stdout.lower()
+
+
+def test_tool_and_cli_search_label_partial_concept_source_as_retained(tmp_path):
+    from typer.testing import CliRunner
+    from looplab.cli import app
+    from looplab.tools.cross_run_tools import CrossRunTools
+
+    capsule = build_concept_capsule(
+        run_id="legacy", fingerprint=["k"], direction="max",
+        concepts=["distillation"], concept_outcomes={})
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            capsule.pop(f"{stem}_{suffix}")
+    _seed(tmp_path, capsules=[capsule])
+
+    tools = CrossRunTools(tmp_path)
+    hit = tools.execute("cross_run_search", {"query": "distillation"})
+    cli = CliRunner().invoke(app, ["cross-run-search", str(tmp_path), "distillation"])
+
+    empty_dir = tmp_path / "empty"
+    empty_dir.mkdir()
+    empty_legacy = build_concept_capsule(
+        run_id="empty-legacy", fingerprint=["k"], direction="max",
+        concepts=[], concept_outcomes={})
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            empty_legacy.pop(f"{stem}_{suffix}")
+    _seed(empty_dir, capsules=[empty_legacy])
+    miss = CrossRunTools(empty_dir).execute(
+        "cross_run_search", {"query": "unseen zirconium"})
+
+    assert "WARNING: PARTIAL capsule source" in hit
+    assert "retained in at least 1 run(s)" in hit
+    assert "source_complete=false" in hit
+    assert "no retained cross-run knowledge matched" in miss
+    assert "not proof that no matching concept exists" in miss
+    assert "PARTIAL capsule source" in miss
+    assert cli.exit_code == 0
+    assert "concept capsule source is partial" in cli.stdout
+    assert "retained in at least 1 run(s)" in cli.stdout
 
 
 def test_pinned_claim_retained_in_retrieval_under_quota(tmp_path):

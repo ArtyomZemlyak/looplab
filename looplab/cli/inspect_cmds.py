@@ -1120,15 +1120,25 @@ def cross_run_search_cmd(
         typer.echo(orjson.dumps(r, option=orjson.OPT_INDENT_2).decode())
         return
     rc = r["receipt"]
+    source_complete = rc.get("source_complete") is True
     trunc = f", {rc['truncated']} dropped" if rc.get("truncated") else ""
     typer.echo(f"cross-run search '{query}' — {rc['n_hits']}/{rc['n_corpus']}{trunc} "
                f"[intent={rc.get('intent', '?')}, {rc.get('n_caveats', 0)} caveat(s) reserved] "
                f"(channels: {', '.join(rc['channels'])})")
+    if not source_complete:
+        # CODEX AGENT: retrieval counts only the concepts that survived each bounded/legacy capsule.  Keep
+        # both positive frequencies and an empty match explicitly lower-bound instead of implying absence.
+        typer.echo("  WARNING: concept capsule source is partial; concept matches and run counts describe "
+                   "retained records only: "
+                   f"{rc.get('source_concepts_omitted', 0)} concept(s) known omitted"
+                   + (f"; {rc.get('source_unknown_capsules', 0)} legacy capsule(s) have unknown totals"
+                      if rc.get("source_unknown_capsules", 0) else ""))
     for h in r["results"]:
         if h["kind"] == "claim":
             typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:100]}")
         else:
-            typer.echo(f"  concept ×{h['n_runs']}  {h['text']}")
+            count = f"×{h['n_runs']}" if source_complete else f"retained in at least {h['n_runs']} run(s)"
+            typer.echo(f"  concept {count}  {h['text']}")
 
 
 @app.command(name="atlas")
