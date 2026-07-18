@@ -1,3 +1,5 @@
+import { activeNodeMap } from './nodeProjection.js'
+
 export const ALL_RUNS = '__all__'
 export const UNASSIGNED_RUNS = '__unassigned__'
 
@@ -77,7 +79,11 @@ export function dagEmptyPresentation({
   displayed = {}, live = null, resourceStatus = 'ready', connected = true,
   historyActive = false, reviewMode = false, sequence = null,
 } = {}) {
-  if (resourceStatus !== 'ready' || Object.keys(displayed?.nodes || {}).length > 0) return null
+  // CODEX AGENT: Tombstoned/aborted rows remain in replay state for audit, but Dag renders only
+  // active nodes. Base the empty-state decision on the same projection or the canvas goes blank
+  // when the last visible experiment is retired.
+  if (resourceStatus !== 'ready'
+      || Object.keys(activeNodeMap(displayed?.nodes || {}, displayed)).length > 0) return null
 
   const connectionNote = connected || historyActive || reviewMode
     ? ''

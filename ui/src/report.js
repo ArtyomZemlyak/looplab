@@ -96,7 +96,7 @@ export const themeEffectiveness = (nodes, dir, state = null) =>
 // this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
 // is evidence shown inside a control, never an implicit ranking that makes controls jump underhand.
 export function directionProfit(state) {
-  const nodes = state.nodes || {}
+  const nodes = activeNodeMap(state.nodes || {}, state)
   const dir = state.direction || 'min'
   const baseline = (improvements(nodes, dir, state)[0] || {}).to ?? null   // first feasible frontier value
   const byDirection = new Map(themeEffectiveness(nodes, dir, state).map(row => [row.key, row]))
@@ -139,7 +139,10 @@ function _pearson(xs, ys) {
 // evaluated feasible nodes ("which knobs mattered"). Needs ≥3 points per param. One source of truth
 // shared by the Report's Learnings section and the Importance panel.
 export function hyperImportance(state) {
-  const nodes = Object.values(state.nodes || {}).filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
+  // CODEX AGENT: lifecycle-retired rows remain in the append-only fold for audit, but every current
+  // report projection must use the same active population as analyze/DAG/Concepts.
+  const nodes = Object.values(activeNodeMap(state.nodes || {}, state))
+    .filter(n => n.status === 'evaluated' && n.metric != null && n.feasible !== false)
   const keys = new Set()
   nodes.forEach(n => Object.entries(n.idea?.params || {}).forEach(([k, v]) => { if (typeof v === 'number') keys.add(k) }))
   const rows = []
@@ -265,7 +268,8 @@ export function trustCaveats(state, best) {
     out.push({ kind: 'leakage', severity: 'alarm', text: 'data-leakage scan flagged this run', panel: 'data' })
   if ((state.drifts || []).length)
     out.push({ kind: 'drift', severity: 'warn', text: `${state.drifts.length} metric-drift divergence(s) caught`, panel: 'trust' })
-  const infeasible = Object.values(state.nodes || {}).filter(n => isEvaluated(n) && n.feasible === false)
+  const infeasible = Object.values(activeNodeMap(state.nodes || {}, state))
+    .filter(n => isEvaluated(n) && n.feasible === false)
   if (infeasible.length)
     out.push({ kind: 'infeasible', severity: 'warn', text: `${infeasible.length} evaluated node(s) violated a constraint`, panel: 'trust' })
   if (best && best.confirmed_mean == null)
@@ -334,7 +338,7 @@ export function buildModelCard(state, _best = null, context = {}) {
   const a = analyze(state)
   const v = verdict(state, a)
   const rep = normalizeRunReport(state.report)
-  const nodeCount = Object.keys(state.nodes || {}).length
+  const nodeCount = Object.keys(activeNodeMap(state.nodes || {}, state)).length
   const coverage = reportNarrativeCoverage(rep, nodeCount)
   const ctx = reportContext(context)
   // The folded event state is the authority. Keep the legacy argument position for callers, but
@@ -372,7 +376,7 @@ export function toMarkdown(state, _best, context = {}) {
   const a = analyze(state)
   const v = verdict(state, a)
   const rep = normalizeRunReport(state.report)
-  const nodeCount = Object.keys(state.nodes || {}).length
+  const nodeCount = Object.keys(activeNodeMap(state.nodes || {}, state)).length
   const coverage = reportNarrativeCoverage(rep, nodeCount)
   const ctx = reportContext(context)
   const champion = v.best || null

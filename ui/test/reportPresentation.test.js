@@ -8,7 +8,8 @@ import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createServer } from 'vite'
 
-import { analyze, buildModelCard, failureBreakdown, toMarkdown, verdict } from '../src/report.js'
+import { analyze, buildModelCard, failureBreakdown, hyperImportance, toMarkdown,
+  verdict } from '../src/report.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportNarrativeCoverage } from '../src/reportModel.js'
 
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
@@ -73,6 +74,23 @@ test('current report projections exclude tombstoned and run-level aborted experi
   assert.deepEqual(projection.themes.map(row => [row.key, row.count]), [['active', 1]])
   assert.deepEqual(projection.regressions, [])
   assert.deepEqual(Object.keys(projection.failures), [])
+})
+
+test('current importance and exported node counts exclude lifecycle-retired experiments', () => {
+  const run = state('max', 1)
+  for (let id = 0; id < 5; id++) {
+    run.nodes[id] = node(id, id + 1, 'improve', id ? [id - 1] : [], `direction-${id}`)
+    run.nodes[id].idea.params = { depth: id }
+  }
+  run.nodes[3].tombstoned = true
+  run.aborted_nodes = [4]
+  run.best_node_id = 2
+
+  const importance = hyperImportance(run)
+  assert.equal(importance.length, 1)
+  assert.deepEqual({ key: importance[0].k, n: importance[0].n }, { key: 'depth', n: 3 })
+  assert.equal(buildModelCard(run).counts.nodes, 3)
+  assert.match(toMarkdown(run), /\*\*Nodes:\*\* 3 — 3 evaluated/)
 })
 
 test('failure breakdown treats prototype names as ordinary model-authored reasons', () => {
