@@ -71,9 +71,13 @@
 .atlas-concepts strong { min-width: 0; overflow-wrap: anywhere; }
 .atlas-concepts > li > div:first-child span { flex: none; color: var(--fg-mut); font-size: 11px; }
 .atlas-runrefs { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
-.atlas-runrefs a { max-width: 100%; padding: 2px 6px; overflow: hidden; border: 1px solid var(--line-2);
+.atlas-runrefs a { display: grid; min-width: 0; max-width: 100%; gap: 2px; padding: 4px 7px; overflow: visible; border: 1px solid var(--line-2);
   border-radius: 5px; background: var(--bg-2); color: var(--fg-dim); font: 10px ui-monospace, Consolas, monospace;
-  text-overflow: ellipsis; white-space: nowrap; }
+  overflow-wrap: anywhere; white-space: normal; }
+.atlas-runref-id { color: var(--fg); font-weight: 700; }
+.atlas-runref-context { color: var(--fg-mut); }
+.atlas-runref-warning { color: var(--warn-text); }
+.atlas-runref-suppressed { color: var(--fg-mut); font-style: italic; }
 .atlas-runrefs a:hover { border-color: var(--accent); color: var(--accent-text); }
 .atlas-runrefs a:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .atlas-thin { padding: 12px 14px 14px; border-top: 1px solid var(--line-2); background: var(--bg-2); }

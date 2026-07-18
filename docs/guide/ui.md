@@ -119,7 +119,8 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   process side effect. Same-key recovery of an already-accepted A command remains observational.
   Natural finish reports use a durable planned/attempt/result boundary. A restart safely performs a
   report only when no attempt marker exists, reuses a scoped durable report, and records an ambiguous
-  paid attempt as incomplete instead of issuing a second provider call.
+  paid attempt as incomplete instead of starting another outer logical report operation; provider-client
+  transport retries and billing ambiguity remain outside that guarantee.
   Standalone legacy CLI `stop`/`finalize`/`resume`/`approve` commands are still outside this server
   sequencer and should not be run concurrently with an active server-owned command.
 - **Review Assistant actions before they run** — permission cards show the server-derived risk,
@@ -177,17 +178,27 @@ Then open the printed URL. The server serves the **built** React bundle from `ui
   launch snapshot for the next restart (not the global UI defaults). Five holdout/verifier fields are
   read-only after `run_started` and come from the folded event log; the API overlays/repairs those values.
   `trust_gate` is changed through a durable event as well as the snapshot, so its effective state is replayable.
-- **Settings page** — a versioned, server-owned editor catalogue with 141 of the 164 direct
-  `Settings` fields in 10 groups. It is intentionally curated, not an exhaustive mirror: fields outside
+  The GET returns a 64-character `config_revision`; the current editor sends it as `expected_revision`.
+  Read/compare/merge/write is covered by its own equivalent local/interprocess locking contract (separate from
+  global Settings), and a stale editor receives a
+  structured `run_config_revision_conflict` instead of overwriting a newer snapshot.
+- **Settings page** — a versioned, server-owned editor catalogue with 143 of the 166 direct
+  `Settings` fields in 10 groups. The default **Essential** view contains 17 high-frequency keys, while
+  search spans the complete catalogue. It is intentionally curated, not an exhaustive mirror: fields outside
   the catalogue remain configurable through environment/config inputs and are preserved by sparse writes.
+  The packaged catalogue is v1 and its HTTP/editor contract is v2; the schema's weak ETag is a semantic cache
+  revision, not a settings mutation token.
   The **API key**
   field (LLM tab) stores the credential securely: it's written to an owner-only `secrets.json`, never
   to `ui_settings.json` or a run snapshot, and the API only ever echoes a masked `***`. Set it here or
   via `LOOPLAB_LLM_API_KEY` (env / `.env`) — either way spawned runs inherit it. Global Save sends only
   schema-owned edits since this tab's last successful load/save; blank edited fields explicitly clear an
   override, and agent-governance roles are a nested sparse patch. The server validates and merges the whole
-  read/modify/write under local + required interprocess locking, so stale tabs preserve disjoint edits. There
-  is no Settings revision/ETag/CAS: two concurrent edits to the same field remain last-writer-wins.
+  read/modify/write under local + required interprocess locking. Ordinary settings and the write-only secret
+  store have separate opaque `settings_revision` and `secret_revision` CAS tokens. The current browser
+  submits the observed token, keeps the draft on a structured 409 conflict or unknown transport outcome,
+  refreshes authoritative state, and never replays the mutation automatically. Omitting a token remains a
+  legacy API compatibility path, not the browser's save contract.
 
 ## Which graph am I looking at?
 
@@ -197,8 +208,27 @@ questions; the Atlas preview is deliberately **not** another force/DAG graph:
 | Surface | What its nodes/regions mean | What it does **not** mean |
 |---|---|---|
 | **Runs → Map** | Run cards packed inside operator-created **Project** folders; `seeded_from` links show when one run was seeded from another. The current filters and project scope are shared with List view. | It is not a theme, concept, evidence, or claim graph. A card may summarize up to four run themes, but themes do not determine the map topology. |
-| **Run → Search** | The experiment DAG for one run. `group by` can project nodes into Direction, operator, metric tercile, or parameter `niche` regions. The **concept chip bar** above the graph is the Part-IV surface: breadcrumb-navigable, multi-select (OR) concept chips that highlight every node touching a selected concept (or a descendant); zoomed-in cards show their authored concepts as tags. A **search icon** in that bar opens a free-text concept lookup that live-previews the same graph highlight as you type (across the whole tree, not just the drilled level) and pins the concept as an ordinary subtree selection on Enter or click. The separate **Concepts** view (`[Concepts]` toggle) is a bounded, generation/sequence-fenced per-run concept tree/table with experiment references, per-concept outcome rollups and typed hierarchy lenses; its header **filter** narrows the tree to concepts and experiments matching the query (experiments by frame node id and status), auto-expanding the path to each match. Both quick-searches are client-side over already-loaded state, add no request, and highlight the matched text. | Direction uses legacy `idea.theme` when present; otherwise it deterministically falls back to the top-level axis of the first authored concept. That compatibility projection is run-local and lossy: it ignores additional concepts and deeper paths, and is not governed taxonomy or cross-run identity. The bounded Concepts view is not the complete Research Space, Direction×Concept crosswalk, release-pinned taxonomy/assignment graph or portfolio Atlas. |
-| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration paging/health receipt, interactive concept topology or governance workbench. |
+| **Run → Search** | The experiment DAG for one run. `group by` can project current nodes into **primary concept axis**, operator, metric-tercile or parameter-`niche` regions. The concept chip bar is breadcrumb-navigable and multi-select (OR); chips stay in canonical-ID order while counts change, and a drilled exact-level membership remains a trailing “· here” target. Search previews and then pins the same subtree selection. Filters and collapsed cards use active-lifecycle members only: tombstoned/aborted attempts remain in audit history but not current counts; filtered aggregates show matched/total, dim zero matches and compute best/status only over the matched eligible subset. The separate **Concepts** view is a bounded generation/sequence-fenced tree/table with exact attempt refs, descriptive rollups and a **Projection lens**. Its dynamic relationship copy persists across loading/recoverable error, counts **displayed concept nodes**, exposes additional projected parents through expandable `+N links`, and labels bulk controls **Expand/Collapse concept rows**; `co_occurs` is identified as membership-derived rather than a recorded edge claim. It also states objective orientation, missing metric name/unit and normalized Δ semantics. Both quick-searches are client-side over validated loaded state. | The primary concept axis is a lossy compatibility slot, not a Direction entity. A folded `node_concepts` row wins: memberships are alias-canonicalized and the lexicographically first top-level axis is chosen; an explicit empty row stays untagged. Only a genuinely missing folded row may fall back to legacy `idea.theme`, then the first authored concept axis. On mixed-era data that fallback may still group Search while Concepts remains honestly empty until folded membership exists. Additional memberships/deeper paths are omitted. The Concepts view is not the complete Research Space, a primary-axis×Concept matrix, release-pinned taxonomy/assignment graph or portfolio Atlas. |
+| **Runs → Atlas preview** | An owner-only, read-only `#/atlas` summary over four independent live projections. It shows bounded concept observations/run links, concepts observed in one run, mixed-evidence claim records, bounded evidence references and recent steward proposals/outcomes; partial endpoint failure is labelled as degraded/stale and last-good failed slices are retained. A raw primary-objective value is preceded by visible task/scope, non-comparability, missing-name/unit and orientation context; without comparison context or orientation the value is hidden with a visible reason. Long warnings wrap without clipping, and bounded untrusted identifiers are stripped of bidi formatting controls. | It is an **Experimental portfolio diagnostic**, not the canonical snapshot-consistent Research Atlas specified in doc 18. “Observed in one run” does not mean untried; evidence balance is not a proposition/applicability verdict; the steward log is not current governance state. There is no Saved Scope, CoverageFrame, compatible comparison, complete exploration paging/health receipt, interactive concept topology or governance workbench. |
+
+Old run links may still contain a `focus` query from the retired Direction surface. The router does not
+silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer
+supported; use the Concepts filter instead.”** New links must encode the Concepts selection when that
+shareable contract lands; they must not revive the old single-slot filter.
+
+Ordinary concept reads and shipped lens switches are free/read-only. **Create lens · paid** is the explicit
+provider action. The browser persists one run-, generation- and prompt-bound identity before dispatch; the
+server durably records `concept_lens_started` before one logical `tool_call_once` worker operation and then
+records a completed, failed or declined terminal. Same-identity Resume rejoins/replays that logical work;
+parser repair and outer same-identity redispatch are suppressed. The core client may still make bounded
+transport retries, so one HTTP/provider attempt or invoice charge is not guaranteed. Cap-only partial
+ConceptFrames may be used and remain labelled partial; corruption-class reasons block provider construction.
+
+After a lost tab, owner-plane recovery is GET-only and returns no prompt, digest, paid idempotency key or
+resolution key. It can poll the exact surviving job, restore its terminal, or expose an orphan/conflict.
+Resolving an orphan requires a separate resolution idempotency key plus the exact recovered request ID and
+started sequence; it sends no provider retry and cannot claim that provider completion or billing is known.
+Review links and historical snapshots cannot create paid lenses.
 
 The project/task/super-task **Cross-run report** is a separate on-demand narrative over a deterministic
 bounded projection of at most 64 runs (the prompt-size cap can include fewer). The panel reports **narrative
@@ -275,7 +305,7 @@ The preview reads `GET /api/cross-run/atlas`, `GET /api/cross-run/claims`,
 limitations. The owner React route does not turn those bounded whole-store summaries into the complete
 Part-IV Research Space/Atlas contract. A bounded per-run Concepts tree/table is shipped, but the canonical
 Research Space, focused multi-relation concept map and cross-run interactive concept graph are not. Do not
-interpret the home Map, Direction grouping, per-run Concepts table, or Atlas preview as the complete
+interpret the home Map, primary concept axis grouping, per-run Concepts table, or Atlas preview as the complete
 concept/evidence UI specified in
 [the UI/UX review](../18-ui-ux-review-2026-07-11.md).
 

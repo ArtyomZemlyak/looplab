@@ -2,18 +2,19 @@
 
 **Project:** LoopLab — an open, backend-flexible **autonomous ML/DS research engine** (an LLM agent that invents → implements → tests → improves ML solutions in a loop, returning the best *verified* result).
 **Status:** current documentation authority map · **Created:** 2026-06-20 ·
-**Validated/consistency-checked:** 2026-07-16 · **Runtime authority:** current `master` source and tests
+**Validated/consistency-checked:** 2026-07-18 · **Runtime authority:** current `master` source and tests
 
 > 📖 **Looking for how to *use* LoopLab?** This index covers the *design* (the why). For practical,
 > task-oriented documentation — install, quickstart, CLI, configuration, tasks — see the
 > **[User Guide](guide/index.md)** and the [README](../README.md).
 
-> **Current implementation authority (2026-07-16):** current `master` source and tests decide runtime truth;
+> **Current implementation authority (2026-07-18):** current `master` source and tests decide runtime truth;
 > [doc 16](16-architecture-code-review-2026-07-11.md)
 > is the finding/reproduction ledger; [doc 17](17-project-review-and-directions-2026-07-11.md) is the
 > canonical priority, dependency, and release-gate plan; [doc 18](18-ui-ux-review-2026-07-11.md) is
 > authoritative for UI/UX observations and UI-specific acceptance criteria. Doc 18 is subordinate to
-> doc 17's overall ordering and does not claim the findings are fixed. [Doc 19](19-ide-integration-and-remote-development-2026-07-12.md)
+> doc 17's overall ordering; it explicitly distinguishes landed, narrowed, open and still-unvalidated
+> findings rather than implying that the whole audit is fixed. [Doc 19](19-ide-integration-and-remote-development-2026-07-12.md)
 > is authoritative for IDE-integration and secure remote-workspace option criteria; it is likewise
 > subordinate to doc 17 and does not claim that an IDE or remote-access path is implemented.
 > [Doc 20](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md) is the
@@ -22,8 +23,10 @@
 > revisions, shared/dedicated GPU entitlements, autonomous batch fill, both managed and externally
 > operated LLMs, Kubernetes/dedicated-server backends, and multiple execution domains without
 > bypassing doc 17's prerequisite gates. [Doc 21](21-full-functionality-review-2026-07-13.md) is the
-> detailed implementation/review chronology and latest post-fix validation ledger; it records what actually
-> landed, but remains subordinate to doc 17 for release ordering and doc 18 for UI acceptance criteria.
+> detailed implementation/review chronology and latest post-fix validation ledger. **Round 25** is the dated
+> `4d1218c` checkpoint; use the **post-Round-25 integration ledger** for explicitly newer deltas. For
+> Part-IV/V integration ordering use **doc 17 §22.11**; for current UI semantics and acceptance use
+> **doc 18 §37**. Earlier rounds/sections remain dated evidence, not competing current authorities.
 
 ---
 
@@ -31,11 +34,11 @@
 
 | # | Doc | What it answers |
 |---|-----|-----------------|
-| 21 | **[21-full-functionality-review-2026-07-13.md](21-full-functionality-review-2026-07-13.md)** | **Current implementation and validation chronology.** Successive integration/review rounds, applied fixes, superseded findings, exact test evidence, and the final post-fix mega-review checkpoint. Use its latest round for implementation status, not an earlier historical round. |
+| 21 | **[21-full-functionality-review-2026-07-13.md](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18)** | **Current implementation and validation chronology.** Successive integration/review rounds, applied fixes, superseded findings and exact checkpoint evidence. Round 25 is pinned to `4d1218c`; the post-Round-25 ledger records only confirmed newer integration deltas and does not invent a final commit. |
 | 20 | **[20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md](20-looplab-unified-ds-workspace-and-distributed-execution-2026-07-12.md)** | **Current multi-user workspace and distributed-execution analysis.** One logical LoopLab entry point with JupyterHub/SSO, experiment-linked IDE and immutable snapshot flow, tenant entitlements/priorities, autonomous GPU fill, managed or external LLMs, Kubernetes/dedicated-server/multi-domain execution, failure semantics, and gated rollout. |
 | 19 | **[19-ide-integration-and-remote-development-2026-07-12.md](19-ide-integration-and-remote-development-2026-07-12.md)** | **Current IDE and remote-development analysis.** Code-grounded explanation of JupyterLab/web-VS-Code lag, embedded CodeMirror/Monaco architecture, full-functionality SSH/WSS/Teleport/Coder options, strict-no-SSH Kubernetes Attach, security boundaries, benchmark plan, and go/no-go gates. |
-| 18 | **[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md)** | **Current UI/UX audit.** Render- and code-validated visual, interaction, accessibility, responsive, safety, and functional-gap findings with acceptance criteria and an UI-R0–R5 delivery sequence subordinate to doc 17. |
-| 17 | **[17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md)** | **Current canonical delivery plan.** Strategic architecture verdict, R0–R5 dependency order, migration/canary/rollback rules, release gates, and gated research directions. Start here for “what next.” |
+| 18 | **[18-ui-ux-review-2026-07-11.md](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18)** | **Current UI/UX audit.** §36 preserves the dated `4d1218c` checkpoint; §37 records post-checkpoint Concepts/Atlas semantics, corrected paid/CAS boundaries and the remaining desktop-first acceptance plan. |
+| 17 | **[17-project-review-and-directions-2026-07-11.md](17-project-review-and-directions-2026-07-11.md#2211-post-checkpoint-integration-release-reconciliation-2026-07-18)** | **Current canonical delivery plan.** §22.11 starts from the bounded per-run concept surface plus explicit post-checkpoint lifecycle/tool deltas, then orders final integration and Research Space graduation in parallel with the unchanged Atlas G0–G6 truth gates. Start here for “what next.” |
 | 16 | **[16-architecture-code-review-2026-07-11.md](16-architecture-code-review-2026-07-11.md)** | **Current finding ledger.** Reproductions and evidence for the P0/P1 blockers that determine doc 17's order. Read this for issue-level detail. |
 | 0 | **[autoresearch-systems-exploration.md](autoresearch-systems-exploration.md)** | *Research basis.* Survey + ranking of existing OSS systems (R&D-Agent, AIDE, SELA, AI-Scientist-v2, Karpathy `autoresearch`, Recursive, …) and the recommendation. Every design choice traces back here. |
 | 1 | **[01-product-design.md](01-product-design.md)** | *What we're building.* Vision, goals/non-goals, users, feature groups, functional + non-functional requirements, success metrics, phased delivery. |
@@ -79,4 +82,5 @@ To **learn the loop**, read **Karpathy `autoresearch`** then fork **AIDE**; **R&
 > and secure remote-workspace choices, use
 > [doc 19](19-ide-integration-and-remote-development-2026-07-12.md). Current code is the runtime source of truth;
 > `docs/guide/` describes intended use, while verified discrepancies in docs 16–21 take precedence. Use only
-> the latest explicitly superseding round in doc 21 for current status.
+> the latest explicitly superseding ledger in doc 21 for current status: the post-Round-25 integration ledger,
+> paired with doc 17 §22.11 and doc 18 §37. Round 25 remains the dated `4d1218c` checkpoint.

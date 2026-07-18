@@ -138,9 +138,9 @@ test('compact drawers and nested popups expose only the active modal layer', asy
 })
 
 test('route changes update title and move focus to a named main landmark', async () => {
-  const [app, auth, list, runView, settings, shared] = await Promise.all([
+  const [app, auth, list, runView, settings, shared, css] = await Promise.all([
     source('App.jsx'), source('OwnerAuth.jsx'), source('RunList.jsx'),
-    source('RunView.jsx'), source('Settings.jsx'), source('SharedAssistant.jsx'),
+    source('RunView.jsx'), source('Settings.jsx'), source('SharedAssistant.jsx'), source('styles.css'),
   ])
   assert.match(app, /document\.title = `\$\{label\} · LoopLab`/)
   assert.match(app, /document\.querySelector\('\[data-route-main\]'\)\?\.focus\(\)/)
@@ -150,6 +150,8 @@ test('route changes update title and move focus to a named main landmark', async
   for (const [name, text] of [['RunList', list], ['RunView', runView], ['Settings', settings], ['SharedAssistant', shared]]) {
     assert.match(text, /data-route-main[^>]*tabIndex=\{-1\}/, `${name} needs a focusable main landmark`)
   }
+  assert.match(css, /\[data-route-main\]\[tabindex="-1"\]:focus \{ outline: none; \}/,
+    'programmatic route focus must not paint a distracting full-view outline')
 })
 
 test('compact Assistant blocks background pointers and traps focus in the side drawer', async () => {

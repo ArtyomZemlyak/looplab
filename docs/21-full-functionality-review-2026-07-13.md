@@ -1,4 +1,4 @@
-# Full functionality review — historical branch origin and final `master` checkpoint (2026-07-13–16)
+# Full functionality review — historical branch origin and current `master` checkpoint (2026-07-13–18)
 
 Historical initial scope: everything the original feature branch added on top of its then-`origin/master`
 (merge-base `edf06f7`): **10 commits,
@@ -8,10 +8,10 @@ capabilities, a generation-fenced run-command service, log pagination, and a big
 plane. The review covers correctness, validation, security, replay/idempotency invariants, corner
 cases, and code/decision quality.
 
-Rounds 1–23 retain the branch/integration chronology and the commit/test facts that were true at each checkpoint.
-**Round 24 is the current implementation/review authority wherever an earlier status claim conflicts; its
-validation ledger explicitly separates completed evidence from root-integration gates still pending.** Doc 17
-still owns release ordering; doc 18 still owns UI/UX acceptance criteria.
+Rounds 1–24 retain the branch/integration chronology and the commit/test facts that were true at each checkpoint.
+**Round 25 is the dated `4d1218c` implementation/review checkpoint. The post-Round-25 ledger records newer
+integration facts without inventing a final publication commit.** Doc 17 still owns release ordering; doc 18
+still owns UI/UX acceptance criteria.
 
 ## Method
 
@@ -1563,7 +1563,11 @@ outside `docs_dir`; neither is a strict-build failure.
 
 ## Round 24 — final multi-level mega-review and publication gate (2026-07-16)
 
-Round 24 is the current implementation/review authority. It is an independent re-review of the integrated
+> **Checkpoint status:** Round 24 remains the 2026-07-16 review/publication ledger. Round 25 supersedes only its
+> current implementation-status and cross-document authority claims; all measured results remain checkpointed
+> here rather than being silently promoted.
+
+Round 24 was the current implementation/review authority at that checkpoint. It is an independent re-review of the integrated
 architecture, replay and numeric boundaries, cross-run governance, durable untrusted projections, server/static
 delivery, React semantics, UI concept and documentation after the Round 23 fixes. Historical counts above stay
 valid for their named checkpoints; this round does not silently reuse them as post-final-delta evidence.
@@ -1642,4 +1646,98 @@ read-only Research Atlas preview**, not the matrix-first Atlas or the per-run Re
 
 The final hand-off is complete only when each pending row is replaced with its measured result (or a named
 blocker), `git diff --check` is clean, no merge/conflict marker survives, and local `HEAD` equals the fetched
-`origin/master`. Until then, Round 24 is the current source-review authority but not a publication certificate.
+`origin/master`. At that checkpoint, Round 24 was the source-review authority but not a publication certificate;
+Round 25 owns the dated `4d1218c` implementation status and does not retroactively fill those pending rows.
+The post-Round-25 ledger below owns only the explicitly recorded newer integration deltas.
+
+## Round 25 — dated `4d1218c` per-run Concepts, paid recovery and Settings reconciliation (2026-07-18)
+
+Round 25 is the dated implementation-status authority at `master` commit
+`4d1218ceaa7423425de357343964324885ab4777`. It reconciles the concept/read-model and durability series after
+Round 24, especially `0e39469` (paid-lens durable identity), `8f58703` (lost-receipt recovery), `6a191f7`
+(durable UI writes and Settings CAS), `7fd044b` (incremental historical/live ConceptFrame replay), `4c3019c`
+(retired Direction bundle), and `4d1218c` (one current concept/lifecycle projection across UI and backend).
+Earlier rounds remain evidence for their named commits; this round supersedes their current-status wording only.
+
+### Current shipped contract
+
+| Area | Current behavior at `4d1218c` | Boundary that remains |
+|---|---|---|
+| Per-run ConceptFrame | `GET /api/runs/{id}/concepts` is bounded, generation-aware and sequence-addressable. It returns completeness/source receipts, canonical memberships, experiment refs, direct/subtree metric rollups, typed lenses and honest historical state. Live reads incrementally replay a stable prefix rather than joining arbitrary current state to an old frame. | Recorded membership remains a claim, not verified taxonomy truth. Review capabilities do not expose ConceptFrame; release-pinned concept/assignment identity and complete proof/resource contracts remain open. |
+| Owner Concepts UI | The run toolbar ships **Search | Concepts | Report**. Concepts renders a searchable hierarchy/relationship tree and metric table; Search renders canonical concept chips over the same active nodes. | This is not the complete coordinated Research Space, first-class Lineage list, Focused Map + complete relationship table, or cross-run Atlas. |
+| Primary axis | Folded post-rename `node_concepts` is authoritative for the one-slot graph/report group. Explicit folded-empty is untagged; only a missing row falls back to legacy authoring. The display label is **primary concept axis** and the deterministic value is the first canonical sorted axis, while breadth retains all memberships. | It is not the old raw-theme Direction identity. A future narrative Direction needs a separate UID/provenance contract. |
+| Legacy focus | `focus=<theme>` is parsed only for migration, removed from canonical owner/review links and announced as unsupported with a pointer to Concepts. The stale Directions overview bundle is removed. | No hidden compatibility filter remains; restoring a Direction product would be a new model, not route resurrection. |
+| Canonical chips | Chip/path ids canonicalize through consolidation renames, sort by canonical id, preserve stable control order as counts change, retarget selected retired ids, distinguish subtree from exact “· here,” and collapse redundant ancestor/descendant OR intent. | Chip identity is still a path id, not a release-pinned cross-run concept UID. |
+| Exact aggregate | Graph grouping, collapsed cards, Inspector drill-down, charts and report use the same state-aware concept/lifecycle projection. Concept highlight, `matched / total`, status, trajectory and best all derive from the exact matched member ids; zero match is explicit and ineligible observations cannot win. | These are descriptive per-run aggregates, not causal effects or compatible cross-run comparisons. |
+| Lifecycle boundary | Tombstoned and run-level aborted nodes remain in raw replay history but are excluded from current ConceptFrame memberships/touch/refs/co-occurrence/baseline/deltas, primary-axis grouping, chips, charts and reports. A historical prefix before deletion reproduces them. | No source history was erased; current exclusion must remain a projection rule, not a fold mutation. |
+| Relationship/metric copy | Edge lenses say **Concept relationships**, name projected relation types, distinguish the primary display parent from `+N` projected links and disclaim taxonomy hierarchy. `co_occurs` explicitly discloses that it is derived from current frame memberships rather than a recorded edge claim. Metric context states unnamed/unit-not-recorded when needed, maximize/minimize orientation, eligible run median and orientation-normalized Δ. | It does not manufacture metric identity/unit, causal “gain,” recorded-edge provenance, or taxonomy authority. |
+| Paid derived lenses | One bounded idempotency key owns one durable worker/logical operation. Durable begin/terminal events support same-key join and terminal replay; `tool_call_once` prevents a parser-repair or outer same-identity redispatch. Browser intent recovery discovers/polls server work, blocks another logical operation on ambiguity and exposes owner-only orphan resolution fenced to generation/request/started sequence without provider I/O. | Core transport retries can still make multiple HTTP/provider requests; one charge and invoice reconciliation are not guaranteed. An abandoned ambiguity remains outcome/billing unknown. |
+| Settings schema | Server schema v2 has a semantic ETag, model-derived numeric bounds and a test-pinned curated catalogue of **143** UI fields against **166** `Settings` model fields. | The 23 non-catalogue structural/expert fields are not silently exposed as generic controls. |
+| Settings concurrency | Global non-secret settings use sparse patches plus opaque `settings_revision` CAS; secrets use a separate `secret_revision`; per-run config uses a SHA-256 snapshot revision under its own equivalent thread/interprocess locking contract. The current UI always sends the observed token, preserves newer drafts, treats transport-unknown outcomes as recovery and reloads authority after typed conflicts instead of blind replay. | Raw HTTP omission remains a serialized legacy last-writer-wins compatibility path. This is resource-level optimistic concurrency, not RBAC, approvals or a configuration history workbench. |
+
+### Superseded status claims
+
+- Doc 18 §35's “Concepts disabled until ConceptFrame exists,” raw-`idea.theme` Direction definition,
+  Direction-focus/crosswalk near-term plan and “Settings has no CAS” statements are checkpoint history. Doc 18
+  §36 owns the dated `4d1218c` checkpoint; §37 owns explicitly newer integration corrections.
+- Doc 17 §22.9's “build ConceptFrame next” and “current Search/DAG has no per-run concept surface” statements
+  are checkpoint history. Doc 17 §22.10 starts from the bounded surface at `4d1218c`; §22.11 records newer
+  integration deltas while retaining the R2/R3 and Atlas G0–G6 promotion gates.
+- The Atlas status did not change: it remains an experimental bounded owner-only read-only diagnostic without
+  immutable scope/common snapshot/access/completeness or a governance workbench.
+
+### Evidence and validation boundary
+
+The current claims above are grounded in the source and dedicated regression contracts at `4d1218c`:
+
+- backend projection/history/lifecycle: `tests/test_concepts_endpoint.py`, `tests/test_theme.py`,
+  `tests/test_run_base_delta.py` and `tests/test_concept_edge_derivation.py`;
+- paid logical-operation/recovery: `tests/test_concept_lens_durability.py` and the Concept lens UI recovery
+  suites; these do not claim one provider transport attempt;
+- Settings schema/CAS: `tests/test_settings_ui_schema.py`, `tests/test_server.py`,
+  `tests/test_secret_settings.py`, `ui/test/settingsSchemaResource.test.js`,
+  `ui/test/settingsPersistence.test.js` and `ui/test/settingsInteractionBehavior.test.js`;
+- UI projection/vocabulary: concept-id/chip/view, grouping, route-state, report-presentation, chart-accessibility
+  and global-review suites under `ui/test/`.
+
+This round is a documentation reconciliation, not a new all-suite or publication certificate. It records no
+fresh full React/Python count, production bundle measurement, browser walkthrough or `origin/master` equality.
+Round 24's measured results and pending rows remain scoped to that checkpoint; a release owner must publish new
+integrated evidence separately. Anchor/cross-document authority is now
+[doc 17 §22.10](17-project-review-and-directions-2026-07-11.md#2210-dated-4d1218c-part-ivv-release-reconciliation-2026-07-18)
+→ [doc 18 §36](18-ui-ux-review-2026-07-11.md#36-dated-4d1218c-uiux-reconciliation-2026-07-18)
+→ this round.
+
+## Post-Round-25 integration ledger — pending final commit (2026-07-18)
+
+This ledger records confirmed deltas after the dated `4d1218c` checkpoint. It is not a final-master or
+publication certificate and intentionally carries no floating `origin/master` hash. The final source/tests
+remain runtime authority; this section exists so integration does not silently promote old evidence or lose
+new contract fixes.
+
+| Integration area | Confirmed post-checkpoint contract | Remaining boundary |
+|---|---|---|
+| Concepts projection copy/state | The selector is **Projection lens**; counts are **displayed concept nodes**; bulk actions say **Expand/Collapse concept rows**. Relationship loading/error preserves the selected vocabulary. `+N links` opens the exact additional projected parents rather than hiding them in hover-only copy. | Still a bounded outline/table, not the complete Research Space or Focused Map + complete relationship table. |
+| Mixed-era data | Legacy authoring may still supply Search's compatibility grouping, but Concepts remains honestly empty until folded concept memberships exist and explains why. | Legacy text is not silently promoted into canonical ConceptFrame membership. |
+| Lifecycle/current projection | Post-`4d1218c` upstream fixes add lifecycle to Concepts refresh identity, use lifecycle-clean nodes in report projections, and keep a lifecycle-empty DAG honestly empty. Historical prefixes still reproduce pre-removal attempts. | Final integration must retain these upstream fixes; Round 25's broader aggregate statement is read as its dated checkpoint, not proof of cases fixed later. |
+| Atlas metric truth | A visible non-comparability warning precedes any raw primary-objective value and includes task/scope, missing name/unit and orientation context. Without task/scope comparison context or orientation the value is hidden with a visible reason. Long copy wraps without clipping; bounded untrusted text strips bidi formatting controls. | This is still an overlapping live diagnostic, not a compatible cross-run comparison or snapshot-complete Atlas. |
+| `concept_card` tool | Post-checkpoint upstream adds an advisory redacted lookup with exact/fuzzy slug reuse, scoped track record separated from global observation count and explicit `UNTRUSTED_MEMORY` treatment. | It is not a prose paper generator, verifier, governance mutation or complete applicability receipt. |
+| Paid logical identity | Same-key join/replay and `tool_call_once` prevent a new outer logical operation and parser-repair dispatch. | The core client can make bounded transport retries; multiple HTTP/provider requests, duplicate/unknown billing and returned-usage undercount remain possible. |
+| Settings/Config CAS | Global settings, secrets and per-run Config own separate/equivalent transaction locks and revision domains. The current Web UI always sends the observed per-run revision. | Raw HTTP token omission remains a legacy serialized last-writer-wins compatibility path. |
+| Route landmark/focus | One named outer run `main` owns route focus; Concepts is a named region. URL hydration/Back/Forward increments the focus boundary, while local Search/Concepts/Report clicks keep focus on the invoking tab. | **CODE + AUTOMATED TEST PASS;** final desktop browser replay remains part of the publication gate. |
+
+### Exact post-checkpoint evidence
+
+| Check | Result |
+|---|---|
+| focused UI selection | **PASS — 57/57**; a narrow selection, not the full React suite or browser walkthrough |
+| paid OpenRouter MiniMax smoke | **PASS** for bounded text + structured `looplab smoke`; not a Concepts-lens E2E, recovery journey or one-provider-attempt proof |
+| full Python run | **NOT PASS YET** — six environment/path-artifact failures were observed; rerun from the corrected final integration environment is required |
+| strict MkDocs + documentation diff hygiene | **PASS** — `mkdocs build --strict` and repository `git diff --check` completed from the post-edit working tree; existing INFO notices for links outside `docs_dir` remain non-fatal |
+| final full React/build, browser journey and publication equality | **PENDING / not claimed** |
+
+Current cross-document ordering is
+[doc 17 §22.11](17-project-review-and-directions-2026-07-11.md#2211-post-checkpoint-integration-release-reconciliation-2026-07-18)
+→ [doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18)
+→ this ledger. Round 25 remains immutable evidence for `4d1218c`; this section supersedes it only for the
+explicit rows above.

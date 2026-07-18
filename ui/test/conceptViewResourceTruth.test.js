@@ -337,6 +337,16 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.match(document.body.textContent, /No concepts have been tagged yet.*Experiments.*Concept hierarchy.*Outcome comparison/s)
     assert.equal(document.querySelector('[aria-label="Visible metric columns"]'), null,
       'empty data must not expose irrelevant table controls')
+    assert.equal(conceptModule.legacyAxisFallbackPresent({
+      nodes: { 0: { id: 0, idea: { theme: 'legacy-axis' } } }, node_concepts: {},
+    }), true, 'an old-run authored axis is detected only when its folded row is absent')
+    assert.equal(conceptModule.legacyAxisFallbackPresent({
+      nodes: { 0: { id: 0, idea: { theme: 'legacy-axis' } } }, node_concepts: { 0: [] },
+    }), false, 'an explicit empty folded membership must never fall back to authored data')
+    assert.equal(conceptModule.legacyAxisFallbackPresent({
+      nodes: { 0: { id: 0, idea: { theme: 'legacy-axis' } } }, node_concepts: {},
+      aborted_nodes: [0],
+    }), false, 'an aborted legacy node must not create current-view compatibility copy')
 
     await act(async () => { button('Refresh concepts').click(); button('Refresh concepts').click(); await settle() })
     assert.equal(requests.length, 2, 'double refresh remains one request')
@@ -352,11 +362,11 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await click(button('Refresh concepts'))
     await reply(requests[2], conceptPayload('loss/a'))
     assert.match(document.body.textContent,
-      /Concept hierarchy.*1 tagged concept.*2 hierarchy nodes.*1 tagged experiment/s,
-      'synthetic ancestors are hierarchy nodes, not mislabeled as tagged concepts')
+      /Concept hierarchy.*1 tagged concept.*2 displayed concept nodes.*1 tagged experiment/s,
+      'synthetic ancestors are displayed concept nodes, not mislabeled as tagged concepts')
     const hierarchyView = document.querySelector('.concept-view')
     assert.equal(hierarchyView?.getAttribute('aria-label'), 'Concept hierarchy')
-    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]')?.value, 'is_a')
+    assert.equal(document.querySelector('[aria-label="Concept projection lens"]')?.value, 'is_a')
     const metricContext = document.getElementById('concept-metric-context')
     assert.equal(metricContext?.getAttribute('role'), 'note')
     assert.match(metricContext?.textContent,
@@ -374,7 +384,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     state = { ...state, direction: 'max' }
     await render()
     await reply(requests.at(-1), conceptPayload('loss/a'))
-    await click(button('Expand hierarchy'))
+    await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a')
     const median = document.querySelector('.cv-baseline')
     assert.equal(median?.getAttribute('role'), 'note')
@@ -441,7 +451,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a',
       'last-good data stays visible while a semantic refresh is pending')
     await reply(requests.at(-1), conceptPayload('architecture/moe'))
-    await click(button('Expand hierarchy'))
+    await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'architecture/moe')
 
     before = requests.length
@@ -465,7 +475,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.match(document.body.textContent, /Refreshing concepts/,
       'a superseded response remains visibly non-current while the newest projection loads')
     await reply(currentSemanticRequest, conceptPayload('coalesced/latest'))
-    await click(button('Expand hierarchy'))
+    await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'),
       'coalesced/latest')
 
@@ -484,7 +494,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     await reply(requests.at(-1), partial)
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
-    await click(button('Expand hierarchy'))
+    await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'safe/root')
     assert.match(document.body.textContent, /recorded claims.*not independently verified/i)
 
@@ -715,7 +725,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       requestedLens: 'race-usage', effectiveLens: 'race-usage',
       complete: false, truncated: true, reasons: ['membership_cap'],
     }))
-    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value,
+    assert.equal(document.querySelector('[aria-label="Concept projection lens"]').value,
       'race-usage')
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
@@ -774,18 +784,34 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     assert.match(requests.at(-1).url,
       /\/api\/runs\/final-run\/concepts\?lens=usage&rels=uses$/)
-    await reply(requests.at(-1), linkedEdgePayload({
+    const firstRelationshipGet = requests.at(-1)
+    assert.equal(document.querySelector('.concept-view')?.getAttribute('aria-label'),
+      'Concept relationship view for projected uses links',
+      'relationship semantics remain stable while the new projection is loading')
+    assert.match(document.body.textContent, /Loading the latest relationship projection/i)
+    await reply(firstRelationshipGet, { detail: 'temporary failure' }, 503)
+    assert.equal(document.querySelector('.concept-view')?.getAttribute('aria-label'),
+      'Concept relationship view for projected uses links',
+      'a relationship read failure must not be mislabeled as a hierarchy')
+    assert.doesNotMatch(document.body.textContent, /Loading the latest hierarchy/i)
+    await click(button('Retry'))
+    const relationshipRetry = requests.at(-1)
+    assert.match(relationshipRetry.url,
+      /\/api\/runs\/final-run\/concepts\?lens=usage&rels=uses$/)
+    await reply(relationshipRetry, linkedEdgePayload({
       runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
       complete: false, truncated: true, reasons: ['membership_cap'],
     }))
-    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value, 'usage')
+    assert.equal(document.querySelector('[aria-label="Concept projection lens"]').value, 'usage')
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i,
       'a fully validated size-cap partial paid result remains visibly partial')
     const relationshipView = document.querySelector('.concept-view')
     assert.match(relationshipView?.getAttribute('aria-label') || '',
       /Concept relationship view for projected uses links/)
     assert.match(document.querySelector('.cv-heading')?.textContent || '',
-      /Concept relationships.*2 relationship nodes/s)
+      /Concept relationships.*2 displayed concept nodes/s)
+    assert.ok(button('Expand concept rows'))
+    assert.ok(button('Collapse concept rows'))
     const relationshipLegend = document.getElementById('concept-relationship-legend')
     assert.equal(relationshipLegend?.getAttribute('role'), 'note')
     assert.match(relationshipLegend?.textContent,
@@ -794,10 +820,14 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       /concept-metric-context.*concept-relationship-legend/)
     assert.equal(document.querySelector('.cv-cid[title="loss/contrastive"]')?.textContent,
       'loss/contrastive', 'edge lenses retain the full canonical id instead of an ambiguous leaf')
-    const crossLink = document.querySelector('.cv-badge[title^="Additional display parent via projected uses link"]')
-    assert.match(crossLink?.textContent, /\+1 links/)
+    const crossLink = document.querySelector('.cv-crosslinks > summary')
+    assert.match(crossLink?.textContent, /\+1 link/)
     assert.match(crossLink?.getAttribute('title'), /training\/contrastive/,
       'validated secondary parents remain visible evidence instead of disappearing from the tree')
+    await click(crossLink)
+    assert.equal(crossLink.parentElement?.open, true)
+    assert.match(crossLink.parentElement?.textContent || '', /projected uses link.*training\/contrastive/is,
+      'keyboard and touch users can open the additional recorded-parent evidence')
 
     generation = GENERATION_A
     await render()
@@ -906,9 +936,12 @@ test('ConceptView does not crash on a concept id that is a JS prototype key (exp
       await settle()
     })
     // expand every row (this is what triggers experiments.map on the prototype-key node) — must not throw
-    await act(async () => { button('Expand all')?.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); await settle() })
+    const expandRows = button('Expand concept rows')
+    assert.ok(expandRows, 'the prototype-key crash path must actually expand the concept outline')
+    await act(async () => { expandRows.dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); await settle() })
     const cids = [...document.querySelectorAll('.cv-cid')].map(n => n.textContent)
     assert.ok(cids.includes('constructor'), 'the prototype-key intermediate row rendered')
+    assert.ok(cids.includes('foo'), 'the child row rendered only after the outline was expanded')
     assert.ok(document.querySelector('.cv-table'), 'the concept table rendered without crashing')
   } finally {
     if (root) await act(async () => root.unmount())

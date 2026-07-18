@@ -107,9 +107,10 @@ export const DEFAULT_BUDGETS = Object.freeze({
       name: 'Research Atlas preview increment',
       roots: [source('src/ResearchAtlas.jsx')],
       baselineRoots: [entry],
-      // Audited July 2026 baseline includes independent current/stale/failed + revision/loaded-at
-      // watermarks for Atlas, claims, and both steward logs. It stays isolated behind this route.
-      limits: { js: { gzip: 7 * KIB }, css: { gzip: 3 * KIB } },
+      // Re-audited 2026-07-18 after the lazy route gained visible metric-context/comparability
+      // disclosure and bidi-safe task/scope normalization: 7,482 B gzip. The 7.5 KiB target leaves
+      // only 198 B of route headroom; the initial-shell and total ceilings remain unchanged.
+      limits: { js: { gzip: 7.5 * KIB }, css: { gzip: 3 * KIB } },
     },
     {
       name: 'React Flow increment',

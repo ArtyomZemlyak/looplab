@@ -40,6 +40,24 @@ const curationOutcomeLabel = entry => {
   return 'proposal only'
 }
 
+export function AtlasRunReference({ run }) {
+  const context = [run.task && `task: ${run.task}`, run.scope && `scope: ${run.scope}`]
+    .filter(Boolean).join(' · ')
+  const disclosure = run.metricSuppressed
+    ? 'Metric hidden · task/scope comparison context or optimization orientation was not recorded.'
+    : run.metric != null && run.optimizationOrientation
+    ? `Not cross-run comparable · Primary objective metric · unnamed · unit not recorded · optimization orientation: ${run.optimizationOrientation} · value ${metricText(run.metric)}`
+    : ''
+  const fullLabel = [run.runId, context, disclosure].filter(Boolean).join(' · ')
+  return <a href={`#/run/${encodeURIComponent(run.runId)}`}
+    aria-label={`Open run. ${fullLabel}`} title={fullLabel}>
+    <span className="atlas-runref-id">{run.runId}</span>
+    {context && <span className="atlas-runref-context">{context}</span>}
+    {disclosure && <span className={run.metricSuppressed
+      ? 'atlas-runref-suppressed' : 'atlas-runref-warning'}>{disclosure}</span>}
+  </a>
+}
+
 function SourceWatermark({ sourceKey, label, source, retry, busy, pending, children }) {
   const state = source.state
   const displayState = pending ? 'loading' : state
@@ -318,10 +336,7 @@ export default function ResearchAtlas({ onBack }) {
                         <div><strong>{concept.concept}</strong><span>{countLabel(concept.nRuns, 'run')}</span></div>
                         {concept.runs.length > 0 && <div className="atlas-runrefs">
                           {concept.runs.map((run, runIndex) => run.runId
-                            ? <a key={`${run.runId}-${runIndex}`} href={`#/run/${encodeURIComponent(run.runId)}`}
-                                 aria-label={`Open run ${run.runId}`}>
-                                {run.runId} · {run.direction} {metricText(run.metric)}
-                              </a>
+                            ? <AtlasRunReference key={`${run.runId}-${runIndex}`} run={run} />
                             : null)}
                         </div>}
                       </li>)}

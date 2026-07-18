@@ -18,15 +18,17 @@ const limits = {
   tree_nodes: 4096, edges: 2048, edge_endpoints: 4096,
 }
 
-function frame(runId, generation, { lens = 'is_a', derived = false } = {}) {
-  const id = derived ? 'loss/contrastive' : 'loss/root'
-  const rels = derived ? ['uses'] : ['is_a']
-  const kind = derived ? 'edge' : 'path'
+function frame(runId, generation, {
+  lens = 'is_a', derived = false, kind = derived ? 'edge' : 'path',
+} = {}) {
+  const edge = derived && kind === 'edge'
+  const id = edge ? 'loss/contrastive' : 'loss/root'
+  const rels = kind === 'edge' ? ['uses'] : ['is_a']
   const lenses = [
     { name: 'is_a', label: 'Family / is-a', rels: ['is_a'], kind: 'path' },
     { name: 'uses', label: 'Usage / uses', rels: ['uses'], kind: 'edge' },
   ]
-  const treeNodes = derived ? {
+  const treeNodes = edge ? {
     [id]: { parent: null, depth: 0, children: [], tagged: true, cross_parents: [] },
   } : {
     loss: { parent: null, depth: 0, children: [id], tagged: false },
@@ -39,8 +41,8 @@ function frame(runId, generation, { lens = 'is_a', derived = false } = {}) {
     lens, effective_lens: lens, requested_lens: lens,
     requested_lens_spec: { name: lens, rels, kind, registration },
     lens_contract: { requested: lens, effective: lens, registration, fallback: null },
-    lenses, edges_present: derived, lens_edges_present: derived,
-    touch: { [id]: 1 }, tree: { lens, roots: [derived ? id : 'loss'], nodes: treeNodes },
+    lenses, edges_present: edge, lens_edges_present: edge,
+    touch: { [id]: 1 }, tree: { lens, roots: [edge ? id : 'loss'], nodes: treeNodes },
     metrics: { baseline: 0.5, direction: 'max', rows: { [id]: {
       touched: 1, evaluated: 1, best: 0.7, mean: 0.7, worst: 0.7,
       delta_best: 0.2, delta_mean: 0.2, first_touch: 0,
@@ -58,9 +60,9 @@ function frame(runId, generation, { lens = 'is_a', derived = false } = {}) {
     complete: true,
     completeness: {
       complete: true, truncated: false, reasons: [], limits,
-      source: { membership_nodes: 1, edges: derived ? 1 : 0 },
+      source: { membership_nodes: 1, edges: edge ? 1 : 0 },
       included: { membership_nodes: 1, memberships: 1, concepts: 1,
-        tree_nodes: derived ? 1 : 2, edges: derived ? 1 : 0, experiment_refs: 1 },
+        tree_nodes: edge ? 1 : 2, edges: edge ? 1 : 0, experiment_refs: 1 },
       source_integrity: { complete: true, generation_identified: true },
     },
   }
@@ -104,6 +106,8 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
   let delayedRecovery = null
   let paidPosts = 0
   let jobResult = null
+  let pathProjectionResolve = null
+  let pathProjectionAttempts = 0
   const installed = {
     window: dom.window, document: dom.window.document, navigator: dom.window.navigator,
     location: dom.window.location, sessionStorage: dom.window.sessionStorage,
@@ -153,6 +157,13 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
         const generation = recoveryByRun.get(`${runId}:generation`) || GENERATION_A
         const requestedLens = parsed.searchParams.get('lens') || 'is_a'
         const configuredFrame = recoveryByRun.get(`${runId}:frame`)
+        if (runId === 'terminal-derived-path' && requestedLens === 'taxonomy') {
+          pathProjectionAttempts += 1
+          if (pathProjectionAttempts === 1) {
+            return new Promise(resolve => { pathProjectionResolve = resolve })
+          }
+          return response(frame(runId, generation, { lens: requestedLens, derived: true, kind: 'path' }))
+        }
         return response(configuredFrame || frame(runId, generation, {
           lens: requestedLens, derived: requestedLens !== 'is_a',
         }))
@@ -252,16 +263,29 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
     assert.ok(calls.some(call => call.href.endsWith(`/api/jobs/${JOB_ID}`)),
       'status=done discovery still polls the retained exact job receipt')
 
-    runId = 'terminal-derived'
+    runId = 'terminal-derived-path'
     recoveryByRun.set(runId, currentGeneration => ({
       schema: 1, generation: currentGeneration, state: 'terminal', request_id: REQUEST_ID,
       started_seq: 8, input_seq: 7,
-      terminal: { ...frame(runId, currentGeneration, { lens: 'usage', derived: true }),
-        ok: true, spec: { name: 'usage', label: 'By usage', rels: ['uses'],
-          kind: 'edge', provenance: 'agent' }, request_id: REQUEST_ID, seq: 9 },
+      terminal: { ...frame(runId, currentGeneration, {
+        lens: 'taxonomy', derived: true, kind: 'path',
+      }), ok: true, spec: { name: 'taxonomy', label: 'Taxonomy', rels: ['is_a'],
+        kind: 'path', provenance: 'agent' }, request_id: REQUEST_ID, seq: 9 },
     }))
     await render()
-    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value, 'usage')
+    assert.match(document.body.textContent, /Loading the latest hierarchy/i,
+      'a validated paid path lens keeps hierarchy semantics while its projection is loading')
+    assert.equal(document.querySelector('.concept-view')?.getAttribute('aria-label'), 'Concept hierarchy')
+    await act(async () => {
+      pathProjectionResolve(response({ detail: 'temporary failure' }, 503))
+      await flush()
+    })
+    assert.equal(document.querySelector('.concept-view')?.getAttribute('aria-label'), 'Concept hierarchy',
+      'a failed paid path read must not be mislabeled as a relationship projection')
+    await act(async () => {
+      button('Retry').dispatchEvent(new dom.window.MouseEvent('click', { bubbles: true })); await flush()
+    })
+    assert.equal(document.querySelector('[aria-label="Concept projection lens"]').value, 'taxonomy')
     assert.match(document.querySelector('#paid-concept-lens-status').textContent,
       /Recovered a validated paid lens.*No provider request was replayed/i)
 

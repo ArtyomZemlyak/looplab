@@ -157,6 +157,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // exact seq; redirect only the unsupported review route instead of hiding owner history.
   const requestedView = reviewMode && requestedRouteView === 'concepts' ? 'dag' : requestedRouteView
   const view = autoReport ? 'report' : requestedView
+  const routeMainRef = useRef(null)
   const workspaceToolbarRef = useRef(null)
   const [workspaceTabStop, setWorkspaceTabStop] = useState(view)
   useEffect(() => {
@@ -817,12 +818,17 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const routeFocusPhase = !live ? `resource:${runStatus}`
     : routeFenceBlocked ? `fence:${generationMismatch ? 'mismatch' : 'pending'}`
     : historyActive && !hist ? `history:${history.status}` : 'ready'
+  const workspaceRouteLabel = `${live?.label || live?.run_id || runId} run workspace · ${
+    view === 'concepts' ? 'Concepts' : view === 'report' ? 'Report' : 'Search'}`
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
-      if (!document.querySelector('[aria-modal="true"]')) document.querySelector('[data-route-main]')?.focus()
+      if (!document.querySelector('[aria-modal="true"]')) {
+        ;(routeMainRef.current || document.querySelector('[data-route-main]'))
+          ?.focus({ preventScroll: true })
+      }
     })
     return () => cancelAnimationFrame(frame)
-  }, [routeFocusPhase])
+  }, [routeFocusPhase, route.navigationRevision])
 
   if (!live) return <div className={'app' + (reviewMode ? ' review-mode' : '')}>
     <div className="topbar run-head">
@@ -963,8 +969,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
 
 
   return (
-    <main className={'app' + (reviewMode ? ' review-mode' : '')} data-route-main tabIndex={-1}>
-      <h1 className="sr-only">{state.label || state.run_id || runId} run workspace</h1>
+    <main ref={routeMainRef} className={'app' + (reviewMode ? ' review-mode' : '')}
+      data-route-main tabIndex={-1} aria-label={workspaceRouteLabel}>
+      <h1 className="sr-only">{workspaceRouteLabel}</h1>
       <div className="topbar run-head">
         <span className="brand"><span className="dot">◉</span> LoopLab</span>
         {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>

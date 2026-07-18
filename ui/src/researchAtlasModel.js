@@ -94,18 +94,40 @@ export function boundedAtlasText(value, max = 360) {
   const limit = Number.isSafeInteger(max) ? Math.max(0, Math.min(2000, max)) : 360
   // Slice before normalization so one model-authored field cannot force an unbounded regex pass.
   const text = String(value).slice(0, limit)
-  return text.replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/gu, ' ').trim().slice(0, limit)
+  // Directional formatting controls can visually reorder an otherwise escaped task/scope and move a
+  // disclosure away from its value. Remove them together with ASCII controls before rendering.
+  return text.replace(/[\u0000-\u001f\u007f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, ' ')
+    .replace(/\s+/gu, ' ').trim().slice(0, limit)
 }
 
 const take = (value, max) => list(value).slice(0, max)
 const textList = (value, max, textMax = 180) => take(value, max)
   .map(item => boundedAtlasText(item, textMax)).filter(Boolean)
+const comparisonContextText = (value, max) => typeof value === 'string'
+  ? boundedAtlasText(value, max)
+  : ''
 const normalizeRun = value => {
   const row = record(value)
+  const runId = boundedAtlasText(row.run_id, 160)
+  // A raw objective value is meaningful inside its own run, but it is not a cross-run comparison
+  // without at least a recorded task/scope and optimization orientation. Fail closed before React:
+  // legacy Atlas rows normally lack that context, so their metric value is deliberately suppressed.
+  const task = comparisonContextText(row.task_id, 180)
+    || comparisonContextText(row.task, 220)
+  const scope = comparisonContextText(row.scope, 220)
+    || comparisonContextText(row.task_scope, 220)
+  const rawMetric = typeof row.metric === 'number' && Number.isFinite(row.metric) ? row.metric : null
+  const rawOrientation = row.direction === 'max' || row.direction === 'min' ? row.direction : ''
+  const discloseMetric = rawMetric !== null && !!rawOrientation && !!(task || scope)
   return {
-    runId: boundedAtlasText(row.run_id, 160),
-    metric: typeof row.metric === 'number' && Number.isFinite(row.metric) ? row.metric : null,
-    direction: row.direction === 'max' || row.direction === 'min' ? row.direction : 'unknown',
+    runId,
+    task,
+    scope,
+    metric: discloseMetric ? rawMetric : null,
+    optimizationOrientation: discloseMetric
+      ? (rawOrientation === 'max' ? 'maximize' : 'minimize')
+      : '',
+    metricSuppressed: rawMetric !== null && !discloseMetric,
   }
 }
 

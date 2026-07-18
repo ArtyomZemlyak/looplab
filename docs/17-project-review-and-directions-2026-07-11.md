@@ -1,8 +1,8 @@
-# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled through 2026-07-16)
+# LoopLab — Project Review, Architecture & Development Directions (2026-07-11, reconciled through 2026-07-18)
 
 > Strategic synthesis pinned to historical executable revision
-> `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`, with the current Part-IV/consumer/UI addendum reviewed on
-> the current `master` review worktree. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
+> `369d6a6c6fe0ccf0f921051ffba71c742879bfdb`, with the Part-IV/consumer/UI addendum reconciled through the
+> post-checkpoint integration ledger. [Doc 16](16-architecture-code-review-2026-07-11.md) (`41f9345`) remains the original
 > finding/reproduction ledger. This revision adds the implementation disposition of the subsequent
 > fix series and supersedes the first version of doc 17 in `32dc6c0`.
 
@@ -12,15 +12,15 @@
 | **As of executable commit** | `369d6a6c6fe0ccf0f921051ffba71c742879bfdb` |
 | **Post-audit increment** | `931c28b` (P0-2 open→partial; census 66/12; see §14.6). Quantitative figures are pinned per statement; unpinned counts are as of `369d6a6`. |
 | **Documentation reconciliation** | `89af408` (doc 18 and post-fix UI disposition) |
-| **Current Part-IV reviewed range** | Current `master`; final reconciliation in §22.9, doc 18 §35 and doc 21 Round 24. Historical core counts remain pinned to the commits named beside them. |
+| **Part-IV reviewed range** | Dated `master` checkpoint `4d1218c` in §22.10/doc 18 §36/doc 21 Round 25; post-checkpoint integration in §22.11/doc 18 §37/doc 21's post-Round-25 ledger. No final publication commit is invented. Historical core counts remain pinned to the commits named beside them. |
 | **Normative for** | priority, dependencies, release gates, feature promotion criteria |
 | **Finding/reproduction authority** | [doc 16](16-architecture-code-review-2026-07-11.md) |
-| **Current implementation disposition** | §6.3 and §14.2 for the core; §22.9 for Part-IV/V cross-run/UI status |
+| **Current implementation disposition** | §6.3 and §14.2 for the core; §22.11 for post-checkpoint Part-IV/V cross-run/UI integration status |
 | **Supersedes** | doc-17 verdict in `32dc6c0`; current-order claims in docs 06/10/11/12, ROADMAP, BACKLOG where they conflict |
 | **Superseded by** | — |
 | **Part III-B addendum** | 2026-07-14 — DS & deep-research agent cohort (§§15–20) |
 | **Part IV addendum** | 2026-07-14 — `rubertlite` narrowing case & hypothesis/theme taxonomy (§21, D1–D7); **Phase 0 implemented** (§21.14: concept graph, D1 asset brief, §12 verifier); **Phase 1 implemented** (§21.15: D7 lock-in, D6 lesson guard, D3 graded novelty, D4 dedup, D2 research targeting — offline analytics); **Phase 2 implemented** (§21.16: 2a Strategist concept-pivot, 2b D3 graded-novelty gate + D7 capability-expansion directive, 2c calibrated foresight verifier — live steering, opt-in) |
-| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-16 (Part III-B/IV and cross-run/UI reconciliation) |
+| **Last verified** | 2026-07-12 (historical core baseline); 2026-07-18 (Part III-B/IV and cross-run/UI reconciliation) |
 
 **Companion docs:** [01-product-design.md](01-product-design.md) ·
 [02-architecture.md](02-architecture.md) · [03-decisions.md](03-decisions.md) (ADR-6, ADR-9,
@@ -4209,8 +4209,10 @@ the complete Research Atlas or audited/reversible governance.
 
 #### 22.8 Post-fix master reconciliation (2026-07-16)
 
-This is the current Part-IV/V implementation checkpoint and supersedes §22.7 wherever runtime status differs.
-It does **not** relax §21.20's release gates or rename a bounded diagnostic into the full Research Atlas.
+This was the then-current Part-IV/V implementation checkpoint and superseded §22.7 wherever runtime status
+differed. §22.10 owns the dated `4d1218c` checkpoint and §22.11 the newer integration status. This checkpoint
+did **not** relax §21.20's release gates or rename a
+bounded diagnostic into the full Research Atlas.
 
 **Landed since §22.7:**
 
@@ -4252,7 +4254,7 @@ It does **not** relax §21.20's release gates or rename a bounded diagnostic int
   Atlas GET adds live-projection, scope and ledger-revision metadata with bounded sections. The lazy owner
   `#/atlas` route consumes those projections plus both proposal logs as an abortable, defensive, read-only
   **Experimental portfolio diagnostic**. It is not the canonical snapshot-consistent Atlas.
-- **Global Settings writes are sparse, not revisioned.** The owner form sends only schema-owned fields changed
+- **Global Settings writes were sparse, not revisioned at this checkpoint.** The owner form sends only schema-owned fields changed
   since its last successful load/save (blank means explicit clear), and `agent_control` is a nested sparse patch.
   The server merges and validates under one local plus required interprocess file-lock transaction, preserving
   disjoint stale-tab edits. There is no Settings revision/ETag/CAS: concurrent edits to the same field remain
@@ -4284,7 +4286,10 @@ scope, trust or exploration regression. Doc 21 Round 23B records the correspondi
 
 #### 22.9 Final comprehensive-review reconciliation (2026-07-16)
 
-This is the current Part-IV/V release-order authority. It supersedes §22.8's remaining-status and cross-link
+> **Checkpoint status:** §22.9 was the 2026-07-16 release-order authority. §22.10 supersedes it for the dated
+> `4d1218c` checkpoint and §22.11 for explicitly newer integration facts; this section remains historical.
+
+This was the current Part-IV/V release-order authority at that checkpoint. It superseded §22.8's remaining-status and cross-link
 claims while preserving that checkpoint's chronology. The final independent passes narrowed operational risk;
 they did not satisfy the scientific/product gates in §21.20.
 
@@ -4362,3 +4367,133 @@ The P0 UI wording/delivery changes do not waive P0 validation: the clean integra
 real desktop + 360 px browser pass are recorded only when completed in doc 21 Round 24. Until G5, the safe
 product name remains **Experimental bounded owner-only read-only Research Atlas preview**. Until R3, the current
 run Search/DAG remains an experiment-lineage surface, not a per-run concept graph.
+
+#### 22.10 Dated `4d1218c` Part-IV/V release reconciliation (2026-07-18)
+
+This is the dated Part-IV/V release-order authority for `master` at `4d1218c`. It supersedes §22.9 only
+where shipped status or the immediate dependency order changed. The scientific/product gates in §21.20 and the
+Atlas G0–G6 sequence remain in force.
+
+**Status corrections.** The bounded per-run concept projection is no longer a future prerequisite:
+
+- a generation-aware, sequence-addressable `ConceptFrame` now ships at
+  `GET /api/runs/{id}/concepts`, with completeness/source receipts, canonical memberships, experiment refs,
+  direct/subtree metrics, historical prefixes and typed lens projection;
+- the owner run workspace ships a **Concepts** tree/table plus canonical concept chips over Search. These are
+  current per-run read surfaces, while review capabilities deliberately exclude the frame;
+- current single-slot grouping is **Primary concept axis**, derived from folded post-rename
+  `node_concepts`; explicit folded-empty is untagged and only a missing folded row uses legacy authoring
+  fallback. The complete concept set remains multi-membership;
+- the legacy Direction-focus query/control is retired with a visible migration notice. A future narrative
+  Direction requires a separately modelled opaque identity; the old Direction × Concept crosswalk is therefore
+  removed from the immediate delivery dependency rather than being fabricated from one concept axis;
+- canonical chip order/rename retargeting, exact collapsed-card/drill-down membership, and current lifecycle
+  exclusion now align the graph, Inspector, charts, report and ConceptFrame. Tombstoned/aborted rows remain
+  replayable history but do not affect current counts, co-occurrence, baseline/deltas or best summaries;
+- typed relationship views name their projected relation vocabulary, disclose membership-derived `co_occurs`, and distinguish one primary display parent
+  from taxonomy truth. The metric note names missing identity/unit, optimization orientation, the eligible run
+  median and orientation-normalized Δ;
+- paid derived-lens work has durable begin/terminal identity, same-key join/replay and owner-only orphan
+  recovery. An ambiguous paid attempt blocks new work and is never automatically reissued;
+- Settings is revision-fenced: the server-delivered schema exposes 143 curated UI fields against 166 model
+  fields, global settings and secrets have separate opaque CAS revisions, and per-run config uses a SHA-256
+  snapshot revision under required locking. This supersedes §22.8/§35's no-CAS status, but does not add RBAC or
+  a configuration history workbench.
+
+These closures move the boundary; they do not complete R3. The shipped ConceptFrame is a bounded recorded-claim
+projection, not release-pinned concept/assignment identity, independent evidence, causal effect or compatible
+cross-run comparison. The current **Concepts** tree/table is not yet the coordinated Research container,
+first-class Lineage equivalent or Focused Concept Map + complete relationship table described in doc 18 §36.
+Likewise, the owner Atlas cards remain an overlapping bounded live diagnostic without an immutable scope,
+common snapshot/access receipt, proof completeness or governance workbench.
+
+**Canonical next order:**
+
+```text
+P0 current shipped-surface evidence and recovery polish
+→ R1 graduate the bounded ConceptFrame (permission/proof/resource receipts + exact deep-link lifecycle)
+→ R2 coordinated Lineage + Concepts Research container and representative fixtures
+→ R3 bounded focused relationship graph + complete table/Inspector hand-off
+‖
+G0/G1 proposition/effect semantics + stable concept/claim/evidence identity
+→ G2 immutable scope/comparison/access + corpus/snapshot/health
+→ G3 resource-safe queries and attributable/redacted consumers
+→ G4 matrix/proof/compare prototype
+→ G5 Research Atlas promotion
+→ G6 governed meaning change with impact/history/migration
+```
+
+P0 is now verification and comprehension of shipped behavior, not permission to rebuild the retired Direction
+bundle. It covers the owner Concepts/Search/Report journey, folded-axis and lifecycle consistency, explicit
+partial/historical/relationship/metric language, paid-recovery states, Settings conflict recovery,
+keyboard/focus/overflow and real-backend desktop evidence. Mobile-specific composition is outside this current
+priority checkpoint.
+
+R1 must preserve the current append-only/history split and one-durable-logical-operation paid boundary while
+adding any missing
+permission, proof and resource receipts. R2/R3 must reuse the existing ConceptFrame and concept filters, not
+create a browser-owned taxonomy. If a narrative Direction is later approved, it enters as a distinct entity
+with UID/provenance/migration and a measured comprehension need; until then the product uses **Primary concept
+axis** only for the deterministic one-slot grouping projection.
+
+Cross-run order is unchanged. Per-run progress may proceed in parallel with G0–G4, but neither side may borrow
+the other's scope, completeness or evidence language. The production label remains **Experimental bounded
+owner-only read-only Research Atlas preview** until G5. Exact implementation chronology and validation limits
+are recorded in
+[doc 21 Round 25](21-full-functionality-review-2026-07-13.md#round-25-dated-4d1218c-per-run-concepts-paid-recovery-and-settings-reconciliation-2026-07-18);
+UI wording and acceptance are in
+[doc 18 §36](18-ui-ux-review-2026-07-11.md#36-dated-4d1218c-uiux-reconciliation-2026-07-18).
+
+#### 22.11 Post-checkpoint integration release reconciliation (2026-07-18)
+
+This is the working release-order correction after `4d1218c`, not a final publication certificate. It names no
+floating upstream hash. The final integrated source/tests decide shipped truth; doc 18 §37 owns detailed UI
+semantics and doc 21's post-Round-25 ledger owns measured execution evidence.
+
+**Required integration deltas.** The final tree must retain the post-checkpoint upstream lifecycle fixes:
+Concepts refresh identity follows lifecycle change, reports use the lifecycle-clean node projection, and a DAG
+with only tombstoned/aborted concept attempts remains honestly empty in its current view while historical
+prefixes remain replayable. It must also retain the advisory `concept_card` boundary: exact/fuzzy slug reuse,
+scoped track record separated from global observation count, redacted `UNTRUSTED_MEMORY` framing, and no claim
+that the tool writes governance or produces a verified paper.
+
+Desktop comprehension now uses **Projection lens**, **displayed concept nodes**, explicit **Expand/Collapse
+concept rows**, expandable additional-parent `+N links`, stable relationship vocabulary across loading/error,
+and honest mixed-era empty-state copy. Atlas raw metrics are preceded by visible scope/non-comparability,
+identity/unit and orientation warnings; context-free values are suppressed, long copy wraps, and bounded
+untrusted identifiers cannot inject bidi formatting controls. The route-main landmark/focus fix is integrated
+and automated-tested; its final desktop browser replay remains part of the publication gate.
+
+The paid boundary is one durable worker/logical invocation with same-key join/replay and no parser repair or
+outer same-identity redispatch. Core transport retries can still issue more than one HTTP/provider request, so
+provider billing and exact returned-usage reconciliation remain ambiguous. Per-run Config owns its own
+equivalent lock/revision transaction; the current Web editor always supplies the SHA-256 revision, while raw
+HTTP omission remains a legacy serialized last-writer-wins path.
+
+**Release order after the checkpoint:**
+
+```text
+integrate + revalidate lifecycle/current-report and route-landmark corrections
+→ preserve truthful Concepts/Atlas copy, text safety and paid/CAS boundaries
+→ rerun the complete Python and full React/build gates from the final tree
+→ perform the real desktop browser/keyboard/focus/overflow/recovery journey
+→ publish only after final source/test/docs evidence and remote equality agree
+‖
+continue R2/R3 Research container + focused map/table design
+‖
+retain Atlas G0–G6 promotion gates
+```
+
+The primary-axis×Concept crosswalk is not an immediate dependency: it would cross one lossy selected member of
+the concept set against that same set. It may return only with a distinct identified Direction entity and a
+measured comprehension need. The full Research Space, Saved Scope/Atlas comparison contract and governance
+workbench remain open.
+
+Known evidence at this integration checkpoint is deliberately narrow: the focused UI selection is **57/57
+PASS**; a paid OpenRouter MiniMax bounded text+structured smoke is **PASS** but is not a Concepts-lens E2E; the
+full Python attempt is **not yet PASS** because six environment/path-artifact failures require a corrected
+rerun. Strict documentation validation and final full-suite/browser/publication results are recorded only when
+completed in
+[doc 21's post-Round-25 ledger](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18).
+Detailed UI wording and acceptance are in
+[doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18).

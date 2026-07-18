@@ -1,11 +1,19 @@
-# Desktop Concepts UI/UX Review — shipped authority, graph views, and product gaps
+# Desktop Concepts UI/UX Review — integration concept, graph views, and product gaps
 
-**Date:** 2026-07-16
-**Scope:** desktop owner UI, with emphasis on Part IV Concepts, Directions, experiment DAG, evidence references,
-typed relation lenses, paid lens creation, Settings discoverability, and recovery behavior.
-**Authority:** this document is the current focused review for the shipped per-run Concepts slice. The broader
-UI target and priorities remain in [doc 18 §35](18-ui-ux-review-2026-07-11.md); implementation/test chronology
-is recorded in [doc 21](21-full-functionality-review-2026-07-13.md).
+**Integration review:** 2026-07-18. The landed baseline is the dated `master` checkpoint `4d1218c`; the
+post-checkpoint integration status and still-pending items are recorded in
+[doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18).
+
+**Historical origin:** the first focused checkpoint was recorded on 2026-07-16; §1.1 preserves its findings and
+marks their current status instead of rewriting them as if they had never existed.
+
+**Scope:** desktop owner UI, with emphasis on Part IV Concepts, the experiment DAG, the folded primary concept
+axis, evidence references, typed relation lenses, paid lens creation/recovery, and Settings discoverability.
+
+**Related authority:** the current integration corrections and broader UI priorities are in
+[doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18);
+implementation/test chronology is recorded in
+[doc 21](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18).
 
 This round deliberately does **not** validate or redesign mobile/touch/reflow. Mobile remains deferred and is
 not a publication blocker for this desktop checkpoint. Existing mobile roadmap requirements are not deleted,
@@ -13,85 +21,131 @@ but no new mobile-conformance claim is made here.
 
 ## 1. Executive finding
 
-LoopLab now has a useful, honest **bounded per-run Concepts workspace**, but it is still one product slice
-inside an information architecture originally organized around experiment lineage. The largest UI gain will
-not come from adding another graph. It will come from explicitly separating three questions:
+LoopLab now has a coherent, bounded and recovery-aware **per-run Concepts workspace**. The 2026-07-18
+checkpoint also removes a major semantic ambiguity: the lineage UI no longer presents “Direction” as if it
+were a separate governed entity. The two durable user questions are:
 
-```text
+~~~text
 Research
-  Lineage    — how experiments derive from one another
-  Directions — the run-local coarse narrative projection
-  Concepts   — multi-label semantic structure and evidence
-```
+  Lineage              — how current experiments derive from one another
+  Concepts              — multi-label semantic structure, relationships, metrics and evidence
 
-The current tree/table is the right default for Concepts because it can show exact IDs, metrics, omissions and
-evidence compactly. A future Focused Concept Map should be a coordinated secondary view with a complete
-relationship table, not the only way to navigate semantic structure.
+Lineage grouping
+  Primary concept axis  — one lossy compatibility projection of folded concept memberships
+~~~
 
-The highest-risk current defects are state and evidence defects rather than cosmetics:
+The current tree/table is the right default for Concepts because it can show canonical IDs, projection
+semantics, metric context, omissions and exact evidence compactly. A future Focused Concept Map should be a
+coordinated secondary view with a complete relationship table, not the only way to navigate semantic
+structure.
 
-1. paid lens creation needs durable idempotency, metering and reload recovery before it is production-safe;
-2. experiment provenance and rollup eligibility must be visible, not hidden in a tooltip;
-3. generation changes must close stale experiment menus even when the replacement reuses the same numeric ID;
-4. rapid live projection changes must coalesce rather than repeatedly abort the only Concepts request;
-5. selected concept pills and split Direction bands must retain enough identity to avoid ambiguous labels.
+The largest remaining UI gain is therefore not another unbounded graph. It is a unified Research container,
+a concept detail Inspector, a bounded synchronized map/table for one selected concept, and reproducible view
+state. A primary-axis×Concept matrix is deliberately retired from the near-term plan: the axis is already one
+member selected from the same multi-membership set, so such a matrix would mostly restate the source data.
+
+### 1.1 Historical 2026-07-16 checkpoint, validated on 2026-07-18
+
+The original review identified five P0 defects. They are retained here as chronology and are **landed** at the
+current checkpoint:
+
+| 2026-07-16 finding | Current 2026-07-18 status |
+|---|---|
+| paid lens creation lacked durable idempotency, metering and reload recovery | landed at the LoopLab logical-work boundary: generation/request fences, durable started/terminal events, one worker operation, same-identity replay and owner-plane recovery; bounded core transport retries remain possible |
+| provenance and rollup eligibility were hidden | landed: evidence rows expose attempt, status, feasibility, membership provenance, rollup eligibility and metric availability |
+| stale experiment menus could survive same-ID generation replacement | landed: run generation/attempt fences close or disable stale actions |
+| rapid live projection updates could starve Concepts refresh | landed: semantic projection changes coalesce while run/generation/sequence/lens changes remain hard fences |
+| selected pills and split/collapsed groups could lose identity or lie about totals | landed: canonical selected IDs, stable chip order, active-lifecycle counts, matched/total aggregates and zero-match treatment |
+
+These fixes close the immediate correctness gate. They do **not** claim that the complete Research Space,
+Focused Concept Map, governance workbench or canonical portfolio Atlas exists.
 
 ## 2. Current product truth
 
-Today the owner run workspace ships a bounded per-run Concepts tree/table backed by `ConceptFrame` v1. The
-response is bound to the exact run generation and captured event prefix; carries requested/captured/max
-sequence, completeness and authority receipts; exposes typed hierarchy projections; and returns self-contained,
+The owner run workspace ships a bounded per-run Concepts tree/table backed by `ConceptFrame` v1. The response
+is bound to the exact run generation and captured event prefix; carries requested/captured/max sequence,
+completeness and authority receipts; exposes typed hierarchy projections; and returns self-contained,
 generation-bound experiment references plus descriptive per-concept outcome rollups. HTTP success alone is not
 projection truth: the browser validates identity, topology, bounds, provenance and authority before rendering.
 
-It is **not** the canonical Research Space or Focused Concept Map. The unified Research information architecture,
-Direction×Concept crosswalk, Landscape/Intersections/Journey, complete paged relationship table, immutable
-taxonomy/assignment releases, exact evidence-family proof and governance workbench remain open.
+It is **not** the canonical Research Space or Focused Concept Map. The unified Research information
+architecture, Landscape/Intersections/Journey, complete paged relationship table, immutable
+taxonomy/assignment releases, exact evidence-family proof and governance workbench remain open. The older
+primary-axis×Concept crosswalk proposal is not an open deliverable unless a separately identified Direction
+entity and a measured comprehension need are established.
 
 | Surface | Shipped user promise | Explicit non-promise |
 |---|---|---|
-| Search / experiment DAG | one run's experiment lineage, grouping and exact experiment selection | not concept topology or cross-run evidence |
-| Directions | coarse run-local compatibility grouping: legacy `idea.theme`, otherwise the first authored concept's top-level axis | ignores additional concepts/deeper paths; not governed taxonomy, causality or cross-run identity |
-| Concept chip bar | browse concept paths and OR-filter/highlight matching experiment memberships | not a complete graph, proof system or winner selector |
-| Concepts tree/table | bounded current/historical frame; shipped/validated lenses; experiment refs; descriptive rollups | not a complete taxonomy, scientific verification or Atlas |
-| Create lens · paid | ask the configured provider for a relation-subset projection spec; the spec changes view state, not run meaning | never creates a concept, edge, assignment or governance decision |
-| Atlas preview | four independently fetched, overlapping bounded portfolio response slices | not a Saved Scope, coherent snapshot, complete corpus or canonical concept graph |
+| Search / experiment DAG | one run’s active experiment lineage, exact experiment selection and optional grouping | not concept topology, governance or cross-run evidence |
+| Primary concept axis | one compatibility grouping derived from the current folded concept memberships | not a Direction entity, taxonomy, causal claim or cross-run identity |
+| Concept chip bar | canonical breadcrumb browsing plus OR selection/highlight of matching current memberships; canonical order stays stable when counts change | not a complete graph, proof system, metric sort or winner selector |
+| Collapsed/expanded groups | active-lifecycle counts; a filter shows matched/total, dims zero matches and computes best/status only over matching eligible members | not evidence that excluded, aborted or tombstoned attempts never existed |
+| Concepts tree/table | bounded current/historical frame; dynamic recorded-relation vocabulary; generation-bound refs; descriptive rollups and explicit metric context | not a complete taxonomy, scientific verification or Atlas |
+| Create lens · paid | ask the configured provider for a validated relation-subset projection spec; the spec changes view state, not run meaning | never creates a concept, edge, assignment or governance decision |
+| Atlas preview | independently fetched bounded portfolio response slices | not a Saved Scope, coherent snapshot, complete corpus or canonical concept graph |
 
-`Direction` is the only user-facing term for the compatibility projection. `theme` remains an internal/legacy
-wire name. A displayed Direction summary is descriptive observed data, never an effect or winner claim.
+### 2.1 Primary concept axis contract
+
+`Primary concept axis` is deliberately labelled as a compatibility projection. For a node that has a folded
+`RunState.node_concepts` row, the reader:
+
+1. canonicalizes every membership through consolidation aliases;
+2. takes distinct top-level axes;
+3. chooses the lexicographically first axis; and
+4. treats an explicit empty folded row as untagged/unassigned, with **no** fallback.
+
+Only when the folded row is genuinely missing may compatibility migrate through legacy `idea.theme`, then
+the first authored concept’s top-level axis. This keeps the DAG, charts, reports and Inspector in the same
+post-retag/post-rename vocabulary. It also makes the lossiness explicit: additional memberships and deeper
+paths are intentionally omitted.
+
+The obsolete URL `focus` value for the old Direction surface is not silently reactivated. It is ignored with
+the visible migration notice “Legacy Direction focus is no longer supported; use the Concepts filter
+instead.” `theme` remains an internal/legacy wire name, not current user-facing product language.
 
 ## 3. Desktop composition and visual hierarchy
 
 The Concepts workspace is a **table-first evidence explorer**, not another force graph squeezed above the
-lineage canvas. Its desktop reading order should be:
+lineage canvas. Its desktop reading order is:
 
 1. run identity, generation/history state and Concepts workspace selection;
-2. frame identity (`N concepts`, tagged experiments and captured sequence);
-3. one primary hierarchy-lens selector;
+2. frame identity (concept count, tagged experiments and captured sequence);
+3. one **Projection lens** selector for hierarchy or projected relationships;
 4. a visually secondary paid custom-lens creator with explicit charge/recovery copy;
-5. hierarchy expand/collapse and refresh controls;
+5. **Expand concept rows**, **Collapse concept rows** and refresh controls;
 6. selectable outcome columns and their run-median reference;
-7. the internally scroll-contained concept/evidence table.
+7. explicit metric and relationship context; and
+8. the internally scroll-contained concept/evidence table.
 
 At 1280×720 the page itself must have no horizontal overflow. The table owns its vertical overflow and keeps
 the column header visible; the command bar must not cover the final evidence row. Long canonical concept IDs
 wrap or truncate only with the complete accessible value retained. Default entry is the collapsed top-level
 axis list: bulk expansion is explicit, and expanding hierarchy never silently expands evidence references.
 
-Typed edge lenses are graph projections rendered as an outline. Therefore every node shows its complete
-canonical ID, not only an ambiguous leaf; the selected primary parent defines indentation; and omitted
-secondary parents are disclosed as `+N links` with their exact IDs. The outline must never imply that one
-chosen parent is the only semantic relation.
+Typed edge lenses are graph projections rendered as an outline. The relationship vocabulary is read from the
+validated `requested_lens_spec.rels` for the active lens, so the heading and legend describe the actual
+projected relation set instead of using a hard-coded “hierarchy” label. `co_occurs` additionally discloses that
+its links are derived from the current frame memberships, not recorded edge claims. Every node shows its complete canonical
+ID; the selected primary display parent defines indentation; and `+N links` is an expandable disclosure with
+exact additional parent IDs, usable by keyboard and pointer. Counts are explicitly **displayed concept nodes**,
+not relationship counts. Loading and error states retain the selected projection's vocabulary and context
+instead of falling back to a contradictory hierarchy label. The outline never implies that the chosen display
+parent is the only relation or that an edge projection is a taxonomy hierarchy.
 
-Search keeps concept chips compact, but a selected filter pill must preserve enough canonical ancestry to
-distinguish equal leaves such as `model/x` and `data/x`. Direction bands split by topology/phase must disclose
-their global total and continuation (`2/4 · continued` or an equivalent grammar); two visually identical
-`architecture 2` cards may not masquerade as two independent Directions.
+Search keeps concept chips compact, but selected pills preserve canonical ancestry to distinguish equal leaves
+such as `model/x` and `data/x`. Chips are sorted by canonical ID, so an SSE count change does not move
+keyboard/click targets. A drilled exact-level membership remains a trailing “· here” choice instead of
+vanishing.
 
-## 4. Evidence and metric comprehension
+Expanded topology bands show matched/band counts and disclose a split when one semantic group spans multiple
+bands. Collapsed cards show `matched/total`, compute status/best/trajectory only from matching current
+members, and render a zero-match card as dimmed with “no matching experiments” rather than leaking a metric
+from another concept.
+
+## 4. Evidence, lifecycle and metric comprehension
 
 The experiment reference is the hand-off from a concept claim to its run evidence. Its visible row—not a
-hover-only tooltip—must expose:
+hover-only tooltip—exposes:
 
 - experiment ID **and attempt/generation**;
 - lifecycle status;
@@ -105,50 +159,71 @@ Tooltips and accessible names may expand this summary, but cannot be the only pl
 eligibility exists. Disabled stale-attempt links explain the generation mismatch rather than opening a current
 experiment with the same numeric ID.
 
-`best`, `mean`, `Δ best`, `Δ mean`, evaluated count and first-touch are individually selectable columns.
-The run median is the descriptive comparison reference; orientation follows the run's minimize/maximize
-contract. Positive/negative colour is redundant with the signed value. Multi-membership experiments count
-fully in every membership and that rule is disclosed; membership is not independent evidence and does not
-directly score or select the champion. `concept_pivot` and `graded_novelty` may separately steer exploration or
-proposal admission when enabled, so guides must not call concepts universally inert.
+Every current experiment projection uses the same lifecycle boundary: tombstoned nodes and IDs in
+`aborted_nodes` remain in replay/audit history but are excluded from DAG geometry, chips, grouping counts,
+collapsed aggregates, charts and ConceptFrame current metrics/references. The post-checkpoint integration also
+keys live refreshes and report projections to that lifecycle boundary. A historical frame retains its own
+generation-bound evidence; it never joins a reference to a later attempt with the same numeric ID.
 
-## 5. Resource, generation, and paid-action safety
+`best`, `mean`, `Δ best`, `Δ mean`, evaluated count and first-touch are selectable columns. The
+visible metric context states that the table uses the primary objective, that its display name/unit are not
+recorded, whether the run minimizes or maximizes, and that positive Δ is orientation-normalized to mean
+“better”. The run median is the descriptive comparison reference. Rows remain in the active
+hierarchy/relationship projection order: choosing a metric column does **not** create an implicit Δ sort.
+Any future ranking control must be explicit, labelled and reversible.
+
+Multi-membership experiments count fully in every membership and that rule is disclosed; membership is not
+independent evidence and does not directly score or select the champion. `concept_pivot` and
+`graded_novelty` may separately steer exploration or proposal admission when enabled, so guides must not call
+concepts universally inert.
+
+## 5. Resource, generation and paid-action safety
 
 Concept GETs retain the last validated frame during refresh and distinguish loading, stale, partial,
-historical, authoritative empty and unavailable states. A live run may update faster than one projection
-round-trip; projection changes must be bounded/coalesced so rapid SSE ticks cannot repeatedly abort the only
-request and leave the view refreshing forever. Run, generation, historical sequence or lens changes remain hard
-semantic fences.
+historical, authoritative empty and unavailable states. Semantic changes to memberships, consolidation,
+lifecycle, status, feasibility, metrics, champion or typed edges coalesce into a current projection refresh;
+run, generation, historical sequence and lens changes remain hard semantic fences.
 
-Every run-local menu, selected experiment and paid intent is also generation-scoped. Replacing a run with the
-same ID and reusing node `#7` must close the old node-action menu, clear stale callbacks and require selection in
-the new generation.
+Every run-local menu, selected experiment and paid intent is generation-scoped. Replacing a run with the same
+ID and reusing node `#7` closes the old node-action menu, clears stale callbacks and requires selection in the
+new generation.
 
-The paid lens path is production-safe only with all of the following:
+The paid Concepts lens path is production-safe at this checkpoint within the following explicit boundary:
 
-- an exact generation fence and authoritative complete base frame **before** provider construction;
-- a caller idempotency key whose durable claim precedes provider work, with request-digest collision checks;
-- server-side concurrent-tab coalescing and terminal replay after lost HTTP responses;
-- a background job receipt rather than an unbounded inline POST;
-- a generation-bound run-activity lease around model work;
-- the shared metered run client and durable `llm_usage` reconciliation;
-- a saved browser intent before fetch, explicit same-key Resume after reload and fail-closed storage handling;
-- durable validated derived/declined terminal receipts, while an orphaned/unknown paid outcome is never
-  automatically retried.
+- the browser saves one run-, generation- and prompt-bound request identity before dispatch and fails closed
+  when tab storage cannot preserve it;
+- the server checks the exact generation and the same bounded ConceptFrame input used by the free view;
+- cap-only partial frames may be used and remain labelled partial, while corruption-class completeness
+  reasons block provider construction;
+- a durable `concept_lens_started` claim precedes background work; one worker performs one logical
+  `tool_call_once` operation through the metered run client, without parser-repair or outer same-identity
+  redispatch;
+- durable completed/failed/declined receipts and run usage accounting make terminal replay observable;
+- the same identity rejoins or replays the existing LoopLab job instead of minting another logical operation;
+- reload recovery is an owner-plane GET that exposes no prompt, digest, paid idempotency key or resolution
+  key; it can poll the exact job, restore a terminal, or report orphan/conflict; and
+- resolving an orphan uses a separate resolution idempotency key plus exact request ID and started sequence.
+  It sends no provider retry and truthfully leaves provider completion/billing unknown.
 
-Provider-side exactly-once billing is still impossible without provider-supported idempotency. LoopLab can
-guarantee that it does not knowingly issue a second provider call for one durable claim; an accepted request
-whose provider response is lost remains an explicit unknown outcome.
+Review links and historical snapshots cannot create paid lenses. A new paid identity remains disabled while
+an unresolved or conflicting claim exists, and paid storage/accounting failure is fail-closed.
 
-## 6. High-impact UI changes
+Provider-side exactly-once billing is still impossible without provider-supported idempotency. The core client
+may make bounded transport retries after timeout/reset/429/5xx/empty/decode failures, and an earlier request may
+already have been accepted or billed. LoopLab therefore guarantees one durable worker/logical invocation and
+no parser-repair or outer same-identity redispatch—not one HTTP/provider attempt. Provider completion, billing
+and returned-usage reconciliation can remain explicitly unknown.
+
+## 6. High-impact next UI changes
 
 ### 6.1 One Research container
 
-Rename the overloaded run-level `Search` workspace to **Research** and expose primary
-**Lineage | Directions | Concepts** lenses. Crosswalk belongs under Directions. Landscape, Intersections,
-Journey and Focused Map belong under Concepts. Overview remains a summary, not a fourth pressed lens.
+Rename the overloaded run-level `Search` workspace to **Research** and expose
+**Lineage | Concepts** as the primary lenses. Keep **Primary concept axis** as an explicitly lossy grouping
+control inside Lineage, not a peer governed entity. Landscape, Intersections, Journey and Focused Map belong
+under Concepts. Overview remains a summary, not a third pressed lens.
 
-Selection is one shared subject (experiment attempt, Direction or concept), while each lens keeps its own
+Selection is one shared subject (experiment attempt or concept), while each lens keeps its own
 camera/scroll/filter return context. The Inspector changes schema with that subject; it does not mix an
 experiment action menu with concept governance.
 
@@ -157,7 +232,7 @@ experiment action menu with concept governance.
 Selecting a concept opens a stable detail Inspector with:
 
 - canonical ID, label/alias state, release/revision and provenance;
-- incoming/outgoing typed relations with direction and confidence/provenance;
+- incoming/outgoing typed relations with direction, confidence and provenance;
 - exact experiment memberships and their attempt identities;
 - descriptive rollups with eligibility and omissions;
 - history/rename/merge/split state when governance identity exists; and
@@ -166,57 +241,103 @@ Selecting a concept opens a stable detail Inspector with:
 ### 6.3 Coordinated Focused Map and relationship table
 
 The map defaults to a bounded neighbourhood around one selected concept and uses distinct grammars for
-hierarchy, usage/composition, co-occurrence/similarity and assignment. The synchronized table is the complete
-path for the declared query/access receipt. Graph edge selection focuses the row; table selection highlights
-the edge without silently re-rooting.
+hierarchy, usage/composition, co-occurrence/similarity and assignment. Its legend is generated from the
+active relationship vocabulary and never relies on colour alone. The synchronized table is the complete path
+for the declared query/access receipt. Graph edge selection focuses the row; table selection highlights the
+edge without silently re-rooting.
 
-### 6.4 Direction×Concept crosswalk
+The map always exposes scope, generation/release, truncation, hidden-node/edge counts and a “why this edge?”
+path into evidence. Layout and camera are view state, not domain meaning.
 
-The crosswalk is the most important migration screen because it explains how familiar run-local Directions
-decompose into multi-label concepts. Sticky Direction rows and canonical Concept columns show distinct
-experiment counts, eligible denominators, unknown/partial states and exact drill-down. It never treats the
-coarse Direction fallback as taxonomy.
+### 6.4 Retired crosswalk and migration explanation
+
+Do not build a primary-axis×Concept matrix from the current model. The primary axis is already a deterministic,
+lossy member of each node's folded concept set, so crossing it against that set risks presenting a derived
+layout slot as an independent entity. Explain migration in-place instead: label the grouping **Primary concept
+axis**, disclose omitted memberships, link to the Concepts filter/detail, and keep the legacy-focus notice. A
+crosswalk becomes valid only if a future Direction receives its own opaque identity/provenance and usability
+research shows that the extra view answers a distinct question.
+
+### 6.5 Reproducible analysis state
+
+A saved/shareable concept view must bind run generation, captured sequence, lens/spec, selected concept,
+filters, visible metric columns, expanded hierarchy/evidence and map camera. Restoring a stale generation
+opens a clearly historical read-only state; it never silently retargets to current evidence.
 
 ## 7. Functional gap and priority ledger
 
-| Priority | Missing/changed capability | Why it materially changes UX |
-|---|---|---|
-| P0 | visible provenance/eligibility in refs; generation-reset menu fencing; live projection coalescing; canonical selected pills; honest continued band totals | removes current deception, stale actions and live starvation |
-| P0 | durable/idempotent/metered paid lens with Resume/unknown states | prevents blind duplicate charges and makes paid work recoverable |
-| P1 | Direction×Concept crosswalk with counts, unknown/partial states and exact experiment drill-down | explains how familiar Directions decompose into multi-label concepts |
-| P1 | concept detail Inspector with incoming/outgoing typed relations, membership history, aliases and proof links | replaces hover archaeology with an evidence workflow |
-| P1 | synchronized Focused Map + complete relationship table | gives a bounded spatial view without making the graph the only accessible source |
-| P1 | Landscape, Intersections and Journey | answers portfolio shape, co-occurrence/gaps and change-over-time questions that a tree cannot |
-| P1 | saved/shareable concept view state (generation, sequence, lens, focus, filters, expanded evidence) | makes analysis reproducible rather than ephemeral browser state |
-| P2 | release-pinned taxonomy/assignment history, impact preview and reversible governance | separates observed claims from approved portfolio meaning |
-| P2 | immutable Saved Scope + compatible Atlas comparison/proof/export | enables defensible cross-run decisions rather than overlapping live previews |
+| Status | Priority | Capability | Why it materially changes UX |
+|---|---|---|---|
+| landed 2026-07-18 | P0 | visible provenance/eligibility; generation-reset fencing; coalesced live refresh; canonical stable chips; lifecycle-safe matched/total groups | removes stale actions, hidden evidence, moving controls, cross-filter metrics and live starvation |
+| landed 2026-07-18 | P0 | durable/idempotent/metered logical paid-lens job with same-identity Resume and owner-plane recovery | prevents blind logical redispatch and makes lost-tab work inspectable; provider retries/billing ambiguity remain explicit |
+| retired / conditional | — | Primary-axis×Concept crosswalk | do not reify a lossy member of the concept set; reconsider only with a distinct Direction identity and measured user need |
+| open | P1 | concept detail Inspector with typed relations, membership history, aliases and proof links | replaces hover archaeology with an evidence workflow |
+| open | P1 | synchronized Focused Map + complete relationship table | gives a bounded spatial view without making the graph the only accessible source |
+| open | P1 | Landscape, Intersections and Journey | answers portfolio shape, co-occurrence/gaps and change-over-time questions that a tree cannot |
+| open | P1 | saved/shareable concept view state | makes analysis reproducible rather than ephemeral browser state |
+| open | P2 | release-pinned taxonomy/assignment history, impact preview and reversible governance | separates observed claims from approved portfolio meaning |
+| open | P2 | immutable Saved Scope + compatible Atlas comparison/proof/export | enables defensible cross-run decisions rather than overlapping live previews |
 
-## 8. Settings discoverability
+## 8. Settings discoverability and concurrency
 
-The Settings UI loads a versioned server-owned editor catalogue with **10 groups and 141 of the 164 direct
-`Settings` fields**, plus the nested agent-control matrix. It is intentionally curated rather than exhaustive.
-Fields outside the catalogue remain configurable through environment/config inputs and must survive sparse UI
-writes. `concept_pivot`, `graded_novelty` and `capability_expansion` are present with their dependency and
-behavioral copy; the interface must not imply that every engine field is editable in the browser.
+The Settings UI loads a versioned server-owned editor catalogue with **10 groups and 143 of the 166 direct
+`Settings` fields**. Its default **Essential** mode contains 17 high-frequency keys; search spans the full
+catalogue. The catalogue is intentionally curated rather than exhaustive. Fields outside it remain
+configurable through environment/config inputs and survive sparse UI writes.
 
-Contextual entry points should open the relevant setting with its effective value, dependency, apply timing,
-cost/risk and disabled reason. A generic Settings dump is not a substitute for explaining why a Concepts
-capability is unavailable in the current run.
+The packaged catalogue is v1 and the HTTP/editor contract is v2. Its weak ETag is a semantic cache revision
+for schema metadata, **not** a settings mutation token.
 
-## 9. Desktop acceptance for this checkpoint
+Global settings and the write-only secret store carry separate opaque `settings_revision` and
+`secret_revision` CAS tokens. The current browser sends the observed token, receives structured 409
+conflicts, keeps the operator’s draft, refreshes authoritative state and requires a deliberate retry. Per-run
+config uses a separate 64-character `config_revision`; its current editor sends `expected_revision` under
+its own equivalent read/compare/merge/write locking contract. Token omission remains a legacy API
+compatibility path at the raw HTTP boundary, not the current UI contract.
 
-- Browser journeys cover a concept-rich run and a concept-authored run with no legacy theme at 1280×720 and
-  one wider desktop viewport; page/table overflow, sticky header, command-bar clearance and console errors are
-  inspected from the mounted production build.
-- Concept-only runs show deterministic Directions from authored top-level axes; every affected report/chart/
-  group/Inspector surface uses the same compatibility reader.
-- Expanding all hierarchy nodes does not expand refs. Opening refs shows all fields in §4. Switching typed
-  lenses retains complete IDs and secondary-link disclosure.
-- Rapid live projection changes settle to a current frame without request starvation. Replacing the same run ID
-  closes an open node menu even when the numeric node survives.
-- A paid MiniMax M3 journey uses one durable key, reaches one terminal lens result, records one run usage delta,
-  survives same-key replay without another provider call, and exposes no credential value.
-- Full React tests, production build, bundle budgets, focused backend durability/concurrency tests, strict
-  MkDocs and `git diff --check` pass from the integrated current `master` tree.
+`concept_pivot`, `graded_novelty` and `capability_expansion` are present with dependency and behavioral
+copy. Contextual entry points should open the relevant setting with its effective value, dependency, apply
+timing, cost/risk and disabled reason. A generic Settings dump is not a substitute for explaining why a
+Concepts capability is unavailable in the current run.
+
+## 9. Desktop acceptance gate and exact evidence
+
+The following bullets are the **remaining release acceptance contract**, not a claim that every journey has
+already passed:
+
+- Browser journeys must cover a concept-rich run and a concept-authored run with no legacy theme at 1280×720
+  and one wider desktop viewport; page/table overflow, sticky header, command-bar clearance and console errors
+  must be inspected from the mounted production build.
+- Concept-only runs derive one deterministic **primary concept axis** from folded canonical memberships;
+  reports, charts, grouping and Inspector use the same compatibility reader. An explicit empty folded row
+  never revives a legacy theme.
+- Chip controls stay in canonical order as counts change; retired aliases retarget through consolidation;
+  tombstoned/aborted experiments disappear from current counts and highlights.
+- Active concept filtering makes expanded and collapsed groups show honest matched/total values; zero-match
+  cards expose no best/status from excluded members; split topology bands disclose their wider total.
+- Expanding all hierarchy nodes does not expand refs. Opening refs shows every field in §4. Switching typed
+  lenses updates the relationship vocabulary, retains complete IDs and discloses secondary links.
+- Metric context names objective scope, missing display name/unit, orientation and Δ semantics. The table does
+  not silently reorder by Δ.
+- Rapid semantic projection changes settle to a current frame without request starvation. Replacing the same
+  run ID closes an open node menu even when the numeric node survives. A legacy `focus` URL produces the
+  migration notice and no hidden filter.
+- A paid lens browser journey must use one durable logical identity, reach one terminal result, record the
+  returned run usage, survive same-identity replay/reload without another LoopLab logical dispatch, expose no
+  prompt/paid key/credential through recovery, and label provider completion/billing ambiguity honestly.
+- Two Settings tabs and two per-run Config editors exercise accepted saves, structured revision conflicts,
+  retained drafts and deliberate reconciliation. Schema ETag changes are not treated as mutation conflicts.
+- Full React tests, production build, focused backend durability/concurrency tests, strict MkDocs and
+  `git diff --check` must pass from the final integrated tree.
+
+Evidence actually recorded for the post-checkpoint integration so far is narrower:
+
+| Check | Result and boundary |
+|---|---|
+| focused UI selection | **PASS — 57/57**; this is not the full React suite or a browser walkthrough |
+| paid OpenRouter MiniMax smoke | **PASS** for bounded text + structured `looplab smoke`; it is not a Concepts-lens route/E2E or an exactly-once billing proof |
+| full Python run | **NOT PASS YET** — six environment/path-artifact failures were observed; rerun from the corrected integrated environment is required |
+| route landmark/focus | **CODE + AUTOMATED TEST PASS** — one named outer run `main`, Concepts as a named region, URL-navigation revision focus without stealing local tab-click focus; final desktop browser replay remains pending |
+| strict docs and diff hygiene | recorded in doc 18 §37 after this documentation pass |
 
 This is a desktop gate only. No mobile/touch/reflow result is inferred from it.

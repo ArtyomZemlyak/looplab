@@ -56,6 +56,42 @@ file's `settings:` **>** env/`.env` **>** defaults.
 
 ---
 
+## Web editors, schema and concurrent saves
+
+The owner Web UI does not build forms by reflecting arbitrary Python fields in the browser. It fetches a
+server-owned curated catalogue with **143 of the 166 direct `Settings` fields in 10 groups**. The default
+**Essential** disclosure mode contains 17 high-frequency keys; search spans all 143 catalogued keys.
+Uncatalogued fields remain valid through environment/config/CLI inputs and are preserved by sparse Web
+writes.
+
+The packaged catalogue format is v1 and the HTTP/editor contract is v2. The schema response includes
+Pydantic-derived validation bounds and a semantic revision exposed as a weak ETag. That ETag only revalidates
+immutable editor metadata: it is **not** a mutation revision and must never be sent as a save CAS token.
+
+Global settings use two independent opaque mutation revisions:
+
+- `settings_revision` covers the sparse non-secret overrides in `ui_settings.json`;
+- `secret_revision` covers the owner-only write-only credential store. The API reports only whether the
+  credential exists and never echoes its value.
+
+The current Settings page sends the revision observed by that tab as `expected_revision`. The server holds
+the local and required interprocess locks across read/compare/merge/validate/atomic-write, and returns
+structured `settings_revision_conflict` or `secret_revision_conflict` 409 responses when another writer
+won. The browser retains the draft, refreshes authoritative state, reconciles fields that were accepted, and
+requires a deliberate retry; it never blindly replays an unknown mutation.
+
+The per-run Config editor has a separate contract. Its GET metadata includes a 64-character SHA-256
+`config_revision` for the complete `config.snapshot.json`; the current editor sends that value as
+`expected_revision` on `PUT /api/runs/{id}/config`. Its own equivalent local/interprocess locking contract—not
+the global Settings lock—covers the
+read/compare/merge/write transaction. A stale value returns structured
+`run_config_revision_conflict` with the current revision and writes nothing. The five run-start-pinned
+holdout/verifier fields and `profile` remain read-only under the rules described above.
+
+All three mutation tokens are optional at the raw HTTP boundary only for legacy clients. Omission preserves
+serialized last-writer-wins compatibility; it is not the current Web UI contract and is not recommended for
+new clients. See [Web UI](ui.md) for the visible conflict/recovery behavior.
+
 ## Profile (one-word preset)
 
 | Setting | Env | Default | Description |

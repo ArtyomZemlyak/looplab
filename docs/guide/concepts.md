@@ -49,7 +49,7 @@ This buys two properties:
 - **Crash-resume.** `looplab resume RUN_DIR` replays every complete event, reconstructs the durable
   frontier, and continues pending work. The reader tolerates a torn final line. External operations
   have narrower guarantees: an effect not yet represented by an event/receipt can be lost, while
-  explicitly begun reflection work is recovered at-most-once rather than blindly repeated.
+  explicitly begun reflection work is not blindly redispatched as another outer logical operation.
 
 The SQLite read-model and HTML/JSON tree projections are rebuildable from events plus whatever trace
 sidecar still exists. Trace spans themselves are recorded diagnostic telemetry, not regenerable from
@@ -206,10 +206,11 @@ scope. A configured natural-finish report uses its own durable sequence inside t
 `report_generated -> finalize_step(report, outcome=...)`. Recovery can make the first
 call when no attempt marker exists, reuses a durable report, and deliberately does not replay an
 ambiguous begun attempt with no report. That last state is recorded as incomplete rather than risking
-a second paid request.
+a second outer logical paid operation.
 Reflection writes its begun marker before external/LLM work. If that attempt is interrupted, recovery
-records it as incomplete without replaying it; this deliberately guarantees at-most-once external
-writes/billing rather than silently risking duplicate memory or model side effects.
+records it as incomplete without replaying the outer logical work; this avoids intentional duplicate memory
+or model dispatch. Provider-client transport retries can still make billing ambiguous, so this is not an
+at-most-once invoice guarantee.
 
 Observed, run-attributable LLM usage is recorded as calls return, including calls made during
 wrap-up, before finalization can complete. Each returned provider result produces a sanitized
@@ -529,6 +530,17 @@ When enabled, however, `concept_pivot` coverage and `graded_novelty` deliberatel
 claims to steer exploration/proposal admission; disabling those controls restores the ordinary non-concept
 search path. UI rollups remain descriptive and do not independently verify taxonomy semantics.
 
+The old single-slot “Direction” is not a second semantic model. Current compatibility surfaces call it
+**primary concept axis** and derive it from the folded state: canonicalize the node's current memberships
+through consolidation aliases, take their distinct top-level axes and choose the lexicographically first.
+An explicit empty `node_concepts` row is authoritative and stays untagged; it must not revive an old
+`idea.theme`. Only a genuinely missing folded row may migrate through legacy `idea.theme`, then the first
+authored concept axis. This projection is intentionally lossy and run-local. The retired run-URL `focus`
+parameter is ignored with a visible notice directing the operator to the Concepts filter.
+On a mixed-era run, that legacy fallback may still group the Search DAG while the Concepts view remains
+honestly empty until folded memberships exist; the UI explains the distinction instead of treating authored
+legacy text as canonical ConceptFrame membership.
+
 **Hierarchy is a projection, not a stored tree.** Because concepts form a graph, "what is a top-level
 axis" is a *perspective*. A **typed concept-edge log** (`EV_CONCEPT_EDGE` → `RunState.concept_edges`,
 folded commutatively — max-confidence-wins per `(src, rel, dst)` triple) retains asserted relations such
@@ -543,27 +555,69 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   or symmetric `co_occurs` oriented by touch (most-used concept = hub). One primary parent per concept
   + `cross_parents` for the memberships it drops; deterministic, cycle-safe.
 - `derive_lens(prompt, edges, client)` — an agent that **mints a lens in the moment** from a
-  natural-language request (a pure projection spec of relation types + optional root; writes no events,
-  so it stays replay-clean).
+  natural-language request. This low-level helper returns a pure projection spec and does not itself write
+  events. The owner HTTP/UI path around it is a separate explicitly paid durable workflow described below;
+  callers must not infer free or replay-clean transport from the helper alone.
 - `concept_metrics(state, graph, tags)` — per-concept `{touched, evaluated, best, mean, delta_best,
   delta_mean, first_touch}`; a multi-membership node's metric counts **fully in every concept it
-  carries** (never divided), and `delta_*` is signed vs the run's median baseline. See
-  `looplab/search/concept_graph.py`.
+  carries** (never divided). Current rollups and the median baseline exclude tombstoned/aborted lifecycle
+  rows; best/mean eligibility also requires an evaluated, finite metric that is not explicitly infeasible.
+  `delta_*` is direction-normalized vs that median, so positive means better for both minimize and maximize
+  runs. See `looplab/search/concept_graph.py`.
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
   are all `added`). Pure projection over the full-set `node_concepts` — no new storage — canonicalized
   through the consolidation rename on both sides, so it shows what each experiment conceptually changed
   relative to where it came from. Surfaced to the Researcher/Strategist via the `node_concept_delta` tool.
 
-These are surfaced at `GET /api/runs/{id}/concepts?lens=…` (per-lens tree + metrics + the lens pack)
-and drive two run-view surfaces: the **Concepts** view (a concept tree/table — concepts as folders at
-any depth, experiments nested under the exact concept they touched, a configurable metric table with
-Δ-from-baseline coloring, and a lens switcher) and, on the **Search** graph, concept chips that
-highlight the matching nodes. Both surfaces carry a **quick-search**: a search icon in the chip bar
-gives a free-text concept lookup that live-previews the graph highlight and pins a concept on
-Enter/click, and the Concepts view has a header filter over concepts and their experiments (by node
-id/status) that auto-expands the path to each match. Both filter client-side over already-loaded
-state (no extra request). Concept tagging ships **on by default** (`concept_pivot`).
+These are surfaced at `GET /api/runs/{id}/concepts?lens=…` as a bounded `ConceptFrame` v1: one exact
+run generation and captured event prefix, completeness/authority receipts, a per-lens tree, metrics and
+self-contained experiment refs carrying node attempt/generation. Current projections consistently exclude
+tombstoned nodes and IDs in `aborted_nodes`; those records remain in append-only audit history. Cap
+truncation is labelled partial, and malformed/corruption-adjacent source reasons are a stronger unsafe state.
+
+The frame drives two run-view surfaces:
+
+- **Concepts** is a concept tree/table with concepts at arbitrary depth, experiments nested under the exact
+  concept they touched, configurable metric columns and a **Projection lens** switcher. Edge-projection copy is dynamic:
+  its heading/legend names the validated active `requested_lens_spec.rels` vocabulary, indentation is one
+  primary **display** parent, and expandable `+N links` exposes exact additional projected parents. The
+  `co_occurs` projection explicitly says that its links are derived from current frame memberships rather
+  than recorded edge claims. Loading and
+  recoverable-error states retain the selected projection vocabulary. Counts say **displayed concept nodes**;
+  bulk controls say **Expand concept rows** / **Collapse concept rows**. The view always states
+  objective scope, missing metric display name/unit, minimize/maximize orientation and normalized Δ
+  semantics. Row order remains the hierarchy/relationship projection order; enabling a metric column does
+  not silently sort by Δ.
+- **Search** adds canonical breadcrumb chips over the lineage DAG. Chips are sorted by canonical ID so live
+  count changes do not move controls, support minimal OR subtree selections, retain a trailing exact “· here”
+  chip when a drilled path has direct memberships, and highlight current matching nodes. Expanded and
+  collapsed groups use the same active-lifecycle boundary; an active filter shows matched/total, dims a zero
+  match and computes best/status/trajectory only from matching eligible members.
+
+Both surfaces carry quick-search. The chip search previews the graph highlight and pins a concept on
+Enter/click; the Concepts header filters concepts and their experiment refs (node id/status) and auto-expands
+paths to matches. Both operate client-side over already validated loaded state. Concept tagging ships **on by
+default** (`concept_pivot`).
+
+### Paid derived-lens lifecycle
+
+Ordinary ConceptFrame GETs and shipped lens switches are read-only. **Create lens · paid** is the explicit
+provider boundary. Before dispatch the current browser stores one run-, generation- and prompt-bound identity.
+The server validates the exact generation and ConceptFrame input, durably appends
+`concept_lens_started`, then runs one logical `tool_call_once` worker operation through the metered run client
+and persists a completed/failed/declined terminal. The same identity rejoins or replays the existing logical
+work; parser repair and outer same-identity redispatch are suppressed. The core client may nevertheless make
+bounded transport retries, so one HTTP/provider attempt, one invoice charge and complete billing
+reconciliation are not guaranteed. A bounded cap-only partial frame may be used and remains labelled partial,
+while any completeness reason outside the explicit safe-cap allowlist blocks provider construction.
+
+Reload recovery is owner-plane GET-only and intentionally returns no prompt, digest, paid idempotency key or
+resolution key. It can poll the exact current job, restore a terminal, or report an orphan/conflict. Explicit
+orphan resolution uses a separate resolution idempotency key plus the recovered request ID and started
+sequence, sends no provider retry, and leaves provider completion/billing unknown. Review links, historical
+snapshots, unavailable recovery storage, ledger conflicts and pending cost accounting all fail closed for new
+paid identities.
 
 ## Cross-run memory
 
@@ -598,6 +652,9 @@ normal consequential edit. The remaining heuristic
 scope, incomplete comparison/access/health receipts, missing evidence/taxonomy releases, and attempt-level rather than independent evidence
 families mean it is not yet the production 50–500-run system. The wired owner `#/atlas` route is explicitly a
 bounded read-only preview of these projections, not that full system.
+The advisory `concept_card` lookup reuses exact/fuzzy slugs, keeps scoped track record separate from the global
+observation count and frames persisted text as untrusted. It is not a prose-paper generator, verifier,
+governance mutation or complete applicability receipt.
 The target CR0–CR3 design adds the full applicability/coverage frame, durable derivation contracts,
 incremental summaries and interactive Research Atlas; see
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).

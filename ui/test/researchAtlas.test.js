@@ -55,12 +55,84 @@ test('Atlas projection reconciles concurrent totals without trusting malformed t
   assert.equal(view.empty, false)
   assert.equal(view.concepts[0].concept, 'robust search')
   assert.equal(view.concepts[0].runs[0].runId, 'run/one')
+  assert.equal(view.concepts[0].runs[0].metric, null,
+    'a legacy raw metric without task/scope context must fail closed before rendering')
+  assert.equal(view.concepts[0].runs[0].metricSuppressed, true)
   assert.equal(view.claims[0].nSupport, 1)
   assert.equal(view.claims[0].nUnverified, 1)
   assert.deepEqual(view.claims[0].unverified, ['run-0:node-2'])
   assert.equal(view.curation[0].merges, 1)
   assert.equal(view.curation[0].splits, 2)
   assert.equal(boundedAtlasText({ unsafe: 'shape' }), '')
+  assert.equal(boundedAtlasText('task\u202e-name\u2066 scope\u2069'), 'task -name scope',
+    'bidi formatting controls cannot visually reorder model-authored comparison context')
+})
+
+test('Atlas suppresses context-free raw metrics and never renders a bare optimization direction', async () => {
+  const view = buildResearchAtlasView({ explored: [
+    { concept: 'legacy row', runs: [
+      { run_id: 'legacy-run', direction: 'max', metric: 0.8 },
+    ] },
+    { concept: 'scoped row', runs: [
+      {
+        run_id: 'scoped-run', task_id: ' task-a\n', scope: ' holdout\tset ',
+        direction: 'max', metric: 0.8,
+      },
+    ] },
+  ] }, {}, {})
+  const legacy = view.concepts.find(row => row.concept === 'legacy row').runs[0]
+  const scoped = view.concepts.find(row => row.concept === 'scoped row').runs[0]
+
+  assert.deepEqual(
+    [legacy.metric, legacy.optimizationOrientation, legacy.metricSuppressed],
+    [null, '', true],
+  )
+  assert.deepEqual(
+    [scoped.task, scoped.scope, scoped.metric, scoped.optimizationOrientation,
+      scoped.metricSuppressed],
+    ['task-a', 'holdout set', 0.8, 'maximize', false],
+  )
+
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { AtlasRunReference } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const legacyMarkup = renderToStaticMarkup(
+      React.createElement(AtlasRunReference, { run: legacy }),
+    )
+    const scopedMarkup = renderToStaticMarkup(
+      React.createElement(AtlasRunReference, { run: scoped }),
+    )
+    const legacyDom = new JSDOM(legacyMarkup)
+    const scopedDom = new JSDOM(scopedMarkup)
+    const legacyText = legacyDom.window.document.body.textContent
+    const scopedText = scopedDom.window.document.body.textContent
+
+    assert.match(legacyText,
+      /legacy-run.*Metric hidden.*task\/scope comparison context or optimization orientation was not recorded/is,
+      'a sighted user can see why an available raw value was not rendered')
+    assert.doesNotMatch(legacyMarkup, /0\.8|\bmax\b/i,
+      'the raw value and shorthand direction must not leak into a context-free run reference')
+    assert.match(legacyDom.window.document.querySelector('a').getAttribute('aria-label'),
+      /Metric hidden.*task\/scope comparison context/is)
+    assert.match(scopedText,
+      /task: task-a.*scope: holdout set.*Not cross-run comparable.*Primary objective metric.*unnamed.*unit not recorded.*optimization orientation: maximize.*value 0[.,]8/is)
+    assert.ok(scopedText.indexOf('Not cross-run comparable') < scopedText.indexOf('value'),
+      'the visible comparability warning precedes the numeric value')
+    assert.doesNotMatch(scopedText, /\bmax\s+0[.,]8\b/i,
+      'optimization orientation must never be presented as a bare comparable metric')
+    assert.doesNotMatch(scopedText, /\bDirection\b/i,
+      'optimization orientation is distinct from the narrative Direction concept')
+    const atlasCss = await source('research-atlas.css')
+    const runReferenceRule = atlasCss.match(/\.atlas-runrefs a \{[^}]+\}/s)?.[0] || ''
+    assert.match(runReferenceRule, /white-space:\s*normal/)
+    assert.doesNotMatch(runReferenceRule, /text-overflow:\s*ellipsis|overflow:\s*hidden/,
+      'desktop Atlas references must not clip the warning while leaving its value visible')
+  } finally {
+    await vite.close()
+  }
 })
 
 test('Atlas derives evidence balance from sanitized totals instead of payload labels', () => {

@@ -123,6 +123,11 @@ button { font: inherit; }
 
 /* ---------- layout shell ---------- */
 .app { display: flex; flex-direction: column; height: 100%; }
+/* Route changes move programmatic focus here so screen readers announce the new view.  These
+   landmarks are deliberately outside the Tab order, so the browser's full-surface focus ring is
+   visual noise rather than a useful keyboard location cue; interactive descendants keep their
+   own :focus-visible treatment. */
+[data-route-main][tabindex="-1"]:focus { outline: none; }
 .topbar {
   display: flex; align-items: center; gap: 10px; padding: 6px 12px;
   background: linear-gradient(180deg, var(--bg-2), var(--bg-1));
@@ -2427,6 +2432,14 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-chev-placeholder { color: var(--line-2); }
 .cv-cid { font-family: ui-monospace, Menlo, Consolas, monospace; font-weight: 650; }
 .cv-badge { margin-left: 8px; padding: 2px 6px; border-radius: 6px; background: var(--bg-3); color: var(--fg-mut); font-size: 10px; }
+.cv-crosslinks { display: inline-block; max-width: min(520px, 52vw); margin-left: 8px; vertical-align: middle; }
+.cv-crosslinks > summary.cv-badge { display: inline-block; margin-left: 0; cursor: pointer; list-style: none; }
+.cv-crosslinks > summary.cv-badge::-webkit-details-marker { display: none; }
+.cv-crosslinks > summary.cv-badge:hover,
+.cv-crosslinks > summary.cv-badge:focus-visible { color: var(--accent-text); box-shadow: 0 0 0 2px var(--accent-dim); }
+.cv-crosslinks-detail { display: inline-block; max-width: 440px; margin: 4px 0 4px 7px; padding: 3px 6px;
+  border-left: 2px solid var(--accent-dim); color: var(--fg-dim); font-size: 10px; line-height: 1.35;
+  overflow-wrap: anywhere; white-space: normal; vertical-align: middle; }
 .cv-num.d-up { color: var(--ok); }
 .cv-num.d-down { color: var(--fail); }
 .cv-erow { height: 38px; border-bottom: 1px solid var(--line); background: color-mix(in srgb, var(--bg-2) 58%, transparent); }
