@@ -1,6 +1,7 @@
 """Phase 3c: the GET /api/runs/{id}/concepts serve endpoint — per-lens hierarchy + per-concept
 metrics/Δ + the lens pack, end to end (fold -> bounded core -> pure lens projection -> JSON)."""
 from concurrent.futures import ThreadPoolExecutor
+import json
 import os
 import threading
 
@@ -38,6 +39,16 @@ def _assert_frame_parity(data):
     integrity = data["completeness"]["source_integrity"]
     assert data["authority"]["source_authoritative"] is (
         integrity["complete"] and integrity["generation_identified"])
+
+
+def _core_wire_bytes(core):
+    """Stable JSON-shaped bytes, including the core's internal tuple-keyed edge map."""
+    payload = {**core, "edges": [[list(key), edge] for key, edge in core["edges"].items()]}
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def _frame_wire_bytes(frame):
+    return json.dumps(frame, ensure_ascii=False, separators=(",", ":")).encode()
 
 
 def test_concepts_endpoint_is_a_lens(tmp_path):
@@ -554,6 +565,339 @@ def test_registered_typed_lens_falls_back_when_only_other_relations_exist(tmp_pa
     assert data["edges_present"] is True and data["lens_edges_present"] is False
     assert data["requested_lens"] == "part_of" and data["effective_lens"] == "is_a"
     assert data["lens_contract"]["fallback"] == "no_matching_edges"
+
+
+def test_concept_frame_membership_caps_are_canonical_and_insertion_order_independent(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    rd = _demo_run(tmp_path)
+    store = EventStore(rd / "events.jsonl")
+    store.append("node_created", {
+        "node_id": 2, "parent_ids": [0], "operator": "improve",
+        "idea": {"operator": "improve", "params": {}, "rationale": "r",
+                 "concepts": ["gamma"]},
+    })
+    state = fold(store.read_all())
+    forward = state.model_copy(deep=True)
+    reverse = state.model_copy(deep=True)
+    raw_memberships = {
+        2: ["gamma"],
+        99: ["outside"],                    # invalid reference must remain receipt-stamped
+        1: ["beta"],
+        0: ["zeta", "<bad>", " Alpha "],  # canonical alpha must win the per-node cap
+    }
+    forward.node_concepts = raw_memberships
+    reverse.node_concepts = {
+        node_id: list(reversed(concepts))
+        for node_id, concepts in reversed(list(raw_memberships.items()))
+    }
+    monkeypatch.setattr(frame_module, "MAX_NODE_MEMBERSHIPS", 2)
+    monkeypatch.setattr(frame_module, "MAX_CONCEPTS_PER_NODE", 1)
+    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 2)
+    lens_pack = default_lenses()
+
+    def materialize(candidate):
+        core = frame_module.build_core(
+            candidate, run_id="demo", lens_pack=lens_pack, generation="a" * 64,
+            requested_seq=None, captured_seq=6, max_seq=6, source_divergence=None)
+        frame = frame_module.project_frame(
+            core, requested_lens="is_a", lens_pack=lens_pack)
+        return core, frame
+
+    forward_core, forward_frame = materialize(forward)
+    reverse_core, reverse_frame = materialize(reverse)
+
+    # CODEX AGENT: cap choice is part of the paid-lens input contract, so equality alone is not enough:
+    # the serialized insertion order must also be stable, and selection must use canonical identity.
+    assert _core_wire_bytes(forward_core) == _core_wire_bytes(reverse_core)
+    assert _frame_wire_bytes(forward_frame) == _frame_wire_bytes(reverse_frame)
+    assert forward_core["concept_ids"] == ["alpha", "beta"]
+    assert set(forward_core["reasons"]) == {
+        "concepts_per_node_cap", "invalid_concept_id", "invalid_experiment_reference",
+        "node_membership_cap",
+    }
+    _assert_frame_parity(forward_frame)
+
+
+def test_concept_frame_edge_cap_uses_canonical_tuple_order_before_selection(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
+    state.concept_consolidation = {"raw-a": "a"}
+    raw_edges = {
+        "00-z-first-by-raw-key": {
+            "src": "Z", "rel": "uses", "dst": "Hub",
+            "confidence": 0.7, "provenance": "asserted",
+        },
+        "99-a-low": {
+            "src": "raw-a", "rel": "uses", "dst": "hub",
+            "confidence": 0.2, "provenance": "evidenced",
+        },
+        "98-a-high": {
+            "src": " A ", "rel": "uses", "dst": "HUB",
+            "confidence": 0.9, "provenance": "asserted",
+        },
+        "50-b": {
+            "src": "B", "rel": "uses", "dst": "hub",
+            "confidence": 0.8, "provenance": "asserted",
+        },
+    }
+    forward = state.model_copy(deep=True)
+    reverse = state.model_copy(deep=True)
+    forward.concept_edges = raw_edges
+    reverse.concept_edges = dict(reversed(list(raw_edges.items())))
+    monkeypatch.setattr(frame_module, "MAX_EDGES", 2)
+    lens_pack = default_lenses()
+
+    def materialize(candidate):
+        core = frame_module.build_core(
+            candidate, run_id="demo", lens_pack=lens_pack, generation="b" * 64,
+            requested_seq=None, captured_seq=4, max_seq=4, source_divergence=None)
+        frame = frame_module.project_frame(
+            core, requested_lens="uses", lens_pack=lens_pack)
+        return core, frame
+
+    forward_core, forward_frame = materialize(forward)
+    reverse_core, reverse_frame = materialize(reverse)
+
+    assert _core_wire_bytes(forward_core) == _core_wire_bytes(reverse_core)
+    assert _frame_wire_bytes(forward_frame) == _frame_wire_bytes(reverse_frame)
+    assert list(forward_core["edges"]) == [("a", "uses", "hub"), ("b", "uses", "hub")]
+    assert forward_core["edges"][("a", "uses", "hub")]["confidence"] == 0.9
+    assert forward_frame["completeness"]["reasons"] == ["edge_cap"]
+    assert forward_frame["completeness"]["truncated"] is True
+    _assert_frame_parity(forward_frame)
+
+
+def test_concept_frame_signed_zero_edges_have_identical_core_and_frame_bytes(tmp_path):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
+    negative = {
+        "src": "a", "rel": "uses", "dst": "hub",
+        "confidence": -0.0, "provenance": "asserted",
+    }
+    positive = {
+        "src": "a", "rel": "uses", "dst": "hub",
+        "confidence": 0.0, "provenance": "asserted",
+    }
+    forward = state.model_copy(deep=True)
+    reverse = state.model_copy(deep=True)
+    forward.concept_edges = {"negative": negative, "positive": positive}
+    reverse.concept_edges = {"positive": positive, "negative": negative}
+    lens_pack = default_lenses()
+
+    def materialize(candidate):
+        core = frame_module.build_core(
+            candidate, run_id="demo", lens_pack=lens_pack, generation="0" * 64,
+            requested_seq=None, captured_seq=4, max_seq=4, source_divergence=None)
+        frame = frame_module.project_frame(
+            core, requested_lens="uses", lens_pack=lens_pack)
+        return core, frame
+
+    forward_core, forward_frame = materialize(forward)
+    reverse_core, reverse_frame = materialize(reverse)
+    forward_core_bytes = _core_wire_bytes(forward_core)
+
+    # CODEX AGENT: numerical/dict equality considers both zeros equal; exact core bytes are the paid-lens
+    # determinism contract and must not retain the first-arriving sign bit from a legacy state.
+    assert forward_core_bytes == _core_wire_bytes(reverse_core)
+    assert _frame_wire_bytes(forward_frame) == _frame_wire_bytes(reverse_frame)
+    assert b"-0.0" not in forward_core_bytes
+    assert forward_core["edges"][("a", "uses", "hub")]["confidence"] == 0.0
+
+
+def test_concept_frame_receipts_derived_edge_omitted_by_full_static_cap(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    def make_state(root, *, repeated_pair):
+        root.mkdir()
+        store = EventStore(root / "events.jsonl")
+        store.append("run_started", {
+            "run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max",
+        })
+        for node_id, concepts in enumerate((
+            ["a", "b"], ["a", "b"] if repeated_pair else ["a", "c"],
+        )):
+            store.append("node_created", {
+                "node_id": node_id, "parent_ids": [], "operator": "draft",
+                "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                         "concepts": concepts},
+            })
+        store.append("concept_edge", {"edges": [{
+            "src": "static/child", "rel": "uses", "dst": "static/parent",
+            "confidence": 1.0, "provenance": "asserted",
+        }]})
+        return fold(store.read_all())
+
+    monkeypatch.setattr(frame_module, "MAX_EDGES", 1)
+    lens_pack = default_lenses()
+
+    def core(state):
+        return frame_module.build_core(
+            state, run_id="demo", lens_pack=lens_pack, generation="1" * 64,
+            requested_seq=None, captured_seq=3, max_seq=3, source_divergence=None)
+
+    repeated = core(make_state(tmp_path / "repeated", repeated_pair=True))
+    no_candidate = core(make_state(tmp_path / "single", repeated_pair=False))
+
+    assert list(repeated["edges"]) == [("static/child", "uses", "static/parent")]
+    assert repeated["derived_edges"] == 0
+    assert repeated["reasons"] == ("edge_cap",)
+    assert no_candidate["derived_edges"] == 0
+    assert no_candidate["reasons"] == ()
+
+
+def test_concept_frame_node_cap_ignores_empty_invalid_only_and_deleted_rows(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    store = EventStore(tmp_path / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max",
+    })
+    for node_id in range(4):
+        store.append("node_created", {
+            "node_id": node_id, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                     "concepts": [f"seed/{node_id}"]},
+        })
+    historical = fold(store.read_all())
+    store.append("node_tombstoned", {"node_ids": [0]})
+    current = fold(store.read_all())
+    raw_memberships = {
+        0: ["deleted/history"],
+        1: [],                         # explicit untagged
+        2: ["<bad>"],                  # invalid-only, receipt but no capacity
+        3: ["active/current", " ACTIVE/CURRENT ", "alias-active"],
+    }
+    historical.node_concepts = dict(raw_memberships)
+    current.node_concepts = dict(raw_memberships)
+    historical.concept_consolidation = {"alias-active": "active/current"}
+    current.concept_consolidation = {"alias-active": "active/current"}
+    monkeypatch.setattr(frame_module, "MAX_NODE_MEMBERSHIPS", 1)
+    monkeypatch.setattr(frame_module, "MAX_CONCEPTS_PER_NODE", 1)
+    lens_pack = default_lenses()
+
+    def core(candidate, seq):
+        return frame_module.build_core(
+            candidate, run_id="demo", lens_pack=lens_pack, generation="c" * 64,
+            requested_seq=seq, captured_seq=seq, max_seq=5, source_divergence=None)
+
+    current_core = core(current, 5)
+    historical_core = core(historical, 4)
+
+    assert current_core["concept_ids"] == ["active/current"]
+    assert set(current_core["reasons"]) == {"invalid_concept_id"}
+    assert current_core["source_membership_nodes"] == 4
+    assert current_core["included_membership_nodes"] == 1
+    assert historical_core["concept_ids"] == ["deleted/history"]
+    assert set(historical_core["reasons"]) == {"invalid_concept_id", "node_membership_cap"}
+
+
+def test_concept_frame_raw_edge_aliases_duplicates_and_cooccurs_do_not_false_cap(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
+    state.concept_consolidation = {"raw-a": "a"}
+    raw_edges = {}
+    expected_confidence = 0.0
+    for index in range(1_000):
+        if index % 3 == 0:
+            raw_edges[str(index)] = {
+                "src": "a", "rel": "co_occurs", "dst": "hub",
+                "confidence": index, "provenance": "evidenced",
+            }
+            continue
+        expected_confidence = float(index)
+        raw_edges[str(index)] = {
+            "src": "raw-a" if index % 2 else " A ", "rel": "uses", "dst": "HUB",
+            "confidence": index, "provenance": "asserted" if index % 5 else "evidenced",
+        }
+    forward = state.model_copy(deep=True)
+    reverse = state.model_copy(deep=True)
+    forward.concept_edges = raw_edges
+    reverse.concept_edges = dict(reversed(list(raw_edges.items())))
+    monkeypatch.setattr(frame_module, "MAX_EDGES", 1)
+    lens_pack = default_lenses()
+
+    def materialize(candidate):
+        core = frame_module.build_core(
+            candidate, run_id="demo", lens_pack=lens_pack, generation="d" * 64,
+            requested_seq=None, captured_seq=4, max_seq=4, source_divergence=None)
+        frame = frame_module.project_frame(core, requested_lens="uses", lens_pack=lens_pack)
+        return core, frame
+
+    core, frame = materialize(forward)
+    reverse_core, reverse_frame = materialize(reverse)
+
+    assert core["source_edges"] == 1_000 and list(core["edges"]) == [("a", "uses", "hub")]
+    assert core["edges"][("a", "uses", "hub")]["confidence"] == expected_confidence
+    assert "edge_cap" not in core["reasons"]
+    assert frame["complete"] is True and frame["completeness"]["truncated"] is False
+    assert _core_wire_bytes(core) == _core_wire_bytes(reverse_core)
+    assert _frame_wire_bytes(frame) == _frame_wire_bytes(reverse_frame)
+
+
+def test_concept_frame_top_k_preprocessing_stays_bounded_for_large_sources(
+        tmp_path, monkeypatch):
+    import looplab.serve.concept_frame as frame_module
+    from looplab.events.replay import fold
+    from looplab.search.concept_graph import default_lenses
+
+    state = fold(EventStore(_demo_run(tmp_path) / "events.jsonl").read_all())
+    state.node_concepts = {
+        1: ["node/second"],
+        0: [f"bulk/{index:05d}" for index in reversed(range(3_000))],
+    }
+    state.concept_edges = {
+        str(index): {
+            "src": f"edge/{index:05d}", "rel": "uses", "dst": "hub",
+            "confidence": 1.0, "provenance": "asserted",
+        }
+        for index in reversed(range(3_000))
+    }
+    monkeypatch.setattr(frame_module, "MAX_NODE_MEMBERSHIPS", 1)
+    monkeypatch.setattr(frame_module, "MAX_CONCEPTS_PER_NODE", 3)
+    monkeypatch.setattr(frame_module, "MAX_MEMBERSHIPS", 3)
+    monkeypatch.setattr(frame_module, "MAX_EDGES", 2)
+
+    real_retain = frame_module._retain_smallest
+    observed_sizes = []
+
+    def guarded_retain(selected, ordered_keys, key, value, limit, **kwargs):
+        omitted = real_retain(selected, ordered_keys, key, value, limit, **kwargs)
+        observed_sizes.append((len(selected), len(ordered_keys), max(0, limit)))
+        assert len(selected) == len(ordered_keys) <= max(0, limit)
+        return omitted
+
+    monkeypatch.setattr(frame_module, "_retain_smallest", guarded_retain)
+    core = frame_module.build_core(
+        state, run_id="demo", lens_pack=default_lenses(), generation="e" * 64,
+        requested_seq=None, captured_seq=4, max_seq=4, source_divergence=None)
+
+    assert observed_sizes
+    assert core["concept_ids"] == ["bulk/00000", "bulk/00001", "bulk/00002"]
+    assert list(core["edges"]) == [
+        ("edge/00000", "uses", "hub"), ("edge/00001", "uses", "hub")]
+    assert {"concepts_per_node_cap", "edge_cap", "node_membership_cap"} <= set(core["reasons"])
+    assert "membership_cap" not in core["reasons"]
 
 
 def test_concept_frame_caps_memberships_before_expanding_experiment_refs(tmp_path, monkeypatch):

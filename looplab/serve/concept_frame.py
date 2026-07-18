@@ -5,6 +5,7 @@ canonicalization, source caps, lifecycle references, or completeness receipts.
 """
 from __future__ import annotations
 
+from bisect import bisect_left
 import math
 import unicodedata
 from typing import Optional
@@ -186,6 +187,31 @@ def edge_rank(edge):
             _EDGE_PROV_RANK.get(provenance, 0), provenance)
 
 
+def _retain_smallest(selected: dict, ordered_keys: list, key, value, limit: int, *, rank=None) -> bool:
+    """Retain the ``limit`` smallest distinct keys using memory bounded by that limit.
+
+    Returns whether one distinct valid key had to be omitted (or evicted). A duplicate never consumes
+    capacity; callers may provide a total ``rank`` to retain the best value for a selected key.
+    """
+    limit = max(0, limit)
+    if key in selected:
+        if rank is not None and rank(value) > rank(selected[key]):
+            selected[key] = value
+        return False
+    if not limit:
+        return True
+    if len(ordered_keys) >= limit and key >= ordered_keys[-1]:
+        return True
+    omitted = False
+    if len(ordered_keys) >= limit:
+        evicted = ordered_keys.pop()
+        del selected[evicted]
+        omitted = True
+    ordered_keys.insert(bisect_left(ordered_keys, key), key)
+    selected[key] = value
+    return omitted
+
+
 def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     """Canonical bounded inputs shared by GET projection and paid lens derivation."""
     from looplab.search.concept_graph import concept_touch_counts, graph_from_node_concepts
@@ -206,10 +232,14 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
 
     current_nodes = _current_nodes(state)
 
-    # Select the bounded CURRENT membership source before any recursive path/edge materialization.
-    # Deleted lifecycle rows remain counted in ``source_membership_nodes`` below (the raw-fold receipt),
-    # but do not consume the live node cap or hide later active rows behind historical tombstones.
-    current_membership_items: list[tuple[int, object]] = []
+    # CODEX AGENT: insertion order is replay history, not semantic priority. Each level keeps a bounded
+    # lexicographic top-K while scanning the full source for integrity receipts. Empty/invalid-only and
+    # deleted lifecycle rows have no canonical membership, so they cannot consume a live node slot.
+    # The resulting memory is O(MAX_NODE_MEMBERSHIPS * MAX_CONCEPTS_PER_NODE), while the chosen paid-lens
+    # input remains byte-identical across replay insertion orders.
+    membership_rows: dict[int, list[str]] = {}
+    membership_node_ids: list[int] = []
+    node_membership_overflow = False
     for raw_node_id, raw_ids in raw_memberships.items():
         if (isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int)
                 or raw_node_id not in state.nodes):
@@ -217,34 +247,40 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
             continue
         if raw_node_id not in current_nodes:
             continue
-        if len(current_membership_items) >= MAX_NODE_MEMBERSHIPS:
-            reasons.add("node_membership_cap")
-            break
-        current_membership_items.append((raw_node_id, raw_ids))
-
-    # CODEX AGENT: cap memberships BEFORE recursive graph/tree materialization. A final-response slice
-    # would be too late: each deep id expands into every ancestor and once per experiment membership.
-    memberships: dict[int, list[str]] = {}
-    accepted_concepts: set[str] = set()
-    accepted_prefixes: set[str] = set()
-    membership_count = 0
-    for node_index, (raw_node_id, raw_ids) in enumerate(current_membership_items):
         if not isinstance(raw_ids, list):
             reasons.add("invalid_membership_list")
             continue
-        if len(raw_ids) > MAX_CONCEPTS_PER_NODE:
-            reasons.add("concepts_per_node_cap")
-        node_concepts: set[str] = set()
-        for raw_concept in raw_ids[:MAX_CONCEPTS_PER_NODE]:
+        canonical_ids: dict[str, None] = {}
+        ordered_concepts: list[str] = []
+        concepts_per_node_overflow = False
+        for raw_concept in raw_ids:
             canonical, problem = canonical_concept(raw_concept, rename)
             if problem:
                 reasons.add(problem)
                 continue
-            if canonical in node_concepts:
-                continue
+            concepts_per_node_overflow |= _retain_smallest(
+                canonical_ids, ordered_concepts, canonical, None, MAX_CONCEPTS_PER_NODE)
+        if concepts_per_node_overflow:
+            reasons.add("concepts_per_node_cap")
+        if not ordered_concepts:
+            continue
+        node_membership_overflow |= _retain_smallest(
+            membership_rows, membership_node_ids, raw_node_id, ordered_concepts,
+            MAX_NODE_MEMBERSHIPS)
+    if node_membership_overflow:
+        reasons.add("node_membership_cap")
+
+    memberships: dict[int, list[str]] = {}
+    accepted_concepts: set[str] = set()
+    accepted_prefixes: set[str] = set()
+    membership_count = 0
+    membership_overflow = False
+    for raw_node_id in membership_node_ids:
+        node_concepts: set[str] = set()
+        for canonical in membership_rows[raw_node_id]:
             if membership_count >= MAX_MEMBERSHIPS:
-                reasons.add("membership_cap")
-                break
+                membership_overflow = True
+                continue
             parts = canonical.split("/")
             prefixes = {"/".join(parts[:depth]) for depth in range(1, len(parts) + 1)}
             if len(accepted_prefixes | prefixes) > MAX_TREE_NODES:
@@ -256,10 +292,8 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
             membership_count += 1
         if node_concepts:
             memberships[raw_node_id] = sorted(node_concepts)
-        if membership_count >= MAX_MEMBERSHIPS:
-            if node_index + 1 < len(current_membership_items):
-                reasons.add("membership_cap")
-            break
+    if membership_overflow:
+        reasons.add("membership_cap")
 
     graph, tags = graph_from_node_concepts(memberships)
     concept_ids = sorted(accepted_concepts)
@@ -267,13 +301,13 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     if not isinstance(raw_edges, dict):
         raw_edges = {}
         reasons.add("invalid_edge_map")
-    if len(raw_edges) > MAX_EDGES:
-        reasons.add("edge_cap")
-    edges: dict[tuple[str, str, str], dict] = {}
-    edge_endpoints: set[str] = set()
-    for edge_index, edge in enumerate(raw_edges.values()):
-        if edge_index >= MAX_EDGES:
-            break
+    # CODEX AGENT: canonical edge identity is the cap ordering key. Retain the bounded smallest distinct
+    # tuples while scanning: raw aliases, duplicates and legacy co_occurs rows neither consume capacity
+    # nor create a false truncation receipt. A retained duplicate still uses edge_rank's total winner.
+    canonical_edges: dict[tuple[str, str, str], dict] = {}
+    canonical_edge_keys: list[tuple[str, str, str]] = []
+    edge_overflow = False
+    for edge in raw_edges.values():
         if not isinstance(edge, dict):
             reasons.add("invalid_edge")
             continue
@@ -296,30 +330,43 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         # saturates), not rejected — rejection would convert the run's strongest empirical edge into a
         # permanent partial/non-authoritative frame. Only a NEGATIVE/None/malformed weight is invalid.
         if (src_problem or dst_problem or not src or not dst or src == dst
-                or relation not in registered_rels or confidence is None
+                or not isinstance(relation, str) or relation not in registered_rels or confidence is None
                 or confidence < 0.0):
             reasons.add(src_problem or dst_problem or "invalid_edge")
             continue
+        # CODEX AGENT: IEEE signed zero compares equal but has different JSON bytes. Normalize it before
+        # duplicate ranking/storage so -0.0 versus 0.0 arrival order cannot change the cached core or the
+        # exact paid-lens input derived from it (legacy/manual states may bypass the replay sanitizer).
+        if confidence == 0.0:
+            confidence = 0.0
         if confidence > MAX_EDGE_WEIGHT:
             confidence = float(MAX_EDGE_WEIGHT)
+        provenance = edge.get("provenance") or ""
+        if (not isinstance(provenance, str) or len(provenance) > 64
+                or any(unicodedata.category(char).startswith("C") for char in provenance)):
+            reasons.add("invalid_edge")
+            continue
+        key = (src, relation, dst)
+        candidate = {"src": src, "rel": relation, "dst": dst,
+                     "confidence": confidence, "provenance": provenance}
+        edge_overflow |= _retain_smallest(
+            canonical_edges, canonical_edge_keys, key, candidate, MAX_EDGES, rank=edge_rank)
+    if edge_overflow:
+        reasons.add("edge_cap")
+
+    edges: dict[tuple[str, str, str], dict] = {}
+    edge_endpoints: set[str] = set()
+    for key in canonical_edge_keys:
+        candidate = canonical_edges[key]
+        src, _relation, dst = key
         new_endpoints = {src, dst} - edge_endpoints
         # One global projection-node budget covers BOTH tag/path nodes and edge-only endpoints.
         if (len(edge_endpoints) + len(new_endpoints) > MAX_EDGE_ENDPOINTS
                 or len(accepted_prefixes | edge_endpoints | new_endpoints) > MAX_TREE_NODES):
             reasons.add("edge_endpoint_cap")
             continue
-        provenance = edge.get("provenance") or ""
-        if (not isinstance(provenance, str) or len(provenance) > 64
-                or any(unicodedata.category(char).startswith("C") for char in provenance)):
-            reasons.add("invalid_edge")
-            continue
         edge_endpoints.update(new_endpoints)
-        key = (src, relation, dst)
-        candidate = {"src": src, "rel": relation, "dst": dst,
-                     "confidence": confidence, "provenance": provenance}
-        previous = edges.get(key)
-        if previous is None or edge_rank(candidate) > edge_rank(previous):
-            edges[key] = candidate
+        edges[key] = candidate
 
     derived_edge_count = 0
 
@@ -347,20 +394,35 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     # CODEX AGENT: co-occurrence is a projection of the bounded CURRENT membership snapshot.
     # Recompute it on every core build for online, offline and legacy runs alike; persisting monotone
     # max receipts made stale weights and removed pairs impossible to retract.
-    if "co_occurs" in registered_rels and len(edges) < MAX_EDGES:
+    if "co_occurs" in registered_rels:
         pair_counts: dict[tuple[str, str], int] = {}
+        static_capacity_full = len(edges) >= MAX_EDGES
+        omitted_derived = False
         for node_concepts in memberships.values():
             cs = sorted(set(node_concepts))
             for i in range(len(cs)):
                 for j in range(i + 1, len(cs)):
-                    pair_counts[(cs[i], cs[j])] = pair_counts.get((cs[i], cs[j]), 0) + 1
-        for (src, dst), cnt in sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            if cnt < 2:
-                continue
-            if not add_derived(
-                    src, "co_occurs", dst, float(min(cnt, MAX_EDGE_WEIGHT)),
-                    "co-tag (derived)"):
+                    pair = (cs[i], cs[j])
+                    pair_counts[pair] = pair_counts.get(pair, 0) + 1
+                    # CODEX AGENT: a full static edge budget still has to inspect the bounded membership
+                    # snapshot. The second observation proves that one valid derived edge was omitted;
+                    # only then is edge_cap truthful. Stop immediately because no derived edge can fit.
+                    if static_capacity_full and pair_counts[pair] == 2:
+                        reasons.add("edge_cap")
+                        omitted_derived = True
+                        break
+                if omitted_derived:
+                    break
+            if omitted_derived:
                 break
+        if not static_capacity_full:
+            for (src, dst), cnt in sorted(pair_counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                if cnt < 2:
+                    continue
+                if not add_derived(
+                        src, "co_occurs", dst, float(min(cnt, MAX_EDGE_WEIGHT)),
+                        "co-tag (derived)"):
+                    break
 
     return {
         "memberships": memberships,

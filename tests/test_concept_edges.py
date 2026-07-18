@@ -3,6 +3,8 @@
 ``co_occurs`` is intentionally excluded: it is derived from current node memberships by ConceptFrame,
 because a max-only event fold cannot retract a stale count or ghost pair after re-tagging.
 """
+import json
+
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
 
@@ -72,3 +74,23 @@ def test_nan_and_bool_confidence_stay_commutative(tmp_path):
     reverse = fold(_store(tmp_path / "r", [flag, real, nan]).read_all()).concept_edges
     assert forward == reverse                                    # order-tolerant despite NaN/bool
     assert forward["a\tr\tb"]["confidence"] == 5.0               # the real edge wins; NaN/True -> 0.0 lose
+
+
+def test_signed_zero_confidence_replays_to_identical_json_bytes(tmp_path):
+    negative = {
+        "src": "a", "rel": "r", "dst": "b",
+        "provenance": "asserted", "confidence": -0.0,
+    }
+    positive = {
+        "src": "a", "rel": "r", "dst": "b",
+        "provenance": "asserted", "confidence": 0.0,
+    }
+    forward = fold(_store(tmp_path / "f", [negative, positive]).read_all()).concept_edges
+    reverse = fold(_store(tmp_path / "r", [positive, negative]).read_all()).concept_edges
+    forward_bytes = json.dumps(forward, ensure_ascii=False, separators=(",", ":")).encode()
+    reverse_bytes = json.dumps(reverse, ensure_ascii=False, separators=(",", ":")).encode()
+
+    # CODEX AGENT: dict equality hides the signed-zero bug; exact unsorted wire bytes expose it.
+    assert forward_bytes == reverse_bytes
+    assert b"-0.0" not in forward_bytes
+    assert forward["a\tr\tb"]["confidence"] == 0.0

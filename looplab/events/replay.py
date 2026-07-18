@@ -1524,6 +1524,10 @@ def _on_concept_edge(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         conf = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else 0.0
         if conf != conf:
             conf = 0.0
+        # CODEX AGENT: -0.0 and 0.0 tie numerically but serialize differently. Canonicalize the sign
+        # before the commutative max so replay order cannot leak into RunState / ConceptFrame bytes.
+        if conf == 0.0:
+            conf = 0.0
         prov = str(ed.get("provenance") or "")
         key = "\t".join((src, rel, dst))
         cur = st.concept_edges.get(key)
