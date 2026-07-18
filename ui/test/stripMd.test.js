@@ -22,6 +22,10 @@ test('stripMd flattens inline Markdown for plain-text one-line surfaces', async 
     assert.equal(stripMd('see [the paper](https://x.test/y)'), 'see the paper')
     assert.equal(stripMd('```\ncode fence\n```after'), 'after')
     assert.equal(stripMd('keep intra_word_underscores intact'), 'keep intra_word_underscores intact')
+    // word-boundary guard: interior dunders / exponents / intra-word markers keep their literal chars
+    assert.equal(stripMd('foo__bar__baz stays'), 'foo__bar__baz stays')
+    assert.equal(stripMd('2**3 and 4**5'), '2**3 and 4**5')
+    assert.equal(stripMd('**bold** and *em*'), 'bold and em')
     // Safe on non-string / empty input (rationale is a string in practice, but be defensive).
     assert.equal(stripMd(null), '')
     assert.equal(stripMd(undefined), '')

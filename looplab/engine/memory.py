@@ -655,13 +655,19 @@ def _valid_capsule_record(capsule) -> bool:
 
 def _dedup_valid_capsules(capsules) -> list[dict]:
     """Quarantine + deterministically de-duplicate a raw capsule sequence: keep only valid records, collapse
-    duplicate run ids (the LAST durable row wins, matching the store's upsert contract), and return them in
-    sorted-run-id order. Shared by the portfolio read-models, which a caller may feed raw decoded rows rather
-    than routing through ConceptCapsuleStore — so each must apply the same quarantine consistently."""
+    duplicate run ids to ONE, and return them in sorted-run-id order. The shared portfolio read-models feed
+    this RAW decoded rows (a caller may concatenate shards or hand a pre-compaction file), so the collision
+    winner must be INPUT-ORDER-INDEPENDENT — pick the row with the lexicographically-greatest canonical JSON
+    (a stable representative), not "last seen in list order". The store path has unique run ids, so it never
+    collides; this only bites the raw-row callers the docstring promises to tolerate."""
     by_run: dict[str, dict] = {}
     for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
-        if _valid_capsule_record(capsule):
-            by_run[capsule["run_id"]] = capsule
+        if not _valid_capsule_record(capsule):
+            continue
+        rid = capsule["run_id"]
+        prev = by_run.get(rid)
+        if prev is None or json.dumps(capsule, sort_keys=True) > json.dumps(prev, sort_keys=True):
+            by_run[rid] = capsule
     return [by_run[run_id] for run_id in sorted(by_run)]
 
 
@@ -715,13 +721,16 @@ def concept_profit_tendencies(concept_rows, *, limit: Optional[int] = None) -> d
     each ranked by that count desc then name. Pure/deterministic; ADVISORY tendency, never a selection input."""
     rows = concept_rows if isinstance(concept_rows, (list, tuple)) else []
 
+    def _int(x) -> int:                          # torn/hand-built rows may carry null/str counts
+        return x if isinstance(x, int) and not isinstance(x, bool) else 0
+
     def _pick(is_help: bool) -> list:
         out = []
         for e in rows:
             if not isinstance(e, dict):
                 continue
-            h, t = e.get("n_helped", 0), e.get("n_hurt", 0)
-            if h + e.get("n_neutral", 0) + t < 2:
+            h, n, t = _int(e.get("n_helped")), _int(e.get("n_neutral")), _int(e.get("n_hurt"))
+            if h + n + t < 2:
                 continue
             if (h >= 2 and h > t) if is_help else (t >= 2 and t > h):
                 out.append((str(e.get("concept") or ""), h if is_help else t))

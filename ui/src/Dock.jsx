@@ -262,8 +262,12 @@ const TYPE_GLYPH = {
   fork: 'gitbranch', agent_validated: 'target', hypothesis_ranked: 'bulb', foresight_selected: 'bulb',
 }
 function kindOf(type) {
-  const g = TYPE2GROUP[type] || 'lifecycle'
-  return { group: g, glyph: TYPE_GLYPH[type] || GROUP_GLYPH[g] || 'dot' }
+  // Own-property reads: a forward-compat event type equal to an Object.prototype key ("constructor",
+  // "toString", …) must not resolve to an inherited function (which would corrupt the icon/group).
+  const g = (Object.hasOwn(TYPE2GROUP, type) && TYPE2GROUP[type]) || 'lifecycle'
+  const glyph = (Object.hasOwn(TYPE_GLYPH, type) && TYPE_GLYPH[type])
+    || (Object.hasOwn(GROUP_GLYPH, g) && GROUP_GLYPH[g]) || 'dot'
+  return { group: g, glyph }
 }
 
 // The curated feed is an ALLOW-LIST: an event shows iff it has a human-readable narration (a NARR
@@ -437,7 +441,7 @@ function NodeCreatedDetail({ d, trace }) {
         <span>operator <b>{idea.operator || d.operator}</b></span>
         {(d.parent_ids || []).length > 0 && <span>built from {d.parent_ids.map(p => '#' + p).join(', ')}</span>}
         {Object.keys(params).length > 0 && <span>params {Object.entries(params).map(([k, v]) => `${k}=${fmt(v, 3)}`).join(', ')}</span>}
-        {Object.keys(space).length > 0 && <span>sweep {Object.entries(space).map(([k, v]) => `${k}∈[${(v || []).join(', ')}]`).join('; ')}</span>}
+        {Object.keys(space).length > 0 && <span>sweep {Object.entries(space).map(([k, v]) => `${k}∈[${(Array.isArray(v) ? v : [v]).join(', ')}]`).join('; ')}</span>}
       </div>
       {think.length > 0 && <Disclosure label="Researcher thinking (debug)">
         {think.map((t, i) => <Markdown key={i} className="think-body" text={t.text} />)}
@@ -544,12 +548,15 @@ export function eventNarration(event) {
     return `${event.type || 'event'} — details omitted (${omittedBytes.toLocaleString()} source bytes exceed page limit)`
   }
   try {
-    const render = NARR[event?.type]
+    // Own-property reads so an event type equal to an Object.prototype key ("toString", "constructor")
+    // can't resolve `render`/`NARR_VALID` to an inherited function (would emit "[object …]" search text).
+    const type = event?.type
+    const render = Object.hasOwn(NARR, type) ? NARR[type] : undefined
     const data = event?.data
     if (render && (data === null || typeof data !== 'object' || Array.isArray(data))) {
       throw new TypeError('invalid event narration payload')
     }
-    if (render && NARR_VALID[event.type] && !NARR_VALID[event.type](data)) {
+    if (render && Object.hasOwn(NARR_VALID, type) && !NARR_VALID[type](data)) {
       throw new TypeError('incomplete event narration payload')
     }
     const value = render ? render(data) : JSON.stringify(data ?? {}).slice(0, 80)

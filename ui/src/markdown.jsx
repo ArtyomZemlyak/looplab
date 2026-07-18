@@ -18,8 +18,15 @@ export function stripMd(text) {
   return String(text ?? '')
     .replace(/```[\s\S]*?```/g, ' ')                     // fenced code block → space
     .replace(/`([^`]+)`/g, '$1')                         // inline code
-    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/g, '$1$2')     // bold
-    .replace(/\*([^*]+)\*|(?<!\w)_([^_]+)_(?!\w)/g, '$1$2') // italic (keep intra-word underscores)
+    // Emphasis: strip **/__/*/_ pairs ONLY when the run is delimited on BOTH sides by a char that is
+    // neither a word char NOR the same marker (or a string edge) — so `2**3` (exponent),
+    // `foo__bar__baz`, `snake_case`, `a*b*c` keep their literal markers, and the `*`/`_` rule can't
+    // reach ACROSS a `**`/`__`. A captured leading boundary ($1) replaces the negative-lookbehind, which
+    // is a hard SyntaxError on older engines (Safari <16.4) and would take down this module + importers.
+    .replace(/(^|[^\w*])\*\*([^*]+)\*\*(?=[^\w*]|$)/g, '$1$2')   // bold **x**
+    .replace(/(^|[^\w_])__([^_]+)__(?=[^\w_]|$)/g, '$1$2')       // bold __x__
+    .replace(/(^|[^\w*])\*([^*]+)\*(?=[^\w*]|$)/g, '$1$2')       // italic *x*
+    .replace(/(^|[^\w_])_([^_]+)_(?=[^\w_]|$)/g, '$1$2')         // italic _x_
     .replace(/^\s{0,3}#{1,6}\s+/gm, '')                  // ATX headings
     .replace(/^\s*([-*+]|\d+\.)\s+/gm, '')               // list bullets / ordered markers
     .replace(/^\s*>\s?/gm, '')                           // blockquotes
