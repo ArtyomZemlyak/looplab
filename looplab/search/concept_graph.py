@@ -952,6 +952,11 @@ def node_concept_delta(state, node_id) -> dict:
     projection = current_concept_projection(state)
     parent_ids = list(dict.fromkeys(p for p in (getattr(node, "parent_ids", None) or []) if p in nodes))
     empty = {"parent_ids": sorted(parent_ids), "added": [], "removed": [], "inherited": []}
+    # CODEX AGENT: a malformed global identity/store projection cannot support either side of a diff.
+    # Keep the stable empty shape and expose the receipt instead of calculating authoritative-looking
+    # additions from the valid-looking subset that survived canonicalization.
+    if projection.global_reasons:
+        return {**empty, "unavailable": True, "reasons": list(projection.global_reasons)}
     node_status, node_reasons = projection.node_status(node_id)
     if node_status == "unavailable":
         return {**empty, "unavailable": True, "reasons": list(node_reasons),
