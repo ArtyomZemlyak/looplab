@@ -152,8 +152,56 @@ class StrategyCadenceMixin:
                 research_claims=research,
                 structured=getattr(self, "_cross_run_structured_claims", False),
             )
+            raw_source = a.get("concept_source")
+            if not isinstance(raw_source, dict):
+                context_pack = a.get("context_pack") if isinstance(a.get("context_pack"), dict) else {}
+                raw_source = (context_pack.get("coverage")
+                              if isinstance(context_pack.get("coverage"), dict) else {})
+
+            def _receipt_count(key: str) -> int:
+                value = raw_source.get(key)
+                return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+            receipt_keys = (
+                "partial_capsules", "source_unknown_capsules",
+                "source_concepts_omitted", "source_outcomes_omitted",
+            )
+            counts_valid = all(
+                isinstance(raw_source.get(key), int)
+                and not isinstance(raw_source.get(key), bool)
+                and raw_source.get(key) >= 0 for key in receipt_keys
+            )
+            partial_count = _receipt_count("partial_capsules")
+            receipt_known = (
+                type(raw_source.get("source_complete")) is bool
+                and counts_valid
+                and _receipt_count("source_unknown_capsules") <= partial_count
+                and raw_source.get("source_complete") == (partial_count == 0)
+                and (partial_count > 0
+                     or (_receipt_count("source_concepts_omitted") == 0
+                         and _receipt_count("source_outcomes_omitted") == 0))
+            )
+            concept_source = {
+                "receipt_known": receipt_known,
+                "source_complete": receipt_known and raw_source.get("source_complete") is True,
+                **{key: _receipt_count(key) for key in receipt_keys},
+            }
             parts = [f"{a['n_runs']} returned run(s), {a['n_concepts']} observed concept(s), "
                      f"{a['n_contested']} mixed-evidence claim record(s)"]
+            source_part = (
+                "concept source receipt: "
+                f"known={str(concept_source['receipt_known']).lower()}, "
+                f"complete={str(concept_source['source_complete']).lower()}, "
+                f"partial_capsules={concept_source['partial_capsules']}, "
+                f"concepts_known_omitted={concept_source['source_concepts_omitted']}, "
+                f"outcomes_known_omitted={concept_source['source_outcomes_omitted']}, "
+                f"legacy_unknown_totals={concept_source['source_unknown_capsules']}"
+            )
+            if not concept_source["source_complete"]:
+                source_part += "; concept observations/counts are retained lower bounds only"
+            # CODEX AGENT: the source receipt is model-visible AND part of both semantic/render digests.
+            # Partial→complete with identical retained rows must create a different advisory identity.
+            parts.append(source_part)
             def _safe(value, limit):
                 return cross_run_text(
                     value, max_chars=limit, single_line=True, entropy=True).strip()
@@ -173,12 +221,13 @@ class StrategyCadenceMixin:
                                 ensure_ascii=False, sort_keys=True, default=str,
                                 separators=(",", ":")).encode("utf-8")
             self._cross_run_note_receipt = {
-                "v": 1,
+                "v": 2,
                 "scope_task": cross_run_text(
                     task_id, max_chars=500, single_line=True, entropy=False),
                 "excluded_run": cross_run_text(
                     run_id, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(caps), "n_research": len(research),
+                "concept_source": concept_source,
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),
             }

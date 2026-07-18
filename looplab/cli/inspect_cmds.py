@@ -1174,6 +1174,22 @@ def atlas_cmd(
         return
     typer.echo(f"Research Atlas: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence")
+    concept_source = atlas.get("concept_source")
+    if not isinstance(concept_source, dict):
+        context_pack = atlas.get("context_pack") if isinstance(atlas.get("context_pack"), dict) else {}
+        concept_source = (context_pack.get("coverage")
+                          if isinstance(context_pack.get("coverage"), dict) else {})
+    if concept_source.get("source_complete") is not True:
+        # CODEX AGENT: legacy/bounded capsule rows make Atlas concept counts lower bounds. The human CLI
+        # must carry the same receipt as JSON/UI/agent consumers instead of printing retained rows as exact.
+        unknown = int(concept_source.get("source_unknown_capsules", 0) or 0)
+        typer.echo(
+            "WARNING: concept capsule source is PARTIAL; Atlas concept observations/counts are retained "
+            "lower bounds only ("
+            f"{int(concept_source.get('source_concepts_omitted', 0) or 0)} concept(s), "
+            f"{int(concept_source.get('source_outcomes_omitted', 0) or 0)} outcome(s) known omitted"
+            + (f"; {unknown} legacy capsule(s) have unknown totals" if unknown else "")
+            + ").")
     if atlas["explored"]:
         typer.echo("Concept observations (concept × returned runs):")
         for e in atlas["explored"]:

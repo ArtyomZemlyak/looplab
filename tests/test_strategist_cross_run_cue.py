@@ -45,6 +45,47 @@ def test_engine_populates_note_from_memory(tmp_path):
     assert "returned run(s)" in note and "mixed-evidence" in note
 
 
+def test_source_completeness_changes_strategist_note_and_semantic_receipt(tmp_path):
+    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+
+    complete_dir, partial_dir = tmp_path / "complete", tmp_path / "partial"
+    complete_dir.mkdir()
+    partial_dir.mkdir()
+    capsule = build_concept_capsule(
+        run_id="prior", task_id="t", fingerprint=["kind:dataset"], direction="max",
+        concepts=["retrieval/rerank"], concept_outcomes={"retrieval/rerank": 0.8},
+    )
+    legacy = dict(capsule)
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy.pop(f"{stem}_{suffix}")
+    ConceptCapsuleStore(complete_dir / "concept_capsules.jsonl").add(capsule)
+    ConceptCapsuleStore(partial_dir / "concept_capsules.jsonl").add(legacy)
+    state = RunState(run_id="current", task_id="t", direction="max")
+    complete_host = _Host(complete_dir, on=True)
+    partial_host = _Host(partial_dir, on=True)
+
+    complete_note = complete_host._cross_run_note_for_ctx(state)
+    partial_note = partial_host._cross_run_note_for_ctx(state)
+
+    assert "concept source receipt: known=true, complete=true" in complete_note
+    assert "concept source receipt: known=true, complete=false" in partial_note
+    assert "retained lower bounds only" in partial_note
+    assert complete_host._cross_run_note_receipt["concept_source"]["source_complete"] is True
+    assert partial_host._cross_run_note_receipt["concept_source"] == {
+        "receipt_known": True,
+        "source_complete": False,
+        "partial_capsules": 1,
+        "source_unknown_capsules": 1,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    }
+    assert (complete_host._cross_run_note_receipt["corpus_digest"]
+            != partial_host._cross_run_note_receipt["corpus_digest"])
+    assert (complete_host._cross_run_note_receipt["render_digest"]
+            != partial_host._cross_run_note_receipt["render_digest"])
+
+
 @pytest.mark.parametrize("persisted_direction", [None, "", "MAX", "sideways", 1])
 def test_strategist_note_rejects_missing_or_garbled_persisted_direction(
         tmp_path, persisted_direction):

@@ -91,6 +91,23 @@ def test_cli_atlas_prints_sections(tmp_path):
     assert "Mixed-evidence claim records" in res.stdout and "mnr helps" in res.stdout
 
 
+def test_cli_atlas_warns_that_legacy_capsule_counts_are_lower_bounds(tmp_path):
+    ConceptCapsuleStore = __import__(
+        "looplab.engine.memory", fromlist=["ConceptCapsuleStore"]).ConceptCapsuleStore
+    legacy = _cap("legacy", ["hard-neg"], {"hard-neg": 0.88})
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy.pop(f"{stem}_{suffix}")
+    ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl").add(legacy)
+
+    res = CliRunner().invoke(app, ["atlas", str(tmp_path)])
+
+    assert res.exit_code == 0
+    assert "WARNING: concept capsule source is PARTIAL" in res.stdout
+    assert "retained lower bounds only" in res.stdout
+    assert "1 legacy capsule(s) have unknown totals" in res.stdout
+
+
 def test_cli_atlas_json(tmp_path):
     (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps(_lesson("x helps", "supported", [1])) + b"\n")
     res = CliRunner().invoke(app, ["atlas", str(tmp_path), "--json"])
