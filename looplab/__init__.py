@@ -45,6 +45,8 @@ _LAYOUT = {
     "attention": "serve",
     "archive": "search",
     "artifacts": "serve",
+    "paid_work": "serve",
+    "settings_ui_schema": "serve",
     "asset_brief": "tools",   # PART IV D1 seed-time asset/prior-art brief (offline)
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_graph": "search",   # PART IV D5 concept-graph coverage diagnostic (offline)
