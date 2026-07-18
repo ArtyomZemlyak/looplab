@@ -10,7 +10,8 @@ import json
 import pytest
 
 from looplab.engine.concept_steward import (
-    apply_concept_curation, curation_is_empty, propose_concept_curation, steward_concepts,
+    apply_concept_curation, concept_curation_input_digest, curation_is_empty,
+    propose_concept_curation, steward_concepts,
 )
 from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
 from looplab.engine.memory import build_concept_capsule, ConceptCapsuleStore, portfolio_concept_overview
@@ -97,6 +98,74 @@ def test_llm_split_and_purge_validated():
     prop = propose_concept_curation(ov, client)
     assert prop["purges"] == [{"from_concept": "junk"}]              # unknown purge dropped
     assert len(prop["splits"]) == 1 and len(prop["splits"][0]["rules"]) == 1   # self-target rule dropped
+
+
+def test_partial_source_receipt_changes_paid_digest_and_prompt_envelope():
+    complete_capsule = build_concept_capsule(
+        run_id="r", fingerprint=["k"], direction="max",
+        concepts=["data/augmentation"], concept_outcomes={},
+    )
+    legacy_capsule = dict(complete_capsule)
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy_capsule.pop(f"{stem}_{suffix}")
+    complete = portfolio_concept_overview([complete_capsule])
+    partial = portfolio_concept_overview([legacy_capsule])
+    assert complete["concepts"] == partial["concepts"]
+    assert concept_curation_input_digest(complete) != concept_curation_input_digest(partial)
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return self._c
+
+    partial_client = _Capture({"merges": [], "splits": [], "purges": []})
+    complete_client = _Capture({"merges": [], "splits": [], "purges": []})
+    propose_concept_curation(partial, partial_client)
+    propose_concept_curation(complete, complete_client)
+    partial_envelope = json.loads(partial_client.messages[1]["content"].split("\n", 1)[1])
+    complete_envelope = json.loads(complete_client.messages[1]["content"].split("\n", 1)[1])
+    assert partial_envelope["concepts"] == complete_envelope["concepts"]
+    assert partial_envelope["source_receipt"] == {
+        "receipt_known": True,
+        "source_complete": False,
+        "partial_capsules": 1,
+        "source_unknown_capsules": 1,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    }
+    assert complete_envelope["source_receipt"]["source_complete"] is True
+    assert "RETAINED LOWER BOUND" in partial_client.messages[0]["content"]
+
+
+def test_partial_source_cannot_propose_absence_based_split_or_purge():
+    complete, _caps = _overview(["data/augmentation"], ["data/aug"])
+    partial = dict(complete)
+    partial.update({
+        "source_complete": False,
+        "partial_capsules": 1,
+        "source_unknown_capsules": 1,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    })
+    client = _Client({
+        "merges": [{"from_concept": "data/aug", "to_concept": "data/augmentation"}],
+        "splits": [{
+            "from_concept": "data/augmentation",
+            "rules": [{"to": "data/hard-neg", "when_any": ["hard"]}],
+            "default": "data/augmentation",
+        }],
+        "purges": ["data/aug"],
+    })
+
+    proposals = propose_concept_curation(partial, client)
+
+    assert proposals["merges"] == [{
+        "from_concept": "data/aug", "to_concept": "data/augmentation", "why": ""}]
+    assert proposals["splits"] == []
+    assert proposals["purges"] == []
 
 
 def test_only_one_operation_per_source_survives_validation():
