@@ -50,6 +50,7 @@ _LAYOUT = {
     "asset_brief": "tools",   # PART IV D1 seed-time asset/prior-art brief (offline)
     "audit": "engine",   # engine audit/trust-emitter mixin
     "concept_graph": "search",   # PART IV D5 concept-graph coverage diagnostic (offline)
+    "concept_projection": "search",  # receipt/lifecycle-aware CURRENT membership boundary
     "coverage": "search",
     "graded_novelty": "search",   # PART IV D3 graded novelty + failed-direction re-exam (advisory)
     "lock_in": "search",   # PART IV D7 action-space lock-in detector (offline)

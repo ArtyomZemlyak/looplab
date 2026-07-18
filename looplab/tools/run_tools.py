@@ -114,7 +114,9 @@ class RunTools:
             fn_spec("node_concept_delta",
                 "How one experiment's concepts DIFFER from its parent(s): what it ADDED, REMOVED, or "
                 "INHERITED. Use it to see the conceptual change a node made relative to where it came from "
-                "(a merge inherits from every parent; a root's concepts are all 'added').",
+                "(a merge compares with every parent; a full-mode root starts empty, while a delta-mode "
+                "root compares with the recorded run base). An unavailable dependency is reported as "
+                "UNAVAILABLE, never as an empty delta.",
                 {"node_id": {"type": "integer"}}, ["node_id"]),
             fn_spec("read_research_memo",
                 "Read the latest DEEP-RESEARCH memo in full: its summary, concrete findings, and "
@@ -326,38 +328,34 @@ class RunTools:
             (f", best={digest.fmt_num(d['best_metric'])}" if d['best_metric'] is not None else "")
             for t, d in sorted(roll.items(), key=lambda kv: -kv[1]["count"]))
 
-    def _canon_node_concepts(self, st: RunState) -> dict:
-        """This run's per-node concepts, each id collapsed through the consolidation rename AND
-        normalized to the SAME canonical vocabulary the /concepts frame ships, so the agent reads/reuses
-        REAL ids that join the rendered tree. Both stores are isinstance-guarded (a non-dict field must
-        soft-fail, not raise AttributeError out of execute())."""
-        from looplab.search.concept_graph import _canonical_with_rename
-        rename = getattr(st, "concept_consolidation", None)
-        rename = rename if isinstance(rename, dict) else {}
-        raw = getattr(st, "node_concepts", None)
-        raw = raw if isinstance(raw, dict) else {}
-        out: dict[int, list[str]] = {}
-        for nid, ids in raw.items():
-            try:
-                key = int(nid)
-            except (TypeError, ValueError):
-                continue
-            if not isinstance(ids, (list, tuple)):
-                continue
-            canon = []
-            for c in ids:
-                cid = _canonical_with_rename(c, rename)   # shared resolver (single source of truth)
-                if cid and cid not in canon:              # normalize + dedup within the node
-                    canon.append(cid)
-            out[key] = canon
-        return out
+    @staticmethod
+    def _concept_projection(st: RunState):
+        from looplab.search.concept_projection import current_concept_projection
+        return current_concept_projection(st)
+
+    @staticmethod
+    def _projection_note(projection) -> str:
+        reasons = ",".join(projection.reasons) or "unspecified"
+        return f"{projection.status.upper()} current concept projection (reasons={reasons})"
+
+    def _canon_node_concepts(self, st: RunState) -> dict[int, list[str]]:
+        """Strict canonical CURRENT memberships; unresolved and inactive rows are absent by design."""
+        projection = self._concept_projection(st)
+        return {node_id: list(concepts) for node_id, concepts in projection.memberships.items()}
 
     def _concept_tree(self, st: RunState) -> str:
         """Indented is_a concept tree with per-branch experiment counts (subtree, deduped)."""
         from collections import defaultdict
         from looplab.search.concept_graph import project_hierarchy
-        nc = self._canon_node_concepts(st)
+        projection = self._concept_projection(st)
+        nc = {node_id: list(concepts) for node_id, concepts in projection.memberships.items()}
+        if projection.status == "unavailable":
+            return (f"({self._projection_note(projection)}; recorded fallback [] is NOT a known-empty "
+                    "taxonomy)")
         if not any(nc.values()):
+            if projection.status == "partial":
+                return (f"({self._projection_note(projection)}; no usable concept ids remain, which is "
+                        "NOT evidence of an empty taxonomy)")
             return "(no concepts tagged yet — experiments carry concepts once the Researcher tags them)"
         cids = sorted({c for ids in nc.values() for c in ids})
         tree = project_hierarchy(cids) or {}
@@ -391,40 +389,58 @@ class RunTools:
         exps = sum(1 for v in nc.values() if v)
         head = (f"{len(cids)} concept id(s) across {exps} experiment(s)  "
                 "([N] = experiments under the branch; · = grouping level, no direct tag):")
+        if projection.status == "partial":
+            head = self._projection_note(projection) + "; available strict subset follows\n" + head
         text = head + "\n" + "\n".join(lines)
         return text if len(text) <= self.max_chars else text[:self.max_chars].rstrip() + " …(truncated)"
 
     def _concept_nodes(self, st: RunState, concept: str) -> str:
-        from looplab.search.concept_graph import _canonical_with_rename
-        rename = getattr(st, "concept_consolidation", None)
-        rename = rename if isinstance(rename, dict) else {}
+        from looplab.search.concept_projection import canonical_concept_query
+        projection = self._concept_projection(st)
+        if projection.status == "unavailable":
+            return (f"({self._projection_note(projection)}; experiment membership is UNAVAILABLE, "
+                    "not empty)")
         # Canonicalize the QUERY through the SAME chain+normalizer as the stored ids, so an agent that
         # types the displayed (normalized) id — or a since-renamed id — resolves to the same target.
-        target = _canonical_with_rename(concept, rename)
+        target = canonical_concept_query(st, concept)
         if not target:
             return "(give an axis/slug concept id — see read_concept_tree)"
-        nc = self._canon_node_concepts(st)
+        nc = {node_id: list(concepts) for node_id, concepts in projection.memberships.items()}
         hits = []
         for nid in sorted(nc):
             if any(c == target or c.startswith(target + "/") for c in nc[nid]):
                 n = st.nodes.get(nid)
                 hits.append(self._line(n) if n else f"#{nid}")
         if not hits:
+            if projection.status == "partial":
+                return (f"({self._projection_note(projection)}; no match in the available subset, "
+                        "which is NOT a complete zero)")
             return f"(no experiments tagged '{target}')"
         shown = hits[:60]
         if len(hits) > len(shown):
             # CODEX AGENT: the headline reports the full population, so the bounded listing needs an
             # honest omission receipt; otherwise a Researcher can mistake the first 60 for exhaustive.
             shown.append(f"… (+{len(hits) - len(shown)} more experiment(s), not shown)")
-        return f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(shown)
+        prefix = (self._projection_note(projection) + "; available strict subset follows\n"
+                  if projection.status == "partial" else "")
+        return prefix + f"{len(hits)} experiment(s) under '{target}':\n" + "\n".join(shown)
 
     def _node_concepts_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):
             return f"(no experiment #{nid})"
-        ids = self._canon_node_concepts(st).get(nid)
+        projection = self._concept_projection(st)
+        status, reasons = projection.node_status(nid)
+        if status == "unavailable":
+            return (f"#{nid} concepts: UNAVAILABLE (reasons={','.join(reasons)}); "
+                    "this is not a known-empty classification")
+        ids = projection.memberships.get(nid, ())
         if not ids:
+            if status == "partial":
+                return (f"#{nid} concepts: PARTIAL (reasons={','.join(reasons)}); "
+                        "no reliable ids remain")
             return f"#{nid}: (no concepts tagged)"
-        return f"#{nid} concepts: " + ", ".join(sorted(set(ids)))
+        prefix = f"PARTIAL (reasons={','.join(reasons)}); " if status == "partial" else ""
+        return f"#{nid} concepts: " + prefix + ", ".join(ids)
 
     def _node_concept_delta_tool(self, st: RunState, nid: int) -> str:
         if not st.nodes.get(nid):
@@ -434,15 +450,20 @@ class RunTools:
         parents = d["parent_ids"]
         base = ("root (no parent)" if not parents
                 else "parent" + ("s " if len(parents) > 1 else " ") + ", ".join(f"#{p}" for p in parents))
-        if d.get("untagged"):
-            return f"#{nid} concept delta vs {base}: (classification pending; no delta inferred)"
+        if d.get("unavailable"):
+            reasons = ",".join(d.get("reasons") or ["unspecified"])
+            pending = "classification pending; " if d.get("untagged") else ""
+            return (f"#{nid} concept delta vs {base}: UNAVAILABLE ({pending}reasons={reasons}); "
+                    "no empty delta inferred")
         def _fmt(label, ids):
             return f"{label}: {', '.join(ids)}" if ids else ""
         parts = [p for p in (_fmt("+added", d["added"]), _fmt("-removed", d["removed"]),
                              _fmt("=inherited", d["inherited"])) if p]
         kin = "parent" if len(parents) <= 1 else "parents"
         body = "; ".join(parts) if parts else f"(no concepts tagged on #{nid} or its {kin})"
-        return f"#{nid} concept delta vs {base}: {body}"
+        prefix = (f"PARTIAL (reasons={','.join(d.get('reasons') or ['unspecified'])}); "
+                  if d.get("partial") else "")
+        return f"#{nid} concept delta vs {base}: {prefix}{body}"
 
     def _research_memo(self, st: RunState) -> str:
         """Signal-delivery (§1): the FULL latest deep-research memo, on demand. Only the memo's top

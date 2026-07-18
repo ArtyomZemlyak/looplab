@@ -8,7 +8,8 @@ import math
 from looplab.events import digest
 from looplab.agents.agent import ToolUsingResearcher
 from looplab.core.config import Settings
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, Node, NodeStatus,
+from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+                                 NODE_CONCEPT_PROVENANCE_CLASSIFIER, Idea, Node, NodeStatus,
                                  RunState, Trial)
 from looplab.agents.roles import LLMResearcher
 from looplab.tools.run_tools import DataTools, RunTools
@@ -35,6 +36,13 @@ def _st() -> RunState:
     }
     st.best_node_id = 2
     return st
+
+
+def _mark_concepts_exact(st: RunState) -> None:
+    """Manual RunState fixtures must model replay's explicit inheritance provenance sidecar."""
+    if isinstance(st.node_concepts, dict):
+        st.node_concept_provenance = {
+            node_id: NODE_CONCEPT_PROVENANCE_CLASSIFIER for node_id in st.node_concepts}
 
 
 # --------------------------------------------------------------------------- digest
@@ -150,6 +158,7 @@ def test_concept_read_tools_expose_the_run_vocabulary(tmp_path):
                 metric=0.7, status=NodeStatus.evaluated),
     }
     st.node_concepts = {0: ["loss/contrast/dcl", "architecture/moe"], 1: ["loss/contrastive/mnr"]}
+    _mark_concepts_exact(st)
     st.concept_consolidation = {"loss/contrast/dcl": "loss/contrastive/dcl"}   # a live rename
     rt = RunTools()
     rt.bind_state(st)
@@ -181,6 +190,7 @@ def test_node_concept_delta_read_model_and_tool():
                 status=NodeStatus.evaluated),
     }
     st.node_concepts = {0: ["loss/a", "arch/moe"], 1: ["loss/a", "loss/b"], 2: ["loss/b", "data/aug"]}
+    _mark_concepts_exact(st)
 
     # node 1 vs its parent 0: dropped arch/moe, added loss/b, kept loss/a
     d1 = node_concept_delta(st, 1)
@@ -211,6 +221,7 @@ def test_node_concept_delta_never_raises_on_non_dict_stores():
     st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
                         status=NodeStatus.evaluated)}
     st.node_concepts = {0: ["loss/a"]}
+    _mark_concepts_exact(st)
     st.concept_consolidation = ["loss/a"]                        # a list, not a dict
     # A malformed consolidation map is an unavailable identity projection: fail closed, do not silently
     # reinterpret it as "no renames". The tool must still return its stable empty shape rather than raise.
@@ -234,6 +245,7 @@ def test_node_concept_delta_applies_consolidation_rename_on_both_sides():
     # parent tagged with a RETIRED raw id; child with its canonical -> after rename they are the SAME concept
     # (inherited), not a spurious add/remove.
     st.node_concepts = {0: ["loss/contrast/dcl"], 1: ["loss/contrastive/dcl", "loss/new"]}
+    _mark_concepts_exact(st)
     st.concept_consolidation = {"loss/contrast/dcl": "loss/contrastive/dcl"}
     d = node_concept_delta(st, 1)
     assert d["inherited"] == ["loss/contrastive/dcl"] and d["added"] == ["loss/new"] and d["removed"] == []
@@ -250,20 +262,119 @@ def test_node_concept_delta_distinguishes_pending_classification_from_empty_tags
                 status=NodeStatus.evaluated),
     }
     st.node_concepts = {0: ["loss/a"]}
+    _mark_concepts_exact(st)
 
     pending = node_concept_delta(st, 1)
     assert pending == {"parent_ids": [0], "added": [], "removed": [], "inherited": [],
+                       "unavailable": True, "reasons": ["membership_not_recorded"],
                        "untagged": True}
     tools = RunTools()
     tools.bind_state(st)
     rendered = tools.execute("node_concept_delta", {"node_id": 1})
     assert "classification pending" in rendered and "-removed" not in rendered
+    assert "PARTIAL" in tools.execute("read_concept_tree", {})
 
     # An explicit empty classifier receipt is materially different: it says the parent tag is absent.
     st.node_concepts[1] = []
+    _mark_concepts_exact(st)
     classified_empty = node_concept_delta(st, 1)
     assert classified_empty["removed"] == ["loss/a"]
     assert "untagged" not in classified_empty
+
+
+def test_concept_tools_share_strict_receipt_and_current_lifecycle_projection():
+    from looplab.search.concept_projection import (concept_inheritance_context,
+                                                    current_concept_projection)
+
+    st = RunState(goal="g", direction="max", run_base_concepts=["base/common"])
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft")),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft")),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft"), tombstoned=True),
+        3: Node(id=3, operator="draft", idea=Idea(operator="draft")),
+        4: Node(id=4, operator="draft", idea=Idea(operator="draft")),
+        5: Node(id=5, operator="draft", idea=Idea(operator="draft")),
+    }
+    st.aborted_nodes = [3]
+    st.node_concepts = {
+        0: [],
+        1: ["safe/current"],
+        2: ["secret/tombstoned"],
+        3: ["secret/aborted"],
+        4: [],
+        5: ["<script>/override", "loss/💥"],
+    }
+    st.node_concept_materialization_receipts = {
+        0: {"status": "unavailable", "reasons": [CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON]},
+        # Historical receipts follow their historical node out of the CURRENT projection.
+        2: {"status": "unavailable", "reasons": [CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON]},
+    }
+    _mark_concepts_exact(st)
+
+    projection = current_concept_projection(st)
+    assert projection.status == "partial"
+    assert projection.memberships == {1: ("safe/current",), 4: (), 5: ()}
+    assert projection.node_status(0) == (
+        "unavailable", (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,))
+    assert concept_inheritance_context(st, 1)["delta_safe"] is True
+
+    tools = RunTools()
+    tools.bind_state(st)
+    tree = tools.execute("read_concept_tree", {})
+    assert "PARTIAL" in tree and "safe" in tree
+    assert "script" not in tree and "tombstoned" not in tree and "aborted" not in tree
+    assert "UNAVAILABLE" in tools.execute("node_concepts", {"node_id": 0})
+    assert "known-empty" in tools.execute("node_concepts", {"node_id": 0})
+    assert "safe/current" in tools.execute("node_concepts", {"node_id": 1})
+    assert "PARTIAL" in tools.execute("node_concepts", {"node_id": 5})
+    assert "#4: (no concepts tagged)" == tools.execute("node_concepts", {"node_id": 4})
+    assert "#1" in tools.execute("concept_nodes", {"concept": "safe/current"})
+    assert "#2" not in tools.execute("concept_nodes", {"concept": "secret/tombstoned"})
+    assert "UNAVAILABLE" in tools.execute("node_concept_delta", {"node_id": 0})
+    delta_spec = next(spec["function"]["description"] for spec in tools.specs()
+                      if spec["function"]["name"] == "node_concept_delta")
+    assert "full-mode root" in delta_spec and "delta-mode root" in delta_spec
+
+
+def test_run_base_materialization_receipt_blocks_delta_even_with_valid_subset():
+    from types import SimpleNamespace
+
+    from looplab.search.concept_projection import concept_inheritance_context
+
+    state = SimpleNamespace(
+        nodes={}, node_concepts={}, run_base_concepts=["base/reliable-subset"],
+        run_base_concept_receipt={
+            "status": "partial", "reasons": ["concepts_per_node_cap"]},
+    )
+
+    context = concept_inheritance_context(state, None)
+
+    assert context["run_base"] == ["base/reliable-subset"]
+    assert context["run_base_status"] == "partial"
+    assert context["run_base_reasons"] == ["concepts_per_node_cap"]
+    assert context["delta_safe"] is False
+
+
+def test_missing_or_untrusted_membership_provenance_is_partial_and_forbids_delta():
+    from looplab.core.models import NODE_CONCEPT_PROVENANCE_UNTRUSTED
+    from looplab.search.concept_projection import concept_inheritance_context, current_concept_projection
+
+    state = RunState(goal="g", direction="max", run_base_concepts=["base/x"])
+    state.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft"))}
+    state.node_concepts = {0: ["safe/parent"]}
+
+    for provenance in ({}, {0: NODE_CONCEPT_PROVENANCE_UNTRUSTED}):
+        state.node_concept_provenance = provenance
+        projection = current_concept_projection(state)
+        assert projection.trusted_memberships == {}
+        assert projection.node_status(0) == (
+            "partial", ("delta_dependency_unknown_parent_membership",))
+        assert concept_inheritance_context(state, 0)["delta_safe"] is False
+
+    tools = RunTools()
+    tools.bind_state(state)
+    rendered = tools.execute("node_concepts", {"node_id": 0})
+    assert "PARTIAL" in rendered and "safe/parent" in rendered
 
 
 def test_concept_nodes_reports_omitted_experiments():
@@ -274,6 +385,7 @@ def test_concept_nodes_reports_omitted_experiments():
         for nid in range(65)
     }
     st.node_concepts = {nid: ["loss/a"] for nid in st.nodes}
+    _mark_concepts_exact(st)
     tools = RunTools()
     tools.bind_state(st)
 
@@ -294,6 +406,7 @@ def test_concept_read_tools_normalize_ids_to_the_frame_vocabulary(tmp_path):
         1: Node(id=1, operator="draft", idea=Idea(operator="draft", params={}), status=NodeStatus.evaluated),
     }
     st.node_concepts = {0: ["loss/InfoNCE", "architecture/MoE"], 1: ["loss/InfoNCE"]}
+    _mark_concepts_exact(st)
     rt = RunTools()
     rt.bind_state(st)
     tree = rt.execute("read_concept_tree", {})
@@ -312,6 +425,7 @@ def test_concept_read_tools_follow_full_rename_chain_and_never_raise(tmp_path):
     st.nodes = {0: Node(id=0, operator="draft", idea=Idea(operator="draft", params={}),
                         status=NodeStatus.evaluated)}
     st.node_concepts = {0: ["loss/a"]}
+    _mark_concepts_exact(st)
     st.concept_consolidation = {"loss/a": "loss/b", "loss/b": "loss/c"}   # 2-hop chain
     rt = RunTools()
     rt.bind_state(st)

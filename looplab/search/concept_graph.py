@@ -936,36 +936,39 @@ def node_concept_delta(state, node_id) -> dict:
     parent diff), so it is replay-safe and answers "what did this node change relative to its parent".
 
     The inherited base is the UNION of ALL parents' canonical concepts (a merge inherits from every parent);
-    both sides are canonicalized through the consolidation rename chain so the diff is on the live vocabulary
-    (leaf normalization is the lenient `_normalize_concept_id`, matching the run_tools concept family — the
-    stricter leaf validation of the /concepts frame's `concept_id` is NOT applied). A legacy full root
+    both sides cross the strict, receipt-aware CURRENT projection, so malformed or unavailable memberships
+    cannot masquerade as an honest empty set. A legacy full root
     inherits nothing; a Part-V delta-authored root inherits `run_base_concepts`. Returns
     {parent_ids, added, removed, inherited}
     with sorted canonical-id lists. Never raises (a non-dict store soft-fails to empty, like the siblings)."""
-    # isinstance-guard `nodes` too (not just `or {}`): a truthy non-dict would raise at `.get` below and
-    # break the never-raise contract, same as the consolidation/node_concepts stores guarded further down.
+    from looplab.search.concept_projection import current_concept_projection
+
     nodes = getattr(state, "nodes", None)
     nodes = nodes if isinstance(nodes, dict) else {}
     node = nodes.get(node_id)
     if node is None:
         return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
-    # isinstance-guard both stores: a truthy non-dict must soft-fail, not raise AttributeError out of a
-    # read-model an LLM tool invokes (matches serve.concept_frame / run_tools, which guard the same fields).
-    rename = _normalized_rename_map(getattr(state, "concept_consolidation", None))
-    node_concepts = getattr(state, "node_concepts", None)
-    node_concepts = node_concepts if isinstance(node_concepts, dict) else {}
-    # Dedup parent ids (a torn log can carry [0, 0]) while keeping only existing parents.
+
+    projection = current_concept_projection(state)
     parent_ids = list(dict.fromkeys(p for p in (getattr(node, "parent_ids", None) or []) if p in nodes))
-    if node_id not in node_concepts:
-        # CODEX AGENT: absence is not an empty classification. A fresh child that the cadence has not
-        # tagged yet must not fabricate removal of every parent concept; expose unknown provenance
-        # explicitly and leave all semantic-delta lists empty.
-        return {"parent_ids": sorted(parent_ids), "added": [], "removed": [], "inherited": [],
-                "untagged": True}
-    own = _canon_set(node_id, node_concepts, rename)
+    empty = {"parent_ids": sorted(parent_ids), "added": [], "removed": [], "inherited": []}
+    node_status, node_reasons = projection.node_status(node_id)
+    if node_status == "unavailable":
+        return {**empty, "unavailable": True, "reasons": list(node_reasons),
+                **({"untagged": True} if "membership_not_recorded" in node_reasons else {})}
+
+    parent_reasons: set[str] = set()
+    for parent_id in parent_ids:
+        parent_status, problems = projection.node_status(parent_id)
+        if parent_status != "complete":
+            parent_reasons.update(problems or ("parent_membership_unavailable",))
+    if parent_reasons:
+        return {**empty, "unavailable": True, "reasons": sorted(parent_reasons)}
+
+    own = set(projection.memberships.get(node_id, ()))
     inherited_base: set = set()
     for pid in parent_ids:
-        inherited_base |= _canon_set(pid, node_concepts, rename)
+        inherited_base.update(projection.memberships.get(pid, ()))
     if not parent_ids:
         raw_deltas = getattr(state, "node_concept_deltas", None)
         provenance = getattr(state, "node_concept_provenance", None)
@@ -975,16 +978,23 @@ def node_concept_delta(state, node_id) -> dict:
             # CODEX AGENT: replay gives an authored delta root the run base. Calling all of those ids
             # `added` makes an explicit zero delta look like it authored the base. Legacy full roots and
             # classifier/operator overrides have no active authored-delta sidecar and retain all-added.
-            raw_base = getattr(state, "run_base_concepts", None)
-            raw_base = raw_base if isinstance(raw_base, (list, tuple)) else []
-            inherited_base = {c for c in (
-                _canonical_with_rename(value, rename) for value in raw_base) if c}
-    return {
+            if projection.run_base_status != "complete":
+                return {**empty, "unavailable": True,
+                        "reasons": list(projection.run_base_reasons or ("run_base_unavailable",))}
+            inherited_base.update(projection.run_base)
+    result = {
         "parent_ids": sorted(parent_ids),
         "added": sorted(own - inherited_base),
         "removed": sorted(inherited_base - own),
         "inherited": sorted(own & inherited_base),
     }
+    local_reasons = set(projection.partial_nodes.get(node_id, ()))
+    # CODEX AGENT: structural identity/store corruption affects every comparison. An unrelated receipt
+    # makes the broad projection partial, but must not contaminate this node's otherwise exact delta.
+    local_reasons.update(projection.global_reasons)
+    if node_status == "partial" or local_reasons:
+        result.update({"partial": True, "reasons": sorted(local_reasons)})
+    return result
 
 
 def project_hierarchy(concept_ids, *, graph: Optional[ConceptGraph] = None,

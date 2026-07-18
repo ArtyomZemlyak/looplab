@@ -63,6 +63,8 @@ class CrossRunTools:
         self._direction = ""
         self._scope_terms: set[str] = set()
         self._concepts: set[str] = set()      # E2: the current run's concept set (for similar_runs overlap)
+        self._concept_projection_status = "complete"
+        self._concept_projection_reasons: tuple[str, ...] = ()
         self._bound = False
 
     def bind_state(self, state, parent=None) -> None:
@@ -80,16 +82,24 @@ class CrossRunTools:
         direction = str(getattr(state, "direction", "") or "")
         self._direction = direction if direction in ("min", "max") else ""
         self._scope_terms = _toks(getattr(state, "goal", "") or "")
-        # E2: the current run's live concept set (union of folded node_concepts) for similar_runs overlap.
-        concepts: set[str] = set()
-        for tags in (getattr(state, "node_concepts", None) or {}).values():
-            for c in (tags or []):
-                s = str(c)
-                if s:
-                    concepts.add(s)
-        self._concepts = concepts
+        # E2: use the same strict CURRENT projection as the run tools. Historical tombstones/aborts and
+        # unresolved delta fallbacks must not authorize cross-run overlap or masquerade as known-empty.
+        from looplab.search.concept_projection import current_concept_projection
+        projection = current_concept_projection(state)
+        self._concept_projection_status = projection.status
+        self._concept_projection_reasons = projection.reasons
+        self._concepts = {
+            concept
+            for concepts in projection.trusted_memberships.values()
+            for concept in concepts
+        }
         # Agentic facets are intentionally not loaded into this visibility predicate. They are
         # untrusted advisory metadata reserved for a future post-scope ranking experiment.
+
+    def _concept_projection_note(self) -> str:
+        reasons = ",".join(self._concept_projection_reasons) or "unspecified"
+        return (f"[{self._concept_projection_status.upper()} current_concept_projection "
+                f"reasons={reasons}]")
 
     def _in_scope(self, row: dict) -> bool:
         """True for compatible direction plus exact task or strict related-goal fingerprint.
@@ -460,6 +470,16 @@ class CrossRunTools:
                         f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
                         f"taxonomy_revision={taxonomy['governance_revision']}]")
 
+            if self._concept_projection_status == "unavailable":
+                return ("(current run concepts are UNAVAILABLE; similar_runs cannot infer overlap from "
+                        "a fallback empty set)\n" + self._concept_projection_note() + "\n"
+                        + _receipt(matched=0, returned=0))
+            partial_note = (self._concept_projection_note() + "\n"
+                            if self._concept_projection_status == "partial" else "")
+            if not mine and self._concept_projection_status == "partial":
+                return (partial_note
+                        + "(no reliable current-run concepts remain; this is not a complete zero)\n"
+                        + _receipt(matched=0, returned=0))
             if not mine:
                 return ("(this run has no concepts yet after canonical taxonomy governance — "
                         "similar_runs ranks by shared concept overlap)\n"
@@ -476,11 +496,15 @@ class CrossRunTools:
                     continue
                 jac = len(shared) / len(mine | theirs)
                 ranked.append((jac, len(shared), rid, sorted(shared)))
+            if not ranked and self._concept_projection_status == "partial":
+                return (partial_note + "(no prior run shares a reliable concept with this one)\n"
+                        + _receipt(matched=0, returned=0))
             if not ranked:
                 return "(no prior run shares a concept with this one)\n" + _receipt(matched=0, returned=0)
             ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
             returned = min(len(ranked), limit)
-            lines = [f"{returned} prior run(s) most similar by shared concepts (advisory):"]
+            lines = ([partial_note.rstrip()] if partial_note else [])
+            lines.append(f"{returned} prior run(s) most similar by shared concepts (advisory):")
             for jac, n, rid, shared in ranked[:limit]:
                 preview = ", ".join(
                     f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
@@ -562,7 +586,10 @@ class CrossRunTools:
             def _scope(meta: dict) -> str:
                 if meta["own"]:
                     return "own"
-                return "cross" if meta["cross_runs"] else "global"
+                if meta["cross_runs"]:
+                    return "cross"
+                return ("global" if self._concept_projection_status == "complete"
+                        else "unknown")
 
             def _run_count(meta: dict) -> int:
                 return (1 if meta["own"] else 0) + len(meta["cross_runs"] | meta["global_runs"])
@@ -574,12 +601,28 @@ class CrossRunTools:
                         f"candidates={candidates} returned={returned} "
                         f"taxonomy_revision={taxonomy['governance_revision']}]")
 
+            concept_dependent_scope = want in {"own", "cross"}
+            if concept_dependent_scope and self._concept_projection_status == "unavailable":
+                return (f"(current run concepts are UNAVAILABLE; scope '{want}' cannot be computed from "
+                        "a fallback empty set)\n" + self._concept_projection_note() + "\n"
+                        + _receipt(candidates=0, returned=0))
+            partial_note = (self._concept_projection_note() + "\n"
+                            if ((concept_dependent_scope
+                                 and self._concept_projection_status == "partial")
+                                or (want in {"all", "global"}
+                                    and self._concept_projection_status != "complete")) else "")
             if want != "all":
-                vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
+                if want == "global" and self._concept_projection_status != "complete":
+                    # CODEX AGENT: prior vocabulary stays usable; only its relationship to this
+                    # run is unknown until current membership materializes.
+                    vocab = {s: m for s, m in vocab.items()
+                             if not m["own"] and not m["cross_runs"]}
+                else:
+                    vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
             if not vocab:
                 message = (f"(no concept slugs in scope '{want}'"
                            + ("; this run has no concepts yet" if want == "own" else "") + ")")
-                return message + "\n" + _receipt(candidates=0, returned=0)
+                return partial_note + message + "\n" + _receipt(candidates=0, returned=0)
             if not query:
                 by_axis = Counter(s.split("/", 1)[0] for s in vocab)
                 lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
@@ -588,9 +631,9 @@ class CrossRunTools:
                 lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
                           for axis, count in ordered_axes]
                 lines.append(_receipt(candidates=len(vocab), returned=len(ordered_axes)))
-                return "\n".join(lines)
+                return partial_note + "\n".join(lines)
             qn = _slug_norm(query)
-            _rank = {"own": 0, "cross": 1, "global": 2}
+            _rank = {"own": 0, "cross": 1, "global": 2, "unknown": 2}
             scored = []
             for slug, meta in vocab.items():
                 sn, ln = _slug_norm(slug), _slug_norm(slug.split("/")[-1])
@@ -603,15 +646,26 @@ class CrossRunTools:
                                 difflib.SequenceMatcher(None, qn, ln).ratio())
                 if score >= 0.55:
                     scored.append((_rank[_scope(meta)], -score, slug, meta))
+            if (not scored and partial_note
+                    and self._concept_projection_status == "partial"):
+                return (partial_note
+                        + f"No reliable existing slug matches {_safe_text(query, 256)!r} in scope '{want}'. "
+                          "Because the current projection is PARTIAL, this is not proof that the slug is new.\n"
+                        + _receipt(candidates=0, returned=0))
             if not scored:
                 return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
                         "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
                         "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
             scored.sort()                            # own before cross before global; then best match first
-            _label = {"own": "this run", "cross": "cross-run", "global": "global map"}
+            _label = {"own": "this run", "cross": "cross-run", "global": "global map",
+                      "unknown": "relation to current run unknown"}
+            order = ("own→cross→global" if self._concept_projection_status == "complete"
+                     else "own→cross→unknown")
             lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
-                     "(own→cross→global) — REUSE the closest, don't respell "
+                     f"({order}) — REUSE the closest, don't respell "
                      "(call concept_card('<slug>') to decode one + see its track record):"]
+            if partial_note:
+                lines.insert(0, partial_note.rstrip())
             for _r, negscore, slug, meta in scored[:limit]:
                 lines.append(f"  [{_label[_scope(meta)]}] "
                              f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "

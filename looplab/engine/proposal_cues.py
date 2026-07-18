@@ -84,31 +84,27 @@ class ProposalCuesMixin:
         # PART V (B): once the run has a BASE concept set, ask for the DELTA instead of the full list, so
         # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
         # system prompt keeps authoring the full set when no base exists — a base-absent run is unchanged).
-        parent_receipt = (state.node_concept_materialization_receipts.get(parent.id)
-                          if parent is not None else None)
-        delta_context_safe = (
-            state.run_base_concept_receipt is None
-            and (parent is None or (
-                parent.id in state.node_concepts and parent_receipt is None))
-        )
-        if (getattr(self, "_concept_run_base", False) and state.run_base_concepts
-                and delta_context_safe):
-            base = ", ".join(str(c) for c in state.run_base_concepts[:40])
-            parent_concepts = state.node_concepts.get(parent.id) if parent is not None else None
-            if parent is None:
-                inherited_line = f" This root inherits the run base [{base}]."
+        if getattr(self, "_concept_run_base", False) and state.run_base_concepts:
+            # CODEX AGENT: unresolved inheritance must force full authoring; fallback [] never enables delta.
+            from looplab.search.concept_projection import (bounded_untrusted_concept_json,
+                                                            concept_inheritance_context)
+            concept_context = concept_inheritance_context(
+                state, parent.id if parent is not None else None)
+            hint += ("\nUNTRUSTED_RECORDED_CONCEPT_DATA="
+                     + bounded_untrusted_concept_json(concept_context))
+            if concept_context["delta_safe"]:
+                hint += (
+                    "\nConcept authoring — delta mode is enabled for a root/draft or this exact primary "
+                    "parent. Set `concept_mode=\"delta\"`; do NOT re-list the full set. Author only the "
+                    "CHANGE in `concepts_added` and `concepts_removed`; leave `concepts` empty; both delta "
+                    "lists may be empty to inherit unchanged. If you propose operator=merge, use "
+                    "`concept_mode=\"full\"` because the other actual parent memberships are not supplied "
+                    "in this prompt.")
             else:
-                inherited = ", ".join(str(c) for c in (parent_concepts or [])[:40])
-                inherited_line = (f" Primary parent {parent.id}'s effective membership is [{inherited}]."
-                                  " A merge inherits the union of every actual parent.")
-            hint += (
-                f"\nConcept authoring — delta mode is enabled; run base=[{base}]." + inherited_line
-                + " Set `concept_mode=\"delta\"`; do NOT re-list the full set. Author only the CHANGE"
-                  " vs that inherited membership: put concepts"
-                  " this experiment INTRODUCES in `concepts_added`, and any inherited concept it DROPS"
-                  " (e.g. swapping one technology for another) in `concepts_removed`. Leave `concepts`"
-                  " empty; both delta lists may be empty to inherit unchanged. The run base and parent"
-                  " inheritance fill the rest.")
+                hint += (
+                    "\nConcept authoring safety — inherited membership is UNAVAILABLE or PARTIAL. "
+                    "You MUST set `concept_mode=\"full\"`, put the exact complete concept set in `concepts`, "
+                    "leave both delta lists empty, and MUST NOT use delta mode for this proposal.")
         # Concept-slug REUSE (fires for EVERY node incl. node 0, which has no run base yet). A shared slug
         # vocabulary spans ALL runs (the global concept map); an agent inventing `rdrop` when
         # `regularization/r-drop` already exists silently breaks the cross-run prior overlap (exact-slug
