@@ -33,8 +33,9 @@ _TOOL_NAMES = frozenset({
 def _slug_norm(s: str) -> str:
     """Separator/case-insensitive concept key so `r-drop`, `rdrop`, `R_Drop` collapse to one bucket —
     the whole point of the fuzzy slug search (an agent writing `rdrop` must still find `regularization/
-    r-drop`). Keeps only [a-z0-9]."""
-    return re.sub(r"[^a-z0-9]", "", str(s).lower())
+    r-drop`). Unicode concept vocabularies remain searchable instead of collapsing to an empty key."""
+    normalized = unicodedata.normalize("NFKC", str(s or "")).casefold()
+    return "".join(char for char in normalized if char.isalnum())
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 _MAX_TOOL_RESULT_CHARS = 16_000
 
@@ -172,14 +173,15 @@ class CrossRunTools:
                 "runs' concept capsules) for an equivalent one and REUSE it — do NOT create a near-duplicate "
                 "(e.g. `rdrop` when `regularization/r-drop` already exists); consistent slugs are what make "
                 "cross-run priors match. Matching is separator/case-insensitive (r-drop == rdrop == r_drop) "
-                "plus fuzzy, so search your intended concept in any spelling. Call with no query to list the "
-                "known concept AXES as an overview.",
+                "plus Unicode-aware fuzzy matching. Operator aliases, splits, and purges are applied before "
+                "matching. Call with no query to list the known concept AXES as an overview.",
                 {"query": {"type": "string", "description": "The concept you intend to author (any spelling), "
                                                             "e.g. 'rdrop' or 'decoupled contrastive'. Omit to "
                                                             "list axes."},
                  "scope": {"type": "string", "enum": ["all", "own", "cross", "global"],
                            "description": "Where to search: own=this run, cross=prior runs sharing a concept "
-                                          "with this one (same direction), global=the whole world concept map "
+                                          "with this one in its same-direction task family, global=the whole "
+                                          "world concept map "
                                           "(use it to hunt SYNERGY from other directions), all=everything ranked "
                                           "own→cross→global. Default all."},
                  "limit": {"type": "integer", "description": "Max matches (default 12)."}},
@@ -480,63 +482,100 @@ class CrossRunTools:
         if name == "find_concept_slugs":
             import difflib
             from collections import Counter
-            try:
-                limit = int(args.get("limit") or 12)
-            except (TypeError, ValueError):
+            raw_limit = args.get("limit")
+            if raw_limit is None:
                 limit = 12
+            elif isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+                return "(cross-run tool error: limit must be an integer)"
+            else:
+                limit = raw_limit
             limit = max(1, min(limit, 50))
-            query = str(args.get("query") or "").strip()
-            want = str(args.get("scope") or "all").lower()
+            raw_query = args.get("query")
+            if raw_query is not None and not isinstance(raw_query, str):
+                return "(cross-run tool error: query must be a string)"
+            if isinstance(raw_query, str) and len(raw_query) > 256:
+                return "(cross-run tool error: query exceeds 256 characters)"
+            query = (raw_query or "").strip()
+            raw_scope = args.get("scope")
+            if raw_scope is not None and not isinstance(raw_scope, str):
+                return "(cross-run tool error: scope must be a string)"
+            want = (raw_scope or "all").strip().lower()
             if want not in ("all", "own", "cross", "global"):
-                want = "all"
+                return "(cross-run tool error: scope must be all, own, cross, or global)"
             # Vocabulary = every slug in prior concept capsules (available from node 0) + this run's live
             # concepts (which only appear after the first evaluated node). Each slug gets a SCOPE:
             #   own    — in THIS run's concept set
             #   cross  — in a prior run that shares >=1 concept with this one (same direction)
             #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
+            from looplab.engine.concept_registry import (canonicalize_concepts,
+                                                         concept_governance_snapshot)
             from looplab.engine.memory import ConceptCapsuleStore
+
+            # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
+            # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
+            # run "cross", while the explicitly requested global tier remains the broader synergy surface.
+            taxonomy = concept_governance_snapshot(self.dir)
+            aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             p = self.dir / "concept_capsules.jsonl"
             caps = ConceptCapsuleStore(p).all() if p.exists() else []
-            mine = {str(c) for c in (self._concepts or set()) if str(c)}
-            similar_runs = set()                    # prior runs sharing a concept with this one
-            for cap in caps:
+            prior_caps = [cap for cap in caps
+                          if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
+            scoped_caps = [cap for cap in prior_caps if self._in_scope(cap)]
+            mine = set(canonicalize_concepts(
+                sorted(self._concepts), aliases=aliases, splits=splits))
+            canonical_by_capsule: dict[int, set[str]] = {
+                id(cap): set(canonicalize_concepts(
+                    cap.get("concepts") or [], aliases=aliases, splits=splits))
+                for cap in prior_caps
+            }
+            cross_run_ids: set[str] = set()
+            for cap in scoped_caps:
                 rid = str(cap.get("run_id") or "")
-                if rid and rid != self._run_id and (mine & {str(c) for c in (cap.get("concepts") or [])}):
-                    similar_runs.add(rid)
+                if rid and mine & canonical_by_capsule[id(cap)]:
+                    cross_run_ids.add(rid)
             vocab: dict[str, dict] = {}
-            for cap in caps:
+            for cap in prior_caps:
                 rid = str(cap.get("run_id") or "")
-                if rid and rid == self._run_id:
-                    continue                         # this run's own capsule is covered by `mine`
-                signs = cap.get("concept_signs") or {}
-                for c in (cap.get("concepts") or []):
-                    c = str(c)
-                    if not c:
-                        continue
-                    e = vocab.setdefault(c, {"runs": set(), "sign": None, "own": False})
-                    if rid:
-                        e["runs"].add(rid)
-                    s = signs.get(c)
-                    if isinstance(s, int) and s and e["sign"] in (None, 0):
-                        e["sign"] = s
-            for c in mine:
-                vocab.setdefault(c, {"runs": set(), "sign": None, "own": False})["own"] = True
+                if not rid:
+                    continue
+                bucket = "cross_runs" if rid in cross_run_ids else "global_runs"
+                for concept in canonical_by_capsule[id(cap)]:
+                    meta = vocab.setdefault(
+                        concept, {"cross_runs": set(), "global_runs": set(), "own": False})
+                    meta[bucket].add(rid)
+            for concept in mine:
+                vocab.setdefault(
+                    concept, {"cross_runs": set(), "global_runs": set(), "own": False})["own"] = True
 
             def _scope(meta: dict) -> str:
                 if meta["own"]:
                     return "own"
-                return "cross" if (meta["runs"] & similar_runs) else "global"
+                return "cross" if meta["cross_runs"] else "global"
+
+            def _run_count(meta: dict) -> int:
+                return (1 if meta["own"] else 0) + len(meta["cross_runs"] | meta["global_runs"])
+
+            def _receipt(*, candidates: int, returned: int) -> str:
+                direction = self._direction if self._bound else "any"
+                return (f"[receipt requested_scope={want} direction={direction or 'invalid'} "
+                        f"prior_capsules={len(prior_caps)} scoped_capsules={len(scoped_caps)} "
+                        f"candidates={candidates} returned={returned} "
+                        f"taxonomy_revision={taxonomy['governance_revision']}]")
 
             if want != "all":
                 vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
             if not vocab:
-                return (f"(no concept slugs in scope '{want}'"
-                        + ("; this run has no concepts yet" if want == "own" else "") + ")")
+                message = (f"(no concept slugs in scope '{want}'"
+                           + ("; this run has no concepts yet" if want == "own" else "") + ")")
+                return message + "\n" + _receipt(candidates=0, returned=0)
             if not query:
                 by_axis = Counter(s.split("/", 1)[0] for s in vocab)
                 lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
                          "search within one: find_concept_slugs('<your concept>'):"]
-                lines += [f"  {ax}  ({n} slugs)" for ax, n in by_axis.most_common()]
+                ordered_axes = sorted(by_axis.items(), key=lambda item: (-item[1], item[0]))
+                lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
+                          for axis, count in ordered_axes]
+                lines.append(_receipt(candidates=len(vocab), returned=len(ordered_axes)))
                 return "\n".join(lines)
             qn = _slug_norm(query)
             _rank = {"own": 0, "cross": 1, "global": 2}
@@ -553,15 +592,18 @@ class CrossRunTools:
                 if score >= 0.55:
                     scored.append((_rank[_scope(meta)], -score, slug, meta))
             if not scored:
-                return (f"No existing slug matches '{query}' in scope '{want}' — it looks NEW. Mint it as "
-                        "`axis/name` (reuse an existing AXIS if one fits; call with no query to list axes).")
+                return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
+                        "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
+                        "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
             scored.sort()                            # own before cross before global; then best match first
             _label = {"own": "this run", "cross": "cross-run", "global": "global map"}
-            lines = [f"Existing slugs matching '{query}' (own→cross→global) — REUSE the closest, don't respell:"]
+            lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
+                     "(own→cross→global) — REUSE the closest, don't respell:"]
             for _r, negscore, slug, meta in scored[:limit]:
-                sign = {1: " (helped before)", -1: " (hurt before)"}.get(meta["sign"], "")
-                lines.append(f"  [{_label[_scope(meta)]}] {slug}  [{len(meta['runs']) or 1} run(s)]"
-                             f"{sign}  match={-negscore:.0%}")
+                lines.append(f"  [{_label[_scope(meta)]}] "
+                             f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
+                             f"[{_run_count(meta)} run(s)] match={-negscore:.0%}")
+            lines.append(_receipt(candidates=len(scored), returned=min(len(scored), limit)))
             return "\n".join(lines)
 
         return "(unknown cross-run tool)"
