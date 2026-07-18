@@ -291,13 +291,14 @@ export function conceptProjectionKey(state) {
 
 const initial = { scope: '', requestVersion: '', status: 'loading', data: null, timeout: false }
 
-function StateCard({ tone, title, body, action, pending = false, stale = false }) {
+function StateCard({ tone, title, body, action, pending = false, stale = false,
+  projectionLabel = 'Concept hierarchy' }) {
   return <section className={`cv-state-card ${tone}`} role={tone === 'error' || stale ? 'alert' : 'status'}
     aria-live={tone === 'error' || stale ? 'assertive' : 'polite'} aria-atomic="true">
     <span className="cv-state-mark" aria-hidden="true">{tone === 'loading' ? '' : tone === 'error' ? '!' : '◇'}</span>
     <span className="cv-state-eyebrow">Concept map</span><h2>{title}</h2><p>{body}</p>
     {tone === 'empty' && <div className="cv-empty-flow" aria-label="How the concept view is built">
-      <span>Experiments</span><i aria-hidden="true">→</i><span>Concept hierarchy</span>
+      <span>Experiments</span><i aria-hidden="true">→</i><span>{projectionLabel}</span>
       <i aria-hidden="true">→</i><span>Outcome comparison</span>
     </div>}
     {stale && <p className="cv-state-warning">Refresh failed; this is the last loaded empty result.</p>}
@@ -529,6 +530,26 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   // in the same DFS visibleConceptRows already runs — search only widens `expanded` and trims the result.
   const edgeProjection = data?.requested_lens_spec?.kind === 'edge'
     && data?.lens_contract?.fallback !== 'no_matching_edges'
+  const relationshipTypes = data?.requested_lens_spec?.rels?.join(', ') || ''
+  const projectionLabel = edgeProjection ? 'Concept relationships' : 'Concept hierarchy'
+  const projectionAriaLabel = edgeProjection
+    ? `Concept relationship view for recorded ${relationshipTypes} links`
+    : 'Concept hierarchy'
+  const projectionDescription = data ? [
+    'concept-metric-context',
+    ...(edgeProjection ? ['concept-relationship-legend'] : []),
+  ].join(' ') : undefined
+  const metricOrientation = data?.metrics?.direction === 'min' ? 'minimize' : 'maximize'
+  const metricContext = data && <div id="concept-metric-context"
+    className="cv-resource-note metric-context" role="note">
+    Primary objective metric · Unnamed metric · unit not recorded · {metricOrientation}.
+    {' '}Δ columns are orientation-normalized; positive values mean better.
+  </div>
+  const relationshipLegend = edgeProjection && <div id="concept-relationship-legend"
+    className="cv-resource-note relationship-legend" role="note">
+    Relationship view · recorded {relationshipTypes} links. Indentation shows one primary display
+    parent; “+N links” exposes additional recorded parents. This is not a taxonomy hierarchy.
+  </div>
   const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection }),
     [data, byConcept, query, edgeProjection])
   const searching = query.trim().length > 0 && !!filter
@@ -1179,7 +1200,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)
     || ['orphaned', 'conflict'].includes(currentRecovery.receipt?.state)
   if (stateCard) return <div className="concept-view cv-state-layout" data-route-main tabIndex={-1}
-    aria-label="Concept tree"><StateCard {...stateCard} />
+    aria-label={projectionAriaLabel} aria-describedby={projectionDescription}>
+    <StateCard {...stateCard} projectionLabel={projectionLabel} />
+    {metricContext}{relationshipLegend}
     {data && recoveryNeedsSurface && (currentRecovery.status === 'settled' && !savedLensIntent
       ? <p className="cv-state-warning" role="status">{currentRecovery.notice}</p>
       : lensCreator)}</div>
@@ -1207,12 +1230,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     ...shippedLenses.filter(item => !derivedNames.has(item.name)),
     ...runDerivedLenses.map(item => ({ ...item, derived: true })),
   ]
-  const linkKind = data.requested_lens_spec.rels.join(', ')
-  return <div className="concept-view" data-route-main tabIndex={-1} aria-label="Concept tree"
+  const linkKind = relationshipTypes
+  return <div className="concept-view" data-route-main tabIndex={-1}
+    aria-label={projectionAriaLabel} aria-describedby={projectionDescription}
     aria-busy={refreshing}>
     <header className="cv-bar">
-      <div className="cv-heading"><strong>Concept tree</strong><span>
-        {counted(taggedConceptCount, 'tagged concept')} · {counted(hierarchyNodeCount, 'hierarchy node')} · {counted(experimentCount, 'tagged experiment')} · frame seq {data.captured_seq}
+      <div className="cv-heading"><strong>{projectionLabel}</strong><span>
+        {counted(taggedConceptCount, 'tagged concept')} · {counted(hierarchyNodeCount,
+          edgeProjection ? 'relationship node' : 'hierarchy node')} · {counted(experimentCount, 'tagged experiment')} · frame seq {data.captured_seq}
       </span></div>
       <div className="cv-search cs">
         <div className={'cs-box' + (searching ? ' focus' : '')}>
@@ -1227,8 +1252,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         </div>
       </div>
       <div className="cv-lensctl">
-        <label className="cv-lenspick"><span>Hierarchy lens</span><select className="text" value={lens}
-          onChange={event => { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens(event.target.value) }} aria-label="Concept hierarchy lens">
+        <label className="cv-lenspick"><span>{edgeProjection ? 'Relationship lens' : 'Hierarchy lens'}</span><select className="text" value={lens}
+          onChange={event => { setExpanded(new Set()); setEvidenceExpanded(new Set()); setLens(event.target.value) }}
+          aria-label={edgeProjection ? 'Concept relationship lens' : 'Concept hierarchy lens'}>
           {availableLenses.map(item => <option key={item.name} value={item.name}>
             {(item.derived ? '✦ ' : '') + (item.label || item.name)}</option>)}
         </select></label>
@@ -1254,6 +1280,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
           run median {fmt(data.metrics.baseline)}</span>}
       </div>
     </header>
+    {metricContext}{relationshipLegend}
     {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />Refreshing concepts… Last loaded view remains visible.</div>}
     {current.status === 'stale' && <div className="cv-resource-note stale" role="alert"><span>Showing the last loaded concept view; refresh {current.timeout ? 'timed out' : 'failed'}.</span><button type="button" className="btn sm" onClick={refresh}>Retry</button></div>}
     {!data.authoritative && <div className="cv-resource-note partial" role="status">
@@ -1290,7 +1317,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const edgeProjection = Array.isArray(node?.cross_parents)
         const conceptLabel = edgeProjection ? id : conceptLeaf(id)
         const crossParentSummary = crossParents.length
-          ? `Secondary ${linkKind} ${crossParents.length === 1 ? 'parent' : 'parents'}: ${crossParents.join(', ')}`
+          ? `Additional display ${crossParents.length === 1 ? 'parent' : 'parents'} via recorded ${linkKind} ${crossParents.length === 1 ? 'link' : 'links'}: ${crossParents.join(', ')}`
           : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost') + (conceptHit ? ' hit' : '')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>

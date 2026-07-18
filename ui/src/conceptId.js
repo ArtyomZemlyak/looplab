@@ -47,10 +47,27 @@ export function conceptMap() {
   return Object.create(null)
 }
 
-// Compatibility reader for the coarse direction used by the legacy "theme" UI. New Ideas no
-// longer author `theme`; the server falls back to the axis of the first authored concept
-// (`loss/contrastive` -> `loss`). Keep client grouping/filter/report on that same vocabulary.
-export function nodeTheme(node) {
+// Compatibility reader for the coarse, single-slot direction used by the legacy "theme" UI.
+// With run state, mirror events/digest.py::node_theme exactly: folded post-rename node_concepts are
+// authoritative (including an explicit empty membership), and only a genuinely missing folded row
+// may fall back to the immutable authoring payload. This keeps DAG grouping, charts and reports in
+// the same vocabulary as Concepts after classifier re-tags, operator edits and run-base deltas.
+export function nodeTheme(node, state = null) {
+  const memberships = state?.node_concepts
+  const nodeId = node?.id
+  if (memberships && typeof memberships === 'object' && !Array.isArray(memberships)
+      && nodeId != null && Object.hasOwn(memberships, String(nodeId))) {
+    const rename = state?.concept_consolidation || {}
+    const raw = Array.isArray(memberships[String(nodeId)])
+      ? memberships[String(nodeId)] : []
+    const axes = new Set()
+    for (const concept of raw) {
+      const canonical = canonicalId(concept, rename)
+      const axis = canonical.split('/', 1)[0]
+      if (axis) axes.add(axis)
+    }
+    return [...axes].sort()[0] || null
+  }
   const legacy = node?.idea?.theme
   if (legacy) return String(legacy)
   const concepts = node?.idea?.concepts

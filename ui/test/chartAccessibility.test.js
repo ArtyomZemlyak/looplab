@@ -40,8 +40,8 @@ test('analytical charts expose named table and CSV alternatives', async () => {
   assert.match(charts, /const _RUN_DASHES = \[/)
   assert.match(charts, /strokeDasharray=\{_RUN_DASHES/)
   assert.match(charts, /className="metric-group-toggle" aria-expanded=\{open\}/)
-  assert.match(charts, /\{ key: 'theme', label: 'Direction' \}/,
-    'the legacy theme wire key must be presented as the coarse Direction dimension')
+  assert.match(charts, /\{ key: 'theme', label: 'Primary concept axis' \}/,
+    'the legacy theme wire key must disclose the lossy primary-axis projection')
   assert.match(charts, /groupDimensionLabel\(g\)/,
     'the visible trajectory grouping control must not print the raw theme wire key')
 })

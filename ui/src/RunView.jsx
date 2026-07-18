@@ -23,7 +23,7 @@ import { initialDagOverviewDecision } from './dagViewport.js'
 import {
   captureMergeIntent, mergeIntentCommand, mergeIntentMatches, selectMergeTarget,
 } from './mergeIntent.js'
-import { nodeTheme } from './conceptId.js'
+import { nodeIsActive } from './nodeProjection.js'
 
 const lazyNamed = (load, name) => lazy(() => load().then(module => ({
   default: name === 'default' ? module.default : module[name],
@@ -140,9 +140,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const inspectTab = routeState.inspectTab
   const panel = routeState.panel
   const requestedRouteView = routeState.view
-  // # CODEX AGENT: No live control owns the legacy direction filter. Honoring a bookmarked value would
-  // silently hide DAG nodes with no affordance to clear it, so keep the old route field inert; concept
-  // highlighting via ConceptChipBar is the replacement.
+  // The obsolete Direction focus route is retired by runRouteState with a visible migration notice.
+  // Keep this compatibility argument null until the old aggregate API is removed; Concepts owns the
+  // only active semantic filter and is propagated separately through conceptHighlight.
   const themeFilter = null
   const routeFenceBlocked = generationMismatch || generationPending
   const historyActive = viewSeq != null
@@ -221,9 +221,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const setView = (value, options = {}) => route.update(current => ({
     ...current, view: typeof value === 'function' ? value(current.view) : value,
   }), options)
-  const setThemeFilter = (value, options = {}) => route.update(current => ({
-    ...current, directionFilter: typeof value === 'function' ? value(current.directionFilter) : value,
-  }), options)
   const changeViewSeq = (next) => {
     if (reviewMode || routeFenceBlocked) return
     const value = Number(next)
@@ -271,7 +268,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
     // must not jump modes when live node 80 arrives, and an exact route must retain its camera context.
     largeOverviewAppliedRef.current = true
     if (decision === 'preserve') return
-    const groups = computeGroups(live.nodes, 'operator')
+    const groups = computeGroups(live.nodes, 'operator', live)
     if (!groups.size) return
     setGroupMode('operator')
     setCollapsed(new Set(groups.keys()))
@@ -428,8 +425,10 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   // Members of the selected group — memoized so unrelated re-renders (toast, live ticks) don't
   // re-walk all nodes; only recomputes when the node set / mode / selection actually changes.
   const groupMembers = useMemo(() => {
-    const ns = (hist || live)?.nodes
-    return (selectedGroup != null && ns) ? (computeGroups(ns, groupMode).get(selectedGroup) || []) : []
+    const st = hist || live
+    const ns = st?.nodes
+    return (selectedGroup != null && ns)
+      ? (computeGroups(ns, groupMode, st).get(selectedGroup) || []) : []
   }, [hist, live, groupMode, selectedGroup])
   // Node selection clears any group selection (the side panel shows one or the other).
   const selectNode = (id) => {
@@ -536,7 +535,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   }, [inspectTab, effectiveInspectTab])
   useEffect(() => {
     if (!live2 || selectedId == null || (historyActive && history.status !== 'ready')) return
-    if (live2.nodes?.[selectedId]) return
+    if (nodeIsActive(live2.nodes?.[selectedId], live2)) return
     setRouteNotice(current => [current, `Experiment #${selectedId} is not available in this run state.`]
       .filter(Boolean).join(' '))
     route.update(current => ({ ...current, nodeId: null, nodeGeneration: null,
@@ -557,14 +556,6 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       { mode: 'replace', preserveIssues: true })
   }, [routeState.commentId, routeState.nodeGeneration, live2, selectedId,
     currentSelectedAttempt, commentAttemptMatches])
-  useEffect(() => {
-    if (!live2 || !themeFilter) return
-    const exists = Object.values(live2.nodes || {}).some(node => nodeTheme(node) === themeFilter)
-    if (exists) return
-    setRouteNotice(current => [current, `Direction “${themeFilter}” is not available in this run state.`]
-      .filter(Boolean).join(' '))
-    setThemeFilter(null, { mode: 'replace', preserveIssues: true })
-  }, [live2, themeFilter])
   useEffect(() => {
     // Initial hydration and Back/Forward are navigation, not a hidden selection: reveal the actual
     // Inspector destination even when a persisted desktop rail or a compact drawer was closed.
@@ -737,7 +728,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
   const autoCollapse = (userInitiated = false) => {
     if (userInitiated) graphPreferenceTouchedRef.current = true
     const st = hist || live; const ns = st?.nodes; if (!ns) return
-    setCollapsed(autoCollapseSet(ns, computeGroups(ns, groupMode),
+    setCollapsed(autoCollapseSet(ns, computeGroups(ns, groupMode, st),
       { mode: groupMode, bestId: st.best_node_id, selectedId, workId: workingId(st) }))
   }
   const autoCollapsedRef = useRef(false)
@@ -1001,9 +992,11 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
             title="at-a-glance run summary — best metric, budget, strategy, hints">Overview</button>
         </div>
         <button type="button" className="btn sm ghost copy-view-btn" onClick={copyViewLink}
-          aria-label={reviewMode ? 'Copy exact read-only review view' : 'Copy exact run view'}
-          title={reviewMode ? 'Copy this read-only capability with the exact visible context' : 'Copy the exact view; recipients still need owner access'}>
-          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy view</span>
+          aria-label={reviewMode ? 'Copy read-only review context' : 'Copy shareable run context'}
+          title={reviewMode
+            ? 'Copy this read-only capability and route context; local visual filters are not included'
+            : 'Copy the run route, selected evidence and snapshot; local graph filters are not included and recipients still need owner access'}>
+          <OpIcon name="link" size={12} /> <span className="copy-view-label">Copy context</span>
         </button>
         <EnergyToggle />
         <span className="pill phase">{displayedPhase}</span>
@@ -1196,7 +1189,7 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         : <>
       <LazyBoundary label="concept filter" resetKey={`${runId}:${generation || 'pending'}`}>
         <ConceptChipBar key={`concept-filter:${runId}:${generation || 'pending'}`}
-          state={state} onHighlight={setConceptHighlight} runId={runId} generation={generation} />
+          state={state} onHighlight={setConceptHighlight} />
       </LazyBoundary>
       <WhyStrip state={state} onSelect={selectNode} />
       <div className={'main run-workspace' + (compactWorkspace ? ' compact' : '')}>
@@ -1244,7 +1237,8 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
                   resetKey={selectedGroup != null ? `group:${selectedGroup}` : `node:${selectedId}`}>
                   {selectedGroup != null
                     ? <GroupSummary groupKey={selectedGroup} memberIds={groupMembers}
-                        state={state} themeFilter={themeFilter} onSelectNode={focusNode}
+                        state={state} themeFilter={themeFilter} highlightIds={conceptHighlight}
+                        onSelectNode={focusNode}
                         onClose={() => { setSelectedGroup(null); closeCompactInspector() }} />
                     : <Inspector runId={runId} nodeId={selectedId} state={state} live={live}
                         tab={effectiveInspectTab} setTab={setInspectTab} onToast={showToast}

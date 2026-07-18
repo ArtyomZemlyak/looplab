@@ -92,6 +92,24 @@ def finite_metric(value) -> Optional[float]:
     return result if math.isfinite(result) else None
 
 
+def _current_nodes(state) -> dict[int, object]:
+    """Nodes eligible for the current operational projection.
+
+    Replay deliberately retains tombstoned and aborted nodes (and their concept memberships) as
+    append-only history.  ConceptFrame is a current-state read, so lifecycle deletion is applied here,
+    at the projection boundary, without mutating that folded audit record.
+    """
+    nodes = getattr(state, "nodes", None) or {}
+    if not isinstance(nodes, dict):
+        return {}
+    raw_aborted = getattr(state, "aborted_nodes", None) or []
+    aborted = set(raw_aborted) if isinstance(raw_aborted, (list, tuple, set, frozenset)) else set()
+    return {
+        node_id: node for node_id, node in nodes.items()
+        if node_id not in aborted and not getattr(node, "tombstoned", False)
+    }
+
+
 def normalized_custom_lens_name(raw) -> Optional[str]:
     """Canonical identity for one ephemeral, client-replayed derived lens."""
     if not isinstance(raw, str) or len(raw) > 64:
@@ -186,20 +204,31 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         raw_memberships = {}
         reasons.add("invalid_membership_map")
 
+    current_nodes = _current_nodes(state)
+
+    # Select the bounded CURRENT membership source before any recursive path/edge materialization.
+    # Deleted lifecycle rows remain counted in ``source_membership_nodes`` below (the raw-fold receipt),
+    # but do not consume the live node cap or hide later active rows behind historical tombstones.
+    current_membership_items: list[tuple[int, object]] = []
+    for raw_node_id, raw_ids in raw_memberships.items():
+        if (isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int)
+                or raw_node_id not in state.nodes):
+            reasons.add("invalid_experiment_reference")
+            continue
+        if raw_node_id not in current_nodes:
+            continue
+        if len(current_membership_items) >= MAX_NODE_MEMBERSHIPS:
+            reasons.add("node_membership_cap")
+            break
+        current_membership_items.append((raw_node_id, raw_ids))
+
     # CODEX AGENT: cap memberships BEFORE recursive graph/tree materialization. A final-response slice
     # would be too late: each deep id expands into every ancestor and once per experiment membership.
     memberships: dict[int, list[str]] = {}
     accepted_concepts: set[str] = set()
     accepted_prefixes: set[str] = set()
     membership_count = 0
-    for node_index, (raw_node_id, raw_ids) in enumerate(raw_memberships.items()):
-        if node_index >= MAX_NODE_MEMBERSHIPS:
-            reasons.add("node_membership_cap")
-            break
-        if (isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int)
-                or raw_node_id not in state.nodes):
-            reasons.add("invalid_experiment_reference")
-            continue
+    for node_index, (raw_node_id, raw_ids) in enumerate(current_membership_items):
         if not isinstance(raw_ids, list):
             reasons.add("invalid_membership_list")
             continue
@@ -228,7 +257,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         if node_concepts:
             memberships[raw_node_id] = sorted(node_concepts)
         if membership_count >= MAX_MEMBERSHIPS:
-            if node_index + 1 < len(raw_memberships):
+            if node_index + 1 < len(current_membership_items):
                 reasons.add("membership_cap")
             break
 
@@ -380,7 +409,11 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
     if not generation:
         reasons.add("generation_unavailable")
 
-    metrics = concept_metrics(state, graph, tags)
+    # Metrics (including the all-experiment median baseline) must use the same current lifecycle
+    # projection as memberships. A shallow Pydantic copy preserves the complete folded state for
+    # history while preventing deleted nodes from skewing deltas even when they no longer have tags.
+    metric_state = state.model_copy(update={"nodes": _current_nodes(state)})
+    metrics = concept_metrics(metric_state, graph, tags)
     if metrics.get("baseline") is not None and finite_metric(metrics["baseline"]) is None:
         metrics["baseline"] = None
         reasons.add("nonfinite_metric")

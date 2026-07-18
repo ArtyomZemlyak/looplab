@@ -2,6 +2,7 @@ import React from 'react'
 import { fmt, operatorMeta } from './util.js'
 import { ChartFrame } from './accessibility.jsx'
 import { nodeTheme } from './conceptId.js'
+import { nodeIsActive } from './nodeProjection.js'
 
 const AX = 'var(--fg-mut)', GRID = 'var(--line)'
 const MARK_SHAPES = ['circle', 'square', 'diamond', 'triangle', 'triangle-down', 'pentagon',
@@ -89,14 +90,19 @@ function ChartLegend({ items, active = null, onPick = null }) {
 // `onPick(id)` (optional) makes every point + frontier marker clickable to drill into that node.
 // Points are coloured BY OPERATOR (grouping), with a legend; the frontier keeps its green line + a
 // soft area fill under it.
-export function Trajectory({ nodes, direction, width = 760, height = 220, steps = null, onPick = null, selected = null }) {
-  const evald = nodes.filter(n => (n.metric ?? null) !== null).sort((a, b) => a.id - b.id)
+export function Trajectory({
+  nodes, direction, state = null, width = 760, height = 220,
+  steps = null, onPick = null, selected = null,
+}) {
+  const evald = nodes.filter(n => nodeIsActive(n, state) && (n.metric ?? null) !== null)
+    .sort((a, b) => a.id - b.id)
   const [logY, setLogY] = React.useState(false)   // interactivity: log-scale toggle (e.g. loss curves)
   const [hoverId, setHoverId] = React.useState(null)   // interactivity: crosshair + tooltip on hover
   const [focusGrp, setFocusGrp] = React.useState(null)   // interactivity: click the legend to isolate one group
   const [groupBy, setGroupBy] = React.useState('operator')   // grouping dimension: operator | theme
-  const groupDimensionLabel = value => value === 'theme' ? 'direction' : value
-  const grpKey = (n) => groupBy === 'theme' ? (nodeTheme(n) || 'untagged') : (n.operator || '—')
+  const groupDimensionLabel = value => value === 'theme' ? 'primary concept axis' : value
+  const themeOf = n => nodeTheme(n, state)
+  const grpKey = (n) => groupBy === 'theme' ? (themeOf(n) || 'untagged') : (n.operator || '—')
   const grpColor = (n) => groupBy === 'theme' ? themeColor(grpKey(n)) : opColor(n.operator)
   const grpLabel = (g) => groupBy === 'theme' ? g : operatorMeta(g).label
   const grpSwatch = (g) => groupBy === 'theme' ? themeColor(g) : opColor(g)
@@ -125,7 +131,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     const v = n.confirmed_mean ?? n.metric
     if (n.feasible !== false && (best === null || (direction === 'min' ? v < best : v > best))) best = v
     if (best !== null) bestPts.push([X(n.id), Y(best)])
-    tableRows.push({ node: n.id, operator: n.operator || '—', theme: nodeTheme(n) || 'untagged',
+    tableRows.push({ node: n.id, operator: n.operator || '—', theme: themeOf(n) || 'untagged',
       metric: v, best, feasible: n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'not reported' })
   })
   const line = bestPts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(' ')
@@ -154,11 +160,11 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
     return { shape: MARK_SHAPES[index % MARK_SHAPES.length],
       variant: ['solid', 'outline', 'dot'][Math.floor(index / MARK_SHAPES.length) % 3] }
   }
-  const hasThemes = evald.some(nodeTheme)
+  const hasThemes = evald.some(themeOf)
   const columns = [
     { key: 'node', label: 'Node', firstColumnHeader: true,
       render: (value) => pick ? <button type="button" className="btn xs ghost" onClick={() => pick(value)}>#{value}</button> : `#${value}` },
-    { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Direction' },
+    { key: 'operator', label: 'Operator' }, { key: 'theme', label: 'Primary concept axis' },
     { key: 'metric', label: 'Metric', numeric: true },
     { key: 'best', label: 'Best so far', numeric: true }, { key: 'feasible', label: 'Constraint status' },
   ]
@@ -198,7 +204,7 @@ export function Trajectory({ nodes, direction, width = 760, height = 220, steps 
       })()}
       {evald.map(n => {
         const v = n.confirmed_mean ?? n.metric
-        const theme = nodeTheme(n)
+        const theme = themeOf(n)
         const c = grpColor(n)
         const dim = focusGrp && grpKey(n) !== focusGrp   // legend focus: fade the other groups
         const status = n.feasible === false ? 'infeasible' : n.feasible === true ? 'feasible' : 'unknown'

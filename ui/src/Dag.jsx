@@ -7,6 +7,7 @@ import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERA
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { canonicalId, nodeTheme } from './conceptId.js'
+import { activeNodeMap } from './nodeProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
@@ -167,9 +168,9 @@ function ExpNode({ data }) {
   // says baseline, everything else diffs vs parent. nodeChip owns those rules (merges handled below).
   const parents = (node.parent_ids || []).map(p => state.nodes[p]).filter(Boolean)
   const isMerge = parents.length > 1
-  const theme = nodeTheme(node)
-  const chg = nodeChip(node, state.nodes)   // returns '' for a (resolved) merge — render guards isMerge
-  const mergeThemes = isMerge ? parents.map(p => nodeTheme(p) || ('#' + p.id)) : null
+  const theme = nodeTheme(node, state)
+  const chg = nodeChip(node, state.nodes, state)   // returns '' for a (resolved) merge — render guards isMerge
+  const mergeThemes = isMerge ? parents.map(p => nodeTheme(p, state) || ('#' + p.id)) : null
   const dim = data.dim   // precomputed in the canvas memo: lineage-focus dimming OR the theme filter
   // View 2: the node's authored concepts (canonical, de-duped) — drawn as on-node tags when zoomed in
   // past the glyph LOD. node_concepts keys are strings in the wire state; node.id is numeric, so read
@@ -200,7 +201,7 @@ function ExpNode({ data }) {
     dagFeasibilityLabel(node.feasible),
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,
-    theme ? `direction ${theme}` : null,
+    theme ? `primary concept axis ${theme}` : null,
     conceptTags.length ? `concepts ${conceptTags.join(', ')}` : null,
     node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
@@ -289,19 +290,20 @@ function ExpNode({ data }) {
 // Group region behind an EXPANDED cluster (round-8): a faint band + a compact label pill (replaces
 // the round-6 full-width lane bar that stretched across the cluster). Click the pill to collapse.
 function GroupLane({ data }) {
-  const { w, h, label, count, totalCount, tint, onToggle } = data
+  const { w, h, label, count, totalCount, matchedCount, filterActive, filterDescription, tint, onToggle } = data
   return <GroupRegion w={w} h={h} label={label} count={count} totalCount={totalCount}
+    matchedCount={matchedCount} filterActive={filterActive} filterDescription={filterDescription}
     tint={tint} onToggle={onToggle} />
 }
 
 // Collapsed group → one aggregate card (semantic zoom). Body selects (group summary); the ▸ expands.
 function GroupSuper({ data }) {
   const { label, count, totalCount, best, series, status, tint, selected, onExpand, onSelect,
-    filterActive, themeFilter } = data
+    filterActive, filterDescription } = data
   const zeroMatch = filterActive && count === 0
   const countText = filterActive ? `${count}/${totalCount}` : String(count)
   const matchText = filterActive
-    ? `${count} of ${totalCount} experiments match direction ${themeFilter}`
+    ? `${count} of ${totalCount} experiments match ${filterDescription}`
     : `${count} experiments`
   const metricText = zeroMatch ? 'no matching experiments' : `best ${fmt(best)}`
   return (
@@ -446,8 +448,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
   const toggleMap = () => setShowMap(v => { storageSet('ll.minimap', v ? '0' : '1'); return !v })
 
   const base = useMemo(() => {
-    const ns = state?.nodes || {}
-    const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode)
+    const ns = activeNodeMap(state?.nodes || {}, state)
+    const groups = groupMode === 'none' ? new Map() : computeGroups(ns, groupMode, state)
     // Group ORDER → a curated tint per group, so adjacent groups stay visually distinct (vs a hash
     // that can collide two neighbours). One muted hue per group is the primary "same family" cue.
     const groupOrder = new Map([...groups.keys()].map((k, i) => [k, i]))
@@ -486,12 +488,16 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       const rects = cell.ids.map(id => pos[`n:${id}`]).filter(Boolean).map(p => ({ x: p.x, y: p.y, w: NODE_W, h: NODE_H }))
       if (!rects.length) return
       const geo = regionGeometry(rects)
+      const filtered = themeFilteredGroupAggregate(
+        cell.ids, ns, state.direction, themeFilter, state, highlightIds)
       rfNodes.push({
         id: `region:${cell.band ?? 'g'}:${cell.key}`, type: 'groupLane', position: { x: geo.x, y: geo.y }, zIndex: 0,
         selectable: false, draggable: false, focusable: false,
         data: {
           w: geo.w, h: geo.h, label: cell.key, count: cell.ids.length,
           totalCount: groups.get(cell.key)?.length ?? cell.ids.length,
+          matchedCount: filtered.matchedCount, filterActive: filtered.filterActive,
+          filterDescription: filtered.filterDescription,
           tint: tintOf(cell.key), onToggle: onToggleGroup,
         },
       })
@@ -501,13 +507,13 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
     groups.forEach((ids, key) => {
       if (!collapsed.has(key)) return
       const p = pos[superId(key)]; if (!p) return
-      const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter)
+      const agg = themeFilteredGroupAggregate(ids, ns, state.direction, themeFilter, state, highlightIds)
       rfNodes.push({
         id: superId(key), type: 'groupSuper', position: p, zIndex: 1, draggable: false,
         data: {
           label: key, count: agg.matchedCount, totalCount: agg.totalCount,
           best: agg.best, series: agg.series, status: agg.status,
-          filterActive: agg.filterActive, themeFilter: agg.themeFilter,
+          filterActive: agg.filterActive, filterDescription: agg.filterDescription,
           tint: tintOf(key), selected: key === selectedGroup, onExpand: onToggleGroup, onSelect: onSelectGroup,
         },
       })
@@ -529,7 +535,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       // dim a node that's outside the selected lineage, off the active theme filter, or (View 2) not in
       // the concept-chip highlight set. highlightIds is null when no concept is selected -> no dimming.
       const dimmed = (focusSet ? !focusSet.has(n.id) : false)
-        || (themeFilter && nodeTheme(n) !== themeFilter)
+        || (themeFilter && nodeTheme(n, state) !== themeFilter)
         || (highlightIds && !highlightIds.has(n.id))
       rfNodes.push({ id: `n:${n.id}`, type: 'exp', position: p, zIndex: 1, width: NODE_W, height: NODE_H,
         focusable: false,
@@ -560,7 +566,8 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
       if (isLeader) cls.push('leader')
       if (onLineage) cls.push('lineage')                 // accent: the path through the selected node
       else if (onChamp) cls.push('champion')             // faint gold: the winning lineage (persistent)
-      const faded = focusSet && !onLineage && !onChamp
+      const offConcept = highlightIds && (!highlightIds.has(e.srcId) || !highlightIds.has(e.dstId))
+      const faded = (focusSet && !onLineage && !onChamp) || offConcept
       if (faded) cls.push('faded')   // everything off-path recedes
       const charging = e.dstId === workId && !hidden.has(e.dstId)   // this edge feeds the working node
       const flow = onLineage ? 'lineage' : onChamp ? 'champion' : null
@@ -696,6 +703,7 @@ export default function Dag({ state, selectedId, onSelect, groupMode = 'none', c
           </div>) })}
       </Panel>}
       {showMap && <MiniMap position="bottom-right" pannable zoomable nodeColor={(n) => {
+        if (n.data?.dim || (n.data?.filterActive && n.data?.count === 0)) return 'var(--line-2)'
         const nd = n.data?.node; if (!nd) return 'var(--bg-3)'
         if (nd.id === state.best_node_id) return 'var(--best)'
         if (nd.status === 'failed') return 'var(--fail)'

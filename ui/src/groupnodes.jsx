@@ -20,14 +20,24 @@ export function RegionShell({ w, h, path, tint, tab }) {
 // top-left (replaces the full-width bar that stretched across the cluster). Group identity reads from
 // the members' shared muted fill; the band + pill just frame and name it. The band is click-through
 // (pointer-events:none) so nodes on top stay clickable; only the pill collapses the group.
-export function GroupRegion({ w, h, label, count, totalCount, tint, onToggle }) {
+export function GroupRegion({
+  w, h, label, count, totalCount, matchedCount = count,
+  filterActive = false, filterDescription = null, tint, onToggle,
+}) {
   const splitAcrossBands = Number.isFinite(totalCount) && totalCount > count
-  const countText = splitAcrossBands ? `${count}/${totalCount} · split` : String(count)
-  const countDescription = splitAcrossBands
+  const countText = filterActive
+    ? `${matchedCount}/${count}${splitAcrossBands ? ' · split' : ''}`
+    : splitAcrossBands ? `${count}/${totalCount} · split` : String(count)
+  const bandDescription = splitAcrossBands
     ? `${count} experiments in this topology band, ${totalCount} in this group across the graph`
     : `${count} experiments`
+  const countDescription = filterActive
+    ? `${matchedCount} of ${count} experiments in this topology band match ${filterDescription}`
+      + (splitAcrossBands ? `; ${totalCount} experiments in this group across the graph` : '')
+    : bandDescription
   return (
-    <div className="grp-band" style={{ width: w, height: h, '--grp-tint': tint }}>
+    <div className={'grp-band' + (filterActive && matchedCount === 0 ? ' dim' : '')}
+      style={{ width: w, height: h, '--grp-tint': tint }}>
       <button type="button" className="grp-pill"
         onClick={(e) => { e.stopPropagation(); onToggle && onToggle(label) }}
         aria-label={`Collapse group ${label}; ${countDescription}`}

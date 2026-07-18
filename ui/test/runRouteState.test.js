@@ -22,12 +22,12 @@ test('timeline filter preserves live spaces (typing) but writes a trimmed canoni
 test('owner diagnostic state round-trips canonically inside the fragment', () => {
   const state = {
     ...emptyRunRouteState(), generation: GEN, view: 'report', nodeId: 14, inspectTab: 'Code',
-    panel: 'trust', directionFilter: 'robust & small/#1', sequence: 29,
+    panel: 'trust', sequence: 29,
     timelineFilter: ' timeout / β? ', timelineKinds: ['trust', 'eval'],
   }
   const hash = hashWithRunRouteState('#/run/demo', state)
   assert.equal(hash,
-    `#/run/demo?gen=${GEN}&view=report&node=14&tab=code&panel=trust&focus=robust+%26+small%2F%231&seq=29&q=timeout+%2F+%CE%B2%3F&kinds=eval%2Ctrust`)
+    `#/run/demo?gen=${GEN}&view=report&node=14&tab=code&panel=trust&seq=29&q=timeout+%2F+%CE%B2%3F&kinds=eval%2Ctrust`)
   const parsed = parseRunRouteState(hash)
   assert.deepEqual(parsed.issues, [])
   assert.deepEqual(parsed.state, { ...state, timelineFilter: 'timeout / β?', timelineKinds: ['eval', 'trust'] })
@@ -71,10 +71,20 @@ test('historical sequence requires an exact generation fence', () => {
 })
 
 test('node, panel, view, and filters also fail closed without a generation fence', () => {
-  for (const query of ['node=4', 'panel=trust', 'view=report', 'view=concepts', 'focus=quality', 'q=timeout', 'kinds=eval']) {
+  for (const query of ['node=4', 'panel=trust', 'view=report', 'view=concepts', 'q=timeout', 'kinds=eval']) {
     const parsed = parseRunRouteState(`#/run/demo?${query}`)
     assert.deepEqual(parsed.state, emptyRunRouteState(), query)
     assert.match(parsed.issues.join(' '), /generation fence/, query)
+  }
+})
+
+test('legacy Direction focus is retired visibly and canonicalized out of owner and review links', () => {
+  for (const reviewMode of [false, true]) {
+    const parsed = parseRunRouteState(`#/run/demo?gen=${GEN}&focus=quality`, { reviewMode })
+    assert.equal(parsed.state.directionFilter, null)
+    assert.match(parsed.issues.join(' '), /no longer supported; use the Concepts filter/)
+    assert.equal(hashWithRunRouteState('#/run/demo', parsed.state,
+      { reviewMode, forceGeneration: true }), `#/run/demo?gen=${GEN}`)
   }
 })
 
@@ -83,11 +93,12 @@ test('review links preserve safe context but strip history and raw timeline filt
   const parsed = parseRunRouteState(hash, { reviewMode: true })
   assert.deepEqual(parsed.state, {
     ...emptyRunRouteState(), generation: GEN, view: 'report', nodeId: 4, inspectTab: 'Code',
-    panel: 'compare', directionFilter: 'quality',
+    panel: 'compare',
   })
   assert.match(parsed.issues.join(' '), /unavailable in review links/)
+  assert.match(parsed.issues.join(' '), /no longer supported/)
   assert.equal(hashWithRunRouteState(hash, parsed.state, { reviewMode: true }),
-    `#/rv_token?gen=${GEN}&view=report&node=4&tab=code&panel=compare&focus=quality`)
+    `#/rv_token?gen=${GEN}&view=report&node=4&tab=code&panel=compare`)
 })
 
 test('review links fail closed on the owner-only Concepts view', () => {

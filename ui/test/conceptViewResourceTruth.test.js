@@ -23,6 +23,7 @@ function framePayload({ id = null, runId = 'run#one', generation = GENERATION_A,
   requestedLens = 'is_a', effectiveLens = requestedLens, derived = false,
   requestedRels = null, requestedKind = null, nodeGeneration = 0,
   requestedSeq = null, capturedSeq = 4, maxSeq = capturedSeq,
+  direction = 'max',
   complete = true, sourceAuthoritative = true, truncated = false,
   reasons = [], edgesPresent = false, lensEdgesPresent = false } = {}) {
   const hasConcept = id !== null
@@ -56,7 +57,7 @@ function framePayload({ id = null, runId = 'run#one', generation = GENERATION_A,
     lenses, edges_present: edgesPresent, lens_edges_present: lensEdgesPresent,
     touch: hasConcept ? { [id]: 1 } : {},
     tree: { lens: effectiveLens, roots: hasConcept ? [treeIds[0]] : [], nodes: treeNodes },
-    metrics: { baseline: hasConcept ? 0.5 : null, direction: 'max', rows: hasConcept ? { [id]: {
+    metrics: { baseline: hasConcept ? 0.5 : null, direction, rows: hasConcept ? { [id]: {
       touched: 1, evaluated: 1, best: 0.7, mean: 0.7,
       worst: 0.7, delta_best: 0.2, delta_mean: 0.2, first_touch: 0,
     } } : {} },
@@ -349,8 +350,28 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await click(button('Refresh concepts'))
     await reply(requests[2], conceptPayload('loss/a'))
     assert.match(document.body.textContent,
-      /Concept tree.*1 tagged concept.*2 hierarchy nodes.*1 tagged experiment/s,
+      /Concept hierarchy.*1 tagged concept.*2 hierarchy nodes.*1 tagged experiment/s,
       'synthetic ancestors are hierarchy nodes, not mislabeled as tagged concepts')
+    const hierarchyView = document.querySelector('.concept-view')
+    assert.equal(hierarchyView?.getAttribute('aria-label'), 'Concept hierarchy')
+    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]')?.value, 'is_a')
+    const metricContext = document.getElementById('concept-metric-context')
+    assert.equal(metricContext?.getAttribute('role'), 'note')
+    assert.match(metricContext?.textContent,
+      /Primary objective metric.*Unnamed metric.*unit not recorded.*maximize.*Δ columns.*orientation-normalized.*positive values mean better/is)
+    assert.match(hierarchyView?.getAttribute('aria-describedby') || '', /concept-metric-context/)
+    assert.equal(document.getElementById('concept-relationship-legend'), null,
+      'the hierarchy must not describe arbitrary relationship-parent semantics')
+
+    state = { ...state, direction: 'min' }
+    await render()
+    await reply(requests.at(-1), conceptPayload('loss/a', { direction: 'min' }))
+    assert.match(document.getElementById('concept-metric-context')?.textContent,
+      /unit not recorded.*minimize.*positive values mean better/is,
+      'the persistent metric context names minimize without reversing normalized delta semantics')
+    state = { ...state, direction: 'max' }
+    await render()
+    await reply(requests.at(-1), conceptPayload('loss/a'))
     await click(button('Expand hierarchy'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'loss/a')
     const median = document.querySelector('.cv-baseline')
@@ -692,7 +713,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       requestedLens: 'race-usage', effectiveLens: 'race-usage',
       complete: false, truncated: true, reasons: ['membership_cap'],
     }))
-    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value,
+    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value,
       'race-usage')
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
@@ -755,12 +776,23 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       runId: 'final-run', generation: GENERATION_B, capturedSeq: 7,
       complete: false, truncated: true, reasons: ['membership_cap'],
     }))
-    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value, 'usage')
+    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value, 'usage')
     assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i,
       'a fully validated size-cap partial paid result remains visibly partial')
+    const relationshipView = document.querySelector('.concept-view')
+    assert.match(relationshipView?.getAttribute('aria-label') || '',
+      /Concept relationship view for recorded uses links/)
+    assert.match(document.querySelector('.cv-heading')?.textContent || '',
+      /Concept relationships.*2 relationship nodes/s)
+    const relationshipLegend = document.getElementById('concept-relationship-legend')
+    assert.equal(relationshipLegend?.getAttribute('role'), 'note')
+    assert.match(relationshipLegend?.textContent,
+      /recorded uses links.*one primary display parent.*\+N links.*additional recorded parents.*not a taxonomy hierarchy/is)
+    assert.match(relationshipView?.getAttribute('aria-describedby') || '',
+      /concept-metric-context.*concept-relationship-legend/)
     assert.equal(document.querySelector('.cv-cid[title="loss/contrastive"]')?.textContent,
       'loss/contrastive', 'edge lenses retain the full canonical id instead of an ambiguous leaf')
-    const crossLink = document.querySelector('.cv-badge[title^="Secondary uses"]')
+    const crossLink = document.querySelector('.cv-badge[title^="Additional display parent via recorded uses link"]')
     assert.match(crossLink?.textContent, /\+1 links/)
     assert.match(crossLink?.getAttribute('title'), /training\/contrastive/,
       'validated secondary parents remain visible evidence instead of disappearing from the tree')

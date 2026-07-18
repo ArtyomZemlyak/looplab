@@ -112,6 +112,48 @@ def test_theme_rollup_is_concept_axis_multi_membership_phase6a():
     assert roll["reg"]["count"] == 1
 
 
+def test_theme_rollup_excludes_aborted_history_and_orders_axes(monkeypatch):
+    from looplab.core.models import Node, NodeStatus, RunState
+    import looplab.events.digest as digest
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), metric=1.0,
+                status=NodeStatus.evaluated),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft"), metric=999.0,
+                status=NodeStatus.evaluated, tombstoned=True),
+        2: Node(id=2, operator="draft", idea=Idea(operator="draft"), metric=888.0,
+                status=NodeStatus.evaluated),
+    }
+    st.node_concepts = {
+        0: ["z/live", "a/live"],
+        1: ["deleted/tombstone"],
+        2: ["deleted/abort"],
+    }
+    st.aborted_nodes = [2]
+
+    real_node_axes = digest.node_axes
+
+    class ReverseAxes(set):
+        def __iter__(self):
+            return iter(sorted(set.copy(self), reverse=True))
+
+    monkeypatch.setattr(
+        digest, "node_axes",
+        lambda state, node: ReverseAxes(real_node_axes(state, node)),
+    )
+
+    roll = digest.theme_rollup(st)
+    assert list(roll) == ["a", "z"]
+    assert roll == {
+        "a": {"count": 1, "best_metric": 1.0},
+        "z": {"count": 1, "best_metric": 1.0},
+    }
+    # Lifecycle filtering is a read projection: the folded audit memberships remain intact.
+    assert st.node_concepts[1] == ["deleted/tombstone"]
+    assert st.node_concepts[2] == ["deleted/abort"]
+
+
 def test_folded_empty_entry_is_untagged_not_resurrected_authored_axis():
     # PART V mega-review M1: an EXPLICIT empty folded entry (operator retag_node [] or a classifier that
     # returned zero tags) means the node is deliberately UNTAGGED — the digest surfaces must NOT resurrect

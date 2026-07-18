@@ -114,10 +114,6 @@ export function sanitizeRunRouteState(input = {}, { reviewMode = false } = {}) {
     state.commentId = input.commentId
   }
   if (PANEL_SET.has(input.panel)) state.panel = input.panel
-  if (typeof input.directionFilter === 'string' && input.directionFilter.length > 0
-      && input.directionFilter.length <= MAX_FOCUS_CHARS && !CONTROL_RE.test(input.directionFilter)) {
-    state.directionFilter = input.directionFilter
-  }
   if (!reviewMode && Number.isSafeInteger(input.sequence) && input.sequence >= 0 && state.generation) {
     state.sequence = input.sequence
   }
@@ -206,7 +202,10 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
     if (PANEL_SET.has(panel)) state.panel = panel
     else issues.push('Unknown panel was ignored.')
   }
-  state.directionFilter = boundedText(single(params, 'focus', issues), 'direction filter', MAX_FOCUS_CHARS, issues)
+  const legacyFocus = boundedText(single(params, 'focus', issues), 'legacy Direction focus', MAX_FOCUS_CHARS, issues)
+  if (legacyFocus) {
+    issues.push('Legacy Direction focus is no longer supported; use the Concepts filter instead.')
+  }
 
   const rawSequence = single(params, 'seq', issues)
   const rawFilter = single(params, 'q', issues)
@@ -234,7 +233,7 @@ export function parseRunRouteState(hash = '', { reviewMode = false } = {}) {
 export function runRouteStateHasTarget(state, { reviewMode = false } = {}) {
   const value = sanitizeRunRouteState(state, { reviewMode })
   return value.view !== 'dag' || value.nodeId != null || value.panel != null
-    || value.directionFilter != null || value.sequence != null
+    || value.sequence != null
     || (!reviewMode && Number.isSafeInteger(state?.sequence) && state.sequence >= 0)
     || value.timelineFilter.trim() !== '' || value.timelineKinds.length > 0
 }
@@ -253,7 +252,6 @@ export function encodeRunRouteState(input, { reviewMode = false, forceGeneration
     if (state.inspectTab === 'Comments' && state.commentId) params.set('comment', state.commentId)
   }
   if (state.panel) params.set('panel', state.panel)
-  if (state.directionFilter) params.set('focus', state.directionFilter)
   if (!reviewMode && state.sequence != null && state.generation) params.set('seq', String(state.sequence))
   // Trim only when writing the canonical URL: the live state keeps interior/trailing spaces so the
   // Dock filter input can be typed left-to-right, but the shareable link stays canonical (and the

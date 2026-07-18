@@ -12,6 +12,7 @@ import { normalizeResearchMemos } from './researchMemoModel.js'
 import { normalizeReportNodeDetail, normalizeRunReport, reportCoverageText,
   reportNarrativeCoverage } from './reportModel.js'
 import { nodeTheme } from './conceptId.js'
+import { nodeIsActive } from './nodeProjection.js'
 import './report-trust-polish.css'
 
 const TRUST_CLASS = { unverified: 'neutral', caveats: 'warn', suspect: 'alarm' }
@@ -130,14 +131,15 @@ function AgentNarrative({ rep, coverage, generation, snapshotSeq }) {
   </section>
 }
 
-function ChampionCard({ best }) {
+function ChampionCard({ best, state }) {
   if (!best) return null
   const m = best.confirmed_mean ?? best.metric
-  const direction = nodeTheme(best)
+  const direction = nodeTheme(best, state)
   return (
     <div className="champion-card">
       <div className="kv">
-        <div className="k">champion</div><div className="v">#{best.id} · {best.operator}{direction ? ` · ${direction}` : ''}</div>
+        <div className="k">champion</div><div className="v">#{best.id} · {best.operator}
+          {direction ? ` · primary concept axis ${direction}` : ''}</div>
         <div className="k">metric</div><div className="v"><b>{fmt(m)}</b>{best.confirmed_mean != null
           ? <span className="muted"> ±{fmt(best.confirmed_std)} over {best.confirmed_seeds} seed{best.confirmed_seeds === 1 ? '' : 's'}</span>
           : <span className="muted"> (single-seed)</span>}</div>
@@ -158,8 +160,9 @@ function List({ items }) {
 export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, onToast, onPickNode, readOnly = false,
   historySeq = null, expectedGeneration = null, observedSeq = null,
   readOnlyReason = 'history', evidenceAvailable = true }) {
-  const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
-  const failed = Object.values(state.nodes).filter(n => n.status === 'failed')
+  const candidate = state.best_node_id != null ? state.nodes[state.best_node_id] : null
+  const best = nodeIsActive(candidate, state) ? candidate : null
+  const failed = Object.values(state.nodes).filter(n => nodeIsActive(n, state) && n.status === 'failed')
   const a = useMemo(() => analyze(state), [state])
   const v = useMemo(() => verdict(state, a), [state, a])
   const rep = useMemo(() => normalizeRunReport(state.report), [state.report])
@@ -437,11 +440,12 @@ export default function ReportView({ state, runId, onOpenPanel, canOpenPanel, on
       </div>}
 
       {best && <><h2 className="section-h">Champion — the answer</h2>
-        <ChampionCard best={best} /></>}
+        <ChampionCard best={best} state={state} /></>}
 
       {a.steps.length > 0 && <>
         <h2 className="section-h">{a.steps.length > 1 ? 'How the metric got better' : 'Metric baseline'}</h2>
-        <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} steps={a.steps} onPick={onPickNode} />
+        <Trajectory nodes={Object.values(state.nodes)} direction={state.direction} state={state}
+          steps={a.steps} onPick={onPickNode} />
         <ImprovementWaterfall steps={a.steps} direction={state.direction} />
         <DataTable caption="Metric trajectory steps" card={false}><table className="tbl"><thead><tr><th>#</th><th>node</th><th>operator</th><th>metric</th><th>Δ</th><th>what changed</th></tr></thead><tbody>
           {a.steps.map((s, i) => <tr key={s.id}>

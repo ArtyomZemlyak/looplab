@@ -39,7 +39,7 @@ test('large graph starts bounded and preserves exact deep links', async () => {
   const [runView, dag] = await Promise.all([source('RunView.jsx'), source('Dag.jsx')])
   assert.match(runView, /initialDagOverviewDecision\(\{/)
   assert.match(runView, /explicitContext: selectedId != null \|\| selectedGroup != null \|\| historyActive/)
-  assert.match(runView, /largeOverviewAppliedRef\.current = true[\s\S]*?computeGroups\(live\.nodes, 'operator'\)/)
+  assert.match(runView, /largeOverviewAppliedRef\.current = true[\s\S]*?computeGroups\(live\.nodes, 'operator', live\)/)
   assert.match(runView, /setCollapsed\(new Set\(groups\.keys\(\)\)\)/)
   assert.match(dag, /fitView=\{autoFit\}[\s\S]*?defaultViewport=\{DAG_READABLE_VIEWPORT\}/)
   assert.match(dag, /useNodesInitialized\(\)/)
@@ -76,16 +76,17 @@ test('compact graph controls remain named and vertically bounded', async () => {
   assert.match(css, /\.cb-chip-main, \.cb-drill \{ min-height: 44px; \}/)
 })
 
-test('collapsed group drill-down preserves the active direction projection', async () => {
+test('collapsed group drill-down preserves the exact active concept projection', async () => {
   const [runView, inspector, dag, groupnodes] = await Promise.all([
     source('RunView.jsx'), source('Inspector.jsx'), source('Dag.jsx'), source('groupnodes.jsx'),
   ])
   assert.match(runView, /<GroupSummary[\s\S]*?themeFilter=\{themeFilter\}/)
-  assert.match(inspector, /themeFilteredGroupAggregate\(memberIds \|\| \[\], state\.nodes, dir, themeFilter\)/)
+  assert.match(runView, /<GroupSummary[\s\S]*?highlightIds=\{conceptHighlight\}/)
+  assert.match(inspector, /themeFilteredGroupAggregate\([\s\S]*?memberIds \|\| \[\], state\.nodes, dir, themeFilter, state, highlightIds\)/)
   assert.match(inspector, /aggregate\.matchedIds\.map/)
-  assert.match(inspector, /No experiments in this group match direction/)
-  assert.match(inspector, /<KV k="directions" v=\{themes\.join\(', '\)\}/,
-    'Group Summary must present the legacy theme field as coarse directions')
+  assert.match(inspector, /No experiments in this group match \{aggregate\.filterDescription\}/)
+  assert.match(inspector, /<KV k="primary concept axes" v=\{themes\.join\(', '\)\}/,
+    'Group Summary must disclose that the compatibility grouping is a lossy primary-axis projection')
   assert.doesNotMatch(inspector, /<KV k="themes"/)
   assert.match(groupnodes, /className="grp-super-select"[\s\S]*?aria-pressed=\{!!selected\}/)
   assert.match(dag, /<button type="button" className="grp-chev btn-chev"/)

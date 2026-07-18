@@ -79,6 +79,22 @@ test('banded theme: all nodes placed with finite coords + returns per-band cells
   assert.ok(aCells.every(c => typeof c.band === 'number'), 'banded cells carry a band index')
 })
 
+test('direction grouping follows folded concepts after delta authoring and explicit clears', () => {
+  const nodes = {
+    1: { id: 1, idea: { theme: 'stale', concepts: ['stale/one'] } },
+    2: { id: 2, idea: { concepts: [], concepts_added: ['data/aug'] } },
+    3: { id: 3, idea: { concepts: ['legacy/fallback'] } },
+  }
+  const state = {
+    nodes,
+    node_concepts: { 1: [], 2: ['optimization/adam', 'data/aug'] },
+    concept_consolidation: {},
+  }
+  assert.deepEqual([...computeGroups(nodes, 'theme', state)], [
+    ['data', [2]], ['legacy', [3]],
+  ])
+})
+
 test('banded theme: no two group cells overlap (the core fix)', () => {
   const ns = twoThemeGraph()
   const groups = computeGroups(ns, 'theme')
@@ -227,4 +243,31 @@ test('collapsed aggregate ranks only finite selection-eligible observations', ()
   assert.equal(aggregate.count, 5, 'all members remain represented in the card count')
   assert.deepEqual(aggregate.status, { evaluated: 3, failed: 1, pending: 1 },
     'status totals continue to describe every member, including ineligible observations')
+})
+
+test('collapsed concept selection and lifecycle exclusions share one exact aggregate', () => {
+  const nodes = mk([
+    { id: 0, metric: 0.1, operator: 'improve' },
+    { id: 1, metric: 0.9, operator: 'improve' },
+    { id: 2, metric: 0.8, operator: 'improve' },
+    { id: 3, metric: 0.7, operator: 'improve' },
+  ])
+  nodes[2].tombstoned = true
+  const state = { nodes, aborted_nodes: [3] }
+  const ids = computeGroups(nodes, 'operator', state).get('improve')
+  assert.deepEqual(ids, [0, 1], 'deleted and aborted experiments never enter current groups')
+
+  const selected = themeFilteredGroupAggregate(ids, nodes, 'max', null, state, new Set([0]))
+  assert.equal(selected.filterActive, true)
+  assert.equal(selected.filterDescription, 'selected concepts')
+  assert.equal(selected.matchedCount, 1)
+  assert.equal(selected.totalCount, 2)
+  assert.deepEqual(selected.matchedIds, [0])
+  assert.equal(selected.best, 0.1, 'the non-matching 0.9 cannot leak into the collapsed card')
+  assert.deepEqual(selected.status, { evaluated: 1, failed: 0, pending: 0 })
+
+  const none = themeFilteredGroupAggregate(ids, nodes, 'max', null, state, new Set())
+  assert.equal(none.filterActive, true)
+  assert.equal(none.matchedCount, 0)
+  assert.equal(none.best, null)
 })

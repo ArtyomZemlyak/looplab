@@ -83,6 +83,71 @@ def test_concepts_endpoint_is_a_lens(tmp_path):
     _assert_frame_parity(data)
 
 
+def test_concepts_endpoint_projects_lifecycle_deletions_but_history_keeps_memberships(tmp_path):
+    from looplab.events.replay import fold
+
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True, exist_ok=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max",
+    })
+    for node_id, (metric, unique_concept) in enumerate((
+        (1.0, "active/only"),
+        (999.0, "deleted/tombstone"),
+        (888.0, "deleted/abort"),
+    )):
+        store.append("node_created", {
+            "node_id": node_id, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                     "concepts": [unique_concept, "pair/x", "pair/y"]},
+        })
+        store.append("node_evaluated", {"node_id": node_id, "metric": metric})
+
+    before_lifecycle_seq = store.read_all()[-1].seq
+    store.append("node_tombstoned", {"node_ids": [1]})
+    store.append("node_abort", {"node_id": 2, "generation": 0})
+
+    client = TestClient(make_app(tmp_path))
+    current = client.get("/api/runs/demo/concepts", params={"lens": "co_occurs"}).json()
+    assert current["historical"] is False
+    assert set(current["touch"]) == {"active/only", "pair/x", "pair/y"}
+    assert current["touch"] == {"active/only": 1, "pair/x": 1, "pair/y": 1}
+    assert current["metrics"]["baseline"] == 1.0
+    assert current["metrics"]["rows"]["pair/x"]["touched"] == 1
+    assert current["metrics"]["rows"]["pair/x"]["best"] == 1.0
+    assert current["completeness"]["source"]["membership_nodes"] == 3
+    assert current["completeness"]["included"]["membership_nodes"] == 1
+    assert current["completeness"]["included"]["memberships"] == 3
+    assert current["completeness"]["included"]["derived_edges"] == 0
+    assert current["requested_lens"] == "co_occurs"
+    assert current["effective_lens"] == "is_a"
+    _assert_frame_parity(current)
+
+    historical = client.get(
+        "/api/runs/demo/concepts",
+        params={"lens": "co_occurs", "seq": before_lifecycle_seq},
+    ).json()
+    assert historical["historical"] is True
+    assert historical["captured_seq"] == before_lifecycle_seq
+    assert {"active/only", "deleted/tombstone", "deleted/abort", "pair/x", "pair/y"} == set(
+        historical["touch"])
+    assert historical["touch"]["pair/x"] == historical["touch"]["pair/y"] == 3
+    assert historical["metrics"]["baseline"] == 888.0
+    assert historical["completeness"]["included"]["membership_nodes"] == 3
+    assert historical["completeness"]["included"]["memberships"] == 9
+    assert historical["completeness"]["included"]["derived_edges"] == 1
+    assert historical["effective_lens"] == "co_occurs"
+    _assert_frame_parity(historical)
+
+    # The fold itself remains append-only and suitable for historical replay.
+    folded = fold(store.read_all())
+    assert set(folded.node_concepts) == {0, 1, 2}
+    assert folded.node_concepts[1] == ["deleted/tombstone", "pair/x", "pair/y"]
+    assert folded.node_concepts[2] == ["deleted/abort", "pair/x", "pair/y"]
+    assert folded.nodes[1].tombstoned is True and folded.aborted_nodes == [2]
+
+
 def test_concepts_endpoint_unknown_run_is_handled(tmp_path):
     client = TestClient(make_app(tmp_path))
     r = client.get("/api/runs/nope/concepts")

@@ -276,17 +276,20 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
 function KV({ k, v }) { return <><div className="k">{k}</div><div className="v">{v}</div></> }
 
 // Summary for a COLLAPSED group's super-node (semantic zoom): aggregate + drill back to members.
-export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, onSelectNode, onClose }) {
+export function GroupSummary({
+  groupKey, memberIds, state, themeFilter = null, highlightIds = null, onSelectNode, onClose,
+}) {
   const dir = state.direction
   // Keep the drill-down on exactly the same semantic projection as its collapsed super-node. Without
   // this, a truthful 2/8 card could open a cross-direction best, trajectory, and member table.
-  const aggregate = themeFilteredGroupAggregate(memberIds || [], state.nodes, dir, themeFilter)
+  const aggregate = themeFilteredGroupAggregate(
+    memberIds || [], state.nodes, dir, themeFilter, state, highlightIds)
   const members = aggregate.matchedIds.map(id => state.nodes[id]).filter(Boolean).sort((a, b) => a.id - b.id)
   const zeroMatch = aggregate.filterActive && aggregate.matchedCount === 0
   const countLabel = aggregate.filterActive
     ? `${aggregate.matchedCount}/${aggregate.totalCount}`
     : String(aggregate.totalCount)
-  const themes = [...new Set(members.map(nodeTheme).filter(Boolean))]
+  const themes = [...new Set(members.map(node => nodeTheme(node, state)).filter(Boolean))]
   return <>
     <div className="tabs">
       <div className="tab active">Group · {groupKey}</div>
@@ -296,15 +299,15 @@ export function GroupSummary({ groupKey, memberIds, state, themeFilter = null, o
     <div className="insp-body">
       <div className="kv">
         <KV k={aggregate.filterActive ? 'matching experiments' : 'experiments'} v={countLabel} />
-        {aggregate.filterActive && <KV k="direction filter" v={themeFilter} />}
+        {aggregate.filterActive && <KV k="active filter" v={aggregate.filterDescription} />}
         <KV k="best" v={zeroMatch ? 'No matching result' : fmt(aggregate.best)} />
-        {themes.length > 0 && <KV k="directions" v={themes.join(', ')} />}
+        {themes.length > 0 && <KV k="primary concept axes" v={themes.join(', ')} />}
       </div>
       {zeroMatch
-        ? <div className="insp-empty" role="status">No experiments in this group match direction {themeFilter}.</div>
+        ? <div className="insp-empty" role="status">No experiments in this group match {aggregate.filterDescription}.</div>
         : <>
           <div className="section-h">Best over {aggregate.filterActive ? 'matching ' : ''}members</div>
-          <Trajectory nodes={members} direction={dir} height={150} onPick={onSelectNode} />
+          <Trajectory nodes={members} direction={dir} state={state} height={150} onPick={onSelectNode} />
           <div className="section-h">{aggregate.filterActive ? 'Matching members' : 'Members'} <span className="pill">{countLabel}</span></div>
           <DataTable caption="Group member results" card={false}><table className="tbl"><thead><tr><th>node</th><th>operator</th><th>metric</th><th>status</th></tr></thead>
             <tbody>{members.map(n => <tr key={n.id}>
@@ -356,8 +359,8 @@ function StagePipeline({ stages, failed, runId, id, generation, onToast }) {
 
 function Overview({ n, state, runId, onToast }) {
   const p = n.idea?.params || {}
-  const uses = mergeSummary(n, state.nodes || {})   // E3: for merges, which technique each parent fused
-  const chg = nodeChip(n, state.nodes || {})        // same chip as the card (sweep-aware; '' for merges)
+  const uses = mergeSummary(n, state.nodes || {}, state)   // E3: for merges, which technique each parent fused
+  const chg = nodeChip(n, state.nodes || {}, state)        // same chip as the card (sweep-aware; '' for merges)
   return <>
     <div className="kv">
       <KV k="node" v={`#${n.id}`} />

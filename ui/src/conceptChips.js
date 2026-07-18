@@ -6,7 +6,8 @@
 import { canonicalId } from './conceptId.js'
 
 // The chips to show at a breadcrumb `path` ('' = top-level roots): the distinct next-level concepts
-// under `path`, each with the count of nodes touching that subtree. Sorted by count desc, then id.
+// under `path`, each with the count of nodes touching that subtree. Sorted by canonical id so live
+// evidence can update counts without moving keyboard/click targets under the operator.
 // When drilled (path != ''), a node tagged EXACTLY at `path` (not deeper) has no next-level child, so
 // it would otherwise vanish from the chips — child counts silently summing below the parent count the
 // user just clicked. We surface those as a trailing `atLevel: true` chip (id === path) so nothing is
@@ -40,29 +41,9 @@ export function chipsAtPath(nodeConcepts = {}, rename = {}, path = '') {
   }
   const chips = [...counts.entries()]
     .map(([id, set]) => ({ id, label: id.split('/').pop(), count: set.size }))
-    .sort((a, b) => b.count - a.count || a.id.localeCompare(b.id))
+    .sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   if (here && here.size) chips.push({ id: path, label: path.split('/').pop(), count: here.size, atLevel: true })
   return chips
-}
-
-// F2: order chips by which concept led to the best outcome — descending Δbest-from-baseline (the advisory
-// per-concept subtree rollup from the /concepts frame, the same signal the old Directions bar carried,
-// now on concepts). Concepts with no evaluated experiment (null Δ) sort last; ties break by touch count
-// then id for stability. With no rollup available it preserves the given (touch-count) order, so the bar
-// never blocks on the advisory metric fetch. Pure.
-export function orderChipsByDelta(chips, rollup) {
-  if (!rollup || typeof rollup !== 'object') return chips
-  const key = (id) => {
-    const d = rollup[id] && rollup[id].delta_best
-    return typeof d === 'number' ? d : -Infinity
-  }
-  // Keep the trailing "· here" chip (atLevel — the nodes tagged EXACTLY at the current path) LAST, where
-  // chipsAtPath placed it. Its count is exact-tagged-only while rollup[path] is the whole SUBTREE, so
-  // ranking it by that Δbest would wrongly float it above the very child chips that produced the number.
-  const level = chips.filter(c => c.atLevel)
-  const rest = chips.filter(c => !c.atLevel).sort((a, b) =>
-    key(b.id) - key(a.id) || b.count - a.count || a.id.localeCompare(b.id))
-  return level.length ? [...rest, ...level] : rest
 }
 
 // Breadcrumb segments for a path: [{id, label}] from root to the full path (inclusive).

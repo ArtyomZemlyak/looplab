@@ -57,6 +57,24 @@ test('total improvement is positive for both objective directions and Markdown n
   assert.doesNotMatch(baseline, /What worked — key improvements/)
 })
 
+test('current report projections exclude tombstoned and run-level aborted experiments', () => {
+  const run = state('max', 1)
+  run.nodes[1] = node(1, 999, 'improve', [0], 'stale-tombstone')
+  run.nodes[1].tombstoned = true
+  run.nodes[2] = node(2, 888, 'improve', [0], 'stale-abort')
+  run.aborted_nodes = [2]
+  run.node_concepts = { 0: ['active/base'], 1: ['deleted/high'], 2: ['aborted/high'] }
+  run.best_node_id = 0
+
+  const projection = analyze(run)
+  assert.equal(projection.nEval, 1)
+  assert.equal(projection.firstBest, 1)
+  assert.equal(projection.finalBest, 1)
+  assert.deepEqual(projection.themes.map(row => [row.key, row.count]), [['active', 1]])
+  assert.deepEqual(projection.regressions, [])
+  assert.deepEqual(Object.keys(projection.failures), [])
+})
+
 test('failure breakdown treats prototype names as ordinary model-authored reasons', () => {
   const protoFailure = { id: 1, status: 'failed', error_reason: '__proto__' }
   const constructorFailure = { id: 2, status: 'failed', error_reason: 'constructor' }

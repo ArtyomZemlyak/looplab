@@ -261,7 +261,7 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
           kind: 'edge', provenance: 'agent' }, request_id: REQUEST_ID, seq: 9 },
     }))
     await render()
-    assert.equal(document.querySelector('[aria-label="Concept hierarchy lens"]').value, 'usage')
+    assert.equal(document.querySelector('[aria-label="Concept relationship lens"]').value, 'usage')
     assert.match(document.querySelector('#paid-concept-lens-status').textContent,
       /Recovered a validated paid lens.*No provider request was replayed/i)
 

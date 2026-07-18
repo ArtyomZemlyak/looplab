@@ -3,9 +3,10 @@
 // and reroute edges when a group collapses into a super-node. No React, no side effects.
 import { fmt } from './util.js'
 import { nodeTheme } from './conceptId.js'
+import { nodeIsActive } from './nodeProjection.js'
 
 export const GROUP_MODES = [
-  ['theme', 'direction'], ['operator', 'operator'], ['metric', 'metric'], ['niche', 'niche'], ['none', 'none'],
+  ['theme', 'primary concept axis'], ['operator', 'operator'], ['metric', 'metric'], ['niche', 'niche'], ['none', 'none'],
 ]
 
 // Per-mode context (e.g. metric tercile thresholds) computed once over the node set.
@@ -23,8 +24,8 @@ function makeCtx(nodes, mode) {
   return {}
 }
 
-export function groupKey(node, mode, ctx) {
-  if (mode === 'theme') return nodeTheme(node)
+export function groupKey(node, mode, ctx, state = null) {
+  if (mode === 'theme') return nodeTheme(node, state)
   if (mode === 'operator') return node.operator || null
   if (mode === 'metric') { const m = node.confirmed_mean ?? node.metric; return (m == null || !ctx.bucketOf) ? null : ctx.bucketOf(m) }
   if (mode === 'niche') {
@@ -38,12 +39,12 @@ export function groupKey(node, mode, ctx) {
 }
 
 // Map<key, nodeId[]> for the chosen mode. Nodes with no key (e.g. no theme) are left ungrouped.
-export function computeGroups(nodesObj, mode) {
-  const nodes = Object.values(nodesObj || {})
+export function computeGroups(nodesObj, mode, state = null) {
+  const nodes = Object.values(nodesObj || {}).filter(node => nodeIsActive(node, state))
   const ctx = makeCtx(nodes, mode)
   const groups = new Map()
   nodes.forEach(n => {
-    const k = groupKey(n, mode, ctx)
+    const k = groupKey(n, mode, ctx, state)
     if (k == null) return
     if (!groups.has(k)) groups.set(k, [])
     groups.get(k).push(n.id)
@@ -137,10 +138,11 @@ export function isMergeEntryEdge(childNode) {
 }
 
 // Aggregate stats for a collapsed group's super-node card.
-export function groupAggregate(memberIds, nodesObj, direction) {
+export function groupAggregate(memberIds, nodesObj, direction, state = null) {
   const better = direction === 'min' ? (a, b) => a < b : (a, b) => a > b
   let best = null; const series = []; const status = { evaluated: 0, failed: 0, pending: 0 }
-  memberIds.map(id => nodesObj[id]).filter(Boolean).sort((a, b) => a.id - b.id).forEach(n => {
+  const members = memberIds.map(id => nodesObj[id]).filter(node => nodeIsActive(node, state))
+  members.sort((a, b) => a.id - b.id).forEach(n => {
     const m = n.confirmed_mean ?? n.metric
     // CODEX AGENT: collapsed-card best/trajectory must obey the same eligibility boundary as
     // winner selection; pending, failed, infeasible, and non-finite observations remain counts only.
@@ -150,23 +152,32 @@ export function groupAggregate(memberIds, nodesObj, direction) {
     }
     status[n.status] = (status[n.status] || 0) + 1
   })
-  return { best, series, status, count: memberIds.length }
+  return { best, series, status, count: members.length }
 }
 
 // A direction chip is a semantic filter, not just decoration. Collapsed cards therefore aggregate
 // only matching experiments while retaining the full membership count as context. This prevents an
 // operator/theme super-node from presenting a cross-theme best as if it belonged to the active theme.
-export function themeFilteredGroupAggregate(memberIds, nodesObj, direction, themeFilter = null) {
-  const totalCount = memberIds.length
-  const matchedIds = themeFilter
-    ? memberIds.filter(id => nodeTheme(nodesObj[id]) === themeFilter)
-    : memberIds
+export function themeFilteredGroupAggregate(
+  memberIds, nodesObj, direction, themeFilter = null, state = null, highlightIds = null,
+) {
+  const activeIds = memberIds.filter(id => nodeIsActive(nodesObj[id], state))
+  const totalCount = activeIds.length
+  const conceptFilterActive = highlightIds !== null
+  const matchedIds = activeIds.filter(id => (!themeFilter || nodeTheme(nodesObj[id], state) === themeFilter)
+    && (!conceptFilterActive || highlightIds.has(id)))
+  const filterActive = !!themeFilter || conceptFilterActive
+  const filterDescription = themeFilter && conceptFilterActive
+    ? `primary concept axis ${themeFilter} and selected concepts`
+    : themeFilter ? `primary concept axis ${themeFilter}` : conceptFilterActive ? 'selected concepts' : null
   return {
-    ...groupAggregate(matchedIds, nodesObj, direction),
+    ...groupAggregate(matchedIds, nodesObj, direction, state),
     matchedIds,
     totalCount,
     matchedCount: matchedIds.length,
-    filterActive: !!themeFilter,
+    filterActive,
+    conceptFilterActive,
+    filterDescription,
     themeFilter,
   }
 }

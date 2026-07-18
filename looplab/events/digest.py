@@ -164,11 +164,16 @@ def theme_rollup(state: RunState) -> dict:
     / UI / /runs API string-match; only the derivation moved from legacy themes to concept axes."""
     better = (lambda a, b: a < b) if state.direction == "min" else (lambda a, b: a > b)
     out: dict[str, dict] = {}
+    aborted = set(getattr(state, "aborted_nodes", None) or [])
     for n in state.nodes.values():
         if n.tombstoned:                        # §6.3: a logically-deleted node must not skew axis counts/bests
             continue
+        if n.id in aborted:                     # aborted nodes likewise remain audit history, not live breadth
+            continue
         m = n.robust_metric
-        for axis in node_axes(state, n):
+        # ``node_axes`` intentionally returns a set. Sort at the wire-materialization boundary so the
+        # first-seen order (and therefore /api/runs' top-four chips) is stable across hash seeds.
+        for axis in sorted(node_axes(state, n)):
             e = out.setdefault(axis, {"count": 0, "best_metric": None})
             e["count"] += 1
             if m is not None and (e["best_metric"] is None or better(m, e["best_metric"])):

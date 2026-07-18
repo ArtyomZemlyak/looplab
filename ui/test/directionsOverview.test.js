@@ -59,6 +59,6 @@ test('optimization and grouping labels use user-facing language without changing
   assert.equal(optimizationLabel('min'), 'minimize')
   assert.equal(optimizationLabel('max'), 'maximize')
   assert.equal(optimizationLabel('legacy'), 'unknown')
-  assert.deepEqual(GROUP_MODES[0], ['theme', 'direction'])
+  assert.deepEqual(GROUP_MODES[0], ['theme', 'primary concept axis'])
   assert.match(toMarkdown({ direction: 'max', nodes: {}, task_id: 't', run_id: 'r' }), /\*\*Optimization orientation:\*\* maximize/)
 })

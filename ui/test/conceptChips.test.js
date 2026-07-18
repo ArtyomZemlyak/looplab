@@ -2,42 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { addConceptSelection, chipsAtPath, breadcrumb, conceptMatches, matchingNodeIds,
-  orderChipsByDelta, toggleConceptSelection } from '../src/conceptChips.js'
-
-test('orderChipsByDelta ranks chips by descending Δbest, nulls last, count/id tie-break', () => {
-  const chips = [
-    { id: 'loss/a', label: 'a', count: 3 },
-    { id: 'loss/b', label: 'b', count: 5 },
-    { id: 'loss/c', label: 'c', count: 2 },   // no metric -> null Δ -> last
-    { id: 'loss/d', label: 'd', count: 9 },   // no metric -> null Δ -> last, but higher count than c
-  ]
-  const rollup = {
-    'loss/a': { delta_best: 0.02 },
-    'loss/b': { delta_best: 0.05 },
-    'loss/c': { delta_best: null },
-    // loss/d absent entirely -> also treated as null
-  }
-  const ordered = orderChipsByDelta(chips, rollup).map(c => c.id)
-  assert.deepEqual(ordered, ['loss/b', 'loss/a', 'loss/d', 'loss/c'])   // 0.05, 0.02, then nulls by count desc
-})
-
-test('orderChipsByDelta preserves the given order when no rollup is available', () => {
-  const chips = [{ id: 'x', count: 1 }, { id: 'y', count: 2 }]
-  assert.equal(orderChipsByDelta(chips, null), chips)          // same reference — advisory fetch not blocking
-  assert.equal(orderChipsByDelta(chips, undefined), chips)
-})
-
-test('orderChipsByDelta keeps the atLevel "here" chip last, not ranked by its subtree Δ', () => {
-  const chips = [
-    { id: 'loss/a', label: 'a', count: 3 },
-    { id: 'loss/b', label: 'b', count: 5 },
-    { id: 'loss', label: 'loss', count: 1, atLevel: true },   // exact-at-path -> must stay last
-  ]
-  // rollup['loss'] is the SUBTREE best (>= children); ranking the here-chip by it would float it front.
-  const rollup = { 'loss/a': { delta_best: 0.02 }, 'loss/b': { delta_best: 0.05 }, loss: { delta_best: 0.09 } }
-  const ordered = orderChipsByDelta(chips, rollup).map(c => c.id)
-  assert.deepEqual(ordered, ['loss/b', 'loss/a', 'loss'])      // children by Δ; the here-chip trails
-})
+  toggleConceptSelection } from '../src/conceptChips.js'
 
 const NC = {
   0: ['loss/contrastive/dcl', 'architecture/moe'],
@@ -53,7 +18,7 @@ test('chipsAtPath top level = roots with subtree counts', () => {
   assert.equal(byId['loss'], 4)                    // nodes 0,1,2,4 all touch the loss subtree
   assert.equal(byId['architecture'], 1)
   assert.equal(byId['data'], 1)
-  assert.equal(chips[0].id, 'loss')                // sorted by count desc
+  assert.deepEqual(chips.map(chip => chip.id), ['architecture', 'data', 'loss'])
   assert.equal(chips.find(c => c.id === 'loss').label, 'loss')
 })
 

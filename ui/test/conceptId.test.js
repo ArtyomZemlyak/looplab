@@ -63,3 +63,18 @@ test('nodeTheme matches the server legacy-theme then first-concept-axis contract
   assert.equal(nodeTheme({ idea: { concepts: 'loss/contrastive' } }), null)
   assert.equal(nodeTheme(null), null)
 })
+
+test('nodeTheme prefers folded post-rename concepts and preserves explicit untagged truth', () => {
+  const node = { id: 7, idea: { theme: 'stale-theme', concepts: ['stale/authored'] } }
+  assert.equal(nodeTheme(node, {
+    node_concepts: { 7: ['Loss/Old', 'architecture/moe'] },
+    concept_consolidation: { 'loss/old': 'data/aug' },
+  }), 'architecture', 'the deterministic primary axis is sorted after canonical renames')
+  assert.equal(nodeTheme(node, { node_concepts: { 7: [] } }), null,
+    'an explicit folded empty row must not resurrect frozen authoring')
+  assert.equal(nodeTheme(node, { node_concepts: { 8: ['data/aug'] } }), 'stale-theme',
+    'a genuinely missing row retains legacy compatibility')
+  assert.equal(nodeTheme({ id: 8, idea: { concepts: [] } }, {
+    node_concepts: { 8: ['optimization/adam'] },
+  }), 'optimization', 'delta-authored nodes need no full idea.concepts list')
+})

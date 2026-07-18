@@ -5,6 +5,7 @@
 
 import { fmt, isSweep, operatorMeta } from './util.js'
 import { nodeTheme } from './conceptId.js'
+import { activeNodeMap, nodeIsActive } from './nodeProjection.js'
 import { normalizeRunReport, reportCoverageText, reportNarrativeCoverage } from './reportModel.js'
 
 const metricOf = (n) => (n.confirmed_mean ?? n.metric)
@@ -31,7 +32,7 @@ export function paramDiffLabel(diff) {
 
 // The frontier walk: in node-id order, every FEASIBLE node that set a new best is one improvement
 // "step". Returns the ordered list with the delta it contributed and what changed vs its parent.
-export function improvements(nodes, direction) {
+export function improvements(nodes, direction, state = null) {
   const dir = direction || 'min'
   const bt = better(dir)
   const ev = Object.values(nodes).filter(isEvaluated).sort((a, b) => a.id - b.id)
@@ -43,7 +44,7 @@ export function improvements(nodes, direction) {
     if (best === null || bt(v, best.v)) {
       const parent = (n.parent_ids || []).map(p => nodes[p]).find(Boolean)
       steps.push({
-        id: n.id, operator: n.operator, theme: nodeTheme(n),
+        id: n.id, operator: n.operator, theme: nodeTheme(n, state),
         from: best ? best.v : null, to: v,
         delta: best ? v - best.v : null,
         params: n.idea?.params || {}, rationale: n.idea?.rationale || '',
@@ -88,7 +89,8 @@ function rollup(nodes, direction, keyFn) {
 export const operatorEffectiveness = (nodes, dir) => rollup(nodes, dir, n => n.operator || 'unknown')
 // Keep this compatibility projection aligned with events/digest.py::node_theme: new Ideas author
 // concepts rather than the legacy `theme`, so their first concept axis becomes the coarse direction.
-export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, nodeTheme)
+export const themeEffectiveness = (nodes, dir, state = null) =>
+  rollup(nodes, dir, node => nodeTheme(node, state))
 
 // Per-direction profit for the Directions overview. `idea.theme` remains the legacy wire field, but
 // this UI projection calls the concept a direction. Controls stay in first-discovery order: live gain
@@ -96,10 +98,10 @@ export const themeEffectiveness = (nodes, dir) => rollup(nodes, dir, nodeTheme)
 export function directionProfit(state) {
   const nodes = state.nodes || {}
   const dir = state.direction || 'min'
-  const baseline = (improvements(nodes, dir)[0] || {}).to ?? null   // first feasible frontier value
-  const byDirection = new Map(themeEffectiveness(nodes, dir).map(row => [row.key, row]))
+  const baseline = (improvements(nodes, dir, state)[0] || {}).to ?? null   // first feasible frontier value
+  const byDirection = new Map(themeEffectiveness(nodes, dir, state).map(row => [row.key, row]))
   const directions = [...new Set(Object.values(nodes).sort((a, b) => a.id - b.id)
-    .map(nodeTheme).filter(Boolean))]
+    .map(node => nodeTheme(node, state)).filter(Boolean))]
   return directions.map(direction => {
     const t = byDirection.get(direction)
     let gain = null
@@ -114,13 +116,13 @@ export const optimizationLabel = direction => direction === 'max' ? 'maximize'
 // For a MERGE node (≥2 parents): what each parent contributed — its theme + the "trick" it carried
 // (that parent's own param-diff vs its parent). Powers the node card's "⊕ combines" line + the
 // Inspector's "uses" list, so a merge says which techniques it actually fused.
-export function mergeSummary(node, nodes) {
+export function mergeSummary(node, nodes, state = null) {
   if (!node || (node.parent_ids || []).length < 2) return []
   return node.parent_ids.map(pid => {
     const p = nodes[pid]
     if (!p) return { parentId: pid, theme: null, change: '' }
     const gp = (p.parent_ids || []).map(x => nodes[x]).find(Boolean)
-    return { parentId: pid, theme: nodeTheme(p), change: paramDiffLabel(paramDiff(p, gp)) }
+    return { parentId: pid, theme: nodeTheme(p, state), change: paramDiffLabel(paramDiff(p, gp)) }
   })
 }
 
@@ -168,7 +170,7 @@ function brief(text, max = 140) {
 //   • no param change (code-only edit / re-run / repair) → the agent's rationale if any, else the
 //       operator's role ("improve — hill-climb around best", …) so the card still says something.
 // Returns '' ONLY for a real merge — it renders its own ⊕ combines line in its place.
-export function nodeChip(node, nodes) {
+export function nodeChip(node, nodes, state = null) {
   if (!node) return ''
   // Resolve parents the SAME way the card's isMerge does (filter out ids missing from the fold), so
   // a node with a dangling 2nd parent id isn't mis-classified as a merge and left with no chip.
@@ -187,7 +189,7 @@ export function nodeChip(node, nodes) {
   }
   const parent = parents[0]
   if (!parent) {                                           // draft / root — nothing to diff against
-    const what = brief(node.idea?.rationale) || brief(nodeTheme(node))
+    const what = brief(node.idea?.rationale) || brief(nodeTheme(node, state))
     return what ? `baseline · ${what}` : 'baseline'        // describe the baseline, don't just label it
   }
   if (node.idea?.change_summary) return brief(node.idea.change_summary)
@@ -198,7 +200,7 @@ export function nodeChip(node, nodes) {
 }
 
 // Nodes that ran but made things worse than their parent (regressions) — the "tried, didn't help".
-export function regressions(nodes, direction) {
+export function regressions(nodes, direction, state = null) {
   const dir = direction || 'min'
   const bt = better(dir)
   const out = []
@@ -207,7 +209,7 @@ export function regressions(nodes, direction) {
     const pm = parent ? metricOf(parent) : null
     if (pm != null && !bt(metricOf(n), pm) && metricOf(n) !== pm) {
       out.push({ id: n.id, operator: n.operator, metric: metricOf(n), parentId: parent.id,
-                 parentMetric: pm, diff: paramDiff(n, parent), theme: nodeTheme(n) })
+                 parentMetric: pm, diff: paramDiff(n, parent), theme: nodeTheme(n, state) })
     }
   })
   return out.sort((a, b) => a.id - b.id)
@@ -225,9 +227,9 @@ export function failureBreakdown(nodes) {
 
 // One call that assembles the whole analysis for the report.
 export function analyze(state) {
-  const nodes = state.nodes || {}
+  const nodes = activeNodeMap(state.nodes || {}, state)
   const dir = state.direction
-  const steps = improvements(nodes, dir)
+  const steps = improvements(nodes, dir, state)
   const evald = Object.values(nodes).filter(isEvaluated)
   const infeasible = evald.filter(n => n.feasible === false)
   return {
@@ -242,8 +244,8 @@ export function analyze(state) {
           : steps[0].to - steps[steps.length - 1].to)
       : 0,
     operators: operatorEffectiveness(nodes, dir),
-    themes: themeEffectiveness(nodes, dir),
-    regressions: regressions(nodes, dir),
+    themes: themeEffectiveness(nodes, dir, state),
+    regressions: regressions(nodes, dir, state),
     failures: failureBreakdown(nodes),
     infeasible,
     nEval: evald.length,
@@ -275,7 +277,8 @@ export function trustCaveats(state, best) {
 // plain-language bottom line, even with no model. `a` is the analyze() result (reused, not recomputed).
 export function verdict(state, a) {
   const dir = state.direction || 'min'
-  const best = state.best_node_id != null ? state.nodes[state.best_node_id] : null
+  const candidate = state.best_node_id != null ? state.nodes[state.best_node_id] : null
+  const best = nodeIsActive(candidate, state) ? candidate : null
   const caveats = trustCaveats(state, best)
   if (!best || a.finalBest == null) {
     return { outcome: 'none', robustness: 'n/a', trust: caveats.length ? 'caveats' : 'unverified', best, caveats,
@@ -431,7 +434,7 @@ export function toMarkdown(state, _best, context = {}) {
   if (a.regressions.length) { L.push(`\n**Regressions:** ${a.regressions.length} node(s) ran but did not beat their parent.`) }
   if (a.infeasible.length) { L.push(`\n**Infeasible:** ${a.infeasible.length} node(s) violated a constraint and were excluded.`) }
   const deadThemes = a.themes.filter(t => t.improved === 0)
-  if (deadThemes.length) L.push(`\n**Directions that didn't pay off:** ${deadThemes.map(t => t.key).join(', ')}.`)
+  if (deadThemes.length) L.push(`\n**Primary concept axes that didn't pay off:** ${deadThemes.map(t => t.key).join(', ')}.`)
   if (!fr.length && !a.regressions.length && !a.infeasible.length && !deadThemes.length) L.push('\n_Nothing notably failed._')
   L.push('')
   L.push('## Operator effectiveness')

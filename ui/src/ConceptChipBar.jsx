@@ -1,10 +1,10 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds, orderChipsByDelta,
+import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
   toggleConceptSelection } from './conceptChips.js'
 import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
-import { get, runApiPath } from './util.js'
+import { activeNodeConcepts } from './nodeProjection.js'
 
 const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
 
@@ -16,42 +16,26 @@ const SearchIcon = ({ small }) => (
 // View 2 — the concept chip bar riding OVER the lineage graph. Breadcrumb-navigable (drill into a
 // concept to reveal its next level) and multi-selectable (OR): selecting concepts highlights every
 // graph node that touches any selected concept OR a descendant of it, dimming the rest. Reads the
-// folded `node_concepts` + consolidation rename straight off the run state (same source as View 1) for
-// the chips themselves, plus ONE best-effort /concepts fetch for the advisory Δbest sort order (never
-// blocking). Pure presentation; the selection drives the graph via `onHighlight(set | null)`.
+// folded `node_concepts` + consolidation rename straight off the run state (same source as View 1).
+// Tombstoned/aborted memberships stay available to history but are excluded from the current projection.
+// Chip order is canonical and stable: changing evidence may update counts but never moves controls.
+// Pure presentation; the selection drives the graph via `onHighlight(set | null)`.
 // The pure model (chip counts, breadcrumb, matching set) lives in conceptChips.js and is unit-tested;
 // this component is only wiring + markup.
-export default function ConceptChipBar({ state, onHighlight, runId = null, generation = null }) {
-  const nodeConcepts = state?.node_concepts || {}
+export default function ConceptChipBar({ state, onHighlight }) {
+  const nodeConcepts = useMemo(() => activeNodeConcepts(state),
+    [state?.node_concepts, state?.nodes, state?.aborted_nodes])
   const rename = state?.concept_consolidation || {}
   const [path, setPath] = useState('')                 // breadcrumb drill position ('' = roots)
   const [selected, setSelected] = useState([])         // ordered selected concept ids (OR)
   const [searchOpen, setSearchOpen] = useState(false)  // the search box is revealed (icon toggled)
   const [query, setQuery] = useState('')               // live free-text concept query
   const [cursor, setCursor] = useState(-1)             // keyboard-focused result index
-  const [rollup, setRollup] = useState(null)           // per-concept subtree Δ (best-effort sort hint)
   const inputRef = useRef(null)
-
-  // F2: order chips by which concepts led to the best outcomes — descending Δbest-from-baseline, the same
-  // signal the old Directions bar carried, now on concepts. The authoritative per-concept subtree metric
-  // lives in the /concepts frame (concept_metrics.rollup); the UI state carries `metric` but not the
-  // backend's `robust_metric`, so re-deriving Δ here would diverge — fetch the frame's rollup instead.
-  // Best-effort and ADVISORY: a failure/loading just leaves the count order, so the bar never blocks.
-  useEffect(() => {
-    if (!runId) return undefined
-    let alive = true
-    const ctrl = new AbortController()
-    get(`${runApiPath(runId, '/concepts')}?lens=is_a`, { signal: ctrl.signal, cache: 'no-store' })
-      .then(frame => { if (alive && frame && frame.metrics && frame.metrics.rollup) setRollup(frame.metrics.rollup) })
-      .catch(() => {})     // advisory sort only
-    return () => { alive = false; ctrl.abort() }
-  }, [runId, generation])
 
   const hasConcepts = useMemo(
     () => Object.values(nodeConcepts).some(v => v && v.length), [nodeConcepts])
-  const rawChips = useMemo(() => chipsAtPath(nodeConcepts, rename, path), [nodeConcepts, rename, path])
-  // Overlay the Δbest order when the advisory rollup is available; else keep chipsAtPath's count order.
-  const chips = useMemo(() => orderChipsByDelta(rawChips, rollup), [rawChips, rollup])
+  const chips = useMemo(() => chipsAtPath(nodeConcepts, rename, path), [nodeConcepts, rename, path])
   const crumbs = useMemo(() => breadcrumb(path), [path])
 
   // Free-text search is GLOBAL (across the whole concept tree, not just the drilled level): the ranked

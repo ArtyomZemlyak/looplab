@@ -13,6 +13,7 @@ import { createServer } from 'vite'
 const UI_ROOT = fileURLToPath(new URL('..', import.meta.url))
 
 const STATE = {
+  nodes: Object.fromEntries(Array.from({ length: 5 }, (_, id) => [id, { id }])),
   node_concepts: {
     0: ['loss/contrastive/dcl', 'architecture/moe'],
     1: ['loss/contrastive/mnr'],
@@ -52,10 +53,33 @@ test('ConceptChipBar renders top-level concept chips with subtree counts', async
     assert.equal(document.querySelector('.cb-head strong')?.textContent, 'Concepts')
     const names = [...document.querySelectorAll('.cb-chip .cb-name')].map(n => n.textContent)
     assert.ok(names.includes('loss') && names.includes('architecture') && names.includes('data'))
-    // loss subtree touches nodes 0,1,2,4 -> count 4, and sorts first (count desc)
+    // Counts remain live, but canonical identity order keeps controls from jumping as evidence changes.
     const first = document.querySelector('.cb-chip')
-    assert.equal(first.querySelector('.cb-name').textContent, 'loss')
-    assert.equal(first.querySelector('.cb-count').textContent, '4')
+    assert.equal(first.querySelector('.cb-name').textContent, 'architecture')
+    assert.equal(first.querySelector('.cb-count').textContent, '1')
+  } finally {
+    await vite.close()
+  }
+})
+
+test('ConceptChipBar excludes tombstoned and run-level aborted memberships', async () => {
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
+    const markup = renderToStaticMarkup(React.createElement(ConceptChipBar, {
+      state: {
+        nodes: { 0: { id: 0 }, 1: { id: 1, tombstoned: true }, 2: { id: 2 } },
+        aborted_nodes: [2],
+        node_concepts: { 0: ['active/one'], 1: ['deleted/one'], 2: ['aborted/one'] },
+      },
+      onHighlight() {},
+    }))
+    const names = [...new JSDOM(markup).window.document.querySelectorAll('.cb-name')]
+      .map(node => node.textContent)
+    assert.deepEqual(names, ['active'])
   } finally {
     await vite.close()
   }
@@ -218,7 +242,8 @@ test('search previews a graph highlight and commits a concept on result click', 
     assert.equal(document.querySelector('.cs-res'), null)
     await act(async () => {
       root.render(React.createElement(ConceptChipBar, {
-        state: { node_concepts: { ...STATE.node_concepts, 5: ['fresh/axis'] } },
+        state: { nodes: { ...STATE.nodes, 5: { id: 5 } },
+          node_concepts: { ...STATE.node_concepts, 5: ['fresh/axis'] } },
         onHighlight: v => calls.push(v),
       }))
       await Promise.resolve()
