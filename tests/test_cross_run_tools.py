@@ -722,9 +722,9 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
     out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "regularization/r-drop"})
     assert "CONCEPT CARD: UNTRUSTED_MEMORY_CONCEPT='regularization/r-drop'" in out
     assert "axis='regularization'" in out and "name='r-drop'" in out
-    assert "track record (your task family): 2 run(s)" in out and "helped 2" in out
+    assert "track record (your task family): 2 run(s)" in out and "ranked better 2" in out
     assert "globally used in 2 prior run(s)" in out
-    assert "consistently HELPED" in out
+    assert "consistently RANKED BETTER" in out
     # co-occurrence: r-drop appears with loss/plain in BOTH runs
     assert "usually paired with:" in out and "loss/plain" in out
 
@@ -786,3 +786,66 @@ def test_concept_card_sanitizes_untrusted_slug_and_rejects_bad_args(tmp_path):
     assert "slug must be a non-empty string" in tools.execute("concept_card", {"slug": "  "})
     assert "slug must be a non-empty string" in tools.execute("concept_card", {"slug": 7})
     assert "slug exceeds 256 characters" in tools.execute("concept_card", {"slug": "x" * 257})
+
+
+def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
+    from looplab.engine.memory import build_concept_capsule
+
+    capsules = []
+    for rid in ("local-a", "local-b"):
+        capsules.append(build_concept_capsule(
+            run_id=rid, task_id="t", fingerprint=["kind:dataset"], direction="max",
+            concepts=["regularization/r-drop", "baseline/plain"],
+            concept_outcomes={"regularization/r-drop": 0.9, "baseline/plain": 0.1}))
+    for rid in ("foreign-a", "foreign-b", "foreign-c"):
+        capsules.append(build_concept_capsule(
+            run_id=rid, task_id="foreign", fingerprint=["kind:other"], direction="max",
+            concepts=["regularization/r-drop", "foreign/winner"],
+            concept_outcomes={"regularization/r-drop": 0.1, "foreign/winner": 0.9}))
+    _seed(tmp_path, capsules=capsules)
+
+    out = _bind(CrossRunTools(tmp_path)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+    assert "ranked better 2" in out and "ranked worse 0" in out
+    assert "consistently RANKED BETTER" in out
+    assert "consistently RANKED WORSE" not in out
+    assert "globally used in 5 prior run(s)" in out
+
+
+def test_concept_card_counts_a_known_slug_beyond_the_overview_display_cap(tmp_path):
+    from looplab.engine.memory import build_concept_capsule
+
+    capsules = []
+    for group in range(3):
+        concepts = [f"group-{group}/concept-{index:03d}" for index in range(255)]
+        if group == 2:
+            concepts.append("zz/target")
+        capsules.append(build_concept_capsule(
+            run_id=f"run-{group}", task_id="foreign", fingerprint=["kind:other"],
+            direction="max", concepts=concepts, concept_outcomes={}))
+    _seed(tmp_path, capsules=capsules)
+
+    out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "zz/target"})
+    assert "globally used in 1 prior run(s)" in out
+    assert "matching_global_runs=1" in out
+
+
+def test_concept_card_fuzzy_ties_are_lexical_and_short_names_do_not_claim_lessons(tmp_path):
+    _seed(tmp_path, capsules=[
+        _cap_scoped("a", "t", concepts=["axis/abd", "axis/a"], fingerprint=["kind:dataset"]),
+        _cap_scoped("b", "t", concepts=["axis/abe"], fingerprint=["kind:dataset"]),
+    ], lessons=[_lesson("training remained stable", "helped", "e", run_id="a")])
+    tools = _bind(CrossRunTools(tmp_path))
+
+    tied = tools.execute("concept_card", {"slug": "abc"})
+    assert "UNTRUSTED_MEMORY_CONCEPT='axis/abd'" in tied
+    short = tools.execute("concept_card", {"slug": "axis/a"})
+    assert "what runs noted:" not in short
+    assert "training remained stable" not in short
+
+
+def test_concept_card_does_not_recommend_minting_invalid_slug_text(tmp_path):
+    _seed(tmp_path, capsules=[])
+    out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "<script>/x"})
+    assert "not a valid concept slug" in out
+    assert "looks NEW" not in out

@@ -107,7 +107,7 @@ class ProposalCuesMixin:
                      "and REUSE the canonical existing slug it returns (matching is separator/case-insensitive "
                      "+ fuzzy, so `rdrop` finds `regularization/r-drop`). Mint a NEW slug only when nothing "
                      "matches — consistent slugs are what let cross-run priors recognise a repeated idea. "
-                     "To DECODE a slug (what it is + whether it has helped or hurt across runs) call "
+                     "To DECODE a slug (what it is + where it ranked within comparable prior runs) call "
                      "concept_card('<slug>').")
         try:
             setattr(self.researcher, "_complexity_hint", hint)
