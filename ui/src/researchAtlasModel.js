@@ -20,6 +20,23 @@ const count = (value, fallback = 0) => {
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
+const normalizeConceptSource = atlas => {
+  const receipt = record(Object.hasOwn(atlas, 'concept_source')
+    ? atlas.concept_source : record(atlas.context_pack).coverage)
+  const keys = ['partial_capsules', 'source_unknown_capsules',
+    'source_concepts_omitted', 'source_outcomes_omitted']
+  const counts = keys.map(key => Object.hasOwn(receipt, key)
+    && Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1)
+  const complete = receipt.source_complete
+  const valid = Object.hasOwn(receipt, 'source_complete')
+    && typeof complete === 'boolean' && counts.every(value => value >= 0)
+    && complete === (counts[0] === 0) && counts[1] <= counts[0]
+    && !(complete && counts.some(Boolean))
+  // CODEX AGENT: missing, malformed, and internally contradictory receipts are UNKNOWN. A fresh HTTP
+  // response is not proof that its bounded capsule source was complete.
+  return valid ? { status: complete ? 'complete' : 'partial', counts } : { status: 'unknown' }
+}
+
 const sourceRevision = (key, value) => {
   const envelope = record(value)
   if (key === 'atlas') {
@@ -303,6 +320,7 @@ export function buildResearchAtlasView(atlasValue, claimsValue, curationValue) {
   }
   return {
     totals,
+    conceptSource: normalizeConceptSource(atlas),
     concepts,
     thin,
     contradictions,

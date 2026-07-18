@@ -22,7 +22,6 @@
   background: var(--bg-1); box-shadow: var(--shadow-card); }
 .atlas-empty-copy h2 { margin: 3px 0 8px; font-size: 18px; }
 .atlas-empty-copy > p:not(.atlas-eyebrow) { margin: 0; color: var(--fg-dim); line-height: 1.5; }
-.atlas-empty-copy .atlas-empty-guidance { margin-top: 7px; color: var(--fg-mut); font-size: 11px; }
 .atlas-empty-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .atlas-source-readiness { display: grid; gap: 7px; margin: 0; padding: 0; list-style: none; }
 .atlas-empty-source { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 9px;

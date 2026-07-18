@@ -71,6 +71,24 @@ def test_atlas_empty_is_well_formed():
     atlas = portfolio_atlas([], [])
     assert atlas["n_runs"] == 0 and atlas["explored"] == [] and atlas["contradictions"] == []
     assert atlas["thin_coverage"] == [] and atlas["context_pack"]["claims"] == []
+    assert atlas["concept_source"] == {
+        "source_complete": True, "partial_capsules": 0, "source_unknown_capsules": 0,
+        "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+    }
+
+
+def test_atlas_surfaces_aggregate_partial_capsule_receipt():
+    concepts = [f"axis/c{index:03}" for index in range(300)]
+    atlas = portfolio_atlas([], [_cap(
+        "wide", concepts, {concept: float(index) for index, concept in enumerate(concepts)})])
+
+    assert atlas["concept_source"] == {
+        "source_complete": False, "partial_capsules": 1, "source_unknown_capsules": 0,
+        "source_concepts_omitted": 44, "source_outcomes_omitted": 44,
+    }
+    assert atlas["concept_source"] == {
+        key: atlas["context_pack"]["coverage"][key] for key in atlas["concept_source"]
+    }
 
 
 def test_cli_atlas_prints_sections(tmp_path):

@@ -1447,6 +1447,13 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     payload = {
         "n_runs": n_runs, "n_concepts": overview["n_concepts"],
         "n_claims": len(claims), "n_contested": len(contested),
+        # CODEX AGENT: the Atlas UI must not infer capsule-source completeness from returned rows or from
+        # transport freshness. Keep one small aggregate receipt at the read-model boundary; the embedded
+        # context-pack copy remains for agents and backward-compatible consumers.
+        "concept_source": {key: overview[key] for key in (
+            "source_complete", "partial_capsules", "source_unknown_capsules",
+            "source_concepts_omitted", "source_outcomes_omitted",
+        )},
         "explored": overview["concepts"][:max_items],        # what's been tried (concept × runs)
         "thin_coverage": thin[:max_items],                   # legacy key: observed in one returned run
         "contradictions": [_bounded_claim_projection(row) for row in contested[:max_items]],

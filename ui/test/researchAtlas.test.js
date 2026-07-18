@@ -68,6 +68,36 @@ test('Atlas projection reconciles concurrent totals without trusting malformed t
     'bidi formatting controls cannot visually reorder model-authored comparison context')
 })
 
+test('Atlas concept-source receipts fail closed and preserve explicit partial bounds', () => {
+  const complete = {
+    source_complete: true, partial_capsules: 0, source_unknown_capsules: 0,
+    source_concepts_omitted: 0, source_outcomes_omitted: 0,
+  }
+  const partial = {
+    source_complete: false, partial_capsules: 2, source_unknown_capsules: 1,
+    source_concepts_omitted: 44, source_outcomes_omitted: 8,
+  }
+  assert.deepEqual(buildResearchAtlasView({ concept_source: complete }, {}, {}).conceptSource,
+    { status: 'complete', counts: [0, 0, 0, 0] })
+  assert.deepEqual(buildResearchAtlasView({
+    context_pack: { coverage: partial },
+  }, {}, {}).conceptSource,
+  { status: 'partial', counts: [2, 1, 44, 8] })
+
+  const unknown = { status: 'unknown' }
+  for (const receipt of [
+    {},
+    { ...complete, partial_capsules: null },
+    { ...complete, source_concepts_omitted: '0' },
+    { ...complete, partial_capsules: 1 },
+    { ...partial, partial_capsules: 0 },
+    { ...partial, source_unknown_capsules: 3 },
+  ]) {
+    assert.deepEqual(buildResearchAtlasView({ concept_source: receipt }, {}, {}).conceptSource,
+      unknown)
+  }
+})
+
 test('Atlas suppresses context-free raw metrics and never renders a bare optimization direction', async () => {
   const view = buildResearchAtlasView({ explored: [
     { concept: 'legacy row', runs: [
@@ -111,15 +141,15 @@ test('Atlas suppresses context-free raw metrics and never renders a bare optimiz
     const scopedText = scopedDom.window.document.body.textContent
 
     assert.match(legacyText,
-      /legacy-run.*Metric hidden.*Missing task\/scope or objective orientation/is,
+      /legacy-run.*Metric hidden.*task, scope, or objective orientation missing/is,
       'a sighted user can see why an available raw value was not rendered')
     assert.doesNotMatch(legacyMarkup, /0\.8|\bmax\b/i,
       'the raw value and shorthand direction must not leak into a context-free run reference')
     assert.equal(legacyDom.window.document.querySelector('a').textContent, legacyText,
       'the native link name contains the same visible disclosure without duplicate ARIA copy')
     assert.match(scopedText,
-      /task: task-a.*scope: holdout set.*Not cross-run comparable.*Primary objective metric.*name\/unit not recorded.*objective orientation: maximize.*value 0[.,]8/is)
-    assert.ok(scopedText.indexOf('Not cross-run comparable') < scopedText.indexOf('value'),
+      /task: task-a.*scope: holdout set.*Not cross-run comparable.*metric name\/unit unknown.*maximize objective.*0[.,]8/is)
+    assert.ok(scopedText.indexOf('Not cross-run comparable') < scopedText.search(/0[.,]8/),
       'the visible comparability warning precedes the numeric value')
     assert.doesNotMatch(scopedText, /\bmax\s+0[.,]8\b/i,
       'optimization orientation must never be presented as a bare comparable metric')
@@ -409,7 +439,7 @@ test('partial Atlas UI never presents an unavailable source as an empty current 
     'empty and partial-empty projections need compact source-level readiness')
   assert.match(atlas, /!view\.empty && <div className="atlas-grid">/,
     'empty projections must not render four oversized empty panels')
-  assert.match(atlas, /atlasLoaded && <>[\s\S]*No concepts returned\./)
+  assert.match(atlas, /atlasLoaded && <>[\s\S]*No retained concepts returned\./)
   assert.match(atlas, /claimsLoaded && \(view\.claims\.length > 0[\s\S]*No claims returned\./)
   assert.match(atlas, /curationCurrent[\s\S]*incomplete merge/)
   assert.doesNotMatch(atlas, /shown · incomplete merge/,
@@ -434,16 +464,16 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
   const failed = { state: 'failed', loadedAt: '', revision: '' }
   const stale = { state: 'retained-stale', loadedAt: '2026-07-16T09:00:00Z', revision: '1' }
   try {
-    const { AtlasEmptyState } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
+    const { AtlasEmptyState, ConceptSourceNotice } = await vite.ssrLoadModule('/src/ResearchAtlas.jsx')
     const allCurrent = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: current, conceptCuration: current, claimCuration: current,
-      }, pending: [], retry() {}, busy: false, onBack() {},
+      }, conceptSource: { status: 'complete' }, pending: [], retry() {}, busy: false, onBack() {},
     }))
     const currentDom = new JSDOM(allCurrent)
     assert.match(currentDom.window.document.querySelector('h2').textContent, /No cross-run evidence/)
     assert.match(currentDom.window.document.body.textContent,
-      /does not mean the project has no runs/)
+      /runs may still exist/)
     assert.equal(currentDom.window.document.querySelectorAll('.atlas-empty-source').length, 4)
     assert.deepEqual([...currentDom.window.document.querySelectorAll('.atlas-readiness-state')]
       .map(node => node.textContent), ['Empty', 'Empty', 'Empty', 'Empty'])
@@ -453,10 +483,31 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     assert.equal(currentDom.window.document.querySelector('.atlas-empty-actions button')?.textContent,
       'Back to runs')
 
+    const bounded = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
+      sourceStates: {
+        atlas: current, claims: current, conceptCuration: current, claimCuration: current,
+      }, conceptSource: { status: 'partial' }, pending: [], retry() {}, busy: false, onBack() {},
+    }))
+    const boundedDom = new JSDOM(bounded)
+    assert.match(boundedDom.window.document.querySelector('h2').textContent,
+      /No retained cross-run evidence/)
+    assert.match(boundedDom.window.document.body.textContent, /do not prove absence/)
+    assert.deepEqual([...boundedDom.window.document.querySelectorAll('.atlas-readiness-state')]
+      .map(node => node.textContent), ['Partial', 'Empty', 'Empty', 'Empty'])
+
+    const notice = renderToStaticMarkup(React.createElement(ConceptSourceNotice, { source: {
+      status: 'partial', counts: [2, 1, 44, 8],
+    } }))
+    const noticeDom = new JSDOM(notice)
+    assert.ok(noticeDom.window.document.querySelector('[role="status"]'))
+    assert.match(noticeDom.window.document.body.textContent,
+      /Concept source partial.*2\/1\/44\/8.*Absence unknown/is)
+
     const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
         atlas: current, claims: failed, conceptCuration: failed, claimCuration: stale,
-      }, pending: ['conceptCuration'], retry() {}, busy: false, onBack() {},
+      }, conceptSource: { status: 'complete' }, pending: ['conceptCuration'],
+      retry() {}, busy: false, onBack() {},
     }))
     const partialDom = new JSDOM(partial)
     assert.match(partialDom.window.document.querySelector('h2').textContent,
@@ -553,7 +604,7 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     assert.match(sourceNote('Claim steward invocation log').textContent, /loading/)
     let retryButton = sourceNote('Claim steward invocation log').querySelector('button')
     assert.equal(retryButton.disabled, true)
-    assert.match(retryButton.getAttribute('aria-label'), /unavailable while refresh is active/)
+    assert.equal(retryButton.getAttribute('aria-label'), 'Retry Claim steward invocation log')
 
     const hangingTimer = sourceTimers.find(timer => !timer.cleared)
     await act(async () => { hangingTimer.fire(); await Promise.resolve(); await Promise.resolve() })
@@ -583,7 +634,7 @@ test('mounted Atlas settles sources progressively and fences timed-out or supers
     assert.match(localBatch[0].url, /\/api\/cross-run\/claim-curation-log\?limit=20$/)
     retryButton = sourceNote('Claim steward invocation log').querySelector('button')
     assert.equal(retryButton.disabled, true)
-    assert.match(retryButton.getAttribute('aria-label'), /unavailable while refresh is active/)
+    assert.equal(retryButton.getAttribute('aria-label'), 'Retry Claim steward invocation log')
     assert.equal(sourceNote('Atlas concept/evidence projection').querySelector('button').disabled, true,
       'all retries are disabled while any source request is active')
     await reply(localBatch[0], { entries: [{ run_id: 'claim-current', outcome: 'empty' }] })
@@ -649,7 +700,7 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   for (const state of [/Loading Research Atlas preview/, /Research Atlas preview unavailable/,
     /No cross-run evidence/, /Some sources unavailable\./]) assert.match(atlas, state)
   assert.match(atlas, /Research Atlas preview[\s\S]*Experimental · bounded · read-only/)
-  assert.match(atlas, /Evidence runs[\s\S]*not the total run count/)
+  assert.match(atlas, /Referenced runs/)
   assert.match(atlas, /Atlas source readiness/)
   // Keep the implicit list role: role="region" would erase list semantics for assistive technology.
   assert.match(atlas, /<ul className="atlas-concepts" tabIndex=\{0\} aria-label="Bounded explored concepts">/)
@@ -665,16 +716,16 @@ test('Atlas has a discoverable owner-only route and complete resource states', a
   assert.match(atlas, /Observed in one run/)
   assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Coverage<\/p>|<h3>Thin coverage/)
   assert.match(atlas, /support-only evidence/)
-  assert.match(atlas, /not a proposition verdict or an applicability decision/)
+  assert.match(atlas, /not a verdict or applicability decision/)
   assert.match(atlas, /claim grouping ·/)
-  assert.match(atlas, /supporting attempt refs/)
+  assert.match(atlas, /support refs/)
   assert.doesNotMatch(atlas, /scope ·|>support <b>|>oppose <b>/)
   assert.match(atlas, /Steward invocation log[\s\S]*Recent proposals \+ outcomes/)
   assert.doesNotMatch(atlas, /<p className="atlas-eyebrow">Audit trail<\/p>|Concept \+ claim governance/)
   assert.equal((atlas.match(/<SourceWatermark (?:key=\{sourceKey\} )?sourceKey=/g) || []).length, 4,
     'every panel must disclose its source; the mapped curation watermark renders twice')
-  assert.match(atlas, /not a\s+CoverageFrame, frozen snapshot, or completeness estimate/)
-  assert.match(atlas, /logged proposals and outcomes; not a current governance snapshot/)
+  assert.match(atlas, /bounded observations, not coverage/)
+  assert.match(atlas, /history, not current governance/)
   assert.match(atlas, /data-route-main tabIndex=\{-1\}/)
   assert.match(api, /crossRunRead[\s\S]*cache: 'no-store'/)
   assert.match(api, /cross-run\/claims\?limit=\$\{args\.limit\}&offset=/)
