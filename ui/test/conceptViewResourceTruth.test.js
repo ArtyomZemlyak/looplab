@@ -783,18 +783,18 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       'a fully validated size-cap partial paid result remains visibly partial')
     const relationshipView = document.querySelector('.concept-view')
     assert.match(relationshipView?.getAttribute('aria-label') || '',
-      /Concept relationship view for recorded uses links/)
+      /Concept relationship view for projected uses links/)
     assert.match(document.querySelector('.cv-heading')?.textContent || '',
       /Concept relationships.*2 relationship nodes/s)
     const relationshipLegend = document.getElementById('concept-relationship-legend')
     assert.equal(relationshipLegend?.getAttribute('role'), 'note')
     assert.match(relationshipLegend?.textContent,
-      /recorded uses links.*one primary display parent.*\+N links.*additional recorded parents.*not a taxonomy hierarchy/is)
+      /projected uses links.*one primary display parent.*\+N links.*additional projected parents.*not a taxonomy hierarchy/is)
     assert.match(relationshipView?.getAttribute('aria-describedby') || '',
       /concept-metric-context.*concept-relationship-legend/)
     assert.equal(document.querySelector('.cv-cid[title="loss/contrastive"]')?.textContent,
       'loss/contrastive', 'edge lenses retain the full canonical id instead of an ambiguous leaf')
-    const crossLink = document.querySelector('.cv-badge[title^="Additional display parent via recorded uses link"]')
+    const crossLink = document.querySelector('.cv-badge[title^="Additional display parent via projected uses link"]')
     assert.match(crossLink?.textContent, /\+1 links/)
     assert.match(crossLink?.getAttribute('title'), /training\/contrastive/,
       'validated secondary parents remain visible evidence instead of disappearing from the tree')

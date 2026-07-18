@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
   toggleConceptSelection } from './conceptChips.js'
 import { searchConcepts } from './conceptSearch.js'
@@ -32,6 +32,12 @@ export default function ConceptChipBar({ state, onHighlight }) {
   const [query, setQuery] = useState('')               // live free-text concept query
   const [cursor, setCursor] = useState(-1)             // keyboard-focused result index
   const inputRef = useRef(null)
+  // CODEX AGENT: keyboard focus intentionally remains on the combobox input. A per-instance stable
+  // listbox id plus concept-identity option ids lets aria-activedescendant expose the visual cursor
+  // without adding results to the Tab order or colliding when two run views coexist.
+  const searchInstanceId = useId().replace(/[^a-zA-Z0-9_-]/g, '')
+  const listboxId = `concept-search-results-${searchInstanceId}`
+  const optionId = id => `${listboxId}-option-${encodeURIComponent(id)}`
 
   const hasConcepts = useMemo(
     () => Object.values(nodeConcepts).some(v => v && v.length), [nodeConcepts])
@@ -49,6 +55,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
     [searching, nodeConcepts, rename, query])
   const results = useMemo(() => allResults.slice(0, SEARCH_RESULTS), [allResults])
   const matchedIds = useMemo(() => new Set(allResults.map(r => r.id)), [allResults])
+  const activeOptionId = searching && results[cursor] ? optionId(results[cursor].id) : undefined
 
   // The highlighted node set is a pure function of (nodeConcepts, selected, rename). Push it up whenever
   // its VALUE changes — keyed on a stable signature so a live SSE tick that only re-refs node_concepts
@@ -144,8 +151,9 @@ export default function ConceptChipBar({ state, onHighlight }) {
                 <SearchIcon small />
                 <input ref={inputRef} className="cs-input" style={{ width: 150 }} value={query}
                   placeholder="find a concept…" aria-label="Search concepts" autoComplete="off"
-                  role="combobox" aria-expanded={searching}
-                  aria-controls={searching ? 'cb-search-results' : undefined}
+                  role="combobox" aria-autocomplete="list" aria-expanded={searching}
+                  aria-controls={searching ? listboxId : undefined}
+                  aria-activedescendant={activeOptionId}
                   onChange={e => setQuery(e.target.value)} onKeyDown={onSearchKey}
                   onBlur={() => { if (!query) closeSearch() }} />
                 {query &&
@@ -153,7 +161,7 @@ export default function ConceptChipBar({ state, onHighlight }) {
                     onClick={() => { setQuery(''); inputRef.current?.focus() }}>×</button>}
               </div>}
           {searching &&
-            <div className="cs-pop" id="cb-search-results" role="listbox" aria-label="Concept search results">
+            <div className="cs-pop" id={listboxId} role="listbox" aria-label="Concept search results">
               {results.length === 0
                 ? <div className="cs-empty">No concept matches “{trimmedQuery}”.</div>
                 : <>
@@ -161,7 +169,8 @@ export default function ConceptChipBar({ state, onHighlight }) {
                   {results.map((r, i) => {
                     const parent = r.id.includes('/') ? r.id.slice(0, r.id.lastIndexOf('/') + 1) : ''
                     return (
-                      <button key={r.id} type="button" role="option" aria-selected={i === cursor}
+                      <button key={r.id} id={optionId(r.id)} type="button" role="option"
+                        tabIndex={-1} aria-selected={i === cursor}
                         className={'cs-res' + (i === cursor ? ' cursor' : '')}
                         onMouseEnter={() => setCursor(i)} onClick={() => commitConcept(r.id)}
                         title={`${r.id} · ${r.count} experiment(s)`}>

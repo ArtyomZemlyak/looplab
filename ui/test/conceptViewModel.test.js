@@ -3,8 +3,24 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import {
   experimentsByConcept, deltaTone, fmtCell, visibleConceptRows, conceptLeaf,
-  CONCEPT_COLUMNS, DEFAULT_COLUMNS,
+  relationshipProjectionCopy, CONCEPT_COLUMNS, DEFAULT_COLUMNS,
 } from '../src/conceptViewModel.js'
+
+test('relationship copy discloses derived co-occurrence and stays neutral for mixed lenses', () => {
+  assert.deepEqual(relationshipProjectionCopy(['uses']), {
+    relationTypes: 'uses', linkDescription: 'projected uses links', derivationNote: '',
+  })
+  const derived = relationshipProjectionCopy(['co_occurs'])
+  assert.equal(derived.relationTypes, 'co-occurrence')
+  assert.equal(derived.linkDescription, 'projected co-occurrence links')
+  assert.match(derived.derivationNote, /derived from the concept memberships in this frame.*not recorded edge claims/i)
+
+  const mixed = relationshipProjectionCopy(['uses', 'co_occurs'])
+  assert.equal(mixed.relationTypes, 'uses, co-occurrence')
+  assert.equal(mixed.linkDescription, 'projected uses, co-occurrence links')
+  assert.match(mixed.derivationNote, /derived from the concept memberships in this frame/i)
+  assert.doesNotMatch(mixed.linkDescription, /recorded/i)
+})
 
 test('experimentsByConcept inverts, canonicalizes, dedups, keeps many-to-many', () => {
   const nc = { 0: ['loss/dcl', 'arch/moe'], 1: ['loss/dcl'], 2: ['raw-syn'] }

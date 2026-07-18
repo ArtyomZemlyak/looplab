@@ -9,7 +9,7 @@ import {
 import { deadlineRequest } from './requestDeadline.js'
 import { getRunAccess } from './runMode.js'
 import {
-  visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
+  relationshipProjectionCopy, visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
   CONCEPT_COLUMNS, DEFAULT_COLUMNS,
 } from './conceptViewModel.js'
 import { filterConceptTree, experimentRefMatches } from './conceptSearch.js'
@@ -530,10 +530,11 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   // in the same DFS visibleConceptRows already runs — search only widens `expanded` and trims the result.
   const edgeProjection = data?.requested_lens_spec?.kind === 'edge'
     && data?.lens_contract?.fallback !== 'no_matching_edges'
-  const relationshipTypes = data?.requested_lens_spec?.rels?.join(', ') || ''
+  const relationshipCopy = relationshipProjectionCopy(data?.requested_lens_spec?.rels)
+  const relationshipTypes = relationshipCopy.relationTypes
   const projectionLabel = edgeProjection ? 'Concept relationships' : 'Concept hierarchy'
   const projectionAriaLabel = edgeProjection
-    ? `Concept relationship view for recorded ${relationshipTypes} links`
+    ? `Concept relationship view for ${relationshipCopy.linkDescription}`
     : 'Concept hierarchy'
   const projectionDescription = data ? [
     'concept-metric-context',
@@ -547,8 +548,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   </div>
   const relationshipLegend = edgeProjection && <div id="concept-relationship-legend"
     className="cv-resource-note relationship-legend" role="note">
-    Relationship view · recorded {relationshipTypes} links. Indentation shows one primary display
-    parent; “+N links” exposes additional recorded parents. This is not a taxonomy hierarchy.
+    Relationship view · {relationshipCopy.linkDescription}.
+    {relationshipCopy.derivationNote && <> {relationshipCopy.derivationNote}</>}
+    {' '}Indentation shows one primary display parent; “+N links” exposes additional projected
+    parents. This is not a taxonomy hierarchy.
   </div>
   const filter = useMemo(() => filterConceptTree(data?.tree, byConcept, query, { edgeProjection }),
     [data, byConcept, query, edgeProjection])
@@ -1289,7 +1292,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         : 'This frame comes from a non-authoritative recoverable event prefix. Treat every included membership as provisional.'}
     </div>}
     {data.lens_contract.fallback === 'no_matching_edges' && <div className="cv-resource-note" role="status">
-      No matching edges were recorded for the requested {data.requested_lens} lens; showing the is-a hierarchy instead.
+      No matching relationship links were available for the requested {data.requested_lens} lens; showing the is-a hierarchy instead.
     </div>}
     {data.historical && <div className="cv-resource-note" role="status">Historical concept frame at sequence {data.captured_seq} of {data.max_seq}.</div>}
     <div className="cv-resource-note epistemic" role="note">Concept memberships are recorded claims; taxonomy semantics are not independently verified.</div>
@@ -1317,7 +1320,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         const edgeProjection = Array.isArray(node?.cross_parents)
         const conceptLabel = edgeProjection ? id : conceptLeaf(id)
         const crossParentSummary = crossParents.length
-          ? `Additional display ${crossParents.length === 1 ? 'parent' : 'parents'} via recorded ${linkKind} ${crossParents.length === 1 ? 'link' : 'links'}: ${crossParents.join(', ')}`
+          ? `Additional display ${crossParents.length === 1 ? 'parent' : 'parents'} via projected ${linkKind} ${crossParents.length === 1 ? 'link' : 'links'}: ${crossParents.join(', ')}`
           : ''
         return <Fragment key={id}><tr className={'cv-crow' + (node?.tagged ? ' tagged' : ' ghost') + (conceptHit ? ' hit' : '')}>
           <td className="cv-name" style={{ paddingLeft: 12 + depth * 18 }}>

@@ -17,6 +17,22 @@ export const CONCEPT_COLUMNS = [
 ]
 export const DEFAULT_COLUMNS = ['touched', 'best', 'delta_best']
 
+// CODEX AGENT: `co_occurs` is materialized from the CURRENT membership projection, while the other
+// relationship edges are persisted claims. Use neutral "projected" wording for the shared edge view
+// and disclose co-occurrence derivation explicitly instead of calling every displayed link recorded.
+export function relationshipProjectionCopy(rels = []) {
+  const source = Array.isArray(rels) ? rels : []
+  const relationTypes = source.map(rel => rel === 'co_occurs' ? 'co-occurrence' : rel).join(', ')
+    || 'relationship'
+  return {
+    relationTypes,
+    linkDescription: `projected ${relationTypes} links`,
+    derivationNote: source.includes('co_occurs')
+      ? 'Co-occurrence links are derived from the concept memberships in this frame; they are not recorded edge claims.'
+      : '',
+  }
+}
+
 const MAX_VISIBLE_ROWS = 10_000
 const MAX_TREE_DEPTH = 256
 const MAX_TREE_REFERENCES = 50_000

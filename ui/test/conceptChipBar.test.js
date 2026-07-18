@@ -248,7 +248,14 @@ test('search previews a graph highlight and commits a concept on result click', 
       }))
       await Promise.resolve()
     })
-    assert.equal(document.querySelector('.cs-res')?.getAttribute('aria-selected'), 'true')
+    const freshInput = document.querySelector('.cs-input')
+    const freshResult = document.querySelector('.cs-res')
+    assert.equal(freshResult?.getAttribute('aria-selected'), 'true')
+    assert.equal(freshInput.getAttribute('aria-autocomplete'), 'list')
+    assert.ok(freshResult.id, 'each option has a stable DOM id')
+    assert.equal(freshInput.getAttribute('aria-activedescendant'), freshResult.id)
+    assert.equal(document.getElementById(freshInput.getAttribute('aria-controls')), freshResult.parentElement)
+    assert.equal(freshResult.tabIndex, -1, 'DOM focus remains on the combobox input')
     await act(async () => {
       document.querySelector('.cs-input').dispatchEvent(
         new dom.window.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
@@ -267,6 +274,20 @@ test('search previews a graph highlight and commits a concept on result click', 
     // ranked results are listed; the exact-leaf `loss` ranks first
     const resultNames = [...document.querySelectorAll('.cs-res')].map(r => r.textContent)
     assert.ok(resultNames.some(t => t.includes('loss')))
+    const input = document.querySelector('.cs-input')
+    const options = [...document.querySelectorAll('.cs-res')]
+    const stableOptionIds = options.map(option => option.id)
+    assert.equal(input.getAttribute('aria-activedescendant'), options[0].id)
+    await act(async () => {
+      input.focus()
+      input.dispatchEvent(new dom.window.KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }))
+      await Promise.resolve()
+    })
+    assert.equal(document.activeElement, input)
+    assert.equal(input.getAttribute('aria-activedescendant'), options[1].id)
+    assert.equal(options[1].getAttribute('aria-selected'), 'true')
+    assert.deepEqual([...document.querySelectorAll('.cs-res')].map(option => option.id), stableOptionIds,
+      'moving the keyboard cursor must not rewrite option identity')
     // no pinned selection yet
     assert.equal(document.querySelector('.cb-pill'), null)
 
