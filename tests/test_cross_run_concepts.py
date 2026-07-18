@@ -167,7 +167,7 @@ def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
 
 def test_context_pack_surfaces_consistent_help_hurt_tendency_advisory_only():
     from looplab.engine.claims import build_context_pack, render_context_pack
-    overview = {"n_runs": 2, "n_concepts": 3, "concepts": [
+    overview = {"n_runs": 2, "n_concepts": 3, "source_complete": True, "concepts": [
         {"concept": "loss/a", "n_runs": 2, "n_helped": 2, "n_neutral": 0, "n_hurt": 0},
         {"concept": "loss/c", "n_runs": 2, "n_helped": 0, "n_neutral": 0, "n_hurt": 2},
         {"concept": "loss/b", "n_runs": 2, "n_helped": 1, "n_neutral": 0, "n_hurt": 1},  # mixed -> neither
@@ -411,8 +411,104 @@ def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
     assert _CONCEPT in cp["matched_concepts"]
     assert cp["prior_runs"][0]["run_id"] == "prior-1"
     assert cp["prior_runs"][0]["outcomes"][_CONCEPT] == 0.88
+    assert cp["v"] == 2 and cp["prior_runs_complete"] is True
+    assert cp["concept_source"] == {
+        "source_complete": True,
+        "partial_capsules": 0,
+        "source_unknown_capsules": 0,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    }
+    run = cp["prior_runs"][0]
+    assert run["run_best_metric"] == 0.88
+    assert run["matched_concepts"] == [_CONCEPT]
+    assert run["matched_concept_outcomes"] == [{
+        "concept": _CONCEPT, "outcome_retained": True, "outcome": 0.88}]
+    assert run["source_receipt"] == {
+        "concepts_total": 1,
+        "concepts_omitted": 0,
+        "concepts_complete": True,
+        "concept_outcomes_total": 1,
+        "concept_outcomes_omitted": 0,
+        "concept_outcomes_complete": True,
+    }
     assert "similarity" in cp["prior_runs"][0]        # receipt carries the ranking similarity
     assert cp["stance"] == "balanced"
+
+
+def test_cross_run_prior_separates_matched_outcome_from_run_best_and_marks_legacy_partial(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    fp = task_fingerprint("dataset", "max", "dense retrieval", "recall", universal=True)
+    legacy = build_concept_capsule(
+        run_id="legacy", fingerprint=fp, direction="max",
+        concepts=[_CONCEPT, "loss/sibling"], best_metric=0.9,
+        concept_outcomes={_CONCEPT: 0.1, "loss/sibling": 0.9},
+    )
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy.pop(f"{stem}_{suffix}")
+    ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(legacy)
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    eng = _GateEngine(s, mem)
+    eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="different implementation")
+
+    assert eng._graded_novelty_precheck(fold(s.read_all()), idea) is idea
+
+    event = fold(s.read_all()).cross_run_priors[0]
+    run = event["prior_runs"][0]
+    assert run["run_best_metric"] == 0.9
+    assert run["matched_concept_outcomes"] == [{
+        "concept": _CONCEPT, "outcome_retained": True, "outcome": 0.1}]
+    assert run["outcomes"] == {_CONCEPT: 0.1}   # legacy alias remains concept-scoped, never run-best
+    assert run["source_receipt"] == {
+        "concepts_total": None,
+        "concepts_omitted": None,
+        "concepts_complete": False,
+        "concept_outcomes_total": None,
+        "concept_outcomes_omitted": None,
+        "concept_outcomes_complete": False,
+    }
+    assert event["concept_source"] == {
+        "source_complete": False,
+        "partial_capsules": 1,
+        "source_unknown_capsules": 1,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    }
+
+
+def test_cross_run_prior_completeness_includes_partial_nonmatching_capsules(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    _seed_prior(mem, _CONCEPT, run_id="complete-match")
+    fp = task_fingerprint("dataset", "max", "dense retrieval", "recall", universal=True)
+    legacy_nonmatching = build_concept_capsule(
+        run_id="legacy-nonmatch", fingerprint=fp, direction="max",
+        concepts=["other/retained"], concept_outcomes={"other/retained": 0.4},
+    )
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy_nonmatching.pop(f"{stem}_{suffix}")
+    ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(legacy_nonmatching)
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    eng = _GateEngine(s, mem)
+    eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="different implementation")
+
+    assert eng._graded_novelty_precheck(fold(s.read_all()), idea) is idea
+
+    event = fold(s.read_all()).cross_run_priors[0]
+    assert event["prior_runs_total"] == 1
+    assert event["prior_runs"][0]["source_receipt"]["concepts_complete"] is True
+    assert event["concept_source"] == {
+        "source_complete": False,
+        "partial_capsules": 1,
+        "source_unknown_capsules": 1,
+        "source_concepts_omitted": 0,
+        "source_outcomes_omitted": 0,
+    }
 
 
 def test_cross_run_prior_never_changes_the_gate_decision(tmp_path):

@@ -417,7 +417,7 @@ class NoveltyGateMixin:
             from pathlib import Path
             from looplab.engine.concept_registry import (canonicalize_concept, canonicalize_concepts,
                                                          load_concept_aliases, load_concept_splits)
-            from looplab.engine.memory import ConceptCapsuleStore
+            from looplab.engine.memory import ConceptCapsuleStore, _capsule_completeness
             # NOTE (full-CR TODO, §21.20.13 CR2a): this reloads+scans the whole capsule JSONL per proposal;
             # a bounded, versioned, scope-keyed query index replaces it once the retrieval planner lands.
             store = ConceptCapsuleStore(Path(self.memory_dir) / "concept_capsules.jsonl")
@@ -435,18 +435,37 @@ class NoveltyGateMixin:
             canonical_caps = []
             for similarity, capsule in caps:
                 raw = [str(x) for x in (capsule.get("concepts") or []) if str(x)]
-                concepts = canonicalize_concepts(raw, aliases=aliases, splits=splits)
-                if not concepts:
-                    continue
-                outcomes = {}
+                concept_meta = _capsule_completeness(capsule, "concepts", len(raw))
                 raw_outcomes = capsule.get("concept_outcomes") or {}
+                outcome_meta = _capsule_completeness(
+                    capsule, "concept_outcomes",
+                    len(raw_outcomes) if isinstance(raw_outcomes, dict) else 0,
+                )
+                if concept_meta is None or outcome_meta is None:
+                    continue
+                concepts = canonicalize_concepts(raw, aliases=aliases, splits=splits)
+                outcomes = {}
                 if isinstance(raw_outcomes, dict):
                     for source in sorted(raw_outcomes, key=str):
                         target = canonicalize_concept(source, sibling_concepts=raw,
                                                       aliases=aliases, splits=splits)
                         if target and target in concepts and target not in outcomes:
                             outcomes[target] = raw_outcomes[source]
-                normalized = {**capsule, "concepts": concepts, "concept_outcomes": outcomes}
+                # CODEX AGENT: canonicalization can merge/purge retained labels, so completeness cannot be
+                # recomputed from the transformed list. Freeze the already-validated raw capsule receipt
+                # before replacing membership with its governed projection.
+                source_receipt = {
+                    "concepts_total": concept_meta[0],
+                    "concepts_omitted": concept_meta[1],
+                    "concepts_complete": concept_meta[2],
+                    "concept_outcomes_total": outcome_meta[0],
+                    "concept_outcomes_omitted": outcome_meta[1],
+                    "concept_outcomes_complete": outcome_meta[2],
+                }
+                normalized = {
+                    **capsule, "concepts": concepts, "concept_outcomes": outcomes,
+                    "_source_receipt": source_receipt,
+                }
                 canonical_caps.append((similarity, normalized))
                 prior.update(concepts)
             return prior, canonical_caps, aliases, splits
@@ -455,8 +474,10 @@ class NoveltyGateMixin:
 
     def _record_cross_run_prior(self, state: RunState, matched: set, prior_caps) -> None:
         """SURFACE (never gate) the cross-run prior: which of the idea's OWN concepts were tried before, in
-        which runs, with the best outcome each — folds into `RunState.cross_run_priors` for the trace/UI
-        ('tried in run X -> metric Y'). Best-effort; audit-only, so a failure never blocks proposing.
+        which runs, with each matched concept's retained outcome and the explicitly run-level best metric —
+        folds into `RunState.cross_run_priors` for the trace/UI. Best-effort; audit-only, so a failure never
+        blocks proposing. Every v2 event carries the source-capsule completeness receipt; legacy event fields
+        remain additive aliases so historical consumers keep folding.
         `matched` is the idea∩prior overlap already computed by the caller (never the gating grade)."""
         try:
             matched = sorted(matched)
@@ -465,20 +486,74 @@ class NoveltyGateMixin:
             # Filter capsules to those actually contributing a matched concept FIRST, THEN cap — so a
             # matching capsule past the top-N is never silently dropped from the receipt (CODEX).
             runs = []
+            source_receipts = []
             for sim, c in prior_caps:
+                source = c.get("_source_receipt")
+                if not isinstance(source, dict):
+                    source = {
+                        "concepts_total": None, "concepts_omitted": None,
+                        "concepts_complete": False,
+                        "concept_outcomes_total": None, "concept_outcomes_omitted": None,
+                        "concept_outcomes_complete": False,
+                    }
+                # CODEX AGENT: source completeness is a denominator over ALL eligible prior capsules. A
+                # partial row where the target is not retained may have omitted that target; filtering to
+                # matching rows would repeat the false-completeness bug fixed in concept_card.
+                source_receipts.append(source)
                 shared = sorted(set(str(x) for x in (c.get("concepts") or [])) & set(matched))
                 if not shared:
                     continue
                 oc = c.get("concept_outcomes") or {}
-                runs.append({"run_id": c.get("run_id"), "best_metric": c.get("best_metric"),
-                             "similarity": round(float(sim), 4),
-                             "concepts": shared, "outcomes": {k: oc[k] for k in shared if k in oc}})
+                retained_outcomes = {k: oc[k] for k in shared if k in oc}
+                run_best = c.get("best_metric")
+                runs.append({
+                    "run_id": c.get("run_id"),
+                    # Legacy aliases remain through the additive v2 transition. New consumers must label
+                    # run_best_metric as RUN-level and use matched_concept_outcomes for concept evidence.
+                    "best_metric": run_best,
+                    "run_best_metric": run_best,
+                    "similarity": round(float(sim), 4),
+                    "concepts": shared,
+                    "matched_concepts": shared,
+                    "outcomes": retained_outcomes,
+                    "matched_concept_outcomes": [
+                        {"concept": concept, "outcome_retained": concept in oc,
+                         "outcome": oc.get(concept)}
+                        for concept in shared
+                    ],
+                    "source_receipt": source,
+                })
             if not runs:
                 return
             runs.sort(key=lambda r: (-r["similarity"], str(r["run_id"])))   # deterministic, most-similar first
+            returned_runs = runs[:8]
+            partial = sum(
+                not receipt.get("concepts_complete")
+                or not receipt.get("concept_outcomes_complete")
+                for receipt in source_receipts
+            )
+            unknown = sum(
+                receipt.get("concepts_total") is None
+                or receipt.get("concept_outcomes_total") is None
+                for receipt in source_receipts
+            )
+            concept_source = {
+                "source_complete": partial == 0,
+                "partial_capsules": partial,
+                "source_unknown_capsules": unknown,
+                "source_concepts_omitted": sum(
+                    receipt.get("concepts_omitted") or 0 for receipt in source_receipts),
+                "source_outcomes_omitted": sum(
+                    receipt.get("concept_outcomes_omitted") or 0 for receipt in source_receipts),
+            }
             self.store.append(EV_CROSS_RUN_PRIOR, {
+                "v": 2,
                 "node_id": max(state.nodes, default=-1) + 1,
-                "matched_concepts": matched, "prior_runs": runs[:8],
+                "matched_concepts": matched, "prior_runs": returned_runs,
+                "prior_runs_total": len(runs),
+                "prior_runs_omitted": len(runs) - len(returned_runs),
+                "prior_runs_complete": len(runs) == len(returned_runs),
+                "concept_source": concept_source,
                 "stance": getattr(self, "_novelty_stance", None)})
         except Exception:  # noqa: BLE001 — audit only, never block proposing
             return
