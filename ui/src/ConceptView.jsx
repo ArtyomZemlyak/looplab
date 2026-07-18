@@ -279,14 +279,14 @@ const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 export function conceptProjectionKey(state) {
   const nodes = entries(state?.nodes).map(([key, node]) => [
     key, node?.id, node?.attempt, node?.status, node?.metric, node?.confirmed_mean,
-    node?.feasible, !!node?.idea,
+    node?.feasible, !!node?.idea, !!node?.tombstoned,
   ])
   const edges = entries(state?.concept_edges).map(([key, edge]) => [
     key, edge?.src, edge?.rel, edge?.dst, edge?.confidence,
   ])
   return JSON.stringify([state?.direction || 'max', state?.best_node_id ?? null,
     entries(state?.node_concepts), entries(state?.node_concept_provenance),
-    entries(state?.concept_consolidation), edges, nodes])
+    entries(state?.concept_consolidation), edges, nodes, state?.aborted_nodes || []])
 }
 
 const initial = { scope: '', requestVersion: '', status: 'loading', data: null, timeout: false }

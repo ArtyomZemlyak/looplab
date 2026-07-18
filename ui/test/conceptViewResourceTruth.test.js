@@ -323,6 +323,8 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       { ...state, node_concept_provenance: { 0: 'classifier-v2' } },
       { ...state, nodes: { 0: { ...state.nodes[0], attempt: 1 } } },
       { ...state, nodes: { 0: { ...state.nodes[0], status: 'pending' } } },
+      { ...state, nodes: { 0: { ...state.nodes[0], tombstoned: true } } },
+      { ...state, aborted_nodes: [0] },
     ]) assert.notEqual(baseProjectionKey, conceptModule.conceptProjectionKey(changed))
 
     await render()
