@@ -47,6 +47,12 @@ test('run workspace navigation announces deep links without stealing focus on lo
   assert.doesNotMatch(runView, /\[routeFocusPhase, route\.navigationRevision, view\]/,
     'ordinary workspace view clicks must keep focus on the invoking tab')
   assert.match(runView, /ref=\{routeMainRef\}[\s\S]*?aria-label=\{workspaceRouteLabel\}/)
+  const routeMains = runView.match(/<main\b[^>]*data-route-main[^>]*>/g) || []
+  assert.equal(routeMains.length, 4, 'every run resource phase has one route-level main')
+  for (const main of routeMains) {
+    assert.match(main, /aria-(?:label|labelledby)=/,
+      'loading, failure, fence, history, and ready route mains all need an accessible name')
+  }
   assert.doesNotMatch(conceptView, /data-route-main/,
     'Concept projection regions must not compete with the one route-level main landmark')
   assert.equal((conceptView.match(/role="region"/g) || []).length, 2,

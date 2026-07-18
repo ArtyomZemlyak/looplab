@@ -64,7 +64,7 @@ Focused Concept Map, governance workbench or canonical portfolio Atlas exists.
 
 The owner run workspace ships a bounded per-run Concepts tree/table backed by `ConceptFrame` v1. The response
 is bound to the exact run generation and captured event prefix; carries requested/captured/max sequence,
-completeness and authority receipts; exposes typed hierarchy projections; and returns self-contained,
+completeness and authority receipts; exposes typed lens projections; and returns self-contained,
 generation-bound experiment references plus descriptive per-concept outcome rollups. HTTP success alone is not
 projection truth: the browser validates identity, topology, bounds, provenance and authority before rendering.
 
@@ -80,7 +80,7 @@ entity and a measured comprehension need are established.
 | Primary concept axis | one compatibility grouping derived from the current folded concept memberships | not a Direction entity, taxonomy, causal claim or cross-run identity |
 | Concept chip bar | canonical breadcrumb browsing plus OR selection/highlight of matching current memberships; canonical order stays stable when counts change | not a complete graph, proof system, metric sort or winner selector |
 | Collapsed/expanded groups | active-lifecycle counts; a filter shows matched/total, dims zero matches and computes best/status only over matching eligible members | not evidence that excluded, aborted or tombstoned attempts never existed |
-| Concepts tree/table | bounded current/historical frame; dynamic recorded-relation vocabulary; generation-bound refs; descriptive rollups and explicit metric context | not a complete taxonomy, scientific verification or Atlas |
+| Concepts tree/table | bounded current/historical frame; dynamic projected-relationship vocabulary; generation-bound refs; descriptive rollups and explicit metric context | not a complete taxonomy, scientific verification or Atlas |
 | Create lens · paid | ask the configured provider for a validated relation-subset projection spec; the spec changes view state, not run meaning | never creates a concept, edge, assignment or governance decision |
 | Atlas preview | independently fetched bounded portfolio response slices | not a Saved Scope, coherent snapshot, complete corpus or canonical concept graph |
 

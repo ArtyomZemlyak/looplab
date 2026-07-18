@@ -827,7 +827,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     await click(crossLink)
     assert.equal(crossLink.parentElement?.open, true)
     assert.match(crossLink.parentElement?.textContent || '', /projected uses link.*training\/contrastive/is,
-      'keyboard and touch users can open the additional recorded-parent evidence')
+      'keyboard and touch users can open the additional projected-parent evidence')
 
     generation = GENERATION_A
     await render()

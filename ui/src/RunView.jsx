@@ -836,24 +836,25 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       {onBack ? <button className="btn sm ghost" onClick={onBack}>← runs</button>
         : <span className="pill">read-only review</span>}
     </div>
-    <main className="run-resource-state" data-route-main tabIndex={-1} aria-live="polite">
+    <main className="run-resource-state" data-route-main tabIndex={-1} aria-live="polite"
+      aria-labelledby="run-state">
       {runStatus === 'not_found' ? <>
         <div className="resource-state-icon" aria-hidden="true">404</div>
-        <h1>Run not found</h1>
+        <h1 id="run-state">Run not found</h1>
         <p><code>{runId}</code> does not exist or may have been removed.</p>
         <div className="resource-state-actions">{onBack && <button className="btn primary" onClick={onBack}>Back to runs</button>}<button className="btn" onClick={retryRun}>Retry</button></div>
       </> : runStatus === 'gone' ? <>
         <div className="resource-state-icon" aria-hidden="true">×</div>
-        <h1>Review access ended</h1>
+        <h1 id="run-state">Review access ended</h1>
         <p>{runError || 'This review link expired or was revoked.'}</p>
       </> : runStatus === 'error' ? <>
         <div className="resource-state-icon" aria-hidden="true">!</div>
-        <h1>Could not load run</h1>
+        <h1 id="run-state">Could not load run</h1>
         <p>{runError || 'Check that the LoopLab server is reachable.'}</p>
         <div className="resource-state-actions"><button className="btn primary" onClick={retryRun}>Retry</button>{onBack && <button className="btn" onClick={onBack}>Back to runs</button>}</div>
       </> : <>
         <div className="history-spinner" aria-hidden="true" />
-        <h1>Opening run…</h1><p>Loading the latest search state.</p>
+        <h1 id="run-state">Opening run…</h1><p>Loading the latest search state.</p>
       </>}
     </main>
   </div>
@@ -864,9 +865,9 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
         : <span className="pill">read-only review</span>}
     </div>
     <main className="run-resource-state stale-route-state" data-route-main tabIndex={-1}
-      role={generationMismatch ? 'alert' : 'status'}>
+      aria-labelledby="run-state" role={generationMismatch ? 'alert' : 'status'}>
       <div className="resource-state-icon" aria-hidden="true">{generationMismatch ? '↺' : '…'}</div>
-      <h1>{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
+      <h1 id="run-state">{generationMismatch ? 'This diagnostic link targets an earlier run generation' : 'Verifying diagnostic link…'}</h1>
       {generationMismatch ? <>
         <p>The run was reset or replaced after this link was created. Node ids and sequence numbers may now mean something else, so LoopLab will not reinterpret the link.</p>
         <div className="route-generation-detail">
@@ -915,11 +916,12 @@ export default function RunView({ runId, onBack, reviewMode = false, reviewMeta 
       <span>read-only</span>
       <button className="btn sm primary" onClick={returnToLive}>Return to live</button>
     </div>
-    <main className="history-resource" data-route-main tabIndex={-1}>
+    <main className="history-resource" data-route-main tabIndex={-1}
+      aria-labelledby="run-state">
       {currentHistory?.status === 'error'
-        ? <><h1>Snapshot unavailable</h1><p>{currentHistory.error}</p>
+        ? <><h1 id="run-state">Snapshot unavailable</h1><p>{currentHistory.error}</p>
             <button className="btn" onClick={() => setHistoryRetry(n => n + 1)}>Retry</button></>
-        : <><div className="history-spinner" aria-hidden="true" /><h1>Loading snapshot seq {viewSeq}…</h1>
+        : <><div className="history-spinner" aria-hidden="true" /><h1 id="run-state">Loading snapshot seq {viewSeq}…</h1>
             <p>The live workspace is hidden until this exact historical state resolves.</p></>}
     </main>
   </div>

@@ -2405,7 +2405,8 @@ body.asst-side-open .app-shell-main { margin-right: var(--asst-side-w, 440px); }
 .cv-lensnew { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .cv-lensnew .text { min-width: 0; width: 148px; font-size: 12px; }
 .cv-lenserr { color: var(--fail-text); font-size: 11px; max-width: 260px; }
-.cv-tree-actions { display: flex; align-items: center; gap: 6px; }
+.cv-tree-actions { display: flex; grid-column: 1 / -1; align-items: center; flex-wrap: wrap; gap: 6px; }
+.cv-tree-actions .btn { white-space: nowrap; }
 .cv-cols { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; padding-top: 10px; border-top: 1px solid var(--line); }
 .cv-col { min-height: 30px; padding: 4px 10px; cursor: pointer; border: 1px solid var(--line-2); border-radius: 999px; background: var(--bg-2); color: var(--fg-dim); font-size: 11px; }
 .cv-col.on { border-color: var(--accent); color: var(--fg); box-shadow: 0 0 0 1px var(--accent); }

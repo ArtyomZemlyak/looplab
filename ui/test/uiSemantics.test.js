@@ -4,6 +4,14 @@ import { readFile } from 'node:fs/promises'
 
 const source = name => readFile(new URL(`../src/${name}`, import.meta.url), 'utf8')
 
+test('Concept bulk actions retain scannable desktop labels', async () => {
+  const css = await source('styles.css')
+  assert.match(css, /\.cv-tree-actions \{[^}]*grid-column:\s*1 \/ -1;[^}]*flex-wrap:\s*wrap;/s,
+    'bulk actions need the full toolbar row instead of a squeezed first grid column')
+  assert.match(css, /\.cv-tree-actions \.btn \{\s*white-space:\s*nowrap;/,
+    'Expand and Collapse concept rows must remain one-line desktop actions')
+})
+
 test('ephemeral command results use polite atomic live regions', async () => {
   const [runView, assistant] = await Promise.all([source('RunView.jsx'), source('AssistantBar.jsx')])
   assert.match(runView, /className="toast" role="status" aria-live="polite" aria-atomic="true"/)

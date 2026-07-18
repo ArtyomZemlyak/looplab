@@ -23,7 +23,6 @@ const SOURCE_READINESS = [
   ['claimCuration', 'Claim steward log'],
 ]
 
-const metricText = value => value == null ? '—' : Number(value).toLocaleString(undefined, { maximumSignificantDigits: 6 })
 const countLabel = (count, singular, plural = `${singular}s`) => `${count} ${count === 1 ? singular : plural}`
 const EPISTEMIC_COPY = {
   supported: 'support-only evidence',
@@ -44,13 +43,11 @@ export function AtlasRunReference({ run }) {
   const context = [run.task && `task: ${run.task}`, run.scope && `scope: ${run.scope}`]
     .filter(Boolean).join(' · ')
   const disclosure = run.metricSuppressed
-    ? 'Metric hidden · task/scope comparison context or optimization orientation was not recorded.'
+    ? 'Metric hidden · Missing task/scope or objective orientation.'
     : run.metric != null && run.optimizationOrientation
-    ? `Not cross-run comparable · Primary objective metric · unnamed · unit not recorded · optimization orientation: ${run.optimizationOrientation} · value ${metricText(run.metric)}`
+    ? `Not cross-run comparable · Primary objective metric · name/unit not recorded · objective orientation: ${run.optimizationOrientation} · value ${run.metric.toLocaleString(undefined, { maximumSignificantDigits: 6 })}`
     : ''
-  const fullLabel = [run.runId, context, disclosure].filter(Boolean).join(' · ')
-  return <a href={`#/run/${encodeURIComponent(run.runId)}`}
-    aria-label={`Open run. ${fullLabel}`} title={fullLabel}>
+  return <a href={`#/run/${encodeURIComponent(run.runId)}`}>
     <span className="atlas-runref-id">{run.runId}</span>
     {context && <span className="atlas-runref-context">{context}</span>}
     {disclosure && <span className={run.metricSuppressed
@@ -417,7 +414,7 @@ export default function ResearchAtlas({ onBack }) {
                     return <li key={`${entry.runId}-${entry.at}-${index}`}>
                       <div className="atlas-curation-meta"><strong className="atlas-curation-run">{entry.runId
                         ? <a href={`#/run/${encodeURIComponent(entry.runId)}`}
-                             aria-label={`Open run ${entry.runId}`} title={entry.runId}>{entry.runId}</a>
+                            title={entry.runId}>{entry.runId}</a>
                         : 'Portfolio steward'}</strong><span className="atlas-curation-time"
                           title={timeLabel}>{timeLabel}</span></div>
                       <p><span className="atlas-curation-kind">{entry.kind} steward</span> · {countLabel(proposals, 'proposal')}

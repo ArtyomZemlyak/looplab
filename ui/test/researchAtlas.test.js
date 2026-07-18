@@ -111,14 +111,14 @@ test('Atlas suppresses context-free raw metrics and never renders a bare optimiz
     const scopedText = scopedDom.window.document.body.textContent
 
     assert.match(legacyText,
-      /legacy-run.*Metric hidden.*task\/scope comparison context or optimization orientation was not recorded/is,
+      /legacy-run.*Metric hidden.*Missing task\/scope or objective orientation/is,
       'a sighted user can see why an available raw value was not rendered')
     assert.doesNotMatch(legacyMarkup, /0\.8|\bmax\b/i,
       'the raw value and shorthand direction must not leak into a context-free run reference')
-    assert.match(legacyDom.window.document.querySelector('a').getAttribute('aria-label'),
-      /Metric hidden.*task\/scope comparison context/is)
+    assert.equal(legacyDom.window.document.querySelector('a').textContent, legacyText,
+      'the native link name contains the same visible disclosure without duplicate ARIA copy')
     assert.match(scopedText,
-      /task: task-a.*scope: holdout set.*Not cross-run comparable.*Primary objective metric.*unnamed.*unit not recorded.*optimization orientation: maximize.*value 0[.,]8/is)
+      /task: task-a.*scope: holdout set.*Not cross-run comparable.*Primary objective metric.*name\/unit not recorded.*objective orientation: maximize.*value 0[.,]8/is)
     assert.ok(scopedText.indexOf('Not cross-run comparable') < scopedText.indexOf('value'),
       'the visible comparability warning precedes the numeric value')
     assert.doesNotMatch(scopedText, /\bmax\s+0[.,]8\b/i,
