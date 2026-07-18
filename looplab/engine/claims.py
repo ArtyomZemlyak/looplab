@@ -1096,15 +1096,20 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     if concept_overview:
         from looplab.engine.memory import concept_profit_tendencies
         rows = [e for e in (concept_overview.get("concepts") or []) if isinstance(e, dict)]
+        source_complete = concept_overview.get("source_complete") is True
         # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN rank tendency (advisory
         # only — prompts, never selection). The threshold lives in ONE shared helper so the context pack and
         # the cross_run_atlas tool can never diverge; a concept with mixed/thin evidence appears in neither.
-        tendency = concept_profit_tendencies(rows, limit=max_claims)
+        # CODEX AGENT: consistency also needs a complete denominator. A non-matching partial capsule may
+        # have omitted this exact concept and an opposite sign, so retained positive rows remain observable
+        # below but cannot support a directional portfolio tendency until every capsule receipt is exact.
+        tendency = (concept_profit_tendencies(rows, limit=max_claims) if source_complete
+                    else {"helps": [], "hurts": []})
         pack["coverage"] = {
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
             # A hand-built/older overview with no receipt is UNKNOWN, never silently exact.
-            "source_complete": concept_overview.get("source_complete") is True,
+            "source_complete": source_complete,
             "partial_capsules": concept_overview.get(
                 "partial_capsules",
                 concept_overview.get("n_runs", 0) if "source_complete" not in concept_overview else 0),
@@ -1491,7 +1496,7 @@ def render_context_pack(pack: dict) -> str:
                 + (f"; {int(cov.get('source_unknown_capsules', 0))} legacy capsule(s) have unknown totals"
                    if cov.get("source_unknown_capsules", 0) else "")
                 + "); "
-                "coverage and tendencies describe returned observations only.")
+                "coverage describes returned observations only; directional tendencies are withheld.")
         top = ", ".join(repr(_safe_text(x, 100))
                         for x in cov.get("top_concepts", [])[:6])
         lines.append(f"Bounded live concept observations (not coverage): {cov.get('n_runs', 0)} returned "

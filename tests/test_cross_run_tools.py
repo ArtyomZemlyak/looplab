@@ -153,6 +153,27 @@ def test_atlas_reports_direction_normalized_profit_tendency(tmp_path):
     assert "RANK WORSE" in out and "loss/lose" in out
 
 
+def test_atlas_withholds_rank_tendency_when_nonmatching_legacy_capsule_is_unknown(tmp_path):
+    complete = [
+        _cap(run_id, ["loss/win", "loss/mid", "loss/lose"],
+             {"loss/win": 0.9, "loss/mid": 0.5, "loss/lose": 0.1})
+        for run_id in ("complete-a", "complete-b")
+    ]
+    legacy_nonmatching = _cap(
+        "legacy-partial", ["other/retained", "other/baseline"],
+        {"other/retained": 0.9, "other/baseline": 0.1})
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy_nonmatching.pop(f"{stem}_{suffix}")
+    _seed(tmp_path, capsules=[*complete, legacy_nonmatching])
+
+    out = CrossRunTools(tmp_path).execute("cross_run_atlas", {})
+
+    assert "WARNING: PARTIAL capsule source" in out
+    assert "rank tendency" not in out
+    assert "RANK BETTER" not in out and "RANK WORSE" not in out
+
+
 def test_atlas_rank_tendency_uses_full_overview_not_explored_display_cap(tmp_path):
     neutral = [f"axis/{letter}" for letter in "abcdefgh"]
     capsules = []

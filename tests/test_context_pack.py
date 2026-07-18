@@ -109,7 +109,7 @@ def test_partial_capsule_coverage_is_explicit_in_pack_and_rendering():
 def test_coverage_helps_hurts_carry_run_counts():
     # E3: the profit tendency must surface the run COUNT (n_helped/n_hurt), not just the concept name,
     # so the Researcher can weigh a strong tendency (n=5) against a thin one (n=2).
-    ov = {"n_runs": 6, "n_concepts": 3, "concepts": [
+    ov = {"n_runs": 6, "n_concepts": 3, "source_complete": True, "concepts": [
         {"concept": "loss/contrastive", "n_helped": 5, "n_neutral": 0, "n_hurt": 1},
         {"concept": "regularization/rdrop", "n_helped": 0, "n_neutral": 1, "n_hurt": 3},
     ]}
@@ -118,6 +118,22 @@ def test_coverage_helps_hurts_carry_run_counts():
     assert pack["coverage"]["hurts"] == ["regularization/rdrop (n=3)"]
     txt = render_context_pack(pack)
     assert "(n=5)" in txt and "RANK BETTER" in txt and "(n=3)" in txt
+
+
+def test_partial_coverage_withholds_directional_tendencies():
+    ov = {"n_runs": 3, "n_concepts": 2, "source_complete": False,
+          "partial_capsules": 1, "source_unknown_capsules": 1,
+          "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+          "concepts": [
+              {"concept": "loss/contrastive", "n_helped": 2, "n_neutral": 0, "n_hurt": 0},
+          ]}
+
+    pack = build_context_pack([], concept_overview=ov, max_claims=5)
+    rendered = render_context_pack(pack)
+
+    assert pack["coverage"]["helps"] == pack["coverage"]["hurts"] == []
+    assert "directional tendencies are withheld" in rendered
+    assert "RANK BETTER" not in rendered and "RANK WORSE" not in rendered
 
 
 def test_support_and_oppose_refs_are_bounded():
