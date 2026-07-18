@@ -42,7 +42,7 @@ def test_specs_are_read_only():
     t = CrossRunTools("/tmp/whatever")
     names = {s["function"]["name"] for s in t.specs()}
     assert names == {"cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
-                     "cross_run_concept_map", "similar_runs"}
+                     "cross_run_concept_map", "similar_runs", "find_concept_slugs"}
     # no create/update/delete/ratify tool is exposed — advisory only (§22.4)
     assert not any(re for re in names if any(w in re for w in ("write", "edit", "add", "ratify", "delete")))
 

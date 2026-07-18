@@ -224,7 +224,7 @@ def parse_mem_bytes(spec) -> Optional[int]:
 def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
              log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
-             fsize_bytes: Optional[int] = None):
+             fsize_bytes: Optional[int] = None, health_check: bool = False):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -350,7 +350,8 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # in-memory tail): `communicate()` buffered the ENTIRE stdout/stderr before clamping, so an
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
-    rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel)
+    rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
+                                         health_check=health_check)
     if docker_cidfile is not None:
         # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
         # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
@@ -387,7 +388,37 @@ def _remove_docker_container(docker: str, cidfile: Path) -> None:
         pass
 
 
-def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
+class _StageHealthMonitor:
+    """Detects a DEGENERATE (diverged) training stage from its streamed stdout: a non-finite loss or
+    grad-norm (nan / inf) reported repeatedly, i.e. training that will never produce a useful model.
+
+    Universal by design — a format-agnostic token scan for `loss`/`grad_norm` immediately followed by
+    `nan`/`inf` — so it fires for HF Trainer, Lightning, or a hand-rolled loop with NO per-framework
+    config and no Developer effort (the built-in half of the hybrid guard; the Developer is separately
+    asked to add a fail-fast finite-loss assert). Deliberately STRICT (needs `threshold` such lines) so
+    an incidental `nan` token in a path/message can't trip it. Line-buffered: counts whole matched lines,
+    never double-counting a chunk boundary."""
+    _PAT = re.compile(r"(loss|grad_norm|grad[ _]norm)['\"]?\s*[:=]\s*[\[]?\s*(nan|-?inf)\b", re.IGNORECASE)
+
+    def __init__(self, threshold: int = 5):
+        self.threshold = threshold
+        self.hits = 0
+        self._buf = ""
+
+    def feed(self, text: str) -> bool:
+        """Accept a streamed chunk; return True once divergence is CONFIRMED (>= threshold non-finite
+        loss/grad lines). Idempotent-safe to call after firing."""
+        self._buf += text
+        *lines, self._buf = self._buf.split("\n")   # keep the trailing partial line for the next chunk
+        if len(self._buf) > 8192:                    # bound a pathological no-newline stream
+            self._buf = self._buf[-8192:]
+        for ln in lines:
+            if self._PAT.search(ln):
+                self.hits += 1
+        return self.hits >= self.threshold
+
+
+def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False):
     """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
     `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
@@ -411,10 +442,15 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
             logf = None
     lock = threading.Lock()
     bufs: dict[str, list[bytes]] = {"out": [], "err": []}
+    monitor = _StageHealthMonitor() if health_check else None
+    diverged = threading.Event()
 
     def _pump(stream, key):
         size = 0
-        decoder = codecs.getincrementaldecoder("utf-8")("replace") if logf is not None else None
+        # A decoder is needed to feed the health monitor even when there is no live log file.
+        scan = monitor is not None and key == "out"
+        decoder = (codecs.getincrementaldecoder("utf-8")("replace")
+                   if (logf is not None or scan) else None)
         try:
             # BufferedReader.read1 returns currently-available pipe data (up to read_chunk), so live
             # logs still update promptly; the fallback keeps the helper friendly to simple test fakes.
@@ -433,11 +469,20 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
                     buf.clear()
                     buf.append(joined)
                     size = len(joined)
-                if logf is not None:
+                if decoder is not None:
                     text = decoder.decode(chunk, final=False)
-                    with lock:
-                        logf.write(text)
-                        logf.flush()
+                    if logf is not None:
+                        with lock:
+                            logf.write(text)
+                            logf.flush()
+                    if scan and text and monitor.feed(text) and not diverged.is_set():
+                        # Confirmed divergence: mark it in the captured stderr (so the stage-failure reason
+                        # the agent sees names the cause) and signal the main loop to tree-kill early.
+                        with lock:
+                            bufs["err"].append(
+                                "\n‼ LOOPLAB health-check: training DIVERGED — non-finite loss/"
+                                "grad_norm reported repeatedly; aborting the stage early.\n".encode("utf-8"))
+                        diverged.set()
         except Exception:
             pass
         finally:
@@ -466,6 +511,16 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel):
             proc.wait(timeout=0.25)
             break
         except subprocess.TimeoutExpired:
+            if diverged.is_set():
+                # Health monitor confirmed a non-finite loss -> tree-kill NOW instead of burning the whole
+                # (often multi-hour) timeout on a model that can no longer learn. Not a timeout: the killed
+                # child exits non-zero -> command_eval's stage-failure path fires with the DIVERGED marker.
+                _kill_tree(proc)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+                break
             if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
                 _kill_tree(proc)
                 try:

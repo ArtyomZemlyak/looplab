@@ -95,6 +95,18 @@ class ProposalCuesMixin:
                   " this experiment INTRODUCES in `concepts_added`, and any inherited concept it DROPS"
                   " (e.g. swapping one technology for another) in `concepts_removed`. Leave `concepts`"
                   " empty when you author a delta — the run base and parent inheritance fill the rest.")
+        # Concept-slug REUSE (fires for EVERY node incl. node 0, which has no run base yet). A shared slug
+        # vocabulary spans ALL runs (the global concept map); an agent inventing `rdrop` when
+        # `regularization/r-drop` already exists silently breaks the cross-run prior overlap (exact-slug
+        # match). Point it at the fuzzy lookup so consistent slugs emerge at authoring time — cheaper and
+        # more robust than post-hoc aliasing. Gated on the tools being wired + concept authoring being on.
+        if (getattr(self, "_cross_run_read_tools", False) and getattr(self, "memory_dir", "")
+                and (getattr(self, "_concept_pivot", False) or getattr(self, "_concept_run_base", False))):
+            hint += ("\nConcept slugs — a shared concept vocabulary spans ALL runs (the global concept map). "
+                     "BEFORE minting a concept slug, call find_concept_slugs('<your concept, any spelling>') "
+                     "and REUSE the canonical existing slug it returns (matching is separator/case-insensitive "
+                     "+ fuzzy, so `rdrop` finds `regularization/r-drop`). Mint a NEW slug only when nothing "
+                     "matches — consistent slugs are what let cross-run priors recognise a repeated idea.")
         try:
             setattr(self.researcher, "_complexity_hint", hint)
         except Exception:  # noqa: BLE001

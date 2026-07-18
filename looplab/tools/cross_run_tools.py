@@ -26,8 +26,15 @@ _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
 _TOOL_NAMES = frozenset({
     "cross_run_prior_attempts", "cross_run_claims", "cross_run_atlas", "cross_run_search",
-    "cross_run_concept_map", "similar_runs",
+    "cross_run_concept_map", "similar_runs", "find_concept_slugs",
 })
+
+
+def _slug_norm(s: str) -> str:
+    """Separator/case-insensitive concept key so `r-drop`, `rdrop`, `R_Drop` collapse to one bucket —
+    the whole point of the fuzzy slug search (an agent writing `rdrop` must still find `regularization/
+    r-drop`). Keeps only [a-z0-9]."""
+    return re.sub(r"[^a-z0-9]", "", str(s).lower())
 _TOOL_UNAVAILABLE = "(cross-run tool unavailable)"
 _MAX_TOOL_RESULT_CHARS = 16_000
 
@@ -157,6 +164,23 @@ class CrossRunTools:
                 "sets), ranked. Use it to find which past experiments explored the same directions before "
                 "you propose — then read_run / cross_run_concept_map to dig into a specific one. Advisory.",
                 {"limit": {"type": "integer", "description": "How many similar runs to return (default 10)."}},
+                []),
+            fn_spec("find_concept_slugs",
+                "BEFORE minting a concept slug, search the EXISTING shared vocabulary (this run + all prior "
+                "runs' concept capsules) for an equivalent one and REUSE it — do NOT create a near-duplicate "
+                "(e.g. `rdrop` when `regularization/r-drop` already exists); consistent slugs are what make "
+                "cross-run priors match. Matching is separator/case-insensitive (r-drop == rdrop == r_drop) "
+                "plus fuzzy, so search your intended concept in any spelling. Call with no query to list the "
+                "known concept AXES as an overview.",
+                {"query": {"type": "string", "description": "The concept you intend to author (any spelling), "
+                                                            "e.g. 'rdrop' or 'decoupled contrastive'. Omit to "
+                                                            "list axes."},
+                 "scope": {"type": "string", "enum": ["all", "own", "cross", "global"],
+                           "description": "Where to search: own=this run, cross=prior runs sharing a concept "
+                                          "with this one (same direction), global=the whole world concept map "
+                                          "(use it to hunt SYNERGY from other directions), all=everything ranked "
+                                          "own→cross→global. Default all."},
+                 "limit": {"type": "integer", "description": "Max matches (default 12)."}},
                 []),
         ]
 
@@ -424,6 +448,93 @@ class CrossRunTools:
                 preview = ", ".join(shared[:8]) + ("…" if len(shared) > 8 else "")
                 lines.append(f"  {rid}: {n} shared ({jac:.0%}) — {preview}")
             lines.append("Dig into one with cross_run_concept_map / cross_run_search.")
+            return "\n".join(lines)
+
+        if name == "find_concept_slugs":
+            import difflib
+            from collections import Counter
+            try:
+                limit = int(args.get("limit") or 12)
+            except (TypeError, ValueError):
+                limit = 12
+            limit = max(1, min(limit, 50))
+            query = str(args.get("query") or "").strip()
+            want = str(args.get("scope") or "all").lower()
+            if want not in ("all", "own", "cross", "global"):
+                want = "all"
+            # Vocabulary = every slug in prior concept capsules (available from node 0) + this run's live
+            # concepts (which only appear after the first evaluated node). Each slug gets a SCOPE:
+            #   own    — in THIS run's concept set
+            #   cross  — in a prior run that shares >=1 concept with this one (same direction)
+            #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
+            from looplab.engine.memory import ConceptCapsuleStore
+            p = self.dir / "concept_capsules.jsonl"
+            caps = ConceptCapsuleStore(p).all() if p.exists() else []
+            mine = {str(c) for c in (self._concepts or set()) if str(c)}
+            similar_runs = set()                    # prior runs sharing a concept with this one
+            for cap in caps:
+                rid = str(cap.get("run_id") or "")
+                if rid and rid != self._run_id and (mine & {str(c) for c in (cap.get("concepts") or [])}):
+                    similar_runs.add(rid)
+            vocab: dict[str, dict] = {}
+            for cap in caps:
+                rid = str(cap.get("run_id") or "")
+                if rid and rid == self._run_id:
+                    continue                         # this run's own capsule is covered by `mine`
+                signs = cap.get("concept_signs") or {}
+                for c in (cap.get("concepts") or []):
+                    c = str(c)
+                    if not c:
+                        continue
+                    e = vocab.setdefault(c, {"runs": set(), "sign": None, "own": False})
+                    if rid:
+                        e["runs"].add(rid)
+                    s = signs.get(c)
+                    if isinstance(s, int) and s and e["sign"] in (None, 0):
+                        e["sign"] = s
+            for c in mine:
+                vocab.setdefault(c, {"runs": set(), "sign": None, "own": False})["own"] = True
+
+            def _scope(meta: dict) -> str:
+                if meta["own"]:
+                    return "own"
+                return "cross" if (meta["runs"] & similar_runs) else "global"
+
+            if want != "all":
+                vocab = {s: m for s, m in vocab.items() if _scope(m) == want}
+            if not vocab:
+                return (f"(no concept slugs in scope '{want}'"
+                        + ("; this run has no concepts yet" if want == "own" else "") + ")")
+            if not query:
+                by_axis = Counter(s.split("/", 1)[0] for s in vocab)
+                lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
+                         "search within one: find_concept_slugs('<your concept>'):"]
+                lines += [f"  {ax}  ({n} slugs)" for ax, n in by_axis.most_common()]
+                return "\n".join(lines)
+            qn = _slug_norm(query)
+            _rank = {"own": 0, "cross": 1, "global": 2}
+            scored = []
+            for slug, meta in vocab.items():
+                sn, ln = _slug_norm(slug), _slug_norm(slug.split("/")[-1])
+                if qn and (qn == sn or qn == ln):
+                    score = 1.0
+                elif qn and (qn in sn or sn in qn):
+                    score = 0.9
+                else:
+                    score = max(difflib.SequenceMatcher(None, qn, sn).ratio(),
+                                difflib.SequenceMatcher(None, qn, ln).ratio())
+                if score >= 0.55:
+                    scored.append((_rank[_scope(meta)], -score, slug, meta))
+            if not scored:
+                return (f"No existing slug matches '{query}' in scope '{want}' — it looks NEW. Mint it as "
+                        "`axis/name` (reuse an existing AXIS if one fits; call with no query to list axes).")
+            scored.sort()                            # own before cross before global; then best match first
+            _label = {"own": "this run", "cross": "cross-run", "global": "global map"}
+            lines = [f"Existing slugs matching '{query}' (own→cross→global) — REUSE the closest, don't respell:"]
+            for _r, negscore, slug, meta in scored[:limit]:
+                sign = {1: " (helped before)", -1: " (hurt before)"}.get(meta["sign"], "")
+                lines.append(f"  [{_label[_scope(meta)]}] {slug}  [{len(meta['runs']) or 1} run(s)]"
+                             f"{sign}  match={-negscore:.0%}")
             return "\n".join(lines)
 
         return "(unknown cross-run tool)"

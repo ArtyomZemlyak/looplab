@@ -665,9 +665,13 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 # instant it opens — the intended live mechanism, just given something to anchor on.
                 with _sp("stage_started", kind="tool", stage=_sname):
                     pass
+                # health_check: a declared stage is where TRAINING runs (often multi-hour). Watch its live
+                # stdout for a diverged (non-finite) loss and tree-kill early instead of burning the whole
+                # timeout on a model that can no longer learn — the killed stage then fails with a DIVERGED
+                # marker the agent reads. Off for the short scorer `cmd` (it is not a training loop).
                 rc, out, err, to = run_argv(_w(_bound(_scmd, _sto), str(wd)), wd,
                                             _sto + grace, env, max_output_bytes, cancel,
-                                            log_path=_log(f"{_sname}.log"))
+                                            log_path=_log(f"{_sname}.log"), health_check=True)
                 to = to or (is_docker and docker_timed_out(rc))
                 if _sh is not None:
                     _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
