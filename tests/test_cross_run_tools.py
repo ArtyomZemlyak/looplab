@@ -918,6 +918,41 @@ def test_concept_card_decodes_and_reports_cross_run_track_record(tmp_path):
     assert "usually paired with:" in out and "loss/plain" in out
 
 
+def test_concept_card_does_not_claim_complete_denominators_from_matching_rows_only(tmp_path):
+    from looplab.engine.memory import build_concept_capsule
+
+    complete = [
+        build_concept_capsule(
+            run_id=rid, task_id="t", fingerprint=["kind:dataset"], direction="max",
+            concepts=["regularization/r-drop", "baseline/plain"],
+            concept_outcomes={"regularization/r-drop": 0.9, "baseline/plain": 0.1},
+        )
+        for rid in ("complete-a", "complete-b")
+    ]
+    legacy_nonmatching = build_concept_capsule(
+        run_id="legacy-partial", task_id="t", fingerprint=["kind:dataset"], direction="max",
+        concepts=["other/retained"], concept_outcomes={"other/retained": 0.5},
+    )
+    for stem in ("concepts", "concept_outcomes"):
+        for suffix in ("total", "omitted", "complete"):
+            legacy_nonmatching.pop(f"{stem}_{suffix}")
+    _seed(tmp_path, capsules=[*complete, legacy_nonmatching])
+
+    out = _bind(CrossRunTools(tmp_path)).execute(
+        "concept_card", {"slug": "regularization/r-drop"})
+
+    assert "task-family WARNING: PARTIAL capsule source" in out
+    assert "global WARNING: PARTIAL capsule source" in out
+    assert "1 legacy capsule(s) have unknown totals" in out
+    assert "track record (returned task-family observations): 2 retained run(s)" in out
+    assert "globally RETAINED in 2 prior run(s)" in out
+    assert "globally used in" not in out
+    assert "consistently RANKED BETTER" not in out
+    assert "paired in retained records with:" in out
+    assert "eligible_prior_runs=3 matching_scoped_runs=2" in out
+    assert "task_source_complete=false global_source_complete=false" in out
+
+
 def test_concept_card_fuzzy_resolves_respelling(tmp_path):
     _seed(tmp_path, capsules=[
         _cap_scoped("a", "t", concepts=["regularization/r-drop", "loss/plain"],

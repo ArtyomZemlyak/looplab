@@ -840,16 +840,25 @@ class CrossRunTools:
             scoped_canon_caps = [
                 c for c, concepts in canonical_caps if canon in concepts and self._in_scope(c)]
             global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
+            # CODEX AGENT: absence/completeness denominators include every eligible capsule, not only rows
+            # where this concept survived the bounded source projection. Matching rows still own the
+            # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
+            scoped_source_summary = _capsule_source_summary(scoped_caps)
             ov_scoped = portfolio_concept_overview(
                 scoped_canon_caps, aliases=aliases, splits=splits)
             row = next((r for r in ov_scoped["concepts"] if r["concept"] == canon), None)
             ov_global = portfolio_concept_overview(
                 global_canon_caps, aliases=aliases, splits=splits)
             grow = next((r for r in ov_global["concepts"] if r["concept"] == canon), None)
+            scoped_complete = scoped_source_summary.get("source_complete") is True
+            global_complete = source_summary.get("source_complete") is True
+            if not scoped_complete:
+                lines.append("  task-family " + _partial_source_warning(scoped_source_summary))
             if row:
-                if ov_scoped.get("source_complete") is not True:
-                    lines.append("  " + _partial_source_warning(ov_scoped))
-                lines.append(f"  track record (your task family): {row['n_runs']} run(s) — "
+                track_label = ("track record (your task family)" if scoped_complete
+                               else "track record (returned task-family observations)")
+                run_label = "run(s)" if scoped_complete else "retained run(s)"
+                lines.append(f"  {track_label}: {row['n_runs']} {run_label} — "
                              f"ranked better {row['n_helped']} / middle {row['n_neutral']} / "
                              f"ranked worse {row['n_hurt']}")
                 _sym = {1: "ranked-better", 0: "middle", -1: "ranked-worse"}
@@ -861,16 +870,23 @@ class CrossRunTools:
                                  + f" ({_safe_text(r.get('direction'), 8)})")
             if canon in mine:
                 lines.append("  NOTE: THIS run is already using this concept.")
-            lines.append(f"  globally used in {grow['n_runs'] if grow else 0} prior run(s) "
-                         "across the whole portfolio.")
+            if global_complete:
+                lines.append(f"  globally used in {grow['n_runs'] if grow else 0} prior run(s) "
+                             "across the whole portfolio.")
+            else:
+                lines.append(f"  globally RETAINED in {grow['n_runs'] if grow else 0} prior run(s) "
+                             "across returned portfolio records.")
+                lines.append("  global " + _partial_source_warning(source_summary))
 
             # Use only the bound task-family row: global usage is context, never permission to let an
             # incompatible task reverse the actionable tendency shown beside the scoped track record.
             tend = concept_profit_tendencies([row] if row else [])
-            if any(c == canon for c, _ in tend["helps"]):
+            # CODEX AGENT: an omitted matching row/sign can reverse a consistency claim. Keep the retained
+            # observations visible above, but emit a directional tendency only for an exact scoped source.
+            if scoped_complete and any(c == canon for c, _ in tend["helps"]):
                 lines.append("  cross-run tendency: consistently RANKED BETTER within comparable runs "
                              "(advisory relative rank, not causal proof).")
-            elif any(c == canon for c, _ in tend["hurts"]):
+            elif scoped_complete and any(c == canon for c, _ in tend["hurts"]):
                 lines.append("  cross-run tendency: consistently RANKED WORSE within comparable runs — "
                              "only revisit with a specific new hypothesis for why it would differ here.")
 
@@ -886,7 +902,8 @@ class CrossRunTools:
                     partners.append((e.get("src"), e.get("n_runs", 0)))
             partners.sort(key=lambda kv: (-kv[1], str(kv[0])))
             if partners:
-                lines.append("  usually paired with: " + ", ".join(
+                pair_label = "usually paired with" if scoped_complete else "paired in retained records with"
+                lines.append(f"  {pair_label}: " + ", ".join(
                     f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
 
             # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
@@ -905,6 +922,8 @@ class CrossRunTools:
             lines.append(f"  [receipt scope={'bound_task_family' if self._bound else 'portfolio'} "
                          f"eligible_prior_runs={len(scoped_caps)} matching_scoped_runs="
                          f"{len(scoped_canon_caps)} matching_global_runs={len(global_canon_caps)} "
+                         f"task_source_complete={str(scoped_complete).lower()} "
+                         f"global_source_complete={str(global_complete).lower()} "
                          f"taxonomy_revision={taxonomy['governance_revision']}]")
             return "\n".join(lines)
 
