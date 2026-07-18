@@ -65,6 +65,16 @@ def test_idea_drops_malformed_authored_concepts():
     assert idea.concepts == ["loss/good", "arch/moe"]      # garbage dropped, order preserved
 
 
+def test_idea_applies_the_same_charset_gate_to_delta_operands():
+    idea = Idea(
+        operator="draft", concept_mode="delta",
+        concepts_added=["loss/good", "junk#base64=="],
+        concepts_removed=["model/old", "loss/💥"],
+    )
+    assert idea.concepts_added == ["loss/good"]
+    assert idea.concepts_removed == ["model/old"]
+
+
 def test_authored_garbage_concept_dropped_at_fold(tmp_path):
     # The Idea field-validator runs at fold too (Idea rebuilt via Idea(**d)), so authored garbage never
     # reaches node_concepts / the /concepts tree even in an already-written log.

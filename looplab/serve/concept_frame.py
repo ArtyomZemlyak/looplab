@@ -12,7 +12,7 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from looplab.core.models import valid_concept_id
+from looplab.core.models import CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON, valid_concept_id
 from looplab.serve.protocol import RUN_GENERATION_FIELD
 
 
@@ -231,6 +231,27 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         reasons.add("invalid_membership_map")
 
     current_nodes = _current_nodes(state)
+
+    # CODEX AGENT: [] is otherwise indistinguishable from an explicitly authored known-empty set.
+    # Replay stamps every unresolved delta-cycle member/descendant, and the public frame carries that
+    # as a corruption-class reason so the UI cannot present fail-closed emptiness as authoritative.
+    # Apply the same CURRENT lifecycle boundary as memberships: tombstoned/aborted historical receipts
+    # remain visible in a historical prefix but do not poison today's projection.
+    raw_materialization_receipts = getattr(
+        state, "node_concept_materialization_receipts", None)
+    if raw_materialization_receipts is None:
+        raw_materialization_receipts = {}
+    if not isinstance(raw_materialization_receipts, dict):
+        reasons.add("invalid_concept_materialization_receipt")
+    else:
+        for raw_node_id, raw_reason in raw_materialization_receipts.items():
+            if (isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int)
+                    or raw_node_id not in state.nodes
+                    or raw_reason != CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON):
+                reasons.add("invalid_concept_materialization_receipt")
+                continue
+            if raw_node_id in current_nodes:
+                reasons.add(CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON)
 
     # CODEX AGENT: insertion order is replay history, not semantic priority. Each level keeps a bounded
     # lexicographic top-K while scanning the full source for integrity receipts. Empty/invalid-only and

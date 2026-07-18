@@ -15,9 +15,12 @@ def _run(direction="min"):
 
 def _node(nid, theme, operator="improve"):
     idea = Idea(operator=operator, params={"x": float(nid)}, rationale="r", theme=theme)
+    # CODEX AGENT: this helper models the pre-concept legacy format whose only grouping field was
+    # `theme`. Exclude the newly defaulted discriminator; explicit modern full+[] is intentionally a
+    # known-empty concept membership and must not fall back to the deprecated theme.
     return Event(seq=nid + 1, type="node_created",
                  data={"node_id": nid, "parent_ids": [], "operator": operator,
-                       "idea": idea.model_dump(mode="json"), "code": ""})
+                       "idea": idea.model_dump(mode="json", exclude={"concept_mode"}), "code": ""})
 
 
 def _eval(nid, metric):

@@ -58,7 +58,7 @@ box("boss",1740,44,360,72,"Boss / Assistant · UI","⌘",C.s,["steer: inject · 
 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
-box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft idea (op+params) + 1-line hypothesis","prompt = brief + cues + idea-space guidance"]);
+box("propose",40,LY,330,LH,"PROPOSE","R",C.r,["draft Idea + hypothesis + explicit concept_mode","full = exact set · delta = base/parent union − removed + added"]);
 box("novelty",410,LY,210,LH,"NOVELTY STAGE","llm",C.r,["shipped mode: LLM if client","no client: pass; algo opt-in"]);
 box("implement",660,LY,300,LH,"DEVELOPER","D",C.d,["stages → plan → implement (fresh repo node)","repair = 1 session · every edit auto-compiled"]);
 box("evaluate",1000,LY,320,LH,"EVALUATE","□",C.ev,["run one isolated search evaluation","repair a mechanical crash in place"]);
@@ -123,7 +123,7 @@ stack(1760,300,DY,[
 stack(2100,360,DY,[
  {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open hypothesis"]},
  {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: concept-axes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agent","shipped agent mode uses tools with a client","no client → deterministic rule fallback","agent_control allow-list per role"]},
- {id:"concept",h:148,t:"Concept graph (Part IV/V)",tag:"mixed defaults",c:C.s,sub:["tagger over task skeleton (heuristic | agentic) — replayable receipts; authored labels are not classifier evidence","run_concepts base + per-node full|delta authoring → folded effective membership","concept_pivot: ON · coverage snapshot every concept_retag_every=30 → uncovered-region hint","graded_novelty: ON · pre-gate flags L4 same-dir-new-impl / L5 wrongly-abandoned","typed concept_edge lenses + current co-occurrence → bounded /concepts frame"]},
+ {id:"concept",h:168,t:"Concept graph (Part IV/V)",tag:"mixed defaults",c:C.s,sub:["run_concepts base + explicit full|delta Idea authoring → folded effective membership","normalize + consolidation before set algebra · delta cycle → non-authoritative receipt","tagger receipts: classifier evidence | operator/offline display | authored claim","concept_pivot: ON · coverage every concept_retag_every=30 → uncovered-region hint","graded_novelty: ON · L4 same-dir-new-impl / L5 wrongly-abandoned","typed concept_edge lenses + current co-occurrence → bounded /concepts frame"]},
  {id:"concept_ops",h:132,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator retag/set-base intent → generation fence → concept_tag_edited/run_concepts","fold stamps operator provenance; explicit [] stays untagged","Assistant ConceptGovernanceTools: merge · purge/unpurge · split","approval binds normalized payload + revision; ledger CAS serializes mutation","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
 ]);
 

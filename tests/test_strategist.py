@@ -1,11 +1,13 @@
 """A7 Strategist + A1 ASHA + A0 operator tests (config-first, replay-safe, off==today)."""
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 
 import anyio
 
 from looplab.core.models import Event, Idea, Node, NodeStatus, RunState
+from looplab.core.config import Settings
 from looplab.engine.orchestrator import Engine
 from looplab.search.policy import ASHAPolicy, GreedyTree, available_policies, make_policy
 from looplab.events.replay import fold
@@ -17,7 +19,9 @@ from looplab.agents.strategist import (
     make_strategist,
     validate_strategy,
 )
+from looplab.adapters.tasks import build_strategist_tools
 from looplab.adapters.toytask import ToyTask
+from looplab.agents.strategist import ToolUsingStrategist
 
 ROOT = Path(__file__).resolve().parents[1]
 TASK_FILE = ROOT / "examples" / "toy_task.json"
@@ -362,6 +366,18 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_run_base_hint_requires_explicit_delta_mode(tmp_path):
+    eng = _engine(tmp_path / "concept-mode", concept_run_base=True)
+    st = RunState(direction="min", run_base_concepts=["base/x"])
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft"))
+    st.node_concepts[0] = ["base/x", "parent/y"]
+
+    eng._set_complexity_hint(st, st.nodes[0])
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "concept_mode=\"delta\"" in hint
+    assert "both delta lists may be empty" in hint
+
+
 def test_failure_reflection_injects_recent_failures(tmp_path):
     eng = _engine(tmp_path / "refl", failure_reflection=True)
     st = RunState(direction="min")
@@ -652,7 +668,8 @@ def test_operator_pin_wins_even_when_strategist_locked_out_of_the_knob(tmp_path)
     even when agent_control removes the strategist's own policy grant — otherwise the recorded decision
     diverges from the live engine (the UI shows the pin while the run runs the old policy)."""
     from looplab.events.eventstore import EventStore
-    rd = tmp_path / "pinlock"; rd.mkdir()
+    rd = tmp_path / "pinlock"
+    rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     eng = _engine(rd, strategist=_AlwaysGreedy(), strategist_every=1,
                   agent_control={"policy": [], "timeout": ["strategist"]})   # strategist LOCKED out of policy
@@ -672,7 +689,8 @@ def test_operator_pin_reapplies_on_resume_under_strategist_lock(tmp_path):
         def decide(self, state, ctx):
             return {"novelty_stance": "explore", "source": "rule", "rationale": "nudge"}
 
-    rd = tmp_path / "pinresume"; rd.mkdir()
+    rd = tmp_path / "pinresume"
+    rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     lock = {"policy": [], "novelty_stance": ["strategist"]}   # strategist LOCKED out of policy
     eng = _engine(rd, strategist=_NudgesNoveltyOnly(), strategist_every=1, agent_control=lock)
@@ -703,7 +721,8 @@ def test_operator_pin_does_not_blanket_exempt_a_locked_strategist_knob(tmp_path)
 def test_operator_pin_policy_wins_over_strategist(tmp_path):
     # Boss pins policy=asha; the (greedy-loving) strategist must never flip it back -> no thrash.
     from looplab.events.eventstore import EventStore
-    rd = tmp_path / "pin"; rd.mkdir()
+    rd = tmp_path / "pin"
+    rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
     assert state.finished
@@ -717,7 +736,8 @@ def test_operator_pin_policy_wins_over_strategist(tmp_path):
 def test_operator_pin_lets_strategist_tune_unpinned_fields(tmp_path):
     # Pinned policy is locked, but the strategist may still set the (unpinned) fidelity.
     from looplab.events.eventstore import EventStore
-    rd = tmp_path / "pin2"; rd.mkdir()
+    rd = tmp_path / "pin2"
+    rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "asha"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
     assert state.active_strategy.get("policy") == "asha"        # pin wins
@@ -730,7 +750,8 @@ def test_invalid_operator_pin_is_dropped_not_recorded(tmp_path):
     # and never re-asserted every consult (which would starve the strategist + spam the log). The
     # greedy strategist still drives.
     from looplab.events.eventstore import EventStore
-    rd = tmp_path / "badpin"; rd.mkdir()
+    rd = tmp_path / "badpin"
+    rd.mkdir()
     EventStore(rd / "events.jsonl").append("set_strategy", {"strategy": {"policy": "explore_lots"}})
     state = anyio.run(_engine(rd, strategist=_AlwaysGreedy(), strategist_every=1).run)
     assert state.finished
@@ -751,11 +772,6 @@ def _read(run_dir: Path):
 # --------------------------------------------------------------------------- #
 # ToolUsingStrategist (strategist_backend="agent"): reads the run/data/etc. then emits
 # --------------------------------------------------------------------------- #
-import json as _json
-
-from looplab.core.config import Settings
-from looplab.agents.strategist import ToolUsingStrategist
-from looplab.adapters.tasks import build_strategist_tools
 
 
 def _tc(name, args):

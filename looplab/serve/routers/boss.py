@@ -587,9 +587,11 @@ def build_router(srv) -> APIRouter:
         st = srv.state(rd)
         from looplab.core.models import Idea
         from looplab.core.parse import parse_structured
+        from looplab.agents.roles import _CONCEPT_AUTHORING_GUIDANCE
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
         prompt = ("Propose ONE next experiment as a structured Idea (operator one of "
-                  "draft/improve/debug/merge; numeric params; a short rationale). Base it on the "
+                  "draft/improve/debug/merge; numeric params; a short rationale). "
+                  + _CONCEPT_AUTHORING_GUIDANCE + "Base it on the "
                   "run context and this discussion.\n\n" + _node_context(st, nid, rd)
                   + (f"\n\nDiscussion so far:\n{convo}" if convo else "")
                   + (f"\n\nInstruction: {instruction}" if instruction else ""))
@@ -606,8 +608,9 @@ def build_router(srv) -> APIRouter:
                         {"role": "system", "content": "Reply with a one-line experiment suggestion: "
                          "the operator (improve/draft/debug), suggested params, and why — plain text."},
                         {"role": "user", "content": prompt}]))
-                    return {"ok": True, "parsed": False, "idea": {
-                        "operator": "improve", "params": {}, "rationale": text.strip()[:600]}}
+                    fallback = Idea(operator="improve", params={}, rationale=text.strip()[:600])
+                    return {"ok": True, "parsed": False,
+                            "idea": fallback.model_dump(mode="json")}
         except HTTPException as exc:
             sanitized = _sanitized_domain_http_exception(exc)
             if sanitized is not None:

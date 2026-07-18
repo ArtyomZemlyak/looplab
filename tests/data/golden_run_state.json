@@ -276,6 +276,7 @@
   ],
   "llm_cost": null,
   "node_concept_deltas": {},
+  "node_concept_materialization_receipts": {},
   "node_concept_provenance": {},
   "node_concepts": {},
   "node_concepts_at_vocab": {},
@@ -299,6 +300,7 @@
       "holdout_metric": null,
       "id": 0,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -349,6 +351,7 @@
       "holdout_metric": null,
       "id": 1,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -399,6 +402,7 @@
       "holdout_metric": null,
       "id": 2,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -452,6 +456,7 @@
       "holdout_metric": null,
       "id": 3,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -507,6 +512,7 @@
       "holdout_metric": null,
       "id": 4,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -559,6 +565,7 @@
       "holdout_metric": null,
       "id": 5,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -614,6 +621,7 @@
       "holdout_metric": null,
       "id": 6,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -670,6 +678,7 @@
       "holdout_metric": null,
       "id": 7,
       "idea": {
+        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
 
@@ -56,6 +56,12 @@ NODE_CONCEPT_PROVENANCE_UNTRUSTED = "untrusted-source"
 # as independent classifier EVIDENCE (classifier_verified_node_concepts stays classifier-only), so a human
 # curation edit never silently becomes cross-run/novelty evidence without its own review.
 NODE_CONCEPT_PROVENANCE_OPERATOR = "operator-edited"
+
+# A folded concept membership can be deliberately empty (an honest, known-empty set) or empty because
+# replay could not materialize an invalid delta dependency graph.  Keep that distinction in a typed,
+# reader-defaulted receipt instead of forcing every downstream projection to reverse-engineer the DAG.
+ConceptMaterializationReason = Literal["delta_dependency_cycle"]
+CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON: ConceptMaterializationReason = "delta_dependency_cycle"
 
 
 def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
@@ -193,12 +199,18 @@ class Idea(BaseModel):
     # explicit and a later classifier event may consolidate/enrich them.
     # Flows through the event log automatically (idea.model_dump → node_created → Idea(**d["idea"])).
     concepts: list[str] = Field(default_factory=list)
-    # PART V (B) run-base + node-DELTA authoring: instead of re-stating the full `concepts` set, a node may
+    # PART V (B) run-base + node-DELTA authoring. The discriminator is semantic: `delta` makes the two
+    # delta lists authoritative EVEN WHEN BOTH ARE EMPTY (inherit without changing anything); `full`
+    # makes `concepts` the exact membership. Reader-side default `full` preserves old Idea payloads.
+    # CODEX AGENT: never infer this choice from list truthiness or serializer field presence — either
+    # collapses an explicit zero delta into an absent legacy membership.
+    concept_mode: Literal["full", "delta"] = "full"
+    # In delta mode, instead of re-stating the full `concepts` set, a node may
     # author only what CHANGES vs the run base + its parents — `concepts_added` (new this node) and
-    # `concepts_removed` (dropped this node, e.g. "swapped transformer -> diffusion"). When either is set,
-    # the fold post-pass materializes node_concepts = inherited − removed + added (inherited = run base at a
-    # root, else the union of parents' effective sets); `concepts` (full set) is then ignored for that node.
-    # Empty (the default) keeps the legacy full-set path.
+    # `concepts_removed` (dropped this node, e.g. "swapped transformer -> diffusion"). The fold post-pass
+    # materializes node_concepts = inherited − removed + added (inherited = run base at a root, else the
+    # union of parents' effective sets); `concepts` (full set) is ignored for that node.
+    # The explicit mode, rather than list truthiness, selects this path.
     concepts_added: list[str] = Field(default_factory=list)
     concepts_removed: list[str] = Field(default_factory=list)
     # Intra-node sweep: instead of a single point in `params`, the Researcher may attach a discrete
@@ -220,12 +232,14 @@ class Idea(BaseModel):
     def is_sweep(self) -> bool:
         return bool(self.space)
 
-    @field_validator("concepts", mode="after")
+    @field_validator("concepts", "concepts_added", "concepts_removed", mode="after")
     @classmethod
     def _drop_malformed_concepts(cls, v):
         # Concept ids are a bounded axis/slug taxonomy. Silently drop malformed AUTHORED ids (base64/hash
         # garbage, symbols, emoji — e.g. an observed real-run tag) so a proposer/LLM hallucination never
-        # pollutes node_concepts, the /concepts tree, or (via the classifier) cross-run capsules. Runs at
+        # pollutes node_concepts, the /concepts tree, or (via the classifier) cross-run capsules. Gate the
+        # full and both delta paths identically; otherwise switching to delta silently bypasses this trust
+        # boundary. Runs at
         # fold too — the Idea is rebuilt via Idea(**d["idea"]) — so it deterministically heals old logs;
         # legitimate ids (incl. non-ASCII letters) pass unchanged.
         return [c for c in v if valid_concept_id(c)] if isinstance(v, list) else v
@@ -682,13 +696,20 @@ class RunState(BaseModel):
     # reader-defaulted; empty on runs that never set a base (every node then authors its own full set).
     run_base_concepts: list[str] = Field(default_factory=list)
     # PART V (B): raw per-node concept DELTAS {node_id -> {"added": [...], "removed": [...]}} authored on
-    # the Idea. Stored raw during replay; a deterministic POST-PASS in `fold` materializes each such node's
+    # the Idea when `concept_mode="delta"` (including an explicit pair of empty lists). Stored raw during
+    # replay; a deterministic POST-PASS in `fold` materializes each such node's
     # effective `node_concepts` = inherited − removed + added, where inherited = the run BASE at a root, else
     # the UNION of the node's parents' effective sets (the base flows in through the roots and down the DAG,
     # so a removal propagates). Kept as a
     # topological read-time resolution (not folded in event order) so `fold` stays ORDER-TOLERANT
     # (invariant 5): the post-pass sees the complete DAG, so a spliced/reordered log resolves identically.
     node_concept_deltas: dict[int, dict] = Field(default_factory=dict)
+    # CODEX AGENT: an unresolved active delta cycle (including every active delta descendant whose
+    # inherited set depends on it) materializes to [] fail-closed.  This receipt prevents that fallback
+    # from being presented as an honest known-empty membership by ConceptFrame.  Keys are current/historic
+    # node ids; current-state projections apply the same tombstone/abort lifecycle filter as memberships.
+    node_concept_materialization_receipts: dict[int, ConceptMaterializationReason] = Field(
+        default_factory=dict)
     # CODEX AGENT: proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
     # replay-derived sidecar records the producer of the CURRENT last-write-wins membership. Missing and
     # unknown values are deliberately untrusted; legacy generation-zero `node_concepts` events replay as

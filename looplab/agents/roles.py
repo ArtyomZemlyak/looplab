@@ -27,13 +27,18 @@ def _attention_points() -> str:
     except Exception:  # noqa: BLE001
         return ""
 
-_RESEARCHER_CORE = ("You are an ML researcher proposing the next experiment as "
-                    "parameters to try. Also set `concepts`: the SET of research concepts this "
-                    "experiment touches, as `axis/slug` ids (e.g. \"loss/contrastive\", "
-                    "\"architecture/moe\", \"regularization/r-drop\", \"hyperparameter/learning-rate\"). "
-                    "An experiment usually touches SEVERAL at once, so include EVERY one that applies. "
-                    "Reuse an id from earlier experiments where it fits; propose a new `axis/slug` id "
-                    "only when none fits. Key on the underlying method/family, not the surface name. ")
+_CONCEPT_AUTHORING_GUIDANCE = (
+    "Always set `concept_mode` explicitly. Default to `concept_mode=\"full\"` with `concepts` as the "
+    "exact complete SET of `axis/slug` ids this experiment touches. Use `concept_mode=\"delta\"` only "
+    "when the run context explicitly enables delta authoring and supplies the inherited membership; "
+    "then put only the change in `concepts_added` and `concepts_removed`. BOTH delta lists may be empty "
+    "to inherit unchanged. In delta mode do not "
+    "re-state inherited ids in `concepts`. An experiment may touch several concepts; include every "
+    "applicable change, reuse existing ids where they fit, and mint a new `axis/slug` only when none "
+    "fits. Key on the underlying method/family, not the surface name. ")
+
+
+_RESEARCHER_CORE = "You are an ML researcher proposing the next experiment as parameters to try. "
 # P6/P21 (docs/PROMPT_REVIEW.md): the intra-node sweep OFFER, shared VERBATIM by both researchers
 # (`LLMResearcher` here and agent.py's `ToolUsingResearcher`) via `_researcher_capability_suffix`,
 # and GATED on capability: only the in-house `LLMDeveloper` honors `idea.space` —
@@ -79,13 +84,14 @@ def _researcher_system(offer_sweep: bool = True) -> str:
     """Assemble the plain researcher's FULL system prompt (core + capability suffix + operator
     note + emit instruction) — a back-compat/reference assembly. The `researcher_system`
     PromptStore default is `_RESEARCHER_CORE` ALONE: `LLMResearcher.propose` appends the
-    capability fragments AFTER the render() (the same pattern as agent.py's
+    concept-authoring/capability fragments AFTER the render() (the same pattern as agent.py's
     `ToolUsingResearcher`), so the composed prompt stays byte-equal to this helper while a
-    `researcher_system.md` override can never bypass the code-owned `offer_sweep` gate. With
+    `researcher_system.md` override can never bypass the code-owned mode contract or `offer_sweep` gate. With
     `offer_sweep=True` this matches the historical `_RESEARCHER_SYSTEM` modulo the verified
     prompt fixes (P21 numeric-grid note, P6 eval_timeout scoping, P14 operator note)."""
-    return (_RESEARCHER_CORE + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE +
-            "Respond ONLY with the requested structured fields.")
+    return (_RESEARCHER_CORE + _CONCEPT_AUTHORING_GUIDANCE
+            + _researcher_capability_suffix(offer_sweep) + _OPERATOR_NOTE
+            + "Respond ONLY with the requested structured fields.")
 
 
 # Appended to the Researcher system prompt when hypothesis tracking is on (P1, default on). Split out
@@ -311,6 +317,28 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         lines.append(f"Best so far: node {best.id} metric={best.metric} params={best.idea.params}")
     if parent is not None:
         lines.append(f"Refine from node {parent.id}: params={parent.idea.params} metric={parent.metric}")
+    # PART V (B): a delta author cannot subtract from an invisible reference. Surface the run base and
+    # effective primary-parent membership, bounded so a malformed taxonomy cannot consume the role context.
+    # Replay uses the union of all actual parents for a merge; the proposal role sees the primary parent
+    # before policy finalizes that edge set, so the prompt names this limitation instead of claiming exactness.
+    raw_base = getattr(state, "run_base_concepts", None)
+    base = list(raw_base) if isinstance(raw_base, (list, tuple)) else []
+    memberships = getattr(state, "node_concepts", None)
+    parent_known = (parent is None or (
+        isinstance(memberships, dict) and parent.id in memberships))
+    parent_membership = (memberships.get(parent.id, [])
+                         if parent is not None and isinstance(memberships, dict) else base)
+
+    def _bounded_concepts(values) -> list[str]:
+        seq = values if isinstance(values, (list, tuple)) else []
+        return [" ".join(str(value).split())[:120] for value in list(seq)[:64]]
+
+    lines.append("Concept membership snapshot (context only; use delta mode only when a separate run "
+                 "cue explicitly enables it; replay uses the run base for a root and actual parents' "
+                 "union for a child/merge): "
+                 f"run_base={_bounded_concepts(base)!r}; "
+                 f"primary_inherited={_bounded_concepts(parent_membership)!r}; "
+                 f"primary_membership={'known' if parent_known else 'absent-legacy'}")
     # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
@@ -354,7 +382,7 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
         lines.append("If your next experiment tests one of these, copy its statement EXACTLY "
                      "(verbatim, unchanged wording) into `hypothesis` so the evidence links to "
                      "the board card.")
-    return "\n".join(l for l in lines if l)
+    return "\n".join(line for line in lines if line)
 
 
 class LLMResearcher:
@@ -397,8 +425,8 @@ class LLMResearcher:
         hyp_sys = _hypothesis_system_suffix(self.track_hypotheses)
         messages = [
             {"role": "system",
-             # P6: the capability suffix (sweep offer — gated on the active Developer — +
-             # eval_timeout), the operator note, and the emit instruction are appended AFTER the
+             # Part V/P6: the explicit concept-mode contract, capability suffix (sweep offer — gated on
+             # the active Developer — + eval_timeout), operator note, and emit instruction are appended AFTER the
              # render() — the SAME code-owned pattern as agent.py's ToolUsingResearcher. A
              # `researcher_system.md` PromptStore override replaces only the CORE persona, so an
              # override can never desync the capability prose from what the backend actually
@@ -406,6 +434,7 @@ class LLMResearcher:
              # bypassed the offer_sweep gate). The assembled default is byte-equal to
              # `_researcher_system(offer_sweep)`.
              "content": render(self.prompts, "researcher_system", _RESEARCHER_CORE)
+                        + _CONCEPT_AUTHORING_GUIDANCE
                         + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
                         + _OPERATOR_NOTE
                         + "Respond ONLY with the requested structured fields." + hyp_sys
@@ -415,7 +444,8 @@ class LLMResearcher:
                                                      hyp_order=getattr(self, "_hyp_order", None))
                                         + "\n" + self.space_hint +
                                         hint_block + cues +
-                                        "\nPropose the next Idea (operator, params, rationale, concepts"
+                                        "\nPropose the next Idea (operator, params, rationale, concept_mode, "
+                                        "concepts/concepts_added/concepts_removed"
                                         + (", hypothesis" if self.track_hypotheses else "") +
                                         # P6: don't re-offer the sweep in the user turn when the
                                         # active Developer can't run one (system prompt gates too).

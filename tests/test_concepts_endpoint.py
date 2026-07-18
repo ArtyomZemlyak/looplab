@@ -540,6 +540,66 @@ def test_concept_frame_empty_is_authoritative_not_unavailable(tmp_path):
     _assert_frame_parity(data)
 
 
+def test_concept_frame_marks_delta_cycle_empty_as_corrupt_but_respects_current_lifecycle(tmp_path):
+    rd = tmp_path / "demo"
+    rd.mkdir(parents=True)
+    store = EventStore(rd / "events.jsonl")
+    store.append(
+        "run_started", {"run_id": "demo", "task_id": "toy", "goal": "g", "direction": "max"})
+
+    def created(node_id, parent_ids, concept):
+        return {
+            "node_id": node_id,
+            "parent_ids": parent_ids,
+            "operator": "draft",
+            "idea": {
+                "operator": "draft",
+                "params": {},
+                "rationale": "r",
+                "concept_mode": "delta",
+                "concepts_added": [concept],
+                "concepts_removed": [],
+            },
+        }
+
+    # First create valid roots, then adversarial pending-node replacements form a cycle.
+    store.append("node_created", created(0, [], "cycle/a"))
+    store.append("node_created", created(1, [], "cycle/b"))
+    store.append("node_created", created(0, [1], "cycle/a"))
+    store.append("node_created", created(1, [0], "cycle/b"))
+    store.append("node_created", created(2, [1], "descendant/c"))
+    cycle_seq = store.read_all()[-1].seq
+    store.append("node_tombstoned", {"node_ids": [0, 1]})
+    descendant_seq = store.read_all()[-1].seq
+    store.append("node_abort", {"node_id": 2, "generation": 0})
+
+    client = TestClient(make_app(tmp_path))
+    historical = client.get(
+        "/api/runs/demo/concepts", params={"seq": cycle_seq}).json()
+    assert historical["tree"]["nodes"] == {}
+    assert historical["status"] == "partial" and historical["complete"] is False
+    assert historical["authoritative"] is False
+    assert historical["authority"]["source_authoritative"] is True
+    assert historical["completeness"]["truncated"] is False
+    assert historical["completeness"]["reasons"] == ["delta_dependency_cycle"]
+    _assert_frame_parity(historical)
+
+    # Removing only the cycle members cannot hide a still-current descendant that depends on them.
+    descendant = client.get(
+        "/api/runs/demo/concepts", params={"seq": descendant_seq}).json()
+    assert descendant["status"] == "partial" and descendant["authoritative"] is False
+    assert descendant["completeness"]["reasons"] == ["delta_dependency_cycle"]
+    _assert_frame_parity(descendant)
+
+    # Receipts remain in append-only history, but once every affected row is outside the current
+    # lifecycle projection (tombstoned or aborted), they no longer poison an honestly empty live frame.
+    current = client.get("/api/runs/demo/concepts").json()
+    assert current["tree"]["nodes"] == {}
+    assert current["status"] == "complete" and current["authoritative"] is True
+    assert current["completeness"]["reasons"] == []
+    _assert_frame_parity(current)
+
+
 @pytest.mark.parametrize(("lens", "rels"), [
     ("teleports", None),
     ("usage", ""),
@@ -993,6 +1053,7 @@ def test_truncation_cap_reasons_exclude_corruption_adjacent_rename_hop():
 
     assert "rename_hop_cap" not in TRUNCATION_CAP_REASONS      # ends in _cap but must block
     assert "rename_cycle" not in TRUNCATION_CAP_REASONS
+    assert "delta_dependency_cycle" not in TRUNCATION_CAP_REASONS
     assert "invalid_edge" not in TRUNCATION_CAP_REASONS and "event_log_corruption" not in TRUNCATION_CAP_REASONS
     assert TRUNCATION_CAP_REASONS == frozenset({
         "node_membership_cap", "concepts_per_node_cap", "membership_cap", "tree_node_cap",

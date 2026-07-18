@@ -87,14 +87,24 @@ class ProposalCuesMixin:
         if getattr(self, "_concept_run_base", False) and state.run_base_concepts:
             base = ", ".join(str(c) for c in state.run_base_concepts[:40])
             parent_concepts = state.node_concepts.get(parent.id) if parent is not None else None
-            parent_line = (f" Your parent experiment's concepts are [{', '.join(str(c) for c in parent_concepts[:40])}]."
-                           if parent is not None and parent_concepts else "")
+            if parent is None:
+                inherited_line = f" This root inherits the run base [{base}]."
+            elif parent.id in state.node_concepts:
+                inherited = ", ".join(str(c) for c in (parent_concepts or [])[:40])
+                inherited_line = (f" Primary parent {parent.id}'s effective membership is [{inherited}]."
+                                  " A merge inherits the union of every actual parent.")
+            else:
+                inherited_line = (f" Primary parent {parent.id} has absent legacy membership, so its"
+                                  " effective inherited set is empty. A merge still unions every actual"
+                                  " parent's effective membership.")
             hint += (
-                f"\nConcept authoring — this run has a BASE concept set [{base}]." + parent_line
-                + " Do NOT re-list the full set. Author only the CHANGE vs the base + parent: put concepts"
+                f"\nConcept authoring — delta mode is enabled; run base=[{base}]." + inherited_line
+                + " Set `concept_mode=\"delta\"`; do NOT re-list the full set. Author only the CHANGE"
+                  " vs that inherited membership: put concepts"
                   " this experiment INTRODUCES in `concepts_added`, and any inherited concept it DROPS"
                   " (e.g. swapping one technology for another) in `concepts_removed`. Leave `concepts`"
-                  " empty when you author a delta — the run base and parent inheritance fill the rest.")
+                  " empty; both delta lists may be empty to inherit unchanged. The run base and parent"
+                  " inheritance fill the rest.")
         # Concept-slug REUSE (fires for EVERY node incl. node 0, which has no run base yet). A shared slug
         # vocabulary spans ALL runs (the global concept map); an agent inventing `rdrop` when
         # `regularization/r-drop` already exists silently breaks the cross-run prior overlap (exact-slug

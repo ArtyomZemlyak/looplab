@@ -4,12 +4,14 @@ evaluated nodes (tie-break by id), so no separate `best_updated` event is needed
 """
 from __future__ import annotations
 
+import heapq
 import math
 from typing import Iterable
 
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+                     NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
                      node_concept_event_provenance,
@@ -311,11 +313,26 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         raise
     except Exception:
         return   # (was `continue` in the loop arm: skip just this event)
+    raw_idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
+    delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
+    delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
+    delta_mode = getattr(n.idea, "concept_mode", "full") == "delta"
+    if "concept_mode" not in raw_idea and (delta_added or delta_removed):
+        # CODEX AGENT: 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
+        # Preserve those durable rows, but canonicalize the replayed Idea to explicit `delta` so a
+        # subsequent dump round-trips the semantic choice. Modern zero-deltas rely only on the mode.
+        delta_mode = True
+        n.idea.concept_mode = "delta"
     current_provenance = st.node_concept_provenance.get(n.id)
     concept_subject_unchanged = bool(
         current is not None
         and current.operator == n.operator
-        and current.idea.model_dump(exclude={"concepts"}) == n.idea.model_dump(exclude={"concepts"})
+        # The independent tagger reads none of the proposer-authored concept envelope. Excluding every
+        # such field preserves an existing evidence receipt when only the proposer's taxonomy changes.
+        and current.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
+                                             "concepts_removed"})
+        == n.idea.model_dump(exclude={"concept_mode", "concepts", "concepts_added",
+                                      "concepts_removed"})
     )
     # A same-idea re-emission (an implement/eval reset re-emits node_created for the UNCHANGED idea) must
     # NOT downgrade an existing independent CLASSIFIER receipt, an operator's deliberate OPERATOR edit,
@@ -339,17 +356,19 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts_at_vocab.pop(n.id, None)
         st.node_concept_deltas.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
-    _delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
-    _delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
-    if (_delta_added or _delta_removed) and not receipt_protected:
+    if delta_mode and not receipt_protected:
         # PART V (B): the node authored a DELTA vs the run base + its parents. Store it RAW; the fold
         # post-pass (`_materialize_concept_deltas`) resolves node_concepts topologically over the complete
         # DAG, so fold stays order-tolerant. Provenance stays `authored` so a classifier/operator event
-        # still wins (the post-pass fills only nodes that keep the authored delta).
-        st.node_concept_deltas[n.id] = {"added": _delta_added, "removed": _delta_removed}
+        # still wins (the post-pass fills only nodes that keep the authored delta). Empty lists are an
+        # explicit zero delta, so they still create a sidecar and materialized membership.
+        st.node_concept_deltas[n.id] = {"added": delta_added, "removed": delta_removed}
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
-    elif n.idea.concepts and not receipt_protected:
+    elif not receipt_protected and (n.idea.concepts or raw_idea.get("concept_mode") == "full"):
+        # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
+        # while an old no-mode/no-concepts payload stays genuinely absent for replay compatibility.
+        st.node_concept_deltas.pop(n.id, None)
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
@@ -950,6 +969,10 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 st.node_concepts.pop(n.id, None)
                 st.node_concept_provenance.pop(n.id, None)
                 st.node_concepts_at_vocab.pop(n.id, None)   # keep the B1 staleness map in sync
+                # CODEX AGENT: the raw delta belongs to the Idea being abandoned. Clear it at the reset
+                # boundary itself; otherwise a replay between reset and rebuild rematerializes stale
+                # taxonomy for the pending node from a proposal that no longer exists.
+                st.node_concept_deltas.pop(n.id, None)
                 # CODEX AGENT: generation stamps did not exist on early classifier events. Remember
                 # the idea boundary inside this fold so those ambiguous receipts still fail closed,
                 # while unstamped receipts after eval/implement-only attempt bumps remain readable.
@@ -1325,6 +1348,50 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.run_base_concepts = base
 
 
+_CONCEPT_RENAME_HOP_CAP = 16
+
+
+def _normalize_delta_concept(raw) -> str:
+    """Lenient concept-id normalization shared in shape with the Part-V read models."""
+    return str(raw or "").strip().lower().replace(" ", "-").strip("/")
+
+
+def _normalized_concept_renames(raw_renames) -> dict[str, str]:
+    """Build a deterministic normalized rename map without mutating the audit-facing folded map."""
+    if not isinstance(raw_renames, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw, canonical in raw_renames.items():
+        src = _normalize_delta_concept(raw)
+        dst = _normalize_delta_concept(canonical)
+        if src and dst:
+            current = out.get(src)
+            out[src] = dst if current is None else min(current, dst)
+    return out
+
+
+def _canonical_delta_concept(raw, renames: dict[str, str]) -> str:
+    """Normalize one id, then resolve a bounded and cycle-safe consolidation chain."""
+    current = _normalize_delta_concept(raw)
+    seen: set[str] = set()
+    for _hop in range(_CONCEPT_RENAME_HOP_CAP + 1):
+        if not current or current in seen:
+            return ""
+        seen.add(current)
+        nxt = renames.get(current)
+        if nxt is None:
+            return current
+        current = nxt
+    return ""
+
+
+def _canonical_delta_set(values, renames: dict[str, str]) -> set[str]:
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return set()
+    return {canonical for raw in values
+            if (canonical := _canonical_delta_concept(raw, renames))}
+
+
 def _materialize_concept_deltas(st: RunState) -> None:
     """PART V (B) fold POST-PASS: resolve every delta-authored node's effective `node_concepts` from the
     run base + its parents. ORDER-TOLERANT (invariant 5): it runs once over the fully-folded DAG, so a
@@ -1333,40 +1400,62 @@ def _materialize_concept_deltas(st: RunState) -> None:
     in through the roots and down the DAG, so a removal propagates to descendants until one re-adds it). A
     classifier/operator event that already set node_concepts WINS (provenance
     != authored) — such a node contributes its stored set to its children and is not overwritten here.
-    Memoized; a defensive cycle guard keeps an adversarial parent cycle from recursing forever."""
-    base = [str(c) for c in (st.run_base_concepts or [])]
-    memo: dict[int, set] = {}
+    Iterative (safe for deep lineages); unresolved active-delta cycles fail closed order-independently."""
+    # CODEX AGENT: set algebra must run on canonical ids. Subtracting raw strings first makes
+    # `Model/Transformer` impossible to remove with `model/transformer`; consolidating only after the
+    # diff can resurrect a renamed id. Canonicalize EVERY operand before union/minus/plus, but leave the
+    # raw base/delta sidecars untouched for audit. The complete folded map makes this order-tolerant.
+    # This post-pass also owns the typed failure receipt.  Recompute it from scratch so a FoldCursor
+    # suffix that repairs the graph cannot retain a stale corruption marker from an earlier snapshot.
+    st.node_concept_materialization_receipts = {}
+    renames = _normalized_concept_renames(getattr(st, "concept_consolidation", None))
+    base = _canonical_delta_set(st.run_base_concepts, renames)
+    active = {nid for nid in st.node_concept_deltas
+              if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED}
+    dependencies: dict[int, set[int]] = {}
+    children: dict[int, set[int]] = {nid: set() for nid in active}
+    for nid in active:
+        node = st.nodes.get(nid)
+        parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
+        dependencies[nid] = {pid for pid in parents if pid in active}
+        for parent_id in dependencies[nid]:
+            children[parent_id].add(nid)
 
-    def resolve(nid: int, seen: frozenset) -> set:
-        cached = memo.get(nid)
-        if cached is not None:
-            return cached
-        if nid in seen:                      # defensive: the node DAG is acyclic; a spliced cycle -> {}
-            return set()
+    # CODEX AGENT: use a deterministic Kahn pass rather than recursive DFS. Long, valid lineages must not
+    # hit Python's recursion limit; a cycle and every delta depending on its undefined output remain
+    # unresolved and fail closed to empty. Authoritative non-delta parents are materialized leaves and do
+    # not participate in cycle detection, so an ignored malformed parent edge cannot poison descendants.
+    ready = [nid for nid, parents in dependencies.items() if not parents]
+    heapq.heapify(ready)
+    effective: dict[int, set[str]] = {}
+    while ready:
+        nid = heapq.heappop(ready)
         node = st.nodes.get(nid)
         parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
         if parents:
-            # A non-root inherits the UNION of its parents' EFFECTIVE sets — the run base flows in through
-            # the roots and down the DAG, so a removal PROPAGATES (a node that swaps transformer->diffusion
-            # keeps descendants on diffusion until one of them changes it again).
-            child_seen = seen | {nid}
-            inherited = set()
-            for pid in parents:
-                inherited |= resolve(pid, child_seen)
+            inherited: set[str] = set()
+            for parent_id in parents:
+                if parent_id in active:
+                    inherited |= effective.get(parent_id, set())
+                else:
+                    inherited |= _canonical_delta_set(st.node_concepts.get(parent_id), renames)
         else:
-            inherited = set(base)                # a root seeds from the run base
-        delta = st.node_concept_deltas.get(nid)
-        if delta is not None and st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED:
-            eff = (inherited - set(delta.get("removed") or [])) | set(delta.get("added") or [])
-        else:
-            # non-delta node, or a delta node a classifier/operator overrode -> use its stored membership.
-            eff = set(st.node_concepts.get(nid) or [])
-        memo[nid] = eff
-        return eff
+            inherited = set(base)
+        delta = st.node_concept_deltas[nid]
+        removed = _canonical_delta_set(delta.get("removed"), renames)
+        added = _canonical_delta_set(delta.get("added"), renames)
+        effective[nid] = (inherited - removed) | added
+        for child_id in sorted(children[nid]):
+            dependencies[child_id].discard(nid)
+            if not dependencies[child_id]:
+                heapq.heappush(ready, child_id)
 
-    for nid in list(st.node_concept_deltas):
-        if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED:
-            st.node_concepts[nid] = sorted(resolve(nid, frozenset()))
+    unresolved = active - effective.keys()
+    st.node_concept_materialization_receipts = {
+        nid: CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON for nid in sorted(unresolved)
+    }
+    for nid in active:
+        st.node_concepts[nid] = sorted(effective.get(nid, set()))
 
 
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2347,9 +2436,9 @@ def fold(events: Iterable[Event]) -> RunState:
 def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     """Apply the order-independent read-model tail to one isolated raw fold state."""
     # PART V (B): materialize delta-authored node concepts topologically once the whole DAG is folded
-    # (order-tolerant; no-op unless a node authored a delta). Before any downstream read-model derivation.
-    if st.node_concept_deltas:
-        _materialize_concept_deltas(st)
+    # (order-tolerant; membership no-op unless a node authored a delta). Always invoke it so the typed
+    # corruption receipt is recomputed/cleared for FoldCursor suffix snapshots as well.
+    _materialize_concept_deltas(st)
 
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)

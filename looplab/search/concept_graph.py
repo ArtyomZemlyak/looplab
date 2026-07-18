@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Optional
 
-from looplab.core.models import RunState
+from looplab.core.models import NODE_CONCEPT_PROVENANCE_AUTHORED, RunState
 
 
 # --------------------------------------------------------------------------- #
@@ -917,6 +917,20 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
 _CONCEPT_RENAME_HOP_CAP = 16   # mirrors serve.concept_frame.MAX_RENAME_HOPS (kept local; no serve import)
 
 
+def _normalized_rename_map(raw) -> dict[str, str]:
+    """Normalize both sides before a read projection follows consolidation links."""
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for source, target in raw.items():
+        source_id = _normalize_concept_id(source)
+        target_id = _normalize_concept_id(target)
+        if source_id and target_id:
+            current = out.get(source_id)
+            out[source_id] = target_id if current is None else min(current, target_id)
+    return out
+
+
 def _canonical_with_rename(raw, rename: dict) -> str:
     """Normalize `raw` and resolve a bounded, cycle-guarded consolidation rename chain (the same shape the
     /concepts frame's canonical_concept uses). "" for a malformed id, a cycle, or an over-long chain."""
@@ -952,8 +966,9 @@ def node_concept_delta(state, node_id) -> dict:
     The inherited base is the UNION of ALL parents' canonical concepts (a merge inherits from every parent);
     both sides are canonicalized through the consolidation rename chain so the diff is on the live vocabulary
     (leaf normalization is the lenient `_normalize_concept_id`, matching the run_tools concept family — the
-    stricter leaf validation of the /concepts frame's `concept_id` is NOT applied). A root (no parents)
-    inherits nothing → everything it carries is `added`. Returns {parent_ids, added, removed, inherited}
+    stricter leaf validation of the /concepts frame's `concept_id` is NOT applied). A legacy full root
+    inherits nothing; a Part-V delta-authored root inherits `run_base_concepts`. Returns
+    {parent_ids, added, removed, inherited}
     with sorted canonical-id lists. Never raises (a non-dict store soft-fails to empty, like the siblings)."""
     # isinstance-guard `nodes` too (not just `or {}`): a truthy non-dict would raise at `.get` below and
     # break the never-raise contract, same as the consolidation/node_concepts stores guarded further down.
@@ -964,8 +979,7 @@ def node_concept_delta(state, node_id) -> dict:
         return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
     # isinstance-guard both stores: a truthy non-dict must soft-fail, not raise AttributeError out of a
     # read-model an LLM tool invokes (matches serve.concept_frame / run_tools, which guard the same fields).
-    rename = getattr(state, "concept_consolidation", None)
-    rename = rename if isinstance(rename, dict) else {}
+    rename = _normalized_rename_map(getattr(state, "concept_consolidation", None))
     node_concepts = getattr(state, "node_concepts", None)
     node_concepts = node_concepts if isinstance(node_concepts, dict) else {}
     # Dedup parent ids (a torn log can carry [0, 0]) while keeping only existing parents.
@@ -980,6 +994,19 @@ def node_concept_delta(state, node_id) -> dict:
     inherited_base: set = set()
     for pid in parent_ids:
         inherited_base |= _canon_set(pid, node_concepts, rename)
+    if not parent_ids:
+        raw_deltas = getattr(state, "node_concept_deltas", None)
+        provenance = getattr(state, "node_concept_provenance", None)
+        if (isinstance(raw_deltas, dict) and node_id in raw_deltas
+                and isinstance(provenance, dict)
+                and provenance.get(node_id) == NODE_CONCEPT_PROVENANCE_AUTHORED):
+            # CODEX AGENT: replay gives an authored delta root the run base. Calling all of those ids
+            # `added` makes an explicit zero delta look like it authored the base. Legacy full roots and
+            # classifier/operator overrides have no active authored-delta sidecar and retain all-added.
+            raw_base = getattr(state, "run_base_concepts", None)
+            raw_base = raw_base if isinstance(raw_base, (list, tuple)) else []
+            inherited_base = {c for c in (
+                _canonical_with_rename(value, rename) for value in raw_base) if c}
     return {
         "parent_ids": sorted(parent_ids),
         "added": sorted(own - inherited_base),

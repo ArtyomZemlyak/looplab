@@ -21,7 +21,8 @@ from looplab.core.models import Idea, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.roles import (
-    _OPERATOR_NOTE, _attention_points, _clamp_fill, _hypothesis_system_suffix,
+    _CONCEPT_AUTHORING_GUIDANCE, _OPERATOR_NOTE, _attention_points, _clamp_fill,
+    _hypothesis_system_suffix,
     _researcher_capability_suffix, _state_brief, collect_hint_cues)
 # The tool-loop machinery was split into `agents.tool_loop`. Every moved name is RE-IMPORTED here
 # under its original name because callers and tests import AND monkeypatch them THROUGH this
@@ -115,9 +116,7 @@ class ToolUsingResearcher:
                "readers end a truncated reply with a resume marker — if a reply ends with a truncation "
                "marker, request the NEXT range instead of re-reading from the start. When you understand "
                "the change you want and can name its params, STOP and emit (operator, params, rationale, "
-               "and `concepts` — the SET of `axis/slug` concept ids this experiment touches, e.g. "
-               "\"loss/contrastive\", \"architecture/moe\"; include every one that applies, reuse existing "
-               "ids, propose a new `axis/slug` only when none fits); you refine on the NEXT node.\n"
+               "and the concept authoring fields); you refine on the NEXT node.\n"
                + _OPERATOR_NOTE + "\n"
                + _IDEA_SPACE_TOOL)
 
@@ -231,13 +230,14 @@ class ToolUsingResearcher:
         hyp = _hypothesis_system_suffix(getattr(self, "track_hypotheses", True))
         messages = [
             {"role": "system",
-             # P6/P8: the shared capability suffix (sweep offer — gated — + eval_timeout) and the
-             # hardware attention points reach the DEFAULT researcher too, appended AFTER the
+             # Part V/P6/P8: the shared concept-mode contract, capability suffix (sweep offer — gated
+             # — + eval_timeout), and hardware attention points reach the DEFAULT researcher, appended AFTER the
              # render() so a `tool_researcher_system.md` override keeps them AND the code-owned
              # offer_sweep gate keeps deciding the sweep offer — the pattern now truly shared with
              # LLMResearcher (whose researcher_system default is likewise core-only) / LLMDeveloper.
              "content": render(self.prompts, "tool_researcher_system", self._SYSTEM)
-                        + "\n" + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
+                        + "\n" + _CONCEPT_AUTHORING_GUIDANCE
+                        + _researcher_capability_suffix(getattr(self, "offer_sweep", True))
                         + self.space_hint + hyp
                         + "\n\n" + _attention_points()},
             {"role": "user", "content": _state_brief(state, parent,

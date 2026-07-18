@@ -509,10 +509,37 @@ roles) — see [Configuration → Strategist & meta-control](configuration.md#st
 ## The concept graph & concept views
 
 Every experiment carries a **set** of research concepts — multi-label `axis/slug` path ids like
-`loss/contrastive/dcl` — instead of a single free-text grouping slug. The Researcher **authors** a
-node's concepts on the `Idea` (`concepts: list[str]`); they fold into `RunState.node_concepts` at
-`node_created` (deterministic, offline — no tagging cadence required), and the strategist cadence may
-later consolidate/enrich them. An **operator** can also re-tag one node's concepts directly via the durable
+`loss/contrastive/dcl` — instead of a single free-text grouping slug. The Researcher **authors** that
+membership on the `Idea` with an explicit contract:
+
+- `concept_mode="full"` means `concepts` is the node's exact complete set. New writers emit this mode
+  even when the set is empty. An old event with no discriminator keeps its historical full-set behavior;
+  an old payload with no membership remains absent rather than becoming a known-empty classification.
+- `concept_mode="delta"` means `concepts_added` / `concepts_removed` modify the inherited set. A root
+  inherits `RunState.run_base_concepts` (from `run_concepts`); a child inherits the union of its parents'
+  effective sets. Both lists may be empty: that is an explicit **zero delta** (inherit unchanged), not an
+  absent membership. The raw delta remains in `RunState.node_concept_deltas`; replay materializes the
+  effective full set in `RunState.node_concepts` after the complete DAG has folded.
+
+Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the complete
+`concept_consolidation` rename chain on the base, inherited values, removals and additions **before** set
+subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and consolidation cannot
+resurrect a renamed id after subtraction. A classifier, operator or offline display receipt remains
+authoritative over an authored delta for the unchanged Idea; only classifier receipts count as independent
+evidence. A `propose` reset clears authored membership, provenance and raw delta together. The short-lived
+pre-discriminator format with a non-empty delta list remains readable and canonicalizes to
+`concept_mode="delta"`; new model/event dumps always emit the discriminator.
+
+An invalid active delta dependency cycle cannot produce a truthful inherited set. Replay therefore
+fails closed to an empty effective set for every cycle member and active delta descendant, while recording
+`RunState.node_concept_materialization_receipts[node_id] = "delta_dependency_cycle"`. `ConceptFrame`
+classifies that receipt as corruption/incomplete and becomes non-authoritative, so the UI cannot mistake
+the fallback for an explicitly authored empty set. Current frames ignore receipts belonging only to
+tombstoned or aborted nodes; historical prefixes retain the receipt and remain non-authoritative.
+
+Full or materialized memberships fold into `RunState.node_concepts` at/after `node_created`
+(deterministic, offline — no tagging cadence required), and the strategist cadence may later
+consolidate/enrich them. An **operator** can also re-tag one node's concepts directly via the durable
 command `concept_tag_edited` (generation-fenced like a comment): it folds with `operator-edited` provenance,
 which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5) — a node reset
 clears the override. Operator edits are authoritative for the run's read models but are deliberately **not**
@@ -566,9 +593,11 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   runs. See `looplab/search/concept_graph.py`.
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
-  are all `added`). Pure projection over the full-set `node_concepts` — no new storage — canonicalized
-  through the consolidation rename on both sides, so it shows what each experiment conceptually changed
-  relative to where it came from. Surfaced to the Researcher/Strategist via the `node_concept_delta` tool.
+  are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a
+  pure projection over materialized full-set `node_concepts`, distinct from the optional raw authored delta
+  sidecar. Both sides canonicalize through the consolidation rename, so it shows what each experiment
+  conceptually changed relative to where it came from. Surfaced to the Researcher/Strategist via the
+  `node_concept_delta` tool.
 
 These are surfaced at `GET /api/runs/{id}/concepts?lens=…` as a bounded `ConceptFrame` v1: one exact
 run generation and captured event prefix, completeness/authority receipts, a per-lens tree, metrics and
