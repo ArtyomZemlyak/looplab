@@ -290,6 +290,7 @@ export function validatePaidDerivedPayload(value, expected = {}) {
 }
 
 const entries = value => record(value) ? Object.keys(value).sort().map(key => [key, value[key]]) : []
+const receiptKey = value => record(value) ? entries(value) : (value ?? null)
 const emptyLensForm = scope => ({ scope, prompt: '', busy: false, error: '' })
 
 export function legacyAxisFallbackPresent(state) {
@@ -315,8 +316,14 @@ export function conceptProjectionKey(state) {
   const edges = entries(state?.concept_edges).map(([key, edge]) => [
     key, edge?.src, edge?.rel, edge?.dst, edge?.confidence,
   ])
+  // CODEX AGENT: effective memberships can stay byte-identical while replay adds or clears a typed
+  // materialization receipt. Those receipts change ConceptFrame authority, so they are projection inputs,
+  // not incidental state; omitting them leaves a stale "complete" frame on screen indefinitely.
+  const materializationReceipts = entries(state?.node_concept_materialization_receipts)
+    .map(([key, receipt]) => [key, receiptKey(receipt)])
   return JSON.stringify([state?.direction || 'max', state?.best_node_id ?? null,
     entries(state?.node_concepts), entries(state?.node_concept_provenance),
+    materializationReceipts, receiptKey(state?.run_base_concept_receipt),
     entries(state?.concept_consolidation), edges, nodes, state?.aborted_nodes || []])
 }
 

@@ -332,6 +332,12 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     for (const changed of [
       { ...state, best_node_id: 1 },
       { ...state, node_concept_provenance: { 0: 'classifier-v2' } },
+      { ...state, node_concept_materialization_receipts: {
+        0: { status: 'unavailable', reasons: ['delta_dependency_cycle'] },
+      } },
+      { ...state, run_base_concept_receipt: {
+        status: 'partial', reasons: ['concepts_per_node_cap'],
+      } },
       { ...state, nodes: { 0: { ...state.nodes[0], attempt: 1 } } },
       { ...state, nodes: { 0: { ...state.nodes[0], status: 'pending' } } },
       { ...state, nodes: { 0: { ...state.nodes[0], tombstoned: true } } },
@@ -510,7 +516,13 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'safe/root')
     assert.match(document.body.textContent, /recorded claims.*not independently verified/i)
 
-    await click(button('Refresh'))
+    before = requests.length
+    state = { ...state, node_concept_materialization_receipts: {
+      0: { status: 'unavailable', reasons: ['delta_dependency_cycle'] },
+    } }
+    await render()
+    assert.equal(requests.length, before + 1,
+      'a receipt-only state change refetches ConceptFrame authority exactly once')
     await reply(requests.at(-1), conceptPayload('cycle', {
       complete: false, reasons: ['delta_dependency_cycle'],
     }))
