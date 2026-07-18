@@ -193,6 +193,17 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       'derived labels must match the server-normalized nonblank form')
     assert.equal(conceptModule.validDerivedLensLabel('hidden\u200blabel'), false,
       'format/control Unicode cannot enter an option label or title')
+    assert.equal(conceptModule.classifyConceptCompleteness(['membership_cap']), 'bounded-cap')
+    for (const reasons of [
+      ['delta_dependency_cycle'], ['delta_dependency_missing_parent'],
+      ['delta_dependency_unknown_parent_membership'], ['invalid_consolidation_map'],
+      ['invalid_concept_id'], ['rename_cycle'], ['rename_hop_cap'], ['concept_mode_unsupported'],
+      ['membership_cap', 'rename_cycle'],
+    ]) assert.equal(conceptModule.classifyConceptCompleteness(reasons),
+      'materialization-corruption', `${reasons.join(',')} is not safe cap truncation`)
+    assert.equal(conceptModule.classifyConceptCompleteness(['event_log_corruption']), 'integrity')
+    assert.equal(conceptModule.classifyConceptCompleteness([7]), 'integrity',
+      'the exported classifier is total over malformed callers')
     const derivedPayload = framePayload({
       id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
       edgesPresent: true, lensEdgesPresent: true,
@@ -493,10 +504,34 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       complete: false, truncated: true, reasons: ['membership_cap'],
     })
     await reply(requests.at(-1), partial)
-    assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
+    assert.match(document.body.textContent,
+      /bounded partial frame.*configured limits omitted records.*membership_cap/i)
     await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'safe/root')
     assert.match(document.body.textContent, /recorded claims.*not independently verified/i)
+
+    await click(button('Refresh'))
+    await reply(requests.at(-1), conceptPayload('cycle', {
+      complete: false, reasons: ['delta_dependency_cycle'],
+    }))
+    const corruptionNotice = document.querySelector('.cv-resource-note.partial')
+    assert.equal(corruptionNotice?.getAttribute('role'), 'alert')
+    assert.match(corruptionNotice?.textContent,
+      /materialization is incomplete.*delta_dependency_cycle.*rows are safe.*missing concepts.*Refresh cannot repair.*Lab.*Events and Authoring.*fork and replay/is)
+    assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'cycle',
+      'safe rows remain visible without turning corruption into a coverage claim')
+
+    await click(button('Refresh'))
+    await reply(requests.at(-1), framePayload({
+      complete: false, reasons: ['rename_cycle'],
+    }))
+    const corruptionCard = document.querySelector('.cv-state-card[role="alert"]')
+    assert.match(corruptionCard?.textContent,
+      /Concept materialization is blocked.*rename_cycle.*not a no-concepts result.*Refresh cannot repair.*Lab.*Events and Authoring.*fork and replay/is)
+    assert.equal(button('Retry'), undefined,
+      'a read retry cannot repair a durable materialization receipt')
+    assert.equal(button('Refresh concepts'), undefined,
+      'permanent corruption must not masquerade as an ordinary empty refresh state')
 
     before = requests.length
     runId = 'next%2Frun'

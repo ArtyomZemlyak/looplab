@@ -522,10 +522,11 @@ membership on the `Idea` with an explicit contract:
   event is the raw audit source. Replay materializes the effective full set in `RunState.node_concepts`
   after the complete DAG has folded.
 
-Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the complete
-`concept_consolidation` rename chain on the base, inherited values, removals and additions **before** set
-subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and consolidation cannot
-resurrect a renamed id after subtraction. A classifier, operator or offline display receipt remains
+Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the bounded
+`concept_consolidation` rename chain (at most 16 hops) on the base, inherited values, removals and additions
+**before** set subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and
+consolidation cannot resurrect a renamed id after subtraction. A classifier, operator or offline display
+receipt remains
 authoritative over an authored delta for the unchanged Idea; only classifier receipts count as independent
 evidence. A `propose` reset clears authored membership, provenance and the bounded delta sidecar together. The short-lived
 pre-discriminator format with a non-empty delta list remains readable and canonicalizes to
@@ -543,12 +544,25 @@ non-authoritative whenever an active receipt exists, so the UI cannot mistake a 
 authored empty set. Current frames ignore node receipts belonging only to tombstoned or aborted nodes;
 historical prefixes retain them and remain non-authoritative.
 
+`ConceptFrame.completeness.reasons` distinguishes safe, bounded cap receipts (for example
+`membership_cap`) from corruption-class receipts such as `concept_mode_unsupported`,
+`delta_dependency_cycle`, `delta_dependency_missing_parent`,
+`delta_dependency_unknown_parent_membership`, `invalid_concept_materialization_receipt`,
+`invalid_consolidation_map`, invalid membership input, `invalid_concept_id`, `rename_cycle`, and
+`rename_hop_cap`. Cap receipts expose a deterministic safe subset; corruption receipts mean that missing
+membership cannot be interpreted as absence. These are read receipts over durable run state, so refreshing
+the same frame does not repair them. Inspect **Lab → Events** and **Authoring** to identify the broken
+delta/consolidation source, then use a supported operator re-tag where appropriate or fork and replay a
+corrected run. Preserve the event log as the audit source; do not hand-edit a derived projection/cache.
+
 Full or materialized memberships fold into `RunState.node_concepts` at/after `node_created`
 (deterministic, offline — no tagging cadence required), and the strategist cadence may later
 consolidate/enrich them. An **operator** can also re-tag one node's concepts directly via the durable
 command `concept_tag_edited` (generation-fenced like a comment): it folds with `operator-edited` provenance,
-which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5) — a node reset
-clears the override. Operator edits are authoritative for the run's read models but are deliberately **not**
+which the classifier re-tag cadence **must not clobber** (order-tolerantly, invariant 5). Generic node resets
+do not clear the override. Only a `propose` reset clears it together with the Idea;
+implement/eval resets preserve it while the Idea is unchanged. Operator edits are authoritative for the
+run's read models but are deliberately **not**
 promoted to independent classifier evidence. Membership is not a metric, independent evidence or a direct champion score.
 The same provenance boundary applies to retro-tagging: `concept-coverage --offline --persist` records exact
 `offline-heuristic` provenance, so its coarse alias matches appear in the UI but cannot feed graded-novelty

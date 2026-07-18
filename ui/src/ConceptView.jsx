@@ -40,6 +40,23 @@ const TRUNCATION_CAP_REASONS = new Set([
   'node_membership_cap', 'concepts_per_node_cap', 'membership_cap', 'tree_node_cap',
   'edge_cap', 'edge_endpoint_cap', 'experiment_ref_cap',
 ])
+const MATERIALIZATION_CORRUPTION_REASONS = new Set([
+  'invalid_concept_materialization_receipt', 'invalid_consolidation_map',
+  'invalid_membership_map', 'invalid_membership_list', 'invalid_experiment_reference',
+  'invalid_concept_id', 'rename_cycle', 'rename_hop_cap', 'concept_mode_unsupported',
+])
+const MATERIALIZATION_REMEDIATION = 'Refresh cannot repair durable run state. Inspect Lab → Events '
+  + 'and Authoring; correct the delta/consolidation source or fork and replay a corrected run.'
+// CODEX AGENT: Cap receipts describe a deterministic, safe subset. Delta/consolidation/membership
+// receipts mean durable concept materialization could not be trusted; a read retry cannot repair them.
+export function classifyConceptCompleteness(reasons = []) {
+  if (!Array.isArray(reasons) || reasons.length === 0) return 'complete'
+  if (reasons.some(reason => typeof reason === 'string'
+      && (MATERIALIZATION_CORRUPTION_REASONS.has(reason)
+        || reason.startsWith('delta_dependency_')))) return 'materialization-corruption'
+  return reasons.every(reason => TRUNCATION_CAP_REASONS.has(reason))
+    ? 'bounded-cap' : 'integrity'
+}
 const generationId = value => value === null
   || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))
 const paidLensReadOnlyMessage = access => access?.mode === 'review'
@@ -604,6 +621,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     : { state: 'unavailable', reasons: [] }, [data])
   const roots = data?.tree?.roots || []
   const empty = !!data && roots.length === 0
+  const completenessKind = classifyConceptCompleteness(data?.completeness?.reasons)
+  const completenessReceipt = data?.completeness?.reasons?.join(', ')
   const refreshing = current.status === 'refreshing'
   const refresh = () => setRetry(value => value + 1)
   const recoveryFrameReady = !!data
@@ -1234,9 +1253,17 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   else if (projectionStatus.state === 'unavailable') stateCard = { tone: 'error',
     title: 'Concepts are unavailable', action: refresh, pending: refreshing,
     body: 'The server returned no safe concept projection. The run is unchanged; retry this read.' }
+  // CODEX AGENT: Fail-closed materialization emptiness is not an honest "no concepts" result and
+  // refreshing the same durable receipt cannot resolve it. Surface the repair path without a Retry.
+  else if (empty && completenessKind === 'materialization-corruption') stateCard = { tone: 'error',
+    title: 'Concept materialization is blocked',
+    body: `No trustworthy concepts were materialized (receipt: ${completenessReceipt}). This is not a no-concepts result. ${MATERIALIZATION_REMEDIATION}` }
+  else if (empty && completenessKind === 'bounded-cap') stateCard = { tone: 'error',
+    title: 'Concept frame is bounded',
+    body: `Configured limits omitted all rows (receipt: ${completenessReceipt}). This is not a no-concepts result; repeated refreshes use the same bounds. Inspect the receipt before making absence or coverage claims.` }
   else if (empty && !data.authoritative) stateCard = { tone: 'error',
     title: 'Concept frame is incomplete', action: refresh, pending: refreshing,
-    body: 'No safe concepts were included in this bounded frame. That is not evidence that the run has no concepts; retry for an authoritative frame.' }
+    body: `No safe concepts were included (receipt: ${completenessReceipt || 'unknown'}). That is not evidence that the run has no concepts; retry only after the source projection can become authoritative.` }
   else if (empty) stateCard = { tone: 'empty', title: 'No concepts have been tagged yet',
     action: refresh, pending: refreshing, stale: current.status === 'stale',
     body: hasLegacyAxisFallback
@@ -1333,10 +1360,15 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     {metricContext}{relationshipLegend}
     {refreshing && <div className="cv-resource-note" role="status" aria-live="polite"><span className="cv-inline-spinner" aria-hidden="true" />Refreshing concepts… Last loaded view remains visible.</div>}
     {current.status === 'stale' && <div className="cv-resource-note stale" role="alert"><span>Showing the last loaded concept view; refresh {current.timeout ? 'timed out' : 'failed'}.</span><button type="button" className="btn sm" onClick={refresh}>Retry</button></div>}
-    {!data.authoritative && <div className="cv-resource-note partial" role="status">
-      {data.authority.source_authoritative
-        ? `This is a bounded partial frame${data.completeness.truncated ? '; configured limits omitted records' : ''}. The included projection is visible, but it is not a complete absence or coverage claim.`
-        : 'This frame comes from a non-authoritative recoverable event prefix. Treat every included membership as provisional.'}
+    {!data.authoritative && <div className="cv-resource-note partial"
+      role={completenessKind === 'materialization-corruption' ? 'alert' : 'status'}>
+      {completenessKind === 'materialization-corruption'
+        ? `Concept materialization is incomplete (receipt: ${completenessReceipt}). Included rows are safe; missing concepts are not evidence of absence. ${MATERIALIZATION_REMEDIATION}`
+        : completenessKind === 'bounded-cap'
+          ? `Bounded partial frame: configured limits omitted records (receipt: ${completenessReceipt}). Included rows are safe, but absence and coverage claims are incomplete.`
+          : data.authority.source_authoritative
+            ? `Some recorded concept data failed integrity checks (receipt: ${completenessReceipt || 'unknown'}). Included rows are visible, but missing concepts and coverage are unknown.`
+            : 'This frame comes from a non-authoritative recoverable event prefix. Treat every included membership as provisional.'}
     </div>}
     {data.lens_contract.fallback === 'no_matching_edges' && <div className="cv-resource-note" role="status">
       No matching relationship links were available for the requested {data.requested_lens} lens; showing the is-a hierarchy instead.
