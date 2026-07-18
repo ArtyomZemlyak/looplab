@@ -4462,7 +4462,10 @@ concept rows**, expandable additional-parent `+N links`, stable relationship voc
 and honest mixed-era empty-state copy. Atlas raw metrics are preceded by visible scope/non-comparability,
 identity/unit and orientation warnings; context-free values are suppressed, long copy wraps, and bounded
 untrusted identifiers cannot inject bidi formatting controls. The route-main landmark/focus fix is integrated
-and automated-tested; its final desktop browser replay remains part of the publication gate.
+and automated-tested. A production-asset desktop replay confirmed the exact Concepts route, local-tab focus,
+Back/Forward announcements, relationship vocabulary and truthful no-link fallback. That replay exposed a
+1280px bulk-action wrap defect; `f956685` fixes it and adds a CSS regression. The post-fix geometry was rebuilt
+and automated-tested but was not represented as a second manual screenshot.
 
 The paid boundary is one durable worker/logical invocation with same-key join/replay and no parser repair or
 outer same-identity redispatch. Core transport retries can still issue more than one HTTP/provider request, so
@@ -4489,11 +4492,12 @@ the concept set against that same set. It may return only with a distinct identi
 measured comprehension need. The full Research Space, Saved Scope/Atlas comparison contract and governance
 workbench remain open.
 
-Known evidence at this integration checkpoint is deliberately narrow: the focused UI selection is **57/57
-PASS**; a paid OpenRouter MiniMax bounded text+structured smoke is **PASS** but is not a Concepts-lens E2E; the
-full Python attempt is **not yet PASS** because six environment/path-artifact failures require a corrected
-rerun. Strict documentation validation and final full-suite/browser/publication results are recorded only when
-completed in
+The integration gate is complete for the published source/UI commit `f956685`: the full Python collection
+reported **3,892 tests** and the complete run exited zero with `basetemp` outside the Git tree; the full UI
+suite is **571/571 PASS**; the focused final UI selection is **62/62 PASS**; production build and every bundle
+budget pass; strict MkDocs and `git diff --check` pass. The paid OpenRouter MiniMax bounded text+structured
+smoke is also **PASS**, but remains a provider smoke rather than a Concepts-lens E2E or one-request billing
+proof. Exact browser and publication boundaries are recorded in
 [doc 21's post-Round-25 ledger](21-full-functionality-review-2026-07-13.md#post-round-25-integration-ledger-pending-final-commit-2026-07-18).
 Detailed UI wording and acceptance are in
 [doc 18 §37](18-ui-ux-review-2026-07-11.md#37-post-checkpoint-ui-integration-reconciliation-2026-07-18).

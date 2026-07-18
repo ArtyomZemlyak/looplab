@@ -330,14 +330,16 @@ already passed:
 - Full React tests, production build, focused backend durability/concurrency tests, strict MkDocs and
   `git diff --check` must pass from the final integrated tree.
 
-Evidence actually recorded for the post-checkpoint integration so far is narrower:
+Release evidence recorded for the published source/UI commit `f956685`:
 
 | Check | Result and boundary |
 |---|---|
-| focused UI selection | **PASS — 57/57**; this is not the full React suite or a browser walkthrough |
+| full + focused UI | **PASS — 571/571 full suite; 62/62 focused final selection** |
 | paid OpenRouter MiniMax smoke | **PASS** for bounded text + structured `looplab smoke`; it is not a Concepts-lens route/E2E or an exactly-once billing proof |
-| full Python run | **NOT PASS YET** — six environment/path-artifact failures were observed; rerun from the corrected integrated environment is required |
-| route landmark/focus | **CODE + AUTOMATED TEST PASS** — one named outer run `main`, Concepts as a named region, URL-navigation revision focus without stealing local tab-click focus; final desktop browser replay remains pending |
-| strict docs and diff hygiene | recorded in doc 18 §37 after this documentation pass |
+| full Python run | **PASS** — 3,892 tests collected; complete run exited zero with external `basetemp`; the prior six failures were repository-ancestry artifacts |
+| route landmark/focus | **CODE + AUTOMATED + DESKTOP BROWSER PASS** — named ready/state-card run mains, Concepts region, exact URL/Back/Forward focus, and no focus theft on local tabs |
+| production/bundle | **PASS** — build passed; total JS gzip 350,183 B ≤ 350,208 B and Atlas increment 7,415 B ≤ 7,680 B |
+| desktop visual replay | **PASS with boundary** — production-asset route and relationship/fallback journeys passed. A 1280px bulk-action wrap was found and fixed in `f956685`; the final CSS is automated/build-verified, but no second post-fix screenshot is claimed. Paid-lens recovery is not called browser E2E. |
+| strict docs, diff hygiene and publication | **PASS** — strict MkDocs + `git diff --check`; `f956685` pushed to `origin/master` and equality confirmed before this docs-only certificate |
 
 This is a desktop gate only. No mobile/touch/reflow result is inferred from it.

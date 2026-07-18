@@ -1708,12 +1708,14 @@ integrated evidence separately. Anchor/cross-document authority is now
 → [doc 18 §36](18-ui-ux-review-2026-07-11.md#36-dated-4d1218c-uiux-reconciliation-2026-07-18)
 → this round.
 
-## Post-Round-25 integration ledger — pending final commit (2026-07-18)
+<a id="post-round-25-integration-ledger-pending-final-commit-2026-07-18"></a>
 
-This ledger records confirmed deltas after the dated `4d1218c` checkpoint. It is not a final-master or
-publication certificate and intentionally carries no floating `origin/master` hash. The final source/tests
-remain runtime authority; this section exists so integration does not silently promote old evidence or lose
-new contract fixes.
+## Post-Round-25 integration release certificate (2026-07-18)
+
+This ledger records confirmed deltas after the dated `4d1218c` checkpoint and certifies the published
+source/UI package `f956685`. That commit was pushed to `origin/master`, then local HEAD and the remote-tracking
+ref were confirmed equal. This documentation-only follow-up records evidence without pretending that a commit
+can name its own final hash. Source and tests remain runtime authority.
 
 | Integration area | Confirmed post-checkpoint contract | Remaining boundary |
 |---|---|---|
@@ -1724,17 +1726,20 @@ new contract fixes.
 | `concept_card` tool | Post-checkpoint upstream adds an advisory redacted lookup with exact/fuzzy slug reuse, scoped track record separated from global observation count and explicit `UNTRUSTED_MEMORY` treatment. | It is not a prose paper generator, verifier, governance mutation or complete applicability receipt. |
 | Paid logical identity | Same-key join/replay and `tool_call_once` prevent a new outer logical operation and parser-repair dispatch. | The core client can make bounded transport retries; multiple HTTP/provider requests, duplicate/unknown billing and returned-usage undercount remain possible. |
 | Settings/Config CAS | Global settings, secrets and per-run Config own separate/equivalent transaction locks and revision domains. The current Web UI always sends the observed per-run revision. | Raw HTTP token omission remains a legacy serialized last-writer-wins compatibility path. |
-| Route landmark/focus | One named outer run `main` owns route focus; Concepts is a named region. URL hydration/Back/Forward increments the focus boundary, while local Search/Concepts/Report clicks keep focus on the invoking tab. | **CODE + AUTOMATED TEST PASS;** final desktop browser replay remains part of the publication gate. |
+| Route landmark/focus | One named outer run `main` owns route focus; Concepts is a named region. URL hydration/Back/Forward increments the focus boundary, while local Search/Concepts/Report clicks keep focus on the invoking tab. Loading/error, generation-fence and historical state-card mains are named too. | **CODE + AUTOMATED + DESKTOP BROWSER PASS.** |
 
 ### Exact post-checkpoint evidence
 
 | Check | Result |
 |---|---|
-| focused UI selection | **PASS — 57/57**; a narrow selection, not the full React suite or browser walkthrough |
+| full UI suite | **PASS — 571/571** |
+| focused final UI selection | **PASS — 62/62** |
 | paid OpenRouter MiniMax smoke | **PASS** for bounded text + structured `looplab smoke`; not a Concepts-lens E2E, recovery journey or one-provider-attempt proof |
-| full Python run | **NOT PASS YET** — six environment/path-artifact failures were observed; rerun from the corrected final integration environment is required |
+| full Python run | **PASS** — 3,892 tests collected; complete run exited zero with external `basetemp`. The earlier six failures disappeared when the temp root no longer inherited repository ancestry. |
+| production build + bundle budgets | **PASS** — total JS gzip 350,183 B ≤ 350,208 B; Research Atlas increment 7,415 B ≤ 7,680 B |
+| desktop browser journey | **PASS with boundary** — production assets confirmed the exact Concepts route, named-main focus, local-tab focus retention, Back/Forward announcements, projected relationship copy and truthful `co_occurs` no-link fallback. The walkthrough found a 1280px bulk-action wrap defect; `f956685` fixes it with a CSS regression and rebuilt bundle, but no second post-fix screenshot is claimed. Paid-lens recovery was not exercised as browser E2E. |
 | strict MkDocs + documentation diff hygiene | **PASS** — `mkdocs build --strict` and repository `git diff --check` completed from the post-edit working tree; existing INFO notices for links outside `docs_dir` remain non-fatal |
-| final full React/build, browser journey and publication equality | **PENDING / not claimed** |
+| publication | **PASS** — `f956685` pushed to `origin/master`; HEAD/remote equality confirmed before this documentation-only certificate |
 
 Current cross-document ordering is
 [doc 17 §22.11](17-project-review-and-directions-2026-07-11.md#2211-post-checkpoint-integration-release-reconciliation-2026-07-18)
