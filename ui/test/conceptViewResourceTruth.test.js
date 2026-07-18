@@ -218,7 +218,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       framePayload({
         id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
         edgesPresent: true, lensEdgesPresent: true, complete: false,
-        truncated: true, reasons: ['rename_hop_cap'],
+        truncated: false, reasons: ['rename_hop_cap'],
       }),
     ]) {
       assert.doesNotThrow(() => conceptModule.validateConceptPayload(
@@ -227,6 +227,12 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
         unsafePartial, paidDerivedExpected), /Invalid concept projection/,
       'paid success accepts only the server allow-listed size-cap partials')
     }
+    assert.throws(() => conceptModule.validateConceptPayload(framePayload({
+      id: 'derived/root', requestedLens: 'usage', effectiveLens: 'usage', derived: true,
+      edgesPresent: true, lensEdgesPresent: true, complete: false,
+      truncated: true, reasons: ['rename_hop_cap'],
+    }), paidDerivedExpected), /Invalid concept projection/,
+    'a corruption-adjacent reason cannot claim monotone truncation just because it ends in _cap')
     assert.throws(() => conceptModule.validateConceptPayload(derivedPayload, {
       requestedLens: 'usage', direction: 'max', derived: false,
     }), /Invalid concept projection/)
