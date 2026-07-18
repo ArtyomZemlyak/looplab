@@ -511,7 +511,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     await reply(requests.at(-1), partial)
     assert.match(document.body.textContent,
-      /bounded partial frame.*configured limits omitted records.*membership_cap/i)
+      /membership_cap.*limits omitted records.*absence and coverage are incomplete/i)
     await click(button('Expand concept rows'))
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'safe/root')
     assert.match(document.body.textContent, /recorded claims.*not independently verified/i)
@@ -529,7 +529,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     const corruptionNotice = document.querySelector('.cv-resource-note.partial')
     assert.equal(corruptionNotice?.getAttribute('role'), 'alert')
     assert.match(corruptionNotice?.textContent,
-      /materialization is incomplete.*delta_dependency_cycle.*rows are safe.*missing concepts.*Refresh cannot repair.*Lab.*Events and Authoring.*fork and replay/is)
+      /delta_dependency_cycle.*materialization is incomplete.*rows are safe.*missing concepts.*Refresh cannot repair.*Lab.*Events\/Authoring.*fork and replay/is)
     assert.equal(document.querySelector('.cv-crow.tagged .cv-cid')?.getAttribute('title'), 'cycle',
       'safe rows remain visible without turning corruption into a coverage claim')
 
@@ -539,7 +539,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }))
     const corruptionCard = document.querySelector('.cv-state-card[role="alert"]')
     assert.match(corruptionCard?.textContent,
-      /Concept materialization is blocked.*rename_cycle.*not a no-concepts result.*Refresh cannot repair.*Lab.*Events and Authoring.*fork and replay/is)
+      /Concept materialization is blocked.*not a no-concepts result.*rename_cycle.*materialization is incomplete.*Refresh cannot repair.*Lab.*Events\/Authoring.*fork and replay/is)
     assert.equal(button('Retry'), undefined,
       'a read retry cannot repair a durable materialization receipt')
     assert.equal(button('Refresh concepts'), undefined,
@@ -592,7 +592,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     assert.equal(requests.length, before,
       'an over-byte-limit prompt is rejected before any paid transport')
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
-      /too long.*800 characters.*2,048 bytes/i)
+      /exceeds.*800 characters.*2,048 bytes/i)
     await setInput(lensInput, 'group by usage')
     assert.equal(document.querySelector('.cv-lenserr'), null,
       'editing the prompt clears the previous local validation error')
@@ -731,7 +731,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       generation: GENERATION_A, request_id: '3'.repeat(64), seq: 9,
     })
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
-      /abandoned on the server.*may already have completed and been billed.*usage.*unavailable/i)
+      /unknown request abandoned.*provider work may have completed and been billed.*usage.*unavailable/i)
     assert.ok(button('Create lens · paid'), 'a durable abandon terminal clears the local intent')
 
     await setInput(document.querySelector('[aria-label="Describe a lens to create"]'),
@@ -774,7 +774,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     }))
     assert.equal(document.querySelector('[aria-label="Concept projection lens"]').value,
       'race-usage')
-    assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i)
+    assert.match(document.body.textContent, /membership_cap.*limits omitted records/i)
     assert.match(document.querySelector('.cv-lenserr')?.textContent,
       /provider completed before abandonment.*validated lens was restored/i)
 
@@ -850,7 +850,7 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
       complete: false, truncated: true, reasons: ['membership_cap'],
     }))
     assert.equal(document.querySelector('[aria-label="Concept projection lens"]').value, 'usage')
-    assert.match(document.body.textContent, /bounded partial frame.*configured limits omitted records/i,
+    assert.match(document.body.textContent, /membership_cap.*limits omitted records/i,
       'a fully validated size-cap partial paid result remains visibly partial')
     const relationshipView = document.querySelector('.concept-view')
     assert.match(relationshipView?.getAttribute('aria-label') || '',

@@ -241,7 +241,7 @@ export function validateConceptLensRecovery(value, expectedGeneration) {
     generation: value.generation, requestId: value.request_id, jobId: null,
   })
   if (terminal.ambiguous === true || terminal.status === 'running') {
-    throw recoveryProtocolError('Paid concept-lens recovery did not contain a terminal receipt.')
+    throw recoveryProtocolError('Paid-lens recovery is not terminal.')
   }
   if (!terminalAfterClaim(terminal, value.started_seq)) {
     throw recoveryProtocolError('Paid concept-lens terminal does not follow its durable claim.')
@@ -264,7 +264,7 @@ export async function pollDiscoveredConceptLens(runId, recovery, {
 } = {}) {
   const inspected = validateConceptLensRecovery(recovery, recovery?.generation)
   if (inspected.state !== 'running') {
-    throw recoveryProtocolError('Only a discovered running paid concept-lens job can be polled.')
+    throw recoveryProtocolError('Only a discovered running recovery job can be polled.')
   }
   const result = validateReceipt(await awaitConceptLensRecoveryJob(inspected.job_id, {
     signal, intervalMs: Math.max(0, pollIntervalMs), timeoutMs: Math.max(1, pollTimeoutMs),
@@ -284,7 +284,7 @@ export async function resolveOrphanedConceptLens(
 ) {
   const inspected = validateConceptLensRecovery(recovery, recovery?.generation)
   if (inspected.state !== 'orphaned' || !UUID.test(resolutionIdempotencyKey || '')) {
-    throw recoveryProtocolError('An exact orphan receipt and separate resolution key are required.')
+    throw recoveryProtocolError('Exact orphan receipt and separate resolution key required.')
   }
   const response = validateReceipt(await abandonRecoveredConceptLens(
     runId, inspected.generation, inspected.request_id, inspected.started_seq, {

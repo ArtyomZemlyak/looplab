@@ -40,20 +40,15 @@ const TRUNCATION_CAP_REASONS = new Set([
   'node_membership_cap', 'concepts_per_node_cap', 'membership_cap', 'tree_node_cap',
   'edge_cap', 'edge_endpoint_cap', 'experiment_ref_cap',
 ])
-const MATERIALIZATION_CORRUPTION_REASONS = new Set([
-  'invalid_concept_materialization_receipt', 'invalid_consolidation_map',
-  'invalid_membership_map', 'invalid_membership_list', 'invalid_experiment_reference',
-  'invalid_concept_id', 'rename_cycle', 'rename_hop_cap', 'concept_mode_unsupported',
-])
-const MATERIALIZATION_REMEDIATION = 'Refresh cannot repair durable run state. Inspect Lab → Events '
-  + 'and Authoring; correct the delta/consolidation source or fork and replay a corrected run.'
+const MATERIALIZATION_CORRUPTION_REASON = /^(?:delta_dependency_|rename_|concept_mode_|invalid_(?:concept|consolidation|membership|experiment))/
+const MATERIALIZATION_REMEDIATION = 'Refresh cannot repair durable state. Inspect Lab → Events/Authoring; '
+  + 'fix delta/consolidation or fork and replay.'
 // CODEX AGENT: Cap receipts describe a deterministic, safe subset. Delta/consolidation/membership
 // receipts mean durable concept materialization could not be trusted; a read retry cannot repair them.
 export function classifyConceptCompleteness(reasons = []) {
   if (!Array.isArray(reasons) || reasons.length === 0) return 'complete'
   if (reasons.some(reason => typeof reason === 'string'
-      && (MATERIALIZATION_CORRUPTION_REASONS.has(reason)
-        || reason.startsWith('delta_dependency_')))) return 'materialization-corruption'
+      && MATERIALIZATION_CORRUPTION_REASON.test(reason))) return 'materialization-corruption'
   return reasons.every(reason => TRUNCATION_CAP_REASONS.has(reason))
     ? 'bounded-cap' : 'integrity'
 }
@@ -62,7 +57,7 @@ const generationId = value => value === null
 const paidLensReadOnlyMessage = access => access?.mode === 'review'
   ? 'Paid lens actions are disabled in a review link; no provider request was sent.'
   : access?.mode === 'stale-link'
-    ? 'This diagnostic link targets an earlier generation. Open the current generation before creating a paid lens; no provider request was sent.'
+    ? 'Earlier-generation link: open the current generation before a paid lens. No provider request was sent.'
     : 'Paid lens actions are disabled in a historical snapshot; return to live first. No provider request was sent.'
 const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
 const countRecord = value => record(value) && Object.values(value).every(item => count(item))
@@ -535,7 +530,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         ...form, busy: false,
         prompt: intent?.generation === generation ? intent.prompt : '',
         error: intent && intent.generation !== generation
-          ? 'A paid receipt belongs to an older generation. Archive it locally to work in this verified replacement; old provider outcome and billing remain unknown.'
+          ? 'Older-generation paid receipt. Archive locally for this verified replacement; provider outcome and billing remain unknown.'
           : '',
       }))
     } catch {
@@ -546,7 +541,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         receipt: null, resolutionKey: null, error: '', notice: '',
       })
       setCurrentLensForm(form => ({ ...form, busy: false,
-        error: 'This tab cannot save a new paid identity. Durable server recovery is still being checked.' }))
+        error: 'This tab cannot save a paid identity; checking durable server recovery.' }))
     }
   }, [paidLensScope, lensScope, runId, generation, displayedSequence, hasExactGeneration])
   useEffect(() => () => {
@@ -630,6 +625,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const empty = !!data && roots.length === 0
   const completenessKind = classifyConceptCompleteness(data?.completeness?.reasons)
   const completenessReceipt = data?.completeness?.reasons?.join(', ')
+  const incompleteMessage = completenessKind === 'materialization-corruption'
+    ? `Receipt: ${completenessReceipt}. Materialization is incomplete. Included rows are safe; missing concepts are unknown. ${MATERIALIZATION_REMEDIATION}`
+    : completenessKind === 'bounded-cap'
+      ? `Receipt: ${completenessReceipt}. Limits omitted records. Included rows are safe; absence and coverage are incomplete.`
+      : data?.authority?.source_authoritative
+        ? `Receipt: ${completenessReceipt || 'unknown'}. Recorded data failed integrity checks; missing concepts and coverage are unknown.`
+        : 'Non-authoritative recoverable event prefix: memberships are provisional.'
   const refreshing = current.status === 'refreshing'
   const refresh = () => setRetry(value => value + 1)
   const recoveryFrameReady = !!data
@@ -679,7 +681,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               input_seq: refreshed.input_seq,
             }
           } else if (refreshed.state === 'running' || refreshed.state === 'none') {
-            throw Object.assign(new Error('The discovered job is still not safely terminal.'), {
+            throw Object.assign(new Error('Discovered job is not safely terminal.'), {
               code: result.code || 'concept_lens_recovery_pending',
             })
           } else receipt = refreshed
@@ -701,8 +703,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       setRecovery({
         status: 'error',
         error: error?.code === 'run_generation_changed'
-          ? 'The run changed while paid recovery was inspected. Reload Concepts.'
-          : 'Durable paid-request recovery could not be verified. New paid work remains disabled.',
+          ? 'Run changed during paid recovery. Reload Concepts.'
+          : 'Paid recovery could not be verified; new paid work remains disabled.',
       })
     }).finally(() => {
       if (lensRecoveryRequest.current === owner) lensRecoveryRequest.current = null
@@ -768,8 +770,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         : response.code === 'concept_lens_abandoned'
           ? 'The durable claim is abandoned. Provider completion, billing, and usage remain unknown; no provider retry was sent.'
           : response.reason === 'no_model'
-            ? 'Recovered terminal: no model was configured, so no provider request was replayed.'
-            : 'Recovered the durable terminal for the previous paid lens. No provider request was replayed.'
+            ? 'Recovered terminal: no model configured. No provider request was replayed.'
+            : 'Recovered the previous paid lens terminal. No provider request was replayed.'
       setLensRecoveryState(previous => previous.scope === paidLensScope
         && previous.status === 'ready' && previous.receipt === receipt
         ? { ...previous, status: 'settled', notice, error: '' } : previous)
@@ -777,7 +779,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       setLensRecoveryState(previous => previous.scope === paidLensScope
         && previous.receipt === receipt
         ? { ...previous, status: 'error',
-            error: 'The recovered terminal failed concept-frame validation. New paid work remains disabled.' }
+            error: 'Recovered terminal failed validation; new paid work remains disabled.' }
         : previous)
     }
   }, [paidLensScope, currentRecovery.status, currentRecovery.receipt,
@@ -811,7 +813,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     if (prompt.length > LENS_PROMPT_MAX_CHARS
         || new TextEncoder().encode(prompt).length > LENS_PROMPT_MAX_BYTES) {
       setCurrentLensForm(form => ({ ...form,
-        error: 'Lens description is too long. Keep it within 800 characters and 2,048 bytes.' }))
+        error: 'Lens description exceeds 800 characters or 2,048 bytes.' }))
       return
     }
     let intent
@@ -821,8 +823,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       setLensIntentState({ scope: lensScope,
         storageReady: error?.code === 'CONCEPT_LENS_INTENT_CONFLICT', intent: savedLensIntent })
       setCurrentLensForm(form => ({ ...form, error: error?.code === 'CONCEPT_LENS_INTENT_CONFLICT'
-        ? 'Another saved paid lens must be reconciled before creating a new request.'
-        : 'Paid lens creation needs working session storage; no paid request was sent.' }))
+        ? 'Reconcile the saved paid lens before creating another request.'
+        : 'Working session storage is required; no paid request was sent.' }))
       return
     }
     const owner = { scope: paidLensScope, intent, resuming: !!savedLensIntent,
@@ -969,12 +971,12 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               : error?.code === 'run_generation_changed'
                 ? 'Run changed. Reload Concepts before creating another paid lens.'
                 : error?.code === 'concept_lens_in_progress'
-                  ? 'Another paid lens already owns this run generation. Wait, then reload Concepts.'
+                  ? 'Another paid lens owns this generation. Wait, then reload Concepts.'
                   : error?.code === 'job_capacity'
                     ? 'The paid-lens service is at capacity. No request was started; retry later.'
                     : error?.code === 'concept_lens_ledger_conflict'
                       ? 'Another conflicting paid-lens ledger needs operator repair. No new request was started.'
-                  : 'The paid request was rejected before model work began. Reload Concepts and review it.' }))
+                  : 'Paid request was rejected before model work. Reload Concepts.' }))
           if (cleared && ['invalid_run_generation', 'run_generation_unavailable',
             'run_generation_changed', 'concept_lens_in_progress',
             'concept_lens_ledger_conflict'].includes(error?.code)) {
@@ -1011,7 +1013,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const discardSavedLens = () => {
     if (lensBusy || !savedLensIntent) return
     setCurrentLensForm(form => ({ ...form,
-      error: 'Saved request retained. Local discard cannot cancel or unlock server-side paid work; Resume it or ask an operator to abandon its durable claim.' }))
+      error: 'Saved request retained: local discard cannot cancel or unlock server paid work. Resume it or ask an operator to abandon the durable claim.' }))
   }
   const archiveOldLens = () => {
     if (lensBusy || !savedLensIntent || !hasExactGeneration
@@ -1020,7 +1022,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       if (!clearConceptLensIntent(runId, savedLensIntent.idempotencyKey)) throw new Error('changed')
       setLensIntentState({ scope: lensScope, storageReady: true, intent: null })
       setCurrentLensForm(form => ({ ...form, prompt: savedLensIntent.prompt,
-        error: 'Old-generation receipt archived locally. Its provider outcome, billing, and old server claim remain unknown; the verified replacement generation is independent.' }))
+        error: 'Receipt archived locally. Provider outcome, billing, and old server claim remain unknown; verified replacement generation is independent.' }))
     } catch {
       setLensIntentState({ scope: lensScope, storageReady: false, intent: savedLensIntent })
       setCurrentLensForm(form => ({ ...form,
@@ -1087,9 +1089,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         error: !cleared
           ? 'The server returned a terminal receipt, but its local identity could not be cleared. Reload before new paid work.'
           : response.code === 'concept_lens_abandoned'
-            ? 'Unknown request abandoned on the server. Provider work may already have completed and been billed; usage can remain unavailable.'
+            ? 'Unknown request abandoned. Provider work may have completed and been billed; usage may remain unavailable.'
             : derived
-              ? 'The provider completed before abandonment; its validated lens was restored instead.'
+              ? 'Provider completed before abandonment; its validated lens was restored.'
               : 'The provider reached a terminal result before abandonment; no new request was created.'
       }))
     } catch (error) {
@@ -1134,7 +1136,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       if (response?.ambiguous === true) {
         setLensRecoveryState(previous => previous.scope === paidLensScope
           ? { ...previous, status: 'checking', receipt: null,
-              error: 'Resolution outcome is uncertain; inspecting the durable ledger before any retry.' }
+              error: 'Resolution uncertain; checking the durable ledger before retry.' }
           : previous)
         setLensRecoveryRetry(value => value + 1)
         return
@@ -1156,7 +1158,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         ...previous, status: shouldRecheck ? 'checking' : 'error',
         receipt: shouldRecheck ? null : recovery,
         error: error?.code === 'concept_lens_still_running'
-          ? 'The original worker is still running. Polling its existing job; no provider retry is being sent.'
+          ? 'Original worker is running. Polling its existing job; no provider retry.'
           : 'Orphan resolution was not durably confirmed. New paid work remains disabled.',
       } : previous)
       if (shouldRecheck) setLensRecoveryRetry(value => value + 1)
@@ -1186,13 +1188,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     : lensReadOnly
       ? paidLensReadOnlyMessage(runAccess)
       : savedLensIntent && !intentMatchesScope
-        ? 'This receipt belongs to an older generation. Archive is local only: it cannot resolve old provider work or billing, but that ledger cannot block this replacement generation.'
+        ? 'Older-generation receipt. Archive is local: old provider work and billing stay unresolved, but cannot block this replacement generation.'
         : savedLensIntent?.state === 'unknown'
           ? canAbandonLens
             ? 'Outcome unknown. Resume checks the same request. Abandon resolves its durable claim, but cannot undo provider work or billing.'
-            : 'Outcome unknown. Resume must first reconcile this same request before server-side abandonment is available.'
+            : 'Outcome unknown. Resume this same request before server-side abandonment.'
           : savedLensIntent?.state === 'running'
-            ? 'Paid job saved. Resume polls its existing receipt and reconciles the same request if needed.'
+            ? 'Paid job saved. Resume polls its receipt and reconciles the same identity.'
             : savedLensIntent?.state === 'submitting'
               ? 'Paid request dispatch may have started. Resume sends only this same saved identity.'
             : savedLensIntent
@@ -1200,19 +1202,19 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               : currentRecovery.status === 'checking'
                 ? 'Checking the durable server ledger before enabling another paid identity…'
                 : currentRecovery.status === 'polling'
-                  ? 'A paid job survived this tab. Polling that exact job without a prompt or paid key; no provider request is being sent.'
+                  ? 'Polling the exact saved job without a prompt or paid key; no provider request is sent.'
                   : currentRecovery.status === 'resolving'
                     ? 'Resolving the exact orphaned claim. This cannot undo provider work or billing.'
                     : currentRecovery.receipt?.state === 'orphaned'
                       ? 'An orphaned paid claim blocks new work. Resolve it explicitly; provider completion and billing remain unknown.'
                       : currentRecovery.receipt?.state === 'conflict'
-                        ? 'The durable paid ledger conflicts. Automatic recovery and new paid work are disabled until it is repaired.'
+                        ? 'Paid-ledger conflict: recovery and new paid work are disabled until repair.'
                         : currentRecovery.status === 'error'
                           ? currentRecovery.error
                           : !lensStorageReady
-                            ? 'Server receipts are reconciled, but new paid work is disabled because this tab cannot save one request identity.'
+                            ? 'Receipts are reconciled, but this tab cannot save one identity; paid work stays disabled.'
                             : currentRecovery.notice
-                              || 'Paid AI action: provider charges may apply. The server ledger is clear; a run-, generation-, and prompt-bound identity will be saved before dispatch.'
+                              || 'Paid AI action: charges may apply. Ledger is clear; a run-, generation-, and prompt-bound identity is saved before dispatch.'
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
     <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
       onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
@@ -1255,27 +1257,27 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     body: `Loading the latest ${edgeProjection ? 'relationship projection' : 'hierarchy'} and outcome rollups for this run.` }
   else if (current.status === 'error') stateCard = { tone: 'error',
     title: 'Concepts are unavailable', action: refresh, body: current.timeout
-      ? 'The concept projection did not respond in time. The run is unchanged; retry this read.'
-      : 'The concept projection could not be read. The run is unchanged; retry when the server is reachable.' }
+      ? 'Concept projection timed out. Run unchanged; retry this read.'
+      : 'Concept projection unavailable. Run unchanged; retry when reachable.' }
   else if (projectionStatus.state === 'unavailable') stateCard = { tone: 'error',
     title: 'Concepts are unavailable', action: refresh, pending: refreshing,
-    body: 'The server returned no safe concept projection. The run is unchanged; retry this read.' }
+    body: 'No safe concept projection returned. Run unchanged; retry.' }
   // CODEX AGENT: Fail-closed materialization emptiness is not an honest "no concepts" result and
   // refreshing the same durable receipt cannot resolve it. Surface the repair path without a Retry.
   else if (empty && completenessKind === 'materialization-corruption') stateCard = { tone: 'error',
     title: 'Concept materialization is blocked',
-    body: `No trustworthy concepts were materialized (receipt: ${completenessReceipt}). This is not a no-concepts result. ${MATERIALIZATION_REMEDIATION}` }
+    body: `No trustworthy concepts were materialized; this is not a no-concepts result. ${incompleteMessage}` }
   else if (empty && completenessKind === 'bounded-cap') stateCard = { tone: 'error',
     title: 'Concept frame is bounded',
-    body: `Configured limits omitted all rows (receipt: ${completenessReceipt}). This is not a no-concepts result; repeated refreshes use the same bounds. Inspect the receipt before making absence or coverage claims.` }
+    body: `No rows fit the configured bounds; this is not a no-concepts result. ${incompleteMessage}` }
   else if (empty && !data.authoritative) stateCard = { tone: 'error',
     title: 'Concept frame is incomplete', action: refresh, pending: refreshing,
-    body: `No safe concepts were included (receipt: ${completenessReceipt || 'unknown'}). That is not evidence that the run has no concepts; retry only after the source projection can become authoritative.` }
+    body: `No safe concepts included; this is not evidence of no concepts. ${incompleteMessage}` }
   else if (empty) stateCard = { tone: 'empty', title: 'No concepts have been tagged yet',
     action: refresh, pending: refreshing, stale: current.status === 'stale',
     body: hasLegacyAxisFallback
-      ? 'Some active experiments only have a legacy authored axis. Search can still use that compatibility grouping, but this view stays empty until folded concept memberships exist; LoopLab does not invent a taxonomy from the coarse fallback.'
-      : 'This view fills automatically after the Researcher assigns concepts to experiments. Until then, LoopLab keeps the canvas honest instead of inventing a taxonomy.' }
+      ? 'Some active experiments have only a legacy axis. Search can show that compatibility grouping, but Concepts stays empty until folded memberships exist; LoopLab does not infer a taxonomy.'
+      : 'This view fills after the Researcher assigns concepts. LoopLab does not invent a taxonomy meanwhile.' }
   const recoveryNeedsSurface = !!savedLensIntent
     || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)
     || ['orphaned', 'conflict'].includes(currentRecovery.receipt?.state)
@@ -1369,19 +1371,13 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     {current.status === 'stale' && <div className="cv-resource-note stale" role="alert"><span>Showing the last loaded concept view; refresh {current.timeout ? 'timed out' : 'failed'}.</span><button type="button" className="btn sm" onClick={refresh}>Retry</button></div>}
     {!data.authoritative && <div className="cv-resource-note partial"
       role={completenessKind === 'materialization-corruption' ? 'alert' : 'status'}>
-      {completenessKind === 'materialization-corruption'
-        ? `Concept materialization is incomplete (receipt: ${completenessReceipt}). Included rows are safe; missing concepts are not evidence of absence. ${MATERIALIZATION_REMEDIATION}`
-        : completenessKind === 'bounded-cap'
-          ? `Bounded partial frame: configured limits omitted records (receipt: ${completenessReceipt}). Included rows are safe, but absence and coverage claims are incomplete.`
-          : data.authority.source_authoritative
-            ? `Some recorded concept data failed integrity checks (receipt: ${completenessReceipt || 'unknown'}). Included rows are visible, but missing concepts and coverage are unknown.`
-            : 'This frame comes from a non-authoritative recoverable event prefix. Treat every included membership as provisional.'}
+      {incompleteMessage}
     </div>}
     {data.lens_contract.fallback === 'no_matching_edges' && <div className="cv-resource-note" role="status">
       No matching relationship links were available for the requested {data.requested_lens} lens; showing the is-a hierarchy instead.
     </div>}
     {data.historical && <div className="cv-resource-note" role="status">Historical concept frame at sequence {data.captured_seq} of {data.max_seq}.</div>}
-    <div className="cv-resource-note epistemic" role="note">Concept memberships are recorded claims; taxonomy semantics are not independently verified.</div>
+    <div className="cv-resource-note epistemic" role="note">Memberships are recorded claims; taxonomy semantics are not independently verified.</div>
     <div className="cv-table-wrap"><table className="cv-table"><thead><tr><th className="cv-name" scope="col">Concept / experiment</th>
       {cols.map(column => <th key={column.key} className="cv-num" scope="col">{column.label}</th>)}</tr></thead><tbody>
       {rows.map(({ id, depth, hasChildren }) => {

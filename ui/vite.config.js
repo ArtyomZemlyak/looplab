@@ -24,6 +24,12 @@ export default defineConfig({
     manifest: true,
     chunkSizeWarningLimit: 500,
     rollupOptions: {
+      experimental: {
+        // CODEX AGENT: Stable module-id ordering lets related literals share each gzip stream's
+        // dictionary. Rolldown applies it only where dependency order stays valid; the manifest
+        // cycle gate below still fails closed if a chunk topology becomes unsafe.
+        chunkModulesOrder: 'module-id',
+      },
       // Prefer the smaller equivalent module wrapper form. The default PIFE wrapper trades a little
       // more shipped code for startup speed; the UI's measured bundle budget favors transfer size.
       optimization: {

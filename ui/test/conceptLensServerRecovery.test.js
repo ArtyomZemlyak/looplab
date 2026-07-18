@@ -324,7 +324,7 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
     await render()
     assert.equal(input().disabled, true)
     assert.match(document.querySelector('#paid-concept-lens-status').textContent,
-      /Server receipts are reconciled.*cannot save one request identity/i)
+      /Receipts are reconciled.*cannot save one identity.*paid work.*disabled/i)
 
     Object.defineProperty(globalThis, 'sessionStorage', {
       configurable: true, writable: true, value: dom.window.sessionStorage,
@@ -343,7 +343,7 @@ test('ConceptView reconciles lost paid receipts before enabling any new provider
       await flush()
     })
     assert.match(document.querySelector('[role="alert"]').textContent,
-      /earlier generation.*no provider request was sent/i)
+      /earlier-generation.*no provider request was sent/i)
     assert.equal(dom.window.sessionStorage.length, 0,
       'a stale diagnostic link cannot stage a paid identity')
     assert.equal(paidPosts, 0)
