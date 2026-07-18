@@ -8,6 +8,8 @@ by run_id (a re-run replaces, never duplicates), similarity thresholding, and th
 """
 import json
 
+import pytest
+
 from looplab.engine.memory import (
     ConceptCapsuleStore, build_concept_capsule, task_fingerprint,
 )
@@ -27,6 +29,15 @@ def test_build_capsule_is_flat_and_deduped():
     assert cap["concepts"] == ["distillation", "hard-neg"]  # sorted, empty dropped
     assert cap["direction"] == "max" and cap["best_metric"] is None
     assert cap["v"] == 2 and cap["concept_evidence"] == "classifier"
+
+
+@pytest.mark.parametrize("direction", [None, "", "MAX", "sideways", 1])
+def test_build_capsule_rejects_invalid_direction_instead_of_inverting_evidence(direction):
+    with pytest.raises(ValueError, match="direction"):
+        build_concept_capsule(
+            run_id="r", fingerprint=["k"], direction=direction,
+            concepts=["loss/a", "loss/b"], concept_outcomes={"loss/a": 1.0, "loss/b": 0.0},
+        )
 
 
 def test_add_persists_and_reloads_across_instances(tmp_path):
@@ -155,3 +166,25 @@ def test_build_capsule_caps_large_generated_collections_deterministically():
     assert len(capsule["concept_outcomes"]) == 256
     assert capsule["fingerprint"] == sorted(capsule["fingerprint"])
     assert set(capsule["concept_outcomes"]) == set(capsule["concepts"])
+    assert capsule["concepts_total"] == capsule["concept_outcomes_total"] == 400
+    assert capsule["concepts_omitted"] == capsule["concept_outcomes_omitted"] == 144
+    assert capsule["concepts_complete"] is capsule["concept_outcomes_complete"] is False
+
+
+def test_capsule_signs_use_complete_source_field_before_bounded_projection():
+    from looplab.engine.memory import _concept_profit_signs
+
+    concepts = [f"axis/c{index:03}" for index in range(300)]
+    outcomes = {concept: float(index) for index, concept in enumerate(concepts)}
+    capsule = build_concept_capsule(
+        run_id="r", fingerprint=["k"], direction="max",
+        concepts=concepts, concept_outcomes=outcomes,
+    )
+
+    full_signs = _concept_profit_signs(outcomes, "max")
+    assert capsule["concept_signs"] == {
+        concept: full_signs[concept] for concept in capsule["concept_outcomes"]
+    }
+    # Regression proof: the retained-only median is different, so this assertion exercises the bug rather
+    # than merely comparing two coincidentally equivalent calculations.
+    assert capsule["concept_signs"] != _concept_profit_signs(capsule["concept_outcomes"], "max")

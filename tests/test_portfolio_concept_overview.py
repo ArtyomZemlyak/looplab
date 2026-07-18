@@ -60,7 +60,12 @@ def test_overview_dedupes_run_count_but_keeps_cards():
 
 def test_empty_portfolio_is_well_formed():
     ov = portfolio_concept_overview([])
-    assert ov == {"n_runs": 0, "n_concepts": 0, "concepts": [], "runs": []}
+    assert ov == {
+        "n_runs": 0, "n_concepts": 0, "concepts": [], "runs": [],
+        "source_complete": True, "partial_capsules": 0,
+        "source_unknown_capsules": 0,
+        "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+    }
 
 
 def test_overview_quarantines_malformed_rows_and_caps_nested_runs_truthfully():
@@ -93,6 +98,39 @@ def test_overview_caps_top_level_collections_with_full_totals():
     assert overview["runs"][0]["n_concepts"] == 256
     assert len(overview["runs"][0]["concepts"]) == 64
     assert overview["runs"][0]["concepts_omitted"] == 192
+
+
+def test_overview_surfaces_capsule_source_omissions_on_result_and_run_card():
+    concepts = [f"axis/c{index:03}" for index in range(300)]
+    capsule = _cap("wide", concepts, {concept: float(index) for index, concept in enumerate(concepts)})
+
+    overview = portfolio_concept_overview([capsule])
+    card = overview["runs"][0]
+
+    assert overview["source_complete"] is False and overview["partial_capsules"] == 1
+    assert overview["source_concepts_omitted"] == overview["source_outcomes_omitted"] == 44
+    assert card["source_concepts_total"] == card["source_outcomes_total"] == 300
+    assert card["source_concepts_omitted"] == card["source_outcomes_omitted"] == 44
+    assert card["source_concepts_complete"] is card["source_outcomes_complete"] is False
+
+
+def test_legacy_v2_without_completeness_is_partial_and_its_rank_signs_are_ignored():
+    capsule = _cap("legacy", ["loss/a", "loss/b"], {"loss/a": 1.0, "loss/b": 0.0})
+    for key in (
+        "concepts_total", "concepts_omitted", "concepts_complete",
+        "concept_outcomes_total", "concept_outcomes_omitted", "concept_outcomes_complete",
+    ):
+        capsule.pop(key)
+    assert capsule["concept_signs"] == {"loss/a": 1, "loss/b": -1}  # could be fabricated by old cap order
+
+    overview = portfolio_concept_overview([capsule])
+    rows = {row["concept"]: row for row in overview["concepts"]}
+
+    assert overview["source_complete"] is False
+    assert overview["partial_capsules"] == overview["source_unknown_capsules"] == 1
+    assert rows["loss/a"]["runs"][0]["metric"] == 1.0  # positive retained observation survives
+    assert rows["loss/a"]["n_helped"] == rows["loss/a"]["n_hurt"] == 0
+    assert overview["runs"][0]["source_outcomes_total"] is None
 
 
 # --------------------------------------------------------------------------- #

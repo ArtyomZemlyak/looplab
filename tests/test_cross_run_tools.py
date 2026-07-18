@@ -834,7 +834,38 @@ def test_find_concept_slugs_axes_are_deterministic_bounded_untrusted_output(tmp_
     alpha = "UNTRUSTED_MEMORY_AXIS='alpha' (2 slugs)"
     zeta = "UNTRUSTED_MEMORY_AXIS='zeta' (1 slugs)"
     assert alpha in out and zeta in out and out.index(alpha) < out.index(zeta)
-    assert "candidates=3 returned=2" in out
+    assert "candidates=2 returned=2" in out
+
+
+def test_find_concept_slugs_no_query_honors_response_limit(tmp_path):
+    _seed(tmp_path, capsules=[
+        _cap("r1", [f"axis{index:02}/one" for index in range(10)], {}),
+    ])
+
+    out = CrossRunTools(tmp_path).execute("find_concept_slugs", {"limit": 3})
+
+    assert out.count("UNTRUSTED_MEMORY_AXIS=") == 3
+    assert "axis00" in out and "axis02" in out and "axis03" not in out
+    assert "candidates=10 returned=3" in out
+
+
+def test_partial_legacy_capsules_never_turn_absence_into_a_new_concept_claim(tmp_path):
+    capsule = _cap("r1", ["known/x"], {})
+    for key in (
+        "concepts_total", "concepts_omitted", "concepts_complete",
+        "concept_outcomes_total", "concept_outcomes_omitted", "concept_outcomes_complete",
+    ):
+        capsule.pop(key)
+    _seed(tmp_path, capsules=[capsule])
+    tools = CrossRunTools(tmp_path)
+
+    search = tools.execute("find_concept_slugs", {"query": "novel zzzzzz"})
+    card = tools.execute("concept_card", {"slug": "novel/zzzzzz"})
+    concept_map = tools.execute("cross_run_concept_map", {})
+
+    assert "not proof the concept is new" in search and "looks NEW" not in search
+    assert "not proof the concept is new" in card and "looks NEW" not in card
+    assert "WARNING: PARTIAL capsule source" in concept_map
 
 
 @pytest.mark.parametrize("args, message", [

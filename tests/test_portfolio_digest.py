@@ -6,8 +6,6 @@ it beats the flat baseline. Honors concept aliases (CR1a).
 """
 from __future__ import annotations
 
-import orjson
-
 from looplab.engine.concept_registry import load_concept_aliases, record_concept_alias
 from looplab.engine.memory import build_concept_capsule, portfolio_digest
 
@@ -44,7 +42,11 @@ def test_digest_honors_aliases(tmp_path):
 
 
 def test_empty_is_well_formed():
-    assert portfolio_digest([]) == {"n_axes": 0, "n_concepts": 0, "axes": []}
+    assert portfolio_digest([]) == {
+        "n_axes": 0, "n_concepts": 0, "axes": [],
+        "source_complete": True, "partial_capsules": 0, "source_unknown_capsules": 0,
+        "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+    }
 
 
 def test_cli_cross_run_digest(tmp_path):

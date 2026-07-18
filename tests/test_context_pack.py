@@ -86,6 +86,24 @@ def test_coverage_block_from_concept_overview():
     pack = build_context_pack([_claim("c", "supported", 1, 0)], concept_overview=ov, max_claims=5)
     assert pack["coverage"]["n_runs"] == 4 and pack["coverage"]["n_concepts"] == 7
     assert pack["coverage"]["top_concepts"] == ["hard-neg", "distillation"]
+    assert pack["coverage"]["source_complete"] is False
+    assert pack["coverage"]["source_unknown_capsules"] == 4
+    assert "unknown totals" in render_context_pack(pack)
+
+
+def test_partial_capsule_coverage_is_explicit_in_pack_and_rendering():
+    ov = {
+        "n_runs": 1, "n_concepts": 256, "concepts": [{"concept": "axis/a"}],
+        "source_complete": False, "partial_capsules": 1,
+        "source_concepts_omitted": 44, "source_outcomes_omitted": 44,
+    }
+
+    pack = build_context_pack([], concept_overview=ov, max_claims=5)
+    rendered = render_context_pack(pack)
+
+    assert pack["coverage"]["source_complete"] is False
+    assert "source is PARTIAL" in rendered
+    assert "44 concept(s)" in rendered and "returned observations only" in rendered
 
 
 def test_coverage_helps_hurts_carry_run_counts():

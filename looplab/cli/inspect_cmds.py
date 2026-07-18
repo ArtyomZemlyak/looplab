@@ -733,6 +733,12 @@ def cross_run_concepts_cmd(
         typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
         return
     typer.echo(f"Cross-run portfolio: {ov['n_runs']} run(s), {ov['n_concepts']} concept(s)")
+    if ov.get("source_complete") is not True:
+        typer.echo("  WARNING: capsule source is partial: "
+                   f"{ov.get('source_concepts_omitted', 0)} concept(s), "
+                   f"{ov.get('source_outcomes_omitted', 0)} outcome(s) known omitted"
+                   + (f"; {ov.get('source_unknown_capsules', 0)} legacy capsule(s) have unknown totals"
+                      if ov.get("source_unknown_capsules", 0) else ""))
     typer.echo("  (rank = RAW per-concept +better/~neutral/-worse-half sign counts across its runs; "
                "advisory, relative rank not causal profit)")
     for e in ov["concepts"][: max(0, top)]:
@@ -1066,6 +1072,8 @@ def cross_run_digest_cmd(
         typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
         return
     typer.echo(f"Cross-run digest: {dg['n_axes']} axis-cluster(s), {dg['n_concepts']} concept(s)")
+    if dg.get("source_complete") is not True:
+        typer.echo("  WARNING: capsule source is partial; digest describes returned observations only")
     for a in dg["axes"]:
         typer.echo(f"  {a['n_concepts']:2d} concept(s) / {a['n_runs']:2d} run(s)  {a['axis']}/  "
                    f"[{', '.join(c.split('/', 1)[-1] for c in a['concepts'][:5])}]")

@@ -931,10 +931,17 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if not isinstance(operator, str) or not operator.strip():
             raise HTTPException(400, "idea.operator must be a non-empty string")
         try:
-            # Modern API writes with a discriminator are closed and internally consistent. Legacy/manual
-            # payloads with no mode stay accepted by the tolerant reader (including transitional deltas).
-            normalized_idea = (IdeaEmission.model_validate(idea).to_idea()
-                               if "concept_mode" in idea else Idea.model_validate(idea))
+            concept_fields = {"concepts", "concepts_added", "concepts_removed"} & set(idea)
+            if "concept_mode" in idea or concept_fields:
+                # CODEX AGENT: replay's tolerant Idea reader is not a mutation boundary. Upgrade legacy
+                # manual concept envelopes to an explicit modern mode, then validate BEFORE any field can
+                # be bounded/dropped and laundered into an apparently exact durable event.
+                emission = dict(idea)
+                if "concept_mode" not in emission:
+                    emission["concept_mode"] = "full" if "concepts" in concept_fields else "delta"
+                normalized_idea = IdeaEmission.model_validate(emission).to_idea()
+            else:
+                normalized_idea = Idea.model_validate(idea)
         except ValidationError as exc:
             issues = [f"{'.'.join(map(str, row.get('loc') or ('idea',)))}: {row.get('msg')}"
                       for row in exc.errors(include_url=False)[:5]]

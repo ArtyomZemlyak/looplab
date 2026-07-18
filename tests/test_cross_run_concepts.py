@@ -134,6 +134,21 @@ def test_portfolio_concept_graph_honors_alias_governance_and_is_deterministic():
     assert g == portfolio_concept_graph(caps, aliases=aliases, min_cooccurrence=2)
 
 
+def test_portfolio_concept_graph_bounds_pair_materialization_before_counting():
+    from looplab.engine.memory import portfolio_concept_graph
+
+    caps = [build_concept_capsule(
+        run_id=f"r{run:02}", fingerprint=["k"], direction="max",
+        concepts=[f"axis{run:02}/c{index:03}" for index in range(256)], concept_outcomes={},
+    ) for run in range(20)]
+
+    graph = portfolio_concept_graph(caps, min_cooccurrence=1)
+
+    assert len(graph["concepts"]) == 512
+    assert graph["pair_candidates"] <= 512 * 511 // 2
+    assert graph["pair_candidates"] == 2 * (256 * 255 // 2)
+
+
 def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():
     from looplab.engine.memory import portfolio_concept_overview
     caps = [
@@ -176,6 +191,45 @@ def test_capsule_validation_guards_profit_signs():
     assert not _valid_capsule_record({**good, "concept_signs": {"a": 2}})      # out of range
     assert not _valid_capsule_record({**good, "concept_signs": {"a": True}})   # bool (int subclass)
     assert not _valid_capsule_record({**good, "concept_signs": "nope"})        # not a dict
+
+
+def test_capsule_validation_quarantines_poisoned_identity_and_completeness_rows():
+    from looplab.engine.memory import _valid_capsule_record
+
+    good = build_concept_capsule(
+        run_id="r", fingerprint=["k"], direction="max",
+        concepts=["good/a", "good/b"], concept_outcomes={"good/a": 1.0, "good/b": 0.0},
+    )
+    metadata = {
+        "concepts_total", "concepts_omitted", "concepts_complete",
+        "concept_outcomes_total", "concept_outcomes_omitted", "concept_outcomes_complete",
+    }
+    legacy_v2 = {key: value for key, value in good.items() if key not in metadata}
+    assert _valid_capsule_record(legacy_v2)  # retained observations remain valid; projections mark unknown
+    assert not _valid_capsule_record({**good, "concepts": ["good/a", "bad!"]})
+    assert not _valid_capsule_record({**good, "concept_outcomes": {"outside/c": 1.0}})
+    assert not _valid_capsule_record({**good, "concept_signs": {"outside/c": 1}})
+    assert not _valid_capsule_record({**good, "concepts_total": 3})
+    assert not _valid_capsule_record({**legacy_v2, "concepts_total": 2})
+    assert not _valid_capsule_record({
+        **good, "concepts_total": 3, "concepts_omitted": 1, "concepts_complete": True,
+    })
+
+
+def test_capsule_builder_filters_invalid_ids_before_persisting_evidence():
+    from looplab.engine.memory import _valid_capsule_record
+
+    capsule = build_concept_capsule(
+        run_id="r", fingerprint=["k"], direction="max",
+        concepts=["Good A", "bad!"], concept_outcomes={"Good A": 1.0, "bad!": 2.0},
+    )
+
+    assert capsule["concepts"] == ["Good A"]
+    assert capsule["concept_outcomes"] == {"Good A": 1.0}
+    assert capsule["concepts_total"] == capsule["concept_outcomes_total"] == 2
+    assert capsule["concepts_omitted"] == capsule["concept_outcomes_omitted"] == 1
+    assert capsule["concepts_complete"] is capsule["concept_outcomes_complete"] is False
+    assert _valid_capsule_record(capsule)
 
 
 def test_concept_outcomes_use_selection_eligible_nodes_but_keep_attempt_coverage(tmp_path):

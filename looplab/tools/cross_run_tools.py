@@ -51,6 +51,17 @@ def _safe_text(value, limit: int) -> str:
         value, max_chars=limit, single_line=True, entropy=True).strip()
 
 
+def _partial_source_warning(view: dict) -> str:
+    """Compact trust receipt for a bounded or legacy capsule projection."""
+    if view.get("source_complete") is True:
+        return ""
+    known = (f"{view.get('source_concepts_omitted', 0)} concept(s), "
+             f"{view.get('source_outcomes_omitted', 0)} outcome(s) known omitted")
+    unknown = int(view.get("source_unknown_capsules", 0) or 0)
+    return ("WARNING: PARTIAL capsule source (" + known
+            + (f"; {unknown} legacy capsule(s) have unknown totals" if unknown else "") + ").")
+
+
 class CrossRunTools:
     """Read-only cross-run knowledge for the tool-loop. `role` ∈ {"researcher","developer"} scopes the
     claims to that role's lessons (+ shared/untagged); anything else sees all. Never raises from execute."""
@@ -283,8 +294,11 @@ class CrossRunTools:
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
             hits = [e for e in scored if (not qt) or (qt & _toks(e["concept"]))][:6]
             if not hits:
+                if ov.get("source_complete") is not True:
+                    return ("(no retained prior run records these concepts; source is partial)\n"
+                            + _partial_source_warning(ov))
                 return "(no prior runs recorded these concepts yet)"
-            lines = []
+            lines = [_partial_source_warning(ov)] if ov.get("source_complete") is not True else []
             for e in hits:
                 runs = ", ".join(
                     f"{_safe_text(r.get('run_id'), 100)!r}" +
@@ -347,6 +361,8 @@ class CrossRunTools:
             # Researcher on one eligible population as well as one threshold: a qualifying concept
             # ranked ninth by frequency must not disappear only from this twin surface.
             coverage = (atlas.get("context_pack") or {}).get("coverage") or {}
+            if coverage.get("source_complete") is not True:
+                lines.append(_partial_source_warning(coverage))
             helps = coverage.get("helps") or []
             hurts = coverage.get("hurts") or []
             if helps or hurts:
@@ -382,8 +398,12 @@ class CrossRunTools:
             # display — they are hierarchy scaffolding, not concepts any run touched.
             explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
             if not explored:
+                if graph.get("source_complete") is not True:
+                    return "(no retained cross-run concepts)\n" + _partial_source_warning(graph)
                 return "(no cross-run concepts yet)"
             lines = [f"Global concept map: {len(explored)} explored concept(s) across {graph['n_runs']} run(s)."]
+            if graph.get("source_complete") is not True:
+                lines.append(_partial_source_warning(graph))
             # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
             axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
             if axes:
@@ -462,6 +482,8 @@ class CrossRunTools:
             caps = self._scoped_capsules()
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
+            from looplab.engine.memory import _capsule_source_summary
+            source_summary = _capsule_source_summary(prior_caps)
             scope = "bound_task_family" if self._bound else "portfolio"
             direction = self._direction if self._bound else "any"
 
@@ -497,14 +519,24 @@ class CrossRunTools:
                 jac = len(shared) / len(mine | theirs)
                 ranked.append((jac, len(shared), rid, sorted(shared)))
             if not ranked and self._concept_projection_status == "partial":
-                return (partial_note + "(no prior run shares a reliable concept with this one)\n"
-                        + _receipt(matched=0, returned=0))
+                lines = [partial_note.rstrip(),
+                         "(no prior run shares a reliable concept with this one among retained capsules)"]
+                if source_summary.get("source_complete") is not True:
+                    lines.append(_partial_source_warning(source_summary))
+                lines.append(_receipt(matched=0, returned=0))
+                return "\n".join(lines)
             if not ranked:
-                return "(no prior run shares a concept with this one)\n" + _receipt(matched=0, returned=0)
+                lines = ["(no prior run shares a retained concept with this one)"]
+                if source_summary.get("source_complete") is not True:
+                    lines.append(_partial_source_warning(source_summary))
+                lines.append(_receipt(matched=0, returned=0))
+                return "\n".join(lines)
             ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
             returned = min(len(ranked), limit)
             lines = ([partial_note.rstrip()] if partial_note else [])
             lines.append(f"{returned} prior run(s) most similar by shared concepts (advisory):")
+            if source_summary.get("source_complete") is not True:
+                lines.append(_partial_source_warning(source_summary))
             for jac, n, rid, shared in ranked[:limit]:
                 preview = ", ".join(
                     f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
@@ -545,7 +577,7 @@ class CrossRunTools:
             #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
             from looplab.engine.concept_registry import (canonicalize_concepts,
                                                          concept_governance_snapshot)
-            from looplab.engine.memory import ConceptCapsuleStore
+            from looplab.engine.memory import ConceptCapsuleStore, _capsule_source_summary
 
             # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
             # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
@@ -556,6 +588,7 @@ class CrossRunTools:
             caps = ConceptCapsuleStore(p).all() if p.exists() else []
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
+            source_summary = _capsule_source_summary(prior_caps)
             scoped_caps = [cap for cap in prior_caps if self._in_scope(cap)]
             mine = set(canonicalize_concepts(
                 sorted(self._concepts), aliases=aliases, splits=splits))
@@ -622,16 +655,29 @@ class CrossRunTools:
             if not vocab:
                 message = (f"(no concept slugs in scope '{want}'"
                            + ("; this run has no concepts yet" if want == "own" else "") + ")")
-                return partial_note + message + "\n" + _receipt(candidates=0, returned=0)
+                lines = ([partial_note.rstrip()] if partial_note else [])
+                lines.append(message)
+                if want != "own" and source_summary.get("source_complete") is not True:
+                    lines.append(_partial_source_warning(source_summary))
+                lines.append(_receipt(candidates=0, returned=0))
+                return "\n".join(lines)
             if not query:
                 by_axis = Counter(s.split("/", 1)[0] for s in vocab)
                 lines = [f"Known concept AXES in scope '{want}' ({len(vocab)} slugs) — "
                          "search within one: find_concept_slugs('<your concept>'):"]
                 ordered_axes = sorted(by_axis.items(), key=lambda item: (-item[1], item[0]))
+                # CODEX AGENT: the validated response limit applies to the no-query axis listing too; many
+                # one-off axes must not bypass the tool's hard output bound.
                 lines += [f"  UNTRUSTED_MEMORY_AXIS={_safe_text(axis, 80)!r} ({count} slugs)"
-                          for axis, count in ordered_axes]
-                lines.append(_receipt(candidates=len(vocab), returned=len(ordered_axes)))
-                return partial_note + "\n".join(lines)
+                          for axis, count in ordered_axes[:limit]]
+                if partial_note:
+                    lines.insert(0, partial_note.rstrip())
+                if want != "own" and source_summary.get("source_complete") is not True:
+                    lines.append(_partial_source_warning(source_summary))
+                # Candidate/returned units must match: this branch returns axes, while the heading already
+                # reports the underlying slug vocabulary size.
+                lines.append(_receipt(candidates=len(ordered_axes), returned=min(len(ordered_axes), limit)))
+                return "\n".join(lines)
             qn = _slug_norm(query)
             _rank = {"own": 0, "cross": 1, "global": 2, "unknown": 2}
             scored = []
@@ -648,11 +694,19 @@ class CrossRunTools:
                     scored.append((_rank[_scope(meta)], -score, slug, meta))
             if (not scored and partial_note
                     and self._concept_projection_status == "partial"):
-                return (partial_note
-                        + f"No reliable existing slug matches {_safe_text(query, 256)!r} in scope '{want}'. "
-                          "Because the current projection is PARTIAL, this is not proof that the slug is new.\n"
-                        + _receipt(candidates=0, returned=0))
+                lines = [partial_note.rstrip(),
+                         f"No reliable existing slug matches {_safe_text(query, 256)!r} in scope '{want}'. "
+                         "Because the current projection is PARTIAL, this is not proof that the slug is new."]
+                if want != "own" and source_summary.get("source_complete") is not True:
+                    lines.append(_partial_source_warning(source_summary))
+                lines.append(_receipt(candidates=0, returned=0))
+                return "\n".join(lines)
             if not scored:
+                if want != "own" and source_summary.get("source_complete") is not True:
+                    return (f"No RETAINED slug matches {_safe_text(query, 256)!r} in scope '{want}'; "
+                            "the capsule source is partial, so this is not proof the concept is new.\n"
+                            + _partial_source_warning(source_summary) + "\n"
+                            + _receipt(candidates=0, returned=0))
                 return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
                         "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
                         "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
@@ -666,6 +720,8 @@ class CrossRunTools:
                      "(call concept_card('<slug>') to decode one + see its track record):"]
             if partial_note:
                 lines.insert(0, partial_note.rstrip())
+            if want != "own" and source_summary.get("source_complete") is not True:
+                lines.append(_partial_source_warning(source_summary))
             for _r, negscore, slug, meta in scored[:limit]:
                 lines.append(f"  [{_label[_scope(meta)]}] "
                              f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
@@ -684,8 +740,9 @@ class CrossRunTools:
             from looplab.engine.concept_registry import (canonicalize_concepts,
                                                          concept_governance_snapshot,
                                                          normalize_key, resolve_slug)
-            from looplab.engine.memory import (ConceptCapsuleStore, concept_profit_tendencies,
-                                               portfolio_concept_graph, portfolio_concept_overview)
+            from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
+                                               concept_profit_tendencies, portfolio_concept_graph,
+                                               portfolio_concept_overview)
 
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
@@ -693,6 +750,7 @@ class CrossRunTools:
             caps = ConceptCapsuleStore(p).all() if p.exists() else []
             prior_caps = [c for c in caps
                           if not self._run_id or str(c.get("run_id") or "") != self._run_id]
+            source_summary = _capsule_source_summary(prior_caps)
             # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
             # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
             mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
@@ -754,6 +812,10 @@ class CrossRunTools:
                     return (f"No concept card for {_safe_text(slug_in, 120)!r}; that text is not a valid "
                             "concept slug. Search descriptive prose with find_concept_slugs, then reuse its "
                             "canonical `axis/name` result.")
+                if source_summary.get("source_complete") is not True:
+                    return (f"No RETAINED concept card for {_safe_text(slug_in, 120)!r}; the capsule source "
+                            "is partial, so this is not proof the concept is new.\n"
+                            + _partial_source_warning(source_summary))
                 return (f"No concept card for {_safe_text(slug_in, 120)!r} — no run has used it, so it "
                         "looks NEW. Mint it as `axis/name` (call find_concept_slugs with no query to reuse "
                         "an existing axis).")
@@ -785,6 +847,8 @@ class CrossRunTools:
                 global_canon_caps, aliases=aliases, splits=splits)
             grow = next((r for r in ov_global["concepts"] if r["concept"] == canon), None)
             if row:
+                if ov_scoped.get("source_complete") is not True:
+                    lines.append("  " + _partial_source_warning(ov_scoped))
                 lines.append(f"  track record (your task family): {row['n_runs']} run(s) — "
                              f"ranked better {row['n_helped']} / middle {row['n_neutral']} / "
                              f"ranked worse {row['n_hurt']}")

@@ -1103,6 +1103,16 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
         pack["coverage"] = {
             "n_runs": concept_overview.get("n_runs", 0),
             "n_concepts": concept_overview.get("n_concepts", 0),
+            # A hand-built/older overview with no receipt is UNKNOWN, never silently exact.
+            "source_complete": concept_overview.get("source_complete") is True,
+            "partial_capsules": concept_overview.get(
+                "partial_capsules",
+                concept_overview.get("n_runs", 0) if "source_complete" not in concept_overview else 0),
+            "source_unknown_capsules": concept_overview.get(
+                "source_unknown_capsules",
+                concept_overview.get("n_runs", 0) if "source_complete" not in concept_overview else 0),
+            "source_concepts_omitted": concept_overview.get("source_concepts_omitted", 0),
+            "source_outcomes_omitted": concept_overview.get("source_outcomes_omitted", 0),
             "top_concepts": [_claim_text(e.get("concept"), 500) for e in rows[:max_claims]],
             # E3: keep the run COUNT (n_helped/n_hurt) in the rendered span — "loss/contrastive (n=7)"
             # vs "(n=2)" tells the Researcher how strong the multi-run tendency is, not just its direction.
@@ -1453,6 +1463,16 @@ def render_context_pack(pack: dict) -> str:
                      + (f"; contradicts={contradicts}" if contradicts else ""))
     cov = pack.get("coverage")
     if cov:
+        if cov.get("source_complete") is not True:
+            lines.append(
+                "  WARNING: concept capsule source is PARTIAL "
+                f"({int(cov.get('partial_capsules', 0))} capsule(s); "
+                f"{int(cov.get('source_concepts_omitted', 0))} concept(s) and "
+                f"{int(cov.get('source_outcomes_omitted', 0))} outcome(s) known omitted"
+                + (f"; {int(cov.get('source_unknown_capsules', 0))} legacy capsule(s) have unknown totals"
+                   if cov.get("source_unknown_capsules", 0) else "")
+                + "); "
+                "coverage and tendencies describe returned observations only.")
         top = ", ".join(repr(_safe_text(x, 100))
                         for x in cov.get("top_concepts", [])[:6])
         lines.append(f"Bounded live concept observations (not coverage): {cov.get('n_runs', 0)} returned "

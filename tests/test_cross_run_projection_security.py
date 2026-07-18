@@ -214,7 +214,7 @@ def test_http_claim_atlas_and_curation_projections_redact_nested_legacy_data(tmp
     from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
     ConceptCapsuleStore(memory / "concept_capsules.jsonl").add(build_concept_capsule(
         run_id="r1", task_id="t", fingerprint=["retrieval"], direction="max",
-        concepts=[f"token={_SECRET}"], concept_outcomes={}))
+        concepts=[f"token/{_SECRET}"], concept_outcomes={}))
     (memory / "claim_curation_log.jsonl").write_bytes(orjson.dumps({
         "action_id": "legacy-row", "revision": 1,
         "proposals": {"items": [{"api_key": "short-secret",
@@ -229,7 +229,7 @@ def test_http_claim_atlas_and_curation_projections_redact_nested_legacy_data(tmp
 
     assert claims["returned"] == len(claims["claims"]) == 1
     assert claims["claims"][0]["statement"].startswith("password=***")
-    assert atlas["explored"][0]["concept"] == "token=***"
+    assert atlas["explored"][0]["concept"] == "token/sk-***"
     assert log["entries"][0]["proposals"]["items"][0]["api_key"] == "***"
     assert _SECRET not in rendered and "short-secret" not in rendered
 

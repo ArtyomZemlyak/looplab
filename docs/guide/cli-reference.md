@@ -437,8 +437,11 @@ looplab cross-run-index RUN_ROOT [--incremental] [--json]
 
 PART IV cross-run Step 3 (§21.20). A portfolio overview over **valid concept capsules present in `MEMORY_DIR`**
 from finalized opt-in runs: which raw concept slugs appear and in which recorded runs, each with its own
-metric-bearing outcome. Missing, malformed, untagged or non-opt-in runs are absent without a completeness
-receipt, and outcome eligibility/trust/split is not fully contracted. Raw metrics are deliberately **not** compared across tasks (different
+metric-bearing outcome. Each new capsule has bounded-source completeness triplets for concepts and outcomes;
+the text command warns when known items were omitted, and `--json` exposes aggregate plus per-run source
+receipts. Legacy v2 capsules without those fields remain positive observations but have unknown totals and do
+not contribute their potentially post-truncation rank signs. Missing, malformed, untagged or non-opt-in runs
+remain outside this corpus, so capsule completeness is not whole-portfolio coverage. Raw metrics are deliberately **not** compared across tasks (different
 task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
 fabricated "best". Each concept also carries a **direction-normalized rank rollup** (`+better/~neutral/-worse`
 half sign counts, with a within-run neutral band around the median): unlike raw metrics, a per-run "did this
@@ -454,7 +457,7 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 |---|---|---|
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `concept_capsules.jsonl` (or the file itself) |
 | `--top N` | `20` | How many most-explored concepts to list |
-| `--json` | off | Emit the full overview (concepts + per-run cards) as JSON |
+| `--json` | off | Emit the bounded overview, per-run cards, and capsule source-completeness/omission receipts as JSON |
 
 ---
 

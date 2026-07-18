@@ -812,15 +812,41 @@ def test_lifecycle_normalizer_requires_exact_attempt_and_parent_snapshot(tmp_pat
     {"operator": "manual", "concept_mode": "delta", "concepts": ["x/y"]},
     {"operator": "manual", "concept_mode": "full", "concepts": ["bad!"]},
 ])
-def test_inject_rejects_invalid_modern_concept_envelopes_but_keeps_legacy_absence(tmp_path, idea):
+def test_inject_rejects_invalid_modern_concept_envelopes_and_upgrades_legacy_fields(tmp_path, idea):
     rd = _seed(tmp_path)
     _client_unused, srv = _client(tmp_path, _Driver())
     with pytest.raises(HTTPException) as error:
         normalize_control(srv, rd, "inject_node", {"idea": idea})
     assert error.value.status_code == 400
-    legacy = normalize_control(srv, rd, "inject_node", {
+    legacy_delta = normalize_control(srv, rd, "inject_node", {
         "idea": {"operator": "manual", "concepts_added": ["legacy/x"]}})
-    assert "concept_mode" not in legacy["idea"]
+    assert legacy_delta["idea"]["concept_mode"] == "delta"
+    assert legacy_delta["idea"]["concepts_added"] == ["legacy/x"]
+    assert legacy_delta["idea"]["concepts"] == legacy_delta["idea"]["concepts_removed"] == []
+    legacy_full = normalize_control(srv, rd, "inject_node", {
+        "idea": {"operator": "manual", "concepts": ["legacy/x"]}})
+    assert legacy_full["idea"]["concept_mode"] == "full"
+    assert legacy_full["idea"]["concepts"] == ["legacy/x"]
+    absent = normalize_control(srv, rd, "inject_node", {"idea": {"operator": "manual"}})
+    assert "concept_mode" not in absent["idea"] and "concepts" not in absent["idea"]
+
+
+@pytest.mark.parametrize("concept_fields", [
+    {"concepts": [f"axis/c{index:03}" for index in range(65)]},
+    {"concepts_added": ["bad!"]},
+    {"concepts_added": ["Model/A", "model/a"]},
+    {"concepts_added": ["model/a"], "concepts_removed": ["Model/A"]},
+])
+def test_inject_rejects_invalid_legacy_concept_fields_before_tolerant_reader(tmp_path, concept_fields):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+
+    with pytest.raises(HTTPException) as error:
+        normalize_control(srv, rd, "inject_node", {
+            "idea": {"operator": "manual", **concept_fields},
+        })
+
+    assert error.value.status_code == 400
 
 
 def test_cross_run_import_snapshots_effective_membership_and_strips_partial_source(tmp_path):

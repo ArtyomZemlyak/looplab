@@ -305,7 +305,9 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 return                          # nothing tagged this run -> no capsule (no-op)
             from looplab.engine.memory import build_concept_capsule
             from looplab.events.replay import promotion_eligible_nodes
-            direction = final.direction or "min"
+            direction = final.direction
+            if direction not in ("min", "max"):
+                return
 
             def _better(a, b) -> bool:          # is metric a strictly better than b for this direction?
                 return a < b if direction == "min" else a > b

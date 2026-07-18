@@ -596,6 +596,7 @@ _MAX_CAPSULE_TOKEN_CHARS = 500
 _MAX_CAPSULE_FINGERPRINT = 256
 _MAX_CAPSULE_CONCEPTS = 256
 _MAX_CAPSULE_OUTCOMES = 256
+_MAX_CAPSULE_SOURCE_ITEMS = (1 << 31) - 1
 _MAX_OVERVIEW_CONCEPTS = 512
 _MAX_OVERVIEW_RUNS_PER_CONCEPT = 64
 _MAX_OVERVIEW_RUN_CARDS = 512
@@ -611,6 +612,51 @@ def _finite_metric(value) -> bool:
         return math.isfinite(value)
     except OverflowError:
         return False
+
+
+def _capsule_completeness(
+        capsule: dict, stem: str, included: int,
+) -> Optional[tuple[Optional[int], Optional[int], bool]]:
+    """Read one additive capsule completeness triplet; old v2 rows are valid but UNKNOWN/partial."""
+    total_key, omitted_key, complete_key = f"{stem}_total", f"{stem}_omitted", f"{stem}_complete"
+    present = [key in capsule for key in (total_key, omitted_key, complete_key)]
+    if not any(present):
+        # Old v2 writers silently capped collections. Their retained observations remain useful, but neither
+        # the original total nor completeness can be reconstructed honestly from the durable row.
+        return None, None, False
+    if not all(present):
+        return None
+    total, omitted, complete = capsule[total_key], capsule[omitted_key], capsule[complete_key]
+    if (type(total) is not int or type(omitted) is not int or type(complete) is not bool
+            or not 0 <= total <= _MAX_CAPSULE_SOURCE_ITEMS
+            or not 0 <= omitted <= _MAX_CAPSULE_SOURCE_ITEMS
+            or total < included or omitted != total - included or complete != (omitted == 0)):
+        return None
+    return total, omitted, complete
+
+
+def _capsule_source_summary(capsules: list[dict]) -> dict:
+    """Aggregate explicit source-omission receipts from already-validated capsules."""
+    concept_omitted = outcome_omitted = partial = unknown = 0
+    for capsule in capsules:
+        concept_meta = _capsule_completeness(capsule, "concepts", len(capsule.get("concepts") or []))
+        outcome_meta = _capsule_completeness(
+            capsule, "concept_outcomes", len(capsule.get("concept_outcomes") or {}))
+        # Callers pass validated rows; keep this total if a future caller violates that private contract.
+        if concept_meta is None or outcome_meta is None:
+            partial += 1
+            continue
+        concept_omitted += concept_meta[1] or 0
+        outcome_omitted += outcome_meta[1] or 0
+        unknown += int(concept_meta[0] is None or outcome_meta[0] is None)
+        partial += int(not concept_meta[2] or not outcome_meta[2])
+    return {
+        "source_complete": partial == 0,
+        "partial_capsules": partial,
+        "source_unknown_capsules": unknown,
+        "source_concepts_omitted": concept_omitted,
+        "source_outcomes_omitted": outcome_omitted,
+    }
 
 
 def _valid_capsule_record(capsule) -> bool:
@@ -646,11 +692,23 @@ def _valid_capsule_record(capsule) -> bool:
     if any(not isinstance(value, str) or not value or len(value) > _MAX_CAPSULE_TOKEN_CHARS
            for value in fingerprint + concepts):
         return False
+    from looplab.core.concepts import valid_concept_id
+    concept_set = set(concepts)
+    # CODEX AGENT: a capsule is a durable evidence boundary. Quarantine the entire poisoned row instead of
+    # letting one invalid/out-of-membership key disagree with canonical run cards and concept projections.
+    if (len(concept_set) != len(concepts)
+            or any(not valid_concept_id(value) for value in concepts)
+            or any(not valid_concept_id(key) or key not in concept_set for key in outcomes)
+            or any(not valid_concept_id(key) or key not in outcomes for key in signs)):
+        return False
     if any(not isinstance(key, str) or not key or len(key) > _MAX_CAPSULE_TOKEN_CHARS
            or type(value) is not int or value not in (-1, 0, 1) for key, value in signs.items()):
         return False   # `type(value) is not int` rejects bool (int subclass) AND float 1.0 in one test
-    return all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
-               and _finite_metric(value) for key, value in outcomes.items())
+    if not all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
+               and _finite_metric(value) for key, value in outcomes.items()):
+        return False
+    return (_capsule_completeness(capsule, "concepts", len(concepts)) is not None
+            and _capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
 
 
 def _dedup_valid_capsules(capsules) -> list[dict]:
@@ -750,23 +808,42 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     reject). Carries a schema `v` + `task_id` scope; deliberately small and JSON-flat (memory-store data,
     not a fold event)."""
     fingerprint_source = fingerprint if isinstance(fingerprint, (list, tuple, set)) else []
-    concepts_source = concepts if isinstance(concepts, (list, tuple, set)) else []
+    concepts_collection = isinstance(concepts, (list, tuple, set))
+    concepts_source = concepts if concepts_collection else []
     bounded_fingerprint = sorted({token for token in fingerprint_source
                                   if isinstance(token, str) and token
                                   and len(token) <= _MAX_CAPSULE_TOKEN_CHARS})[:_MAX_CAPSULE_FINGERPRINT]
-    bounded_concepts = sorted({concept for concept in concepts_source
-                               if isinstance(concept, str) and concept
-                               and len(concept) <= _MAX_CAPSULE_TOKEN_CHARS})[:_MAX_CAPSULE_CONCEPTS]
-    raw_outcomes = concept_outcomes if isinstance(concept_outcomes, dict) else {}
-    bounded_outcomes = {
-        key: value for key, value in sorted(raw_outcomes.items(), key=lambda item: str(item[0]))
-        if isinstance(key, str) and key in bounded_concepts and _finite_metric(value)
-    }
-    bounded_outcomes = dict(list(bounded_outcomes.items())[:_MAX_CAPSULE_OUTCOMES])
-    normalized_direction = str(direction or "min")
-    if normalized_direction not in ("min", "max"):
-        normalized_direction = "min"
-    concept_signs = _concept_profit_signs(bounded_outcomes, normalized_direction)
+    if not isinstance(direction, str) or direction not in ("min", "max"):
+        # CODEX AGENT: direction controls both sign polarity and task-family scope. A writer typo must fail
+        # closed, never be coerced to `min` and persisted as inverted cross-run evidence.
+        raise ValueError("concept capsule direction must be exactly 'min' or 'max'")
+    normalized_direction = direction
+    from looplab.core.concepts import valid_concept_id
+    valid_concepts = sorted({raw for raw in concepts_source if valid_concept_id(raw)})
+    invalid_concepts = sum(not valid_concept_id(raw) for raw in concepts_source) + int(not concepts_collection)
+    bounded_concepts = valid_concepts[:_MAX_CAPSULE_CONCEPTS]
+    concept_set = set(valid_concepts)
+    outcomes_mapping = isinstance(concept_outcomes, dict)
+    raw_outcomes = concept_outcomes if outcomes_mapping else {}
+    all_outcomes: dict[str, object] = {}
+    for raw_key, value in sorted(raw_outcomes.items(), key=lambda item: str(item[0])):
+        if not valid_concept_id(raw_key) or raw_key not in concept_set or not _finite_metric(value):
+            continue
+        all_outcomes[raw_key] = value
+    # CODEX AGENT: compute the run-relative baseline over the COMPLETE valid source field. Truncating first
+    # shifts its median/neutral band and can reverse the persisted sign of retained concepts.
+    all_signs = _concept_profit_signs(all_outcomes, normalized_direction)
+    bounded_concept_set = set(bounded_concepts)
+    bounded_outcomes = dict(list((
+        (key, value) for key, value in sorted(all_outcomes.items()) if key in bounded_concept_set
+    ))[:_MAX_CAPSULE_OUTCOMES])
+    concept_signs = {key: all_signs[key] for key in bounded_outcomes if key in all_signs}
+    # Invalid source entries are omitted evidence too. Count them in the receipt so filtering cannot turn a
+    # poisoned input into a capsule that claims its source was exact/complete.
+    concepts_total = len(valid_concepts) + invalid_concepts
+    concepts_omitted = concepts_total - len(bounded_concepts)
+    outcomes_total = len(raw_outcomes) + int(concept_outcomes is not None and not outcomes_mapping)
+    outcomes_omitted = outcomes_total - len(bounded_outcomes)
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
@@ -775,8 +852,14 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
         "fingerprint": bounded_fingerprint,
         "direction": normalized_direction,
         "concepts": bounded_concepts,
+        "concepts_total": concepts_total,
+        "concepts_omitted": concepts_omitted,
+        "concepts_complete": concepts_omitted == 0,
         "best_metric": best_metric if _finite_metric(best_metric) else None,
         "concept_outcomes": bounded_outcomes,
+        "concept_outcomes_total": outcomes_total,
+        "concept_outcomes_omitted": outcomes_omitted,
+        "concept_outcomes_complete": outcomes_omitted == 0,
         # PART V Phase 1: a direction-normalized RANK-WITHIN-RUN sign per concept (+1 clearly-better-half /
         # 0 neutral / -1 clearly-worse-half vs this run's own field) — additive over v2 (old capsules lack
         # it, readers default {}). Relative rank, not causal profit; the per-node delta is Phase 3.
@@ -878,7 +961,11 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     for c in valid_capsules:
         rid = str(c.get("run_id") or "")
         oc = c.get("concept_outcomes") or {}
-        signs = c.get("concept_signs") or {}         # Phase 1: direction-normalized profit sign per concept
+        outcome_meta = _capsule_completeness(
+            c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
+        # CODEX AGENT: pre-receipt v2 writers could truncate BEFORE computing rank signs. Keep their positive
+        # concept/outcome observations, but never aggregate a sign whose comparison field may be incomplete.
+        signs = (c.get("concept_signs") or {}) if outcome_meta and outcome_meta[2] else {}
         direction = str(c.get("direction") or "min")
         raw = list(c.get("concepts") or [])
         # Deterministic per-(canonical, run) aggregation: canonicalize each raw slug through the shared
@@ -920,11 +1007,21 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     cards = []
     for c in valid_capsules:
         canonical = canonicalize_concepts(c.get("concepts") or [], aliases=aliases, splits=splits)
+        concept_meta = _capsule_completeness(c, "concepts", len(c.get("concepts") or []))
+        outcome_meta = _capsule_completeness(
+            c, "concept_outcomes", len(c.get("concept_outcomes") or {}))
+        assert concept_meta is not None and outcome_meta is not None  # validated by _dedup_valid_capsules
         # The overview must apply normalization even with empty governance maps; otherwise
         # `Hard-Neg` and `hard-neg` are one UID in the registry but two portfolio concepts/cards.
         card = {"run_id": str(c.get("run_id") or ""), "n_concepts": len(canonical),
-                "best_metric": c.get("best_metric"), "direction": str(c.get("direction") or "min"),
-                "concepts": canonical[:_MAX_OVERVIEW_CARD_CONCEPTS]}
+                 "best_metric": c.get("best_metric"), "direction": str(c.get("direction") or "min"),
+                 "concepts": canonical[:_MAX_OVERVIEW_CARD_CONCEPTS],
+                 "source_concepts_total": concept_meta[0],
+                 "source_concepts_omitted": concept_meta[1],
+                 "source_concepts_complete": concept_meta[2],
+                 "source_outcomes_total": outcome_meta[0],
+                 "source_outcomes_omitted": outcome_meta[1],
+                 "source_outcomes_complete": outcome_meta[2]}
         if len(canonical) > len(card["concepts"]):
             card["concepts_omitted"] = len(canonical) - len(card["concepts"])
         cards.append(card)
@@ -932,8 +1029,9 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
     # CODEX AGENT: every outward collection has an independent hard cap. Totals and explicit omission
     # counters describe the full validated snapshot, so a bounded response never masquerades as complete.
     result = {"n_runs": len(valid_capsules), "n_concepts": len(concepts),
-              "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
-              "runs": cards[:_MAX_OVERVIEW_RUN_CARDS]}
+               "concepts": concepts[:_MAX_OVERVIEW_CONCEPTS],
+               "runs": cards[:_MAX_OVERVIEW_RUN_CARDS],
+               **_capsule_source_summary(valid_capsules)}
     if len(concepts) > len(result["concepts"]):
         result["concepts_omitted"] = len(concepts) - len(result["concepts"])
     if len(cards) > len(result["runs"]):
@@ -965,17 +1063,12 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
 
     valid_capsules = _dedup_valid_capsules(capsules)
 
-    concept_runs: dict[str, set] = {}
-    pair_runs: dict[tuple, set] = {}
+    concept_runs: dict[str, int] = {}
     for c in valid_capsules:
-        rid = str(c.get("run_id") or "")
         canon = sorted(set(canonicalize_concepts(
             (c.get("concepts") or [])[:_MAX_GRAPH_PER_CONCEPT_CONCEPTS], aliases=aliases, splits=splits)))
         for cid in canon:
-            concept_runs.setdefault(cid, set()).add(rid)
-        for i, a in enumerate(canon):                       # unordered pairs (sorted -> a < b), one run each
-            for b in canon[i + 1:]:
-                pair_runs.setdefault((a, b), set()).add(rid)
+            concept_runs[cid] = concept_runs.get(cid, 0) + 1
 
     # is_a spine from the concept PATHS (materialize each ancestor prefix as a node too).
     prefixes: set[str] = set()
@@ -984,33 +1077,47 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
         for depth in range(1, len(parts)):
             prefixes.add("/".join(parts[:depth]))
     for pfx in prefixes:
-        concept_runs.setdefault(pfx, set())
+        concept_runs.setdefault(pfx, 0)
 
-    concepts = sorted(concept_runs, key=lambda cid: (-len(concept_runs[cid]), cid))
+    concepts = sorted(concept_runs, key=lambda cid: (-concept_runs[cid], cid))
     kept = set(concepts[:_MAX_GRAPH_CONCEPTS])
     edges: list[dict] = []
     for cid in sorted(kept):
         parent = cid.rsplit("/", 1)[0] if "/" in cid else ""
         if parent and parent in kept:
-            edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": len(concept_runs[cid])})
+            edges.append({"src": cid, "rel": "is_a", "dst": parent, "n_runs": concept_runs[cid]})
+    is_a_candidates = len(edges)
+    # CODEX AGENT: select the bounded node set BEFORE O(k^2) pairing. The old one-pass implementation
+    # retained pair sets for every source concept even though at most 512 nodes could reach the response.
+    pair_runs: dict[tuple[str, str], int] = {}
+    for c in valid_capsules:
+        canon = sorted(set(canonicalize_concepts(
+            (c.get("concepts") or [])[:_MAX_GRAPH_PER_CONCEPT_CONCEPTS],
+            aliases=aliases, splits=splits)) & kept)
+        for i, a in enumerate(canon):                       # unordered sorted pair; one count per unique run
+            for b in canon[i + 1:]:
+                pair_runs[(a, b)] = pair_runs.get((a, b), 0) + 1
     try:
         threshold = max(1, int(min_cooccurrence))       # a per-pair run-count floor; <=0 means "keep all"
     except (TypeError, ValueError):
         threshold = 2                                    # a contract-violating caller falls back to the default
-    cooc = sorted(((a, b, runs) for (a, b), runs in pair_runs.items()
-                   if len(runs) >= threshold and a in kept and b in kept),
-                  key=lambda t: (-len(t[2]), t[0], t[1]))
-    for a, b, runs in cooc:
+    cooc = sorted(((a, b, n_runs) for (a, b), n_runs in pair_runs.items()
+                   if n_runs >= threshold),
+                  key=lambda t: (-t[2], t[0], t[1]))
+    for a, b, n_runs in cooc:
         if len(edges) >= _MAX_GRAPH_EDGES:
             break
-        edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": len(runs)})
+        edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": n_runs})
+    edge_candidates = is_a_candidates + len(cooc)
     return {
         "n_runs": len(valid_capsules),
         "n_concepts": len(concepts),
-        "concepts": [{"concept": cid, "n_runs": len(concept_runs[cid])} for cid in concepts[:_MAX_GRAPH_CONCEPTS]],
+        "concepts": [{"concept": cid, "n_runs": concept_runs[cid]} for cid in concepts[:_MAX_GRAPH_CONCEPTS]],
         "edges": edges[:_MAX_GRAPH_EDGES],
         "concepts_omitted": max(0, len(concepts) - _MAX_GRAPH_CONCEPTS),
-        "edges_omitted": max(0, len(cooc) + sum(1 for e in edges if e["rel"] == "is_a") - len(edges)),
+        "edges_omitted": max(0, edge_candidates - len(edges)),
+        "pair_candidates": len(pair_runs),
+        **_capsule_source_summary(valid_capsules),
     }
 
 
@@ -1035,7 +1142,11 @@ def portfolio_digest(capsules: list[dict], *, aliases: Optional[dict] = None,
     axes = [{"axis": c["axis"], "n_concepts": len(c["concepts"]), "n_runs": len(c["_runs"]),
              "concepts": sorted(c["concepts"])} for c in clusters.values()]
     axes.sort(key=lambda c: (-c["n_concepts"], -c["n_runs"], c["axis"]))
-    return {"n_axes": len(axes), "n_concepts": ov["n_concepts"], "axes": axes}
+    return {"n_axes": len(axes), "n_concepts": ov["n_concepts"], "axes": axes,
+            **{key: ov[key] for key in (
+                "source_complete", "partial_capsules", "source_unknown_capsules",
+                "source_concepts_omitted", "source_outcomes_omitted",
+            )}}
 
 
 class CaseLibrary:
