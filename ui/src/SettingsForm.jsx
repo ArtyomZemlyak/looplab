@@ -1,4 +1,4 @@
-import React, { useId, useState } from 'react'
+import React, { useEffect, useId, useState } from 'react'
 import { filterSettingsGroups, normalizeSettingsQuery } from './settingsModel.js'
 import './settings-polish.css'
 
@@ -33,7 +33,7 @@ function changeDot(unsaved, changed) {
 const safeId = value => String(value).replace(/[^a-zA-Z0-9_-]/g, '-')
 
 function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted, onToggleAgent,
-                 secretSet, onClearSecret, readOnly, rolePills }) {
+                 secretSet, onClearSecret, secretActionDisabled, readOnly, rolePills }) {
   const set = (v) => onChange(f.key, v)
   const inputId = `${idPrefix}-setting-${safeId(f.key)}`
   const helpId = `${inputId}-help`
@@ -69,7 +69,9 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
              onChange={e => set(e.target.value)} />
       {secretSet && onClearSecret &&
         <button type="button" className="btn sm ghost" aria-label={`Clear stored ${f.label}`}
-                title="remove the stored key" onClick={() => onClearSecret(f.key)}>Clear</button>}
+                title="Remove the stored key immediately (separate from Save)"
+                disabled={secretActionDisabled}
+                onClick={() => onClearSecret(f.key)}>Clear now</button>}
     </div>
   } else {
     const numeric = f.type === 'int' || f.type === 'float'
@@ -101,6 +103,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
     {hasDescription && <div id={helpId} className="sf-help">
       {f.type === 'secret' && <span className="sf-secret-state">
         {secretSet ? 'A credential is stored. Enter a value only to replace it. ' : 'No credential is stored. '}
+        Clear now is immediate and separate from Save.{' '}
       </span>}
       {f.help}
     </div>}
@@ -111,7 +114,7 @@ function Field({ idPrefix, f, value, onChange, changed, unsaved, error, granted,
 }
 
 function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, agentControl,
-                      onToggleAgent, secretState, onClearSecret, readOnlyKeys,
+                      onToggleAgent, secretState, onClearSecret, secretActionDisabled, readOnlyKeys,
                       panelId, labelledBy, searchable, rolePills }) {
   const headingId = `${idPrefix}-heading-${safeId(group.title)}`
   return <section className="sf-group" id={panelId}
@@ -126,14 +129,16 @@ function GroupPanel({ group, idPrefix, form, onChange, dirty, unsaved, errors, a
         changed={dirty?.has(f.key)} unsaved={unsaved?.has(f.key)} error={errors?.[f.key]} onChange={onChange}
         granted={agentControl?.[f.key]} onToggleAgent={onToggleAgent}
         secretSet={secretState?.[f.key]} onClearSecret={onClearSecret}
+        secretActionDisabled={secretActionDisabled}
         readOnly={readOnlyKeys?.has(f.key)} rolePills={rolePills} />)}
     </div>
   </section>
 }
 
 export default function SettingsForm({ form, onChange, dirty, unsaved, errors, only, agentControl, onToggleAgent,
-                                       secretState, onClearSecret, readOnlyKeys, hideSecret,
-                                       mode = 'all', query = '', schema }) {
+                                       secretState, onClearSecret, secretActionDisabled, readOnlyKeys, hideSecret,
+                                       mode = 'all', query = '', schema,
+                                       focusKey = '', focusRequest = 0 }) {
   const groups = filterSettingsGroups(schema.groups, { mode, query, only, hideSecret })
   const rolePills = schema.agentRolePills
   const [active, setActive] = useState(0)
@@ -145,16 +150,32 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
   const groupUnsaved = gr => gr.fields.some(f => unsaved?.has(f.key))
   const groupChanged = gr => gr.fields.some(f => dirty?.has(f.key))
 
+  useEffect(() => {
+    if (!focusKey || !Object.hasOwn(schema.fieldByKey, focusKey)) return undefined
+    const groupIndex = groups.findIndex(item => item.fields.some(field => field.key === focusKey))
+    if (groupIndex < 0) return undefined
+    if (!searching && active !== groupIndex) {
+      setActive(groupIndex)
+      return undefined
+    }
+    const timer = setTimeout(() => {
+      document.querySelector(`[data-settings-form="${idPrefix}"] [name="${focusKey}"]`)?.focus()
+    }, 0)
+    return () => clearTimeout(timer)
+  }, [focusKey, focusRequest, mode, query, only, hideSecret, schema, searching, active])
+
   if (!groups.length) return <div className="settings-empty" role="status">
     <strong>No settings match “{query.trim()}”</strong>
     <span>Try a field name, key, option, or a broader term.</span>
   </div>
 
   if (searching) return <div className="settings-form settings-search-results" role="form"
+                              data-settings-form={idPrefix}
                               aria-label="Matching settings">
     {groups.map(gr => <GroupPanel key={gr.title} group={gr} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
+      secretActionDisabled={secretActionDisabled}
       readOnlyKeys={readOnlyKeys} searchable rolePills={rolePills} />)}
   </div>
 
@@ -172,7 +193,8 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
 
   const tabId = `${idPrefix}-tab-${idx}`
   const panelId = `${idPrefix}-panel-${idx}`
-  return <div className="settings-form tabbed" role="form" aria-label="Settings fields">
+  return <div className="settings-form tabbed" role="form" aria-label="Settings fields"
+              data-settings-form={idPrefix}>
     <div className="tabs sf-tabs" role="tablist" aria-label="Settings sections">
       {groups.map((gr, index) => <button key={gr.title} type="button" role="tab"
         id={`${idPrefix}-tab-${index}`}
@@ -187,6 +209,7 @@ export default function SettingsForm({ form, onChange, dirty, unsaved, errors, o
     <GroupPanel key={group.title} group={group} idPrefix={idPrefix} form={form}
       onChange={onChange} dirty={dirty} unsaved={unsaved} errors={errors} agentControl={agentControl}
       onToggleAgent={onToggleAgent} secretState={secretState} onClearSecret={onClearSecret}
+      secretActionDisabled={secretActionDisabled}
       readOnlyKeys={readOnlyKeys} panelId={panelId} labelledBy={tabId} rolePills={rolePills} />
   </div>
 }

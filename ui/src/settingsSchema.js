@@ -1,10 +1,11 @@
-import { getSettingsSchema } from './api.js'
+import { get } from './api.js'
 import { deadlineRequest } from './requestDeadline.js'
 
-export const SETTINGS_SCHEMA_VERSION = 1
+export const SETTINGS_SCHEMA_VERSION = 2
 const SETTINGS_SCHEMA_TIMEOUT_MS = 15_000
 const FIELD_TYPES = new Set(['bool', 'enum', 'secret', 'int', 'float', 'list', 'text'])
 const OPTIONAL_TEXT = ['help', 'placeholder', 'warning', 'warningTitle', 'warningTone']
+const NUMERIC_BOUNDS = ['minimum', 'exclusiveMinimum', 'maximum', 'exclusiveMaximum']
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const schemaError = () => { throw new TypeError('Invalid settings schema') }
 const boundedText = (value, maximum, allowEmpty = false) => {
@@ -52,6 +53,19 @@ export function validateSettingsSchema(value) {
       if (Object.hasOwn(field, 'essential')) {
         if (typeof field.essential !== 'boolean') schemaError()
       }
+      if (typeof field.nullable !== 'boolean') schemaError()
+      const numeric = field.type === 'int' || field.type === 'float'
+      for (const bound of NUMERIC_BOUNDS) {
+        if (!Object.hasOwn(field, bound)) continue
+        if (!numeric || typeof field[bound] !== 'number' || !Number.isFinite(field[bound])) schemaError()
+      }
+      if ((Object.hasOwn(field, 'minimum') && Object.hasOwn(field, 'exclusiveMinimum'))
+          || (Object.hasOwn(field, 'maximum') && Object.hasOwn(field, 'exclusiveMaximum'))) schemaError()
+      const lower = field.minimum ?? field.exclusiveMinimum
+      const upper = field.maximum ?? field.exclusiveMaximum
+      if (lower != null && upper != null
+          && (lower > upper || (lower === upper
+            && (Object.hasOwn(field, 'exclusiveMinimum') || Object.hasOwn(field, 'exclusiveMaximum'))))) schemaError()
       if (field.type === 'enum') {
         if (!Array.isArray(field.options) || !field.options.length || field.options.length > 64) {
           schemaError()
@@ -87,11 +101,11 @@ export function createSettingsSchemaLoader(readSchema) {
   return Object.freeze({
     peek: () => cached,
     load: ({ reload = false } = {}) => {
-      if (cached) return Promise.resolve(cached)
+      if (cached && !reload) return Promise.resolve(cached)
       if (flight) return flight
       let pending
       pending = Promise.resolve()
-        .then(() => readSchema({ cache: reload ? 'reload' : 'default' }))
+        .then(() => readSchema({ cache: reload ? 'reload' : 'no-cache' }))
         .then(validateSettingsSchema)
         .then(value => { cached = value; return value })
         .finally(() => { if (flight === pending) flight = null })
@@ -102,7 +116,8 @@ export function createSettingsSchemaLoader(readSchema) {
 }
 
 const schemaLoader = createSettingsSchemaLoader(({ cache }) => {
-  const timed = deadlineRequest(signal => getSettingsSchema({ signal, cache }),
+  const timed = deadlineRequest(signal => get(`/api/settings/schema/${SETTINGS_SCHEMA_VERSION}`,
+    { signal, cache }),
     SETTINGS_SCHEMA_TIMEOUT_MS)
   return timed.promise
 })
@@ -122,10 +137,34 @@ export const INVALID_SETTING_VALUE = Symbol('invalid-setting-value')
 const INTEGER_INPUT = /^[+-]?\d+(?:\.0+)?$/u
 const DECIMAL_INPUT = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/u
 
-export function parseSettingValue(field, raw) {
+const numericRangeError = (field, value) => {
+  const hasMin = Object.hasOwn(field, 'minimum')
+  const hasExclusiveMin = Object.hasOwn(field, 'exclusiveMinimum')
+  const hasMax = Object.hasOwn(field, 'maximum')
+  const hasExclusiveMax = Object.hasOwn(field, 'exclusiveMaximum')
+  const below = (hasMin && value < field.minimum)
+    || (hasExclusiveMin && value <= field.exclusiveMinimum)
+  const above = (hasMax && value > field.maximum)
+    || (hasExclusiveMax && value >= field.exclusiveMaximum)
+  if (!below && !above) return ''
+  const lower = hasMin ? field.minimum : hasExclusiveMin ? field.exclusiveMinimum : null
+  const upper = hasMax ? field.maximum : hasExclusiveMax ? field.exclusiveMaximum : null
+  if (lower != null && upper != null) {
+    const left = hasExclusiveMin ? 'greater than' : 'at least'
+    const right = hasExclusiveMax ? 'less than' : 'at most'
+    return `Enter a value ${left} ${lower} and ${right} ${upper}.`
+  }
+  if (lower != null) return `Enter a value ${hasExclusiveMin ? 'greater than' : 'at least'} ${lower}.`
+  return `Enter a value ${hasExclusiveMax ? 'less than' : 'at most'} ${upper}.`
+}
+
+export function parseSettingValue(field, raw, { allowClear = true } = {}) {
   if (field.type === 'bool') return { valid: true, value: !!raw, error: '' }
   if (raw == null || (typeof raw === 'string' && raw.trim() === '')) {
-    return { valid: true, value: null, error: '' }
+    return allowClear || field.nullable
+      ? { valid: true, value: null, error: '' }
+      : { valid: false, value: INVALID_SETTING_VALUE,
+          error: 'This run setting is required. Enter a value instead of leaving it blank.' }
   }
   if (field.type === 'int') {
     const text = String(raw).trim()
@@ -143,6 +182,8 @@ export function parseSettingValue(field, raw) {
     if (!Number.isSafeInteger(value)) {
       return { valid: false, value: INVALID_SETTING_VALUE, error: 'Enter a whole number within the safe range.' }
     }
+    const rangeError = numericRangeError(field, value)
+    if (rangeError) return { valid: false, value: INVALID_SETTING_VALUE, error: rangeError }
     return { valid: true, value, error: '' }
   }
   if (field.type === 'float') {
@@ -152,9 +193,13 @@ export function parseSettingValue(field, raw) {
         error: 'Enter a finite decimal number (scientific notation is allowed).' }
     }
     const value = Number(text)
-    return Number.isFinite(value)
-      ? { valid: true, value, error: '' }
-      : { valid: false, value: INVALID_SETTING_VALUE, error: 'Enter a finite number.' }
+    if (!Number.isFinite(value)) {
+      return { valid: false, value: INVALID_SETTING_VALUE, error: 'Enter a finite number.' }
+    }
+    const rangeError = numericRangeError(field, value)
+    return rangeError
+      ? { valid: false, value: INVALID_SETTING_VALUE, error: rangeError }
+      : { valid: true, value, error: '' }
   }
   if (field.type === 'list') {
     return { valid: true, value: String(raw).split(',').map(s => s.trim()).filter(Boolean), error: '' }
@@ -162,15 +207,15 @@ export function parseSettingValue(field, raw) {
   return { valid: true, value: raw, error: '' }   // text / enum
 }
 
-export function coerce(field, raw) {
-  return parseSettingValue(field, raw).value
+export function coerce(field, raw, options = {}) {
+  return parseSettingValue(field, raw, options).value
 }
 
-export function settingsValidationErrors(form, schema) {
+export function settingsValidationErrors(form, schema, options = {}) {
   const errors = {}
   for (const [key, field] of Object.entries(fieldsFor(schema))) {
     if (field.type !== 'int' && field.type !== 'float') continue
-    const result = parseSettingValue(field, form?.[key])
+    const result = parseSettingValue(field, form?.[key], options)
     if (!result.valid) errors[key] = result.error
   }
   return errors
@@ -194,11 +239,11 @@ export function toForm(settings, schema) {
 // Turn the form shape back into a coerced settings object (for PUT /api/settings or run launch).
 // `secret` fields are SKIPPED — they never travel in the settings payload (they go through the
 // dedicated, owner-only secret endpoint instead), so a credential can't land in ui_settings.json.
-export function fromForm(form, schema) {
+export function fromForm(form, schema, options = {}) {
   const out = {}
   for (const [k, f] of Object.entries(fieldsFor(schema))) {
     if (f.type === 'secret') continue
-    out[k] = coerce(f, form[k])
+    out[k] = coerce(f, form[k], options)
   }
   return out
 }

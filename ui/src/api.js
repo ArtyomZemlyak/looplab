@@ -1120,6 +1120,82 @@ export const abandonConceptLens = (runId, expectedGeneration, requestId, options
     expected_generation: expectedGeneration, request_id: requestId,
   }, options)
 
+// Lost-tab recovery is deliberately owner-plane even though discovery is a GET.  Do not route it
+// through get(): reviewReadPath() would translate the URL into a reviewer capability, while this
+// projection is the authority used to decide whether another paid identity may be created.
+export async function getConceptLensRecovery(runId, expectedGeneration, {
+  signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+} = {}) {
+  if (!validRunGeneration(expectedGeneration)) {
+    throw runGenerationError('invalid_run_generation',
+      'A verified run generation is required before paid concept-lens recovery.',
+      'Reload Concepts before inspecting paid work.')
+  }
+  const basePath = runApiPath(runId, '/concepts/lens/recovery')
+  assertNotReviewMutation(basePath)
+  const path = `${basePath}?expected_generation=${encodeURIComponent(expectedGeneration)}`
+  return commandFetch(path, {
+    signal, cache: 'no-store', headers: _authHeaders({}),
+  }, requestTimeoutMs, async response => {
+    if (!response.ok) await _throw(response, basePath)
+    return commandResponseJson(response, basePath)
+  })
+}
+
+export function awaitConceptLensRecoveryJob(jobId, options = {}) {
+  const path = `/api/jobs/${encodeURIComponent(String(jobId || ''))}`
+  assertNotReviewMutation(path)
+  if (!/^[0-9a-f]{16}$/.test(jobId || '')) {
+    throw new Error('An exact recovered concept-lens job id is required.')
+  }
+  return jobAwait({ status: 'running', job_id: jobId }, options)
+}
+
+export async function abandonRecoveredConceptLens(
+  runId, expectedGeneration, requestId, expectedStartedSeq, {
+    resolutionIdempotencyKey, signal, requestTimeoutMs = COMMAND_REQUEST_TIMEOUT_MS,
+  } = {},
+) {
+  if (!validRunGeneration(expectedGeneration)) {
+    throw runGenerationError('invalid_run_generation',
+      'A verified run generation is required before resolving recovered paid work.',
+      'Reload Concepts and inspect the current recovery receipt.')
+  }
+  if (!safeIdentityText(requestId) || !/^[0-9a-f]{64}$/.test(requestId)) {
+    throw new Error('An exact recovered concept-lens request id is required.')
+  }
+  if (!Number.isSafeInteger(expectedStartedSeq) || expectedStartedSeq < 0) {
+    throw new Error('An exact recovered concept-lens start sequence is required.')
+  }
+  if (!UUID_V4_RE.test(resolutionIdempotencyKey || '')) {
+    throw new Error('A valid recovery resolution idempotency key is required.')
+  }
+  const path = runApiPath(runId, '/concepts/lens/recovery/abandon')
+  assertNotReviewMutation(path)
+  assertRunMutationAllowed(path)
+  try {
+    return await commandFetch(path, {
+      method: 'POST', signal,
+      headers: _authHeaders({
+        'Content-Type': 'application/json',
+        'Resolution-Idempotency-Key': resolutionIdempotencyKey,
+      }),
+      body: JSON.stringify({
+        expected_generation: expectedGeneration,
+        request_id: requestId,
+        expected_started_seq: expectedStartedSeq,
+      }),
+    }, requestTimeoutMs, async response => {
+      if (!response.ok) await _throw(response, path)
+      return commandResponseJson(response, path, { submission: true })
+    })
+  } catch (error) {
+    if (error?.status == null || error?.code === 'COMMAND_REQUEST_TIMEOUT'
+        || error?.code === 'COMMAND_PROTOCOL_ERROR') error.submissionMayHaveSucceeded = true
+    throw error
+  }
+}
+
 export const CONTROL = {
   // Three operator controls (see docs/guide/concepts.md → "Stopping a run"):
   //   stop     — freeze the run, NO finalization (event: pause). Resumable; finalize later if wanted.
@@ -1256,7 +1332,7 @@ export const resetRun = (rid) => post(`/api/runs/${encodeURIComponent(rid)}/rese
 export const clearNodeTrace = (rid, id) =>
   post(runNodeApiPath(rid, id, '/clear_trace'), {})
 
-export const llmHealth = () => get('/api/llm/health')
+export const llmHealth = (options = {}) => get('/api/llm/health', options)
 
 // Owner and reviewer are distinct principals. A review fragment wins even if this tab has stale
 // owner state, so the read-only surface can never accidentally send both credentials.
@@ -1472,14 +1548,17 @@ export async function putText(path, text) {
   if (!r.ok) await _throw(r, path)
   return r.json()
 }
-async function send(path, method, body) {
+async function send(path, method, body, { signal } = {}) {
   if (method !== 'GET') assertNotReviewMutation(path)
   if (method !== 'GET') assertRunMutationAllowed(path)
   // Only attach a JSON body for methods that carry one (PATCH/PUT/POST). A DELETE with a request
   // body + Content-Type is unusual and some reverse proxies (e.g. jupyter-server-proxy) mishandle it
   // — which surfaced as a 500 on "delete chat"/"delete run". DELETE goes bodyless.
   const hasBody = method !== 'DELETE' && method !== 'GET'
-  const opts = { method, headers: _authHeaders(hasBody ? { 'Content-Type': 'application/json' } : {}) }
+  const opts = {
+    method, signal,
+    headers: _authHeaders(hasBody ? { 'Content-Type': 'application/json' } : {}),
+  }
   if (hasBody) opts.body = JSON.stringify(body || {})
   const r = await fetch(apiUrl(path), opts)
   if (!r.ok) await _throw(r, path)
@@ -1558,14 +1637,23 @@ export const gpuStat = () => get('/api/gpu')
 
 // ---- settings + run launch ----
 export const getSettings = () => get('/api/settings')
-export const getSettingsSchema = (options = {}) => get('/api/settings/schema/1', options)
-export const saveSettings = (settings) => send('/api/settings', 'PUT', { settings })
+export const getSettingsSchema = (options = {}) => get('/api/settings/schema/2', options)
+export const saveSettings = (settings, { expectedRevision, ...options } = {}) =>
+  send('/api/settings', 'PUT', {
+    settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
+  }, options)
 // Store (or clear, value='') a secret credential. Goes to the dedicated owner-only secret store,
 // NOT ui_settings.json — the value is never echoed back (the GET reports it only as masked "***").
-export const saveSecret = (key, value) => send('/api/settings/secret', 'PUT', { key, value })
+export const saveSecret = (key, value, { expectedRevision, ...options } = {}) =>
+  send('/api/settings/secret', 'PUT', {
+    key, value, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
+  }, options)
 // Per-run settings: edit a specific run's config.snapshot.json so the next RESUME picks up the
-// change (only changed fields are sent). Blocked server-side while the run's engine is live.
-export const saveRunConfig = (rid, settings) => send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', { settings })
+// change (only changed fields are sent). A live engine keeps its in-memory copy until restart.
+export const saveRunConfig = (rid, settings, { expectedRevision, ...options } = {}) =>
+  send(`/api/runs/${encodeURIComponent(rid)}/config`, 'PUT', {
+    settings, ...(expectedRevision == null ? {} : { expected_revision: expectedRevision }),
+  }, options)
 
 // Experimental Research Atlas: owner-only, read-only projections over the shared memory portfolio.
 // Bypass browser caches so Refresh observes newly finalized runs/governance without a stale intermediary.

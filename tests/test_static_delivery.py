@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from urllib.parse import urljoin
 
 import pytest
 
@@ -24,6 +25,10 @@ def _dist(tmp_path):
     payload = ("window.looplabBundle = 'compressible-production-asset';\n" * 400).encode("utf-8")
     (assets / "app-a1b2c3d4.js").write_bytes(payload)
     (assets / "runtime.js").write_text("window.runtime = true;\n", encoding="utf-8")
+    (dist / "looplab-icons-v1.svg").write_text(
+        '<svg xmlns="http://www.w3.org/2000/svg"><symbol id="check" /></svg>',
+        encoding="utf-8",
+    )
     manifest_dir = dist / ".vite"
     manifest_dir.mkdir()
     (manifest_dir / "manifest.json").write_text(json.dumps({
@@ -78,3 +83,44 @@ def test_token_protected_index_remains_no_store(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_review_shells_keep_relative_assets_inside_a_proxy_mount(tmp_path, monkeypatch):
+    dist, _ = _dist(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_DIST", str(dist))
+    monkeypatch.delenv("LOOPLAB_UI_TOKEN", raising=False)
+    client = TestClient(make_app(tmp_path / "runs"))
+
+    canonical = client.get("/review")
+    assert canonical.status_code == 200
+    assert '<base href="../">' not in canonical.text
+    assert canonical.headers["cache-control"] == "no-store"
+    assert canonical.headers["referrer-policy"] == "no-referrer"
+
+    trailing = client.get("/review/")
+    assert trailing.status_code == 200
+    assert '<base href="../review">' in trailing.text
+    assert trailing.headers["cache-control"] == "no-store"
+    assert trailing.headers["referrer-policy"] == "no-referrer"
+
+    mounted_review = "https://lab.example/user/alice/proxy/8765/review"
+    mounted_root = "https://lab.example/user/alice/proxy/8765/"
+    for relative in ("./assets/app-a1b2c3d4.js", "./looplab-icons-v1.svg"):
+        assert urljoin(mounted_review, relative).startswith(mounted_root)
+        trailing_base = urljoin(f"{mounted_review}/", "../review")
+        assert urljoin(trailing_base, relative).startswith(mounted_root)
+    assert urljoin(urljoin(f"{mounted_review}/", "../review"), "#/run/demo") == (
+        f"{mounted_review}#/run/demo")
+
+
+def test_versioned_root_icon_sprite_is_immutable(tmp_path, monkeypatch):
+    dist, _ = _dist(tmp_path)
+    monkeypatch.setenv("LOOPLAB_UI_DIST", str(dist))
+    client = TestClient(make_app(tmp_path / "runs"))
+
+    response = client.get("/looplab-icons-v1.svg")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == _IMMUTABLE_ASSET_CACHE
+    assert response.headers["content-type"].startswith("image/svg+xml")
+    assert b'<symbol id="check"' in response.content

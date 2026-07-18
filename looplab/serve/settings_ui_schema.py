@@ -11,24 +11,50 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+from typing import get_args
 from pathlib import Path
 
 from looplab.core.config import Settings
 
 
-SETTINGS_UI_SCHEMA_VERSION = 1
+# The packaged catalogue format remains v1. HTTP contract v2 adds bounds derived from the live
+# Pydantic model so the browser never maintains a second, drifting copy of validation truth.
+SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
+SETTINGS_UI_SCHEMA_VERSION = 2
 SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 141
 SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 164
 SETTINGS_UI_SCHEMA_KEYSET_REVISION = "a5871bc85e10eeb6289dd6b4bba51de601320785719ca00e1db58fb2e9914878"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})
 _OPTIONAL_TEXT = ("help", "placeholder", "warning", "warningTitle", "warningTone")
+_MODEL_BOUND_KEYS = (("ge", "minimum"), ("gt", "exclusiveMinimum"),
+                     ("le", "maximum"), ("lt", "exclusiveMaximum"))
 
 
 def _text(value, label: str, *, maximum: int = 16_000, empty: bool = False) -> str:
     if not isinstance(value, str) or (not empty and not value) or len(value) > maximum:
         raise RuntimeError(f"settings UI schema {label} must be a bounded string")
     return value
+
+
+def _numeric_bounds(key: str, kind: str) -> dict[str, int | float]:
+    """Project Pydantic numeric constraints into inert, JSON-safe display metadata."""
+    if kind not in {"int", "float"}:
+        return {}
+    bounds: dict[str, int | float] = {}
+    for constraint in Settings.model_fields[key].metadata:
+        for model_name, ui_name in _MODEL_BOUND_KEYS:
+            value = getattr(constraint, model_name, None)
+            if value is None:
+                continue
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value)):
+                raise RuntimeError(f"Settings field {key!r} has a non-JSON numeric bound")
+            if ui_name in bounds and bounds[ui_name] != value:
+                raise RuntimeError(f"Settings field {key!r} repeats numeric bound {ui_name}")
+            bounds[ui_name] = value
+    return bounds
 
 
 def _load_schema() -> tuple[dict, str]:
@@ -42,8 +68,8 @@ def _load_schema() -> tuple[dict, str]:
         value = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"invalid packaged settings UI schema: {exc}") from exc
-    if not isinstance(value, dict) or value.get("schema") != SETTINGS_UI_SCHEMA_VERSION:
-        raise RuntimeError("settings UI schema version mismatch")
+    if not isinstance(value, dict) or value.get("schema") != SETTINGS_UI_SCHEMA_CATALOGUE_VERSION:
+        raise RuntimeError("settings UI catalogue version mismatch")
 
     groups = value.get("groups")
     roles = value.get("agent_role_pills")
@@ -89,6 +115,15 @@ def _load_schema() -> tuple[dict, str]:
             kind = field.get("type")
             if kind not in _FIELD_TYPES:
                 raise RuntimeError(f"settings UI schema field {key!r} has invalid type")
+            for bound_name in {ui_name for _model_name, ui_name in _MODEL_BOUND_KEYS}:
+                if bound_name in field:
+                    raise RuntimeError(
+                        f"settings UI catalogue must not duplicate model bound {key}.{bound_name}")
+            if "nullable" in field:
+                raise RuntimeError(
+                    f"settings UI catalogue must not duplicate model nullability {key}.nullable")
+            field.update(_numeric_bounds(key, kind))
+            field["nullable"] = type(None) in get_args(Settings.model_fields[key].annotation)
             for attribute in _OPTIONAL_TEXT:
                 if attribute in field:
                     _text(field[attribute], f"field {key}.{attribute}", empty=True)
@@ -114,8 +149,9 @@ def _load_schema() -> tuple[dict, str]:
         raise RuntimeError(
             "settings UI catalogue keyset changed; review and pin the curated field contract")
 
-    # The digest covers the canonical semantic value, not whitespace in the package file.  It is
-    # both the response revision and the strong ETag suffix for the versioned immutable endpoint.
+    # The digest covers the canonical semantic value, not JSONResponse's exact transfer bytes. It is
+    # therefore a semantic revision and weak ETag suffix for the revalidated endpoint.
+    value = {**value, "schema": SETTINGS_UI_SCHEMA_VERSION}
     canonical = json.dumps(value, ensure_ascii=False, sort_keys=True,
                            separators=(",", ":")).encode("utf-8")
     revision = hashlib.sha256(canonical).hexdigest()
@@ -123,4 +159,4 @@ def _load_schema() -> tuple[dict, str]:
 
 
 SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_REVISION = _load_schema()
-SETTINGS_UI_SCHEMA_ETAG = f'"settings-ui-v{SETTINGS_UI_SCHEMA_VERSION}-{SETTINGS_UI_SCHEMA_REVISION}"'
+SETTINGS_UI_SCHEMA_ETAG = f'W/"settings-ui-v{SETTINGS_UI_SCHEMA_VERSION}-{SETTINGS_UI_SCHEMA_REVISION}"'

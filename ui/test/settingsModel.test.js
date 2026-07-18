@@ -11,8 +11,14 @@ import {
   filterSettingsGroups,
   normalizeSettingsQuery,
   reconcileAcceptedRecord,
+  reconcileUnknownRecord,
+  runConfigWriteDisposition,
   splitRunConfigPayload,
   settingsViewStats,
+  validateRunConfigSaveAck,
+  validateSecretSaveAck,
+  validateSettingsResource,
+  validateSettingsSaveAck,
 } from '../src/settingsModel.js'
 
 test('every curated essential key exists in the settings schema', () => {
@@ -76,6 +82,16 @@ test('numeric settings distinguish invalid input from a deliberate blank clear',
   assert.match(parseSettingValue({ type: 'float' }, '1e309').error, /finite number/i)
   assert.match(settingsValidationErrors({ max_nodes: '2.5' }, SETTINGS_SCHEMA).max_nodes,
     /whole number/i)
+  assert.match(parseSettingValue(FIELD_BY_KEY.max_nodes, '0').error, /at least 1/i)
+  assert.match(parseSettingValue(FIELD_BY_KEY.max_nodes, '1000001').error, /at most 1000000/i)
+  assert.match(parseSettingValue(FIELD_BY_KEY.timeout, '0').error, /greater than 0/i)
+  assert.match(parseSettingValue(FIELD_BY_KEY.holdout_fraction, '0.91').error, /at most 0\.9/i)
+  assert.deepEqual(parseSettingValue(FIELD_BY_KEY.select_verifier_samples, '32'),
+    { valid: true, value: 32, error: '' })
+  assert.match(parseSettingValue(FIELD_BY_KEY.max_nodes, '', { allowClear: false }).error,
+    /required/i)
+  assert.deepEqual(parseSettingValue(FIELD_BY_KEY.max_seconds, '', { allowClear: false }),
+    { valid: true, value: null, error: '' })
 })
 
 test('accepted save records rebase without erasing edits made after submit', () => {
@@ -101,18 +117,128 @@ test('accepted save records honor a local deletion made after submit', () => {
   )
 })
 
+test('unknown save recovery keeps an unreflected draft and accepts it only when observed', () => {
+  const submitted = { max_nodes: 8, policy: 'greedy', serverOnly: 'old' }
+  const current = { ...submitted, policy: 'mcts' }
+
+  assert.deepEqual(reconcileUnknownRecord(current, submitted, {
+    max_nodes: 4, policy: 'greedy', serverOnly: 'fresh', concurrent: true,
+  }, ['max_nodes']), {
+    max_nodes: 8,
+    policy: 'mcts',
+    serverOnly: 'fresh',
+    concurrent: true,
+  })
+  assert.deepEqual(reconcileUnknownRecord(current, submitted, {
+    max_nodes: 8, policy: 'greedy', serverOnly: 'old', concurrent: true,
+  }, ['max_nodes']), {
+    max_nodes: 8,
+    policy: 'mcts',
+    serverOnly: 'old',
+    concurrent: true,
+  })
+  assert.deepEqual(reconcileUnknownRecord({}, {}, { timeout: ['strategist'] }, ['timeout']), {},
+    'an uncertain explicit deletion remains a visible local deletion when the server still has it')
+})
+
+test('run-config write disposition fails closed around partial-write server errors', () => {
+  assert.equal(runConfigWriteDisposition({ status: 409, code: 'run_config_revision_conflict' }),
+    'conflict')
+  assert.equal(runConfigWriteDisposition({ status: 503, code: 'run_config_lock_unavailable' }),
+    'rejected')
+  for (const error of [new Error('offline'), { status: 409 }, { status: 500 },
+    { status: 503, code: 'different_failure' }]) {
+    assert.equal(runConfigWriteDisposition(error), 'unknown')
+  }
+  for (const error of [{ status: 400 }, { status: 404 }, { status: 422 }]) {
+    assert.equal(runConfigWriteDisposition(error), 'rejected')
+  }
+})
+
 test('per-run config metadata is separated from the flat config and exposes launch pins', () => {
   const parsed = splitRunConfigPayload({
     timeout: 40,
     holdout_fraction: 0.4,
     _looplab_config_meta: {
+      config_revision: 'a'.repeat(64),
       run_start_pinned_fields: ['holdout_fraction', 'holdout_fraction', 'select_verifier'],
       snapshot_mismatch_fields: ['holdout_fraction'],
+      run_read_only_fields: ['profile'],
     },
   })
   assert.deepEqual(parsed.config, { timeout: 40, holdout_fraction: 0.4 })
+  assert.equal(parsed.configRevision, 'a'.repeat(64))
   assert.deepEqual([...parsed.pinnedFields], ['holdout_fraction', 'select_verifier'])
+  assert.deepEqual([...parsed.readOnlyFields], ['holdout_fraction', 'select_verifier', 'profile'])
   assert.deepEqual(parsed.mismatchFields, ['holdout_fraction'])
+})
+
+const validSettingValue = field => {
+  if (field.type === 'bool') return false
+  if (field.type === 'enum') return field.options[0]
+  if (field.type === 'secret') return null
+  if (field.type === 'int') return field.minimum ?? (field.exclusiveMinimum ?? 0) + 1
+  if (field.type === 'float') return field.minimum ?? (field.exclusiveMinimum ?? 0) + 0.5
+  if (field.type === 'list') return []
+  return field.nullable ? null : ''
+}
+
+const completeSettingsRecord = ({ includeSecret = true } = {}) => Object.fromEntries(
+  Object.values(SETTINGS_SCHEMA.fieldByKey)
+    .filter(field => includeSecret || field.type !== 'secret')
+    .map(field => [field.key, validSettingValue(field)]),
+)
+
+test('settings and run-config resources reject malformed HTTP-200 envelopes', () => {
+  const settings = completeSettingsRecord()
+  const defaults = completeSettingsRecord({ includeSecret: false })
+  const resource = { settings, defaults, overrides: {},
+    settings_revision: 'settings-r1', secret_revision: 'secret-r1' }
+  assert.equal(validateSettingsResource(resource, SETTINGS_SCHEMA), resource)
+  assert.equal(validateSettingsSaveAck({ ok: true, settings, overrides: {},
+    settings_revision: 'settings-r2' }, SETTINGS_SCHEMA).ok, true)
+  assert.equal(validateSecretSaveAck({ ok: true, key: 'llm_api_key', set: true,
+    secret_revision: 'secret-r2' },
+    'llm_api_key').set, true)
+
+  for (const malformed of [
+    {}, { ...resource, settings: [] }, { ...resource, defaults: 'wrong' },
+    { ...resource, settings: { ...settings, max_nodes: 'many' } },
+    { ...resource, settings: Object.fromEntries(
+      Object.entries(settings).filter(([key]) => key !== 'max_nodes')) },
+  ]) assert.throws(() => validateSettingsResource(malformed, SETTINGS_SCHEMA),
+    /Invalid settings resource/)
+  assert.throws(() => validateSettingsSaveAck({ ok: true, settings: {}, overrides: {} },
+    SETTINGS_SCHEMA), /Invalid settings resource/)
+  assert.throws(() => validateSecretSaveAck({ ok: true, key: 'llm_api_key', set: 'yes' },
+    'llm_api_key'), /Invalid settings resource/)
+
+  const config = { ...settings, _looplab_config_meta: {
+    config_revision: 'b'.repeat(64), run_start_pinned_fields: [],
+    snapshot_mismatch_fields: [], run_read_only_fields: ['profile'],
+  } }
+  assert.equal(splitRunConfigPayload(config, SETTINGS_SCHEMA).readOnlyFields.has('profile'), true)
+  const ack = { ok: true, config, changed: ['max_nodes'], normalized_pinned: [],
+    trust_gate_event_appended: false, engine_running: false }
+  assert.equal(validateRunConfigSaveAck(ack, SETTINGS_SCHEMA), ack)
+  for (const malformed of [{}, { ...config, _looplab_config_meta: null },
+    { ...config, max_nodes: [] },
+    { ...config, _looplab_config_meta: {
+      run_start_pinned_fields: [], snapshot_mismatch_fields: [], run_read_only_fields: ['profile'],
+    } },
+    { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 'short' } },
+    { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 'C'.repeat(64) } },
+    { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 7 } },
+    { ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: 'd'.repeat(65) } },
+    { ...config, _looplab_config_meta: { ...config._looplab_config_meta, unexpected: [] } }]) {
+    assert.throws(() => splitRunConfigPayload(malformed, SETTINGS_SCHEMA),
+      /Invalid settings resource/)
+  }
+  assert.throws(() => validateRunConfigSaveAck({ ...ack, changed: 'max_nodes' },
+    SETTINGS_SCHEMA), /Invalid settings resource/)
+  assert.throws(() => validateRunConfigSaveAck({ ...ack, config: {
+    ...config, _looplab_config_meta: { ...config._looplab_config_meta, config_revision: null },
+  } }, SETTINGS_SCHEMA), /Invalid settings resource/)
 })
 
 test('holdout and verifier run-start contracts are all represented in the settings catalogue', () => {

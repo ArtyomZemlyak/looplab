@@ -114,9 +114,15 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     MutationObserver: dom.window.MutationObserver, HTMLElement: dom.window.HTMLElement,
     requestAnimationFrame: callback => nativeSetTimeout(callback, 0),
     cancelAnimationFrame: handle => nativeClearTimeout(handle), IS_REACT_ACT_ENVIRONMENT: true,
-    fetch: (url, options = {}) => new Promise((resolve, reject) => requests.push({
-      url: String(url), options, resolve, reject,
-    })),
+    fetch: (url, options = {}) => {
+      const href = String(url)
+      if (href.includes('/concepts/lens/recovery?') && (options.method || 'GET') === 'GET') {
+        const expected = new URL(href, 'https://looplab.test').searchParams.get('expected_generation')
+        return Promise.resolve({ ok: true, status: 200, headers: { get: () => null },
+          json: async () => ({ schema: 1, generation: expected, state: 'none' }) })
+      }
+      return new Promise((resolve, reject) => requests.push({ url: href, options, resolve, reject }))
+    },
     setTimeout: (callback, delay, ...args) => {
       if (delay !== 12_000) return nativeSetTimeout(callback, delay, ...args)
       const id = ++timerId; deadlines.set(id, callback); return id
@@ -632,7 +638,8 @@ test('ConceptView fences, retries and preserves truthful last-good resource stat
     })
     await reply(abandonPost, {
       ...conceptPayload('scope/root', { runId: 'lens-scope-run', generation: GENERATION_A }),
-      ok: false, code: 'concept_lens_abandoned', reason: 'operator_abandoned', resolved: true,
+      ok: false, code: 'concept_lens_abandoned', reason: 'operator_abandoned',
+      abandoned: true, resolved: true,
       provider_outcome: 'unknown', billing_status: 'unknown',
       warning: 'Provider may already have completed and billed the request.',
       generation: GENERATION_A, request_id: '3'.repeat(64), seq: 9,

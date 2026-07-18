@@ -2,9 +2,12 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { fmt, get, runApiPath } from './util.js'
 import {
   abandonUnknownConceptLens, acquireConceptLensIntent, clearConceptLensIntent,
-  peekConceptLensIntent, requestConceptLens, updateConceptLensIntent,
+  createConceptLensResolutionKey, discoverConceptLensRecovery, peekConceptLensIntent,
+  pollDiscoveredConceptLens, requestConceptLens, resolveOrphanedConceptLens,
+  updateConceptLensIntent,
 } from './conceptLensRecovery.js'
 import { deadlineRequest } from './requestDeadline.js'
+import { getRunAccess } from './runMode.js'
 import {
   visibleConceptRows, conceptLeaf, deltaTone, fmtCell,
   CONCEPT_COLUMNS, DEFAULT_COLUMNS,
@@ -33,6 +36,11 @@ const PAID_LENS_CAP_REASONS = new Set([
 ])
 const generationId = value => value === null
   || (typeof value === 'string' && /^[0-9a-f]{64}$/.test(value))
+const paidLensReadOnlyMessage = access => access?.mode === 'review'
+  ? 'Paid lens actions are disabled in a review link; no provider request was sent.'
+  : access?.mode === 'stale-link'
+    ? 'This diagnostic link targets an earlier generation. Open the current generation before creating a paid lens; no provider request was sent.'
+    : 'Paid lens actions are disabled in a historical snapshot; return to live first. No provider request was sent.'
 const invalidPayload = () => { throw new TypeError('Invalid concept projection') }
 const countRecord = value => record(value) && Object.values(value).every(item => count(item))
 const validList = (value, test) => Array.isArray(value) && value.every(test)
@@ -298,6 +306,7 @@ function StateCard({ tone, title, body, action, pending = false, stale = false }
 export default function ConceptView({ runId, generation, sequence: displayedSequence, state, onPickNode }) {
   const runKey = String(runId)
   const lensScope = JSON.stringify([runKey, generation ?? null])
+  const paidLensScope = JSON.stringify([runKey, generation ?? null, displayedSequence ?? null])
   const hasExactGeneration = typeof generation === 'string' && generationId(generation)
   const [lensSelection, setLensSelection] = useState({ scope: lensScope, name: 'is_a' })
   const lens = lensSelection.scope === lensScope ? lensSelection.name : 'is_a'
@@ -315,23 +324,34 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const [lensIntentState, setLensIntentState] = useState({
     scope: '', storageReady: null, intent: null,
   })
+  const [lensRecoveryState, setLensRecoveryState] = useState({
+    scope: '', status: 'idle', receipt: null, resolutionKey: null, error: '', notice: '',
+  })
+  const [lensRecoveryRetry, setLensRecoveryRetry] = useState(0)
+  const [runAccess, setRunAccessState] = useState(() => getRunAccess(runKey))
   const lensCreates = useRef(new Map())
+  const lensRecoveryRequest = useRef(null)
   const lensForm = lensFormState.scope === lensScope ? lensFormState : emptyLensForm(lensScope)
   const { prompt: lensPrompt, error: lensErr } = lensForm
   const currentIntentState = lensIntentState.scope === lensScope
     ? lensIntentState : { storageReady: null, intent: null }
   const savedLensIntent = currentIntentState.intent
   const lensStorageReady = currentIntentState.storageReady === true
+  const currentRecovery = lensRecoveryState.scope === paidLensScope
+    ? lensRecoveryState
+    : { status: 'idle', receipt: null, resolutionKey: null, error: '', notice: '' }
   const intentMatchesScope = !!savedLensIntent && savedLensIntent.runId === runKey
     && savedLensIntent.generation === generation
-  const lensBusy = lensForm.busy || lensCreates.current.has(lensScope)
+  const recoveryBusy = ['checking', 'polling', 'resolving'].includes(currentRecovery.status)
+  const lensBusy = lensForm.busy || lensCreates.current.has(paidLensScope) || recoveryBusy
+  const lensReadOnly = !!runAccess.readOnly
   const setCurrentLensForm = update => setLensFormState(previous => {
     const currentForm = previous.scope === lensScope ? previous : emptyLensForm(lensScope)
     const next = typeof update === 'function' ? update(currentForm) : update
     return { ...next, scope: lensScope }
   })
-  const currentLensScope = useRef(lensScope)
-  currentLensScope.current = lensScope
+  const currentPaidLensScope = useRef(paidLensScope)
+  currentPaidLensScope.current = paidLensScope
   const request = useRef(null)
   const pendingRequest = useRef(null)
   const latestRequest = useRef(null)
@@ -351,6 +371,15 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
     derived: !!activeDerived, rels: activeDerived?.rels ? [...activeDerived.rels] : undefined,
   }
+
+  useEffect(() => {
+    setRunAccessState(getRunAccess(runKey))
+    const onAccess = event => {
+      if (String(event.detail?.runId) === runKey) setRunAccessState(getRunAccess(runKey))
+    }
+    window.addEventListener('ll:run-access', onAccess)
+    return () => window.removeEventListener('ll:run-access', onAccess)
+  }, [runKey])
 
   // Projection ticks coalesce behind one bounded request. A semantic navigation boundary still
   // aborts immediately, but a busy live run cannot starve the concept view by cancelling every
@@ -422,14 +451,25 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
 
   useEffect(() => {
     for (const [ownerScope, owner] of lensCreates.current) {
-      if (ownerScope === lensScope) continue
+      if (ownerScope === paidLensScope) continue
       owner.controller?.abort()
       lensCreates.current.delete(ownerScope)
+    }
+    const recoveryOwner = lensRecoveryRequest.current
+    if (recoveryOwner && recoveryOwner.scope !== paidLensScope) {
+      lensRecoveryRequest.current = null
+      recoveryOwner.controller?.abort()
     }
     let intent = null
     try {
       intent = peekConceptLensIntent(runId)
       setLensIntentState({ scope: lensScope, storageReady: true, intent })
+      setLensRecoveryState({
+        scope: paidLensScope,
+        status: intent ? 'local'
+          : displayedSequence != null || !hasExactGeneration ? 'inactive' : 'checking',
+        receipt: null, resolutionKey: null, error: '', notice: '',
+      })
       setCurrentLensForm(form => ({
         ...form, busy: false,
         prompt: intent?.generation === generation ? intent.prompt : '',
@@ -439,13 +479,20 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       }))
     } catch {
       setLensIntentState({ scope: lensScope, storageReady: false, intent: null })
+      setLensRecoveryState({
+        scope: paidLensScope,
+        status: displayedSequence != null || !hasExactGeneration ? 'inactive' : 'checking',
+        receipt: null, resolutionKey: null, error: '', notice: '',
+      })
       setCurrentLensForm(form => ({ ...form, busy: false,
-        error: 'Paid lens creation needs working session storage to preserve one request identity.' }))
+        error: 'This tab cannot save a new paid identity. Durable server recovery is still being checked.' }))
     }
-  }, [lensScope, runId, generation])
+  }, [paidLensScope, lensScope, runId, generation, displayedSequence, hasExactGeneration])
   useEffect(() => () => {
     for (const owner of lensCreates.current.values()) owner.controller?.abort()
     lensCreates.current.clear()
+    lensRecoveryRequest.current?.controller?.abort()
+    lensRecoveryRequest.current = null
   }, [])
 
   const current = resource.scope !== scope ? initial
@@ -494,6 +541,156 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const empty = !!data && roots.length === 0
   const refreshing = current.status === 'refreshing'
   const refresh = () => setRetry(value => value + 1)
+  const recoveryFrameReady = !!data
+
+  useEffect(() => {
+    if (!recoveryFrameReady || displayedSequence != null || !hasExactGeneration
+        || currentIntentState.scope !== lensScope || savedLensIntent
+        || currentRecovery.status !== 'checking') return undefined
+    if (lensRecoveryRequest.current?.scope === paidLensScope) return undefined
+    const controller = typeof AbortController === 'undefined' ? null : new AbortController()
+    const owner = { scope: paidLensScope, controller }
+    lensRecoveryRequest.current = owner
+    const ownsScope = () => lensRecoveryRequest.current === owner
+      && currentPaidLensScope.current === paidLensScope
+    const setRecovery = update => {
+      if (!ownsScope()) return
+      setLensRecoveryState(previous => previous.scope === paidLensScope
+        ? { ...previous, ...update } : previous)
+    }
+    Promise.resolve().then(async () => {
+      let receipt = await discoverConceptLensRecovery(runId, generation, {
+        signal: controller?.signal,
+      })
+      if (!ownsScope()) return
+      if (receipt.state === 'running') {
+        setRecovery({ status: 'polling', receipt, error: '', notice: '' })
+        const result = await pollDiscoveredConceptLens(runId, receipt, {
+          signal: controller?.signal,
+        })
+        if (!ownsScope()) return
+        if (result?.ambiguous === true) {
+          const refreshed = await discoverConceptLensRecovery(runId, generation, {
+            signal: controller?.signal,
+          })
+          if (!ownsScope()) return
+          // job_unknown/contact-loss may only cause another owner-plane read. If that read still
+          // points at a process job, stop and let the operator retry instead of polling forever.
+          if (refreshed.state === 'running' && refreshed.status === 'done') {
+            // The process receipt is terminal but did not yield a trustworthy durable terminal.
+            // The fresh owner-plane read still proves the exact unresolved claim, and the recovery
+            // POST independently rechecks that no worker is running before it can append anything.
+            // Drop only the volatile job fields so the operator can explicitly resolve this orphan;
+            // never resubmit the paid prompt or its lost idempotency key.
+            receipt = {
+              schema: refreshed.schema, generation: refreshed.generation, state: 'orphaned',
+              request_id: refreshed.request_id, started_seq: refreshed.started_seq,
+              input_seq: refreshed.input_seq,
+            }
+          } else if (refreshed.state === 'running' || refreshed.state === 'none') {
+            throw Object.assign(new Error('The discovered job is still not safely terminal.'), {
+              code: result.code || 'concept_lens_recovery_pending',
+            })
+          } else receipt = refreshed
+        } else {
+          receipt = {
+            schema: 1, generation: receipt.generation, state: 'terminal',
+            request_id: receipt.request_id, started_seq: receipt.started_seq,
+            input_seq: receipt.input_seq, terminal: result,
+          }
+        }
+      }
+      setRecovery({
+        status: 'ready', receipt,
+        resolutionKey: receipt.state === 'orphaned' ? currentRecovery.resolutionKey : null,
+        error: '', notice: '',
+      })
+    }).catch(error => {
+      if (!ownsScope() || controller?.signal?.aborted) return
+      setRecovery({
+        status: 'error',
+        error: error?.code === 'run_generation_changed'
+          ? 'The run changed while paid recovery was inspected. Reload Concepts.'
+          : 'Durable paid-request recovery could not be verified. New paid work remains disabled.',
+      })
+    }).finally(() => {
+      if (lensRecoveryRequest.current === owner) lensRecoveryRequest.current = null
+    })
+    return () => {
+      if (lensRecoveryRequest.current === owner) lensRecoveryRequest.current = null
+      controller?.abort()
+    }
+  }, [paidLensScope, recoveryFrameReady, currentIntentState.scope,
+    currentIntentState.storageReady, savedLensIntent, lensRecoveryRetry])
+
+  // A local receipt owns recovery while it exists. Once that exact receipt is terminalized or
+  // explicitly archived, require a fresh owner-plane read before another paid identity is enabled.
+  useEffect(() => {
+    if (savedLensIntent || currentRecovery.status !== 'local'
+        || displayedSequence != null || !hasExactGeneration) return
+    setLensRecoveryState(previous => previous.scope === paidLensScope
+      ? { ...previous, status: 'checking', receipt: null, error: '', notice: '' } : previous)
+    setLensRecoveryRetry(value => value + 1)
+  }, [paidLensScope, savedLensIntent, currentRecovery.status,
+    displayedSequence, hasExactGeneration])
+
+  // A durable terminal is safe to present only after both the recovery envelope and the complete
+  // concept-frame contract have been validated. A valid terminal is historical truth, not a lock:
+  // it may restore an ephemeral lens, but it never prevents a deliberate new paid request.
+  useEffect(() => {
+    const receipt = currentRecovery.receipt
+    if (currentRecovery.status !== 'ready' || receipt?.state !== 'terminal') return
+    const response = receipt.terminal
+    try {
+      const spec = response?.spec
+      const derived = response?.ok === true && record(spec) && conceptId(spec.name)
+        && validDerivedLensLabel(spec.label) && Array.isArray(spec.rels)
+        && spec.rels.length && spec.rels.every(conceptId)
+      if (derived) {
+        validatePaidDerivedPayload(response, {
+          runId, generation, requestedSeq: null, requestedLens: spec.name,
+          direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
+          derived: true, rels: spec.rels,
+        })
+        const recovered = { scope: lensScope, name: spec.name,
+          label: spec.label || spec.name, rels: [...spec.rels] }
+        setDerivedLenses(list => [...list.filter(item => item.scope !== lensScope
+          || item.name !== recovered.name), recovered])
+        setExpanded(new Set())
+        setEvidenceExpanded(new Set())
+        setLens(recovered.name)
+      } else {
+        const terminalReason = response?.code === 'concept_lens_abandoned'
+          || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
+            'concept_frame_partial'].includes(response?.reason)
+          || (response?.code === 'job_capacity' && response?.reason === 'capacity')
+        if (response?.ok !== false || !terminalReason) invalidPayload()
+        validateConceptPayload(response, {
+          runId, generation, requestedSeq: null, requestedLens: 'is_a',
+          direction: ['min', 'max'].includes(state?.direction) ? state.direction : null,
+          derived: false,
+        })
+      }
+      const notice = derived
+        ? 'Recovered a validated paid lens from the durable server terminal. No provider request was replayed.'
+        : response.code === 'concept_lens_abandoned'
+          ? 'The durable claim is abandoned. Provider completion, billing, and usage remain unknown; no provider retry was sent.'
+          : response.reason === 'no_model'
+            ? 'Recovered terminal: no model was configured, so no provider request was replayed.'
+            : 'Recovered the durable terminal for the previous paid lens. No provider request was replayed.'
+      setLensRecoveryState(previous => previous.scope === paidLensScope
+        && previous.status === 'ready' && previous.receipt === receipt
+        ? { ...previous, status: 'settled', notice, error: '' } : previous)
+    } catch {
+      setLensRecoveryState(previous => previous.scope === paidLensScope
+        && previous.receipt === receipt
+        ? { ...previous, status: 'error',
+            error: 'The recovered terminal failed concept-frame validation. New paid work remains disabled.' }
+        : previous)
+    }
+  }, [paidLensScope, currentRecovery.status, currentRecovery.receipt,
+    runId, generation, lensScope, state?.direction])
+
   const toggle = id => setExpanded(previous => {
     const next = new Set(previous); next.has(id) ? next.delete(id) : next.add(id); return next
   })
@@ -503,12 +700,21 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   const toggleColumn = key => setColumns(value => value.includes(key)
     ? value.length === 1 ? value : value.filter(item => item !== key) : [...value, key])
   const cols = CONCEPT_COLUMNS.filter(column => columns.includes(column.key))
+  const serverRecoveryAllowsNew = (currentRecovery.status === 'ready'
+      && currentRecovery.receipt?.state === 'none')
+    || (currentRecovery.status === 'settled' && currentRecovery.receipt?.state === 'terminal')
 
   const createLens = async event => {
     event.preventDefault()
+    const access = getRunAccess(runId)
+    if (access.readOnly) {
+      setCurrentLensForm(form => ({ ...form, error: paidLensReadOnlyMessage(access) }))
+      return
+    }
     const prompt = intentMatchesScope ? savedLensIntent.prompt : lensPrompt.trim()
     if (!prompt || displayedSequence != null || !hasExactGeneration
-        || !lensStorageReady || lensCreates.current.has(lensScope)
+        || !lensStorageReady || lensCreates.current.has(paidLensScope)
+        || (!savedLensIntent && !serverRecoveryAllowsNew)
         || (savedLensIntent && !intentMatchesScope)) return
     if (prompt.length > LENS_PROMPT_MAX_CHARS
         || new TextEncoder().encode(prompt).length > LENS_PROMPT_MAX_BYTES) {
@@ -527,9 +733,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         : 'Paid lens creation needs working session storage; no paid request was sent.' }))
       return
     }
-    const owner = { scope: lensScope, intent, resuming: !!savedLensIntent,
+    const owner = { scope: paidLensScope, intent, resuming: !!savedLensIntent,
       controller: typeof AbortController === 'undefined' ? null : new AbortController() }
-    lensCreates.current.set(lensScope, owner)
+    lensCreates.current.set(paidLensScope, owner)
     try {
       if (intent.state === 'ready') {
         owner.intent = updateConceptLensIntent(runId, intent.idempotencyKey, {
@@ -537,7 +743,7 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         })
       }
     } catch {
-      lensCreates.current.delete(lensScope)
+      lensCreates.current.delete(paidLensScope)
       setLensIntentState({ scope: lensScope, storageReady: false, intent })
       setCurrentLensForm(form => ({ ...form, busy: false,
         error: 'Paid lens recovery could not be staged; no paid request was sent.' }))
@@ -552,13 +758,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         onReceipt: receipt => {
           const updated = updateConceptLensIntent(runId, owner.intent.idempotencyKey, receipt)
           owner.intent = updated
-          if (lensCreates.current.get(lensScope) === owner
-              && currentLensScope.current === lensScope) {
+          if (lensCreates.current.get(paidLensScope) === owner
+              && currentPaidLensScope.current === paidLensScope) {
             setLensIntentState({ scope: lensScope, storageReady: true, intent: updated })
           }
         },
       })
-      if (lensCreates.current.get(lensScope) !== owner || currentLensScope.current !== lensScope) return
+      if (lensCreates.current.get(paidLensScope) !== owner
+          || currentPaidLensScope.current !== paidLensScope) return
       if (response?.ambiguous === true) {
         try {
           const requestId = typeof response.request_id === 'string'
@@ -604,7 +811,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         setCurrentLensForm(form => ({ ...form, prompt: '', error: cleared ? ''
           : 'Lens created, but its saved identity could not be cleared. Reload before another paid request.' }))
       } else {
-        const terminalReason = ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
+        const terminalReason = response?.code === 'concept_lens_abandoned'
+          || ['declined', 'invalid_spec', 'no_model', 'accounting_pending',
           'concept_frame_partial'].includes(response?.reason)
           || (response?.code === 'job_capacity' && response?.reason === 'capacity')
         if (response?.ok !== false || !terminalReason) invalidPayload()
@@ -620,6 +828,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         setCurrentLensForm(form => ({ ...form,
           error: !cleared
             ? 'The request ended, but its saved identity could not be cleared. Reload before another paid request.'
+            : response.code === 'concept_lens_abandoned'
+              ? response.reason === 'operator_recovered_abandon'
+                ? 'Another recovery view durably abandoned this claim. Provider completion, billing, and usage remain unknown.'
+                : 'This claim was durably abandoned. Provider completion, billing, and usage remain unknown.'
             : response.reason === 'no_model'
               ? 'No model is configured for lens creation.'
               : response.code === 'job_capacity'
@@ -631,14 +843,28 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                 : 'The model declined that lens; name a concrete relation and try again intentionally.' }))
       }
     } catch (error) {
-      if (lensCreates.current.get(lensScope) === owner
-          && currentLensScope.current === lensScope) {
+      if (lensCreates.current.get(paidLensScope) === owner
+          && currentPaidLensScope.current === paidLensScope) {
+        const localReadOnly = ['STALE_LINK_READ_ONLY', 'HISTORICAL_READ_ONLY',
+          'REVIEW_READ_ONLY'].includes(error?.code)
         const safelyRejected = ['invalid_run_generation', 'run_generation_unavailable',
           'run_generation_changed', 'concept_lens_prompt_too_large', 'concept_lens_body_too_large',
           'concept_lens_in_progress', 'concept_lens_ledger_conflict', 'job_capacity'].includes(error?.code)
           || ([400, 401, 403, 404, 413, 422].includes(Number(error?.status))
             && error?.code !== 'idempotency_key_reused')
-        if (safelyRejected && !owner.resuming) {
+        if (localReadOnly) {
+          let cleared = !owner.resuming
+          if (!owner.resuming) {
+            try { cleared = clearConceptLensIntent(runId, owner.intent.idempotencyKey) }
+            catch { cleared = false }
+          }
+          setLensIntentState({ scope: lensScope, storageReady: owner.resuming || cleared,
+            intent: owner.resuming || !cleared ? owner.intent : null })
+          setCurrentLensForm(form => ({ ...form,
+            error: !owner.resuming && !cleared
+              ? 'No provider request was sent, but its locally staged identity could not be cleared. Reload before acting.'
+              : paidLensReadOnlyMessage(getRunAccess(runId)) }))
+        } else if (safelyRejected && !owner.resuming) {
           let cleared = true
           try { cleared = clearConceptLensIntent(runId, owner.intent.idempotencyKey) }
           catch { cleared = false }
@@ -656,6 +882,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
                     : error?.code === 'concept_lens_ledger_conflict'
                       ? 'Another conflicting paid-lens ledger needs operator repair. No new request was started.'
                   : 'The paid request was rejected before model work began. Reload Concepts and review it.' }))
+          if (cleared && ['invalid_run_generation', 'run_generation_unavailable',
+            'run_generation_changed', 'concept_lens_in_progress',
+            'concept_lens_ledger_conflict'].includes(error?.code)) {
+            setLensRecoveryState(previous => previous.scope === paidLensScope
+              ? { ...previous, status: 'checking', receipt: null, error: '', notice: '' }
+              : previous)
+            setLensRecoveryRetry(value => value + 1)
+          }
         } else {
           try {
             const updated = updateConceptLensIntent(runId, owner.intent.idempotencyKey, {
@@ -673,9 +907,9 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
         }
       }
     } finally {
-      if (lensCreates.current.get(lensScope) === owner) {
-        lensCreates.current.delete(lensScope)
-        if (currentLensScope.current === lensScope) {
+      if (lensCreates.current.get(paidLensScope) === owner) {
+        lensCreates.current.delete(paidLensScope)
+        if (currentPaidLensScope.current === paidLensScope) {
           setCurrentLensForm(form => ({ ...form, busy: false }))
         }
       }
@@ -701,17 +935,19 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     }
   }
   const abandonSavedLens = async () => {
-    if (lensBusy || !intentMatchesScope || savedLensIntent?.state !== 'unknown'
+    if (getRunAccess(runId).readOnly || lensBusy || !intentMatchesScope
+        || savedLensIntent?.state !== 'unknown'
         || !/^[0-9a-f]{64}$/.test(savedLensIntent.requestId || '')) return
-    const owner = { scope: lensScope, intent: savedLensIntent,
+    const owner = { scope: paidLensScope, intent: savedLensIntent,
       controller: typeof AbortController === 'undefined' ? null : new AbortController() }
-    lensCreates.current.set(lensScope, owner)
+    lensCreates.current.set(paidLensScope, owner)
     setCurrentLensForm(form => ({ ...form, busy: true, error: '' }))
     try {
       const response = await abandonUnknownConceptLens(runId, savedLensIntent, {
         signal: owner.controller?.signal,
       })
-      if (lensCreates.current.get(lensScope) !== owner || currentLensScope.current !== lensScope) return
+      if (lensCreates.current.get(paidLensScope) !== owner
+          || currentPaidLensScope.current !== paidLensScope) return
       if (response?.ambiguous === true) {
         setCurrentLensForm(form => ({ ...form,
           error: 'Abandonment is still uncertain. The saved request is retained; Resume it before any new paid work.' }))
@@ -762,16 +998,76 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               : 'The provider reached a terminal result before abandonment; no new request was created.'
       }))
     } catch (error) {
-      if (lensCreates.current.get(lensScope) !== owner || currentLensScope.current !== lensScope) return
+      if (lensCreates.current.get(paidLensScope) !== owner
+          || currentPaidLensScope.current !== paidLensScope) return
       setCurrentLensForm(form => ({ ...form, error: error?.code === 'concept_lens_still_running'
         ? 'The provider worker is still running. Resume its receipt; abandonment is not safe yet.'
         : 'Abandonment was not durably confirmed. The saved request is retained; Resume it before any new paid work.' }))
     } finally {
-      if (lensCreates.current.get(lensScope) === owner) {
-        lensCreates.current.delete(lensScope)
-        if (currentLensScope.current === lensScope) {
+      if (lensCreates.current.get(paidLensScope) === owner) {
+        lensCreates.current.delete(paidLensScope)
+        if (currentPaidLensScope.current === paidLensScope) {
           setCurrentLensForm(form => ({ ...form, busy: false }))
         }
+      }
+    }
+  }
+  const retryServerRecovery = () => {
+    if (lensBusy || savedLensIntent || displayedSequence != null || !hasExactGeneration) return
+    lensRecoveryRequest.current?.controller?.abort()
+    lensRecoveryRequest.current = null
+    setLensRecoveryState(previous => previous.scope === paidLensScope
+      ? { ...previous, status: 'checking', receipt: null, error: '', notice: '' } : previous)
+    setLensRecoveryRetry(value => value + 1)
+  }
+  const resolveRecoveredLens = async () => {
+    const recovery = currentRecovery.receipt
+    if (getRunAccess(runId).readOnly || lensBusy || lensCreates.current.has(paidLensScope)
+        || savedLensIntent || currentRecovery.status !== 'ready'
+        || recovery?.state !== 'orphaned' || displayedSequence != null || !hasExactGeneration) return
+    const resolutionKey = currentRecovery.resolutionKey || createConceptLensResolutionKey()
+    const owner = { scope: paidLensScope,
+      controller: typeof AbortController === 'undefined' ? null : new AbortController() }
+    lensCreates.current.set(paidLensScope, owner)
+    setLensRecoveryState(previous => previous.scope === paidLensScope
+      ? { ...previous, status: 'resolving', resolutionKey, error: '', notice: '' } : previous)
+    try {
+      const response = await resolveOrphanedConceptLens(
+        runId, recovery, resolutionKey, { signal: owner.controller?.signal })
+      if (lensCreates.current.get(paidLensScope) !== owner
+          || currentPaidLensScope.current !== paidLensScope) return
+      if (response?.ambiguous === true) {
+        setLensRecoveryState(previous => previous.scope === paidLensScope
+          ? { ...previous, status: 'checking', receipt: null,
+              error: 'Resolution outcome is uncertain; inspecting the durable ledger before any retry.' }
+          : previous)
+        setLensRecoveryRetry(value => value + 1)
+        return
+      }
+      setLensRecoveryState(previous => previous.scope === paidLensScope ? {
+        ...previous, status: 'ready', error: '', notice: '',
+        receipt: {
+          schema: 1, generation: recovery.generation, state: 'terminal',
+          request_id: recovery.request_id, started_seq: recovery.started_seq,
+          input_seq: recovery.input_seq, terminal: response,
+        },
+      } : previous)
+    } catch (error) {
+      if (lensCreates.current.get(paidLensScope) !== owner
+          || currentPaidLensScope.current !== paidLensScope) return
+      const shouldRecheck = error?.code === 'concept_lens_still_running'
+        || error?.submissionMayHaveSucceeded === true
+      setLensRecoveryState(previous => previous.scope === paidLensScope ? {
+        ...previous, status: shouldRecheck ? 'checking' : 'error',
+        receipt: shouldRecheck ? null : recovery,
+        error: error?.code === 'concept_lens_still_running'
+          ? 'The original worker is still running. Polling its existing job; no provider retry is being sent.'
+          : 'Orphan resolution was not durably confirmed. New paid work remains disabled.',
+      } : previous)
+      if (shouldRecheck) setLensRecoveryRetry(value => value + 1)
+    } finally {
+      if (lensCreates.current.get(paidLensScope) === owner) {
+        lensCreates.current.delete(paidLensScope)
       }
     }
   }
@@ -781,8 +1077,10 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   }
   // Fence paid lens derivation by owner and run; disabled state alone cannot stop a
   // double submit or keep a late paid response out of a same-id replacement run.
+  const serverRecoveryBlocksNew = !savedLensIntent && !serverRecoveryAllowsNew
   const lensUnavailable = displayedSequence != null || !hasExactGeneration
-    || !lensStorageReady || (!!savedLensIntent && !intentMatchesScope)
+    || lensReadOnly || !lensStorageReady || serverRecoveryBlocksNew
+    || (!!savedLensIntent && !intentMatchesScope)
   const canArchiveLens = !!savedLensIntent && hasExactGeneration && lensStorageReady
     && savedLensIntent.generation !== generation
   const canAbandonLens = intentMatchesScope && savedLensIntent?.state === 'unknown'
@@ -790,8 +1088,8 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
     && displayedSequence == null && hasExactGeneration && lensStorageReady
   const lensStatus = currentIntentState.storageReady === null
     ? 'Checking paid-request recovery storage…'
-    : !lensStorageReady
-      ? 'Paid lens creation is disabled: this tab cannot safely save its request identity.'
+    : lensReadOnly
+      ? paidLensReadOnlyMessage(runAccess)
       : savedLensIntent && !intentMatchesScope
         ? 'This receipt belongs to an older generation. Archive is local only: it cannot resolve old provider work or billing, but that ledger cannot block this replacement generation.'
         : savedLensIntent?.state === 'unknown'
@@ -804,7 +1102,22 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
               ? 'Paid request dispatch may have started. Resume sends only this same saved identity.'
             : savedLensIntent
               ? 'Paid request saved before dispatch. Resume sends only this same request identity.'
-              : 'Paid AI action: provider charges may apply. Its run-, generation-, and prompt-bound identity is saved before dispatch.'
+              : currentRecovery.status === 'checking'
+                ? 'Checking the durable server ledger before enabling another paid identity…'
+                : currentRecovery.status === 'polling'
+                  ? 'A paid job survived this tab. Polling that exact job without a prompt or paid key; no provider request is being sent.'
+                  : currentRecovery.status === 'resolving'
+                    ? 'Resolving the exact orphaned claim. This cannot undo provider work or billing.'
+                    : currentRecovery.receipt?.state === 'orphaned'
+                      ? 'An orphaned paid claim blocks new work. Resolve it explicitly; provider completion and billing remain unknown.'
+                      : currentRecovery.receipt?.state === 'conflict'
+                        ? 'The durable paid ledger conflicts. Automatic recovery and new paid work are disabled until it is repaired.'
+                        : currentRecovery.status === 'error'
+                          ? currentRecovery.error
+                          : !lensStorageReady
+                            ? 'Server receipts are reconciled, but new paid work is disabled because this tab cannot save one request identity.'
+                            : currentRecovery.notice
+                              || 'Paid AI action: provider charges may apply. The server ledger is clear; a run-, generation-, and prompt-bound identity will be saved before dispatch.'
   const lensCreator = <form className="cv-lensnew" onSubmit={createLens}>
     <input className="text" value={lensPrompt} maxLength={LENS_PROMPT_MAX_CHARS}
       onChange={event => setCurrentLensForm(form => ({ ...form, prompt: event.target.value, error: '' }))}
@@ -816,15 +1129,26 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
       aria-describedby="paid-concept-lens-status"
       title={!hasExactGeneration ? 'Reload the run and wait for its verified generation.' : undefined}
       disabled={lensBusy || lensUnavailable || (!savedLensIntent && !lensPrompt.trim())}>
-      {lensBusy ? 'Reconciling paid lens…'
+      {lensBusy ? currentRecovery.status === 'polling' ? 'Polling existing paid job…'
+        : currentRecovery.status === 'checking' ? 'Checking paid recovery…'
+          : currentRecovery.status === 'resolving' ? 'Resolving orphaned claim…'
+            : 'Reconciling paid lens…'
         : savedLensIntent ? 'Resume paid lens' : 'Create lens · paid'}</button>
     {savedLensIntent && (canArchiveLens
       ? <button type="button" className="btn sm danger cv-lensdiscard"
         disabled={lensBusy} onClick={archiveOldLens}>Archive old-generation receipt</button>
       : canAbandonLens ? <button type="button" className="btn sm danger cv-lensdiscard"
-        disabled={lensBusy} onClick={abandonSavedLens}>Abandon unknown request</button>
+        disabled={lensBusy || lensReadOnly} onClick={abandonSavedLens}>Abandon unknown request</button>
       : <button type="button" className="btn sm ghost cv-lensdiscard"
         disabled={lensBusy} onClick={discardSavedLens}>Why no local discard?</button>)}
+    {!savedLensIntent && currentRecovery.status === 'ready'
+      && currentRecovery.receipt?.state === 'orphaned'
+      && <button type="button" className="btn sm danger cv-lensdiscard"
+        disabled={lensBusy || lensReadOnly} onClick={resolveRecoveredLens}>Resolve orphaned paid claim</button>}
+    {!savedLensIntent && (currentRecovery.status === 'error'
+      || currentRecovery.receipt?.state === 'conflict')
+      && <button type="button" className="btn sm ghost cv-lensdiscard"
+        disabled={lensBusy} onClick={retryServerRecovery}>Recheck paid recovery</button>}
     <span id="paid-concept-lens-status" className="muted" role="note">
       {lensStatus}</span>
     {lensErr && <span className="cv-lenserr" role="alert">{lensErr}</span>}
@@ -847,8 +1171,14 @@ export default function ConceptView({ runId, generation, sequence: displayedSequ
   else if (empty) stateCard = { tone: 'empty', title: 'No concepts have been tagged yet',
     action: refresh, pending: refreshing, stale: current.status === 'stale',
     body: 'This view fills automatically after the Researcher assigns concepts to experiments. Until then, LoopLab keeps the canvas honest instead of inventing a taxonomy.' }
+  const recoveryNeedsSurface = !!savedLensIntent
+    || ['checking', 'polling', 'resolving', 'error', 'settled'].includes(currentRecovery.status)
+    || ['orphaned', 'conflict'].includes(currentRecovery.receipt?.state)
   if (stateCard) return <div className="concept-view cv-state-layout" data-route-main tabIndex={-1}
-    aria-label="Concept tree"><StateCard {...stateCard} /></div>
+    aria-label="Concept tree"><StateCard {...stateCard} />
+    {data && recoveryNeedsSurface && (currentRecovery.status === 'settled' && !savedLensIntent
+      ? <p className="cv-state-warning" role="status">{currentRecovery.notice}</p>
+      : lensCreator)}</div>
 
   // Null-prototype rehydrate (same prototype-safety as byConcept): metrics.rows is raw JSON, and a
   // "constructor"/"__proto__" intermediate concept id would otherwise read an inherited Object.prototype

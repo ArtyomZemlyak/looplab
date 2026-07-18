@@ -39,7 +39,25 @@ test('settings metadata fails closed on version, revision, identity and role dri
   }
 })
 
-test('settings schema loader is single-flight and keeps one immutable validated revision', async () => {
+test('settings metadata fails closed on malformed or contradictory numeric bounds', () => {
+  for (const mutate of [
+    value => { delete value.groups[0].fields[0].nullable },
+    value => { value.groups[0].fields[0].nullable = 'sometimes' },
+    value => { value.groups[0].fields[0].minimum = 1 },
+    value => { value.groups[0].fields.find(field => field.key === 'max_nodes').minimum = NaN },
+    value => { value.groups[0].fields.find(field => field.key === 'max_nodes').exclusiveMinimum = 1 },
+    value => {
+      const field = value.groups[0].fields.find(item => item.key === 'max_nodes')
+      field.minimum = field.maximum + 1
+    },
+  ]) {
+    const value = payload()
+    mutate(value)
+    assert.throws(() => validateSettingsSchema(value), /Invalid settings schema/)
+  }
+})
+
+test('settings schema loader is single-flight and keeps one revalidated revision', async () => {
   let finish
   let reads = 0
   const seen = []
@@ -59,7 +77,7 @@ test('settings schema loader is single-flight and keeps one immutable validated 
   assert.equal(await loader.load(), schema)
   assert.equal(loader.peek(), schema)
   assert.equal(reads, 1)
-  assert.deepEqual(seen, [{ cache: 'default' }])
+  assert.deepEqual(seen, [{ cache: 'no-cache' }])
 })
 
 test('failed or malformed schema reads never populate cache and retry requests a reload', async () => {
@@ -78,5 +96,21 @@ test('failed or malformed schema reads never populate cache and retry requests a
   assert.equal(loader.peek(), null)
   const schema = await loader.load({ reload: true })
   assert.equal(schema.revision, 'a'.repeat(64))
-  assert.deepEqual(seen.map(item => item.cache), ['default', 'reload', 'reload'])
+  assert.deepEqual(seen.map(item => item.cache), ['no-cache', 'reload', 'reload'])
+})
+
+test('explicit schema reload revalidates a cached same-version semantic revision', async () => {
+  const seen = []
+  let revision = 'a'.repeat(64)
+  const loader = createSettingsSchemaLoader(options => {
+    seen.push(options.cache)
+    return { ...payload(), revision }
+  })
+  const first = await loader.load()
+  revision = 'b'.repeat(64)
+  const refreshed = await loader.load({ reload: true })
+  assert.equal(first.revision, 'a'.repeat(64))
+  assert.equal(refreshed.revision, 'b'.repeat(64))
+  assert.equal(loader.peek(), refreshed)
+  assert.deepEqual(seen, ['no-cache', 'reload'])
 })

@@ -1422,6 +1422,9 @@ def test_settings_get_put_roundtrip(tmp_path):
     client = TestClient(make_app(tmp_path))
     base = client.get("/api/settings").json()
     assert "settings" in base and "defaults" in base and base["overrides"] == {}
+    assert isinstance(base["settings_revision"], str) and base["settings_revision"]
+    assert isinstance(base["secret_revision"], str) and base["secret_revision"]
+    assert base["settings_revision"] != base["secret_revision"]
     # saving a value EQUAL to the default keeps the override file empty (stores only diffs)
     default_nodes = base["defaults"]["max_nodes"]
     client.put("/api/settings", json={"settings": {"max_nodes": default_nodes}})
@@ -1434,6 +1437,47 @@ def test_settings_get_put_roundtrip(tmp_path):
     # secrets are never accepted as an override
     client.put("/api/settings", json={"settings": {"llm_api_key": "leak"}})
     assert "llm_api_key" not in client.get("/api/settings").json()["overrides"]
+
+
+def test_settings_cas_rejects_an_old_delayed_put(tmp_path):
+    """A request prepared from an old GET cannot overwrite a newer same-resource save."""
+    client = TestClient(make_app(tmp_path))
+    loaded = client.get("/api/settings").json()
+    old_revision = loaded["settings_revision"]
+
+    newer = client.put("/api/settings", json={
+        "settings": {"max_nodes": 93}, "expected_revision": old_revision,
+    })
+    assert newer.status_code == 200
+    new_revision = newer.json()["settings_revision"]
+    assert new_revision != old_revision
+
+    # This body represents the older request arriving only after the newer one completed.
+    delayed = client.put("/api/settings", json={
+        "settings": {"max_nodes": 17}, "expected_revision": old_revision,
+    })
+    assert delayed.status_code == 409
+    assert delayed.json()["detail"] == {
+        "code": "settings_revision_conflict",
+        "resource": "settings",
+        "message": "Settings changed after this form was loaded; reload and retry.",
+        "expected_revision": old_revision,
+        "current_revision": new_revision,
+    }
+    current = client.get("/api/settings").json()
+    assert current["settings"]["max_nodes"] == 93
+    assert current["settings_revision"] == new_revision
+    assert current["secret_revision"] == loaded["secret_revision"]
+
+
+@pytest.mark.parametrize("bad_revision", [None, "", 1, True, [], "x" * 257])
+def test_settings_put_rejects_invalid_expected_revision(tmp_path, bad_revision):
+    client = TestClient(make_app(tmp_path))
+    response = client.put("/api/settings", json={
+        "settings": {"max_nodes": 22}, "expected_revision": bad_revision,
+    })
+    assert response.status_code == 400
+    assert client.get("/api/settings").json()["overrides"] == {}
 
 
 def test_settings_partial_put_preserves_hidden_overrides_and_null_clears(tmp_path):
@@ -1490,6 +1534,7 @@ def test_concurrent_disjoint_settings_puts_do_not_lose_updates(tmp_path, monkeyp
         responses = (first.result(timeout=10), second.result(timeout=10))
 
     assert all(response.status_code == 200 for response in responses)
+    monkeypatch.setattr(store, "ui_settings_transaction", original_transaction)
     overrides = clients[0].get("/api/settings").json()["overrides"]
     assert overrides == {"max_nodes": 91, "policy": "mcts"}
 
@@ -1567,6 +1612,171 @@ def test_put_run_config_edits_snapshot_for_resume(tmp_path):
     assert snap["timeout"] == 120.0 and snap["inline_repair_reasons"] == ["crash", "timeout"]
     rebuilt = Settings(**{k: v for k, v in snap.items() if k != "llm_api_key"})
     assert rebuilt.timeout == 120.0      # what Engine() would get on resume
+
+
+def test_run_config_cas_rejects_an_old_delayed_put(tmp_path):
+    """A timed-out request prepared from an old GET cannot overwrite a newer same-key save."""
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+
+    loaded = client.get("/api/runs/demo/config").json()
+    old_revision = loaded["_looplab_config_meta"]["config_revision"]
+    assert len(old_revision) == 64 and int(old_revision, 16) >= 0
+
+    newer = client.put("/api/runs/demo/config", json={
+        "settings": {"timeout": 91.0}, "expected_revision": old_revision,
+    })
+    assert newer.status_code == 200
+    new_revision = newer.json()["config"]["_looplab_config_meta"]["config_revision"]
+    assert new_revision != old_revision
+
+    delayed = client.put("/api/runs/demo/config", json={
+        "settings": {"timeout": 17.0}, "expected_revision": old_revision,
+    })
+    assert delayed.status_code == 409
+    assert delayed.json()["detail"] == {
+        "code": "run_config_revision_conflict",
+        "resource": "run_config",
+        "message": "Run configuration changed after this form was loaded; reload and retry.",
+        "expected_revision": old_revision,
+        "current_revision": new_revision,
+    }
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 91.0
+    current = client.get("/api/runs/demo/config").json()
+    assert current["_looplab_config_meta"]["config_revision"] == new_revision
+
+
+@pytest.mark.parametrize("bad_revision", [None, "", 1, True, [], "g" * 64, "a" * 65])
+def test_put_run_config_rejects_invalid_expected_revision(tmp_path, bad_revision):
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    client = TestClient(make_app(tmp_path))
+
+    response = client.put("/api/runs/demo/config", json={
+        "settings": {"timeout": 44.0}, "expected_revision": bad_revision,
+    })
+    assert response.status_code == 400
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 30.0
+
+
+def test_concurrent_run_config_puts_serialize_the_complete_cas_transaction(
+        tmp_path, monkeypatch):
+    """The loser cannot read the old snapshot while the winner is paused immediately before write."""
+    import looplab.serve.routers.runs as runs_router
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+    clients = [TestClient(make_app(tmp_path)), TestClient(make_app(tmp_path))]
+    revision = clients[0].get(
+        "/api/runs/demo/config").json()["_looplab_config_meta"]["config_revision"]
+
+    lock = threading.Lock()
+    attempts_lock = threading.Lock()
+    second_attempted_lock = threading.Event()
+    attempts = 0
+
+    class ObservedLock:
+        def __enter__(self):
+            nonlocal attempts
+            with attempts_lock:
+                attempts += 1
+                if attempts == 2:
+                    second_attempted_lock.set()
+            lock.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            lock.release()
+
+    monkeypatch.setattr(runs_router, "_run_config_thread_lock", lambda _path: ObservedLock())
+    original_write = runs_router.atomic_write_text
+    first_at_write = threading.Event()
+    release_first = threading.Event()
+    writes_lock = threading.Lock()
+    writes = 0
+
+    def delayed_first_write(path, payload):
+        nonlocal writes
+        with writes_lock:
+            writes += 1
+            is_first = writes == 1
+        if is_first:
+            first_at_write.set()
+            assert release_first.wait(5), "test did not release the first config writer"
+        return original_write(path, payload)
+
+    monkeypatch.setattr(runs_router, "atomic_write_text", delayed_first_write)
+
+    def save(client, timeout):
+        return client.put("/api/runs/demo/config", json={
+            "settings": {"timeout": timeout}, "expected_revision": revision,
+        })
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(save, clients[0], 101.0)
+        assert first_at_write.wait(5)
+        second = pool.submit(save, clients[1], 202.0)
+        assert second_attempted_lock.wait(5)
+        try:
+            assert not second.done(), "the competing PUT crossed the run-config transaction lock"
+        finally:
+            release_first.set()
+        responses = first.result(timeout=10), second.result(timeout=10)
+
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 101.0
+
+
+def test_put_run_config_null_clears_optional_but_not_required_or_read_only_fields(tmp_path):
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0, max_seconds=90.0, profile="default")
+    client = TestClient(make_app(tmp_path))
+    metadata = client.get("/api/runs/demo/config").json()["_looplab_config_meta"]
+    assert metadata["run_read_only_fields"] == ["profile"]
+
+    cleared = client.put("/api/runs/demo/config", json={"settings": {"max_seconds": None}})
+    assert cleared.status_code == 200
+    assert cleared.json()["changed"] == ["max_seconds"]
+    assert json.loads((rd / "config.snapshot.json").read_text(
+        encoding="utf-8"))["max_seconds"] is None
+
+    required = client.put("/api/runs/demo/config", json={"settings": {"timeout": None}})
+    assert required.status_code == 422
+    assert "timeout" in required.json()["detail"]
+    profile = client.put("/api/runs/demo/config", json={"settings": {"profile": None}})
+    assert profile.status_code == 422
+    assert "profile can't be changed per-run" in profile.json()["detail"]
+    persisted = json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))
+    assert persisted["timeout"] == 30.0 and persisted["profile"] == "default"
+
+
+def test_put_run_config_fails_closed_when_interprocess_lock_is_unavailable(
+        tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from looplab.events.eventstore import EventStoreLockError
+    import looplab.serve.routers.runs as runs_router
+
+    _build_run(tmp_path)
+    rd = tmp_path / "demo"
+    _write_snapshot(rd, timeout=30.0)
+
+    @contextmanager
+    def unavailable(path, *, required=False):
+        assert required is True
+        raise EventStoreLockError(path, OSError("injected unsupported lock"))
+        yield  # pragma: no cover - makes this a context manager; acquisition must fail
+
+    monkeypatch.setattr(runs_router, "_interprocess_lock", unavailable)
+    response = TestClient(make_app(tmp_path)).put(
+        "/api/runs/demo/config", json={"settings": {"timeout": 44.0}})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "run_config_lock_unavailable"
+    assert json.loads((rd / "config.snapshot.json").read_text(encoding="utf-8"))["timeout"] == 30.0
 
 
 def test_put_run_config_rejects_invalid_value_naming_the_field(tmp_path):

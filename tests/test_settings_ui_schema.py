@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -12,18 +13,19 @@ from fastapi.testclient import TestClient
 from looplab.core.config import Settings
 from looplab.serve.server import make_app
 from looplab.serve.settings_ui_schema import (
-    SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT, SETTINGS_UI_SCHEMA_ETAG,
+    SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT,
+    SETTINGS_UI_SCHEMA_CATALOGUE_VERSION, SETTINGS_UI_SCHEMA_ETAG,
     SETTINGS_UI_SCHEMA_KEYSET_REVISION, SETTINGS_UI_SCHEMA_REVISION,
     SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT, SETTINGS_UI_SCHEMA_VERSION,
 )
 
 
-def test_settings_ui_schema_is_versioned_immutable_and_conditionally_cacheable(tmp_path):
+def test_settings_ui_schema_is_versioned_revalidated_and_conditionally_cacheable(tmp_path):
     client = TestClient(make_app(tmp_path))
     response = client.get(f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}")
     assert response.status_code == 200
     assert response.json() == SETTINGS_UI_SCHEMA
-    assert response.headers["cache-control"] == "private, max-age=31536000, immutable"
+    assert response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
     assert response.headers["etag"] == SETTINGS_UI_SCHEMA_ETAG
     assert response.headers["x-looplab-schema-version"] == str(SETTINGS_UI_SCHEMA_VERSION)
     assert response.json()["revision"] == SETTINGS_UI_SCHEMA_REVISION
@@ -36,14 +38,63 @@ def test_settings_ui_schema_is_versioned_immutable_and_conditionally_cacheable(t
     assert unchanged.content == b""
     assert unchanged.headers["cache-control"] == response.headers["cache-control"]
     assert unchanged.headers["etag"] == SETTINGS_UI_SCHEMA_ETAG
+    strong_equivalent = SETTINGS_UI_SCHEMA_ETAG.removeprefix("W/")
+    for validator in (
+        strong_equivalent,
+        f'"some-other-revision", {SETTINGS_UI_SCHEMA_ETAG}',
+        "*",
+    ):
+        conditional = client.get(
+            f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}",
+            headers={"If-None-Match": validator},
+        )
+        assert conditional.status_code == 304
+        assert conditional.content == b""
+        assert conditional.headers["etag"] == SETTINGS_UI_SCHEMA_ETAG
+    changed = client.get(
+        f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}",
+        headers={"If-None-Match": 'W/"some-other-revision"'},
+    )
+    assert changed.status_code == 200
+    invalid = client.get(
+        f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}",
+        headers={"If-None-Match": f"not-an-entity-tag {SETTINGS_UI_SCHEMA_ETAG}"},
+    )
+    assert invalid.status_code == 200
     assert client.get(f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION + 1}").status_code == 404
+
+
+def test_settings_schema_keeps_revalidation_policy_with_owner_auth(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOOPLAB_UI_TOKEN", "owner-secret")
+    response = TestClient(make_app(tmp_path)).get(
+        f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION}",
+        headers={"X-LoopLab-Token": "owner-secret"},
+    )
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-cache, max-age=0, must-revalidate"
+    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["etag"] == SETTINGS_UI_SCHEMA_ETAG
+    unknown = TestClient(make_app(tmp_path)).get(
+        f"/api/settings/schema/{SETTINGS_UI_SCHEMA_VERSION + 1}",
+        headers={"X-LoopLab-Token": "owner-secret"},
+    )
+    assert unknown.status_code == 404
+    assert unknown.headers["cache-control"] == "no-store"
 
 
 def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields():
     packaged = json.loads(Path(__file__).parents[1].joinpath(
         "looplab", "serve", "settings_ui_schema.json").read_text(encoding="utf-8"))
-    assert {key: value for key, value in SETTINGS_UI_SCHEMA.items() if key != "revision"} == packaged
-    assert packaged["schema"] == SETTINGS_UI_SCHEMA_VERSION
+    catalogue_shape = deepcopy(SETTINGS_UI_SCHEMA)
+    catalogue_shape.pop("revision")
+    catalogue_shape["schema"] = SETTINGS_UI_SCHEMA_CATALOGUE_VERSION
+    for group in catalogue_shape["groups"]:
+        for field in group["fields"]:
+            for name in ("minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"):
+                field.pop(name, None)
+            field.pop("nullable", None)
+    assert catalogue_shape == packaged
+    assert packaged["schema"] == SETTINGS_UI_SCHEMA_CATALOGUE_VERSION
 
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
@@ -60,3 +111,21 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert "D8" in by_key["cross_run_concepts"]["help"]
     assert "never applies" in by_key["cross_run_curation_auto"]["warning"]
     assert packaged["agent_role_pills"]["researcher"]["short"] == "R"
+
+    served_fields = {
+        field["key"]: field
+        for group in SETTINGS_UI_SCHEMA["groups"]
+        for field in group["fields"]
+    }
+    assert served_fields["max_nodes"] | {"minimum": 1, "maximum": 1_000_000} == served_fields["max_nodes"]
+    assert served_fields["n_seeds"]["minimum"] == 1
+    assert served_fields["n_seeds"]["maximum"] == 1024
+    assert served_fields["timeout"]["exclusiveMinimum"] == 0
+    assert served_fields["timeout"]["nullable"] is False
+    assert served_fields["max_seconds"]["nullable"] is True
+    assert served_fields["holdout_fraction"]["minimum"] == 0
+    assert served_fields["holdout_fraction"]["maximum"] == 0.9
+    assert served_fields["select_verifier_samples"]["minimum"] == 1
+    assert served_fields["select_verifier_samples"]["maximum"] == 32
+    assert not ({"minimum", "exclusiveMinimum", "maximum", "exclusiveMaximum"}
+                & served_fields["llm_model"].keys())

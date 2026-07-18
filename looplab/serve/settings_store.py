@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import tempfile
 import threading
 from contextlib import contextmanager
@@ -17,6 +18,28 @@ from looplab.core.config import Settings
 
 _SECRET_FIELDS = {"llm_api_key"}
 _ALLOWED_FIELDS = set(Settings.model_fields)
+
+# Keep each resource's opaque CAS token in the SAME atomically-replaced JSON object as its data.
+# A sidecar token could lag the data after a crash between two renames and let an old request pass
+# CAS. These reserved keys are ignored by the allow-listed data loaders below. The secret token is
+# random and independent of the credential -- it is not a value-derived hash or other verifier.
+_REVISION_KEY = "__looplab_revision__"
+_INITIAL_UI_REVISION = "gUoF2YQlVSLWCEg3hWJOCxJ2YFDKfZ2D"
+_INITIAL_SECRET_REVISION = "p5SDQn8FLhx0O8vFbKbBzix42RdCUGyN"
+
+
+class SettingsRevisionConflict(RuntimeError):
+    """A settings resource moved after the caller read it."""
+
+    def __init__(self, resource: str, expected: str, current: str):
+        self.resource = resource
+        self.expected = expected
+        self.current = current
+        super().__init__(f"stale {resource} revision")
+
+
+def _new_revision() -> str:
+    return secrets.token_urlsafe(24)
 
 # --- Secret store (B3/ADR-11): secrets (the LLM API key) are NEVER written to ui_settings.json
 # or a run's config.snapshot.json (which only ever record `***`). They live in a separate,
@@ -40,6 +63,7 @@ class SettingsStore:
         # Atomic rename keeps one write whole, but a PUT is a larger read/merge/validate/write
         # transaction. Serialize that complete transaction within this server process too.
         self._ui_settings_lock = threading.Lock()
+        self._secrets_lock = threading.Lock()
 
     @contextmanager
     def ui_settings_transaction(self):
@@ -54,6 +78,36 @@ class SettingsStore:
         lock_path = Path(str(self._ui_settings_path) + ".lock")
         with self._ui_settings_lock, _interprocess_lock(lock_path, required=True):
             yield
+
+    @contextmanager
+    def secret_transaction(self):
+        """Serialize one secret read/CAS/write transaction locally and across server processes."""
+        from looplab.events.eventstore import _interprocess_lock
+
+        lock_path = Path(str(self._secrets_path) + ".lock")
+        with self._secrets_lock, _interprocess_lock(lock_path, required=True):
+            yield
+
+    @staticmethod
+    def _stored_revision(path: Path, initial: str) -> str:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return initial
+        if not isinstance(payload, dict):
+            return initial
+        revision = payload.get(_REVISION_KEY)
+        if not isinstance(revision, str) or not revision or len(revision) > 256:
+            return initial
+        return revision
+
+    def ui_settings_revision(self) -> str:
+        """Return the opaque revision. Call under ``ui_settings_transaction`` for a CAS snapshot."""
+        return self._stored_revision(self._ui_settings_path, _INITIAL_UI_REVISION)
+
+    def secret_revision(self) -> str:
+        """Return the opaque revision. Call under ``secret_transaction`` for a CAS snapshot."""
+        return self._stored_revision(self._secrets_path, _INITIAL_SECRET_REVISION)
 
     def load_ui_settings(self) -> dict:
         try:
@@ -73,34 +127,49 @@ class SettingsStore:
         except (OSError, json.JSONDecodeError):
             return {}
 
-    def store_secret(self, key: str, value: str) -> None:
-        d = self.load_secrets()
-        if value:
-            d[key] = value
-        else:
-            d.pop(key, None)
-        # Write through a temp file that is owner-only FROM CREATION (mkstemp creates 0600), then
-        # atomically rename. This closes the window where atomic_write_text + a later chmod would leave
-        # the plaintext key world-readable at the default umask between the rename and the chmod.
-        fd, tmp = tempfile.mkstemp(dir=str(self._secrets_path.parent), prefix=".secrets-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(json.dumps(d))
-            os.replace(tmp, self._secrets_path)    # the 0600 mode rides along from the temp inode
-        finally:
+    def store_secret(self, key: str, value: str, *, expected_revision: Optional[str] = None) -> str:
+        """CAS-write one credential and return its new opaque revision.
+
+        The interprocess lock covers revision read, comparison, credential merge, and atomic rename.
+        Callers that omit ``expected_revision`` retain the legacy last-writer-wins behavior, but are
+        still serialized so two processes cannot produce torn JSON or race a read/merge/write cycle.
+        """
+        with self.secret_transaction():
+            current_revision = self.secret_revision()
+            if expected_revision is not None and expected_revision != current_revision:
+                raise SettingsRevisionConflict("secret", expected_revision, current_revision)
+
+            d = self.load_secrets()
+            if value:
+                d[key] = value
+            else:
+                d.pop(key, None)
+            revision = _new_revision()
+            d[_REVISION_KEY] = revision
+            # Write through a temp file that is owner-only FROM CREATION (mkstemp creates 0600), then
+            # atomically rename. This closes the window where atomic_write_text + a later chmod would leave
+            # the plaintext key world-readable at the default umask between the rename and the chmod.
+            fd, tmp = tempfile.mkstemp(
+                dir=str(self._secrets_path.parent), prefix=".secrets-", suffix=".tmp")
             try:
-                os.unlink(tmp)                # no-op once the rename consumed it; cleans up on write error
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    f.write(json.dumps(d))
+                os.replace(tmp, self._secrets_path)    # the 0600 mode rides along from the temp inode
+            finally:
+                try:
+                    os.unlink(tmp)                # no-op once the rename consumed it; cleans up on write error
+                except OSError:
+                    pass
+            try:                                  # belt-and-suspenders (no-op on Windows)
+                os.chmod(self._secrets_path, 0o600)
             except OSError:
                 pass
-        try:                                  # belt-and-suspenders (no-op on Windows)
-            os.chmod(self._secrets_path, 0o600)
-        except OSError:
-            pass
-        env_name = _SECRET_ENV[key]           # live-apply: in-process LLM + future spawns see it now
-        if value:
-            os.environ[env_name] = value
-        else:
-            os.environ.pop(env_name, None)
+            env_name = _SECRET_ENV[key]           # live-apply: in-process LLM + future spawns see it now
+            if value:
+                os.environ[env_name] = value
+            else:
+                os.environ.pop(env_name, None)
+            return revision
 
     def prime_env(self) -> None:
         # Prime this process's env from the stored secrets at startup, WITHOUT clobbering a value the
@@ -158,5 +227,10 @@ class SettingsStore:
             env[f"LOOPLAB_{k.upper()}"] = s
         return env
 
-    def write_ui_settings(self, overrides: dict) -> None:
-        atomic_write_text(self._ui_settings_path, json.dumps(overrides, indent=2))   # unique temp + safe fsync
+    def write_ui_settings(self, overrides: dict) -> str:
+        """Atomically publish overrides plus a fresh opaque CAS revision; caller holds UI lock."""
+        revision = _new_revision()
+        payload = dict(overrides)
+        payload[_REVISION_KEY] = revision
+        atomic_write_text(self._ui_settings_path, json.dumps(payload, indent=2))  # unique temp + safe fsync
+        return revision

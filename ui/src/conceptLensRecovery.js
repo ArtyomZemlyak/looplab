@@ -1,5 +1,6 @@
 import {
-  abandonConceptLens, createIdempotencyKey, jobAwait, submitConceptLens,
+  abandonConceptLens, abandonRecoveredConceptLens, awaitConceptLensRecoveryJob,
+  createIdempotencyKey, getConceptLensRecovery, jobAwait, submitConceptLens,
 } from './api.js'
 
 const PREFIX = 'll.concept-lens.'
@@ -11,6 +12,9 @@ const STATES = new Set(['ready', 'submitting', 'running', 'unknown'])
 const UUID = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
 const GENERATION = /^[0-9a-f]{64}$/
 const REQUEST_ID = /^[0-9a-f]{64}$/
+const JOB_ID = /^[0-9a-f]{16}$/
+const RECOVERY_STATES = new Set(['none', 'running', 'orphaned', 'terminal', 'conflict'])
+const ABANDON_REASONS = new Set(['operator_abandoned', 'operator_recovered_abandon'])
 const safeText = (value, max = 200) => typeof value === 'string' && value.length > 0
   && value.length <= max && !/[\u0000-\u001f\u007f]/.test(value)
 const validGeneration = value => typeof value === 'string' && GENERATION.test(value)
@@ -39,7 +43,7 @@ const validateIntent = (payload, runId) => {
       || payload.version !== 1 || payload.runId !== String(runId)
       || !safeText(payload.runId, 255) || !validGeneration(payload.generation)
       || !validPrompt(payload.prompt) || !UUID.test(payload.idempotencyKey)
-      || !STATES.has(payload.state) || !(payload.jobId === null || safeText(payload.jobId))
+      || !STATES.has(payload.state) || !(payload.jobId === null || JOB_ID.test(payload.jobId))
       || !validRequestId(payload.requestId) || (payload.state === 'running' && !payload.jobId)
       || (payload.state === 'running' && !payload.requestId)
       || (['ready', 'submitting'].includes(payload.state)
@@ -124,6 +128,15 @@ export function clearConceptLensIntent(runId, idempotencyKey, storage = undefine
 const protocolError = message => Object.assign(new Error(message), {
   code: 'CONCEPT_LENS_PROTOCOL_ERROR', ambiguous: true, submissionMayHaveSucceeded: true,
 })
+const recoveryProtocolError = message => Object.assign(new Error(message), {
+  code: 'CONCEPT_LENS_RECOVERY_PROTOCOL_ERROR', ambiguous: true,
+})
+const validAbandonmentReceipt = result => result?.code !== 'concept_lens_abandoned'
+  || (result.ok === false && ABANDON_REASONS.has(result.reason)
+    && result.abandoned === true
+    && result.resolved === true && result.provider_outcome === 'unknown'
+    && result.billing_status === 'unknown'
+    && safeText(result.warning, 500))
 const normalizeJobResult = value => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw protocolError('Invalid paid concept-lens receipt.')
@@ -146,13 +159,16 @@ const validateReceipt = (value, intent) => {
             || (intent.requestId && result.request_id !== intent.requestId)
             || (!intent.requestId && !Object.hasOwn(result, 'generation'))))
         || (Object.hasOwn(result, 'job_id')
-          && (!safeText(result.job_id) || result.job_id !== intent.jobId))) {
+          && (!JOB_ID.test(result.job_id || '') || result.job_id !== intent.jobId))) {
       throw protocolError('Ambiguous paid concept-lens receipt does not match this request.')
     }
     return result
   }
+  if (!validAbandonmentReceipt(result)) {
+    throw protocolError('Invalid paid concept-lens abandonment receipt.')
+  }
   if (result.status === 'running') {
-    if (!safeText(result.job_id) || result.generation !== intent.generation
+    if (!JOB_ID.test(result.job_id || '') || result.generation !== intent.generation
         || typeof result.request_id !== 'string' || !REQUEST_ID.test(result.request_id)
         || (intent.requestId && result.request_id !== intent.requestId)) {
       throw protocolError('Invalid running paid concept-lens receipt.')
@@ -165,6 +181,123 @@ const validateReceipt = (value, intent) => {
     throw protocolError('Paid concept-lens receipt does not match this request.')
   }
   return result
+}
+
+const exactKeys = (value, names) => {
+  const expected = names.split(' ')
+  return Object.keys(value).length === expected.length
+    && expected.every(name => Object.hasOwn(value, name))
+}
+const safeSequence = (value, minimum = 0) => Number.isSafeInteger(value) && value >= minimum
+const terminalAfterClaim = (value, startedSeq) => safeSequence(value?.seq)
+  && value.seq > startedSeq
+
+// This is a security boundary, not a permissive API decoder. The projection is what lets a tab
+// decide that creating another paid identity is safe, so unknown/missing fields and identity drift
+// fail closed. The server intentionally excludes prompt, paid key and prompt digest.
+export function validateConceptLensRecovery(value, expectedGeneration) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+      || value.schema !== 1 || value.generation !== expectedGeneration
+      || !validGeneration(value.generation) || !RECOVERY_STATES.has(value.state)) {
+    throw recoveryProtocolError('Invalid paid concept-lens recovery projection.')
+  }
+  if (value.state === 'none') {
+    if (!exactKeys(value, 'schema generation state')) {
+      throw recoveryProtocolError('Invalid empty paid concept-lens recovery projection.')
+    }
+    return value
+  }
+  if (value.state === 'conflict') {
+    if (!exactKeys(value, 'schema generation state code message')
+        || !safeText(value.code) || !safeText(value.message, 500)
+        || !value.code.startsWith('concept_lens_recovery_')) {
+      throw recoveryProtocolError('Invalid conflicting paid concept-lens recovery projection.')
+    }
+    return value
+  }
+  const identityKeys = 'schema generation state request_id started_seq input_seq'
+  if (!REQUEST_ID.test(value.request_id || '') || !safeSequence(value.started_seq)
+      || !safeSequence(value.input_seq, -1) || value.input_seq >= value.started_seq) {
+    throw recoveryProtocolError('Invalid paid concept-lens recovery identity.')
+  }
+  if (value.state === 'orphaned') {
+    if (!exactKeys(value, identityKeys)) {
+      throw recoveryProtocolError('Invalid orphaned paid concept-lens recovery projection.')
+    }
+    return value
+  }
+  if (value.state === 'running') {
+    if (!exactKeys(value, `${identityKeys} job_id status`)
+        || !JOB_ID.test(value.job_id || '') || !['running', 'done'].includes(value.status)) {
+      throw recoveryProtocolError('Invalid running paid concept-lens recovery projection.')
+    }
+    return value
+  }
+  if (!exactKeys(value, `${identityKeys} terminal`)) {
+    throw recoveryProtocolError('Invalid terminal paid concept-lens recovery projection.')
+  }
+  const terminal = validateReceipt(value.terminal, {
+    generation: value.generation, requestId: value.request_id, jobId: null,
+  })
+  if (terminal.ambiguous === true || terminal.status === 'running') {
+    throw recoveryProtocolError('Paid concept-lens recovery did not contain a terminal receipt.')
+  }
+  if (!terminalAfterClaim(terminal, value.started_seq)) {
+    throw recoveryProtocolError('Paid concept-lens terminal does not follow its durable claim.')
+  }
+  return { ...value, terminal }
+}
+
+export const createConceptLensResolutionKey = () => createIdempotencyKey()
+
+export async function discoverConceptLensRecovery(runId, generation, options = {}) {
+  return validateConceptLensRecovery(
+    await getConceptLensRecovery(runId, generation, options), generation)
+}
+
+// A discovered job is polled by job id only. In particular this path has no prompt and no paid
+// Idempotency-Key, so an expired job receipt can only trigger a fresh discovery read, never provider
+// resubmission. The caller owns that refresh because it also owns navigation/generation fencing.
+export async function pollDiscoveredConceptLens(runId, recovery, {
+  signal, pollIntervalMs = 1000, pollTimeoutMs = 45000, requestTimeoutMs = 8000,
+} = {}) {
+  const inspected = validateConceptLensRecovery(recovery, recovery?.generation)
+  if (inspected.state !== 'running') {
+    throw recoveryProtocolError('Only a discovered running paid concept-lens job can be polled.')
+  }
+  const result = validateReceipt(await awaitConceptLensRecoveryJob(inspected.job_id, {
+    signal, intervalMs: Math.max(0, pollIntervalMs), timeoutMs: Math.max(1, pollTimeoutMs),
+    maxTransientErrors: 3, requestTimeoutMs,
+  }), {
+    generation: inspected.generation, requestId: inspected.request_id, jobId: inspected.job_id,
+  })
+  if (result.ambiguous !== true && result.status !== 'running'
+      && !terminalAfterClaim(result, inspected.started_seq)) {
+    throw recoveryProtocolError('Paid concept-lens job terminal does not follow its durable claim.')
+  }
+  return result
+}
+
+export async function resolveOrphanedConceptLens(
+  runId, recovery, resolutionIdempotencyKey, options = {},
+) {
+  const inspected = validateConceptLensRecovery(recovery, recovery?.generation)
+  if (inspected.state !== 'orphaned' || !UUID.test(resolutionIdempotencyKey || '')) {
+    throw recoveryProtocolError('An exact orphan receipt and separate resolution key are required.')
+  }
+  const response = validateReceipt(await abandonRecoveredConceptLens(
+    runId, inspected.generation, inspected.request_id, inspected.started_seq, {
+      ...options, resolutionIdempotencyKey,
+    }), {
+    generation: inspected.generation, requestId: inspected.request_id, jobId: null,
+  })
+  if (response.ambiguous !== true && response.status === 'running') {
+    throw recoveryProtocolError('Orphan resolution returned a running receipt.')
+  }
+  if (response.ambiguous !== true && !terminalAfterClaim(response, inspected.started_seq)) {
+    throw recoveryProtocolError('Orphan resolution terminal does not follow its durable claim.')
+  }
+  return response
 }
 
 export async function requestConceptLens(runId, intent, {
@@ -208,11 +341,7 @@ export async function abandonUnknownConceptLens(runId, intent, options = {}) {
       ...options, idempotencyKey: intent.idempotencyKey,
     }), intent)
   if (response.ambiguous === true) return response
-  if (response.code === 'concept_lens_abandoned'
-      && (response.ok !== false || response.reason !== 'operator_abandoned'
-        || response.resolved !== true || response.provider_outcome !== 'unknown'
-        || response.billing_status !== 'unknown'
-        || typeof response.warning !== 'string' || !response.warning)) {
+  if (!validAbandonmentReceipt(response)) {
     throw protocolError('Invalid paid concept-lens abandonment receipt.')
   }
   return response

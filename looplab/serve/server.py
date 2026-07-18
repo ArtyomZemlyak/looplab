@@ -487,7 +487,18 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # immutable cache policy of Vite's content-hashed /assets.  The owner and review HTML
             # shells already carry their own stricter headers in the handlers below.
             if p.startswith("/api/"):
-                response.headers["Cache-Control"] = "no-store"
+                # Preserve only a successful schema handler's explicit validator policy. A numeric
+                # but unknown version (or an exception before the handler) must remain no-store.
+                schema_revalidation = (
+                    bool(re.fullmatch(r"/api/settings/schema/\d+", p))
+                    and response.status_code in {200, 304}
+                    and response.headers.get("Cache-Control")
+                    == "private, no-cache, max-age=0, must-revalidate"
+                    and bool(response.headers.get("ETag"))
+                    and bool(response.headers.get("X-LoopLab-Schema-Version"))
+                )
+                if not schema_revalidation:
+                    response.headers["Cache-Control"] = "no-store"
                 response.headers["Referrer-Policy"] = "no-referrer"
             return response
     else:
@@ -648,15 +659,19 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
         }
         return HTMLResponse(html, headers=headers)
 
-    def _review_index_response():
+    def _review_index_response(*, trailing_slash: bool = False):
         """Serve a review SPA without ever embedding the owner UI token.
 
-        ``../`` resolves from ``<mount>/review`` back to ``<mount>/`` and therefore keeps
-        Vite's relative asset URLs working behind an arbitrary proxy prefix.  Referrers are disabled
-        because the bearer lives in the fragment.
+        Canonical ``<mount>/review`` already resolves Vite's ``./assets`` and the root icon sprite
+        against ``<mount>/``. Inserting ``../`` there would escape one level of a Jupyter/reverse-
+        proxy mount. Only the explicit trailing-slash form is directory-like and needs ``../``.
+        Referrers are disabled because the bearer lives in the fragment.
         """
         html = (dist / "index.html").read_text(encoding="utf-8")
-        html = html.replace("<head>", '<head><base href="../">', 1)
+        if trailing_slash:
+            # Use a file-like review base. Assets still resolve from the mount root, while a
+            # fragment-only application link remains under /review instead of escaping to owner UI.
+            html = html.replace("<head>", '<head><base href="../review">', 1)
         return HTMLResponse(html, headers={
             "Cache-Control": "no-store",
             "Referrer-Policy": "no-referrer",
@@ -677,6 +692,21 @@ def make_app(run_root: str | os.PathLike) -> "FastAPI":
             # Credential validity is rendered by GET /api/review so expired/revoked links get the
             # product's accessible error state rather than a bare server error page.
             return _review_index_response()
+
+        @app.get("/review/")
+        def review_spa_trailing_slash():
+            # Keep an explicitly shared trailing-slash URL functional without relying on a redirect
+            # to preserve its fragment bearer.
+            return _review_index_response(trailing_slash=True)
+
+        @app.get("/looplab-icons-v1.svg")
+        def icon_sprite():
+            """The stable, explicitly versioned external glyph sprite is immutable like hashed assets."""
+            path = dist / "looplab-icons-v1.svg"
+            if not path.is_file():
+                return JSONResponse({"detail": "icon sprite is unavailable"}, status_code=404,
+                                    headers={"Cache-Control": "no-store"})
+            return FileResponse(str(path), headers={"Cache-Control": _IMMUTABLE_ASSET_CACHE})
 
         @app.get("/{path:path}")
         def spa(path: str, request: Request):

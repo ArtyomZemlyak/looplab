@@ -22,7 +22,8 @@ from looplab.core.atomicio import atomic_write_text, strict_fsync
 from looplab.core.config import (
     RUN_START_PINNED_FIELDS, Settings, run_start_pinned_settings)
 from looplab.engine.finalize import incomplete_finalize_scope
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, iter_jsonl
+from looplab.events.eventstore import (
+    EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock, iter_jsonl)
 from looplab.events.replay import fold
 from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
 from looplab.events.types import (
@@ -80,10 +81,28 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
 _CONCEPT_LENS_RECOVERY_SCHEMA = 1
 _MAX_SAFE_INTEGER = 9_007_199_254_740_991
+_RUN_CONFIG_LOCK_STRIPES = tuple(threading.Lock() for _ in range(64))
 _CONCEPT_LENS_SAFE_ERROR_KINDS = frozenset({
     "accounting_pending", "credentials", "rate_limit", "unavailable", "provider_error",
     "capacity", "internal",
 })
+
+
+def _run_config_revision(snapshot: dict) -> str:
+    """Bounded opaque CAS token for one complete on-disk config snapshot."""
+    canonical = json.dumps(
+        snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _run_config_thread_lock(snapshot_path: Path) -> threading.Lock:
+    """Bound same-process serialization without retaining one lock for every historical run."""
+    identity = os.path.normcase(os.path.abspath(snapshot_path)).encode(
+        "utf-8", errors="surrogatepass")
+    stripe = int.from_bytes(hashlib.sha256(identity).digest()[:2], "big")
+    return _RUN_CONFIG_LOCK_STRIPES[stripe % len(_RUN_CONFIG_LOCK_STRIPES)]
+
+
 def _concept_lens_idempotency_key(raw: str) -> str:
     """Validate the opaque browser receipt before it becomes an HMAC key.
 
@@ -2007,8 +2026,12 @@ def build_router(srv) -> APIRouter:
         effective = dict(snapshot)
         effective.update(pinned)
         effective["_looplab_config_meta"] = {
+            "config_revision": _run_config_revision(snapshot),
             "run_start_pinned_fields": sorted(pinned),
             "snapshot_mismatch_fields": mismatches,
+            # A profile is expanded into explicit snapshot values at launch. Changing only its name
+            # later cannot reapply that bundle truthfully, so the server declares it read-only.
+            "run_read_only_fields": ["profile"],
         }
         return effective
 
@@ -2034,6 +2057,96 @@ def build_router(srv) -> APIRouter:
                 continue
         raise HTTPException(409, "the run changed while trust_gate was being saved; retry the edit")
 
+    def _put_run_config_locked(
+            rd: Path, snap: Path, incoming: dict, expected_revision: Optional[str]) -> dict:
+        """Read/compare/merge/validate/write while the caller holds both config locks."""
+        from pydantic import ValidationError
+        from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
+
+        if not snap.exists():
+            raise HTTPException(
+                404, "run has no config.snapshot.json (it predates self-describing runs)")
+        current = json.loads(snap.read_text(encoding="utf-8"))
+        if not isinstance(current, dict):
+            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
+        current_revision = _run_config_revision(current)
+        if expected_revision is not None and expected_revision != current_revision:
+            raise HTTPException(409, {
+                "code": "run_config_revision_conflict",
+                "resource": "run_config",
+                "message": "Run configuration changed after this form was loaded; reload and retry.",
+                "expected_revision": expected_revision,
+                "current_revision": current_revision,
+            })
+
+        allowed, secret = _ALLOWED_FIELDS, _SECRET_FIELDS
+        folded = srv.state(rd)
+        pinned = run_start_pinned_settings(folded)
+        attempted_pinned_changes = sorted(
+            key for key, value in incoming.items()
+            if key in pinned and value != pinned[key]
+        )
+        if attempted_pinned_changes:
+            raise HTTPException(
+                422,
+                "run-start pinned settings cannot be changed after creation: "
+                + ", ".join(attempted_pinned_changes)
+                + ". Start a new run to use different holdout/verifier semantics.",
+            )
+
+        updated = dict(current)
+        # Repair snapshots written by older servers. These values are not a new policy decision: the
+        # event fold has always been the authority used by replay/re-entry, and GET already overlays it.
+        normalized_pinned = sorted(k for k, value in pinned.items() if updated.get(k) != value)
+        updated.update(pinned)
+        # A hand-authored/legacy sparse snapshot may omit the mutable trust gate. Preserve the folded
+        # policy in that case rather than manufacturing an "audit" downgrade during an unrelated edit.
+        updated.setdefault("trust_gate", folded.trust_gate)
+        # A profile switch would silently no-op on resume because every old profile field is already
+        # explicit. Treat every unequal value (including null) as a read-only-field violation.
+        if "profile" in incoming and incoming["profile"] != updated.get("profile"):
+            raise HTTPException(422, "profile can't be changed per-run after launch — the snapshot "
+                                     "already contains the expanded profile; set the individual "
+                                     "fields (trust_gate, confirm_top_k, …) instead")
+
+        changed = {}
+        for key, value in incoming.items():
+            if (key in allowed and key not in secret and key not in RUN_START_PINNED_FIELDS
+                    and updated.get(key) != value):
+                updated[key] = value
+                changed[key] = value
+        # Validate the merged config before persistence. Optional fields may deliberately be cleared
+        # with null; required fields remain protected by Settings' schema.
+        try:
+            Settings(**{key: value for key, value in updated.items()
+                        if key in allowed and key not in secret})
+        except ValidationError as exc:
+            fields = "; ".join(
+                f"{'.'.join(str(x) for x in error['loc']) or '?'}: {error['msg']}"
+                for error in exc.errors())
+            raise HTTPException(422, f"invalid settings — {fields}") from exc
+        except Exception as exc:  # noqa: BLE001 - normalize any other coercion failure
+            raise HTTPException(422, f"invalid settings: {exc}") from exc
+
+        atomic_write_text(snap, json.dumps(updated, indent=2))
+        # trust_gate is enforced by the fold, so repair its event while this config transaction is
+        # still serialized. A legacy request can retry an ambiguous dual-write failure safely.
+        try:
+            gate_repaired = _repair_trust_gate_event(rd, updated["trust_gate"])
+        except HTTPException:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(
+                500, f"snapshot updated but trust_gate event append failed: {exc}") from exc
+        return {
+            "ok": True,
+            "config": _run_config_payload(rd, updated),
+            "changed": sorted(changed),
+            "normalized_pinned": normalized_pinned,
+            "trust_gate_event_appended": gate_repaired,
+            "engine_running": _engine_liveness(rd),
+        }
+
     @router.put("/api/runs/{run_id}/config")
     async def put_run_config(run_id: str, request: Request):
         """Per-run settings edit: rewrite THIS run's config.snapshot.json so a later RESUME re-enters
@@ -2049,7 +2162,6 @@ def build_router(srv) -> APIRouter:
         applied (masked llm_api_key + any unknown keys preserved); the merged config is validated through
         `Settings()` so a bad value (e.g. n_seeds<1, timeout<=0, bad enum) is rejected 422 — with the
         offending field surfaced — instead of poisoning the next resume."""
-        from pydantic import ValidationError
         rd = _run_dir(run_id)
         snap = rd / "config.snapshot.json"
         if not snap.exists():
@@ -2060,78 +2172,26 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "request body must be a JSON object") from e
         if not isinstance(body, dict):
             raise HTTPException(400, "request body must be a JSON object")
+        has_expected_revision = "expected_revision" in body
+        expected_revision = body.get("expected_revision")
+        if has_expected_revision and (
+                not isinstance(expected_revision, str)
+                or _SHA256_RE.fullmatch(expected_revision) is None):
+            raise HTTPException(400, "expected_revision must be the 64-character config revision")
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
-        # Use the SHARED single-source sets (settings_store) rather than a hardcoded {"llm_api_key"} —
-        # a future SecretStr field is then masked here automatically instead of leaking into
-        # config.snapshot.json in plaintext (the whole point of the _SECRET_FIELDS abstraction).
-        from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_FIELDS
-        allowed, secret = _ALLOWED_FIELDS, _SECRET_FIELDS
-        current = json.loads(snap.read_text(encoding="utf-8"))
-        if not isinstance(current, dict):
-            raise HTTPException(500, "the run configuration snapshot is not a JSON object")
-        folded = srv.state(rd)
-        pinned = run_start_pinned_settings(folded)
-        attempted_pinned_changes = sorted(
-            key for key, value in incoming.items()
-            if key in pinned and value != pinned[key]
-        )
-        if attempted_pinned_changes:
-            raise HTTPException(
-                422,
-                "run-start pinned settings cannot be changed after creation: "
-                + ", ".join(attempted_pinned_changes)
-                + ". Start a new run to use different holdout/verifier semantics.",
-            )
-        updated = dict(current)
-        # Repair snapshots written by older servers. These values are not a new policy decision: the
-        # event fold has always been the authority used by replay/re-entry, and GET already overlays it.
-        normalized_pinned = sorted(k for k, value in pinned.items() if updated.get(k) != value)
-        updated.update(pinned)
-        # A hand-authored/legacy sparse snapshot may omit the mutable trust gate. Preserve the folded
-        # policy in that case rather than manufacturing an "audit" downgrade during an unrelated edit.
-        updated.setdefault("trust_gate", folded.trust_gate)
-        changed = {}
-        for k, v in incoming.items():        # apply only known, non-secret, actually-set fields
-            if (k in allowed and k not in secret and k not in RUN_START_PINNED_FIELDS
-                    and v is not None and updated.get(k) != v):
-                updated[k] = v
-                changed[k] = v
-        # Validate the MERGED config before persisting. Only KNOWN, non-secret fields are passed to
-        # Settings (the masked secret re-reads from env/default at resume; any unknown/forward-compat
-        # keys are preserved on disk but not validated). A ValidationError is reported per-field so the
-        # UI can tell the user EXACTLY what's wrong (the original bug: an opaque "422").
         try:
-            Settings(**{k: v for k, v in updated.items() if k in allowed and k not in secret})
-        except ValidationError as e:
-            fields = "; ".join(f"{'.'.join(str(x) for x in err['loc']) or '?'}: {err['msg']}"
-                               for err in e.errors())
-            raise HTTPException(422, f"invalid settings — {fields}")
-        except Exception as e:               # noqa: BLE001 - any other coercion error
-            raise HTTPException(422, f"invalid settings: {e}")
-        # A profile switch would silently no-op on resume: the snapshot already carries every field
-        # of the OLD profile's expansion as explicit values, so `_apply_profile` in the resumed
-        # engine would skip the new bundle entirely. Refuse rather than pretend.
-        if "profile" in changed:
-            raise HTTPException(422, "profile can't be changed per-run after launch — the snapshot "
-                                     "already contains the expanded profile; set the individual "
-                                     "fields (trust_gate, confirm_top_k, …) instead")
-        atomic_write_text(snap, json.dumps(updated, indent=2))
-        # trust_gate is enforced by the FOLD (which reads it from the event log, not the snapshot),
-        # so a snapshot edit alone would leave the Trust panel claiming an enforcement that never
-        # engages. Record the change as an event: every fold — live UI, resume, reset — applies it.
-        try:
-            gate_repaired = _repair_trust_gate_event(rd, updated["trust_gate"])
-        except HTTPException:
-            raise
-        except Exception as e:  # noqa: BLE001
-            raise HTTPException(500, f"snapshot updated but trust_gate event append failed: {e}")
-        return {"ok": True, "config": _run_config_payload(rd, updated),
-                "changed": sorted(changed), "normalized_pinned": normalized_pinned,
-                "trust_gate_event_appended": gate_repaired,
-                "engine_running": _engine_liveness(rd)}
-
+            # The required OS lock is the cross-process guarantee; the bounded stripe supplies the
+            # same guarantee to multiple threads in this process on every supported platform.
+            with (_run_config_thread_lock(snap),
+                  _interprocess_lock(Path(str(snap) + ".lock"), required=True)):
+                return _put_run_config_locked(rd, snap, incoming, expected_revision)
+        except EventStoreLockError as exc:
+            raise HTTPException(503, {
+                "code": "run_config_lock_unavailable",
+                "message": "Run configuration locking is unavailable; no settings were written.",
+            }) from exc
     @router.get("/api/runs/{run_id}/cost")
     def run_cost(run_id: str):
         st = srv.state(_run_dir(run_id))

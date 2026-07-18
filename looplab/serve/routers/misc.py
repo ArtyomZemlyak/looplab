@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -20,7 +21,9 @@ from fastapi.responses import JSONResponse
 
 from looplab.core.config import Settings
 from looplab.serve.assistant import safe_provider_failure
-from looplab.serve.settings_store import _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS
+from looplab.serve.settings_store import (
+    SettingsRevisionConflict, _ALLOWED_FIELDS, _SECRET_ENV, _SECRET_FIELDS,
+)
 from looplab.serve.settings_ui_schema import (
     SETTINGS_UI_SCHEMA, SETTINGS_UI_SCHEMA_ETAG, SETTINGS_UI_SCHEMA_VERSION,
 )
@@ -30,7 +33,61 @@ from looplab.trust.redact import is_secret_key_name, redact_persisted_text
 _MEMORY_TIER_LIMIT = 200
 _MEMORY_SOURCE_BYTES = 2 * 1024 * 1024
 _MEMORY_SOURCE_ROWS = 1000
+_ETAG_TOKEN = re.compile(r'(?:W/)?"[!#-~\x80-\xff]*"')
+
+
+def _if_none_match(value: str | None, current: str) -> bool:
+    """Use RFC 9110 weak comparison for an If-None-Match validator list."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    value = value.strip()
+    if value == "*":
+        return True
+    target = current[2:] if current.startswith("W/") else current
+    matched = False
+    position = 0
+    while position < len(value):
+        while position < len(value) and value[position] in " \t,":
+            position += 1
+        if position == len(value):
+            break
+        match = _ETAG_TOKEN.match(value, position)
+        if match is None:
+            return False
+        candidate = match.group(0)
+        if candidate.startswith("W/"):
+            candidate = candidate[2:]
+        if candidate == target:
+            matched = True
+        position = match.end()
+        while position < len(value) and value[position] in " \t":
+            position += 1
+        if position < len(value) and value[position] != ",":
+            return False
+    return matched
+
+
 _MEMORY_ROW_BYTES = 128 * 1024
+
+
+def _expected_revision(body: dict) -> Optional[str]:
+    """Parse the optional opaque CAS token without assigning it client-visible semantics."""
+    if "expected_revision" not in body:
+        return None
+    revision = body["expected_revision"]
+    if not isinstance(revision, str) or not revision or len(revision) > 256:
+        raise HTTPException(400, "expected_revision must be a non-empty opaque string")
+    return revision
+
+
+def _revision_conflict(resource: str, expected: str, current: str) -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "code": f"{resource}_revision_conflict",
+        "resource": resource,
+        "message": f"{resource.capitalize()} changed after this form was loaded; reload and retry.",
+        "expected_revision": expected,
+        "current_revision": current,
+    })
 
 
 def _memory_text(value, maximum: int, *, entropy: bool = True) -> str:
@@ -207,25 +264,40 @@ def build_router(srv) -> APIRouter:
     # persisted at <run-root>/ui_settings.json and applied to a spawned run as LOOPLAB_* env.
     @router.get("/api/settings/schema/{version}")
     def get_settings_schema(version: int, request: Request):
-        """Immutable display metadata for the versioned Settings/Config form contract."""
+        """Revalidated display metadata for the versioned Settings/Config form contract.
+
+        The envelope version describes the wire format. Labels and bounds are derived from the
+        deployed Settings model and may change without another format bump, so this stable URL must
+        consult its semantic ETag instead of being cached as immutable.
+        """
         if version != SETTINGS_UI_SCHEMA_VERSION:
             raise HTTPException(404, "unknown settings UI schema version")
         headers = {
-            "Cache-Control": "private, max-age=31536000, immutable",
+            "Cache-Control": "private, no-cache, max-age=0, must-revalidate",
             "ETag": SETTINGS_UI_SCHEMA_ETAG,
             "X-LoopLab-Schema-Version": str(SETTINGS_UI_SCHEMA_VERSION),
         }
-        if request.headers.get("if-none-match") == SETTINGS_UI_SCHEMA_ETAG:
+        if _if_none_match(request.headers.get("if-none-match"), SETTINGS_UI_SCHEMA_ETAG):
             return Response(status_code=304, headers=headers)
         return JSONResponse(SETTINGS_UI_SCHEMA, headers=headers)
 
     @router.get("/api/settings")
     def get_settings():
-        s = Settings()                        # build once — each Settings() now also reads .env off disk
-        defaults = s.model_dump()
-        defaults.pop("llm_api_key", None)
-        return {"settings": store.resolved_settings(s), "overrides": store.load_ui_settings(),
-                "defaults": defaults}
+        # Bind each returned resource snapshot to the revision checked by its next PUT. The locks
+        # prevent a concurrent rename (or secret env mutation) between payload and token reads.
+        # This is the only two-resource lock site; its fixed UI-then-secret order avoids lock cycles.
+        with store.ui_settings_transaction(), store.secret_transaction():
+            s = Settings()                    # build once; Settings() also reads .env from disk
+            defaults = s.model_dump()
+            defaults.pop("llm_api_key", None)
+            response = {
+                "settings": store.resolved_settings(s),
+                "overrides": store.load_ui_settings(),
+                "defaults": defaults,
+                "settings_revision": store.ui_settings_revision(),
+                "secret_revision": store.secret_revision(),
+            }
+        return response
 
     @router.put("/api/settings")
     async def put_settings(request: Request):
@@ -235,6 +307,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "settings payload must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "settings payload must be a JSON object")
+        expected_revision = _expected_revision(body)
         incoming = body.get("settings", body)
         if not isinstance(incoming, dict):
             raise HTTPException(400, "settings must be a JSON object")
@@ -247,6 +320,9 @@ def build_router(srv) -> APIRouter:
         # Atomic rename prevents torn JSON but cannot protect this larger load→merge→write cycle:
         # two concurrent disjoint PUTs must observe one another instead of losing the first rename.
         with store.ui_settings_transaction():
+            current_revision = store.ui_settings_revision()
+            if expected_revision is not None and expected_revision != current_revision:
+                raise _revision_conflict("settings", expected_revision, current_revision)
             current = store.load_ui_settings()
             prev = store.resolved_settings()
             candidate = dict(current)
@@ -295,8 +371,9 @@ def build_router(srv) -> APIRouter:
             except Exception as exc:  # noqa: BLE001 - reject before persisting a poison configuration
                 raise HTTPException(422, f"invalid settings: {exc}") from exc
             # PATCH-like contract: omission preserves opaque overrides; explicit null/default removes one.
-            store.write_ui_settings(overrides)
-            return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides}
+            revision = store.write_ui_settings(overrides)
+            return {"ok": True, "settings": store.resolved_settings(), "overrides": overrides,
+                    "settings_revision": revision}
 
     @router.put("/api/settings/secret")
     async def put_secret(request: Request):
@@ -309,14 +386,20 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(400, "secret payload must be valid JSON") from exc
         if not isinstance(body, dict):
             raise HTTPException(400, "secret payload must be a JSON object")
+        expected_revision = _expected_revision(body)
         key = body.get("key")
         if key not in _SECRET_ENV:
             raise HTTPException(400, f"unknown secret {key!r} (known: {sorted(_SECRET_ENV)})")
         value = body.get("value")
         if value is not None and not isinstance(value, str):
             raise HTTPException(400, "value must be a string (or null to clear)")
-        store.store_secret(key, (value or "").strip())
-        return {"ok": True, "key": key, "set": bool((value or "").strip())}
+        try:
+            revision = store.store_secret(
+                key, (value or "").strip(), expected_revision=expected_revision)
+        except SettingsRevisionConflict as exc:
+            raise _revision_conflict("secret", exc.expected, exc.current) from exc
+        return {"ok": True, "key": key, "set": bool((value or "").strip()),
+                "secret_revision": revision}
 
     # ------------------------------------------------------------------ task catalogue
     @router.get("/api/tasks")
