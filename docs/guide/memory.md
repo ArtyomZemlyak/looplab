@@ -53,13 +53,16 @@ claim decisions do fence a current claim and its observed evidence digest. An ow
 bounded read models, but it is not the complete snapshot-consistent Research Atlas. The home Runs Map and a
 run's theme grouping are different surfaces (see [Web UI](ui.md#which-graph-am-i-looking-at)).
 
-Concept capsule v2 has an additive bounded-source receipt for both stored collections:
+Concept capsule v2 has additive bounded-source receipts for its applicability fingerprint and both stored
+collections: `fingerprint_total` / `fingerprint_omitted` / `fingerprint_complete`,
 `concepts_total` / `concepts_omitted` / `concepts_complete` and
 `concept_outcomes_total` / `concept_outcomes_omitted` / `concept_outcomes_complete`. A new writer computes
 within-run rank signs against the full valid outcome field before retaining the bounded projection. Invalid
 concept IDs and outcome keys are never persisted as evidence and count as omitted input, so their removal cannot
 produce `complete=true`; an invalid direction is rejected instead of being coerced into inverted `min` evidence.
-A legacy v2 row without either triplet remains readable for its positive retained
+A capped fingerprint, or a legacy v2 row without its fingerprint receipt, remains usable for an exact
+`task_id` but cannot authorize fuzzy related-task transfer. A legacy v2 row without either concept triplet
+remains readable for its positive retained
 concept/outcome observations, but its source totals are **unknown**, the portfolio projection is partial, and its
 old `concept_signs` are ignored because the former writer may have calculated them after truncation. Overview,
 graph, digest, CLI and agent-facing context surfaces carry or render this partial-source receipt.

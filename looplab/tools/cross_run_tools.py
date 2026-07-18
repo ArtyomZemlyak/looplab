@@ -112,7 +112,7 @@ class CrossRunTools:
         return (f"[{self._concept_projection_status.upper()} current_concept_projection "
                 f"reasons={reasons}]")
 
-    def _in_scope(self, row: dict) -> bool:
+    def _in_scope(self, row: dict, *, source: str = "generic") -> bool:
         """True for compatible direction plus exact task or strict related-goal fingerprint.
 
         Goal terms come from bare fingerprint tokens; rows without that fingerprint (including v2 D8)
@@ -128,6 +128,12 @@ class CrossRunTools:
             return True
         fp = row.get("fingerprint")
         if isinstance(fp, list) and self._scope_terms:
+            if source == "capsule":
+                from looplab.engine.memory import _capsule_fingerprint_scope_complete
+                # CODEX AGENT: only an exact persisted fingerprint may grant related-task visibility.
+                # A legacy/trimmed capsule remains available through exact task identity or unbound audit.
+                if not _capsule_fingerprint_scope_complete(row):
+                    return False
             row_terms = {t for t in fp if isinstance(t, str) and ":" not in t}
             shared = row_terms & self._scope_terms
             # A single generic word ("model", "retrieval", "training") is not a security scope.  Similar
@@ -230,7 +236,8 @@ class CrossRunTools:
         """Lessons visible to this role AND in scope: the role's own + shared/untagged (mirrors the
         role-routed cross-run lesson priors), scoped to the bound run's task (portfolio-wide when unbound).
         An unknown role sees every role."""
-        lessons = [lz for lz in self._load("lessons.jsonl") if self._in_scope(lz)]
+        lessons = [lz for lz in self._load("lessons.jsonl")
+                   if self._in_scope(lz, source="lesson")]
         if self.role not in ("researcher", "developer"):
             return lessons
         return [lz for lz in lessons if str(lz.get("role") or "") in ("", self.role)]
@@ -239,13 +246,14 @@ class CrossRunTools:
         from looplab.engine.memory import ConceptCapsuleStore
         p = self.dir / "concept_capsules.jsonl"
         caps = ConceptCapsuleStore(p).all() if p.exists() else []
-        return [c for c in caps if self._in_scope(c)]
+        return [c for c in caps if self._in_scope(c, source="capsule")]
 
     def _role_research_claims(self) -> list[dict]:
         """D8 is researcher evidence, never developer memory; bound rows are exact-task-only."""
         if self.role == "developer":
             return []
-        return [r for r in self._load("research_claims.jsonl") if self._in_scope(r)]
+        return [r for r in self._load("research_claims.jsonl")
+                if self._in_scope(r, source="research")]
 
     def execute(self, name: str, args: dict) -> str:
         # ToolProvider contract: execute NEVER raises (a junk arg must read as a tool error, not crash
@@ -603,7 +611,7 @@ class CrossRunTools:
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
             source_summary = _capsule_source_summary(prior_caps)
-            scoped_caps = [cap for cap in prior_caps if self._in_scope(cap)]
+            scoped_caps = [cap for cap in prior_caps if self._in_scope(cap, source="capsule")]
             mine = set(canonicalize_concepts(
                 sorted(self._concepts), aliases=aliases, splits=splits))
             canonical_by_capsule: dict[int, set[str]] = {
@@ -850,9 +858,11 @@ class CrossRunTools:
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in alt[:6]))
 
             # Track record: SCOPED overview = the trustworthy tendency; global count = portfolio context.
-            scoped_caps = [c for c, _concepts in canonical_caps if self._in_scope(c)]
+            scoped_caps = [c for c, _concepts in canonical_caps
+                           if self._in_scope(c, source="capsule")]
             scoped_canon_caps = [
-                c for c, concepts in canonical_caps if canon in concepts and self._in_scope(c)]
+                c for c, concepts in canonical_caps
+                if canon in concepts and self._in_scope(c, source="capsule")]
             global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
             # CODEX AGENT: absence/completeness denominators include every eligible capsule, not only rows
             # where this concept survived the bounded source projection. Matching rows still own the

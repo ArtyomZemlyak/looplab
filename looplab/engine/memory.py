@@ -659,6 +659,21 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
     }
 
 
+def _capsule_fingerprint_scope_complete(capsule: dict) -> bool:
+    """Whether a capsule's persisted fingerprint is an exact source projection.
+
+    Related-task transfer treats this as an applicability boundary.  Exact ``task_id`` matches do not need
+    the fuzzy fingerprint, but a capped or legacy-unknown fingerprint must never authorize a foreign task.
+    """
+    if not isinstance(capsule, dict):
+        return False
+    fingerprint = capsule.get("fingerprint")
+    if not isinstance(fingerprint, list):
+        return False
+    meta = _capsule_completeness(capsule, "fingerprint", len(fingerprint))
+    return meta is not None and meta[2] is True
+
+
 def _valid_capsule_record(capsule) -> bool:
     """Validate one durable capsule without coercing semantic identity.
 
@@ -707,7 +722,8 @@ def _valid_capsule_record(capsule) -> bool:
     if not all(isinstance(key, str) and key and len(key) <= _MAX_CAPSULE_TOKEN_CHARS
                and _finite_metric(value) for key, value in outcomes.items()):
         return False
-    return (_capsule_completeness(capsule, "concepts", len(concepts)) is not None
+    return (_capsule_completeness(capsule, "fingerprint", len(fingerprint)) is not None
+            and _capsule_completeness(capsule, "concepts", len(concepts)) is not None
             and _capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
 
 
@@ -807,12 +823,18 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     with what result?" and feed `grade_novelty`'s `prior_concepts` (D3 level 3 = surface prior, never
     reject). Carries a schema `v` + `task_id` scope; deliberately small and JSON-flat (memory-store data,
     not a fold event)."""
-    fingerprint_source = fingerprint if isinstance(fingerprint, (list, tuple, set)) else []
+    fingerprint_collection = isinstance(fingerprint, (list, tuple, set))
+    fingerprint_source = fingerprint if fingerprint_collection else []
     concepts_collection = isinstance(concepts, (list, tuple, set))
     concepts_source = concepts if concepts_collection else []
-    bounded_fingerprint = sorted({token for token in fingerprint_source
-                                  if isinstance(token, str) and token
-                                  and len(token) <= _MAX_CAPSULE_TOKEN_CHARS})[:_MAX_CAPSULE_FINGERPRINT]
+    valid_fingerprint = sorted({token for token in fingerprint_source
+                                if isinstance(token, str) and token
+                                and len(token) <= _MAX_CAPSULE_TOKEN_CHARS})
+    invalid_fingerprint = sum(
+        not isinstance(token, str) or not token or len(token) > _MAX_CAPSULE_TOKEN_CHARS
+        for token in fingerprint_source
+    ) + int(not fingerprint_collection)
+    bounded_fingerprint = valid_fingerprint[:_MAX_CAPSULE_FINGERPRINT]
     if not isinstance(direction, str) or direction not in ("min", "max"):
         # CODEX AGENT: direction controls both sign polarity and task-family scope. A writer typo must fail
         # closed, never be coerced to `min` and persisted as inverted cross-run evidence.
@@ -844,12 +866,17 @@ def build_concept_capsule(*, run_id: str, fingerprint: list[str], direction: str
     concepts_omitted = concepts_total - len(bounded_concepts)
     outcomes_total = len(raw_outcomes) + int(concept_outcomes is not None and not outcomes_mapping)
     outcomes_omitted = outcomes_total - len(bounded_outcomes)
+    fingerprint_total = len(valid_fingerprint) + invalid_fingerprint
+    fingerprint_omitted = fingerprint_total - len(bounded_fingerprint)
     return {
         "v": CONCEPT_CAPSULE_VERSION,
         "concept_evidence": NODE_CONCEPT_PROVENANCE_CLASSIFIER,
         "run_id": str(run_id or ""),
         "task_id": str(task_id or ""),
         "fingerprint": bounded_fingerprint,
+        "fingerprint_total": fingerprint_total,
+        "fingerprint_omitted": fingerprint_omitted,
+        "fingerprint_complete": fingerprint_omitted == 0,
         "direction": normalized_direction,
         "concepts": bounded_concepts,
         "concepts_total": concepts_total,
@@ -913,10 +940,14 @@ class ConceptCapsuleStore:
         return True
 
     def prior_capsules(self, fingerprint: list[str], *, min_sim: float = 0.3,
-                       exclude_run_id: str = "") -> list[tuple[float, dict]]:
-        """Prior-run capsules whose fingerprint is at least `min_sim` similar (Jaccard, universal-aware
-        because the fingerprint itself already is), most-similar first, excluding this run. Bounded by
-        the caller; each tuple is (similarity, capsule) so a surfacing cue can rank + cite by run."""
+                       exclude_run_id: str = "", task_id: str = "") -> list[tuple[float, dict]]:
+        """Prior-run capsules in an exact task or with an exact fingerprint clearing ``min_sim``.
+
+        Fingerprint matching is Jaccard/universal-aware because the fingerprint itself already is.  Exact
+        task identity, when supplied, scores 1.0 without consulting a potentially legacy/capped fingerprint.
+        Results are most-similar first, excluding this run; each tuple is ``(similarity, capsule)`` so a
+        surfacing cue can rank and cite by run.
+        """
         # NOTE (CODEX, full-CR TODO §21.20.13 CR2a): O(portfolio) scan+sort per call, on top of the
         # whole-file reload/rewrite this store inherits from JsonlCaseLibrary — fine at tens–hundreds of
         # runs, replaced by a bounded scope/version-keyed index snapshot at portfolio scale.
@@ -924,18 +955,25 @@ class ConceptCapsuleStore:
         for c in self.capsules:
             if exclude_run_id and str(c.get("run_id") or "") == str(exclude_run_id):
                 continue
-            sim = fingerprint_similarity(fingerprint, c.get("fingerprint") or [])
+            exact_task = bool(task_id) and str(c.get("task_id") or "") == str(task_id)
+            # CODEX AGENT: the writer bounds fingerprints.  A retained prefix (or a pre-receipt v2 row)
+            # can inflate Jaccard and is not authority for related-task transfer.  Exact task identity is
+            # still usable because it does not depend on the lossy fingerprint projection.
+            if not exact_task and not _capsule_fingerprint_scope_complete(c):
+                continue
+            sim = 1.0 if exact_task else fingerprint_similarity(fingerprint, c.get("fingerprint") or [])
             if sim >= min_sim:
                 out.append((sim, c))
-        out.sort(key=lambda t: -t[0])
+        out.sort(key=lambda t: (-t[0], str(t[1].get("run_id") or "")))
         return out
 
     def prior_concepts(self, fingerprint: list[str], *, min_sim: float = 0.3,
-                       exclude_run_id: str = "") -> set[str]:
+                       exclude_run_id: str = "", task_id: str = "") -> set[str]:
         """The UNION of concepts explored by similar prior runs — exactly the `set[str]` shape
         `grade_novelty(prior_concepts=…)` consumes to fire D3 level 3 ("tried across runs")."""
         acc: set[str] = set()
-        for _sim, c in self.prior_capsules(fingerprint, min_sim=min_sim, exclude_run_id=exclude_run_id):
+        for _sim, c in self.prior_capsules(
+                fingerprint, min_sim=min_sim, exclude_run_id=exclude_run_id, task_id=task_id):
             acc.update(str(x) for x in (c.get("concepts") or []))
         return acc
 

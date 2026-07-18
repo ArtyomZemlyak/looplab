@@ -80,6 +80,25 @@ def test_on_includes_coverage_line_from_capsules(tmp_path):
     assert "Bounded live concept observations (not coverage)" in txt and "hard-neg" in txt
 
 
+def test_related_advisory_rejects_capsule_with_unknown_fingerprint_projection(tmp_path):
+    class _RelatedHost(_Host):
+        def _task_fingerprint(self, state, best=None):
+            return ["kind:dataset", "retrieval", "russian"]
+
+    capsule = build_concept_capsule(
+        run_id="prior", task_id="foreign", fingerprint=["kind:dataset", "retrieval", "russian"],
+        direction="max", concepts=["data/hard-neg"], concept_outcomes={},
+    )
+    for suffix in ("total", "omitted", "complete"):
+        capsule.pop(f"fingerprint_{suffix}")
+    _seed(tmp_path, capsules=[capsule])
+
+    text = _RelatedHost(tmp_path, on=True)._cross_run_advisory_text(
+        RunState(run_id="current", task_id="current", direction="max"))
+
+    assert text == ""
+
+
 def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):
     capsules = []
     for run_id in ("r1", "r2"):

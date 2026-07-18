@@ -427,7 +427,9 @@ class NoveltyGateMixin:
             # same optimization direction before a prior counts (a lean stand-in for the full contract).
             my_dir = str(getattr(state, "direction", "") or "min")
             caps = [(s, c) for s, c in store.prior_capsules(
-                        fp, min_sim=self._CROSS_RUN_MIN_SIM, exclude_run_id=getattr(state, "run_id", "") or "")
+                        fp, min_sim=self._CROSS_RUN_MIN_SIM,
+                        exclude_run_id=getattr(state, "run_id", "") or "",
+                        task_id=getattr(state, "task_id", "") or "")
                     if str(c.get("direction") or "min") == my_dir]
             aliases = load_concept_aliases(self.memory_dir)
             splits = load_concept_splits(self.memory_dir)

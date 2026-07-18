@@ -220,7 +220,7 @@ class ProposalCuesMixin:
             fp = ([t for t in fp_fn(state, state.best()) if not str(t).startswith("param:")]
                   if callable(fp_fn) else [])
 
-            def _scoped(row):
+            def _scoped(row, *, capsule: bool = False):
                 if rid and str(row.get("run_id") or "") == rid:
                     return False
                 # Direction is a hard semantic boundary even for an exact task id: support for a
@@ -238,11 +238,18 @@ class ProposalCuesMixin:
                 stored = row.get("fingerprint")
                 if not isinstance(stored, list):
                     return False
+                if capsule:
+                    from looplab.engine.memory import _capsule_fingerprint_scope_complete
+                    # CODEX AGENT: capsule fingerprints are bounded durable projections. A capped or
+                    # pre-receipt fingerprint may still support its exact task above, but cannot authorize
+                    # fuzzy transfer into a different task's live Researcher prompt.
+                    if not _capsule_fingerprint_scope_complete(row):
+                        return False
                 stored = [t for t in stored if not str(t).startswith("param:")]
                 return fingerprint_similarity(fp, stored) >= 0.34
 
             lessons = [r for r in lessons if _scoped(r)]
-            capsules = [r for r in capsules if _scoped(r)]
+            capsules = [r for r in capsules if _scoped(r, capsule=True)]
             research = [r for r in load_research_claims(base)
                         if (not rid or str(r.get("run_id") or "") != rid)
                         and bool(tid) and str(r.get("task_id") or "") == tid

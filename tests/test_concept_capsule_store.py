@@ -29,6 +29,7 @@ def test_build_capsule_is_flat_and_deduped():
     assert cap["concepts"] == ["distillation", "hard-neg"]  # sorted, empty dropped
     assert cap["direction"] == "max" and cap["best_metric"] is None
     assert cap["v"] == 2 and cap["concept_evidence"] == "classifier"
+    assert (cap["fingerprint_total"], cap["fingerprint_omitted"], cap["fingerprint_complete"]) == (2, 0, True)
 
 
 @pytest.mark.parametrize("direction", [None, "", "MAX", "sideways", 1])
@@ -102,6 +103,26 @@ def test_prior_capsules_ranked_by_similarity_with_run_provenance(tmp_path):
     assert all(0.0 <= sim <= 1.0 for sim, _c in ranked)
 
 
+@pytest.mark.parametrize("legacy_receipt", [False, True])
+def test_incomplete_fingerprint_cannot_authorize_related_task_but_exact_task_survives(
+        tmp_path, legacy_receipt):
+    source = ["retrieval", "russian", *[f"term-{index:03}" for index in range(300)]]
+    capsule = build_concept_capsule(
+        run_id="prior", task_id="foreign-task", fingerprint=source,
+        direction="max", concepts=["data/hard-neg"],
+    )
+    if legacy_receipt:
+        for suffix in ("total", "omitted", "complete"):
+            capsule.pop(f"fingerprint_{suffix}")
+    store = ConceptCapsuleStore(tmp_path / "scope.jsonl")
+    assert store.add(capsule)
+
+    # CODEX AGENT regression: a retained fingerprint prefix is not an applicability grant for another task.
+    assert store.prior_capsules(source, min_sim=0.1, task_id="current-task") == []
+    exact = store.prior_capsules(["unrelated"], min_sim=0.99, task_id="foreign-task")
+    assert len(exact) == 1 and exact[0][0] == 1.0 and exact[0][1]["run_id"] == "prior"
+
+
 def test_capsule_store_quarantines_structurally_poisoned_rows(tmp_path):
     path = tmp_path / "c.jsonl"
     valid = _cap("good", "dense retrieval", ["hard-neg"], metric=0.8)
@@ -165,6 +186,9 @@ def test_build_capsule_caps_large_generated_collections_deterministically():
     assert len(capsule["concepts"]) == 256
     assert len(capsule["concept_outcomes"]) == 256
     assert capsule["fingerprint"] == sorted(capsule["fingerprint"])
+    assert capsule["fingerprint_total"] == 400
+    assert capsule["fingerprint_omitted"] == 144
+    assert capsule["fingerprint_complete"] is False
     assert set(capsule["concept_outcomes"]) == set(capsule["concepts"])
     assert capsule["concepts_total"] == capsule["concept_outcomes_total"] == 400
     assert capsule["concepts_omitted"] == capsule["concept_outcomes_omitted"] == 144

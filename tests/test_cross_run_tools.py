@@ -467,6 +467,26 @@ def test_bound_scopes_out_foreign_task_capsules_in_prior_attempts_and_atlas(tmp_
     assert "quantization" in CrossRunTools(tmp_path).execute("cross_run_atlas", {})
 
 
+def test_bound_related_scope_rejects_capsule_with_unknown_fingerprint_projection(tmp_path):
+    from types import SimpleNamespace
+
+    capsule = _cap_scoped(
+        "legacy", "foreign", ["data/hard-neg"], ["retrieval", "russian"])
+    for suffix in ("total", "omitted", "complete"):
+        capsule.pop(f"fingerprint_{suffix}")
+    _seed(tmp_path, capsules=[capsule])
+
+    related = CrossRunTools(tmp_path)
+    related.bind_state(SimpleNamespace(
+        task_id="current", goal="dense retrieval for russian reviews", direction="max"))
+    exact = CrossRunTools(tmp_path)
+    exact.bind_state(SimpleNamespace(
+        task_id="foreign", goal="totally different words", direction="max"))
+
+    assert "hard-neg" not in related.execute("cross_run_prior_attempts", {"idea": "hard-neg"})
+    assert "hard-neg" in exact.execute("cross_run_prior_attempts", {"idea": "hard-neg"})
+
+
 # --------------------------------------------------------------------------- #
 # Genesis wiring (§22.5) — the run planner gets the cross-run tool when enabled
 # --------------------------------------------------------------------------- #

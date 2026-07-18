@@ -583,6 +583,31 @@ def test_dissimilar_prior_does_not_surface(tmp_path):
     assert fold(s.read_all()).cross_run_priors == []
 
 
+@pytest.mark.parametrize("prior_task, expected", [("foreign-task", 0), ("unknown-task", 1)])
+def test_novelty_related_scope_rejects_unknown_fingerprint_but_exact_task_survives(
+        tmp_path, prior_task, expected):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    fp = task_fingerprint("dataset", "max", "dense retrieval", "recall", universal=True)
+    capsule = build_concept_capsule(
+        run_id="legacy", task_id=prior_task, fingerprint=fp, direction="max",
+        concepts=[_CONCEPT], concept_outcomes={_CONCEPT: 0.9},
+    )
+    for suffix in ("total", "omitted", "complete"):
+        capsule.pop(f"fingerprint_{suffix}")
+    assert ConceptCapsuleStore(mem / "concept_capsules.jsonl").add(capsule)
+    store = _run_with_cached_concept(tmp_path, _CONCEPT)
+    engine = _GateEngine(store, mem)
+    engine._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+
+    engine._graded_novelty_precheck(
+        fold(store.read_all()),
+        Idea(operator="improve", params={"rank": 8.0}, rationale="hard-neg scheme"),
+    )
+
+    assert len(fold(store.read_all()).cross_run_priors) == expected
+
+
 def test_cross_run_direction_gate_suppresses_opposite_direction_prior(tmp_path):
     # The HARD direction gate (novelty._cross_run_prior) in ISOLATION: a prior with the SAME goal/metric/
     # kind but the OPPOSITE optimization direction differs only in the `dir:` fingerprint token, so it still
