@@ -389,16 +389,19 @@ def _remove_docker_container(docker: str, cidfile: Path) -> None:
 
 
 class _StageHealthMonitor:
-    """Detects a DEGENERATE (diverged) training stage from its streamed stdout: a non-finite loss or
-    grad-norm (nan / inf) reported repeatedly, i.e. training that will never produce a useful model.
+    """Detects a DEGENERATE (diverged) training stage from one streamed output channel: a non-finite
+    loss or grad-norm (nan / inf) reported repeatedly, i.e. training that will never produce a useful model.
 
     Universal by design — a format-agnostic token scan for `loss`/`grad_norm` immediately followed by
     `nan`/`inf` — so it fires for HF Trainer, Lightning, or a hand-rolled loop with NO per-framework
     config and no Developer effort (the built-in half of the hybrid guard; the Developer is separately
-    asked to add a fail-fast finite-loss assert). Deliberately STRICT (needs `threshold` such lines) so
-    an incidental `nan` token in a path/message can't trip it. Line-buffered: counts whole matched lines,
-    never double-counting a chunk boundary."""
-    _PAT = re.compile(r"(loss|grad_norm|grad[ _]norm)['\"]?\s*[:=]\s*[\[]?\s*(nan|-?inf)\b", re.IGNORECASE)
+    asked to add a fail-fast finite-loss assert). Deliberately STRICT (needs `threshold` such records) so
+    an incidental `nan` token in a path/message can't trip it. Record-buffered: accepts both newline logs
+    and carriage-return progress bars, never double-counting a chunk boundary."""
+    _PAT = re.compile(
+        r"(loss|grad_norm|grad[ _]norm)['\"]?\s*[:=]\s*[\[]?\s*"
+        r"(nan|[-+]?inf(?:inity)?)\b", re.IGNORECASE)
+    _BREAK = re.compile(r"[\r\n]")
 
     def __init__(self, threshold: int = 5):
         self.threshold = threshold
@@ -409,12 +412,19 @@ class _StageHealthMonitor:
         """Accept a streamed chunk; return True once divergence is CONFIRMED (>= threshold non-finite
         loss/grad lines). Idempotent-safe to call after firing."""
         self._buf += text
-        *lines, self._buf = self._buf.split("\n")   # keep the trailing partial line for the next chunk
+        *lines, self._buf = self._BREAK.split(self._buf)  # keep the trailing partial record for next chunk
         if len(self._buf) > 8192:                    # bound a pathological no-newline stream
             self._buf = self._buf[-8192:]
         for ln in lines:
             if self._PAT.search(ln):
                 self.hits += 1
+        return self.hits >= self.threshold
+
+    def finish(self) -> bool:
+        """Observe the final unterminated record at EOF. Safe to call more than once."""
+        final, self._buf = self._buf, ""
+        if final and self._PAT.search(final):
+            self.hits += 1
         return self.hits >= self.threshold
 
 
@@ -442,13 +452,30 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
             logf = None
     lock = threading.Lock()
     bufs: dict[str, list[bytes]] = {"out": [], "err": []}
-    monitor = _StageHealthMonitor() if health_check else None
+    # CODEX AGENT: stdout and stderr need independent record buffers (never splice two partial lines),
+    # but one shared threshold. Framework loggers commonly use stderr while user metrics use stdout.
+    monitors = ({"out": _StageHealthMonitor(), "err": _StageHealthMonitor()}
+                if health_check else None)
+    health_lock = threading.Lock()
     diverged = threading.Event()
+
+    def _observe_health(key: str, text: str = "", *, final: bool = False) -> None:
+        if monitors is None:
+            return
+        with health_lock:
+            monitor = monitors[key]
+            if text:
+                monitor.feed(text)
+            if final:
+                monitor.finish()
+            if (not diverged.is_set()
+                    and sum(item.hits for item in monitors.values()) >= monitor.threshold):
+                diverged.set()
 
     def _pump(stream, key):
         size = 0
         # A decoder is needed to feed the health monitor even when there is no live log file.
-        scan = monitor is not None and key == "out"
+        scan = monitors is not None
         decoder = (codecs.getincrementaldecoder("utf-8")("replace")
                    if (logf is not None or scan) else None)
         try:
@@ -475,24 +502,20 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                         with lock:
                             logf.write(text)
                             logf.flush()
-                    if scan and text and monitor.feed(text) and not diverged.is_set():
-                        # Confirmed divergence: mark it in the captured stderr (so the stage-failure reason
-                        # the agent sees names the cause) and signal the main loop to tree-kill early.
-                        with lock:
-                            bufs["err"].append(
-                                "\n‼ LOOPLAB health-check: training DIVERGED — non-finite loss/"
-                                "grad_norm reported repeatedly; aborting the stage early.\n".encode("utf-8"))
-                        diverged.set()
+                    if scan and text:
+                        _observe_health(key, text)
         except Exception:
             pass
         finally:
-            if logf is not None and decoder is not None:
+            if decoder is not None:
                 try:
                     text = decoder.decode(b"", final=True)
-                    if text:
+                    if text and logf is not None:
                         with lock:
                             logf.write(text)
                             logf.flush()
+                    if scan:
+                        _observe_health(key, text, final=True)
                 except Exception:
                     pass
             try:
@@ -532,6 +555,14 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     # Let the final lines flush before we read the buffers.
     t_out.join(timeout=5)
     t_err.join(timeout=5)
+    marker = ("\n‼ LOOPLAB health-check: training DIVERGED — non-finite loss/grad_norm "
+              "reported repeatedly; aborting the stage early.\n")
+    if diverged.is_set() and logf is not None:
+        try:
+            logf.write(marker)
+            logf.flush()
+        except Exception:
+            pass
     if logf is not None:
         try:
             logf.close()
@@ -540,6 +571,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     rc = proc.returncode if proc.returncode is not None else -1
     out = b"".join(bufs["out"]).decode("utf-8", "replace")
     err = b"".join(bufs["err"]).decode("utf-8", "replace")
+    if diverged.is_set():
+        err += marker
+        # A short process can exit before the 250 ms parent poll observes `diverged`. Its zero status
+        # does not make repeated non-finite training telemetry healthy; fail closed after the drain.
+        if rc == 0:
+            rc = -1
     return rc, out, err, timed_out
 
 

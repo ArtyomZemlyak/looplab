@@ -39,6 +39,13 @@ def test_monitor_handles_chunk_split_across_boundary():
     assert m.feed("rm': nan}\n")                                # completes -> matches once
 
 
+def test_monitor_handles_progress_carriage_returns_and_final_partial_line():
+    m = _StageHealthMonitor(threshold=3)
+    assert not m.feed("loss: nan\rgrad_norm: +inf\r")
+    assert not m.feed("loss: infinity")                         # no line terminator yet
+    assert m.finish()                                           # EOF makes the final record observable
+
+
 def test_run_argv_kills_diverged_stage_early():
     # A stage that prints NaN loss then would sleep 60s; the watchdog must kill it in well under that.
     prog = ("import time, sys\n"
@@ -53,6 +60,36 @@ def test_run_argv_kills_diverged_stage_early():
     assert not timed_out                                        # a divergence kill is NOT a timeout
     assert rc != 0                                              # killed child -> non-zero -> stage-fail path
     assert "DIVERGED" in err                                    # the reason the agent reads
+
+
+def test_run_argv_combines_stdout_and_stderr_health_evidence():
+    # Frameworks commonly route tqdm/Lightning metrics to stderr. Threshold evidence may straddle both
+    # streams, but partial records from the two streams must never be concatenated into a fake line.
+    prog = ("import sys, time\n"
+            "for stream in [sys.stdout, sys.stderr, sys.stdout, sys.stderr, sys.stderr]:\n"
+            "    print('loss: nan', file=stream, flush=True)\n"
+            "time.sleep(60)\n")
+    t0 = time.time()
+    rc, out, err, timed_out = run_argv(
+        [sys.executable, "-c", prog], "/tmp", timeout=60, health_check=True)
+
+    assert time.time() - t0 < 20
+    assert rc != 0 and not timed_out
+    assert out.count("loss: nan") == 2 and err.count("loss: nan") == 3
+    assert "DIVERGED" in err
+
+
+def test_run_argv_fails_closed_when_diverged_process_exits_zero_before_poll(tmp_path):
+    # A fast subprocess can exit before the parent's 250 ms watchdog poll. Draining still observes all
+    # records, so health divergence must override a misleading zero exit code instead of accepting it.
+    prog = ("import sys\n"
+            "sys.stderr.write('loss: nan\\r' * 4 + 'loss: infinity')\n"
+            "sys.stderr.flush()\n")
+    rc, _out, err, timed_out = run_argv(
+        [sys.executable, "-c", prog], str(tmp_path), timeout=30, health_check=True)
+
+    assert rc != 0 and not timed_out
+    assert "DIVERGED" in err
 
 
 def test_run_argv_healthy_stage_runs_to_completion():
