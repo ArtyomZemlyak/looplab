@@ -1,5 +1,9 @@
 """Phase 3c: the GET /api/runs/{id}/concepts serve endpoint — per-lens hierarchy + per-concept
 metrics/Δ + the lens pack, end to end (fold -> bounded core -> pure lens projection -> JSON)."""
+from concurrent.futures import ThreadPoolExecutor
+import os
+import threading
+
 import pytest
 
 pytest.importorskip("fastapi")
@@ -604,10 +608,10 @@ def test_derive_lens_refuses_corrupt_source(tmp_path):
     assert "event_log_corruption" in payload["blocking_reasons"]
 
 
-def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_path, monkeypatch):
-    # CODEX AGENT: lens changes are view-only. They must not replay the same event prefix, while every
-    # byte-version transition (append, corruption, atomic replacement) must force a new generation-safe
-    # core and must never turn the process-local optimization into an HTTP-cacheable response.
+def test_concept_core_cache_incrementally_replays_and_invalidates_every_file_version(tmp_path, monkeypatch):
+    # CODEX AGENT: lens changes are view-only and live appends must extend the raw cursor rather than
+    # invoke a fresh full fold. Historical prefixes still take the exact pure-fold path. Every byte-version
+    # transition must force a new generation-safe core and never make the HTTP response cacheable.
     import looplab.serve.routers.runs as runs_router
 
     fold_calls = 0
@@ -634,17 +638,17 @@ def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_p
     first = client.get("/api/runs/demo/concepts")
     first_payload = first.json()
     assert first.status_code == 200 and first.headers["cache-control"] == "no-store"
-    assert (fold_calls, core_calls) == (1, 1)
+    assert (fold_calls, core_calls) == (0, 1)
     for params in ({"lens": "uses"}, {"lens": "usage", "rels": "uses"}):
         response = client.get("/api/runs/demo/concepts", params=params)
         assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
-    assert (fold_calls, core_calls) == (1, 1)                    # same core, two pure lenses
+    assert (fold_calls, core_calls) == (0, 1)                    # same core, two pure lenses
 
     historical = client.get("/api/runs/demo/concepts", params={"seq": 2})
-    assert historical.status_code == 200 and (fold_calls, core_calls) == (2, 2)
+    assert historical.status_code == 200 and (fold_calls, core_calls) == (1, 2)
     historical_other_lens = client.get(
         "/api/runs/demo/concepts", params={"seq": 2, "lens": "uses"})
-    assert historical_other_lens.status_code == 200 and (fold_calls, core_calls) == (2, 2)
+    assert historical_other_lens.status_code == 200 and (fold_calls, core_calls) == (1, 2)
 
     EventStore(log).append(
         "node_created", {"node_id": 1, "parent_ids": [0], "operator": "improve",
@@ -652,18 +656,18 @@ def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_p
                                   "concepts": ["cache/append"]}})
     appended = client.get("/api/runs/demo/concepts").json()
     assert "cache/append" in appended["tree"]["nodes"]
-    assert (fold_calls, core_calls) == (3, 3)
+    assert (fold_calls, core_calls) == (1, 3)
     client.get("/api/runs/demo/concepts", params={"lens": "uses"})
-    assert (fold_calls, core_calls) == (3, 3)                    # appended version is reusable too
+    assert (fold_calls, core_calls) == (1, 3)                    # appended version is reusable too
 
     with log.open("ab") as stream:
         stream.write(b"{not-json}\n")
     corrupt = client.get("/api/runs/demo/concepts").json()
     assert corrupt["status"] == "partial"
     assert "event_log_corruption" in corrupt["completeness"]["reasons"]
-    assert (fold_calls, core_calls) == (4, 4)                    # corruption invalidates clean core
+    assert (fold_calls, core_calls) == (1, 4)                    # corruption resets cursor, no full fold
     client.get("/api/runs/demo/concepts", params={"lens": "uses"})
-    assert (fold_calls, core_calls) == (4, 4)                    # corrupt prefix stays reusable
+    assert (fold_calls, core_calls) == (1, 4)                    # corrupt prefix stays reusable
 
     replacement_dir = tmp_path / "replacement"
     replacement_dir.mkdir()
@@ -677,7 +681,7 @@ def test_concept_core_cache_reuses_fold_and_invalidates_every_file_version(tmp_p
                                   "concepts": ["replacement/generation"]}})
     replacement_log.replace(log)
     replaced = client.get("/api/runs/demo/concepts").json()
-    assert (fold_calls, core_calls) == (5, 5)
+    assert (fold_calls, core_calls) == (1, 5)
     assert replaced["generation"] != first_payload["generation"]
     assert "replacement/generation" in replaced["tree"]["nodes"]
     assert "cache/append" not in replaced["tree"]["nodes"]
@@ -706,6 +710,131 @@ def test_concept_core_cache_bounds_prefixes_and_total_entries(monkeypatch):
     replaced_a = ("a/events.jsonl", 1, 11, 101, 101, 101)
     assert cache.get(replaced_a, None) is None
     assert all(key[0][0] != source_a[0] for key in cache._entries)
+
+
+def test_concept_live_replay_applies_each_append_once_under_concurrent_gets(tmp_path, monkeypatch):
+    """Repeated polling is O(total envelopes), including a forced two-reader cache-miss race."""
+    import looplab.serve.routers.runs as runs_router
+
+    rd = _demo_run(tmp_path)
+    log = rd / "events.jsonl"
+    initial_count = len(EventStore(log).read_all())
+    applied = 0
+    applied_lock = threading.Lock()
+    real_extend = runs_router.FoldCursor.extend
+
+    def counted_extend(cursor, suffix):
+        nonlocal applied
+        items = list(suffix)
+        with applied_lock:
+            applied += len(items)
+        return real_extend(cursor, items)
+
+    monkeypatch.setattr(runs_router.FoldCursor, "extend", counted_extend)
+    client = TestClient(make_app(tmp_path))
+    assert client.get("/api/runs/demo/concepts").status_code == 200
+    assert applied == initial_count
+
+    writer = EventStore(log)
+    for index in range(8):
+        writer.append("hint", {"text": f"incremental-{index}"})
+        assert client.get("/api/runs/demo/concepts").status_code == 200
+        assert applied == initial_count + index + 1
+
+    raced = writer.append("hint", {"text": "concurrent"})
+    build_barrier = threading.Barrier(2)
+    real_build = runs_router._build_concept_core
+
+    def synchronized_build(*args, **kwargs):
+        if kwargs.get("captured_seq") == raced.seq:
+            build_barrier.wait(timeout=10)
+        return real_build(*args, **kwargs)
+
+    # Both requests miss the not-yet-published core. They may independently build the bounded view,
+    # but the per-source replay lock must let exactly one of them extend the shared raw cursor.
+    monkeypatch.setattr(runs_router, "_build_concept_core", synchronized_build)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _i: client.get("/api/runs/demo/concepts"), range(2)))
+    assert [response.status_code for response in responses] == [200, 200]
+    assert applied == initial_count + 9
+
+
+def test_concept_replay_cache_resets_and_returns_isolated_snapshots(tmp_path):
+    """Shrink, same-size rewrite and corruption cannot inherit an old mutable RunState."""
+    import looplab.serve.routers.runs as runs_router
+
+    rd = _demo_run(tmp_path)
+    log = rd / "events.jsonl"
+    cache = runs_router._ConceptReplayCache()
+
+    identity = runs_router._concept_event_file_identity(log)
+    events, first, divergence, observed = cache.snapshot(log, identity)
+    assert observed == identity
+    assert divergence is None and len(events) == 5
+    first.node_concepts[0].append("caller/poison")
+    first.nodes[0].feasible = False
+    _, isolated, _, _ = cache.snapshot(log, identity)
+    assert "caller/poison" not in isolated.node_concepts[0]
+    assert isolated.nodes[0].feasible is True
+
+    # Rewrite the SAME inode with the SAME byte count. A replacement-generation token and a concept
+    # both change, while an explicit mtime bump makes the rewrite observable even on a coarse test FS.
+    raw = log.read_bytes()
+    rewritten = raw.replace(b'"run_id":"demo"', b'"run_id":"damo"', 1)
+    rewritten = rewritten.replace(b"loss/contrastive/dcl", b"loss/contrastive/xyz", 1)
+    assert len(rewritten) == len(raw) and rewritten != raw
+    prior_stat = log.stat()
+    with log.open("r+b") as stream:
+        stream.write(rewritten)
+        stream.truncate()
+    os.utime(log, ns=(prior_stat.st_atime_ns, prior_stat.st_mtime_ns + 1_000_000))
+    rewritten_identity = runs_router._concept_event_file_identity(log)
+    _, rewritten_state, rewritten_divergence, _ = cache.snapshot(log, rewritten_identity)
+    assert rewritten_divergence is None and rewritten_state.run_id == "damo"
+    assert rewritten_state.node_concepts[0] == ["loss/contrastive/xyz", "architecture/moe"]
+
+    # A same-inode rewrite can also GROW. Size-only logic would misclassify this as append and retain
+    # stale parsed Events; constant-size prefix probes must detect the changed durable prefix.
+    grown = rewritten.replace(b'"run_id":"damo"', b'"run_id":"demo"', 1)
+    grown = grown.replace(b"loss/contrastive/xyz", b"loss/contrastive/abc", 1) + b"\n"
+    log.write_bytes(grown)
+    grown_identity = runs_router._concept_event_file_identity(log)
+    _, grown_state, grown_divergence, _ = cache.snapshot(log, grown_identity)
+    assert grown_divergence is None and grown_state.run_id == "demo"
+    assert grown_state.node_concepts[0] == ["loss/contrastive/abc", "architecture/moe"]
+
+    with log.open("ab") as stream:
+        stream.write(b"{not-json}\n")
+    corrupt_identity = runs_router._concept_event_file_identity(log)
+    _, corrupt_state, corrupt_divergence, _ = cache.snapshot(log, corrupt_identity)
+    assert corrupt_divergence is not None
+    assert corrupt_state.run_id == "demo"                       # recoverable prefix, freshly replayed
+
+    # Shrinking away the corrupt tail and all nodes resets both EventStore and cursor to disk truth.
+    first_line = grown.splitlines(keepends=True)[0]
+    log.write_bytes(first_line)
+    shrunk_identity = runs_router._concept_event_file_identity(log)
+    shrunk_events, shrunk_state, shrunk_divergence, _ = cache.snapshot(log, shrunk_identity)
+    assert len(shrunk_events) == 1 and shrunk_divergence is None
+    assert shrunk_state.run_id == "demo" and not shrunk_state.nodes
+
+
+def test_concept_replay_cache_bounds_live_sources(tmp_path, monkeypatch):
+    import looplab.serve.routers.runs as runs_router
+
+    monkeypatch.setattr(runs_router, "_CONCEPT_REPLAY_CACHE_MAX_SOURCES", 2)
+    cache = runs_router._ConceptReplayCache()
+    paths = []
+    for index in range(3):
+        path = tmp_path / str(index) / "events.jsonl"
+        store = EventStore(path)
+        store.append("run_started", {
+            "run_id": str(index), "task_id": "toy", "goal": "g", "direction": "max",
+        })
+        paths.append(path)
+        cache.snapshot(path, runs_router._concept_event_file_identity(path))
+    assert len(cache._sources) == 2
+    assert str(paths[0].absolute()) not in cache._sources
 
 
 def test_concept_core_cache_retries_unknown_identity_before_replacement(tmp_path, monkeypatch):
@@ -743,6 +872,52 @@ def test_concept_core_cache_retries_unknown_identity_before_replacement(tmp_path
     assert "replacement/stable" in first["tree"]["nodes"]
     assert "replacement/stable" in second["tree"]["nodes"]
     assert "loss/contrastive/dcl" not in first["tree"]["nodes"]
+
+
+def test_concept_core_cache_uses_isolated_fold_after_three_replacement_races(tmp_path, monkeypatch):
+    import looplab.serve.routers.runs as runs_router
+
+    rd = _demo_run(tmp_path)
+    log = rd / "events.jsonl"
+    replacements = []
+    for index in range(3):
+        replacement_dir = tmp_path / f"replacement-{index}"
+        replacement_dir.mkdir()
+        replacement_log = replacement_dir / "events.jsonl"
+        store = EventStore(replacement_log)
+        store.append("run_started", {
+            "run_id": "demo", "task_id": f"new-{index}", "goal": "new", "direction": "max",
+        })
+        store.append("node_created", {
+            "node_id": 0, "parent_ids": [], "operator": "draft",
+            "idea": {"operator": "draft", "params": {}, "rationale": "r",
+                     "concepts": [f"replacement/final-{index}"]},
+        })
+        replacements.append(replacement_log)
+
+    real_identity = runs_router._concept_event_file_identity
+    identity_calls = 0
+
+    def replace_between_every_before_after_pair(path):
+        nonlocal identity_calls
+        identity_calls += 1
+        if identity_calls in (2, 4, 6):
+            replacements.pop(0).replace(log)
+        return real_identity(path)
+
+    monkeypatch.setattr(
+        runs_router, "_concept_event_file_identity", replace_between_every_before_after_pair)
+    client = TestClient(make_app(tmp_path))
+    raced = client.get("/api/runs/demo/concepts")
+    assert raced.status_code == 200
+    assert "replacement/final-2" in raced.json()["tree"]["nodes"]
+    assert "loss/contrastive/dcl" not in raced.json()["tree"]["nodes"]
+
+    # The uncertain cursors from the three failed identities were never published as a core. A stable
+    # follow-up converges on the same final generation instead of resurrecting an intermediate one.
+    stable = client.get("/api/runs/demo/concepts").json()
+    assert stable["generation"] == raced.json()["generation"]
+    assert "replacement/final-2" in stable["tree"]["nodes"]
 
 
 def test_concept_core_cache_partitions_request_run_id_aliases():

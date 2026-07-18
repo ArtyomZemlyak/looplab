@@ -24,7 +24,7 @@ from looplab.core.config import (
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.eventstore import (
     EventStore, EventStoreConcurrencyError, EventStoreLockError, _interprocess_lock, iter_jsonl)
-from looplab.events.replay import fold
+from looplab.events.replay import FoldCursor, fold
 from looplab.events.traceview import TRACE_PROJECTION_SCHEMA, unavailable_projection
 from looplab.events.types import (
     EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED, EV_CONCEPT_LENS_STARTED,
@@ -76,6 +76,8 @@ _OP_STAGE_NAMES: dict[tuple[str, int, int], tuple] = {}
 
 _CONCEPT_CORE_CACHE_MAX_ENTRIES = 16
 _CONCEPT_CORE_CACHE_MAX_PREFIXES_PER_SOURCE = 4
+_CONCEPT_REPLAY_CACHE_MAX_SOURCES = 16
+_CONCEPT_REPLAY_PREFIX_PROBE_BYTES = 4_096
 _RUN_GENERATION_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CONCEPT_LENS_KEY_RE = re.compile(r"^[\x21-\x7e]{16,512}$")
@@ -395,6 +397,149 @@ class _ConceptCoreCache:
                 self._entries.popitem(last=False)
 
 
+class _ConceptReplaySource:
+    """One path's incremental EventStore + unfinalized replay accumulator."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.lock = threading.RLock()
+        self.store: Optional[EventStore] = None
+        self.cursor = FoldCursor()
+        self.identity: Optional[tuple] = None
+        self.divergence: Optional[dict] = None
+        self.first_event = None
+        self.boundary_event = None
+        self.head_probe = b""
+        self.tail_probe = b""
+        self.users = 0
+
+    def reset(self) -> None:
+        self.store = EventStore(self.path)
+        self.invalidate()
+
+    def invalidate(self) -> None:
+        self.cursor = FoldCursor()
+        self.identity = None
+        self.divergence = None
+        self.first_event = None
+        self.boundary_event = None
+        self.head_probe = b""
+        self.tail_probe = b""
+
+    def probes(self, prefix_size: int) -> tuple[bytes, bytes]:
+        """Read constant-size anchors from a claimed durable prefix."""
+        width = min(max(0, prefix_size), _CONCEPT_REPLAY_PREFIX_PROBE_BYTES)
+        try:
+            with self.path.open("rb") as stream:
+                head = stream.read(width)
+                stream.seek(max(0, prefix_size - width))
+                tail = stream.read(width)
+        except OSError:
+            return b"", b""
+        return head, tail
+
+
+class _ConceptReplayCache:
+    """Bounded LRU of append-incremental event readers and fold cursors.
+
+    A source lock covers stat-version validation, EventStore top-up, cursor extension and deep snapshot.
+    Consequently concurrent GETs for one live run apply each suffix once.  Replacement, shrink,
+    same-size rewrite and corruption transitions discard the raw accumulator before it can be reused.
+    """
+
+    def __init__(self):
+        self._sources: OrderedDict[str, _ConceptReplaySource] = OrderedDict()
+        self._lock = threading.Lock()
+
+    def _source(self, path: Path) -> _ConceptReplaySource:
+        key = str(path.absolute())
+        with self._lock:
+            source = self._sources.get(key)
+            if source is None:
+                source = _ConceptReplaySource(path)
+                self._sources[key] = source
+            source.users += 1
+            self._sources.move_to_end(key)
+            self._prune_unlocked()
+            return source
+
+    def _prune_unlocked(self) -> None:
+        while len(self._sources) > _CONCEPT_REPLAY_CACHE_MAX_SOURCES:
+            victim = next((key for key, source in self._sources.items() if source.users == 0), None)
+            if victim is None:
+                return  # all sources are in flight; the next release restores the hard idle bound
+            del self._sources[victim]
+
+    def _release(self, source: _ConceptReplaySource) -> None:
+        with self._lock:
+            source.users -= 1
+            self._prune_unlocked()
+
+    @staticmethod
+    def _identity_requires_reset(previous: Optional[tuple], current: tuple) -> bool:
+        if previous is None:
+            return False
+        old_lineage = previous[1:3]
+        new_lineage = current[1:3]
+        if new_lineage != old_lineage or current[5] < previous[5]:
+            return True
+        # An append changes size. A metadata change at the SAME size is an in-place rewrite and must
+        # not inherit the previous cursor even when the filesystem preserves the inode.
+        return current[5] == previous[5] and current != previous
+
+    def snapshot(self, path: Path, identity: tuple):
+        """Return ``(events, deep-finalized-state, divergence, identity-after-read)``."""
+        source = self._source(path)
+        try:
+            with source.lock:
+                reset = self._identity_requires_reset(source.identity, identity)
+                if (not reset and source.identity is not None
+                        and identity[5] > source.identity[5]
+                        and source.probes(source.identity[5]) != (source.head_probe, source.tail_probe)):
+                    # Same-inode growth is normally append. Constant-size prefix anchors catch an in-place
+                    # rewrite/replacement that grew (a case stat size alone cannot distinguish) without
+                    # re-reading the whole history and accidentally extending EventStore's stale bytes.
+                    reset = True
+                if source.store is None or reset:
+                    source.reset()
+                events = source.store.read_all()
+                divergence = source.store.divergence
+
+                # EventStore independently resets its byte cache on replacement/rewrite. Guard the replay
+                # cursor too: count/boundary checks cover a reset noticed between the outer stat and read.
+                boundary_changed = (
+                    source.cursor.event_count > len(events)
+                    or (source.cursor.event_count and len(events) >= source.cursor.event_count
+                        and source.boundary_event != events[source.cursor.event_count - 1])
+                    or (events and source.first_event is not None and source.first_event != events[0])
+                )
+                # CODEX AGENT: corruption changes the meaning of "complete prefix" even if no valid event
+                # was added. Rebuild from the recoverable prefix on every clean<->corrupt/detail transition;
+                # never reuse an authoritative cursor while merely attaching a partial-source receipt.
+                if reset or boundary_changed or divergence != source.divergence:
+                    source.cursor = FoldCursor()
+
+                source.cursor.extend(events[source.cursor.event_count:])
+                state = source.cursor.snapshot()
+                divergence_copy = dict(divergence) if divergence is not None else None
+                observed_after = _concept_event_file_identity(path)
+                if observed_after == identity:
+                    source.identity = identity
+                    source.divergence = divergence_copy
+                    source.first_event = events[0] if events else None
+                    source.boundary_event = events[source.cursor.event_count - 1] if events else None
+                    source.head_probe, source.tail_probe = source.probes(identity[5])
+                else:
+                    # The deep snapshot remains a coherent result of the bytes EventStore consumed, but
+                    # it has no reusable stat identity. Discard every mutable cursor component so the
+                    # retry cannot bind old events to replacement probes observed after this read.
+                    source.store = None
+                    source.invalidate()
+                return events, state, divergence_copy, observed_after
+        finally:
+            self._release(source)
+
+
 def _operator_stage_names(rd: Path) -> tuple:
     """Names of the OPERATOR-declared `cmd.stages` pipeline from the run's verbatim
     task.snapshot.json, vetted the way the ENGINE consumes them — () when the task declares none
@@ -446,6 +591,7 @@ def build_router(srv) -> APIRouter:
                 "projection": unavailable_projection()}
     _state_payload = srv.state_payload
     concept_core_cache = _ConceptCoreCache()
+    concept_replay_cache = _ConceptReplayCache()
 
     def _materialize_concept_core(rd: Path, run_id: str, requested_seq: Optional[int],
                                   lens_pack: list[dict]) -> dict:
@@ -453,7 +599,7 @@ def build_router(srv) -> APIRouter:
         path = rd / "events.jsonl"
         relation_registry = _concept_relation_registry_identity(lens_pack)
 
-        def _from_snapshot(events, source_divergence):
+        def _from_snapshot(events, current_state, source_divergence):
             if not events:
                 raise HTTPException(409, {
                     "code": "run_generation_unavailable",
@@ -466,7 +612,8 @@ def build_router(srv) -> APIRouter:
             max_seq = max((event.seq for event in events), default=-1)
             captured_seq = max((event.seq for event in projected), default=-1)
             return _build_concept_core(
-                fold(projected), run_id=run_id, lens_pack=lens_pack,
+                (current_state if requested_seq is None else fold(projected)),
+                run_id=run_id, lens_pack=lens_pack,
                 generation=generation, requested_seq=requested_seq,
                 captured_seq=captured_seq, max_seq=max_seq,
                 source_divergence=source_divergence)
@@ -474,14 +621,6 @@ def build_router(srv) -> APIRouter:
         # A read raced by an append/replacement is still a coherent prefix, but it has no stat identity
         # we can safely reuse. Retry a few times for a cacheable stable view, then serve one uncached
         # coherent snapshot rather than delaying a busy live run indefinitely.
-        # REVIEW(2026-07-16): on a LIVE run this cache is near-useless by construction — the key is the
-        # exact stat identity (mtime_ns/size), so EVERY append invalidates it, and get() even evicts
-        # all older versions for the path before lookup. The expensive miss path (full read + fold +
-        # core build) therefore runs on every ConceptView refetch tick of an active run, which is
-        # exactly when the endpoint is hottest; only finished runs ever hit. Pair it with the
-        # ConceptView projectionKey note below: the client refetches per node-status flip while the
-        # server recomputes per append — the two multiply. A generation+max_seq-keyed core (valid for
-        # any longer prefix via incremental fold, like the SSE state cache) would serve live runs too.
         for _attempt in range(3):
             identity = _concept_event_file_identity(path)
             if identity is not None:
@@ -490,21 +629,31 @@ def build_router(srv) -> APIRouter:
                 if (cached is not None
                         and _concept_event_file_identity(path) == identity):
                     return cached
-            source = EventStore(path)
-            events = source.read_all()
-            after = _concept_event_file_identity(path)
+                events, state, divergence, after = concept_replay_cache.snapshot(path, identity)
+            else:
+                # A transient stat failure has no trustworthy cache key. Keep this attempt isolated:
+                # installing it into the persistent cursor could bind generation-A bytes to generation B.
+                source = EventStore(path)
+                events = source.read_all()
+                state = fold(events)
+                divergence = source.divergence
+                after = _concept_event_file_identity(path)
             # CODEX AGENT: equality is required even when the first stat failed. Treating
             # ``None -> identity B`` as stable could cache bytes read from replaced generation A
             # under B's identity and poison every later hit until the file changed again.
             if after != identity:
                 continue
-            core = _from_snapshot(events, source.divergence)
+            core = _from_snapshot(events, state, divergence)
             if identity is not None:
                 concept_core_cache.put(after, requested_seq, core, relation_registry)
             return core
 
+        # Three moving identities mean we cannot prove the shared cursor corresponds to any one stat
+        # version (a reset/rewrite may look like growth during the race). Re-read and fold one isolated
+        # recoverable prefix; it remains uncached, so no uncertain identity can poison later requests.
         source = EventStore(path)
-        return _from_snapshot(source.read_all(), source.divergence)
+        events = source.read_all()
+        return _from_snapshot(events, fold(events), source.divergence)
 
     # ------------------------------------------------------------------ runs list
     # File identity is part of the signature: reset replaces events.jsonl and can preserve both

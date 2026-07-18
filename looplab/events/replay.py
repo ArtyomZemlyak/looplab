@@ -2333,11 +2333,15 @@ def fold(events: Iterable[Event]) -> RunState:
     ctx = _FoldCtx()
     for index, e in enumerate(events):
         ctx.event_index = index
-        h = _HANDLERS.get(e.type)
-        # unknown event types (e.g. "budget") are ignored for state — forward-compat
-        if h is not None:
-            h(st, e, e.data, ctx)
+        handler = _HANDLERS.get(e.type)
+        # Unknown event types (e.g. "budget") are ignored for state — forward-compat.
+        if handler is not None:
+            handler(st, e, e.data, ctx)
+    return _finalize_fold(st, ctx)
 
+
+def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
+    """Apply the order-independent read-model tail to one isolated raw fold state."""
     # PART V (B): materialize delta-authored node concepts topologically once the whole DAG is folded
     # (order-tolerant; no-op unless a node authored a delta). Before any downstream read-model derivation.
     if st.node_concept_deltas:
@@ -2348,6 +2352,47 @@ def fold(events: Iterable[Event]) -> RunState:
 
     _derive_hypotheses(st)   # P1: audit-only ledger (after best is known); never touches selection
     return st
+
+
+class FoldCursor:
+    """Incrementally accumulate an event prefix without changing ``fold`` semantics.
+
+    Handlers mutate an *unfinalized* state in log order. ``snapshot`` deep-copies that raw state before
+    applying the ordinary fold post-passes, because trust enforcement, best selection and Part-V delta
+    materialization mutate their input and therefore must never leak back into the next suffix extension.
+    The cursor is intentionally lock-free: its owner must serialize ``extend``/``snapshot`` as one read.
+    """
+
+    def __init__(self) -> None:
+        self._state = RunState()
+        self._ctx = _FoldCtx()
+        self._event_count = 0
+
+    @property
+    def event_count(self) -> int:
+        return self._event_count
+
+    def extend(self, events: Iterable[Event]) -> int:
+        """Apply a suffix and return the number of newly accumulated envelopes."""
+        added = 0
+        for e in events:
+            self._ctx.event_index = self._event_count
+            handler = _HANDLERS.get(e.type)
+            # Unknown event types still advance the physical index because report/finish adjacency is
+            # defined over envelopes, even though their state mutation is a forward-compatible no-op.
+            if handler is not None:
+                handler(self._state, e, e.data, self._ctx)
+            self._event_count += 1
+            added += 1
+        return added
+
+    def snapshot(self) -> RunState:
+        """Return an independently mutable state byte-equivalent to ``fold`` of this prefix."""
+        # CODEX AGENT: never finalize the accumulator itself. Several post-passes are destructive
+        # (``block`` marks nodes infeasible; concept DELTAs overwrite effective memberships). A deep
+        # Pydantic copy makes every GET independent and preserves the raw state for the next append.
+        state = self._state.model_copy(deep=True)
+        return _finalize_fold(state, self._ctx)
 
 
 

@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
-from looplab.events.replay import fold
+from looplab.events.replay import FoldCursor, fold
 
 
 def _seed_host(store, *, concept_run_base=True):
@@ -72,7 +72,8 @@ def test_delta_materialization_is_order_tolerant(tmp_path):
         for typ, data in seq:
             s.append(typ, data)
         return fold(s.read_all()).node_concepts
-    (tmp_path / "last").mkdir(); (tmp_path / "first").mkdir()
+    (tmp_path / "last").mkdir()
+    (tmp_path / "first").mkdir()
     expected = {0: ["a", "b"], 1: ["b", "c"], 2: ["c"]}
     assert _events(base_last=False) == expected     # base set first
     assert _events(base_last=True) == expected       # base set AFTER every node -> identical (post-pass)
@@ -96,6 +97,29 @@ def test_classifier_event_overrides_an_authored_delta(tmp_path):
     st = fold(s.read_all())
     assert st.node_concepts[0] == ["classifier/x"]              # classifier wins over the delta
     assert st.node_concept_provenance[0] == "classifier"
+
+
+def test_fold_cursor_suffix_matches_full_fold_without_postpass_leakage(tmp_path):
+    # CODEX AGENT: the live /concepts cursor keeps the pre-post-pass state. Materializing DELTAs in one
+    # response must not overwrite that accumulator before a classifier event arrives on the next poll.
+    s = _store(tmp_path)
+    s.append("run_concepts", {"concepts": ["a"]})
+    s.append("node_created", _created(0, added=["b"]))
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": ["classifier/x"], "generation": 0,
+    })
+    events = s.read_all()
+    cursor = FoldCursor()
+    cursor.extend(events[:3])
+    delta_snapshot = cursor.snapshot()
+    assert delta_snapshot.node_concepts[0] == ["a", "b"]
+    delta_snapshot.node_concepts[0].append("caller/poison")
+
+    cursor.extend(events[3:])
+    incremental = cursor.snapshot()
+    expected = fold(events)
+    assert incremental.model_dump(mode="json") == expected.model_dump(mode="json")
+    assert incremental.node_concepts[0] == ["classifier/x"]
 
 
 def test_operator_retag_overrides_an_authored_delta(tmp_path):
