@@ -5,8 +5,8 @@ import math
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import (BaseModel, Field, field_serializer, field_validator, model_serializer,
-                      model_validator)
+from pydantic import (BaseModel, ConfigDict, Field, field_serializer, field_validator,
+                      model_serializer, model_validator)
 
 from looplab.core.concepts import (
     CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON as _CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
@@ -323,6 +323,8 @@ class Idea(BaseModel):
 
 class IdeaEmission(Idea):
     """Strict modern producer schema; durable replay intentionally continues to use ``Idea``."""
+
+    model_config = ConfigDict(extra="forbid")
 
     concepts: list[str] = Field(default_factory=list, max_length=64)
     concept_mode: Literal["full", "delta"]

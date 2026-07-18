@@ -98,6 +98,7 @@ def test_strict_emission_requires_consistent_bounded_canonical_mode():
     schema = IdeaEmission.model_json_schema()
     assert "concept_mode" in schema["required"]
     assert schema["properties"]["concepts"]["maxItems"] == 64
+    assert schema["additionalProperties"] is False
     valid = IdeaEmission.model_validate({
         "operator": "draft", "concept_mode": "delta", "concepts_added": ["model/new"]})
     assert valid.to_idea().concept_mode == "delta"
@@ -113,6 +114,7 @@ def test_strict_emission_requires_consistent_bounded_canonical_mode():
          "concepts": ["Model/A", "model/a"]},
         {"operator": "draft", "concept_mode": "full",
          "concepts": [f"axis/c{i}" for i in range(65)]},
+        {"operator": "draft", "concept_mode": "delta", "concepts_aded": ["model/a"]},
     ]
     for payload in invalid:
         with pytest.raises(ValueError):
