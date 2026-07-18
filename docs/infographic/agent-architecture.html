@@ -41,13 +41,6 @@
 <div class="hint">◱ scroll — the canvas is large (pinch/scroll to pan)</div>
 <div class="scroll"><svg id="d" xmlns="http://www.w3.org/2000/svg"></svg></div>
 
-<!-- REVIEW(2026-07-16): the 25-commit concepts Phase 0-5 series (fd877d0..) added flows this
-diagram does not show: the UI-writable concept_tag_edited command path (operator re-tag -> fold
-provenance), the assistant ConceptGovernanceTools loop (taxonomy merge/purge/split into the shared
-cross-run ledger), the cross_run_concept_map / concept_* RunTools reads, and the Phase 1
-direction-normalized profit signal feeding advisory packs. CLAUDE.md requires the diagram move in
-the SAME change; an engineer tracing how an operator edit reaches the fold or how the assistant
-mutates cross-run state is currently pointed at a flow that predates all of it. -->
 <script>
 const NS="http://www.w3.org/2000/svg",svg=document.getElementById("d");
 const C={r:"#7aa2f7",d:"#e6b062",s:"#c3a6f9",dr:"#f7768e",ev:"#9ece6a",mem:"#f0c675",trust:"#ff9e64",sig:"#34d3bd",mut:"#6b7f92"};
@@ -61,7 +54,7 @@ function edge(f,fs,t,ts,o){E.push([f,fs,t,ts,o||{}]);}
 /* ============ SETUP row ============ */
 box("genesis",40,44,300,72,"Genesis","⌘",C.mut,["author task from a plain goal (LLM)","composable: repo · dataset · cmd · kaggle (kind inferred)","generative kind → backend=llm (CLI + web /api/start)"]);
 box("onboard",370,44,360,58,"Onboarding · repo","□",C.ev,["agent proposes → human ratifies eval spec","ratify_freeze | autonomous | ratify_freeze_drift"]);
-box("boss",1740,44,360,58,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","UI sends intents; server/engine serialize events"]);
+box("boss",1740,44,360,72,"Boss / Assistant · UI","⌘",C.s,["steer: inject · hypothesis · approve · stop/finalize/resume","run concepts: set base · retag node","portfolio taxonomy: merge · purge/unpurge · split (approval-gated)"]);
 
 /* ============ MAIN LOOP row (y=150) ============ */
 const LY=150,LH=76;
@@ -77,11 +70,11 @@ const DY=300;
 // PROPOSE — the read funnel (reads flow UP into propose)
 stack(40,330,DY,[
  {id:"f_meta",h:66,t:"① Meta-notes",tag:"×3",c:C.mem,sub:["exact task_id · last 3","model hypothesis or stats fallback (≤700c)"]},
- {id:"f_less",h:108,t:"② Cross-run evidence",tag:"mixed defaults",c:C.mem,sub:["reflection lessons/meta-notes on with memory","concept/advisory/structured-claim reads opt-in","direction + exact-task / strict goal for lessons/capsules","v2 D8 exact-task only · no goal fingerprint","rejected claims never steer prompts"]},
+ {id:"f_less",h:108,t:"② Cross-run evidence",tag:"mixed defaults",c:C.mem,sub:["reflection lessons/meta-notes on with memory","concept/advisory/structured-claim reads opt-in","direction-normalized concept profit is advisory (rank sign, not causal)","direction + exact-task / strict goal for lessons/capsules","rejected claims never steer prompts"]},
  {id:"f_dig",h:80,t:"③ Experiment digest",tag:"in-run",c:C.mem,sub:["cap = min(6000, max(1200, 60×nodes))","strong×5 · sweep×10 · weak×3 · themes · ablation×5"]},
  {id:"f_sib",h:66,t:"④ Siblings · lineage · board",tag:"",c:C.mem,sub:["siblings×5 · lineage×5 (by |Δ|)","open hypotheses ×5 (foresight order)"]},
  {id:"f_kb",h:56,t:"⑤ KB / Memora",tag:"k=3",c:C.mem,sub:["kb_search 3 + anchor-expand 3 · case 3"]},
- {id:"f_tools",h:66,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools · AllRunsTools","list/read experiments·code·logs — this + every run"]},
+ {id:"f_tools",h:80,t:"⑥ Mid-loop read tools",tag:"R",c:C.r,sub:["RunTools · DataTools · KnowledgeTools · AllRunsTools","concept tree·nodes·delta + cross_run_concept_map","list/read experiments·code·logs — this + every run"]},
 ]);
 // NOVELTY
 stack(410,210,DY,[
@@ -130,7 +123,8 @@ stack(1760,300,DY,[
 stack(2100,360,DY,[
  {id:"deepres",h:132,t:"Deep Researcher",tag:"LLM · every 3",c:C.dr,sub:["stage absent without an LLM client","tools: Run/Data/Knowledge; Literature/Web opt-in","overlaps eval · memo recorded immediately","memo: summary·findings·claims·directions×5","check claimed support against cited evidence","each direction → open hypothesis"]},
  {id:"strat",h:140,t:"Strategist",tag:"every 3",c:C.s,sub:["reads coverage: concept-axes·niches·entropy (narrowing signal)","sets novelty_stance explore|balanced|exploit → proposer·foresight·gate","retune: policy·operators·fidelity·request-research","off | rule | llm | agent","shipped agent mode uses tools with a client","no client → deterministic rule fallback","agent_control allow-list per role"]},
- {id:"concept",h:132,t:"Concept graph (Part IV)",tag:"mixed defaults",c:C.s,sub:["tagger over task skeleton (heuristic | agentic) — pure/replayable · audit-only, never selection","concept_pivot: ON · 2a coverage snapshot every concept_retag_every=30 (decoupled from strat) → uncovered-region explore hint","graded_novelty: ON · pre-gate flags L4 same-dir-new-impl / L5 wrongly-abandoned","authored concepts + concept_edge lens substrate → /concepts endpoint (tree · lenses · Δ metrics)","capability_expansion: opt-in · lock-in forced-jump read off the 2a snapshot (needs concept_pivot)"]},
+ {id:"concept",h:148,t:"Concept graph (Part IV/V)",tag:"mixed defaults",c:C.s,sub:["tagger over task skeleton (heuristic | agentic) — replayable receipts; authored labels are not classifier evidence","run_concepts base + per-node full|delta authoring → folded effective membership","concept_pivot: ON · coverage snapshot every concept_retag_every=30 → uncovered-region hint","graded_novelty: ON · pre-gate flags L4 same-dir-new-impl / L5 wrongly-abandoned","typed concept_edge lenses + current co-occurrence → bounded /concepts frame"]},
+ {id:"concept_ops",h:132,t:"Concept edits · governance",tag:"durable",c:C.s,sub:["operator retag/set-base intent → generation fence → concept_tag_edited/run_concepts","fold stamps operator provenance; explicit [] stays untagged","Assistant ConceptGovernanceTools: merge · purge/unpurge · split","approval binds normalized payload + revision; ledger CAS serializes mutation","read tools: concept_* in-run · cross_run_concept_map portfolio"]},
 ]);
 
 /* ============ HYPOTHESIS pipeline (row y≈900) ============ */
@@ -142,7 +136,7 @@ box("kanban",1070,HY-8,640,90,"Hypothesis board · kanban","A",C.r,["derived on 
 
 /* ============ MEMORY WRITE (row y≈1080) ============ */
 const WY=1080;
-box("w_order",40,WY,260,86,"Finalize memory tail","fin",C.mem,["case/research/concept capsule","→ reflection → concept → claim","→ facets → llm_cost → completion"]);
+box("w_order",40,WY,260,86,"Finalize memory tail","fin",C.mem,["case/research/concept capsule","rank-normalized concept profit signs","→ reflection → concept → claim → completion"]);
 box("w_case",320,WY,290,72,"KB case","cases.jsonl",C.mem,["task_id·goal·dir·params·metric·rationale","upsert-if-better · Memora consolidate 0.86"]);
 box("w_reflect",630,WY,300,72,"Lessons: reflect (LLM)","R",C.mem,["consolidate run: nodes + resolved hyps + fail themes","→ 1 lesson/theme · conf 0.6 · role: researcher · evidence_sig"]);
 box("w_hyp",950,WY,300,72,"Lessons: offline only","",C.mem,["no-LLM/toy: winner record + param-diff pairs","real run: LLM-authored only — no templated/verbatim dump"]);
@@ -162,13 +156,13 @@ box("g_rec",1380,GY,340,66,"Reconcile on re-eval","R",C.mem,["node_reset flips o
 const TY=1360;
 box("mA",40,TY,300,72,"A · Hypothesis board","in-run",C.mem,["state.hypotheses — derived each fold"]);
 box("mB",356,TY,300,72,"B · Experiment memory","in-run",C.mem,["state.nodes + digest (the search tree)"]);
-box("mC",672,TY,320,92,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules/overlays · v2 claims","stewards @finalize: proposals only","operator CLI / typed owner API applies overlays"]);
+box("mC",672,TY,320,108,"C · Cross-run evidence","cross-run",C.mem,["lessons · capsules + direction-normalized profit · v2 claims","alias/split/tombstone taxonomy ledger with global revision","stewards @finalize: proposals only","operator CLI / approved Assistant applies governed mutations"]);
 box("mD",1008,TY,330,72,"D · Knowledge base · Memora","cross-run",C.mem,["~/.looplab/knowledge · memory/cases.jsonl · abstraction+anchors"]);
 box("mE",1354,TY,300,72,"E · Skills & meta-notes","cross-run",C.mem,["memory/skills · meta_notes.jsonl"]);
 box("sim",1670,TY,470,72,"Three kinds of ‘same’","",C.sig,["exact hash → hypotheses · embedding → novelty 0.92 / Memora 0.86","hybrid+agent → lessons & board merges"]);
 
 /* ============ EVENT SPINE (row y≈1480) ============ */
-box("spine",40,1480,2100,84,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars"]);
+box("spine",40,1480,2100,98,"THE EVENT SPINE","",C.sig,["domain/control event → serialized append → events.jsonl → replay.fold → RunState","concept path: run_concepts · concept_tag_edited · node_concepts · concept_edge","one live engine · deterministic RunState fold · traces/snapshots/memory retain explicit sidecars"]);
 
 /* ============ SIGNAL DELIVERY (row y≈1600) — §1: every folded signal reaches the agent that acts on it ============
    Registry engine/signal_delivery.py + tests/test_signal_delivery.py enforce ONE injection site per signal
@@ -209,6 +203,8 @@ edge("refine","b","r_gt","t",{c:C.r,thin:1});
 edge("deepres","l","kanban","r",{c:C.dr,dash:1,label:"+ hypotheses"});
 edge("deepres","t","evaluate","b",{c:C.dr,dash:1,thin:1,label:"overlap"});
 edge("strat","t","refine","b",{c:C.s,dash:1,thin:1,label:"retune"});
+edge("boss","b","concept_ops","t",{c:C.s,dash:1,thin:1,label:"retag / govern",arc:120});
+edge("concept_ops","t","concept","b",{c:C.s,thin:1,label:"folded concepts"});
 // hypothesis pipeline (propose feeds it down the LEFT margin to skirt the read funnel)
 edge("propose","l","h_state","l",{c:C.r,thin:1,dash:1,label:"states a belief",arc:30});
 edge("h_state","r","h_dedup","l",{c:C.r});
@@ -231,6 +227,7 @@ edge("g_ag","r","g_ct","l",{c:C.mem,thin:1});
 edge("g_ct","r","g_cp","l",{c:C.mem,thin:1});
 edge("g_cp","r","g_rec","l",{c:C.mem,thin:1});
 edge("g_ex","b","mC","t",{c:C.mem,thin:1});
+edge("concept_ops","b","mC","t",{c:C.mem,thin:1,dash:1,label:"taxonomy CAS",arc:120});
 edge("w_case","b","mD","t",{c:C.mem,thin:1,arc:60});
 edge("w_skill","b","mE","t",{c:C.mem,thin:1,arc:60});
 // (the funnel boxes ① ② ⑤ under Propose ARE the reads of tiers C/D/E — no long back-arrows needed)
