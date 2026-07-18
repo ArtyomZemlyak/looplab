@@ -39,6 +39,17 @@ def _store(tmp_path, nodes) -> EventStore:
     return s
 
 
+def _concept_store(tmp_path, concepts_per_node) -> EventStore:
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "toy", "goal": "g", "direction": "min"})
+    for i, concepts in enumerate(concepts_per_node):
+        s.append("node_created", {"node_id": i, "parent_ids": [], "operator": "draft",
+                                  "idea": {"operator": "draft", "params": {"x": float(i)},
+                                           "concepts": concepts, "rationale": ""}})
+        s.append("node_evaluated", {"node_id": i, "metric": float(i)})
+    return s
+
+
 # --------------------------------------------------------------------------- #
 # Pure signal
 # --------------------------------------------------------------------------- #
@@ -68,6 +79,20 @@ def test_spread_themes_read_as_broad(tmp_path):
     assert sig["themes"] == 4
     assert sig["theme_entropy"] == 1.0
     assert sig["dominant_theme_frac"] == 0.25
+
+
+def test_multi_axis_memberships_do_not_false_trigger_narrowing(tmp_path):
+    from looplab.agents.strategist import _rule_novelty_stance
+
+    concepts = [(["loss/contrastive", "data/augmentation"] if i % 2
+                 else ["data/augmentation", "loss/contrastive"]) for i in range(8)]
+    sig = coverage_signal(fold(_concept_store(tmp_path, concepts).read_all()), recent=4)
+    assert sig["top_themes"][:2] == [["data", 8], ["loss", 8]]
+    assert sig["theme_entropy"] == 1.0
+    assert sig["dominant_theme_frac"] == sig["recent_dominant_frac"] == 0.5
+    # CODEX AGENT: max-axis-count / node-count is 1.0 here and falsely forces explore even though
+    # every experiment spans two independent axes. Axis-membership mass is part of the denominator.
+    assert _rule_novelty_stance(StrategyContext(coverage=sig)) is None
 
 
 def test_recent_window_flags_narrowing_now(tmp_path):
@@ -104,6 +129,15 @@ def test_failed_nodes_count_for_themes_but_not_niches(tmp_path):
     sig = coverage_signal(st)
     assert sig["nodes"] == 2 and sig["themes"] == 2
     assert sig["niches"] == 1   # only the one evaluated node forms a niche
+
+
+def test_tombstoned_nodes_do_not_dilute_coverage_denominators(tmp_path):
+    st = fold(_store(tmp_path, [("old", {"x": 1.0}, 1.0),
+                                ("live", {"x": 2.0}, 2.0)]).read_all())
+    st.nodes[0].tombstoned = True
+    sig = coverage_signal(st)
+    assert sig["nodes"] == 1 and sig["themes"] == 1 and sig["niches"] == 1
+    assert sig["top_themes"] == [["live", 1]] and sig["dominant_theme_frac"] == 1.0
 
 
 def test_signal_is_deterministic(tmp_path):

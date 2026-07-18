@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from looplab.core.models import Event, Idea, NodeStatus, RunState
+from looplab.core.models import Event, Idea
 from looplab.events.replay import fold
 
 
@@ -135,6 +135,21 @@ def test_folded_empty_entry_is_untagged_not_resurrected_authored_axis():
     assert node_axes(st, st.nodes[1]) == {"loss"}       # no folded entry -> authored fallback
     roll = theme_rollup(st)
     assert set(roll) == {"loss"} and roll["loss"]["count"] == 1   # only node 1, node 0 cleared out
+
+
+def test_folded_axes_normalize_and_follow_full_consolidation_chain():
+    from looplab.core.models import Node, NodeStatus, RunState
+    from looplab.events.digest import node_axes
+
+    st = RunState(goal="g", direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft"),
+                       metric=0.9, status=NodeStatus.evaluated)
+    st.node_concepts[0] = [" Old Lever/X ", "DATA/Aug"]
+    st.concept_consolidation = {
+        "old-lever/x": "middle/lever",
+        "middle/lever": "optimization/schedule",
+    }
+    assert node_axes(st, st.nodes[0]) == {"data", "optimization"}
 
 
 def test_theme_rollup_legacy_theme_when_no_concepts_phase6a():

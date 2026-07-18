@@ -24,7 +24,7 @@ import math
 from collections import Counter
 
 from looplab.core.models import RunState
-from looplab.events.digest import node_theme
+from looplab.events.digest import node_axes, node_theme, theme_rollup
 from looplab.search.archive import DiversityArchive
 
 
@@ -60,11 +60,9 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     the breadth the Strategist reads matches the /concepts map and the /runs API exactly and no longer
     depends on the Researcher's first-concept AUTHORING ORDER. The dict keys keep the historical
     `theme_*` names (a wire contract the Strategist prompt / proposal_cues / UI string-match) — only the
-    derivation moved. The dominant-* FRACTIONS are over ALL idea-carrying nodes (not just tagged ones):
-    an untagged idea is real effort on NO axis, so it DILUTES the fraction — a mostly-untagged run
-    correctly does not read as concentrated, and the fraction shares the same denominator as
-    `_rule_novelty_stance`'s node-count trust guard. Because axes multi-count, `themes` and the counts
-    can exceed the node total; the FRACTIONS stay in [0,1] (a single axis appears at most once per node).
+    derivation moved. The dominant-* FRACTIONS divide by ``max(idea_nodes, axis_memberships)``: untagged
+    effort still dilutes concentration, while multi-axis mass prevents a run where every node spans several
+    independent axes from looking 100% concentrated merely because one of those axes is shared.
 
     Keys:
       nodes                - ideas proposed so far (nodes that carry an idea)
@@ -76,18 +74,12 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
       recent_dominant_frac - in [0,1], same over the last `recent` idea-nodes (narrowing NOW?)
       top_themes           - [[axis, count], ...] top few, so the LLM can name the concentration
     """
-    nodes = [n for n in state.nodes.values() if getattr(n, "idea", None) is not None]
+    nodes = [n for n in state.nodes.values()
+             if getattr(n, "idea", None) is not None and not getattr(n, "tombstoned", False)]
     if not nodes:
         return {"nodes": 0, "themes": 0, "niches": 0, "operators": 0,
                 "theme_entropy": 0.0, "dominant_theme_frac": 0.0,
                 "recent_dominant_frac": 0.0, "top_themes": []}
-    # REVIEW(2026-07-16): this deliberately-local import (and its "keep `search` import-time free of
-    # digest" rationale) is now contradicted three screens up — eba3cc6 added a MODULE-level
-    # `from looplab.events.digest import node_theme`, so `search.coverage` imports digest at import
-    # time anyway (cycle-safe: digest only imports core). Either both imports go top-level and this
-    # stale load-bearing comment is dropped, or the constraint is real and node_theme's import must
-    # become local too — as written, the comment documents a rule the module no longer follows.
-    from looplab.events.digest import theme_rollup     # local: keep `search` import-time free of digest
     rollup = theme_rollup(state)                        # {theme: {count, best_metric}} — canonical
     counts = [v["count"] for v in rollup.values()]
     ops = {getattr(n, "operator", None) for n in nodes}
@@ -98,13 +90,14 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
     # nodes-first (not themed-first) keeps this a genuine "narrowing NOW?" measure: a window of fresh
     # UNTITLED drafts reads as un-concentrated (0.0), not as the dominant OLD theme reaching forward.
     recent_nodes = sorted(nodes, key=lambda n: n.id)[-max(1, recent):]
-    from looplab.events.digest import node_axes         # local: Phase 6a multi-membership over folded axes
     recent_axes: Counter = Counter()
     for n in recent_nodes:
         for a in node_axes(state, n):                   # count a recent node under EVERY axis it touches
             recent_axes[a] += 1
     recent_dom = recent_axes.most_common(1)
     recent_dom_count = recent_dom[0][1] if recent_dom else 0
+    membership_count = sum(counts)
+    recent_membership_count = sum(recent_axes.values())
     top = sorted(rollup.items(), key=lambda kv: (-kv[1]["count"], kv[0]))[:3]
     return {
         "nodes": len(nodes),
@@ -112,7 +105,8 @@ def coverage_signal(state: RunState, *, resolution: float = 1.0, recent: int = 4
         "niches": niches,
         "operators": len(ops),
         "theme_entropy": normalized_entropy(counts),
-        "dominant_theme_frac": round(dominant / len(nodes), 4),
-        "recent_dominant_frac": round(recent_dom_count / len(recent_nodes), 4),
+        "dominant_theme_frac": round(dominant / max(len(nodes), membership_count), 4),
+        "recent_dominant_frac": round(
+            recent_dom_count / max(len(recent_nodes), recent_membership_count), 4),
         "top_themes": [[t, v["count"]] for t, v in top],
     }
