@@ -618,6 +618,27 @@ test('malformed background-job receipts become same-request ambiguity', async ()
   }
 })
 
+test('background-job receipts cannot redirect an accepted paid identity', async () => {
+  const previous = { fetch: globalThis.fetch, location: globalThis.location }
+  globalThis.location = { pathname: '/', hash: '' }
+  globalThis.fetch = async () => ({
+    ok: true, json: async () => ({ status: 'done', ok: true, job_id: 'different-job' }),
+  })
+  try {
+    const result = await jobAwait(
+      { status: 'running', job_id: 'accepted-job' }, { intervalMs: 0 })
+    assert.deepEqual(result, {
+      ok: false, code: 'job_identity_mismatch', ambiguous: true,
+      job_id: 'accepted-job', jobId: 'accepted-job', error: 'job identity mismatch',
+    })
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
 test('poll protocol and client errors retain the accepted paid identity', async () => {
   const previous = {
     fetch: globalThis.fetch, location: globalThis.location,

@@ -153,7 +153,8 @@ const validateReceipt = (value, intent) => {
     // If an ambiguous server/job receipt does carry identity, however, it must be well-formed and
     // remain bound to the receipt already saved before dispatch; ambiguity is never permission to
     // replace a known request or job with another one.
-    if ((Object.hasOwn(result, 'generation') && result.generation !== intent.generation)
+    if (result.code === 'job_identity_mismatch'
+        || (Object.hasOwn(result, 'generation') && result.generation !== intent.generation)
         || (Object.hasOwn(result, 'request_id')
           && (typeof result.request_id !== 'string' || !REQUEST_ID.test(result.request_id)
             || (intent.requestId && result.request_id !== intent.requestId)

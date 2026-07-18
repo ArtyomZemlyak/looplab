@@ -99,13 +99,16 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     fields = [field for group in packaged["groups"] for field in group["fields"]]
     keys = [field["key"] for field in fields]
     assert len(keys) == len(set(keys))
-    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 141
-    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 164
+    assert len(keys) == SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT == 143
+    assert len(Settings.model_fields) == SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT == 166
     assert hashlib.sha256("\0".join(sorted(keys)).encode()).hexdigest() == SETTINGS_UI_SCHEMA_KEYSET_REVISION
     assert set(keys) <= set(Settings.model_fields)
     by_key = {field["key"]: field for field in fields}
-    assert set(("concept_pivot", "graded_novelty", "capability_expansion")) <= set(by_key)
+    assert set(("concept_pivot", "concept_run_base", "concept_retag_every",
+                "graded_novelty", "capability_expansion")) <= set(by_key)
     assert "never ranks or selects" in by_key["concept_pivot"]["help"]
+    assert "folded effective axes" in by_key["concept_run_base"]["help"]
+    assert "Researcher-authored additions" in by_key["concept_retag_every"]["help"]
     assert "proposal admission" in by_key["graded_novelty"]["help"]
     assert "Concept coverage pivot" in by_key["capability_expansion"]["help"]
     assert "D8" in by_key["cross_run_concepts"]["help"]

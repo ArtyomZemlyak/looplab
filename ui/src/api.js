@@ -1891,6 +1891,15 @@ export async function jobAwait(resp, {
         return { ok: false, code: 'job_protocol_error', ambiguous: true,
           job_id: acceptedJobId, jobId: acceptedJobId, error: 'invalid job status' }
       }
+      // A terminal payload is data produced by the worker, not authority to redirect the client to
+      // another paid identity. Preserve the accepted id for recovery, but make any supplied mismatch
+      // explicit so endpoint-specific validators cannot mistake a rewritten receipt for completion.
+      const returnedIds = ['job_id', 'jobId']
+        .filter(key => Object.hasOwn(j, key)).map(key => j[key])
+      if (returnedIds.some(value => typeof value !== 'string' || value !== acceptedJobId)) {
+        return { ok: false, code: 'job_identity_mismatch', ambiguous: true,
+          job_id: acceptedJobId, jobId: acceptedJobId, error: 'job identity mismatch' }
+      }
       if (j.status === 'done') return { ...j, job_id: acceptedJobId, jobId: acceptedJobId }
       if (j.status === 'unknown') return { ok: false, code: 'job_unknown', ambiguous: true,
         job_id: acceptedJobId, jobId: acceptedJobId, error: 'job receipt expired' }

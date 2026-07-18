@@ -12,6 +12,7 @@ const TEST_MODEL_BOUNDS = {
   timeout: { exclusiveMinimum: 0 },
   holdout_fraction: { minimum: 0, maximum: 0.9 },
   select_verifier_samples: { minimum: 1, maximum: 32 },
+  concept_retag_every: { minimum: 1 },
 }
 const TEST_NULLABLE = new Set([
   'max_seconds', 'max_eval_seconds', 'memory_dir', 'agent_cmd', 'researcher_model',
