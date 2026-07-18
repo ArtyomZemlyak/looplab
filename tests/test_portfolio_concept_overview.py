@@ -58,6 +58,23 @@ def test_overview_dedupes_run_count_but_keeps_cards():
     assert {e["concept"] for e in ov["concepts"]} == {"a", "b"}
 
 
+def test_canonical_collapse_uses_the_run_direction_best_outcome_not_first_alias():
+    aliases = {"method/a": "method/canonical", "method/b": "method/canonical"}
+    capsules = [
+        _cap("max-run", ["method/a", "method/b"], {"method/a": 0.1, "method/b": 0.9}),
+        _cap("min-run", ["method/a", "method/b"], {"method/a": 0.8, "method/b": 0.2},
+             direction="min"),
+    ]
+
+    overview = portfolio_concept_overview(capsules, aliases=aliases)
+    row = next(item for item in overview["concepts"] if item["concept"] == "method/canonical")
+
+    assert {run["run_id"]: run["metric"] for run in row["runs"]} == {
+        "max-run": 0.9,
+        "min-run": 0.2,
+    }
+
+
 def test_empty_portfolio_is_well_formed():
     ov = portfolio_concept_overview([])
     assert ov == {

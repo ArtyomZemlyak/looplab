@@ -981,7 +981,11 @@ def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] 
                 continue                          # purged concept -> dropped from cross-run views
             by_canon.setdefault(key, []).append(concept)
         for key, raws in by_canon.items():
-            metric = next((oc.get(r) for r in sorted(raws) if oc.get(r) is not None), None)
+            observed = [oc[r] for r in sorted(raws) if r in oc and oc[r] is not None]
+            # CODEX AGENT: governance asserts collapsed raw labels are one canonical technique. Its run
+            # outcome is therefore the best retained observation in THIS run's direction, not the value of
+            # whichever alias sorts first (which can present a losing sibling beside a winning canonical).
+            metric = ((min(observed) if direction == "min" else max(observed)) if observed else None)
             # When several raw slugs collapse to ONE canonical (operator alias/split), COMBINE their signs
             # by NET rather than taking the sorted-first — else a merge silently drops the loser when two
             # raws landed on opposite sides of the run's median. sign(sum): majority side, tie -> neutral.
