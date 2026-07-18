@@ -326,6 +326,12 @@ def current_concept_projection(state: Any) -> CurrentConceptProjection:
                     partial_nodes.setdefault(node_id, set()).add(
                         _UNKNOWN_PARENT_MEMBERSHIP_REASON)
 
+    # CODEX AGENT: exact/trusted membership is a subset of nodes whose local projection is COMPLETE.
+    # A canonical partial receipt, or a malformed retained raw id discovered without a receipt, means the
+    # displayed valid subset is useful but incomplete.  It must not authorize exact inheritance or
+    # cross-run overlap merely because its producer provenance is otherwise trusted.
+    trusted_nodes.difference_update(partial_nodes)
+
     absent_nodes = active_nodes - available_nodes - set(unavailable)
     if absent_nodes:
         # CODEX AGENT: absence is classification-pending, not an honest empty membership. Keep this
