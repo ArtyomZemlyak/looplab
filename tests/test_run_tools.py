@@ -212,7 +212,9 @@ def test_node_concept_delta_never_raises_on_non_dict_stores():
                         status=NodeStatus.evaluated)}
     st.node_concepts = {0: ["loss/a"]}
     st.concept_consolidation = ["loss/a"]                        # a list, not a dict
-    assert node_concept_delta(st, 0)["added"] == ["loss/a"]      # rename ignored, no crash
+    # A malformed consolidation map is an unavailable identity projection: fail closed, do not silently
+    # reinterpret it as "no renames". The tool must still return its stable empty shape rather than raise.
+    assert node_concept_delta(st, 0)["added"] == []
     st.node_concepts = "loss/a"                                  # a str, not a dict
     d = node_concept_delta(st, 0)
     assert isinstance(d, dict) and d["added"] == [] and d["removed"] == []
@@ -490,7 +492,8 @@ def test_agent_uses_run_tool_then_emits():
     client = _FakeChatClient([
         _tool_call("read_experiment", {"node_id": 2}),                 # consult the best node
         _tool_call("emit", {"operator": "improve",
-                            "params": {"x": 3.0, "y": -1.0}, "rationale": "refine the leader"}),
+                            "params": {"x": 3.0, "y": -1.0}, "rationale": "refine the leader",
+                            "concept_mode": "full"}),
     ])
     r = ToolUsingResearcher(client, RunTools(),
                             bounds={"x": (-10.0, 10.0), "y": (-10.0, 10.0)})

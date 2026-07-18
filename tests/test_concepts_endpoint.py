@@ -1060,6 +1060,21 @@ def test_truncation_cap_reasons_exclude_corruption_adjacent_rename_hop():
         "edge_cap", "edge_endpoint_cap", "experiment_ref_cap"})
 
 
+def test_bounded_run_base_receipt_reaches_global_frame_completeness(tmp_path):
+    rd = tmp_path / "base-receipt"
+    rd.mkdir()
+    store = EventStore(rd / "events.jsonl")
+    store.append("run_started", {
+        "run_id": "base-receipt", "task_id": "toy", "goal": "g", "direction": "max"})
+    store.append("run_concepts", {
+        "concepts": [f"base/c{i:03d}" for i in range(65)]})
+    client = TestClient(make_app(tmp_path))
+    frame = client.get("/api/runs/base-receipt/concepts").json()
+    assert frame["status"] == "partial"
+    assert frame["completeness"]["reasons"] == ["concepts_per_node_cap"]
+    assert frame["completeness"]["truncated"] is True
+
+
 def test_derive_lens_refuses_corrupt_source(tmp_path):
     # A corruption-class reason (torn/invalid source) DOES block minting BEFORE the model call, and
     # rides back as a blocking_reasons receipt so the UI can explain WHY it is permanent instead of

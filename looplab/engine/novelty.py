@@ -280,15 +280,26 @@ class NoveltyGateMixin:
         seed = seed if seed.concepts() else None
         all_node_concepts = getattr(state, "node_concepts", None) or {}
         concept_provenance = getattr(state, "node_concept_provenance", None) or {}
+        receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
         # CODEX AGENT: an Idea's concepts are authored by the same proposer whose admission is being
         # decided, so they cannot certify their own graded-novelty bypass. Only replay-proven
         # `node_concepts` classifier events enter the agentic path; missing/unknown provenance fails
         # closed to the curated heuristic path (or no-op when no curated vocabulary exists).
         experiment_ids = {nd.id for nd in _experiment_nodes(state)}
+        if any(
+            nid in receipts
+            and concept_provenance.get(nid) in {
+                NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR}
+            for nid in experiment_ids
+        ):
+            # A retained subset cannot certify complete experiment coverage or an L4/L5 bypass. This
+            # also prevents an emptied partial cache from silently falling back to the heuristic path.
+            return None
         classifier_ids = {
             nid for nid in experiment_ids
             if nid in all_node_concepts
             and concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+            and nid not in receipts
         }
         # An operator-edited node has an authoritative human/assistant-asserted tag set, so it counts as
         # COVERED for the completeness check below — but its tags never enter `node_concepts` (the graded
@@ -298,6 +309,7 @@ class NoveltyGateMixin:
         operator_ids = {
             nid for nid in experiment_ids
             if concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_OPERATOR
+            and nid not in receipts
         }
         # CODEX AGENT: a partial cadence is UNKNOWN coverage, not evidence that the remaining nodes
         # touch no concepts. Once any classifier receipt exists, every experiment must be covered (a

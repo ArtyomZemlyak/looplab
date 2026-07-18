@@ -55,7 +55,7 @@ def test_agent_loop_uses_tool_then_emits(tmp_path):
         _tool_call("kb_search", {"query": "polynomial degree"}),   # turn 1: consult KB
         _tool_call("emit", {"operator": "draft",                   # turn 2: final Idea
                             "params": {"degree": 2.0, "lam": 0.0},
-                            "rationale": "kb says degree 2"}),
+                            "rationale": "kb says degree 2", "concept_mode": "full"}),
     ])
     r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
                             bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)})
@@ -71,7 +71,8 @@ def test_agent_loop_uses_tool_then_emits(tmp_path):
 def test_agent_loop_clamps_out_of_bounds_emit(tmp_path):
     _seed_kb(tmp_path)
     client = _FakeChatClient([
-        _tool_call("emit", {"operator": "draft", "params": {"degree": 99.0}, "rationale": "x"}),
+        _tool_call("emit", {"operator": "draft", "params": {"degree": 99.0},
+                            "rationale": "x", "concept_mode": "full"}),
     ])
     r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
                             bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)})
@@ -85,7 +86,8 @@ def test_agent_loop_emit_after_nudges_to_commit(tmp_path):
     client = _FakeChatClient([
         _tool_call("kb_search", {"query": "a"}),                       # turn 1: investigate
         _tool_call("kb_search", {"query": "b"}),                       # turn 2: reaches emit_after=2 -> nudge
-        _tool_call("emit", {"operator": "draft", "params": {"degree": 2.0}, "rationale": "commit"}),
+        _tool_call("emit", {"operator": "draft", "params": {"degree": 2.0},
+                            "rationale": "commit", "concept_mode": "full"}),
     ])
     r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
                             bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)},
@@ -104,7 +106,7 @@ def test_agent_loop_rejects_empty_emit_and_reprompts(tmp_path):
     client = _FakeChatClient([
         _tool_call("emit", {"operator": "draft", "params": {}, "rationale": ""}),   # empty no-op -> bounced
         _tool_call("emit", {"operator": "draft", "params": {"degree": 3.0},          # re-emit: real idea
-                            "rationale": "try degree 3"}),
+                            "rationale": "try degree 3", "concept_mode": "full"}),
     ])
     r = ToolUsingResearcher(client, KnowledgeTools(str(tmp_path)),
                             bounds={"degree": (0.0, 6.0), "lam": (0.0, 100.0)})
@@ -124,11 +126,12 @@ def test_tool_researcher_finalize_drops_nonnumeric_params():
     r = ToolUsingResearcher(client=None, tools=None, bounds=None)
     # the live model returned this and crashed the run before the fix
     idea = r._finalize({"operator": "modify_metric", "params": {"new_metric": "linear"},
-                        "rationale": "switch reward landscape"})
+                        "rationale": "switch reward landscape", "concept_mode": "full"})
     assert idea.params == {} and idea.rationale == "switch reward landscape"
     # numeric params survive; bounds still fill/clamp
     r2 = ToolUsingResearcher(client=None, tools=None, bounds={"x": (0.0, 10.0)})
-    idea2 = r2._finalize({"operator": "improve", "params": {"x": "99", "junk": "nope"}})
+    idea2 = r2._finalize({"operator": "improve", "params": {"x": "99", "junk": "nope"},
+                          "concept_mode": "full"})
     assert idea2.params == {"x": 10.0}                       # "99" clamped to 10, junk dropped
 
 

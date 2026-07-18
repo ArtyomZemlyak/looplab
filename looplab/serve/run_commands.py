@@ -32,8 +32,13 @@ from typing import Callable, Optional
 from fastapi import HTTPException
 from pydantic import ValidationError
 
+from looplab.core.concepts import (
+    normalized_concept_materialization_receipt,
+    normalized_concept_renames,
+    resolve_concept_set,
+)
 from looplab.core.atomicio import atomic_write_text
-from looplab.core.models import Event, Idea
+from looplab.core.models import Event, Idea, IdeaEmission, durable_idea_payload
 from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.comment_projection import (
     COMMENT_ID_RE, COMMENT_MAX_PER_NODE_GENERATION, COMMENT_MAX_PER_RUN, COMMENT_MAX_VERSION,
@@ -774,7 +779,27 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
             raise HTTPException(409, f"source experiment #{sn} in run {sr} is tombstoned")
         if sn in sst.aborted_nodes:
             raise HTTPException(409, f"source experiment #{sn} in run {sr} is aborted")
-        sidea = snode.idea.model_dump(mode="json")
+        sidea = durable_idea_payload(snode.idea)
+        receipt = (getattr(sst, "node_concept_materialization_receipts", None) or {}).get(sn)
+        receipt_valid = (receipt is None
+                         or normalized_concept_materialization_receipt(receipt) is not None)
+        membership_known = sn in (getattr(sst, "node_concepts", None) or {})
+        effective: set[str] = set()
+        membership_problem = None
+        if receipt is None and receipt_valid and membership_known:
+            effective, membership_problem = resolve_concept_set(
+                sst.node_concepts[sn],
+                normalized_concept_renames(getattr(sst, "concept_consolidation", None)))
+        if receipt is None and receipt_valid and membership_known and membership_problem is None:
+            # CODEX AGENT: a source delta is relative to the SOURCE base/DAG. Import its effective
+            # snapshot as an exact full set so the target run cannot reinterpret it against new parents.
+            sidea.update({"concept_mode": "full", "concepts": sorted(effective),
+                          "concepts_added": [], "concepts_removed": []})
+        else:
+            # Unknown/partial/unavailable source membership must not transport a relative or future
+            # envelope. The experiment/code import remains useful; taxonomy stays genuinely absent.
+            for field in ("concept_mode", "concepts", "concepts_added", "concepts_removed"):
+                sidea.pop(field, None)
         note = f"imported from run {sr} #{sn}"
         base = (sidea.get("rationale") or "").strip()
         sidea["rationale"] = f"{base} | {note}" if base else note
@@ -906,12 +931,15 @@ def normalize_control(srv, rd: Path, event_type: str, data) -> dict:
         if not isinstance(operator, str) or not operator.strip():
             raise HTTPException(400, "idea.operator must be a non-empty string")
         try:
-            normalized_idea = Idea.model_validate(idea)
+            # Modern API writes with a discriminator are closed and internally consistent. Legacy/manual
+            # payloads with no mode stay accepted by the tolerant reader (including transitional deltas).
+            normalized_idea = (IdeaEmission.model_validate(idea).to_idea()
+                               if "concept_mode" in idea else Idea.model_validate(idea))
         except ValidationError as exc:
             issues = [f"{'.'.join(map(str, row.get('loc') or ('idea',)))}: {row.get('msg')}"
                       for row in exc.errors(include_url=False)[:5]]
             raise HTTPException(400, f"idea is invalid: {'; '.join(issues)}") from exc
-        data["idea"] = normalized_idea.model_dump(mode="json")
+        data["idea"] = durable_idea_payload(normalized_idea)
         if data.get("parent_id") is not None:
             data["parent_id"] = _node("parent_id")
         if data.get("parent_ids") is not None:

@@ -84,6 +84,22 @@ def test_run_facts_excludes_researcher_authored_concept_claims(tmp_path):
     assert facts["attempts"][0]["concepts"] == []
 
 
+def test_run_facts_excludes_partial_classifier_membership(tmp_path):
+    s = EventStore(tmp_path / "partial.jsonl")
+    s.append("run_started", {"run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}},
+    })
+    s.append("node_concepts", {
+        "node_id": 0, "mode": "llm", "concepts": [f"axis/c{i:03d}" for i in range(65)]})
+
+    state = fold(s.read_all())
+    assert state.node_concept_materialization_receipts[0]["status"] == "partial"
+    facts = run_facts(state, kind="dataset", metric="recall")
+    assert facts["attempts"][0]["concepts"] == []
+
+
 # --------------------------------------------------------------------------- #
 # CR0 gate: rebuild from scratch == itself, order-independent
 # --------------------------------------------------------------------------- #

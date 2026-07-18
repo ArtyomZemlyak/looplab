@@ -377,6 +377,16 @@ def test_run_base_hint_requires_explicit_delta_mode(tmp_path):
     assert "concept_mode=\"delta\"" in hint
     assert "both delta lists may be empty" in hint
 
+    st.run_base_concept_receipt = {
+        "status": "partial", "reasons": ["concepts_per_node_cap"]}
+    eng._set_complexity_hint(st, st.nodes[0])
+    assert "concept_mode=\"delta\"" not in getattr(eng.researcher, "_complexity_hint", "")
+    st.run_base_concept_receipt = None
+    st.node_concept_materialization_receipts[0] = {
+        "status": "unavailable", "reasons": ["delta_dependency_unknown_parent_membership"]}
+    eng._set_complexity_hint(st, st.nodes[0])
+    assert "concept_mode=\"delta\"" not in getattr(eng.researcher, "_complexity_hint", "")
+
 
 def test_failure_reflection_injects_recent_failures(tmp_path):
     eng = _engine(tmp_path / "refl", failure_reflection=True)

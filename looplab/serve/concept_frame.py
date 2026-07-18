@@ -12,7 +12,15 @@ from typing import Optional
 
 from fastapi import HTTPException
 
-from looplab.core.models import CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON, valid_concept_id
+from looplab.core.concepts import (
+    MAX_CONCEPT_ID_CHARS,
+    MAX_CONCEPT_ID_DEPTH,
+    CONCEPT_RENAME_HOP_CAP,
+    normalize_concept_id,
+    normalized_concept_materialization_receipt,
+    normalized_concept_renames,
+    resolve_concept,
+)
 from looplab.serve.protocol import RUN_GENERATION_FIELD
 
 
@@ -24,9 +32,9 @@ MAX_EDGE_WEIGHT = MAX_MEMBERSHIPS
 MAX_TREE_NODES = 4_096
 MAX_EDGES = 2_048
 MAX_EDGE_ENDPOINTS = 4_096
-MAX_ID_CHARS = 256
-MAX_ID_DEPTH = 12
-MAX_RENAME_HOPS = 16
+MAX_ID_CHARS = MAX_CONCEPT_ID_CHARS
+MAX_ID_DEPTH = MAX_CONCEPT_ID_DEPTH
+MAX_RENAME_HOPS = CONCEPT_RENAME_HOP_CAP
 MAX_LENS_RELS = 8
 MAX_LENS_RELS_CHARS = 192
 MAX_LENS_PROMPT_BYTES = 2_048
@@ -48,39 +56,12 @@ TRUNCATION_CAP_REASONS = frozenset({
 
 def concept_id(raw) -> Optional[str]:
     """Return a projection-safe canonical concept id, or ``None``."""
-    if not isinstance(raw, str) or len(raw) > MAX_ID_CHARS:
-        return None
-    value = raw.strip().lower().replace(" ", "-").strip("/")
-    if not value or len(value) > MAX_ID_CHARS:
-        return None
-    parts = value.split("/")
-    if (len(parts) > MAX_ID_DEPTH or any(not part for part in parts)
-            or any(ch.isspace() or unicodedata.category(ch).startswith("C") for ch in value)
-            # Enforce the shared CHARSET rule (letters/digits + -._ per segment): reject base64/hash
-            # garbage, symbols, emoji, `<script>`, `a/..` that the depth/length/control checks miss.
-            or not valid_concept_id(value)):
-        return None
-    return value
+    return normalize_concept_id(raw)
 
 
 def canonical_concept(raw, rename: dict) -> tuple[Optional[str], Optional[str]]:
     """Resolve a bounded rename chain; malformed identity is omitted and receipt-stamped."""
-    current = raw
-    seen: set[str] = set()
-    for _hop in range(MAX_RENAME_HOPS + 1):
-        canonical = concept_id(current)
-        if canonical is None:
-            return None, "invalid_concept_id"
-        if canonical in seen:
-            return None, "rename_cycle"
-        seen.add(canonical)
-        nxt = rename.get(current)
-        if nxt is None and current != canonical:
-            nxt = rename.get(canonical)
-        if nxt is None:
-            return canonical, None
-        current = nxt
-    return None, "rename_hop_cap"
+    return resolve_concept(raw, rename)
 
 
 def finite_metric(value) -> Optional[float]:
@@ -221,10 +202,25 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     registered_rels = {rel for item in registered.values() for rel in (item.get("rels") or [])
                        if isinstance(rel, str)}
     reasons: set[str] = set()
-    rename = getattr(state, "concept_consolidation", None) or {}
-    if not isinstance(rename, dict):
+    rename = getattr(state, "concept_consolidation", None)
+    if rename is None:
         rename = {}
+    elif not isinstance(rename, dict):
         reasons.add("invalid_consolidation_map")
+    # CODEX AGENT: normalize once at the projection boundary; replay/search/serve now follow the
+    # identical bounded chain semantics and invalid targets remain poison markers rather than aliases.
+    rename = normalized_concept_renames(rename)
+    if rename.endpoint_problem:
+        reasons.add("invalid_concept_id")
+    materialization_unavailable = False
+    raw_base_receipt = getattr(state, "run_base_concept_receipt", None)
+    if raw_base_receipt is not None:
+        base_receipt = normalized_concept_materialization_receipt(raw_base_receipt)
+        if base_receipt is None:
+            reasons.add("invalid_concept_materialization_receipt")
+        else:
+            reasons.update(base_receipt["reasons"])
+            materialization_unavailable |= base_receipt["status"] == "unavailable"
     raw_memberships = getattr(state, "node_concepts", None) or {}
     if not isinstance(raw_memberships, dict):
         raw_memberships = {}
@@ -244,14 +240,16 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
     if not isinstance(raw_materialization_receipts, dict):
         reasons.add("invalid_concept_materialization_receipt")
     else:
-        for raw_node_id, raw_reason in raw_materialization_receipts.items():
+        for raw_node_id, raw_receipt in raw_materialization_receipts.items():
+            receipt = normalized_concept_materialization_receipt(raw_receipt)
             if (isinstance(raw_node_id, bool) or not isinstance(raw_node_id, int)
                     or raw_node_id not in state.nodes
-                    or raw_reason != CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON):
+                    or receipt is None):
                 reasons.add("invalid_concept_materialization_receipt")
                 continue
             if raw_node_id in current_nodes:
-                reasons.add(CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON)
+                reasons.update(receipt["reasons"])
+                materialization_unavailable |= receipt["status"] == "unavailable"
 
     # CODEX AGENT: insertion order is replay history, not semantic priority. Each level keeps a bounded
     # lexicographic top-K while scanning the full source for integrity receipts. Empty/invalid-only and
@@ -457,6 +455,7 @@ def bounded_inputs(state, lens_pack: list[dict]) -> dict:
         "source_membership_nodes": len(raw_memberships),
         "source_edges": len(raw_edges),
         "derived_edges": derived_edge_count,
+        "materialization_unavailable": materialization_unavailable,
     }
 
 
@@ -557,6 +556,7 @@ def build_core(state, *, run_id: str, lens_pack: list[dict],
         "source_membership_nodes": inputs["source_membership_nodes"],
         "source_edges": inputs["source_edges"],
         "derived_edges": inputs["derived_edges"],
+        "materialization_unavailable": inputs["materialization_unavailable"],
         "included_membership_nodes": len(memberships),
         "membership_count": inputs["membership_count"],
         "reference_count": reference_count,

@@ -18,7 +18,7 @@ from uuid import uuid4
 
 import anyio
 
-from looplab.core.models import Idea
+from looplab.core.models import Idea, durable_idea_payload
 from looplab.events.replay import fold
 from looplab.events.types import EV_ABLATE
 
@@ -149,7 +149,8 @@ class AblationMixin:
         if top is not None and top in proposal.params:
             new_params[top] = proposal.params[top]
         idea = Idea(operator="refine_block", params=new_params,
-                    rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})")
+                    rationale=f"ablation: refine highest-impact '{top}' (impacts={impacts})",
+                    concept_mode="delta", concepts_added=[], concepts_removed=[])
         # §1: a standing operator directive must steer the ablation-produced refine_block code too —
         # this is a real tree-entering node built from an idea, exactly like the improve/merge sites
         # that already thread _directed_idea (the signal_delivery registry lists the Developer as a
@@ -161,7 +162,7 @@ class AblationMixin:
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-            idea=idea.model_dump(mode="json"), code=code,
+            idea=durable_idea_payload(idea), code=code,
             files=getattr(self.developer, "last_files", {}) or {},
             parent_generations={str(parent_id): generation})
         if node_id not in fold(self.store.read_all()).nodes:
@@ -260,7 +261,8 @@ class AblationMixin:
             top_src = "\n".join(code.splitlines()[s:e])[:300]
         idea = Idea(operator="refine_block", params=dict(parent.idea.params),
                     rationale=("code-block ablation: refine the highest-impact pipeline block "
-                               f"#{top} and keep the rest. Block:\n{top_src}"))
+                               f"#{top} and keep the rest. Block:\n{top_src}"),
+                    concept_mode="delta", concepts_added=[], concepts_removed=[])
         new_code = self._implement(self._directed_idea(idea, state), parent)   # §1: directives (see _ablate)
         if not self._ablation_parent_current(parent_id, generation):
             self._discard_node_build_telemetry()
@@ -268,7 +270,7 @@ class AblationMixin:
         node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
         self._emit_node_created(
             node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-            idea=idea.model_dump(mode="json"), code=new_code,
+            idea=durable_idea_payload(idea), code=new_code,
             files=getattr(self.developer, "last_files", {}) or {},
             parent_generations={str(parent_id): generation})
         if node_id not in fold(self.store.read_all()).nodes:

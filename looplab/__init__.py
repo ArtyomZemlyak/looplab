@@ -77,6 +77,7 @@ _LAYOUT = {
     "command_eval": "runtime",
     "command_observation": "serve",
     "comparison": "core",
+    "concepts": "core",       # canonical concept identity + materialization integrity contracts
     "concept_frame": "serve",   # bounded versioned concept frames served to the UI
     "config": "core",
     "confirm": "trust",

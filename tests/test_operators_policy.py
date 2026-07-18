@@ -24,6 +24,8 @@ def test_merge_idea_means_params():
     idea = merge_idea(parents)
     assert idea.operator == "merge"
     assert idea.params == {"x": 3.0, "y": 1.0}
+    assert idea.concept_mode == "delta"
+    assert idea.concepts_added == idea.concepts_removed == []
 
 
 def test_policy_debugs_failed_leaf_then_stops():
@@ -79,7 +81,6 @@ def test_policy_merges_after_improves():
         st.nodes[i] = Node(id=i, operator=op,
                            idea=Idea(operator=op, params={"x": float(i), "y": 0.0}),
                            metric=m, status=NodeStatus.evaluated)
-    from looplab.events.replay import fold  # recompute best deterministically
     # set best via fold-equivalent: lowest metric is node 2 (m=1.0)
     st.best_node_id = 2
     pol = GreedyTree(n_seeds=3, max_nodes=12, merge_every=3, max_merges=2)

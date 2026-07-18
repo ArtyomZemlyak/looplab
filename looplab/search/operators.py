@@ -33,4 +33,7 @@ def merge_idea(parents: list[Node]) -> Idea:
         if vals:
             params[k] = round(sum(vals) / len(vals), 4)
     pids = ",".join(str(p.id) for p in parents)
-    return Idea(operator="merge", params=params, rationale=f"mean-merge of nodes {pids}")
+    # CODEX AGENT: a merge inherits the UNION of every parent. A bare durable Idea has unknown/absent
+    # membership; an explicit zero delta is the only unambiguous way to preserve that union unchanged.
+    return Idea(operator="merge", params=params, rationale=f"mean-merge of nodes {pids}",
+                concept_mode="delta", concepts_added=[], concepts_removed=[])

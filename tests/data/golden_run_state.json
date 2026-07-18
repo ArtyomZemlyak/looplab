@@ -300,7 +300,6 @@
       "holdout_metric": null,
       "id": 0,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -351,7 +350,6 @@
       "holdout_metric": null,
       "id": 1,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -402,7 +400,6 @@
       "holdout_metric": null,
       "id": 2,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -456,7 +453,6 @@
       "holdout_metric": null,
       "id": 3,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -512,7 +508,6 @@
       "holdout_metric": null,
       "id": 4,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -565,7 +560,6 @@
       "holdout_metric": null,
       "id": 5,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -621,7 +615,6 @@
       "holdout_metric": null,
       "id": 6,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -678,7 +671,6 @@
       "holdout_metric": null,
       "id": 7,
       "idea": {
-        "concept_mode": "full",
         "concepts": [],
         "concepts_added": [],
         "concepts_removed": [],
@@ -774,6 +766,7 @@
   "research_requests": [],
   "research_served": 0,
   "reward_hacks": [],
+  "run_base_concept_receipt": null,
   "run_base_concepts": [],
   "run_id": "golden",
   "run_setup_done": [],

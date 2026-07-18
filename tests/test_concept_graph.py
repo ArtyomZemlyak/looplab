@@ -354,6 +354,25 @@ def test_node_concept_source_provenance_is_explicit_and_future_safe(
         assert state.node_concepts_at_vocab == {}
 
 
+@pytest.mark.parametrize("concepts", [
+    [f"axis/c{i:03d}" for i in range(65)],
+    ["valid/x", "bad!"],
+])
+def test_partial_classifier_membership_is_display_only_not_verified_evidence(tmp_path, concepts):
+    from looplab.core.models import classifier_verified_node_concepts
+    from looplab.events.eventstore import EventStore
+    s = EventStore(tmp_path / "e.jsonl")
+    s.append("run_started", {"run_id": "t", "task_id": "dr", "goal": "g", "direction": "max"})
+    s.append("node_created", {"node_id": 0, "parent_ids": [], "operator": "draft",
+                              "idea": {"operator": "draft", "params": {}, "rationale": "r"}})
+    s.append("node_concepts", {"node_id": 0, "concepts": concepts, "mode": "llm"})
+
+    state = fold(s.read_all())
+    assert state.node_concepts[0]                         # valid bounded subset stays displayable
+    assert state.node_concept_materialization_receipts[0]["status"] == "partial"
+    assert classifier_verified_node_concepts(state, 0) == []
+
+
 @pytest.mark.parametrize("order", ["offline-first", "classifier-first"])
 def test_classifier_receipt_dominates_offline_replay_in_either_order(tmp_path, order):
     from looplab.events.eventstore import EventStore

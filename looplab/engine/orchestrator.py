@@ -70,7 +70,7 @@ from looplab.engine.workspace import WorkspaceSeeder
 from looplab.engine.triage import (_MAX_DEP_ROUNDS, _MECHANICAL_MARKERS,  # noqa: F401
                                    _dir_fingerprint, _failure_reason, _holdout_indices,
                                    _normalize_error_sig, _rule_triage, _shallow_fingerprint)
-from looplab.core.models import Idea, Node, NodeStatus, RunState
+from looplab.core.models import Idea, Node, NodeStatus, RunState, durable_idea_payload
 from looplab.core.config import RUN_START_PINNED_FIELDS
 from looplab.core.fitness import VERIFIER_SELECTION_CONTRACT
 from looplab.search.operators import merge_idea
@@ -1793,7 +1793,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 node_id=node_id,
                 parent_ids=parents,
                 operator=idea.operator,
-                idea=idea.model_dump(mode="json"),
+                idea=durable_idea_payload(idea),
                 code=code,
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
@@ -1887,7 +1887,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 return
             self._emit_node_created(
                 node_id=node.id, parent_ids=parents, operator=idea.operator,
-                idea=idea.model_dump(mode="json"), code=code,
+                idea=durable_idea_payload(idea), code=code,
                 files=getattr(self.developer, "last_files", {}) or {},
                 deleted=getattr(self.developer, "last_deleted", []) or [],
                 generation=generation,
@@ -1994,7 +1994,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 node_id=node_id,
                 parent_ids=parents,
                 operator=idea.operator,
-                idea=idea.model_dump(mode="json"),
+                idea=durable_idea_payload(idea),
                 code=code,
                 # Honour explicit files/deleted on the request (a cross-run `import` ships the
                 # sibling's full multi-file solution); else use the Developer's last build, and

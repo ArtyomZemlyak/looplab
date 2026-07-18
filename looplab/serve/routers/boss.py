@@ -585,7 +585,7 @@ def build_router(srv) -> APIRouter:
         instruction = (body.get("instruction") or "").strip()
         history = body.get("messages") or []
         st = srv.state(rd)
-        from looplab.core.models import Idea
+        from looplab.core.models import Idea, IdeaEmission, durable_idea_payload
         from looplab.core.parse import parse_structured
         from looplab.agents.roles import _CONCEPT_AUTHORING_GUIDANCE
         convo = "\n".join(f"{m.get('role')}: {m.get('content')}" for m in history)
@@ -601,8 +601,9 @@ def build_router(srv) -> APIRouter:
                 try:
                     # Offload — the blocking parser/completion must not stall the event loop.
                     idea = await anyio.to_thread.run_sync(lambda: parse_structured(
-                        client, [{"role": "user", "content": prompt}], Idea, s.llm_parser))
-                    return {"ok": True, "idea": idea.model_dump(mode="json"), "parsed": True}
+                        client, [{"role": "user", "content": prompt}],
+                        IdeaEmission, s.llm_parser).to_idea())
+                    return {"ok": True, "idea": durable_idea_payload(idea), "parsed": True}
                 except Exception:  # small models can fumble strict output; fall back to editable text
                     text = await anyio.to_thread.run_sync(lambda: client.complete_text([
                         {"role": "system", "content": "Reply with a one-line experiment suggestion: "
@@ -610,7 +611,7 @@ def build_router(srv) -> APIRouter:
                         {"role": "user", "content": prompt}]))
                     fallback = Idea(operator="improve", params={}, rationale=text.strip()[:600])
                     return {"ok": True, "parsed": False,
-                            "idea": fallback.model_dump(mode="json")}
+                            "idea": durable_idea_payload(fallback)}
         except HTTPException as exc:
             sanitized = _sanitized_domain_http_exception(exc)
             if sanitized is not None:

@@ -442,14 +442,21 @@ class StrategyCadenceMixin:
         main task appends it (invariant 1). No-op while off or until a node has authored concepts."""
         if not getattr(self, "_concept_run_base", False):
             return state
-        if state.run_base_concepts:                       # already seeded -> never re-emit (idempotent)
+        if state.run_base_concepts or state.run_base_concept_receipt is not None:
+            # A partial/unavailable empty base is still an authored base event. Never overwrite it with
+            # a later apparently exact seed; operator repair remains an explicit last-write-wins action.
             return state
         prov = getattr(state, "node_concept_provenance", None) or {}
+        receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
         # First evaluated node whose concepts the RESEARCHER authored (not a classifier tag) — the run's
         # common tech stack. Deterministic (id-sorted). Downstream nodes then author only deltas vs this.
         for node in sorted(state.evaluated_nodes(), key=lambda x: x.id):
             concepts = state.node_concepts.get(node.id)
-            if not concepts or prov.get(node.id) != NODE_CONCEPT_PROVENANCE_AUTHORED:
+            if (node.id in state.aborted_nodes or not concepts
+                    or prov.get(node.id) != NODE_CONCEPT_PROVENANCE_AUTHORED
+                    or node.id in receipts):
+                # CODEX AGENT: a bounded/invalid/otherwise partial membership cannot become an exact
+                # run base merely because the next event contains only its retained valid subset.
                 continue
             # Normalize EXACTLY as _on_run_concepts folds it (drop empty/dup), and only seed a NON-EMPTY
             # base. Otherwise `["" ]`-style concepts would fold to an empty run_base_concepts, the "base is
@@ -515,11 +522,13 @@ class StrategyCadenceMixin:
                 # re-tags an operator node every pass forever (the fold guard rejects the re-tag, so it never
                 # converges: wasted LLM calls + no-op log growth). This keeps operator tags out of the
                 # classifier-only cross-run/novelty EVIDENCE channel (still gated on CLASSIFIER provenance).
+                receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
                 all_known = {
                     int(k): v
                     for k, v in (getattr(state, "node_concepts", None) or {}).items()
-                    if provenance.get(int(k)) in (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
-                                                  NODE_CONCEPT_PROVENANCE_OPERATOR)
+                    if (provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_OPERATOR
+                        or (provenance.get(int(k)) == NODE_CONCEPT_PROVENANCE_CLASSIFIER
+                            and int(k) not in receipts))
                 }
                 at_vocab = {int(k): int(v)
                             for k, v in (getattr(state, "node_concepts_at_vocab", None) or {}).items()}

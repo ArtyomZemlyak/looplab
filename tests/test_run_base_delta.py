@@ -7,10 +7,12 @@ classifier/operator event still wins over an authored delta.
 """
 from types import SimpleNamespace
 
-from looplab.core.models import Event, Idea
+import pytest
+
+from looplab.core.models import Event, Idea, Node, RunState
 from looplab.engine.orchestrator import Engine
 from looplab.events.eventstore import EventStore
-from looplab.events.replay import FoldCursor, fold
+from looplab.events.replay import FoldCursor, _materialize_concept_deltas, fold
 from looplab.search.concept_graph import node_concept_delta
 
 
@@ -115,9 +117,9 @@ def test_active_delta_cycle_fails_closed_independently_of_event_order():
         # CODEX AGENT: empty is the safe fallback, not an honest known-empty classification. Every
         # cycle member and active delta descendant gets the same deterministic typed receipt.
         assert state.node_concept_materialization_receipts == {
-            0: "delta_dependency_cycle",
-            1: "delta_dependency_cycle",
-            2: "delta_dependency_cycle",
+            0: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
+            1: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
+            2: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
         }
         restored = type(state).model_validate_json(state.model_dump_json())
         assert (restored.node_concept_materialization_receipts
@@ -145,9 +147,9 @@ def test_fold_cursor_recomputes_and_clears_delta_cycle_receipts():
     cursor.extend(events)
     cycle_snapshot = cursor.snapshot()
     assert cycle_snapshot.node_concept_materialization_receipts == {
-        0: "delta_dependency_cycle",
-        1: "delta_dependency_cycle",
-        2: "delta_dependency_cycle",
+        0: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
+        1: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
+        2: {"status": "unavailable", "reasons": ["delta_dependency_cycle"]},
     }
 
     cursor.extend([repaired])
@@ -285,7 +287,7 @@ def test_explicit_empty_delta_is_distinct_from_absent_legacy_membership(tmp_path
     assert st.node_concepts == {0: []}
     assert st.node_concept_deltas == {0: {"added": [], "removed": []}}
     assert st.node_concept_provenance == {0: "researcher-authored"}
-    assert st.nodes[1].idea.concept_mode == "full"
+    assert st.nodes[1].idea.concept_mode is None
 
 
 def test_explicit_full_empty_is_known_empty_but_legacy_empty_stays_absent(tmp_path):
@@ -306,7 +308,7 @@ def test_default_delta_fields_without_mode_do_not_activate_delta(tmp_path):
     s.append("node_created", _created(0, added=[], removed=[]))
 
     st = fold(s.read_all())
-    assert st.nodes[0].idea.concept_mode == "full"
+    assert st.nodes[0].idea.concept_mode is None
     assert 0 not in st.node_concept_deltas
     assert 0 not in st.node_concepts
     assert 0 not in st.node_concept_provenance
@@ -392,7 +394,7 @@ def test_legacy_no_mode_preserves_full_and_transitional_delta_behaviour(tmp_path
 
     st = fold(s.read_all())
     assert st.node_concepts[0] == ["legacy/full"]
-    assert st.nodes[0].idea.concept_mode == "full"
+    assert st.nodes[0].idea.concept_mode is None
     assert st.node_concepts[1] == ["base/x", "legacy/delta-add"]
     assert st.nodes[1].idea.concept_mode == "delta"
 
@@ -409,7 +411,7 @@ def test_concept_mode_round_trips_through_model_and_event_json():
     restored = Idea.model_validate(decoded.data["idea"])
     assert decoded.data["idea"]["concept_mode"] == "delta"
     assert restored.model_dump(mode="json") == idea.model_dump(mode="json")
-    assert Idea(operator="draft").model_dump(mode="json")["concept_mode"] == "full"
+    assert "concept_mode" not in Idea(operator="draft").model_dump(mode="json")
 
 
 def test_propose_reset_immediately_clears_delta_sidecar_and_membership(tmp_path):
@@ -486,3 +488,243 @@ def test_engine_seed_skips_a_node_whose_concepts_normalize_empty(tmp_path):
     st2 = Engine._maybe_seed_run_base_concepts(_seed_host(s), st)
     assert st2.run_base_concepts == ["loss/dcl"]               # seeded from node1, not the empty node0
     assert len([e for e in s.read_all() if e.type == "run_concepts"]) == 1
+
+
+@pytest.mark.parametrize("partial", [
+    [f"axis/c{i:03d}" for i in range(65)],
+    ["valid/x", "bad!"],
+])
+def test_engine_seed_never_launders_partial_membership_into_exact_base(tmp_path, partial):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=partial))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    s.append("node_created", _created(1, concepts=["exact/y"]))
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.9})
+
+    state = fold(s.read_all())
+    assert state.node_concept_materialization_receipts[0]["status"] == "partial"
+    seeded = Engine._maybe_seed_run_base_concepts(_seed_host(s), state)
+    assert seeded.run_base_concepts == ["exact/y"]
+    assert seeded.run_base_concept_receipt is None
+
+
+def test_engine_seed_skips_aborted_evaluated_source(tmp_path):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, concepts=["aborted/x"]))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    s.append("node_abort", {"node_id": 0})
+    s.append("node_created", _created(1, concepts=["live/y"]))
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.9})
+
+    seeded = Engine._maybe_seed_run_base_concepts(_seed_host(s), fold(s.read_all()))
+    assert seeded.run_base_concepts == ["live/y"]
+
+
+def test_engine_does_not_replace_a_partial_empty_base_event(tmp_path):
+    s = _store(tmp_path)
+    s.append("run_concepts", {"concepts": ["bad!"]})
+    s.append("node_created", _created(0, concepts=["exact/x"]))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+
+    state = fold(s.read_all())
+    assert state.run_base_concepts == [] and state.run_base_concept_receipt is not None
+    unchanged = Engine._maybe_seed_run_base_concepts(_seed_host(s), state)
+    assert unchanged.run_base_concepts == []
+    assert len([event for event in s.read_all() if event.type == "run_concepts"]) == 1
+
+
+def test_unknown_mode_keeps_node_and_propagates_unavailable_receipt(tmp_path):
+    s = _store(tmp_path)
+    s.append("node_created", _created(
+        0, mode="future-v9", concepts=["future/x"], added=["future/y"]))
+    s.append("node_created", _created(1, parent_ids=[0], mode="delta", added=["child/z"]))
+
+    st = fold(s.read_all())
+    assert sorted(st.nodes) == [0, 1]
+    assert 0 not in st.node_concepts
+    expected = {"status": "unavailable", "reasons": ["concept_mode_unsupported"]}
+    assert st.node_concept_materialization_receipts == {0: expected, 1: expected}
+    assert st.node_concepts[1] == []
+
+
+def test_cycle_descendant_keeps_independent_unavailable_parent_reason():
+    events = [Event(type="node_created", data=_created(0, mode="delta")),
+              Event(type="node_created", data=_created(1, mode="delta")),
+              Event(type="node_created", data=_created(3, mode="future-v9")),
+              Event(type="node_created", data=_created(0, parent_ids=[1], mode="delta")),
+              Event(type="node_created", data=_created(1, parent_ids=[0], mode="delta")),
+              Event(type="node_created", data=_created(
+                  2, parent_ids=[1, 3], mode="delta"))]
+    state = fold(events)
+    assert state.node_concept_materialization_receipts[2] == {
+        "status": "unavailable",
+        "reasons": ["concept_mode_unsupported", "delta_dependency_cycle"],
+    }
+
+
+def test_cycle_receipt_keeps_own_and_partial_parent_rename_causes():
+    state = RunState(
+        nodes={
+            0: Node(id=0, parent_ids=[1, 2], operator="draft", idea=Idea(
+                operator="draft", concept_mode="delta")),
+            1: Node(id=1, parent_ids=[0], operator="draft", idea=Idea(
+                operator="draft", concept_mode="delta")),
+            2: Node(id=2, operator="draft", idea=Idea(operator="draft")),
+        },
+        concept_consolidation={"a/x": "a/y", "a/y": "a/x"},
+        node_concepts={2: ["a/x", *[f"wide/c{i:02d}" for i in range(64)]]},
+        node_concept_provenance={0: "researcher-authored", 1: "researcher-authored",
+                                 2: "classifier"},
+        node_concept_deltas={
+            0: {"added": ["a/x"], "removed": []},
+            1: {"added": [], "removed": []},
+        },
+    )
+    _materialize_concept_deltas(state, capped_inputs={2})
+    assert state.node_concept_materialization_receipts[0] == {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_cycle", "rename_cycle", "concepts_per_node_cap"],
+    }
+
+
+def test_missing_and_reset_window_parents_are_typed_unavailable(tmp_path):
+    missing = RunState(
+        nodes={1: Node(id=1, parent_ids=[99], operator="draft", idea=Idea(
+            operator="draft", concept_mode="delta"))},
+        node_concept_deltas={1: {"added": [], "removed": []}},
+        node_concept_provenance={1: "researcher-authored"},
+    )
+    _materialize_concept_deltas(missing)
+    assert missing.node_concept_materialization_receipts[1] == {
+        "status": "unavailable", "reasons": ["delta_dependency_missing_parent"]}
+
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, mode="full", concepts=["parent/x"]))
+    s.append("node_created", _created(1, parent_ids=[0], mode="delta"))
+    s.append("node_reset", {"node_id": 0, "from_stage": "propose", "generation": 0})
+    reset_window = fold(s.read_all())
+    assert reset_window.node_concepts[1] == []
+    assert reset_window.node_concept_materialization_receipts[1] == {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_unknown_parent_membership"],
+    }
+
+    untrusted = RunState(
+        nodes={
+            0: Node(id=0, operator="draft", idea=Idea(operator="draft")),
+            1: Node(id=1, parent_ids=[0], operator="draft", idea=Idea(
+                operator="draft", concept_mode="delta")),
+        },
+        node_concepts={0: ["future/x"]},
+        node_concept_provenance={0: "untrusted-source", 1: "researcher-authored"},
+        node_concept_deltas={1: {"added": [], "removed": []}},
+    )
+    _materialize_concept_deltas(untrusted)
+    assert untrusted.node_concept_materialization_receipts[1] == {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_unknown_parent_membership"],
+    }
+
+
+def test_rename_cycle_is_partial_and_propagates_valid_subset(tmp_path):
+    s = _store(tmp_path)
+    s.append("run_concepts", {"concepts": ["cycle/a", "keep/x"]})
+    s.append("concept_consolidation", {"rename": {"cycle/a": "cycle/b", "cycle/b": "cycle/a"}})
+    s.append("node_created", _created(0, mode="delta"))
+    s.append("node_created", _created(1, parent_ids=[0], mode="delta", added=["child/y"]))
+
+    st = fold(s.read_all())
+    assert st.node_concepts == {0: ["keep/x"], 1: ["child/y", "keep/x"]}
+    expected = {"status": "partial", "reasons": ["rename_cycle"]}
+    assert st.node_concept_materialization_receipts == {0: expected, 1: expected}
+
+
+def test_materialized_membership_is_bounded_through_deep_and_wide_dags():
+    nodes: dict[int, Node] = {}
+    memberships: dict[int, list[str]] = {}
+    provenance: dict[int, str] = {}
+    for node_id in range(1_000):
+        nodes[node_id] = Node(id=node_id, operator="draft", idea=Idea(operator="draft"))
+        memberships[node_id] = [f"p{node_id:04d}/c{index:02d}" for index in range(64)]
+        provenance[node_id] = "researcher-authored"
+    merge_id = 1_000
+    nodes[merge_id] = Node(
+        id=merge_id, parent_ids=list(range(1_000)), operator="merge",
+        idea=Idea(operator="merge", concept_mode="delta"))
+    st = RunState(
+        nodes=nodes,
+        node_concepts=memberships,
+        node_concept_provenance={**provenance, merge_id: "researcher-authored"},
+        node_concept_deltas={merge_id: {"added": [], "removed": []}},
+    )
+    _materialize_concept_deltas(st)
+    assert len(st.node_concepts[merge_id]) == 64
+    assert st.node_concept_materialization_receipts[merge_id] == {
+        "status": "partial", "reasons": ["concepts_per_node_cap"]}
+
+    events = [Event(type="run_concepts", data={"concepts": []})]
+    for node_id in range(200):
+        events.append(Event(type="node_created", data=_created(
+            node_id, parent_ids=[] if node_id == 0 else [node_id - 1],
+            mode="delta", added=[f"lineage/c{node_id:03d}"])))
+    deep = fold(events)
+    assert max(map(len, deep.node_concepts.values())) == 64
+    assert deep.node_concept_materialization_receipts[199]["reasons"] == ["concepts_per_node_cap"]
+
+
+@pytest.mark.parametrize("producer", ["classifier", "operator"])
+@pytest.mark.parametrize("bad_kind", ["future", "cap", "invalid"])
+def test_protected_full_receipt_survives_same_subject_reemit(tmp_path, producer, bad_kind):
+    s = _store(tmp_path)
+    original = _created(0, mode="delta", added=["authored/x"])
+    s.append("node_created", original)
+    tags = [f"tag/c{i:02d}" for i in range(65)] if bad_kind == "cap" else ["trusted/x"]
+    if bad_kind == "invalid":
+        tags.append("bad!")
+    if producer == "classifier":
+        s.append("node_concepts", {
+            "node_id": 0, "concepts": tags, "mode": "llm", "generation": 0})
+    else:
+        s.append("concept_tag_edited", {
+            "node_id": 0, "concepts": tags, "node_generation": 0})
+    replacement = _created(0, mode="future-v2" if bad_kind == "future" else "delta",
+                           added=["authored/x"])
+    if bad_kind == "cap":
+        replacement["idea"]["concepts_added"] = [f"ignored/c{i:02d}" for i in range(65)]
+    elif bad_kind == "invalid":
+        replacement["idea"]["concepts_added"] = ["bad!"]
+    s.append("node_created", replacement)
+
+    st = fold(s.read_all())
+    expected_provenance = "classifier" if producer == "classifier" else "operator-edited"
+    assert st.node_concept_provenance[0] == expected_provenance
+    expected_reasons = (["concepts_per_node_cap"] if len(tags) > 64 else
+                        ["invalid_concept_id"] if "bad!" in tags else [])
+    if expected_reasons:
+        assert st.node_concept_materialization_receipts[0] == {
+            "status": "partial", "reasons": expected_reasons}
+    else:
+        assert 0 not in st.node_concept_materialization_receipts
+
+
+def test_invalid_only_transitional_delta_inherits_base_with_partial_receipt(tmp_path):
+    s = _store(tmp_path)
+    s.append("run_concepts", {"concepts": ["base/x"]})
+    s.append("node_created", _created(0, added=["bad!"]))
+    st = fold(s.read_all())
+    assert st.nodes[0].idea.concept_mode == "delta"
+    assert st.node_concepts[0] == ["base/x"]
+    assert st.node_concept_materialization_receipts[0] == {
+        "status": "partial", "reasons": ["invalid_concept_id"]}
+
+
+def test_bounded_run_base_persists_receipt_and_round_trips():
+    raw = [f"base/c{i:03d}" for i in range(100)] + ["bad!"]
+    state = fold([Event(type="run_concepts", data={"concepts": raw})])
+    assert len(state.run_base_concepts) == 64
+    assert state.run_base_concept_receipt == {
+        "status": "partial",
+        "reasons": ["invalid_concept_id", "concepts_per_node_cap"],
+    }
+    restored = RunState.model_validate_json(state.model_dump_json())
+    assert restored.run_base_concept_receipt == state.run_base_concept_receipt

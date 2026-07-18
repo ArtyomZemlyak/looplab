@@ -806,6 +806,58 @@ def test_lifecycle_normalizer_requires_exact_attempt_and_parent_snapshot(tmp_pat
     assert normalized_inject["parent_generations"] == {"0": 1}
 
 
+@pytest.mark.parametrize("idea", [
+    {"operator": "manual", "concept_mode": "future-v2"},
+    {"operator": "manual", "concept_mode": "full", "concepts_added": ["x/y"]},
+    {"operator": "manual", "concept_mode": "delta", "concepts": ["x/y"]},
+    {"operator": "manual", "concept_mode": "full", "concepts": ["bad!"]},
+])
+def test_inject_rejects_invalid_modern_concept_envelopes_but_keeps_legacy_absence(tmp_path, idea):
+    rd = _seed(tmp_path)
+    _client_unused, srv = _client(tmp_path, _Driver())
+    with pytest.raises(HTTPException) as error:
+        normalize_control(srv, rd, "inject_node", {"idea": idea})
+    assert error.value.status_code == 400
+    legacy = normalize_control(srv, rd, "inject_node", {
+        "idea": {"operator": "manual", "concepts_added": ["legacy/x"]}})
+    assert "concept_mode" not in legacy["idea"]
+
+
+def test_cross_run_import_snapshots_effective_membership_and_strips_partial_source(tmp_path):
+    target = _seed(tmp_path, "target")
+    exact = _seed(tmp_path, "exact")
+    exact_store = EventStore(exact / "events.jsonl")
+    exact_store.append("run_concepts", {"concepts": ["base/x"]})
+    exact_store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "base",
+                 "concept_mode": "delta", "concepts_added": ["child/y"]},
+        "code": "print(1)",
+    })
+    partial = _seed(tmp_path, "partial")
+    partial_store = EventStore(partial / "events.jsonl")
+    partial_store.append("run_concepts", {
+        "concepts": [f"base/c{i:03d}" for i in range(65)]})
+    partial_store.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "base",
+                 "concept_mode": "delta"},
+        "code": "print(1)",
+    })
+    _client_unused, srv = _client(tmp_path, _Driver())
+
+    imported = normalize_control(srv, target, "inject_node", {
+        "source_run": "exact", "source_node": 0})
+    assert imported["idea"]["concept_mode"] == "full"
+    assert imported["idea"]["concepts"] == ["base/x", "child/y"]
+    assert imported["idea"]["concepts_added"] == imported["idea"]["concepts_removed"] == []
+
+    stripped = normalize_control(srv, target, "inject_node", {
+        "source_run": "partial", "source_node": 0})
+    for field in ("concept_mode", "concepts", "concepts_added", "concepts_removed"):
+        assert field not in stripped["idea"]
+
+
 def test_approval_normalizer_defaults_to_pending_subject_and_requires_active_gate(tmp_path):
     rd = _seed(tmp_path)
     store = EventStore(rd / "events.jsonl")

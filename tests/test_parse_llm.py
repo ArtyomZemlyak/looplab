@@ -62,7 +62,8 @@ def test_all_parsers_fail_raises():
 
 
 def test_llm_researcher_returns_idea():
-    c = FakeClient(tool=[{"operator": "improve", "params": {"x": 3.0, "y": -1.0}, "rationale": "r"}])
+    c = FakeClient(tool=[{"operator": "improve", "params": {"x": 3.0, "y": -1.0},
+                          "rationale": "r", "concept_mode": "full"}])
     r = LLMResearcher(c)
     from looplab.core.models import RunState
     idea = r.propose(RunState(goal="g"), None)

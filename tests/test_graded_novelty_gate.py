@@ -163,6 +163,32 @@ def test_operator_edited_node_counts_as_covered_for_the_completeness_gate(tmp_pa
     assert "someaxis/hand-labeled" not in g["shared_concepts"]
 
 
+@pytest.mark.parametrize(("event_type", "payload"), [
+    ("node_concepts", {
+        "node_id": 1, "concepts": [f"axis/c{i:03d}" for i in range(65)], "mode": "llm"}),
+    ("node_concepts", {
+        "node_id": 1, "concepts": ["valid/y", "bad!"], "mode": "llm"}),
+    ("concept_tag_edited", {
+        "node_id": 1, "concepts": [f"operator/c{i:03d}" for i in range(65)]}),
+])
+def test_partial_classifier_or_operator_cache_cannot_certify_admission(
+        tmp_path, event_type, payload):
+    s = _run(tmp_path, task_id="totally-unknown-task")
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": ["encoderarch/adapter-tuning"], "mode": "llm"})
+    s.append(event_type, payload)
+    state = fold(s.read_all())
+    assert state.node_concept_materialization_receipts[1]["status"] == "partial"
+
+    eng = _GateEngine(s, graded=True)
+    eng._reflect_client = lambda: _IdeaReflectClient(["encoderarch/adapter-tuning"])
+    candidate = Idea(operator="improve", params={"rank": 8.0},
+                     rationale="a different adapter bottleneck size")
+
+    assert eng._graded_novelty_precheck(state, candidate) is None
+    assert fold(s.read_all()).novelty_grades == []
+
+
 def test_researcher_authored_concepts_cannot_certify_agentic_bypass(tmp_path):
     """The proposer cannot self-author the classifier evidence that lets its next proposal bypass dedup."""
     s = EventStore(tmp_path / "events.jsonl")

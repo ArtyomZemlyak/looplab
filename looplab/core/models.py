@@ -5,12 +5,31 @@ import math
 from enum import Enum
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, field_serializer, field_validator, model_validator
+from pydantic import (BaseModel, Field, field_serializer, field_validator, model_serializer,
+                      model_validator)
 
-# The single direction-comparator owner. fitness.py imports nothing from models (duck-typed on nodes),
-# so this top-level import is cycle-free and keeps RunState.is_better a one-hop delegation, not a
-# per-call import (R1/SearchFitness).
+from looplab.core.concepts import (
+    CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON as _CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+    CONCEPT_MATERIALIZATION_REASONS as _CONCEPT_MATERIALIZATION_REASONS,
+    ConceptMaterializationReceipt,
+    ConceptMaterializationReason as _ConceptMaterializationReason,
+    bounded_raw_concept_values,
+    concept_materialization_receipt as _concept_materialization_receipt,
+    concept_materialization_reason as _concept_materialization_reason,
+    normalize_concept_id,
+    normalized_concept_materialization_receipt as _normalized_concept_materialization_receipt,
+    valid_concept_id,
+)
 from looplab.core.fitness import is_better as _is_better, is_usable_metric
+
+# Compatibility/public import seam: receipt ownership lives in core.concepts, while historical consumers
+# import domain contracts from core.models. Explicit assignments keep that API stable without duplicate logic.
+CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON = _CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON
+CONCEPT_MATERIALIZATION_REASONS = _CONCEPT_MATERIALIZATION_REASONS
+ConceptMaterializationReason = _ConceptMaterializationReason
+concept_materialization_receipt = _concept_materialization_receipt
+concept_materialization_reason = _concept_materialization_reason
+normalized_concept_materialization_receipt = _normalized_concept_materialization_receipt
 
 
 def normalize_extra_metrics(value, *, max_items: int = 256) -> dict[str, float]:
@@ -60,10 +79,6 @@ NODE_CONCEPT_PROVENANCE_OPERATOR = "operator-edited"
 # A folded concept membership can be deliberately empty (an honest, known-empty set) or empty because
 # replay could not materialize an invalid delta dependency graph.  Keep that distinction in a typed,
 # reader-defaulted receipt instead of forcing every downstream projection to reverse-engineer the DAG.
-ConceptMaterializationReason = Literal["delta_dependency_cycle"]
-CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON: ConceptMaterializationReason = "delta_dependency_cycle"
-
-
 def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
     """Return concept memberships backed by the independent classifier.
 
@@ -74,6 +89,11 @@ def classifier_verified_node_concepts(state: Any, node_id: int) -> list[str]:
     provenance = getattr(state, "node_concept_provenance", None) or {}
     # CODEX AGENT: only the exact reviewed producer is evidence; proposer-authored labels remain display-only.
     if provenance.get(node_id) != NODE_CONCEPT_PROVENANCE_CLASSIFIER:
+        return []
+    receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
+    if node_id in receipts:
+        # A classifier may have produced some valid labels while also overflowing the bound or emitting
+        # malformed ids. The retained subset is useful UI data, but it is not a complete evidence set.
         return []
     memberships = getattr(state, "node_concepts", None) or {}
     return list(memberships.get(node_id) or [])
@@ -143,32 +163,6 @@ class NodeStatus(str, Enum):
     failed = "failed"        # ran but produced no usable metric
 
 
-_MAX_CONCEPT_ID_CHARS = 256      # mirrors serve.concept_frame.MAX_ID_CHARS (the frame projection gate)
-_MAX_CONCEPT_ID_DEPTH = 12       # mirrors serve.concept_frame.MAX_ID_DEPTH
-
-
-def valid_concept_id(raw: Any) -> bool:
-    """True iff ``raw`` is a well-formed concept id: ``<seg>[/<seg>...]`` where each ``/``-segment is a
-    bounded token of unicode letters/digits plus ``-``, ``.``, ``_`` and contains at least one letter/digit.
-
-    LLM-authored English/Cyrillic/German slugs pass (``loss/decoupled-contrastive``, ``данные/размер``);
-    base64/hash garbage, symbols, emoji, control chars and pure-punctuation segments are rejected
-    (``a/b#c==``, ``loss/💥``, ``<script>``, ``a/..``). Pure/deterministic (no I/O) so every concept-id
-    WRITE path can gate on it — the shared CHARSET owner the three per-layer canonicalizers (serve
-    ``concept_id``, search ``_normalize_concept_id``, engine ``normalize_key``) lacked. Normalizes like the
-    per-run canonicalizers (lower + space→dash + strip surrounding slashes) before checking."""
-    if not isinstance(raw, str):
-        return False
-    s = raw.strip().lower().replace(" ", "-").strip("/")
-    if not s or len(s) > _MAX_CONCEPT_ID_CHARS:
-        return False
-    parts = s.split("/")
-    if len(parts) > _MAX_CONCEPT_ID_DEPTH:
-        return False
-    return all(any(ch.isalnum() for ch in part) and all(ch.isalnum() or ch in "-._" for ch in part)
-               for part in parts)
-
-
 class Idea(BaseModel):
     """A proposed experiment: which operator, what parameters, why."""
     operator: str
@@ -201,10 +195,12 @@ class Idea(BaseModel):
     concepts: list[str] = Field(default_factory=list)
     # PART V (B) run-base + node-DELTA authoring. The discriminator is semantic: `delta` makes the two
     # delta lists authoritative EVEN WHEN BOTH ARE EMPTY (inherit without changing anything); `full`
-    # makes `concepts` the exact membership. Reader-side default `full` preserves old Idea payloads.
+    # makes `concepts` the exact membership. Reader-side absence preserves old Idea payloads.
     # CODEX AGENT: never infer this choice from list truthiness or serializer field presence — either
     # collapses an explicit zero delta into an absent legacy membership.
-    concept_mode: Literal["full", "delta"] = "full"
+    # CODEX AGENT: this is the tolerant durable reader. Absent is distinct from authoritative full+[];
+    # modern producers cross the required/closed IdeaEmission boundary below.
+    concept_mode: Optional[str] = None
     # In delta mode, instead of re-stating the full `concepts` set, a node may
     # author only what CHANGES vs the run base + its parents — `concepts_added` (new this node) and
     # `concepts_removed` (dropped this node, e.g. "swapped transformer -> diffusion"). The fold post-pass
@@ -232,6 +228,24 @@ class Idea(BaseModel):
     def is_sweep(self) -> bool:
         return bool(self.space)
 
+    @model_serializer(mode="wrap")
+    def _omit_absent_concept_mode(self, handler):
+        # Pydantic 2.6-compatible nested serialization rule. This covers Node/RunState dumps too;
+        # Field(exclude_if=...) is newer than the project's supported floor.
+        payload = handler(self)
+        if self.concept_mode is None and isinstance(payload, dict):
+            payload.pop("concept_mode", None)
+        return payload
+
+    @field_validator("concepts", "concepts_added", "concepts_removed", mode="before")
+    @classmethod
+    def _read_bounded_concept_list(cls, value):
+        # Historical/future logs are untrusted input: a malformed list must not drop the whole node, and
+        # an enormous list must not make each descendant copy an ever-growing membership. The raw event
+        # remains the audit record; the folded reader keeps the canonical lexical top 64.
+        bounded, _overflow, _invalid = bounded_raw_concept_values(value)
+        return bounded
+
     @field_validator("concepts", "concepts_added", "concepts_removed", mode="after")
     @classmethod
     def _drop_malformed_concepts(cls, v):
@@ -243,6 +257,17 @@ class Idea(BaseModel):
         # fold too — the Idea is rebuilt via Idea(**d["idea"]) — so it deterministically heals old logs;
         # legitimate ids (incl. non-ASCII letters) pass unchanged.
         return [c for c in v if valid_concept_id(c)] if isinstance(v, list) else v
+
+    @field_validator("concept_mode", mode="before")
+    @classmethod
+    def _read_future_concept_mode(cls, value):
+        # Durable readers are total over future/corrupt discriminators. Replay inspects raw presence
+        # and stamps an untrusted receipt; retaining a bounded spelling here keeps the node auditable.
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return value[:80]
+        return f"unsupported:{type(value).__name__}"[:80]
 
     @model_validator(mode="after")
     def _backfill_rationale(self) -> "Idea":
@@ -294,6 +319,79 @@ class Idea(BaseModel):
         except (TypeError, ValueError, OverflowError):
             return None
         return f if math.isfinite(f) and f > 0 else None
+
+
+class IdeaEmission(Idea):
+    """Strict modern producer schema; durable replay intentionally continues to use ``Idea``."""
+
+    concepts: list[str] = Field(default_factory=list, max_length=64)
+    concept_mode: Literal["full", "delta"]
+    concepts_added: list[str] = Field(default_factory=list, max_length=64)
+    concepts_removed: list[str] = Field(default_factory=list, max_length=64)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _strict_raw_concept_envelope(cls, value):
+        if not isinstance(value, dict):
+            raise ValueError("Idea emission must be an object")
+        for field in ("concepts", "concepts_added", "concepts_removed"):
+            raw = value.get(field, [])
+            if not isinstance(raw, list):
+                raise ValueError(f"{field} must be a JSON list")
+            if len(raw) > 64:
+                raise ValueError(f"{field} may contain at most 64 ids")
+            if any(not isinstance(item, str) or not valid_concept_id(item) for item in raw):
+                raise ValueError(f"every {field} item must be a bounded axis/slug")
+        return value
+
+    @field_validator("concepts", "concepts_added", "concepts_removed", mode="before")
+    @classmethod
+    def _strict_concept_list(cls, value):
+        # CODEX AGENT: the tolerant reader heals old logs, but a modern writer must retry malformed ids.
+        # Otherwise base Idea's drop-validator could turn full+[bad] into authoritative known-empty or
+        # delta+[bad] into a semantically different zero delta.
+        if not isinstance(value, list):
+            raise ValueError("concept fields must be JSON lists")
+        if len(value) > 64:
+            raise ValueError("concept fields may contain at most 64 ids")
+        if any(not isinstance(item, str) or not valid_concept_id(item) for item in value):
+            raise ValueError("every concept id must be a bounded axis/slug")
+        canonical = [normalize_concept_id(item) for item in value]
+        if len(set(canonical)) != len(canonical):
+            raise ValueError("concept fields cannot contain duplicates")
+        return value
+
+    @model_validator(mode="after")
+    def _consistent_concept_envelope(self) -> "IdeaEmission":
+        if self.concept_mode == "full" and (self.concepts_added or self.concepts_removed):
+            raise ValueError("full concept_mode cannot carry concepts_added/concepts_removed")
+        if self.concept_mode == "delta" and self.concepts:
+            raise ValueError("delta concept_mode cannot carry a full concepts list")
+        added = {normalize_concept_id(item) for item in self.concepts_added}
+        removed = {normalize_concept_id(item) for item in self.concepts_removed}
+        if added & removed:
+            raise ValueError("one concept cannot be both added and removed")
+        return self
+
+    def to_idea(self) -> Idea:
+        """Cross the strict writer boundary into the forward-compatible durable model."""
+        return Idea.model_validate(self.model_dump(mode="json"))
+
+
+def durable_idea_payload(idea: Idea) -> dict[str, Any]:
+    """Serialize an Idea for ``node_created`` without inventing a concept mode.
+
+    The explicit pops are a regression-proof durable boundary in addition to Idea's nested serializer.
+    Pydantic materializes list defaults during validation, so keep an explicitly supplied empty legacy
+    field but do not turn a genuinely absent concept envelope into three authored empty lists.
+    """
+    payload = idea.model_dump(mode="json")
+    if idea.concept_mode is None:
+        payload.pop("concept_mode", None)
+        for field in ("concepts", "concepts_added", "concepts_removed"):
+            if field not in idea.model_fields_set:
+                payload.pop(field, None)
+    return payload
 
 
 class Trial(BaseModel):
@@ -695,20 +793,25 @@ class RunState(BaseModel):
     # base + its parents (see `node_concept_deltas`), keeping per-node annotations minimal. Additive /
     # reader-defaulted; empty on runs that never set a base (every node then authors its own full set).
     run_base_concepts: list[str] = Field(default_factory=list)
-    # PART V (B): raw per-node concept DELTAS {node_id -> {"added": [...], "removed": [...]}} authored on
-    # the Idea when `concept_mode="delta"` (including an explicit pair of empty lists). Stored raw during
-    # replay; a deterministic POST-PASS in `fold` materializes each such node's
+    # Derived integrity receipt for the bounded run base. ``None`` means its stored set is exact; a
+    # partial/unavailable envelope disables modern delta authoring while preserving a bounded audit view.
+    run_base_concept_receipt: Optional[ConceptMaterializationReceipt] = None
+    # PART V (B): bounded per-node concept DELTAS {node_id -> {"added": [...], "removed": [...]}} authored
+    # on the Idea when `concept_mode="delta"` (including an explicit pair of empty lists). Replay stores
+    # the tolerant reader's bounded valid operands here; the append-only Event remains the lossless audit
+    # source. A deterministic POST-PASS in `fold` materializes each such node's
     # effective `node_concepts` = inherited − removed + added, where inherited = the run BASE at a root, else
     # the UNION of the node's parents' effective sets (the base flows in through the roots and down the DAG,
     # so a removal propagates). Kept as a
     # topological read-time resolution (not folded in event order) so `fold` stays ORDER-TOLERANT
     # (invariant 5): the post-pass sees the complete DAG, so a spliced/reordered log resolves identically.
     node_concept_deltas: dict[int, dict] = Field(default_factory=dict)
-    # CODEX AGENT: an unresolved active delta cycle (including every active delta descendant whose
-    # inherited set depends on it) materializes to [] fail-closed.  This receipt prevents that fallback
-    # from being presented as an honest known-empty membership by ConceptFrame.  Keys are current/historic
-    # node ids; current-state projections apply the same tombstone/abort lifecycle filter as memberships.
-    node_concept_materialization_receipts: dict[int, ConceptMaterializationReason] = Field(
+    # CODEX AGENT: partial/unavailable materialization is represented by a closed, ordered reason envelope.
+    # An unresolved dependency (including every active descendant) materializes to [] fail-closed; bounded
+    # identity loss keeps the valid subset. The receipt prevents either fallback from being presented as an
+    # exact membership by ConceptFrame. Keys are current/historic node ids; current-state projections apply
+    # the same tombstone/abort lifecycle filter as memberships.
+    node_concept_materialization_receipts: dict[int, ConceptMaterializationReceipt] = Field(
         default_factory=dict)
     # CODEX AGENT: proposer-authored taxonomy is an untrusted claim, never classifier evidence. This
     # replay-derived sidecar records the producer of the CURRENT last-write-wins membership. Missing and

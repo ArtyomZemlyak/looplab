@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 from looplab.core.config import Settings
 from looplab.core.models import Idea
 from looplab.engine.lessons import LessonMemory
@@ -262,6 +264,29 @@ def test_store_concept_capsule_ignores_offline_heuristic_memberships(tmp_path):
     assert state.node_concepts[0] == ["claimed/by-alias"]
     LessonMemory(_fake_engine(mem)).store_concept_capsule(state)
 
+    assert not (mem / "concept_capsules.jsonl").exists()
+
+
+@pytest.mark.parametrize("concepts", [
+    [f"axis/c{i:03d}" for i in range(65)],
+    ["valid/x", "bad!"],
+])
+def test_store_concept_capsule_excludes_partial_classifier_membership(tmp_path, concepts):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    s = EventStore(tmp_path / "events.jsonl")
+    s.append("run_started", {
+        "run_id": "r", "task_id": "t", "goal": "g", "direction": "max"})
+    s.append("node_created", {
+        "node_id": 0, "parent_ids": [], "operator": "draft",
+        "idea": {"operator": "draft", "params": {}, "rationale": "r"},
+    })
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.5})
+    s.append("node_concepts", {"node_id": 0, "concepts": concepts, "mode": "llm"})
+
+    state = fold(s.read_all())
+    assert state.node_concept_materialization_receipts[0]["status"] == "partial"
+    LessonMemory(_fake_engine(mem)).store_concept_capsule(state)
     assert not (mem / "concept_capsules.jsonl").exists()
 
 

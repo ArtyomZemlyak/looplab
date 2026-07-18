@@ -84,19 +84,23 @@ class ProposalCuesMixin:
         # PART V (B): once the run has a BASE concept set, ask for the DELTA instead of the full list, so
         # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
         # system prompt keeps authoring the full set when no base exists — a base-absent run is unchanged).
-        if getattr(self, "_concept_run_base", False) and state.run_base_concepts:
+        parent_receipt = (state.node_concept_materialization_receipts.get(parent.id)
+                          if parent is not None else None)
+        delta_context_safe = (
+            state.run_base_concept_receipt is None
+            and (parent is None or (
+                parent.id in state.node_concepts and parent_receipt is None))
+        )
+        if (getattr(self, "_concept_run_base", False) and state.run_base_concepts
+                and delta_context_safe):
             base = ", ".join(str(c) for c in state.run_base_concepts[:40])
             parent_concepts = state.node_concepts.get(parent.id) if parent is not None else None
             if parent is None:
                 inherited_line = f" This root inherits the run base [{base}]."
-            elif parent.id in state.node_concepts:
+            else:
                 inherited = ", ".join(str(c) for c in (parent_concepts or [])[:40])
                 inherited_line = (f" Primary parent {parent.id}'s effective membership is [{inherited}]."
                                   " A merge inherits the union of every actual parent.")
-            else:
-                inherited_line = (f" Primary parent {parent.id} has absent legacy membership, so its"
-                                  " effective inherited set is empty. A merge still unions every actual"
-                                  " parent's effective membership.")
             hint += (
                 f"\nConcept authoring — delta mode is enabled; run base=[{base}]." + inherited_line
                 + " Set `concept_mode=\"delta\"`; do NOT re-list the full set. Author only the CHANGE"

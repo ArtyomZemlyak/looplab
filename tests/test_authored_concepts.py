@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from looplab.core.models import Idea
+from looplab.core.models import Idea, IdeaEmission, Node, durable_idea_payload
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.events.eventstore import EventStore
 from looplab.events.replay import fold
@@ -92,6 +92,47 @@ def test_idea_concepts_round_trip():
     assert d["concepts"] == ["loss/contrastive/dcl", "regularization/r-drop"]
     assert Idea(**d).concepts == idea.concepts            # rides on the Idea through the event log
     assert Idea(operator="draft", params={}, rationale="r").concepts == []   # default empty
+
+
+def test_strict_emission_requires_consistent_bounded_canonical_mode():
+    schema = IdeaEmission.model_json_schema()
+    assert "concept_mode" in schema["required"]
+    assert schema["properties"]["concepts"]["maxItems"] == 64
+    valid = IdeaEmission.model_validate({
+        "operator": "draft", "concept_mode": "delta", "concepts_added": ["model/new"]})
+    assert valid.to_idea().concept_mode == "delta"
+    invalid = [
+        {"operator": "draft"},
+        {"operator": "draft", "concept_mode": "future"},
+        {"operator": "draft", "concept_mode": "full", "concepts_added": ["model/new"]},
+        {"operator": "draft", "concept_mode": "delta", "concepts": ["model/full"]},
+        {"operator": "draft", "concept_mode": "full", "concepts": ["bad!"]},
+        {"operator": "draft", "concept_mode": "delta",
+         "concepts_added": ["Model/A"], "concepts_removed": ["model/a"]},
+        {"operator": "draft", "concept_mode": "full",
+         "concepts": ["Model/A", "model/a"]},
+        {"operator": "draft", "concept_mode": "full",
+         "concepts": [f"axis/c{i}" for i in range(65)]},
+    ]
+    for payload in invalid:
+        with pytest.raises(ValueError):
+            IdeaEmission.model_validate(payload)
+
+
+def test_tolerant_reader_keeps_node_shape_bounded_and_omits_absent_mode_nested():
+    idea = Idea.model_validate({
+        "operator": "draft",
+        "concepts": [f"axis/c{i:03d}" for i in range(100)] + ["bad!", 7],
+        "concepts_added": "not-a-list",
+    })
+    assert len(idea.concepts) == 64
+    assert idea.concepts_added == []
+    durable = durable_idea_payload(idea)
+    assert "concept_mode" not in durable
+    assert "concepts_removed" not in durable
+    assert "concepts" in durable and "concepts_added" in durable
+    node_dump = Node(id=0, operator="draft", idea=idea).model_dump(mode="json")
+    assert "concept_mode" not in node_dump["idea"]
 
 
 def test_authored_concepts_fold_into_node_concepts(tmp_path):
@@ -227,6 +268,54 @@ def test_cadence_retags_authored_claim_and_stamps_classifier_generation(tmp_path
     assert captured["known_tags"] == {1: ["classifier/known"]}
     emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
     assert any(row["node_id"] == 0 and row["generation"] == 0 for row in emitted)
+
+
+def test_cadence_repairs_partial_classifier_instead_of_caching_subset(tmp_path, monkeypatch):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, None))
+    s.append("node_created", _created(1, None))
+    s.append("node_concepts", {
+        "node_id": 0, "concepts": [f"axis/c{i:03d}" for i in range(65)],
+        "mode": "llm", "at_vocab": 4,
+    })
+    s.append("node_concepts", {
+        "node_id": 1, "concepts": ["classifier/known"], "mode": "llm", "at_vocab": 4,
+    })
+    state = fold(s.read_all())
+    assert state.node_concept_materialization_receipts[0]["status"] == "partial"
+    captured = {}
+
+    from looplab.search import concept_graph as cg
+    graph = cg.dense_retrieval_skeleton()
+    tags = {0: frozenset({"classifier/repaired"}),
+            1: frozenset({"classifier/known"})}
+
+    def fake_build(*args, known_tags=None, **kwargs):
+        captured["known_tags"] = dict(known_tags or {})
+        return {
+            "graph": graph,
+            "tags": tags,
+            "raw_tags": tags,
+            "coverage": cg.concept_coverage(state, graph, tags),
+            "important_uncovered": [],
+            "consolidated": {},
+            "mode": "llm",
+        }
+
+    monkeypatch.setattr(cg, "build_concept_map", fake_build)
+
+    class CaptureStore:
+        def __init__(self): self.events = []
+        def append(self, event_type, data): self.events.append((event_type, data))
+
+    store = CaptureStore()
+    host = SimpleNamespace(_reflect_client=lambda: object(), store=store)
+    assert StrategyCadenceMixin._concept_coverage_snapshot(host, state) is not None
+
+    assert captured["known_tags"] == {1: ["classifier/known"]}
+    emitted = [data for event_type, data in store.events if event_type == "node_concepts"]
+    assert any(row["node_id"] == 0 and row["concepts"] == ["classifier/repaired"]
+               for row in emitted)
 
 
 def test_cadence_never_retags_an_operator_edited_node(tmp_path, monkeypatch):

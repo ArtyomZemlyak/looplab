@@ -13,7 +13,7 @@ from __future__ import annotations
 import random
 from typing import Optional, Protocol
 
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import LLMClient, ParseError, extract_code, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.core.validate import AgentReport, validate_agent_code
@@ -324,8 +324,11 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
     raw_base = getattr(state, "run_base_concepts", None)
     base = list(raw_base) if isinstance(raw_base, (list, tuple)) else []
     memberships = getattr(state, "node_concepts", None)
+    receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
+    base_receipt = getattr(state, "run_base_concept_receipt", None)
+    parent_receipt = receipts.get(parent.id) if parent is not None and isinstance(receipts, dict) else None
     parent_known = (parent is None or (
-        isinstance(memberships, dict) and parent.id in memberships))
+        isinstance(memberships, dict) and parent.id in memberships and parent_receipt is None))
     parent_membership = (memberships.get(parent.id, [])
                          if parent is not None and isinstance(memberships, dict) else base)
 
@@ -337,8 +340,9 @@ def _state_brief(state: RunState, parent: Optional[Node], digest_cap: int = 0,
                  "cue explicitly enables it; replay uses the run base for a root and actual parents' "
                  "union for a child/merge): "
                  f"run_base={_bounded_concepts(base)!r}; "
+                 f"run_base_quality={'exact' if base_receipt is None else base_receipt.get('status')}; "
                  f"primary_inherited={_bounded_concepts(parent_membership)!r}; "
-                 f"primary_membership={'known' if parent_known else 'absent-legacy'}")
+                 f"primary_membership={'known-exact' if parent_known else 'absent-or-partial'}")
     # Append the always-on "working set": a compact view of the whole search (top winners, weakest /
     # failures, theme map) so the Researcher proposes with awareness of what's already been tried,
     # not just `best` + `parent`. Depth (full experiments, code, data) lives behind the run tools.
@@ -473,7 +477,12 @@ class LLMResearcher:
         last: Optional[Exception] = None
         for _attempt in range(2):
             try:
-                idea = parse_structured(self.client, messages, Idea, self.parser)
+                # CODEX AGENT: modern model output must choose full vs delta explicitly. The durable
+                # Idea reader stays tolerant for historical/future logs, so writers cross this boundary.
+                parsed = parse_structured(self.client, messages, IdeaEmission, self.parser)
+                # Preserve the long-standing injectable parser seam used by custom integrations/test
+                # doubles: the real parser returns IdeaEmission, while a trusted adapter may return Idea.
+                idea = parsed.to_idea() if isinstance(parsed, IdeaEmission) else Idea.model_validate(parsed)
                 break
             except ParseError as e:
                 last = e

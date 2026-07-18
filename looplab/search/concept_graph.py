@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Optional
 
+from looplab.core.concepts import normalize_concept_id, normalized_concept_renames, resolve_concept
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_AUTHORED, RunState
 
 
@@ -667,13 +668,8 @@ def stale_tagged_nodes(node_ids, at_vocab: dict, *, growth: float = 0.7, cap: in
 
 
 def _normalize_concept_id(raw) -> str:
-    # CODEX AGENT: search used to accept markup, emoji and punctuation-only path segments that replay
-    # and ConceptFrame reject, creating a vocabulary visible to coverage/digests but absent in Concepts.
-    # Keep the charset contract owned by core.models and normalize only after that shared gate passes.
-    from looplab.core.models import valid_concept_id
-    if not valid_concept_id(raw):
-        return ""
-    return raw.strip().lower().replace(" ", "-").strip("/")
+    # CODEX AGENT: search analytics share the core bounded identity contract with replay and serve.
+    return normalize_concept_id(raw) or ""
 
 
 def _describe_node(node) -> str:
@@ -914,40 +910,16 @@ def concept_metrics(state: RunState, graph: ConceptGraph,
             "direction": direction, "rows": rows, "rollup": rollup}
 
 
-_CONCEPT_RENAME_HOP_CAP = 16   # mirrors serve.concept_frame.MAX_RENAME_HOPS (kept local; no serve import)
-
-
 def _normalized_rename_map(raw) -> dict[str, str]:
     """Normalize both sides before a read projection follows consolidation links."""
-    if not isinstance(raw, dict):
-        return {}
-    out: dict[str, str] = {}
-    for source, target in raw.items():
-        source_id = _normalize_concept_id(source)
-        target_id = _normalize_concept_id(target)
-        if source_id and target_id:
-            current = out.get(source_id)
-            out[source_id] = target_id if current is None else min(current, target_id)
-    return out
+    return normalized_concept_renames(raw)
 
 
 def _canonical_with_rename(raw, rename: dict) -> str:
     """Normalize `raw` and resolve a bounded, cycle-guarded consolidation rename chain (the same shape the
     /concepts frame's canonical_concept uses). "" for a malformed id, a cycle, or an over-long chain."""
-    current = raw
-    seen: set[str] = set()
-    for _hop in range(_CONCEPT_RENAME_HOP_CAP + 1):
-        canonical = _normalize_concept_id(current)
-        if not canonical or canonical in seen:
-            return ""
-        seen.add(canonical)
-        nxt = rename.get(current)
-        if nxt is None and current != canonical:
-            nxt = rename.get(canonical)
-        if nxt is None:
-            return canonical
-        current = nxt
-    return ""
+    canonical, _problem = resolve_concept(raw, rename)
+    return canonical or ""
 
 
 def _canon_set(node_id, node_concepts: dict, rename: dict) -> set:

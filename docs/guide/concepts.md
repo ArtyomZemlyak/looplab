@@ -518,24 +518,30 @@ membership on the `Idea` with an explicit contract:
 - `concept_mode="delta"` means `concepts_added` / `concepts_removed` modify the inherited set. A root
   inherits `RunState.run_base_concepts` (from `run_concepts`); a child inherits the union of its parents'
   effective sets. Both lists may be empty: that is an explicit **zero delta** (inherit unchanged), not an
-  absent membership. The raw delta remains in `RunState.node_concept_deltas`; replay materializes the
-  effective full set in `RunState.node_concepts` after the complete DAG has folded.
+  absent membership. Bounded valid operands remain in `RunState.node_concept_deltas`; the append-only
+  event is the raw audit source. Replay materializes the effective full set in `RunState.node_concepts`
+  after the complete DAG has folded.
 
 Replay normalizes ids (case, surrounding whitespace/slashes, spaces to hyphens) and resolves the complete
 `concept_consolidation` rename chain on the base, inherited values, removals and additions **before** set
 subtraction/union. Thus `Model/Transformer` can be removed by `model/transformer`, and consolidation cannot
 resurrect a renamed id after subtraction. A classifier, operator or offline display receipt remains
 authoritative over an authored delta for the unchanged Idea; only classifier receipts count as independent
-evidence. A `propose` reset clears authored membership, provenance and raw delta together. The short-lived
+evidence. A `propose` reset clears authored membership, provenance and the bounded delta sidecar together. The short-lived
 pre-discriminator format with a non-empty delta list remains readable and canonicalizes to
-`concept_mode="delta"`; new model/event dumps always emit the discriminator.
+`concept_mode="delta"`. Modern producer schemas require the discriminator; tolerant replay preserves
+genuine absence on historical events instead of serializing it as an invented full set.
 
-An invalid active delta dependency cycle cannot produce a truthful inherited set. Replay therefore
-fails closed to an empty effective set for every cycle member and active delta descendant, while recording
-`RunState.node_concept_materialization_receipts[node_id] = "delta_dependency_cycle"`. `ConceptFrame`
-classifies that receipt as corruption/incomplete and becomes non-authoritative, so the UI cannot mistake
-the fallback for an explicitly authored empty set. Current frames ignore receipts belonging only to
-tombstoned or aborted nodes; historical prefixes retain the receipt and remain non-authoritative.
+Replay records bounded, canonical integrity envelopes in
+`RunState.node_concept_materialization_receipts[node_id]` with `status` (`partial` or `unavailable`) and an
+ordered closed list of `reasons`. Invalid ids, rename failures and the 64-concept cap preserve the valid
+subset as partial. Unsupported modes, invalid consolidation maps, missing/unknown parent membership and
+active dependency cycles are unavailable; they fail closed to an empty effective set and propagate to
+active descendants. `RunState.run_base_concept_receipt` applies the same distinction to the run base and
+disables new delta authoring unless inheritance is exact. `ConceptFrame` becomes incomplete and
+non-authoritative whenever an active receipt exists, so the UI cannot mistake a fallback for an explicitly
+authored empty set. Current frames ignore node receipts belonging only to tombstoned or aborted nodes;
+historical prefixes retain them and remain non-authoritative.
 
 Full or materialized memberships fold into `RunState.node_concepts` at/after `node_created`
 (deterministic, offline — no tagging cadence required), and the strategist cadence may later
@@ -594,7 +600,7 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
 - `node_concept_delta(state, node_id)` — one node's concepts as a **delta vs its parent(s)**:
   `{parent_ids, added, removed, inherited}` (a merge inherits from the UNION of parents; a root's concepts
   are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a
-  pure projection over materialized full-set `node_concepts`, distinct from the optional raw authored delta
+  pure projection over materialized full-set `node_concepts`, distinct from the optional bounded authored delta
   sidecar. Both sides canonicalize through the consolidation rename, so it shows what each experiment
   conceptually changed relative to where it came from. Surfaced to the Researcher/Strategist via the
   `node_concept_delta` tool.

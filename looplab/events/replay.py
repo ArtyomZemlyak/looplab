@@ -8,12 +8,26 @@ import heapq
 import math
 from typing import Iterable
 
+from looplab.core.concepts import (
+    CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
+    CONCEPT_DELTA_MISSING_PARENT_REASON,
+    CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON,
+    CONCEPT_INVALID_ID_REASON,
+    CONCEPTS_PER_NODE_CAP_REASON,
+    CONCEPT_MODE_UNSUPPORTED_REASON,
+    ConceptMaterializationReason,
+    BoundedConceptAccumulator,
+    bounded_raw_concept_values,
+    concept_materialization_receipt,
+    normalized_concept_renames,
+    resolve_concept_set_reasons,
+)
 from looplab.core.fitness import (VERIFIER_SELECTION_CONTRACT, SearchFitness, is_usable_metric,
                                   verifier_evidence_digest)
-from looplab.core.models import (CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON,
-                     NODE_CONCEPT_PROVENANCE_AUTHORED,
+from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED,
                      NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
                      NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+                     NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                      node_concept_event_provenance,
                      Event, Hypothesis, Idea, Node, NodeStatus,
                      RunState, Trial, hypothesis_id, normalize_extra_metrics, run_setup_key)
@@ -154,7 +168,9 @@ class _FoldCtx:
     __slots__ = (
         "best_confirmed", "best_confirmed_significant", "llm_usage_seen", "llm_usage_ids",
         "charged_terminal_generations", "charged_confirm_seeds", "charged_ablation_ids",
-        "pending_finish_report", "concept_subject_invalidated", "event_index",
+        "pending_finish_report", "concept_subject_invalidated", "concept_mode_untrusted",
+        "concept_input_capped", "concept_input_invalid", "run_base_capped",
+        "run_base_invalid", "event_index",
     )
 
     def __init__(self):
@@ -179,6 +195,13 @@ class _FoldCtx:
         # Fold-only receipt boundary for legacy, unstamped node_concepts events. Lifecycle attempts also
         # advance for eval/code retries, but concept evidence becomes ambiguous only after the IDEA changed.
         self.concept_subject_invalidated: set[int] = set()
+        # Explicit future/malformed mode values are not legacy absence. Keep the node, but make its
+        # concept membership unavailable until a reviewed mode or independent classifier supersedes it.
+        self.concept_mode_untrusted: set[int] = set()
+        self.concept_input_capped: set[int] = set()
+        self.concept_input_invalid: set[int] = set()
+        self.run_base_capped = False
+        self.run_base_invalid = False
         self.event_index = -1
 
 def _on_run_started(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -314,15 +337,42 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     except Exception:
         return   # (was `continue` in the loop arm: skip just this event)
     raw_idea = d.get("idea") if isinstance(d.get("idea"), dict) else {}
+    raw_concept_receipts = {
+        field: bounded_raw_concept_values(raw_idea[field])
+        for field in ("concepts", "concepts_added", "concepts_removed") if field in raw_idea
+    }
     delta_added = [str(c) for c in (getattr(n.idea, "concepts_added", None) or [])]
     delta_removed = [str(c) for c in (getattr(n.idea, "concepts_removed", None) or [])]
-    delta_mode = getattr(n.idea, "concept_mode", "full") == "delta"
-    if "concept_mode" not in raw_idea and (delta_added or delta_removed):
+    mode_present = "concept_mode" in raw_idea
+    raw_mode = raw_idea.get("concept_mode")
+    recognized_mode = raw_mode if isinstance(raw_mode, str) and raw_mode in ("full", "delta") else None
+    unsupported_mode = mode_present and recognized_mode is None
+    if unsupported_mode:
+        # CODEX AGENT: forward compatibility belongs at the node boundary. Keep the experiment and its
+        # audit Idea, but never guess how a future/malformed envelope changes membership.
+        ctx.concept_mode_untrusted.add(n.id)
+    else:
+        ctx.concept_mode_untrusted.discard(n.id)
+    delta_mode = recognized_mode == "delta"
+    raw_transitional_delta = any(
+        isinstance(raw_idea.get(field), list) and bool(raw_idea.get(field))
+        for field in ("concepts_added", "concepts_removed")
+    )
+    if not mode_present and raw_transitional_delta:
         # CODEX AGENT: 40a5a94 briefly wrote non-empty delta lists before the discriminator existed.
         # Preserve those durable rows, but canonicalize the replayed Idea to explicit `delta` so a
         # subsequent dump round-trips the semantic choice. Modern zero-deltas rely only on the mode.
         delta_mode = True
         n.idea.concept_mode = "delta"
+    authoritative_fields = (
+        tuple(raw_concept_receipts)
+        if unsupported_mode else
+        ("concepts_added", "concepts_removed") if delta_mode else ("concepts",)
+    )
+    authoritative_receipts = [raw_concept_receipts[field] for field in authoritative_fields
+                              if field in raw_concept_receipts]
+    input_capped = any(overflow for _values, overflow, _invalid in authoritative_receipts)
+    input_invalid = any(invalid for _values, _overflow, invalid in authoritative_receipts)
     current_provenance = st.node_concept_provenance.get(n.id)
     concept_subject_unchanged = bool(
         current is not None
@@ -343,6 +393,19 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     receipt_protected = bool(concept_subject_unchanged and current_provenance in (
         NODE_CONCEPT_PROVENANCE_CLASSIFIER, NODE_CONCEPT_PROVENANCE_OPERATOR,
         NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC))
+    if receipt_protected:
+        # The independent/operator full set owns the membership. A same-subject re-emission may retain
+        # a malformed proposer envelope for audit, but it must not poison the protected classification.
+        ctx.concept_mode_untrusted.discard(n.id)
+    else:
+        if input_capped:
+            ctx.concept_input_capped.add(n.id)
+        else:
+            ctx.concept_input_capped.discard(n.id)
+        if input_invalid:
+            ctx.concept_input_invalid.add(n.id)
+        else:
+            ctx.concept_input_invalid.discard(n.id)
     st.nodes[n.id] = n
     # Researcher-AUTHORED concepts populate the compatible concept read model at creation, but the
     # provenance sidecar prevents an admission consumer from mistaking that self-authored taxonomy for
@@ -356,8 +419,9 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concepts_at_vocab.pop(n.id, None)
         st.node_concept_deltas.pop(n.id, None)
         ctx.concept_subject_invalidated.add(n.id)
-    if delta_mode and not receipt_protected:
-        # PART V (B): the node authored a DELTA vs the run base + its parents. Store it RAW; the fold
+    if delta_mode and not unsupported_mode and not receipt_protected:
+        # PART V (B): the node authored a DELTA vs the run base + its parents. Store the tolerant reader's
+        # bounded valid operands here; the append-only Event remains the lossless audit source. The fold
         # post-pass (`_materialize_concept_deltas`) resolves node_concepts topologically over the complete
         # DAG, so fold stays order-tolerant. Provenance stays `authored` so a classifier/operator event
         # still wins (the post-pass fills only nodes that keep the authored delta). Empty lists are an
@@ -365,13 +429,23 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.node_concept_deltas[n.id] = {"added": delta_added, "removed": delta_removed}
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
-    elif not receipt_protected and (n.idea.concepts or raw_idea.get("concept_mode") == "full"):
+    elif (not unsupported_mode and not receipt_protected
+          and (n.idea.concepts or recognized_mode == "full")):
         # Full is an exact replacement. An explicit `full` + [] is therefore a known-empty membership,
         # while an old no-mode/no-concepts payload stays genuinely absent for replay compatibility.
         st.node_concept_deltas.pop(n.id, None)
         st.node_concepts[n.id] = [str(c) for c in n.idea.concepts]
         st.node_concept_provenance[n.id] = NODE_CONCEPT_PROVENANCE_AUTHORED
         st.node_concepts_at_vocab.pop(n.id, None)
+    elif not receipt_protected:
+        # Unknown mode and genuinely absent legacy membership are both non-authoritative. A pending
+        # replacement must not retain a previous authored set merely because classifier-protected
+        # subject equality intentionally ignores the proposer concept envelope.
+        st.node_concept_deltas.pop(n.id, None)
+        if st.node_concept_provenance.get(n.id) == NODE_CONCEPT_PROVENANCE_AUTHORED:
+            st.node_concepts.pop(n.id, None)
+            st.node_concept_provenance.pop(n.id, None)
+            st.node_concepts_at_vocab.pop(n.id, None)
     if current is None:
         # A holdout score is a disclosed final-exam signal. If a genuinely NEW candidate lands
         # afterwards (an inject/fork/policy action won the finish CAS race), the search has become
@@ -973,6 +1047,9 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 # boundary itself; otherwise a replay between reset and rebuild rematerializes stale
                 # taxonomy for the pending node from a proposal that no longer exists.
                 st.node_concept_deltas.pop(n.id, None)
+                ctx.concept_mode_untrusted.discard(n.id)
+                ctx.concept_input_capped.discard(n.id)
+                ctx.concept_input_invalid.discard(n.id)
                 # CODEX AGENT: generation stamps did not exist on early classifier events. Remember
                 # the idea boundary inside this fold so those ambiguous receipts still fail closed,
                 # while unstamped receipts after eval/implement-only attempt bumps remain readable.
@@ -1338,78 +1415,52 @@ def _on_run_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     this base; the fold post-pass materializes their node_concepts. Additive; malformed input -> ignored."""
     concepts = d.get("concepts")
     if isinstance(concepts, list):
-        seen: set[str] = set()
-        base: list[str] = []
-        for c in concepts:
-            s = str(c)
-            if s and s not in seen:
-                seen.add(s)
-                base.append(s)
-        st.run_base_concepts = base
+        base, overflow, invalid = bounded_raw_concept_values(concepts)
+        # CODEX AGENT: keep the folded/FoldCursor base bounded; the append-only event remains the raw
+        # audit source. Last valid run_concepts wins for both membership and its integrity receipt.
+        st.run_base_concepts = list(dict.fromkeys(base))
+        ctx.run_base_capped = overflow
+        ctx.run_base_invalid = invalid
 
 
-_CONCEPT_RENAME_HOP_CAP = 16
+def _materialize_concept_deltas(
+    st: RunState,
+    *,
+    untrusted_modes: set[int] | None = None,
+    capped_inputs: set[int] | None = None,
+    invalid_inputs: set[int] | None = None,
+    base_capped: bool = False,
+    base_invalid: bool = False,
+) -> None:
+    """Iteratively materialize delta memberships with typed partial/unavailable receipts.
 
+    The post-pass sees the complete folded DAG, which makes it event-order tolerant and safe for very
+    deep lineages. Identity failures omit only malformed operands (``partial``); missing/unknown parents,
+    unsupported modes, and dependency cycles make the result ``unavailable`` and propagate unchanged.
+    """
+    # CODEX AGENT: receipts are derived from scratch on every full fold and FoldCursor snapshot. A
+    # repaired suffix therefore clears stale failures instead of carrying snapshot-finalization state.
+    seed_reasons: dict[int, set[ConceptMaterializationReason]] = {
+        nid: {CONCEPT_MODE_UNSUPPORTED_REASON}
+        for nid in sorted(untrusted_modes or ()) if nid in st.nodes
+    }
+    for nid in sorted(capped_inputs or ()):
+        if nid in st.nodes:
+            seed_reasons.setdefault(nid, set()).add(CONCEPTS_PER_NODE_CAP_REASON)
+    for nid in sorted(invalid_inputs or ()):
+        if nid in st.nodes:
+            seed_reasons.setdefault(nid, set()).add(CONCEPT_INVALID_ID_REASON)
+    renames = normalized_concept_renames(getattr(st, "concept_consolidation", None))
+    base, base_reasons = resolve_concept_set_reasons(st.run_base_concepts, renames)
+    if base_capped:
+        base_reasons.add(CONCEPTS_PER_NODE_CAP_REASON)
+    if base_invalid:
+        base_reasons.add(CONCEPT_INVALID_ID_REASON)
+    if renames.endpoint_problem:
+        # Invalid unused endpoints do not erase resolvable ids, but the projection is only partial.
+        base_reasons.add(CONCEPT_INVALID_ID_REASON)
+    st.run_base_concept_receipt = concept_materialization_receipt(base_reasons)
 
-def _normalize_delta_concept(raw) -> str:
-    """Lenient concept-id normalization shared in shape with the Part-V read models."""
-    return str(raw or "").strip().lower().replace(" ", "-").strip("/")
-
-
-def _normalized_concept_renames(raw_renames) -> dict[str, str]:
-    """Build a deterministic normalized rename map without mutating the audit-facing folded map."""
-    if not isinstance(raw_renames, dict):
-        return {}
-    out: dict[str, str] = {}
-    for raw, canonical in raw_renames.items():
-        src = _normalize_delta_concept(raw)
-        dst = _normalize_delta_concept(canonical)
-        if src and dst:
-            current = out.get(src)
-            out[src] = dst if current is None else min(current, dst)
-    return out
-
-
-def _canonical_delta_concept(raw, renames: dict[str, str]) -> str:
-    """Normalize one id, then resolve a bounded and cycle-safe consolidation chain."""
-    current = _normalize_delta_concept(raw)
-    seen: set[str] = set()
-    for _hop in range(_CONCEPT_RENAME_HOP_CAP + 1):
-        if not current or current in seen:
-            return ""
-        seen.add(current)
-        nxt = renames.get(current)
-        if nxt is None:
-            return current
-        current = nxt
-    return ""
-
-
-def _canonical_delta_set(values, renames: dict[str, str]) -> set[str]:
-    if not isinstance(values, (list, tuple, set, frozenset)):
-        return set()
-    return {canonical for raw in values
-            if (canonical := _canonical_delta_concept(raw, renames))}
-
-
-def _materialize_concept_deltas(st: RunState) -> None:
-    """PART V (B) fold POST-PASS: resolve every delta-authored node's effective `node_concepts` from the
-    run base + its parents. ORDER-TOLERANT (invariant 5): it runs once over the fully-folded DAG, so a
-    reordered/spliced log resolves identically. A node's set = inherited − removed + added, where inherited
-    is the run BASE at a root and the UNION of the node's parents' effective sets otherwise (the base flows
-    in through the roots and down the DAG, so a removal propagates to descendants until one re-adds it). A
-    classifier/operator event that already set node_concepts WINS (provenance
-    != authored) — such a node contributes its stored set to its children and is not overwritten here.
-    Iterative (safe for deep lineages); unresolved active-delta cycles fail closed order-independently."""
-    # CODEX AGENT: set algebra must run on canonical ids. Subtracting raw strings first makes
-    # `Model/Transformer` impossible to remove with `model/transformer`; consolidating only after the
-    # diff can resurrect a renamed id. Canonicalize EVERY operand before union/minus/plus, but leave the
-    # raw base/delta sidecars untouched for audit. The complete folded map makes this order-tolerant.
-    # This post-pass also owns the typed failure receipt.  Recompute it from scratch so a FoldCursor
-    # suffix that repairs the graph cannot retain a stale corruption marker from an earlier snapshot.
-    st.node_concept_materialization_receipts = {}
-    renames = _normalized_concept_renames(getattr(st, "concept_consolidation", None))
-    base = _canonical_delta_set(st.run_base_concepts, renames)
     active = {nid for nid in st.node_concept_deltas
               if st.node_concept_provenance.get(nid) == NODE_CONCEPT_PROVENANCE_AUTHORED}
     dependencies: dict[int, set[int]] = {}
@@ -1417,43 +1468,172 @@ def _materialize_concept_deltas(st: RunState) -> None:
     for nid in active:
         node = st.nodes.get(nid)
         parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
-        dependencies[nid] = {pid for pid in parents if pid in active}
+        dependencies[nid] = {parent_id for parent_id in parents if parent_id in active}
         for parent_id in dependencies[nid]:
             children[parent_id].add(nid)
 
-    # CODEX AGENT: use a deterministic Kahn pass rather than recursive DFS. Long, valid lineages must not
-    # hit Python's recursion limit; a cycle and every delta depending on its undefined output remain
-    # unresolved and fail closed to empty. Authoritative non-delta parents are materialized leaves and do
-    # not participate in cycle detection, so an ignored malformed parent edge cannot poison descendants.
     ready = [nid for nid, parents in dependencies.items() if not parents]
     heapq.heapify(ready)
     effective: dict[int, set[str]] = {}
+    reasons_by_node: dict[int, set[ConceptMaterializationReason]] = {
+        nid: set(reasons) for nid, reasons in seed_reasons.items()
+    }
     while ready:
         nid = heapq.heappop(ready)
         node = st.nodes.get(nid)
         parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
-        if parents:
-            inherited: set[str] = set()
+        materialized = BoundedConceptAccumulator()
+        reasons = set(reasons_by_node.get(nid, ()))
+        delta = st.node_concept_deltas.get(nid)
+        if not isinstance(delta, dict):
+            reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
+            removed: set[str] = set()
+            added: set[str] = set()
+        else:
+            removed, removed_problems = resolve_concept_set_reasons(delta.get("removed"), renames)
+            added, added_problems = resolve_concept_set_reasons(delta.get("added"), renames)
+            reasons.update(removed_problems)
+            reasons.update(added_problems)
+        seed_receipt = concept_materialization_receipt(reasons)
+        unavailable = bool(
+            seed_receipt is not None and seed_receipt["status"] == "unavailable")
+        if node is None:
+            reasons.add(CONCEPT_DELTA_MISSING_PARENT_REASON)
+            unavailable = True
+        elif parents:
             for parent_id in parents:
                 if parent_id in active:
-                    inherited |= effective.get(parent_id, set())
-                else:
-                    inherited |= _canonical_delta_set(st.node_concepts.get(parent_id), renames)
+                    parent_reasons = reasons_by_node.get(parent_id, set())
+                    reasons.update(parent_reasons)
+                    parent_receipt = concept_materialization_receipt(parent_reasons)
+                    if parent_receipt is not None and parent_receipt["status"] == "unavailable":
+                        unavailable = True
+                    else:
+                        materialized.update(
+                            value for value in effective.get(parent_id, set()) if value not in removed)
+                    continue
+                if parent_id not in st.nodes:
+                    reasons.add(CONCEPT_DELTA_MISSING_PARENT_REASON)
+                    unavailable = True
+                    continue
+                parent_seed = reasons_by_node.get(parent_id, set())
+                if parent_seed:
+                    reasons.update(parent_seed)
+                    parent_seed_receipt = concept_materialization_receipt(parent_seed)
+                    if (parent_seed_receipt is not None
+                            and parent_seed_receipt["status"] == "unavailable"):
+                        unavailable = True
+                        continue
+                if parent_id not in st.node_concepts:
+                    reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
+                    unavailable = True
+                    continue
+                parent_provenance = st.node_concept_provenance.get(parent_id)
+                # CODEX AGENT: an explicit full-set producer may be low-trust display taxonomy and still
+                # define inheritance (offline heuristic), but an unknown/future producer or missing
+                # provenance is not an exact set. Classifier/operator/authored-full remain authoritative.
+                if parent_provenance not in {
+                    NODE_CONCEPT_PROVENANCE_AUTHORED,
+                    NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                    NODE_CONCEPT_PROVENANCE_OPERATOR,
+                    NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+                }:
+                    reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
+                    unavailable = True
+                    continue
+                parent_concepts, parent_problems = resolve_concept_set_reasons(
+                    st.node_concepts[parent_id], renames)
+                materialized.update(value for value in parent_concepts if value not in removed)
+                reasons.update(parent_problems)
         else:
-            inherited = set(base)
-        delta = st.node_concept_deltas[nid]
-        removed = _canonical_delta_set(delta.get("removed"), renames)
-        added = _canonical_delta_set(delta.get("added"), renames)
-        effective[nid] = (inherited - removed) | added
+            materialized.update(value for value in base if value not in removed)
+            reasons.update(base_reasons)
+            base_receipt = concept_materialization_receipt(base_reasons)
+            unavailable = bool(
+                base_receipt is not None and base_receipt["status"] == "unavailable")
+        # Remove is applied while streaming every inherited source; add is applied last and therefore
+        # wins for tolerant legacy rows that ambiguously contain the same canonical id in both lists.
+        materialized.update(added)
+        receipt = concept_materialization_receipt(reasons)
+        if receipt is not None and receipt["status"] == "unavailable":
+            unavailable = True
+        if materialized.overflow:
+            reasons.add(CONCEPTS_PER_NODE_CAP_REASON)
+        effective[nid] = set() if unavailable else set(materialized.values)
+        if reasons:
+            reasons_by_node[nid] = reasons
         for child_id in sorted(children[nid]):
             dependencies[child_id].discard(nid)
             if not dependencies[child_id]:
                 heapq.heappush(ready, child_id)
 
+    # Kahn leaves cycle members and every active descendant of their undefined output unresolved. Seed
+    # the cycle cause, also inspect direct non-cycle parents, then propagate the bounded closed reason set
+    # through the unresolved subgraph. Fixing one cycle must not hide a second independent unavailable cause.
     unresolved = active - effective.keys()
-    st.node_concept_materialization_receipts = {
-        nid: CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON for nid in sorted(unresolved)
-    }
+    pending: list[int] = []
+    queued: set[int] = set()
+    for nid in sorted(unresolved):
+        effective[nid] = set()
+        reasons = reasons_by_node.setdefault(nid, set())
+        reasons.add(CONCEPT_DELTA_DEPENDENCY_CYCLE_REASON)
+        raw_delta = st.node_concept_deltas.get(nid)
+        if isinstance(raw_delta, dict):
+            _removed, removed_problems = resolve_concept_set_reasons(
+                raw_delta.get("removed"), renames)
+            _added, added_problems = resolve_concept_set_reasons(
+                raw_delta.get("added"), renames)
+            reasons.update(removed_problems)
+            reasons.update(added_problems)
+        else:
+            reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
+        node = st.nodes.get(nid)
+        unresolved_parents = (getattr(node, "parent_ids", None) or []) if node is not None else []
+        for parent_id in unresolved_parents:
+            if parent_id in active:
+                if parent_id not in unresolved:
+                    reasons.update(reasons_by_node.get(parent_id, ()))
+                continue
+            if parent_id not in st.nodes:
+                reasons.add(CONCEPT_DELTA_MISSING_PARENT_REASON)
+                continue
+            parent_seed = reasons_by_node.get(parent_id, set())
+            if parent_seed:
+                reasons.update(parent_seed)
+                parent_seed_receipt = concept_materialization_receipt(parent_seed)
+                if (parent_seed_receipt is not None
+                        and parent_seed_receipt["status"] == "unavailable"):
+                    continue
+            if (parent_id not in st.node_concepts
+                    or st.node_concept_provenance.get(parent_id) not in {
+                        NODE_CONCEPT_PROVENANCE_AUTHORED,
+                        NODE_CONCEPT_PROVENANCE_CLASSIFIER,
+                        NODE_CONCEPT_PROVENANCE_OPERATOR,
+                        NODE_CONCEPT_PROVENANCE_OFFLINE_HEURISTIC,
+                    }):
+                reasons.add(CONCEPT_DELTA_UNKNOWN_PARENT_MEMBERSHIP_REASON)
+                continue
+            _concepts, parent_problems = resolve_concept_set_reasons(
+                st.node_concepts[parent_id], renames)
+            reasons.update(parent_problems)
+        heapq.heappush(pending, nid)
+        queued.add(nid)
+    while pending:
+        parent_id = heapq.heappop(pending)
+        queued.discard(parent_id)
+        for child_id in sorted(children.get(parent_id, ()) & unresolved):
+            child_reasons = reasons_by_node.setdefault(child_id, set())
+            before = len(child_reasons)
+            child_reasons.update(reasons_by_node.get(parent_id, ()))
+            if len(child_reasons) != before and child_id not in queued:
+                heapq.heappush(pending, child_id)
+                queued.add(child_id)
+
+    st.node_concept_materialization_receipts = {}
+    for nid, reasons in sorted(reasons_by_node.items()):
+        receipt = concept_materialization_receipt(reasons)
+        if receipt is not None:
+            st.node_concept_materialization_receipts[nid] = receipt
     for nid in active:
         st.node_concepts[nid] = sorted(effective.get(nid, set()))
 
@@ -1502,8 +1682,17 @@ def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     elif generation is None or generation != node.attempt:
         return
     concepts = d.get("concepts")
-    st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    bounded, overflow, invalid = bounded_raw_concept_values(concepts)
+    st.node_concepts[nid] = bounded
     st.node_concept_provenance[nid] = incoming_provenance
+    ctx.concept_input_capped.discard(nid)
+    ctx.concept_input_invalid.discard(nid)
+    if overflow:
+        ctx.concept_input_capped.add(nid)
+    if invalid:
+        ctx.concept_input_invalid.add(nid)
+    if incoming_provenance != NODE_CONCEPT_PROVENANCE_UNTRUSTED:
+        ctx.concept_mode_untrusted.discard(nid)
     # B1 (§21.18): remember the vocabulary size at tag time so the cadence can spot tags made against an
     # out-of-date (smaller) vocabulary and refresh them. Absent on pre-B1 events -> no receipt (oldest).
     av = d.get("at_vocab")
@@ -1541,8 +1730,16 @@ def _on_concept_tag_edited(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> 
         if generation is None or generation != node.attempt:
             return
     concepts = d.get("concepts")
-    st.node_concepts[nid] = [str(c) for c in concepts] if isinstance(concepts, list) else []
+    bounded, overflow, invalid = bounded_raw_concept_values(concepts)
+    st.node_concepts[nid] = bounded
     st.node_concept_provenance[nid] = NODE_CONCEPT_PROVENANCE_OPERATOR
+    ctx.concept_mode_untrusted.discard(nid)
+    ctx.concept_input_capped.discard(nid)
+    ctx.concept_input_invalid.discard(nid)
+    if overflow:
+        ctx.concept_input_capped.add(nid)
+    if invalid:
+        ctx.concept_input_invalid.add(nid)
     # Operator tags are not vocabulary-versioned; clear any classifier staleness receipt for this node.
     st.node_concepts_at_vocab.pop(nid, None)
 
@@ -2438,7 +2635,14 @@ def _finalize_fold(st: RunState, ctx: _FoldCtx) -> RunState:
     # PART V (B): materialize delta-authored node concepts topologically once the whole DAG is folded
     # (order-tolerant; membership no-op unless a node authored a delta). Always invoke it so the typed
     # corruption receipt is recomputed/cleared for FoldCursor suffix snapshots as well.
-    _materialize_concept_deltas(st)
+    _materialize_concept_deltas(
+        st,
+        untrusted_modes=ctx.concept_mode_untrusted,
+        capped_inputs=ctx.concept_input_capped,
+        invalid_inputs=ctx.concept_input_invalid,
+        base_capped=ctx.run_base_capped,
+        base_invalid=ctx.run_base_invalid,
+    )
 
     flagged = _apply_trust_gate(st)
     _select_best(st, flagged, ctx.best_confirmed, ctx.best_confirmed_significant)

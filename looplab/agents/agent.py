@@ -17,7 +17,7 @@ from typing import Optional
 
 from looplab.core import tracing
 from looplab.core.llm import BudgetExceeded
-from looplab.core.models import Idea, Node, RunState
+from looplab.core.models import Idea, IdeaEmission, Node, RunState
 from looplab.core.parse import ParseError, parse_structured
 from looplab.core.prompts import PromptStore, render
 from looplab.agents.roles import (
@@ -153,7 +153,8 @@ class ToolUsingResearcher:
     def _emit_spec(self) -> dict:
         return {"type": "function", "function": {
             "name": "emit", "description": "Emit the final Idea for the next experiment.",
-            "parameters": Idea.model_json_schema()}}
+            # CODEX AGENT: expose the strict modern writer schema, not the tolerant durable reader.
+            "parameters": IdeaEmission.model_json_schema()}}
 
     @staticmethod
     def _sanitize(args: dict) -> dict:
@@ -179,7 +180,7 @@ class ToolUsingResearcher:
         # message so it re-emits, instead of being silently turned into a no-op idea. Returns an error
         # string to reject, or None to accept.
         try:
-            idea = Idea.model_validate(self._sanitize(args))
+            idea = IdeaEmission.model_validate(self._sanitize(args))
         except Exception as e:  # noqa: BLE001
             return (f"it didn't parse ({str(e)[:180]}). Emit an object with `operator`, numeric "
                     "`params`, and a `rationale` naming WHAT you change and WHY")
@@ -197,7 +198,8 @@ class ToolUsingResearcher:
         # Never let a malformed emit (non-numeric params, bad shape) crash the loop — sanitize,
         # then fall back to a rationale-preserving draft if validation still fails.
         try:
-            return _clamp_fill(Idea.model_validate(self._sanitize(args)), self.bounds)
+            emitted = IdeaEmission.model_validate(self._sanitize(args))
+            return _clamp_fill(emitted.to_idea(), self.bounds)
         except Exception:  # noqa: BLE001 - resilience: the run must survive a junk proposal
             rationale = str((args or {}).get("rationale", "") or "")[:500]
             operator = str((args or {}).get("operator") or "draft")
@@ -209,7 +211,7 @@ class ToolUsingResearcher:
         try:
             idea = parse_structured(
                 self.client, messages + [{"role": "user", "content": "Emit the Idea now."}],
-                Idea, self.parser)
+                IdeaEmission, self.parser).to_idea()
         except ParseError:
             idea = Idea(operator="draft", params={}, rationale="fallback (agent parse failed)")
         return _clamp_fill(idea, self.bounds)
