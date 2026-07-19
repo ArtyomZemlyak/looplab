@@ -4,7 +4,7 @@ import { addConceptSelection, chipsAtPath, breadcrumb, matchingNodeIds,
 import { searchConcepts } from './conceptSearch.js'
 import { Marked } from './Highlight.jsx'
 import { canonicalId } from './conceptId.js'
-import { activeNodeConcepts } from './nodeProjection.js'
+import { activeNodeConcepts, conceptMaterializationStatus } from './nodeProjection.js'
 
 const SEARCH_RESULTS = 8   // dropdown cap; the pure model ranks globally, this trims the visible list
 
@@ -23,8 +23,13 @@ const SearchIcon = ({ small }) => (
 // The pure model (chip counts, breadcrumb, matching set) lives in conceptChips.js and is unit-tested;
 // this component is only wiring + markup.
 export default function ConceptChipBar({ state, onHighlight }) {
-  const nodeConcepts = useMemo(() => activeNodeConcepts(state),
-    [state?.node_concepts, state?.nodes, state?.aborted_nodes])
+  // CODEX AGENT: partial rows may be rendered on their node, but absence within them is not truth.
+  // Keep them out of chip counts, search, selection and DAG filtering as one indivisible gate.
+  const [materialization, nodeConcepts] = useMemo(() => {
+    const status = conceptMaterializationStatus(state)
+    return [status, status === 'complete' ? activeNodeConcepts(state) : {}]
+  }, [state?.run_base_concept_receipt, state?.node_concept_materialization_receipts,
+    state?.node_concepts, state?.nodes, state?.aborted_nodes])
   const rename = state?.concept_consolidation || {}
   const [path, setPath] = useState('')                 // breadcrumb drill position ('' = roots)
   const [selected, setSelected] = useState([])         // ordered selected concept ids (OR)
@@ -122,6 +127,16 @@ export default function ConceptChipBar({ state, onHighlight }) {
     else if (event.key === 'Escape') { event.preventDefault(); query ? setQuery('') : closeSearch() }
   }
 
+  if (materialization !== 'complete') return (
+    <div className="concept-bar" role={materialization === 'unavailable' ? 'alert' : 'status'}>
+      <div className="cb-head">
+        <strong>Concepts</strong><span className="chip xs warn">{materialization.toUpperCase()}</span>
+        <span className="muted">{materialization === 'partial'
+          ? 'Retained IDs are display-only; filters off.'
+          : 'Membership unavailable; not empty.'}</span>
+      </div>
+    </div>
+  )
   if (!hasConcepts) return null
   // Display a selection key: strip the `=` exact marker for the label, keep a hint that it's level-exact.
   const keyValue = (key) => key[0] === '=' ? key.slice(1) : key

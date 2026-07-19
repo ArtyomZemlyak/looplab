@@ -1,3 +1,5 @@
+import { conceptMaterializationStatus } from './nodeProjection.js'
+
 // Shared safe concept-id helpers. Concept ids are LLM-authored free strings, so a tag can collide with
 // an Object.prototype key ("__proto__", "constructor", "toString", …). Any code that reads a rename map
 // or builds a concept-keyed map MUST go through here, or one weird tag reaches the prototype chain — a
@@ -59,6 +61,9 @@ export function conceptMap() {
 export function nodeTheme(node, state = null) {
   const memberships = state?.node_concepts
   const nodeId = node?.id
+  // CODEX AGENT: grouping, charts, Inspector and reports all converge here. An own/run-base receipt
+  // makes retained ids display-only; never resurrect an authored fallback as an authoritative theme.
+  if (state && conceptMaterializationStatus(state, nodeId) !== 'complete') return null
   if (memberships && typeof memberships === 'object' && !Array.isArray(memberships)
       && nodeId != null && Object.hasOwn(memberships, String(nodeId))) {
     const rename = state?.concept_consolidation || {}

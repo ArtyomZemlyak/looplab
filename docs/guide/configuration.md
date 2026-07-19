@@ -299,6 +299,12 @@ per-node dials — not 1:1 `Settings` fields, but gated the same way.)
 | `cross_run_curation_auto` | `LOOPLAB_CROSS_RUN_CURATION_AUTO` | `false` | **Deprecated compatibility input; it does not auto-apply.** Retained so old environment/config snapshots still load. When `cross_run_curation` is enabled, finalize records the request as `auto_requested` in the proposal audit row but remains fail-closed and performs no governance write. An operator must review the exact proposal and apply selected changes through typed concept/claim CLI or owner HTTP governance. Default off; otherwise inert |
 | `capability_expansion` | `LOOPLAB_CAPABILITY_EXPANSION` | `false` | PART IV Phase 2b (D7). With `concept_pivot`, action-space lock-in on an explore stance changes the proposal directive toward new capability/infrastructure. The resulting idea is stamped `operator="expand"` and competes normally under SearchFitness, so yield is measurable; the flag does not itself guarantee a capability was built or helped. Keep opt-in and show the dependency/effective state |
 
+The secondary DAG concept UI follows the same materialization truth as `ConceptFrame`.
+`run_base_concept_receipt` or an active entry in `node_concept_materialization_receipts` marks retained
+IDs as `PARTIAL`/display-only: they never drive theme grouping, chips, search, or graph filters.
+`UNAVAILABLE` is shown as an integrity state, never as an empty concept set. Receipts retained only for
+tombstoned or aborted nodes do not make the current projection partial.
+
 Concept owner HTTP mutations use two concurrency tokens: the per-ledger `expected_revision` and the required
 cross-alias/split `expected_governance_revision`. Both are strict non-negative integers. Mutation receipts and
 Atlas reads expose the resulting shared governance revision; a stale token returns 409 without appending.

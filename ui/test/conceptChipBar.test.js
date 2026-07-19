@@ -39,6 +39,34 @@ test('ConceptChipBar renders nothing when the run carries no concepts', async ()
   }
 })
 
+test('ConceptChipBar distinguishes partial and unavailable membership from an empty run', async () => {
+  const vite = await createServer({
+    root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
+    server: { middlewareMode: true },
+  })
+  try {
+    const { default: ConceptChipBar } = await vite.ssrLoadModule('/src/ConceptChipBar.jsx')
+    const render = state => new JSDOM(renderToStaticMarkup(React.createElement(ConceptChipBar, {
+      state, onHighlight() {},
+    }))).window.document
+    const partial = render({ ...STATE, node_concept_materialization_receipts: {
+      0: { status: 'partial', reasons: ['concepts_per_node_cap'] },
+    } })
+    assert.equal(partial.querySelector('.concept-bar')?.getAttribute('role'), 'status')
+    assert.match(partial.body.textContent, /PARTIAL.*display-only.*filters off/s)
+    assert.equal(partial.querySelector('.cb-chip'), null)
+    assert.equal(partial.querySelector('[aria-label="Search concepts"]'), null)
+
+    const unavailable = render({ nodes: {}, node_concepts: {}, run_base_concept_receipt: {
+      status: 'unavailable', reasons: ['delta_dependency_cycle'],
+    } })
+    assert.equal(unavailable.querySelector('.concept-bar')?.getAttribute('role'), 'alert')
+    assert.match(unavailable.body.textContent, /UNAVAILABLE.*not empty/s)
+  } finally {
+    await vite.close()
+  }
+})
+
 test('ConceptChipBar renders top-level concept chips with subtree counts', async () => {
   const vite = await createServer({
     root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
@@ -155,6 +183,23 @@ test('selecting a chip pushes the matching node set to onHighlight; clear resets
     })))
     assert.deepEqual([...document.querySelectorAll('.cb-pill-label')].map(node => node.textContent),
       ['objective/contrastive'])
+
+    // A partial live receipt keeps its warning visible but atomically removes authoritative filters.
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: { ...STATE, node_concept_materialization_receipts: {
+        0: { status: 'partial', reasons: ['concepts_per_node_cap'] },
+      } },
+      onHighlight: v => calls.push(v),
+    })))
+    assert.match(document.querySelector('[role="status"]').textContent, /PARTIAL/)
+    assert.equal(document.querySelector('.cb-chip'), null)
+    assert.equal(calls.at(-1), null, 'partial membership cannot strand an authoritative DAG filter')
+
+    await act(async () => root.render(React.createElement(ConceptChipBar, {
+      state: STATE, onHighlight: v => calls.push(v),
+    })))
+    assert.equal(document.querySelector('.cb-pill'), null,
+      'restoring complete membership cannot resurrect a stale selection')
 
     // A live reset that removes the last concept must clear graph dimming before hiding the bar.
     await act(async () => root.render(React.createElement(ConceptChipBar, {

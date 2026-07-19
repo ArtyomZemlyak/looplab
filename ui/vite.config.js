@@ -51,6 +51,14 @@ export default defineConfig({
         codeSplitting: {
           groups: [
             {
+              name: 'concept-support',
+              // CODEX AGENT: Chips and the full Concepts view share identity, search, highlight and
+              // receipt gates. One stream avoids tiny wrappers and gives their repeated vocabulary
+              // one gzip dictionary; List may fetch this small support stream but no route component.
+              test: /[/\\]src[/\\](conceptId|nodeProjection|conceptChips|conceptSearch|Highlight)\.(js|jsx)$/,
+              includeDependenciesRecursively: false,
+            },
+            {
               name: 'vendor-flow',
               // The app adapter and these private graph dependencies are an exact @xyflow
               // co-closure; no non-graph source imports them. One stream shares a gzip dictionary

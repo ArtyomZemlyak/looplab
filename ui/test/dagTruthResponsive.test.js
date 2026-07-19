@@ -64,6 +64,11 @@ test('fixed DAG cards keep one bounded context row and truthful provenance contr
     'cross-run provenance stays keyboard reachable after moving into the header')
   assert.match(dag, /node\.origin\?\.run_id \? <a className="origin-chip compact"[\s\S]*?: node\.research_origin \? <span className="origin-chip rsch compact"/,
     'the bounded header shows one provenance marker while its accessible label retains both facts')
-  assert.match(dag, /const cardTitle =[\s\S]*?conceptTags\.length \? ` · concepts: \$\{conceptTags\.join\(', '\)\}`/,
+  assert.match(dag, /const conceptTruth = conceptStatus === 'unavailable'[\s\S]*?conceptStatus === 'partial'[\s\S]*?conceptTags\.length \? `concepts:/)
+  assert.match(dag, /const cardTitle =[\s\S]*?conceptTruth \? ` · \$\{conceptTruth\}`/,
     'the pointer-transparent +N strip must expose its complete canonical list on the card tooltip')
+  assert.match(dag, /conceptMaterializationStatus\(state, node\.id\)/)
+  assert.match(dag, /PARTIAL concepts \(display-only\)/)
+  assert.match(dag, />PARTIAL<\/span>/,
+    'retained partial ids need an explicit visible marker in addition to accessible copy')
 })

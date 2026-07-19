@@ -95,6 +95,23 @@ test('direction grouping follows folded concepts after delta authoring and expli
   ])
 })
 
+test('partial concept ids never drive theme grouping or resurrect legacy axes', () => {
+  const nodes = {
+    1: { id: 1, idea: { theme: 'stale-partial' } },
+    2: { id: 2, idea: { theme: 'stale-unavailable' } },
+    3: { id: 3, idea: { theme: 'legacy-complete' } },
+  }
+  const state = {
+    nodes,
+    node_concepts: { 1: ['partial/retained'], 2: ['unknown/retained'], 3: ['exact/current'] },
+    node_concept_materialization_receipts: {
+      1: { status: 'partial', reasons: ['concepts_per_node_cap'] },
+      2: { status: 'unavailable', reasons: ['delta_dependency_missing_parent'] },
+    },
+  }
+  assert.deepEqual([...computeGroups(nodes, 'theme', state)], [['exact', [3]]])
+})
+
 test('banded theme: no two group cells overlap (the core fix)', () => {
   const ns = twoThemeGraph()
   const groups = computeGroups(ns, 'theme')

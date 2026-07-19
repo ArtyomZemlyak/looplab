@@ -107,7 +107,8 @@ def test_packaged_settings_ui_schema_preserves_copy_and_only_known_unique_fields
     assert set(("concept_pivot", "concept_run_base", "concept_retag_every",
                 "graded_novelty", "capability_expansion")) <= set(by_key)
     assert "never ranks or selects" in by_key["concept_pivot"]["help"]
-    assert "folded effective axes" in by_key["concept_run_base"]["help"]
+    assert "materialization receipts" in by_key["concept_run_base"]["help"]
+    assert "display-only" in by_key["concept_run_base"]["help"]
     assert "Researcher-authored additions" in by_key["concept_retag_every"]["help"]
     assert "proposal admission" in by_key["graded_novelty"]["help"]
     assert "Concept coverage pivot" in by_key["capability_expansion"]["help"]

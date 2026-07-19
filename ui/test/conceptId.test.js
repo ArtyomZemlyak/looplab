@@ -2,6 +2,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { canonicalId, normalizeConceptId, conceptMap, nodeTheme } from '../src/conceptId.js'
+import { conceptMaterializationStatus } from '../src/nodeProjection.js'
 
 test('canonicalId applies the rename map', () => {
   assert.equal(canonicalId('raw', { raw: 'loss/x' }), 'loss/x')
@@ -91,4 +92,60 @@ test('nodeTheme prefers folded post-rename concepts and preserves explicit untag
   assert.equal(nodeTheme({ id: 8, idea: { concepts: [] } }, {
     node_concepts: { 8: ['optimization/adam'] },
   }), 'optimization', 'delta-authored nodes need no full idea.concepts list')
+})
+
+test('materialization receipts gate every authoritative concept projection', () => {
+  const nodes = {
+    1: { id: 1, idea: { theme: 'legacy', concepts: ['legacy/fallback'] } },
+    2: { id: 2, idea: { theme: 'safe' } },
+    3: { id: 3, tombstoned: true },
+    4: { id: 4 },
+  }
+  const partial = { status: 'partial', reasons: ['invalid_concept_id', 'concepts_per_node_cap'] }
+  const unavailable = { status: 'unavailable', reasons: ['delta_dependency_cycle'] }
+  const state = {
+    nodes, node_concepts: { 1: ['loss/retained'], 2: ['data/full'], 3: ['old/deleted'], 4: ['old/aborted'] },
+    node_concept_materialization_receipts: { 1: partial, 3: unavailable, 4: unavailable },
+    aborted_nodes: [4],
+  }
+
+  assert.equal(conceptMaterializationStatus(state, 1), 'partial')
+  assert.equal(conceptMaterializationStatus(state, 2), 'complete')
+  assert.equal(conceptMaterializationStatus(state), 'partial',
+    'durable receipts for deleted/aborted nodes do not poison the current projection')
+  assert.equal(nodeTheme(nodes[1], state), null, 'retained partial ids cannot become a theme')
+  assert.equal(nodeTheme(nodes[2], state), 'data', 'a receipt on another node does not erase exact data')
+  assert.equal(nodeTheme(nodes[1], {
+    nodes, node_concepts: {}, node_concept_materialization_receipts: { 1: partial },
+  }), null, 'a partial own receipt also blocks the legacy fallback')
+
+  const basePartial = { ...state, run_base_concept_receipt: {
+    status: 'partial', reasons: ['concepts_per_node_cap'],
+  } }
+  assert.equal(nodeTheme(nodes[2], basePartial), null, 'run-base partiality gates every node')
+  assert.equal(conceptMaterializationStatus({ ...basePartial,
+    node_concept_materialization_receipts: { 2: unavailable },
+  }, 2), 'unavailable', 'an unavailable node wins over a partial run base')
+})
+
+test('materialization receipt parsing fails closed without rejecting future partial reasons', () => {
+  const nodes = { 1: { id: 1 }, 2: { id: 2 } }
+  assert.equal(conceptMaterializationStatus({ nodes }), 'complete')
+  assert.equal(conceptMaterializationStatus({ nodes, run_base_concept_receipt: null }), 'complete')
+  assert.equal(conceptMaterializationStatus({ nodes, node_concept_materialization_receipts: [] }),
+    'unavailable')
+  assert.equal(conceptMaterializationStatus({ nodes, node_concept_materialization_receipts: {
+    9: { status: 'partial', reasons: ['concepts_per_node_cap'] },
+  } }), 'unavailable', 'an orphan receipt cannot silently disappear')
+  for (const receipt of [
+    null,
+    { status: 'partial', reasons: [] },
+    { status: 'partial', reasons: [3] },
+    { status: 'partial', reasons: ['delta_dependency_cycle'] },
+  ]) assert.equal(conceptMaterializationStatus({ nodes, node_concept_materialization_receipts: {
+    1: receipt,
+  } }), 'unavailable')
+  assert.equal(conceptMaterializationStatus({ nodes, node_concept_materialization_receipts: {
+    1: { status: 'partial', reasons: ['future_bounded_reason'] },
+  } }), 'partial', 'unknown reasons remain non-authoritative without breaking forward compatibility')
 })

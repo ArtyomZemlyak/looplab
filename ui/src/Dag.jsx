@@ -7,7 +7,7 @@ import { fmt, layoutWithGroups, nodeClass, delta, workingId, operatorMeta, OPERA
 import { stripMd } from './markdown.jsx'
 import { nodeChip } from './report.js'
 import { canonicalId, nodeTheme } from './conceptId.js'
-import { activeNodeMap } from './nodeProjection.js'
+import { activeNodeMap, conceptMaterializationStatus } from './nodeProjection.js'
 import { OpIcon } from './icons.jsx'
 import { Spark } from './charts.jsx'
 import { GroupRegion, SuperShell } from './groupnodes.jsx'
@@ -168,6 +168,7 @@ function ExpNode({ data }) {
   // says baseline, everything else diffs vs parent. nodeChip owns those rules (merges handled below).
   const parents = (node.parent_ids || []).map(p => state.nodes[p]).filter(Boolean)
   const isMerge = parents.length > 1
+  const conceptStatus = conceptMaterializationStatus(state, node.id)
   const theme = nodeTheme(node, state)
   const chg = nodeChip(node, state.nodes, state)   // returns '' for a (resolved) merge — render guards isMerge
   const mergeThemes = isMerge ? parents.map(p => nodeTheme(p, state) || ('#' + p.id)) : null
@@ -177,13 +178,14 @@ function ExpNode({ data }) {
   // both. Canonicalized through the consolidation rename so a retired raw id never shows next to its
   // canonical twin (conceptId.js keeps LLM-authored ids off the prototype chain).
   const conceptTags = useMemo(() => {
+    if (conceptStatus === 'unavailable') return []
     const nc = state.node_concepts
     const raw = (nc && (nc[node.id] || nc[String(node.id)])) || []
     const rn = state.concept_consolidation || {}
     const seen = new Set(); const out = []
     for (const r of raw) { const c = canonicalId(r, rn); if (c && !seen.has(c)) { seen.add(c); out.push(c) } }
     return out
-  }, [node.id, state.node_concepts, state.concept_consolidation])
+  }, [conceptStatus, node.id, state.node_concepts, state.concept_consolidation])
   const confirmed = node.confirmed_mean != null
   const cardCls = nodeClass(node, state, workId) + (node.id === selectedId ? ' sel' : '') + (sweep ? ' sweep' : '') + (groupTint ? ' grouped' : '') + (dim ? ' dim' : '')
   // FX "heat" (0..1) for the reactor-core glow — only read under [data-fx]; harmless when FX is off.
@@ -193,8 +195,11 @@ function ExpNode({ data }) {
   const cardStyle = { '--core': coreI, ...(groupTint ? { '--grp-tint': groupTint } : {}) }
   // # CODEX AGENT: the tag strip is pointer-transparent and visually caps at two leaves. Put the
   // complete canonical set on the card itself so the +N overflow has a reachable mouse tooltip.
+  const conceptTruth = conceptStatus === 'unavailable' ? 'concepts unavailable, not empty'
+    : conceptStatus === 'partial' ? `PARTIAL concepts (display-only): ${conceptTags.join(', ') || 'none retained'}`
+      : conceptTags.length ? `concepts: ${conceptTags.join(', ')}` : ''
   const cardTitle = op.label + (node.idea?.rationale ? ' — ' + stripMd(node.idea.rationale) : '')
-    + (conceptTags.length ? ` · concepts: ${conceptTags.join(', ')}` : '')
+    + (conceptTruth ? ` · ${conceptTruth}` : '')
   const selectionLabel = [
     `Experiment #${node.id}`, op.label, node.status || 'unknown status',
     m == null ? 'metric unavailable' : `metric ${fmt(m)}`,
@@ -202,7 +207,7 @@ function ExpNode({ data }) {
     node.id === state.best_node_id ? 'current champion' : null,
     node.id === workId ? 'currently working' : null,
     theme ? `primary concept axis ${theme}` : null,
-    conceptTags.length ? `concepts ${conceptTags.join(', ')}` : null,
+    conceptTruth || null,
     node.origin?.run_id ? `seeded from run ${node.origin.run_id}, experiment ${node.origin.node_id}` : null,
     node.research_origin ? 'proposed from deep research directions' : null,
     node.status === 'failed' ? `failure reason ${node.error_reason || 'not reported'}` : null,
@@ -277,7 +282,8 @@ function ExpNode({ data }) {
     {/* View 2: on-node concept tags, drawn only at the full-card zoom (glyph LOD skips them). Absolutely
         positioned just below the fixed-height card so it never perturbs the layout geometry (NODE_H);
         capped at two leaves + an overflow count, the full set is in the card title + the a11y label. */}
-    {conceptTags.length > 0 && <div className="node-concepts" aria-hidden="true">
+    {(conceptStatus === 'partial' || conceptTags.length > 0) && <div className="node-concepts" aria-hidden="true">
+      {conceptStatus === 'partial' && <span className="nc-tag more" title="Incomplete concept materialization">PARTIAL</span>}
       {conceptTags.slice(0, 2).map(c => <span key={c} className="nc-tag" title={c}>{c.split('/').pop()}</span>)}
       {conceptTags.length > 2 &&
         <span className="nc-tag more" title={conceptTags.join(', ')}>+{conceptTags.length - 2}</span>}
