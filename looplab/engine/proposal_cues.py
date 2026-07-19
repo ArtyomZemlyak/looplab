@@ -151,7 +151,23 @@ class ProposalCuesMixin:
                      "cross-validation gates them — KEEP a feature only if it improves CV; drop any "
                      "that don't (feature engineering is non-universal).")
         hint += self._prior_note_text   # E4: cross-run meta-learned prior (empty unless enabled)
-        hint += self._cross_run_advisory_text(state)   # §21.20 Step 5: cross-run context pack (empty unless enabled)
+        # §21.20 Step 5: cross-run context pack (empty unless enabled). `_cross_run_advisory_text`
+        # sets `self._cross_run_advisory_receipt` as a side effect; Variant-1: hold `_advisory_lock`
+        # across the compute + the capture, then stamp the receipt onto THIS build's researcher so a
+        # concurrent sibling draft can't mis-attribute its provenance to this node. The lock is
+        # uncontended (and the block a no-op) on the serial path / when advisory is off.
+        _adv_lock = getattr(self, "_advisory_lock", None)
+        if _adv_lock is not None:
+            with _adv_lock:
+                hint += self._cross_run_advisory_text(state)
+                _receipt = getattr(self, "_cross_run_advisory_receipt", {})
+        else:  # bare test hosts without the engine __init__ (no lock) — original behaviour
+            hint += self._cross_run_advisory_text(state)
+            _receipt = getattr(self, "_cross_run_advisory_receipt", {})
+        try:
+            setattr(_r, "_cross_run_advisory_receipt", _receipt)
+        except Exception:  # noqa: BLE001
+            pass
         hint += self._cross_run_pointer_text()         # lean "you have cross_run_* tools" nudge (advisory-off default)
         # PART V (B): once the run has a BASE concept set, ask for the DELTA instead of the full list, so
         # per-node annotations stay minimal and inherit down the DAG. Dynamic + gated here (the static
@@ -205,7 +221,7 @@ class ProposalCuesMixin:
             setattr(_r, "_sweep_hint", sweep_hint)
         except Exception:  # noqa: BLE001
             pass
-        self._stamp_novelty_hint(state, self._novelty_stance)
+        self._stamp_novelty_hint(state, self._novelty_stance, researcher=_r)
 
     def _cross_run_pointer_text(self) -> str:
         """PART V §22 (advisory): a LEAN, static one-line pointer telling the Researcher it holds the
@@ -378,7 +394,7 @@ class ProposalCuesMixin:
             self._cross_run_advisory_receipt = {}
             return ""
 
-    def _stamp_novelty_hint(self, state: RunState, stance: str) -> None:
+    def _stamp_novelty_hint(self, state: RunState, stance: str, researcher=None) -> None:
         """Stamp the Strategist's novelty dial onto the ACTIVE researcher (slice 2/4): a prose
         directive `_novelty_hint` (+ the coverage gaps to act on) that the researcher folds into its
         prompt, plus the stance VALUE `_novelty_stance` the foresight ranker reads. "balanced" ->
@@ -439,8 +455,13 @@ class ProposalCuesMixin:
         elif stance == "exploit":
             nov_hint = ("\nNovelty stance: EXPLOIT — refine and deepen the current best line of "
                         "attack; a focused improvement beats opening a new direction now.")
+        # Variant-1: stamp THIS build's own researcher (a pool member), not the shared
+        # `self.researcher` — otherwise a concurrent sibling build clobbers the novelty hint/stance
+        # this researcher is about to read in `propose`, and the pooled build silently loses the
+        # strategist's explore/capability-expansion directive (the plateau-jump escape).
+        _r = researcher if researcher is not None else self.researcher
         for _attr, _val in (("_novelty_hint", nov_hint), ("_novelty_stance", stance)):
             try:
-                setattr(self.researcher, _attr, _val)
+                setattr(_r, _attr, _val)
             except Exception:  # noqa: BLE001
                 pass

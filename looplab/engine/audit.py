@@ -24,19 +24,19 @@ class AuditMixin:
     """The engine's audit/trust-emitter cluster. See the module docstring for the mixin
     convention (`self` is the Engine)."""
 
-    def _emit_agent_report(self, node_id: int, generation: int = 0) -> None:
+    def _emit_agent_report(self, node_id: int, generation: int = 0, developer=None) -> None:
         """External-agent audit (ADR-7): if the Developer validated its output (a
         `ValidatingDeveloper`), record the verdict as an `agent_validated` event so each
         node carries a trail of how the external coding agent performed. No-op for
         plain developers (no `last_report`).
 
-        Safe because node *creation* (`_create_node` / `_ablate`) is awaited sequentially
-        in the main loop and never inside the parallel `evals` task group, so the shared
-        `developer.last_report` set just above always belongs to `node_id`."""
-        report = getattr(self.developer, "last_report", None)
+        Serial node creation stamps the shared `self.developer.last_report` against `node_id`.
+        Under Variant-1 parallel build the caller passes `developer=` THIS build's pooled developer
+        so a concurrent sibling build's `last_report` is never mis-attributed to this node."""
+        report = getattr(developer if developer is not None else self.developer, "last_report", None)
         if report is not None:
             data = {"node_id": node_id, **report.summary()}
-            extra = getattr(self.developer, "audit_extra", None)
+            extra = getattr(developer if developer is not None else self.developer, "audit_extra", None)
             if callable(extra):
                 data.update(extra())
             data["generation"] = generation
@@ -62,34 +62,43 @@ class AuditMixin:
             self.store.append(event_type, data, trace_id=tid, span_id=sid)
             setattr(role, attr, None)
 
-    def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None) -> None:
+    def _emit_hypothesis_ranked(self, node_id: int, generation: int | None = None,
+                                researcher=None) -> None:
         """FOREAGENT board prioritization audit: if the active Researcher (a `ForesightPanelResearcher`)
         predicted an order over the OPEN-hypothesis board while proposing THIS node, record it as a
         `hypothesis_ranked` event — the analysis + selection trace the UI surfaces (kanban order + the
-        model's `reason`)."""
+        model's `reason`). `researcher=` (Variant-1): read THIS build's pooled researcher so a
+        concurrent sibling's prediction is not cross-wired onto this node."""
         self._emit_role_telemetry(
-            self.researcher, "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id, generation)
+            researcher if researcher is not None else self.researcher,
+            "last_hyp_priority", EV_HYPOTHESIS_RANKED, node_id, generation)
 
-    def _emit_foresight_selected(self, node_id: int, generation: int | None = None) -> None:
+    def _emit_foresight_selected(self, node_id: int, generation: int | None = None,
+                                 researcher=None, developer=None) -> None:
         """FOREAGENT predict-before-execute audit: when the world model picked WHICH candidate becomes
         this node — the best of K generated ideas (the researcher panel) or of N code implementations
         (best-of-N) — record the ranking + confidence + the model's reasoning as a `foresight_selected`
         event. Without it the choice and its discarded alternatives vanish (only the winner survives in
-        `node_created`)."""
+        `node_created`). `researcher=`/`developer=` (Variant-1): read THIS build's pooled roles so a
+        concurrent sibling's pick is not cross-wired onto this node."""
         self._emit_role_telemetry(
-            self.developer, "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation)
+            developer if developer is not None else self.developer,
+            "last_foresight_pick", EV_FORESIGHT_SELECTED, node_id, generation)
         self._emit_role_telemetry(
-            self.researcher, "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)
+            researcher if researcher is not None else self.researcher,
+            "last_foresight", EV_FORESIGHT_SELECTED, node_id, generation)
 
-    def _discard_node_build_telemetry(self) -> None:
+    def _discard_node_build_telemetry(self, researcher=None, developer=None) -> None:
         """Consume per-build role state when a reset/abort supersedes the build before node_created.
 
         Otherwise a following merge/debug path that does not produce fresh predictions can emit the
         abandoned build's ranking/foresight/report against the next node. Walk common wrapper chains
-        because some developer wrappers expose read-only forwarding properties.
-        """
-        for role, attrs in ((self.researcher, ("last_hyp_priority", "last_foresight")),
-                            (self.developer, ("last_foresight_pick", "last_report"))):
+        because some developer wrappers expose read-only forwarding properties. `researcher=`/
+        `developer=` (Variant-1): discard THIS build's pooled roles, not the shared `self.*`."""
+        for role, attrs in ((researcher if researcher is not None else self.researcher,
+                             ("last_hyp_priority", "last_foresight")),
+                            (developer if developer is not None else self.developer,
+                             ("last_foresight_pick", "last_report"))):
             for attr in attrs:
                 current = role
                 seen: set[int] = set()

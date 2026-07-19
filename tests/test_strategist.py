@@ -382,6 +382,47 @@ def test_parallel_build_runs_seeds_concurrently_with_distinct_ids(tmp_path):
     assert eng._role_pool and len(eng._role_pool) == 1       # pool built one extra pair (primary + 1)
 
 
+def test_stamp_novelty_hint_targets_the_passed_researcher(tmp_path):
+    # Variant-1 Phase 1 (review HIGH): the per-build researcher (a pool member) must receive its OWN
+    # novelty hint/stance — never the shared self.researcher — or a concurrent draft build clobbers
+    # the directive this build is about to read in propose (and a pooled build silently loses the
+    # strategist's explore / capability-expansion plateau-jump escape).
+    import types
+    eng = _engine(tmp_path / "hint-iso")
+    eng.researcher = types.SimpleNamespace()             # distinct sentinel for the SHARED role
+    pooled = types.SimpleNamespace()
+    eng._stamp_novelty_hint(RunState(), "explore", researcher=pooled)
+    assert getattr(pooled, "_novelty_stance", None) == "explore"
+    assert getattr(pooled, "_novelty_hint", "")          # explore => a non-empty directive
+    assert not hasattr(eng.researcher, "_novelty_stance")   # the shared role was NOT clobbered
+
+
+def test_build_telemetry_emitters_read_and_consume_the_passed_roles(tmp_path):
+    # Variant-1 Phase 1 (review MED-HIGH): the audit emitters must read/consume THIS build's pooled
+    # roles so two concurrent draft builds never cross-wire each other's ranking/foresight telemetry
+    # (nor consume it off the wrong role).
+    import types
+    from looplab.events.types import EV_HYPOTHESIS_RANKED, EV_FORESIGHT_SELECTED
+    eng = _engine(tmp_path / "emit-iso")
+    eng.store.append("run_started",
+                     {"run_id": "r", "task_id": "t", "goal": "g", "direction": "min"})
+    pooled_res = types.SimpleNamespace(last_hyp_priority={"order": [1, 2], "reason": "pooled"},
+                                       last_foresight={"choice": "pooled"})
+    pooled_dev = types.SimpleNamespace(last_foresight_pick=None, last_report=None)
+    # The SHARED roles carry DIFFERENT telemetry that must NOT be emitted for / consumed against this node.
+    eng.researcher = types.SimpleNamespace(last_hyp_priority={"order": [9], "reason": "shared"},
+                                           last_foresight=None)
+    eng.developer = types.SimpleNamespace(last_foresight_pick=None, last_report=None)
+    eng._emit_hypothesis_ranked(7, 0, researcher=pooled_res)
+    eng._emit_foresight_selected(7, 0, researcher=pooled_res, developer=pooled_dev)
+    ranked = [e for e in eng.store.read_all() if e.type == EV_HYPOTHESIS_RANKED]
+    fores = [e for e in eng.store.read_all() if e.type == EV_FORESIGHT_SELECTED]
+    assert ranked and ranked[-1].data["node_id"] == 7 and ranked[-1].data["reason"] == "pooled"
+    assert fores and fores[-1].data["node_id"] == 7 and fores[-1].data["choice"] == "pooled"
+    assert pooled_res.last_hyp_priority is None and pooled_res.last_foresight is None   # consumed on pooled
+    assert eng.researcher.last_hyp_priority == {"order": [9], "reason": "shared"}        # shared untouched
+
+
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
     # Variant-1 Phase 0: the atomic build reservation must give CONCURRENT builds distinct, monotonic
     # ids (and one node_building each) so parallel_build>1 can never collide on max(nodes)+1.
