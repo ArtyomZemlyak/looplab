@@ -58,9 +58,12 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
 ## Engine invariants (violating these breaks replay/resume)
 
 1. **The engine is the sole writer of domain events.** Background tasks return values; only the
-   main task appends — with ONE typed exception: the concurrent-research task may append the
-   selection-neutral types in `events/types.py::BACKGROUND_APPENDABLE` (asserted at the append
-   sites; `tests/test_background_appendable.py` proves splice-position neutrality). UI/CLI append
+   main task appends FOLDED events — with ONE typed exception: the concurrent-research task may append the
+   selection-neutral FOLDED types in `events/types.py::BACKGROUND_APPENDABLE` (asserted at the append
+   sites; `tests/test_background_appendable.py` proves splice-position neutrality). A concurrent task
+   MAY additionally append `DIAGNOSTIC_EVENTS` (fold-ignored, so splice-neutral BY CONSTRUCTION — the
+   fold never reads them): the training-monitor task appends `EV_TRAIN_MONITOR_ALERT` this way under
+   `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site. UI/CLI append
    only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
    `serve/routers/control.py`).
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is

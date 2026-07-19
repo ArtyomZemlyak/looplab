@@ -50,7 +50,7 @@ class EngineOptions:
     """
     max_parallel: int = 1                # single experiment at a time; > 1 = backlog parallel seam
     train_monitor: bool = False          # per-eval live training-log observer (off = today)
-    train_monitor_interval_s: float = 600.0   # monitor tick cadence (seconds; floored at 1s in the loop)
+    train_monitor_interval_s: float = 600.0   # base tick cadence (s); effective cadence adapts to the budget
     train_monitor_kill: bool = False     # Phase 3: let the monitor tree-kill a 'broken' training early
     train_monitor_kill_confidence: float = 0.8   # min verdict confidence to act on a 'broken' kill
     timeout: float = 30.0

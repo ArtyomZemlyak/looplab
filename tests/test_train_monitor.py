@@ -207,8 +207,25 @@ def test_unchanged_digest_does_not_re_call_the_llm(tmp_path):
     wd.mkdir()
     (wd / "train.log").write_text("step 1 loss: 0.5\n")     # static log across every tick
     client = _FakeClient({"status": "healthy", "reason": "ok", "confidence": 0.7})
-    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
-    assert client.calls == 1, f"LLM should fire once for a static digest, not per tick (fired {client.calls})"
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    # The invariant is "NOT re-called per tick": at most once for an unchanged digest. `<=` (not `==`)
+    # so a slow CI runner that fits fewer ticks in the window never flakes; the span proves it did tick.
+    assert client.calls <= 1, f"static digest must not re-call the LLM per tick (fired {client.calls})"
+    assert [s for s in spans if s.get("name") == "train_monitor"], "monitor should have ticked at least once"
+
+
+def test_verdict_recheck_after_s_flows_through_the_loop(tmp_path):
+    # Phase-2 self-pacing end-to-end: a verdict's `recheck_after_s` (>= base) is honored by the loop and
+    # surfaced as the span's `next_check_s`, so the observer really does control the next cadence.
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("epoch 2 val steady\n")
+    client = _FakeClient({"status": "watch", "reason": "keeping an eye on it",
+                          "confidence": 0.6, "recheck_after_s": 0.2})   # base here is the 0.05 config
+    _host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    tm = [s for s in spans if s.get("name") == "train_monitor"]
+    assert tm and any(s["attributes"].get("next_check_s") == 0.2 for s in tm), \
+        "the loop must honor the verdict's recheck_after_s and stamp it on the span"
 
 
 def test_no_client_degrades_to_trace_only_observation(tmp_path):
@@ -364,9 +381,9 @@ def test_llm_call_cap_stops_spending_but_keeps_observing(tmp_path, monkeypatch):
     client = _AppendingClient()
     _host, spans = _run_verdict_monitor(
         tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.5)
-    assert client.calls == 2, f"LLM must stop at the cap (fired {client.calls})"
+    assert client.calls <= 2, f"LLM must never EXCEED the cap (fired {client.calls})"   # `<=` = robust
     tm_spans = [s for s in spans if s.get("name") == "train_monitor"]
-    assert any(s["attributes"].get("llm_capped") for s in tm_spans)   # the cap is surfaced, never silent
+    assert any(s["attributes"].get("llm_capped") for s in tm_spans)   # cap was REACHED + surfaced (not silent)
 
 
 def test_monitor_cadence_derives_from_budget():

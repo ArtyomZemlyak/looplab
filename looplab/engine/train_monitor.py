@@ -40,9 +40,10 @@ class TrainingVerdict(BaseModel):
     confidence: float = Field(default=0.5, description="Confidence in the status, 0.0 to 1.0.")
     recheck_after_s: Optional[float] = Field(
         default=None,
-        description="Optional: seconds until you want to look again. Use a LARGER value when the run is "
-                    "healthy and steady (there is no need to watch a boring, well-behaved run closely), a "
-                    "SMALLER value when you saw something to keep an eye on. Omit to keep the default cadence.")
+        description="Optional: how many seconds until you want to look again. Use a LARGER value when the "
+                    "run is healthy and steady, so a boring, well-behaved run is not watched closely. You "
+                    "cannot look sooner than the automatic cadence (values below it are ignored); the "
+                    "automatic pace already tightens on shorter runs. Omit to keep the default cadence.")
 
 
 # The observer's framing. A contract: it fixes the observer's role (the engineer who wrote THIS loop),
@@ -121,9 +122,12 @@ def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, 
 
 
 def active_training_log(workdir) -> Optional[Path]:
-    """The workdir's most-recently-written `<stage>.log` — the live log of whichever stage is running
+    """The workdir's most-recently-written `*.log` — a proxy for the live log of whichever stage is running
     NOW (the sandbox writes one `<stage>.log` per stage; during training the train stage's file is the
-    freshest). None when there is no per-stage log (the solution.py path writes none)."""
+    freshest). The mtime heuristic follows the moving active stage without coupling to the sandbox's live
+    stage cursor (unobservable from the engine's worker thread); if the solution code also drops its OWN
+    `*.log`, the freshest one still tracks the most recent training output, which is what the observer
+    wants. None when there is no `*.log` at all (the solution.py path writes none)."""
     try:
         logs = list(Path(workdir).glob("*.log"))
     except OSError:
@@ -267,6 +271,8 @@ class TrainingMonitorMixin:
                         _redact = getattr(self, "_redact", None)
                         reason = (verdict.reason or "")
                         reason = (_redact(reason) if callable(_redact) else reason)[:300]
+                        # The durable event keeps the fuller reason (300); the trace span carries a shorter
+                        # preview (200) — spans are a high-volume sidecar, the event is the authoritative record.
                         sp.set_many(status=verdict.status, confidence=round(conf, 3), reason=reason[:200])
                         healthy_streak = healthy_streak + 1 if verdict.status == "healthy" else 0
                         next_sleep = next_monitor_sleep(
