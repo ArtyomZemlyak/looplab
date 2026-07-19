@@ -336,6 +336,9 @@ class NoveltyGateMixin:
                 telem.append({
                     "last_hyp_priority": self._snapshot_role_telemetry("last_hyp_priority"),
                     "last_foresight": self._snapshot_role_telemetry("last_foresight"),
+                    # THIS roll's cross-run advisory receipt (set on self by _set_complexity_hint above)
+                    # so each pooled build stamps ITS OWN node_created provenance, not the last roll's.
+                    "_cross_run_advisory_receipt": dict(getattr(self, "_cross_run_advisory_receipt", {}) or {}),
                 })
         finally:
             setattr(self.researcher, "_novelty_feedback", prev_feedback)

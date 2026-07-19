@@ -66,6 +66,13 @@ in its inline `<script>`); edit the data, not hand-placed SVG.
    `_write_lock`, asserting membership in `DIAGNOSTIC_EVENTS` at its append site. UI/CLI append
    only *control intents* (allow-listed in `serve/protocol.py::CONTROL_EVENTS`, enforced by
    `serve/routers/control.py`).
+   *Parallel build (Variant-1, `parallel_build>1`)* is a further accepted seam: `_create_node` runs
+   in worker threads (`anyio.to_thread`) that append their own node's FOLDED events (`node_created`,
+   `node_failed`, per-node audit). This is safe because each thread writes an INDEPENDENT node's
+   events, `EventStore.append`/`read_all` serialize via their own `threading.Lock`s, ids are reserved
+   serially under `_id_lock` up front, and the fold is order-tolerant across independent nodes — so
+   only the log's byte-order (not the folded state) becomes nondeterministic. The serial default
+   (`parallel_build=1`) keeps the strict "only the main task appends" behaviour, byte-identical.
 2. **Exactly one terminal event per node** (`node_evaluated` | `node_failed`). The fold is
    idempotent on duplicate terminals (first terminal wins).
 3. **Every side effect must be gated on a domain event** so resume-by-replay is idempotent

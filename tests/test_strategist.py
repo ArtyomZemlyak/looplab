@@ -507,6 +507,7 @@ def test_propose_batch_captures_per_idea_foreagent_telemetry(tmp_path):
     assert len(ideas) == 3 and len(telem) == 3
     assert [t["last_hyp_priority"]["reason"] for t in telem] == ["roll 1", "roll 2", "roll 3"]
     assert [t["last_foresight"]["choice"] for t in telem] == ["idea1", "idea2", "idea3"]
+    assert all("_cross_run_advisory_receipt" in t for t in telem)   # receipt captured per-idea too
     assert eng.researcher.last_hyp_priority is None and eng.researcher.last_foresight is None
 
 
