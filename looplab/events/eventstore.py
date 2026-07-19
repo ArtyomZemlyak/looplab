@@ -265,7 +265,10 @@ def replace_jsonl_rows_atomic_preserving_quarantine(
             if not raw.strip():
                 continue
             try:
-                decoded = loads(raw)
+                # CODEX AGENT: parse with the same UTF-8 text contract as read_jsonl_lenient. Python's
+                # json.loads(bytes) accepts a BOM that json.loads(str) rejects; using bytes here could
+                # therefore classify a reader-quarantined row as understood and erase it during upsert.
+                decoded = loads(raw.decode("utf-8"))
             except Exception:  # noqa: BLE001 — this is the raw quarantine we must retain
                 retained.append(raw)
                 continue

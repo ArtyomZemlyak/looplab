@@ -214,6 +214,28 @@ def test_upsert_preserves_quarantined_rows_for_future_migration(tmp_path):
     assert reloaded.source_health["source_malformed_rows"] == 1
 
 
+def test_upsert_preserves_bom_row_quarantined_by_reader(tmp_path):
+    path = tmp_path / "bom.jsonl"
+    current = _cap("current", "dense retrieval", ["hard-neg"], metric=0.8)
+    quarantined = b"\xef\xbb\xbf" + json.dumps(current).encode("utf-8")
+    path.write_bytes(quarantined + b"\n")
+
+    before = ConceptCapsuleStore(path)
+    assert before.all() == []
+    assert before.source_health["source_malformed_rows"] == 1
+
+    replacement = _cap("current", "dense retrieval", ["hard-neg", "fresh"], metric=0.9)
+    assert before.add(replacement) is True
+
+    persisted = path.read_bytes().splitlines()
+    assert persisted[0] == quarantined
+    assert json.loads(persisted[1]) == replacement
+    reloaded = ConceptCapsuleStore(path)
+    assert reloaded.all() == [replacement]
+    assert reloaded.source_health["source_malformed_rows"] == 1
+    assert reloaded.source_health["source_store_complete"] is False
+
+
 def test_build_capsule_caps_large_generated_collections_deterministically():
     capsule = build_concept_capsule(
         run_id="r", fingerprint=[f"f-{index:04}" for index in range(400)], direction="max",
