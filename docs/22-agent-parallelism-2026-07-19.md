@@ -209,8 +209,26 @@ rolls that might collide:
 
 ### Risks / open questions
 
-- **Developer reentrancy** — the external CLI-agent backend may not be safe to call concurrently; may need
-  a per-worker instance (biggest unknown; validate in Phase 1 before Phase 2).
+- **Role reentrancy is CONFIRMED, and is the crux of Phase 1** (verified 2026-07-19, so the plan above is
+  now grounded, not speculative):
+  - `CliAgentDeveloper`/`LLMDeveloper`/`ValidatingDeveloper` keep the shipped attempt as **instance state**
+    (`self.last_files` / `self.last_deleted`, e.g. `cli_agent.py:249`), read by `_create_node` right after
+    `implement`. N parallel `implement()` on ONE developer clobber each other's `last_files`.
+  - The Researcher is stateful too: `_set_complexity_hint` (proposal_cues.py, 3 sites) and
+    `_apply_novelty_gate` (novelty.py:242,252) do `setattr(self.researcher, "_complexity_hint"/
+    "_novelty_feedback", …)`, read by the very next `propose`. Parallel builds race on those.
+  - So Phase 1 needs a **per-build (researcher, developer) pair**, and `_create_node` + `_set_complexity_hint`
+    + `_apply_novelty_gate` must take the roles explicitly (bounded: ~5 sites on the draft path).
+  - Building the pool is NOT just `task.build_roles()` — that returns RAW roles missing the `make_roles`
+    wiring (the `ValidatingDeveloper` retry/patch-gate wrapper). A `copy.copy` of the wired developer does
+    NOT isolate a `WrapsDeveloper`/`ValidatingDeveloper` (it shares `_wrapped`, whose `last_files` still
+    races). Options: (a) thread a `role_factory` (from `make_roles`) into the Engine as an OPTIONAL ctor
+    arg (default None → pool unavailable → parallel_build clamps to 1, backward-compatible); (b) accept RAW
+    pool roles for pool nodes (correct, but pool nodes skip validation-retry — a quality, not correctness,
+    gap). Recommend (a).
+  - **Conclusion:** Phase 1 is bounded but a real engine-core refactor; implement it as a focused,
+    separately-reviewed change (default `parallel_build=1` OFF), NOT bundled with Phase 0. Phase 0 (id
+    reservation) already shipped standalone and is fold-identical.
 - **Diversity quality** — a weak `propose_batch` could still emit near-dups; the batch novelty gate is the
   backstop, but measure it.
 - **Determinism** — id order now follows `node_building` append order under the lock; confirm a re-run
