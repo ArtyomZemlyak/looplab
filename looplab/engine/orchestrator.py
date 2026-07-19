@@ -317,8 +317,10 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.role_factory = role_factory
         # NB: draft builds fan out via anyio.to_thread, whose default capacity limiter is 40 threads;
         # a `parallel_build` above that (le=64) just queues the excess (no deadlock — workers never
-        # re-enter the loop), so effective build concurrency silently caps near 40.
-        self.parallel_build = max(1, _opt("parallel_build"))
+        # re-enter the loop), so effective build concurrency silently caps near 40. The value is a raw
+        # opt here (0 = AUTO); it is resolved against the settled `self.max_parallel` further down.
+        self._parallel_build_opt = _opt("parallel_build")
+        self.parallel_build = max(1, self._parallel_build_opt)   # provisional; re-resolved below
         self._role_pool: Optional[list] = None
         # A0b/T8: "auto" resolves by Developer capability — code recombination is the verified
         # strongest merge (removing it costs ~9 pp), so it is the default wherever the Developer
@@ -445,6 +447,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         if max_parallel == 0:                            # AUTO: the agent/operator lets the box decide
             max_parallel = max(1, len(self._gpu_ids))
         self.max_parallel = max(1, int(max_parallel))
+        # Now that max_parallel is settled, resolve parallel_build (0 = AUTO = max_parallel), so a build
+        # fan-out never exceeds what we can concurrently evaluate.
+        self.parallel_build = self._resolve_parallel_build(self._parallel_build_opt)
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
         self._gpu_lock = threading.Lock()
         self.timeout = timeout
@@ -1376,6 +1381,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 self.max_parallel = max(1, len(self._gpu_ids)) if _mp == 0 else max(1, _mp)
             except (TypeError, ValueError):
                 pass
+        if "parallel_build" in _bo:
+            try:
+                # 0 = AUTO = the resolved max_parallel (build as many seeds as we can concurrently eval);
+                # resolved AFTER max_parallel above so an AUTO build tracks a just-changed AUTO eval width.
+                self.parallel_build = self._resolve_parallel_build(int(_bo["parallel_build"]))
+            except (TypeError, ValueError):
+                pass
         return max_s, max_es
 
     async def _serve_forced_requests(self, state: RunState) -> bool:
@@ -1822,6 +1834,18 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self.store.append(EV_NODE_BUILDING,
                               {"node_id": node_id, "operator": kind, "parent_ids": _bparents})
             return state, node_id, kind, _bparents, parent_generations
+
+    def _resolve_parallel_build(self, value: int) -> int:
+        """Resolve a `parallel_build` setting to a concrete build fan-out. `0` = AUTO = the (already
+        resolved) `self.max_parallel`, so we build exactly as many seeds as we can concurrently evaluate;
+        any other value is used as-is (clamped to >=1). The build pool still clamps to 1 downstream
+        (`_build_role_pairs`) when no `role_factory` is wired. Shared by __init__ and the Strategist's
+        live `_apply_strategy` retune so both honour the AUTO convention identically."""
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, self.max_parallel) if value == 0 else max(1, value)
 
     def _build_role_pairs(self, n: int) -> list:
         """Up to `n` (researcher, developer) pairs for a parallel build batch: the primary (self's roles)

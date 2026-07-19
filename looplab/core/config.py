@@ -118,6 +118,7 @@ PROFILES: dict[str, dict] = {
 DEFAULT_AGENT_CONTROL: dict[str, list[str]] = {
     "timeout": ["researcher", "strategist"],
     "max_parallel": ["strategist"],
+    "parallel_build": ["strategist"],
     "max_nodes": ["strategist", "boss"],
     "max_eval_seconds": ["strategist", "boss"],
     "policy": ["strategist"],
@@ -192,9 +193,11 @@ class Settings(BaseSettings):
     # "let the box decide" autonomy knob the Strategist can also set.
     max_parallel: int = Field(default=1, ge=0, le=1024)
     # Variant-1 parallel BUILD: research + code up to N independent (seed/explore) nodes CONCURRENTLY,
-    # each on its own pooled (researcher, developer) pair + GPU-pinned eval. 1 = serial (today). Needs a
-    # role_factory wired into the engine (the CLI/launcher passes one); without it the engine clamps to 1.
-    parallel_build: int = Field(default=1, ge=1, le=64)
+    # each on its own pooled (researcher, developer) pair + GPU-pinned eval. 1 = serial (today).
+    # `parallel_build=0` means AUTO: the engine resolves it to the (resolved) `max_parallel` so you build
+    # exactly as many seeds as you can concurrently evaluate — "let the box decide", also Strategist-set.
+    # Needs a role_factory wired into the engine (the CLI/launcher passes one); without it, clamps to 1.
+    parallel_build: int = Field(default=1, ge=0, le=64)
     # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
     # training log while a (often multi-hour) declared stage runs in a worker thread. ON in the product
     # surface (Settings) — advisory-only, never touches node selection or replay, and only fires on the

@@ -60,6 +60,7 @@ Strategy = TypedDict(
                                 # "balanced" == today's behavior; the Strategist owns this dial.
         "timeout": float,       # per-eval wall-clock budget (s) — applied only if the matrix allows it
         "max_parallel": int,    # concurrent evals — applied only if the matrix allows it
+        "parallel_build": int,  # concurrent node BUILDS (0=AUTO=max_parallel) — applied only if allowed
         "request_research": bool,  # ask the engine to run the Deep-Research stage before continuing
         "rationale": str,       # human-readable "why" (the UI panel)
         "source": str,          # "rule"|"llm"|"operator"|"config" (provenance, audit)
@@ -219,6 +220,9 @@ def validate_strategy(strat: Optional[Strategy], ctx: StrategyContext) -> Option
     mp = strat.get("max_parallel")
     if isinstance(mp, int) and not isinstance(mp, bool) and mp >= 0:
         out["max_parallel"] = mp   # 0 = AUTO (one experiment per detected GPU), resolved in _apply_strategy
+    pb = strat.get("parallel_build")
+    if isinstance(pb, int) and not isinstance(pb, bool) and 0 <= pb <= 64:
+        out["parallel_build"] = pb   # 0 = AUTO (= resolved max_parallel), resolved in _apply_strategy
     if isinstance(strat.get("request_research"), bool) and strat["request_research"]:
         out["request_research"] = True   # ask the engine to run the Deep-Research stage
     if not out:

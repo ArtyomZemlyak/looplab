@@ -62,7 +62,8 @@ class StrategyCadenceMixin:
         # was never recorded or applied (the P8 live-budget retune silently no-op'd unless bundled with a
         # change to another tracked field).
         return {k: s.get(k) for k in ("policy", "policy_params", "developer", "operators", "fidelity",
-                                      "novelty_stance", "request_research", "timeout", "max_parallel")}
+                                      "novelty_stance", "request_research", "timeout", "max_parallel",
+                                      "parallel_build")}
 
     def _available_developers(self) -> list[str]:
         from looplab.agents.cli_agent import PRESETS
@@ -357,6 +358,14 @@ class StrategyCadenceMixin:
         if "max_parallel" in strat and may("max_parallel"):
             try:
                 self.max_parallel = max(1, int(strat["max_parallel"]))
+            except (TypeError, ValueError):
+                pass
+        # parallel_build: concurrent node BUILDS. 0 = AUTO -> resolved max_parallel (build exactly as
+        # many seeds as you can concurrently eval). Rebuilt role pool is lazy (_build_role_pairs), so a
+        # mid-run change takes effect on the next draft batch; clamps to 1 without a role_factory.
+        if "parallel_build" in strat and may("parallel_build"):
+            try:
+                self.parallel_build = self._resolve_parallel_build(int(strat["parallel_build"]))
             except (TypeError, ValueError):
                 pass
         # The policy NAME and its `policy_params` are gated INDEPENDENTLY: an operator can pin

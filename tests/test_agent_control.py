@@ -102,6 +102,23 @@ def test_strategist_blocked_when_not_granted(tmp_path):
     assert eng.timeout == 30.0 and eng.max_parallel == 1               # unchanged
 
 
+def test_strategist_applies_parallel_build_with_auto_when_granted(tmp_path):
+    # Variant-1 Phase 3: parallel_build is Strategist-governed like max_parallel; 0 = AUTO resolves to
+    # the (freshly applied) max_parallel so a build fan-out tracks the eval width.
+    eng = _engine(tmp_path / "pb_on",
+                  agent_control={"parallel_build": ["strategist"], "max_parallel": ["strategist"]})
+    eng._apply_strategy({"max_parallel": 3, "parallel_build": 2})
+    assert eng.max_parallel == 3 and eng.parallel_build == 2
+    eng._apply_strategy({"parallel_build": 0})                         # AUTO -> resolved max_parallel (3)
+    assert eng.parallel_build == 3
+
+
+def test_strategist_parallel_build_blocked_when_not_granted(tmp_path):
+    eng = _engine(tmp_path / "pb_off", agent_control={})               # nothing granted
+    eng._apply_strategy({"parallel_build": 4})
+    assert eng.parallel_build == 1                                     # unchanged (serial default)
+
+
 def test_strategist_search_knobs_gated_by_matrix(tmp_path):
     """M4: EVERY strategist knob (not just timeout/max_parallel) is governance-gated. Under an empty
     matrix a policy/operator/novelty change is blocked; granting it in the matrix lets it through."""
@@ -126,10 +143,13 @@ def test_strategist_search_knobs_gated_by_matrix(tmp_path):
 
 def test_validate_strategy_whitelists_resource_budgets():
     ctx = StrategyContext(available_policies=["greedy"], available_developers=["default"])
-    out = validate_strategy({"timeout": 120.0, "max_parallel": 3}, ctx)
-    assert out["timeout"] == 120.0 and out["max_parallel"] == 3
+    out = validate_strategy({"timeout": 120.0, "max_parallel": 3, "parallel_build": 2}, ctx)
+    assert out["timeout"] == 120.0 and out["max_parallel"] == 3 and out["parallel_build"] == 2
+    assert validate_strategy({"parallel_build": 0}, ctx)["parallel_build"] == 0   # 0 = AUTO is valid
     # bad shapes dropped
     assert "timeout" not in (validate_strategy({"timeout": -5}, ctx) or {})
+    assert "parallel_build" not in (validate_strategy({"parallel_build": -1}, ctx) or {})
+    assert "parallel_build" not in (validate_strategy({"parallel_build": 99}, ctx) or {})   # >64 dropped
     assert "max_parallel" not in (validate_strategy({"max_parallel": -1}, ctx) or {})      # negative dropped
     assert validate_strategy({"max_parallel": 0}, ctx)["max_parallel"] == 0   # 0 = AUTO (per-GPU), allowed
     assert "max_parallel" not in (validate_strategy({"max_parallel": True}, ctx) or {})   # bool != int budget
