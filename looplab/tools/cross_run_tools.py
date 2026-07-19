@@ -197,7 +197,8 @@ class CrossRunTools:
                 "concepts appear most, their path hierarchy (is_a), and which concept PAIRS reliably "
                 "co-occur across MULTIPLE runs (evidence of related directions). Use it to see the big "
                 "picture of what the portfolio has explored and how concepts relate, before proposing. "
-                "Advisory map, never a rule.",
+                "Advisory map, never a rule. The edge receipt declares when edges cover only the bounded "
+                "retained-node projection and edges touching pruned nodes are unknown.",
                 {}, []),
             fn_spec("cross_run_search",
                 "Relevance-ranked SEARCH over all cross-run knowledge (claims + explored concepts) — a "
@@ -511,11 +512,22 @@ class CrossRunTools:
                         lines.append(_partial_scope_warning(scope_receipt))
                     return "\n".join(lines)
                 return "(no cross-run concepts yet)"
-            lines = [f"Global concept map: {len(explored)} explored concept(s) across {graph['n_runs']} run(s)."]
+            n_explored = int(graph.get("n_explored_concepts", len(explored)) or 0)
+            if len(explored) < n_explored:
+                lines = [f"Global concept map: showing {len(explored)} of {n_explored} explored concept(s) "
+                         f"across {graph['n_runs']} run(s)."]
+            else:
+                lines = [f"Global concept map: {n_explored} explored concept(s) "
+                         f"across {graph['n_runs']} run(s)."]
             if graph.get("source_complete") is not True:
                 lines.append(_partial_source_warning(graph))
             if scope_receipt.get("scope_complete") is not True:
                 lines.append(_partial_scope_warning(scope_receipt))
+            if graph.get("edge_source_complete") is not True:
+                lines.append("WARNING: PARTIAL edge source — hierarchy/co-occurrence edges cover only "
+                             f"{graph.get('edge_source_nodes_included', 0)} retained top graph node(s); "
+                             f"{graph.get('edge_source_nodes_pruned', 0)} node(s) were pruned and edges "
+                             "touching them are UNKNOWN.")
             # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
             axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
             if axes:
@@ -528,12 +540,15 @@ class CrossRunTools:
                 lines.append("Concept pairs that co-occur across runs: " + "; ".join(
                     f"UNTRUSTED_MEMORY={_safe_text(e.get('src'), 80)!r}+UNTRUSTED_MEMORY="
                     f"{_safe_text(e.get('dst'), 80)!r}(×{e.get('n_runs', 0)})" for e in cooc[:8]))
-            # omission relative to what is DISPLAYED (12 concepts / 8 pairs), plus anything beyond the
-            # read-model caps — so the receipt never implies the render showed everything.
-            hidden_c = max(0, len(explored) - 12) + graph.get("concepts_omitted", 0)
+            # Concepts use the exact full retained-snapshot total. Edge omissions stay exact only inside the
+            # declared edge-source projection; the warning above separately keeps out-of-projection edges UNKNOWN.
+            hidden_c = max(0, n_explored - 12)
             hidden_e = max(0, len(cooc) - 8) + graph.get("edges_omitted", 0)
             if hidden_c or hidden_e:
-                lines.append(f"(+{hidden_c} more concept(s), {hidden_e} more co-occurrence pair(s) not shown)")
+                edge_label = ("known retained-projection co-occurrence pair(s)"
+                              if graph.get("edge_source_complete") is not True
+                              else "more co-occurrence pair(s)")
+                lines.append(f"(+{hidden_c} more concept(s), {hidden_e} {edge_label} not shown)")
             return "\n".join(lines)
 
         if name == "cross_run_search":
@@ -1087,6 +1102,10 @@ class CrossRunTools:
                 pair_label = "usually paired with" if scoped_complete else "paired in retained records with"
                 lines.append(f"  {pair_label}: " + ", ".join(
                     f"UNTRUSTED_MEMORY={_safe_text(c, 80)!r}(×{n})" for c, n in partners[:6]))
+            if graph.get("edge_source_complete") is not True:
+                lines.append("  co-occurrence coverage: PARTIAL retained-node projection; "
+                             f"{graph.get('edge_source_nodes_pruned', 0)} graph node(s) were pruned and "
+                             "partners outside the projection are UNKNOWN.")
 
             # Lessons that mention it (free-text pros/cons) — match the name token in the statement.
             name_terms = _toks(cname or canon)
@@ -1110,6 +1129,9 @@ class CrossRunTools:
                          f"{str(scope_receipt.get('scope_complete') is True).lower()} "
                          f"task_scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                          f"global_source_complete={str(global_complete).lower()} "
+                         f"cooccurrence_source_complete="
+                         f"{str(graph.get('edge_source_complete') is True).lower()} "
+                         f"cooccurrence_nodes_pruned={graph.get('edge_source_nodes_pruned', 0)} "
                          f"taxonomy_revision={taxonomy['governance_revision']}]")
             return "\n".join(lines)
 

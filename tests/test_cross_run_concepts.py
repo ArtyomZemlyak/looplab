@@ -120,6 +120,9 @@ def test_portfolio_concept_graph_builds_cross_run_cooccurrence_and_paths():
     cooc = {(e["src"], e["dst"]): e["n_runs"] for e in g["edges"] if e["rel"] == "co_occurs"}
     assert cooc[("arch/moe", "loss/contrastive/dcl")] == 2                   # co-occurred in r1 + r2 (sorted pair)
     assert ("data/aug", "loss/contrastive/dcl") not in cooc                  # only 1 run -> below min_cooccurrence
+    assert g["edge_source_scope"] == "retained_snapshot" and g["edge_source_complete"] is True
+    assert g["edge_source_nodes_pruned"] == g["edges_outside_projection"] == 0
+    assert g["edges_outside_projection_unknown"] is False
 
 
 def test_portfolio_concept_graph_honors_alias_governance_and_is_deterministic():
@@ -147,6 +150,12 @@ def test_portfolio_concept_graph_bounds_pair_materialization_before_counting():
     assert len(graph["concepts"]) == 512
     assert graph["pair_candidates"] <= 512 * 511 // 2
     assert graph["pair_candidates"] == 2 * (256 * 255 // 2)
+    assert graph["edge_source_scope"] == "retained_node_projection"
+    assert graph["edge_source_complete"] is False
+    assert graph["edge_source_nodes_included"] == 512
+    assert graph["edge_source_nodes_pruned"] == graph["concepts_omitted"] == graph["n_concepts"] - 512
+    assert graph["edges_outside_projection"] is None
+    assert graph["edges_outside_projection_unknown"] is True
 
 
 def test_portfolio_overview_rolls_up_help_hurt_counts_across_runs():

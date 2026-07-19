@@ -1102,7 +1102,9 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
                  the profit sign aggregates: a per-run boolean counted across runs). Only pairs meeting
                  `min_cooccurrence` (default 2 runs) are kept, so a single-run coincidence is not an edge.
     Canonicalized through aliases/splits like the overview (purged concepts drop; a split re-tags per that
-    run's siblings). Everything is bounded; omission counters describe the full validated snapshot."""
+    run's siblings). Everything is bounded. Node omissions are exact for the full validated retained snapshot;
+    edge omissions are exact only inside the declared bounded node projection, while edges touching pruned
+    nodes stay explicitly unknown (computing their exact distinct-pair count would restore unbounded O(N²))."""
     from looplab.engine.concept_registry import canonicalize_concepts
 
     valid_capsules = _dedup_valid_capsules(capsules)
@@ -1125,6 +1127,7 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
 
     concepts = sorted(concept_runs, key=lambda cid: (-concept_runs[cid], cid))
     kept = set(concepts[:_MAX_GRAPH_CONCEPTS])
+    pruned_nodes = len(concepts) - len(kept)
     edges: list[dict] = []
     for cid in sorted(kept):
         parent = cid.rsplit("/", 1)[0] if "/" in cid else ""
@@ -1153,12 +1156,25 @@ def portfolio_concept_graph(capsules: list[dict], *, aliases: Optional[dict] = N
             break
         edges.append({"src": a, "rel": "co_occurs", "dst": b, "n_runs": n_runs})
     edge_candidates = is_a_candidates + len(cooc)
+    # CODEX AGENT: edge generation intentionally runs only over the bounded node projection. Keep that
+    # O(N^2) guard, but never present `edges_omitted` as a count of every edge in the full graph: edges that
+    # touch a pruned node were not materialized at all and their distinct-pair count is deliberately UNKNOWN.
+    edge_source_complete = pruned_nodes == 0
     return {
         "n_runs": len(valid_capsules),
         "n_concepts": len(concepts),
+        "n_explored_concepts": sum(1 for n_runs in concept_runs.values() if n_runs > 0),
         "concepts": [{"concept": cid, "n_runs": concept_runs[cid]} for cid in concepts[:_MAX_GRAPH_CONCEPTS]],
         "edges": edges[:_MAX_GRAPH_EDGES],
-        "concepts_omitted": max(0, len(concepts) - _MAX_GRAPH_CONCEPTS),
+        "concepts_omitted": pruned_nodes,
+        "edge_source_scope": ("retained_snapshot" if edge_source_complete
+                              else "retained_node_projection"),
+        "edge_source_complete": edge_source_complete,
+        "edge_source_nodes_included": len(kept),
+        "edge_source_nodes_pruned": pruned_nodes,
+        "edges_outside_projection": 0 if edge_source_complete else None,
+        "edges_outside_projection_unknown": not edge_source_complete,
+        # Exact only within `edge_source_scope`: response-cap omissions, not unknown out-of-projection edges.
         "edges_omitted": max(0, edge_candidates - len(edges)),
         "pair_candidates": len(pair_runs),
         **_capsule_source_summary(valid_capsules),

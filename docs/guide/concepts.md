@@ -688,7 +688,11 @@ Atlas/claims projections. Its bound agent tools use role and compatible directio
 exact task or a strict related-goal fingerprint, while v2 D8 is exact-task-only because it stores no goal
 fingerprint. Task facets are advisory metadata reserved for future ranking and currently neither grant
 visibility nor change ordering. External coding-agent Developer backends receive no D8 provider. Proactive
-prompt influence carries lean digest receipts. Typed
+prompt influence carries lean digest receipts. The `cross_run_concept_map` tool computes exact node/run totals
+from the validated retained capsule snapshot, but deliberately limits edge generation to the top 512 graph
+nodes before pair materialization. Its edge receipt distinguishes response-capped edges known within that
+projection from edges touching pruned nodes, whose count remains explicitly **unknown** rather than reported
+as zero; capsule-source completeness is a separate receipt. Typed
 owner governance actions add revision/action fencing and explicit clear operations — reachable both from
 the `/api/cross-run/concept-*` endpoints and, for the owner assistant, from mode+approver-gated
 `concept_merge` / `concept_purge` / `concept_split` / `concept_edit_clear` tools (read-only

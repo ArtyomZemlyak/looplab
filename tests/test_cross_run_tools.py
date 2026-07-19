@@ -208,6 +208,22 @@ def test_concept_map_tool_renders_global_graph(tmp_path):
     assert "cross_run_concept_map" in {s["function"]["name"] for s in CrossRunTools(tmp_path).specs()}
 
 
+def test_concept_map_tool_discloses_edges_outside_bounded_node_projection(tmp_path):
+    capsules = [
+        _cap(f"r{start}", [f"axis{start // 256}/c{i:03d}" for i in range(start, start + 256)], {})
+        for start in (0, 256, 512)
+    ]
+    _seed(tmp_path, capsules=capsules)
+
+    out = CrossRunTools(tmp_path).execute("cross_run_concept_map", {})
+
+    assert "showing 512 of 768 explored concept(s)" in out
+    assert "WARNING: PARTIAL edge source" in out
+    assert "259 node(s) were pruned" in out
+    assert "edges touching them are UNKNOWN" in out
+    assert "0 known retained-projection co-occurrence pair(s) not shown" in out
+
+
 def test_execute_never_raises_on_junk(tmp_path):
     _seed(tmp_path, lessons=[])
     t = CrossRunTools(tmp_path)
@@ -1007,6 +1023,22 @@ def test_concept_card_does_not_claim_complete_denominators_from_matching_rows_on
     assert "eligible_prior_runs=3 matching_scoped_runs=2" in out
     assert "task_source_complete=false task_scope_complete=true" in out
     assert "global_source_complete=false" in out
+
+
+def test_concept_card_discloses_partial_cooccurrence_projection(tmp_path):
+    capsules = []
+    for run in range(3):
+        concepts = ["target/shared", *[f"axis{run}/c{i:03d}" for i in range(255)]]
+        capsules.append(_cap_scoped(
+            f"r{run}", "t", concepts=concepts, fingerprint=["kind:dataset"]))
+    _seed(tmp_path, capsules=capsules)
+
+    out = _bind(CrossRunTools(tmp_path)).execute("concept_card", {"slug": "target/shared"})
+
+    assert "co-occurrence coverage: PARTIAL retained-node projection" in out
+    assert "partners outside the projection are UNKNOWN" in out
+    assert "cooccurrence_source_complete=false" in out
+    assert "cooccurrence_nodes_pruned=" in out
 
 
 def test_concept_card_fuzzy_resolves_respelling(tmp_path):
