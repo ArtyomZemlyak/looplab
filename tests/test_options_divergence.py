@@ -24,6 +24,7 @@ EXPECTED = {
     "agent_drives_actions": (True, False),
     "comparative_lessons": (True, False),
     "concurrent_research": (True, False),
+    "concurrent_research_repeat": (True, False),
     "debug_depth": (2, 1),
     "deep_repair": (True, False),
     "deep_research_every": (3, 0),

@@ -951,6 +951,23 @@ class Settings(BaseSettings):
     # event log stays single-writer. ON by default: the LLM is typically remote (no GPU contention
     # with eval), so overlapping is a free intelligence win over the long per-node training time.
     concurrent_research: bool = True
+    # Concurrent-research REPEAT — don't idle a multi-DAY eval. The overlapped "think" fires ONCE per
+    # window by default; ON here, it RE-RUNS on an adaptive time cadence for the WHOLE eval window
+    # (a two-day training must not leave the reasoning agents idle after one memo). Self-paced: it
+    # only records a memo whose CONTENT is new (identical re-runs are skipped, so the log/board don't
+    # bloat) and backs off geometrically as the analysis converges, capped so it always re-checks.
+    # Advisory-only (BACKGROUND_APPENDABLE — never touches node selection or replay). The library
+    # default is one-shot (== today, byte-identical); this product default turns the repetition on.
+    concurrent_research_repeat: bool = True
+    # Base cadence (seconds) between repeated concurrent-research passes. Research is EXPENSIVE
+    # (multi-turn LLM + web/arXiv), so this is a FLOOR, not a ceiling: the effective cadence is
+    # max(this, ~5% of the per-experiment time budget) — a two-day eval is re-researched about hourly,
+    # a short eval not at all (the first tick outlasts it). Only matters when the repeat is on.
+    concurrent_research_interval_s: float = Field(default=1800.0, gt=0)
+    # Per-eval-window backstop on repeated-research LLM calls (0 = cadence-only, no cap). The adaptive
+    # cadence + convergence backoff are the primary budget control; this bounds a pathological
+    # never-converging window. Past it the loop stops calling the LLM (the health monitor still runs).
+    concurrent_research_max_calls: int = Field(default=40, ge=0)
     # Cadence for the agent-authored run report: regenerate the conclusion-first narrative every N
     # created nodes (0 = off; it still regenerates on a manual `report_refresh` from the UI). The
     # deterministic report always renders from the node set regardless of this knob.

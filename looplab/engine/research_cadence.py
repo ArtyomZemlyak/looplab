@@ -23,6 +23,25 @@ from looplab.events.types import (EV_HINT, EV_HYPOTHESIS_ADDED, EV_HYPOTHESIS_ME
                                   BACKGROUND_APPENDABLE)
 
 
+def research_memo_sig(memo) -> str:
+    """Stable content signature of a research memo (its summary + recommended directions). PURE and
+    deterministic. Used by the REPEATED concurrent-research loop to skip re-recording an identical
+    memo: a long eval re-runs research on a timer, and when the analysis has converged the researcher
+    returns the same conclusions — recording those again would bloat the log/hypothesis board without
+    adding signal. Accepts a ResearchMemo (attr access) or a plain dict (the sanitized payload)."""
+    import hashlib
+
+    def _get(key):
+        if isinstance(memo, dict):
+            return memo.get(key)
+        return getattr(memo, key, None)
+
+    summary = str(_get("summary") or "").strip()
+    directions = [str(d).strip() for d in (_get("recommended_directions") or []) if str(d).strip()]
+    blob = summary + "\n" + "\n".join(directions)
+    return hashlib.sha256(blob.encode("utf-8", "replace")).hexdigest()[:16]
+
+
 class ResearchCadenceMixin:
     """The engine's research-cadence cluster (deep research + hypothesis merge + report). See the
     module docstring for the mixin convention (`self` is the Engine)."""
@@ -48,8 +67,8 @@ class ResearchCadenceMixin:
         # `default=0` (no prior research → baseline at the run start, node 0): the first deep-research
         # fires a full `every` nodes in (n >= every), so the opening window is the SAME width as every
         # later one. (`default=-1` would fire it one node early — a narrower first window.)
-        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
-                                if isinstance(m, dict) and m.get("at_node") is not None), default=0)
+        _last_research_n = max((int(m.get("at_node", -1)) for m in self._cadence_research_memos(state)
+                                if m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):
             return self._run_deep_research(state, trigger="cadence", manual=False)
         hist = state.strategy_history
@@ -59,8 +78,18 @@ class ResearchCadenceMixin:
         return state
 
     @staticmethod
-    def _already_researched_at(state: RunState, n: int) -> bool:
-        return any((m or {}).get("at_node") == n for m in state.research)
+    def _cadence_research_memos(state: RunState) -> list:
+        """Research memos that COUNT toward the serial (node-count) cadence — everything EXCEPT the
+        repeated concurrent-overlap memos (`trigger="repeat"`). Those fire on a TIME cadence during a
+        long eval (`_research_overlap_loop`), so letting them advance the node-count marker would
+        re-phase and suppress the between-nodes research pass — the one that runs with the freshest
+        results at a no-pending decision point. Excluding them keeps the two mechanisms independent."""
+        return [m for m in state.research
+                if isinstance(m, dict) and (m or {}).get("trigger") != "repeat"]
+
+    @classmethod
+    def _already_researched_at(cls, state: RunState, n: int) -> bool:
+        return any((m or {}).get("at_node") == n for m in cls._cadence_research_memos(state))
 
     def _run_deep_research(self, state: RunState, *, trigger: str, manual: bool) -> RunState:
         """Execute one Deep-Research step (serial path) and record it, then re-fold. Always records a
@@ -157,8 +186,8 @@ class ResearchCadenceMixin:
         n = len(state.nodes)
         if n == 0 or self._already_researched_at(state, n):
             return None
-        _last_research_n = max((int(m.get("at_node", -1)) for m in state.research
-                                if isinstance(m, dict) and m.get("at_node") is not None), default=0)
+        _last_research_n = max((int(m.get("at_node", -1)) for m in self._cadence_research_memos(state)
+                                if m.get("at_node") is not None), default=0)
         if self._cadence_due(n, _last_research_n, self.deep_research_every):   # since-last, gap-safe
             return "cadence"
         hist = state.strategy_history

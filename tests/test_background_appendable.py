@@ -72,10 +72,13 @@ def test_background_events_are_selection_neutral_at_every_position():
 
 
 def test_background_task_appends_only_via_the_gated_method():
-    # The _bg coroutine must reach the store ONLY through _record_deep_research (whose appends
-    # carry the BACKGROUND_APPENDABLE assertions). A direct store.append added to _spawn_research
-    # would bypass the gate silently — this source scan turns that into a red test.
+    # The background research coroutines must reach the store ONLY through _record_deep_research
+    # (whose appends carry the BACKGROUND_APPENDABLE assertions). A direct store.append added to the
+    # one-shot spawn OR the repeating overlap loop would bypass the gate silently — this source scan
+    # turns that into a red test. Both the one-shot (_spawn_research::_bg) and the repeating
+    # (_research_overlap_loop) background writers are covered.
     import looplab.engine.orchestrator as orch
-    src = inspect.getsource(orch.Engine._spawn_research)
-    assert "store.append" not in src, "_spawn_research must not append directly — see BACKGROUND_APPENDABLE"
-    assert "_record_deep_research" in src
+    for meth in ("_spawn_research", "_research_overlap_loop"):
+        src = inspect.getsource(getattr(orch.Engine, meth))
+        assert "store.append" not in src, f"{meth} must not append directly — see BACKGROUND_APPENDABLE"
+        assert "_record_deep_research" in src, f"{meth} must write only via _record_deep_research"

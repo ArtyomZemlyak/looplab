@@ -79,6 +79,9 @@ class EngineOptions:
     concept_retag_every: int = 30   # PART V (F1): concept classifier re-tag cadence, decoupled from strategist_every
     deep_research_every: int = 0         # run the stage every N created nodes (0 = manual/strategist only)
     concurrent_research: bool = False    # overlap a due research "think" with the GPU-bound eval
+    concurrent_research_repeat: bool = False   # one-shot overlap (== today); product re-runs on a cadence
+    concurrent_research_interval_s: float = 1800.0   # base repeat cadence (s); floors the budget-derived pace
+    concurrent_research_max_calls: int = 40     # per-eval-window repeated-research LLM backstop (0 = no cap)
     report_every: int = 0                # regenerate the run report every N created nodes (0 = manual only)
     merge_mode: str = "mean"             # A0b: "mean" | "ensemble" ("auto" resolves in Engine.__init__)
     complexity_cue: bool = False         # A0d: breadth-keyed prompt hint

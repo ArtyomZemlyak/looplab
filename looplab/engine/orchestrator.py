@@ -228,6 +228,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         concept_retag_every = _opt("concept_retag_every")
         deep_research_every = _opt("deep_research_every")
         concurrent_research = _opt("concurrent_research")
+        concurrent_research_repeat = _opt("concurrent_research_repeat")
+        concurrent_research_interval_s = _opt("concurrent_research_interval_s")
+        concurrent_research_max_calls = _opt("concurrent_research_max_calls")
         report_every = _opt("report_every")
         merge_mode = _opt("merge_mode")
         complexity_cue = _opt("complexity_cue")
@@ -306,6 +309,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.deep_researcher = deep_researcher
         self.deep_research_every = max(0, deep_research_every)
         self.concurrent_research = concurrent_research
+        # Repeated concurrent research (don't idle a multi-day eval): the overlapped think re-runs on
+        # an adaptive time cadence for the whole window instead of once. Off in the library default
+        # (one-shot == today); the product turns it on. Interval floors the budget-derived pace;
+        # max_calls is a per-window LLM backstop. See _spawn_research / _research_overlap_loop.
+        self._concurrent_research_repeat = bool(concurrent_research_repeat)
+        self._concurrent_research_interval_s = max(1.0, float(concurrent_research_interval_s or 1800.0))
+        self._concurrent_research_max_calls = max(0, int(concurrent_research_max_calls or 0))
         self.report_writer = report_writer
         self.report_every = max(0, report_every)
         self.developer_factory = developer_factory
@@ -1563,8 +1573,25 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         proposal instead of landing ~an eval later. Recording from the research task is safe: it's an
         AUDIT-only event (the fold ignores it for node selection) and `EventStore.append` serializes
         writers under an interprocess lock with collision-safe seq derivation. No-op when
-        concurrent_research is off or no trigger is due."""
+        concurrent_research is off.
+
+        Two modes: the library default fires ONCE per window when a trigger is due (== today,
+        byte-identical). With `concurrent_research_repeat` on, the overlapped think RE-RUNS on an
+        adaptive time cadence for the whole eval window (`_research_overlap_loop`) so a multi-day
+        training doesn't leave the reasoning agents idle after one memo — the caller cancels the
+        loop when the evals join (see `_dispatch_evals`)."""
         if not self.concurrent_research:
+            return
+        # Defensive getattr: some tests build a partial Engine (no __init__) — a missing knob means
+        # the safe one-shot default (== today), exactly like the train-monitor gates.
+        if getattr(self, "_concurrent_research_repeat", False):
+            # Repeat mode: keep researching for the whole eval window. Pass the initially-due trigger
+            # so the FIRST pass fires promptly (matching one-shot promptness) when research was due.
+            # Skip entirely with no model wired — the one-shot path no-ops the same way (via
+            # `_due_research_trigger` returning None), so we don't spin recording "unavailable" stubs.
+            if self.deep_researcher is None:
+                return
+            tg.start_soon(self._research_overlap_loop, self._due_research_trigger(state))
             return
         rtrig = self._due_research_trigger(state)
         if rtrig is None:
@@ -1583,47 +1610,146 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 pass
         tg.start_soon(_bg)
 
+    def _research_repeat_cadence(self) -> float:
+        """Base interval (seconds) between REPEATED concurrent-research passes. Research is expensive
+        (multi-turn LLM + web/arXiv), so the config `concurrent_research_interval_s` is a FLOOR, not a
+        ceiling: the effective pace is max(config, ~5% of the per-experiment time budget). A two-day
+        eval is re-researched roughly hourly; a short eval's first tick outlasts it (so it fires once
+        or not at all). Falls back to the config interval when no budget is known."""
+        cfg = max(1.0, float(getattr(self, "_concurrent_research_interval_s", 1800.0) or 1800.0))
+        budget = None
+        fn = getattr(self, "_experiment_time_budget", None)
+        if callable(fn):
+            try:
+                budget = fn()
+            except Exception:  # noqa: BLE001 — cadence is advisory; a budget hiccup just uses the config
+                budget = None
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+            derived = min(3600.0, max(300.0, float(budget) * 0.05))
+            return max(cfg, derived)         # research is costly: never MORE often than the config floor
+        return cfg
+
+    async def _research_overlap_loop(self, initial_trigger: Optional[str] = None) -> None:
+        """Repeated concurrent deep-research: keep the reasoning agents productive for the WHOLE eval
+        window (a multi-day training must not idle them after a single memo). Re-runs the overlapped
+        think on an adaptive cadence, records ONLY memos whose content is NEW (identical re-runs are
+        skipped so the log/hypothesis board don't bloat), backs off geometrically as the analysis
+        converges (capped so it always re-checks — new sibling-eval results or cross-run lessons can
+        land mid-window), and stops calling the LLM past the per-window cap. Advisory-only
+        (BACKGROUND_APPENDABLE via `_record_deep_research`) so it never touches selection or replay.
+        Runs in `_dispatch_evals`'s background task group; cancelled when the evals join."""
+        from looplab.engine.research_cadence import research_memo_sig
+        from looplab.engine.train_monitor import next_monitor_sleep
+        base = self._research_repeat_cadence()
+        # Fire promptly if research was already due at spawn (one-shot promptness); else wait a full
+        # cadence before the first deepening pass, so a short eval that outlasts no tick never researches.
+        next_sleep = 0.0 if initial_trigger else base
+        last_sig: Optional[str] = None
+        converged = 0
+        calls = 0
+        cap = self._concurrent_research_max_calls
+        trig = initial_trigger or "repeat"
+        while True:
+            await anyio.sleep(next_sleep)    # only cancellation (evals joined) unwinds the loop from here
+            try:
+                if cap > 0 and calls >= cap:
+                    return                   # per-window LLM budget spent; the health monitor still runs
+                # Re-fold each tick (invariant #4): pick up sibling evals that finished + fresh hints.
+                # abandon_on_cancel=True on BOTH reads: when the evals join and this loop is cancelled,
+                # node dispatch must NOT wait for an in-flight multi-turn research LLM call (an endpoint
+                # timeout+retry could be minutes) — the same latency fix train_monitor uses. The
+                # abandoned thread finishes in the background; its (now-moot) memo is discarded.
+                snap = await anyio.to_thread.run_sync(
+                    lambda: fold(self.store.read_all()), abandon_on_cancel=True)
+                memo = await anyio.to_thread.run_sync(
+                    functools.partial(self._compute_deep_research, snap, trig, trace=False),
+                    abandon_on_cancel=True)
+                calls += 1
+                if memo is None:
+                    next_sleep = base
+                    continue
+                sig = research_memo_sig(memo)
+                if sig == last_sig:          # converged — same conclusions; don't re-record, just back off
+                    converged += 1
+                    # cap = max(base, 3600): the backoff must never drop BELOW the configured interval
+                    # FLOOR. next_monitor_sleep returns min(cap, base·2^k); with the default cap=3600 a
+                    # base>3600 (user set interval_s>1h) would be clamped to 3600 < base, re-calling the
+                    # LLM MORE often than the floor when converged. Raising the cap to base keeps the
+                    # floor honoured (for base>3600 the sleep just stays at base — still bounded by the cap).
+                    next_sleep = next_monitor_sleep(base, status="healthy", healthy_streak=converged,
+                                                    cap=max(base, 3600.0))
+                    continue
+                last_sig = sig
+                converged = 0
+                next_sleep = base
+                # The RECORD thread is deliberately NOT abandon_on_cancel (unlike the reads above): it
+                # WRITES the event log (and may run a verify LLM pass), so abandoning it could append
+                # research_completed/hint/hypothesis_added AFTER _dispatch_evals returns — possibly past
+                # finalize. Waiting for the append (bounded, far shorter than the compute path) is safer.
+                await anyio.to_thread.run_sync(
+                    functools.partial(self._record_deep_research, memo, trigger=trig, manual=False))
+                trig = "repeat"              # subsequent passes are repeats, not the initial due trigger
+            except anyio.get_cancelled_exc_class():
+                raise                        # cooperative cancellation (evals joined) — must propagate
+            except Exception:  # noqa: BLE001 — an advisory tick hiccup must not disturb the eval
+                next_sleep = base
+                continue
+
     async def _dispatch_evals(self, evals: list, state: RunState,
                               max_es: Optional[float]) -> None:
         # Single experiment at a time is the base mode: run evals sequentially and
         # deterministically. Concurrent fan-out (the task-group below) is a backlog
         # seam — opt in with max_parallel > 1. Deep research overlaps + records immediately
         # in BOTH modes (see _spawn_research), independent of max_parallel.
-        if self.max_parallel <= 1:
-            limiter = anyio.CapacityLimiter(1)
-            async with anyio.create_task_group() as tg:
-                self._spawn_research(tg, state)
-                for a in evals:
+        #
+        # Nested groups: the repeating research (`_spawn_research`, when
+        # `concurrent_research_repeat` is on) lives in the OUTER `bg_tg` and never finishes on its
+        # own; the evals run in / under it and, once they JOIN, the `finally` cancels `bg_tg` to stop
+        # the loop. The one-shot path (repeat off, == today) is NOT cancelled — `bg_tg` waits for the
+        # single memo to finish exactly as the pre-refactor single group did (byte-identical).
+        async with anyio.create_task_group() as bg_tg:
+            self._spawn_research(bg_tg, state)
+            try:
+                if self.max_parallel <= 1:
+                    limiter = anyio.CapacityLimiter(1)
+                    for a in evals:
+                        cur = fold(self.store.read_all())
+                        if self._skip_if_aborted(a, cur):
+                            continue
+                        # Re-check the eval-compute budget BEFORE each eval (not just per loop
+                        # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
+                        if (max_es is not None and cur.total_eval_seconds >= max_es):
+                            break
+                        await self._evaluate(a["node_id"], limiter, max_es)
+                else:
+                    # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
+                    # eval-budget guard the review flagged for this path: cap the number STARTED so an
+                    # over-budget run launches at most ~max_parallel more evals, not the whole batch.
+                    limiter = anyio.CapacityLimiter(self.max_parallel)
                     cur = fold(self.store.read_all())
-                    if self._skip_if_aborted(a, cur):
-                        continue
-                    # Re-check the eval-compute budget BEFORE each eval (not just per loop
-                    # iteration), so a multi-eval batch can't overshoot by a whole batch (#2/#25).
-                    if (max_es is not None and cur.total_eval_seconds >= max_es):
-                        break
-                    await self._evaluate(a["node_id"], limiter, max_es)
-        else:
-            # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
-            # eval-budget guard the review flagged for this path: cap the number STARTED so an
-            # over-budget run launches at most ~max_parallel more evals, not the whole batch.
-            limiter = anyio.CapacityLimiter(self.max_parallel)
-            cur = fold(self.store.read_all())
-            started = 0
-            async with anyio.create_task_group() as tg:
-                self._spawn_research(tg, state)   # overlap deep research here too (max_parallel-independent)
-                for a in evals:
-                    if self._skip_if_aborted(a, cur):
-                        continue
-                    # Budget guard (parallel path): cap each fan-out batch to the worker-pool size.
-                    # `cur` is folded ONCE before this loop and never changes mid-batch (the evals
-                    # join only at the task-group exit), so a budget check on cur here is dead — the
-                    # real enforcement is the per-iteration outer guard (it re-folds and finishes the
-                    # run once total_eval_seconds >= max_es). Capping the batch to max_parallel bounds
-                    # the overshoot to ~one batch instead of launching the whole `evals` list at once.
-                    if started >= self.max_parallel:
-                        break
-                    tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
-                    started += 1
+                    started = 0
+                    async with anyio.create_task_group() as tg:
+                        for a in evals:
+                            if self._skip_if_aborted(a, cur):
+                                continue
+                            # Budget guard (parallel path): cap each fan-out batch to the worker-pool
+                            # size. `cur` is folded ONCE before this loop and never changes mid-batch
+                            # (the evals join only at the task-group exit), so a budget check on cur
+                            # here is dead — the real enforcement is the per-iteration outer guard (it
+                            # re-folds and finishes the run once total_eval_seconds >= max_es). Capping
+                            # the batch to max_parallel bounds the overshoot to ~one batch instead of
+                            # launching the whole `evals` list at once.
+                            if started >= self.max_parallel:
+                                break
+                            tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
+                            started += 1
+            finally:
+                # Evals have joined (or errored out) — stop the repeating research loop. One-shot
+                # research (repeat off) leaves `bg_tg` uncancelled so its single memo still records,
+                # preserving the pre-refactor behaviour byte-for-byte. Defensive getattr: a partial
+                # test Engine defaults to one-shot (no cancel), == today.
+                if getattr(self, "_concurrent_research_repeat", False):
+                    bg_tg.cancel_scope.cancel()
 
     # ------------------------------- strategist cadence (extracted to engine/strategy.py)
     # The A7 strategist-consultation + coverage-snapshot cluster (`_strategy_core`,
