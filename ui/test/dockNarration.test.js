@@ -105,6 +105,27 @@ test('timeline narration stays renderable for malformed and forward-compatible e
           { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
         ],
       }] },
+      { prior_runs: [{
+        run_id: 'old', run_best_metric: 0.9, matched_concepts: ['loss/target'],
+        source_receipt: { ...completeRunSource, concepts_total: 0 },
+        matched_concept_outcomes: [
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+        ],
+      }] },
+      { prior_runs: [{
+        run_id: 'old', run_best_metric: 0.9, matched_concepts: ['loss/target'],
+        source_receipt: { ...completeRunSource, concept_outcomes_total: 0 },
+        matched_concept_outcomes: [
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+        ],
+      }] },
+      { prior_runs: [{
+        run_id: 'old', run_best_metric: 0.9, matched_concepts: ['loss/target'],
+        source_receipt: completeRunSource, matched_concept_outcomes: [
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.2 },
+        ],
+      }] },
     ]) {
       const narration = eventNarration(prior(corrupt))
       assert.match(narration, /evidence completeness unknown/)

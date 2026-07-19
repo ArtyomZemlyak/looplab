@@ -88,9 +88,9 @@ export default defineConfig({
             {
               name: 'settings-support',
               // The Settings route and the run-local Settings panel share the same bounded schema,
-              // coercion and form renderer. One interaction-scoped stream avoids a second wrapper
-              // and lets their repeated field vocabulary share a gzip dictionary.
-              test: /[/\\]src[/\\](Settings|SettingsForm|settingsModel|settingsSchema)\.(js|jsx)$/,
+              // coercion, form renderer and loss guard. One interaction-scoped stream avoids a
+              // 640-byte shared wrapper and lets their repeated field vocabulary share a dictionary.
+              test: /[/\\]src[/\\](Settings|SettingsForm|settingsModel|settingsSchema|navigationLossGuard)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {
