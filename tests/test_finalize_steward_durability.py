@@ -66,6 +66,67 @@ _CASES = [
 ]
 
 
+_POISON_CASES = [
+    (*_CASES[0], b"{not-json}\n"),
+    (*_CASES[1], b'{"v":999}\n'),
+    (*_CASES[2], b'{"v":2,"v":1}\n'),
+]
+
+
+@pytest.mark.parametrize(
+    "method_name,target,log_name,result,poison", _POISON_CASES)
+def test_unhealthy_paid_history_never_becomes_a_key_miss_or_new_append(
+        tmp_path, monkeypatch, method_name, target, log_name, result, poison):
+    calls: list[int] = []
+
+    def paid(*_args, **_kwargs):
+        calls.append(1)
+        return result
+
+    monkeypatch.setattr(target, paid)
+    path = tmp_path / log_name
+    path.write_bytes(poison)
+    before = path.read_bytes()
+    memory = _memory(tmp_path)
+
+    getattr(memory, method_name)(
+        RunState(run_id="poisoned-history", task_id="task", goal="goal"))
+
+    assert calls == []
+    assert path.read_bytes() == before
+    assert not list((tmp_path / ".curation_invocations").glob("*.json"))
+
+
+@pytest.mark.parametrize("method_name,target,log_name,result", _CASES)
+def test_known_v1_terminal_history_still_deduplicates_paid_finalize(
+        tmp_path, monkeypatch, method_name, target, log_name, result):
+    calls: list[int] = []
+
+    def paid(*_args, **_kwargs):
+        calls.append(1)
+        return result
+
+    monkeypatch.setattr(target, paid)
+    path = tmp_path / log_name
+    path.write_text(json.dumps({
+        "run_id": "legacy-terminal",
+        "task_id": "task",
+        "outcome": "proposed",
+        "auto": False,
+        "auto_requested": False,
+        "proposals": {},
+        "receipt": None,
+    }) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    getattr(_memory(tmp_path), method_name)(
+        RunState(run_id="legacy-terminal", task_id="task", goal="goal"))
+
+    assert calls == []
+    assert path.read_bytes() == before
+    assert not list((tmp_path / ".curation_invocations").glob("*.json"))
+
+
 @pytest.mark.parametrize("method_name,target,log_name,result", _CASES)
 def test_finalize_steward_lost_terminal_receipt_is_not_rebilled(
         tmp_path, monkeypatch, method_name, target, log_name, result):

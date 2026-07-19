@@ -359,7 +359,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
     def _already_curated(self, log_name: str, curation_key: str) -> bool:
         """Whether semantic work has a terminal outcome; unavailable clients do not consume the key."""
-        from looplab.events.eventstore import read_jsonl_lenient
+        from looplab.engine.governance_health import read_curation_rows
 
         p = Path(self._e.memory_dir) / log_name
         if not p.exists():
@@ -367,7 +367,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         return any(
             str(r.get("curation_key") or "") == curation_key
             and str(r.get("outcome") or "") != "unavailable"
-            for r in read_jsonl_lenient(p, loads=json.loads, dicts_only=True)
+            for r in read_curation_rows(p)
         )
 
     @staticmethod
@@ -440,7 +440,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
 
     def _legacy_curation_terminal(self, log_name: str, final: RunState) -> bool:
         """Bridge known v1 outcomes without reviving the old polymorphic run/task identity."""
-        from looplab.events.eventstore import read_jsonl_lenient
+        from looplab.engine.governance_health import read_curation_rows
 
         rid, tid = str(final.run_id or ""), str(final.task_id or "")
         path = Path(self._e.memory_dir) / log_name
@@ -451,7 +451,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             and str(row.get("run_id") or "") == rid
             and str(row.get("task_id") or "") == tid
             and str(row.get("outcome") or "") != "unavailable"
-            for row in read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
+            for row in read_curation_rows(path)
         )
 
     def _write_curation_claim(self, path: Path, log_name: str, kind: str,
@@ -714,7 +714,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                               require_durable: bool = False) -> bool:
         """Append one semantic steward outcome; unavailable audits remain non-blocking."""
         from looplab.engine.concept_registry import _append_governance
-        from looplab.events.eventstore import read_jsonl_lenient
+        from looplab.engine.governance_health import read_curation_rows
 
         class _AlreadyLogged(RuntimeError):
             pass
@@ -723,11 +723,17 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         path.parent.mkdir(parents=True, exist_ok=True)
         source_key = self._curation_source_key(final)
         outcome = str(rec.get("outcome") or "")
+        locked_rows: list[dict] = []
+
+        def _read_locked(current: Path) -> list[dict]:
+            # CODEX AGENT: paid history is policy. Capture the complete validated ledger under the
+            # physical append lock so dedup and the next revision are derived from the same snapshot.
+            rows = read_curation_rows(current)
+            locked_rows[:] = rows
+            return rows
 
         def _validate_locked() -> None:
-            if not path.exists():
-                return
-            for row in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
+            for row in locked_rows:
                 if str(row.get("curation_key") or "") != curation_key:
                     continue
                 prior_outcome = str(row.get("outcome") or "")
@@ -753,7 +759,8 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
         }
         try:
             _append_governance(
-                path, payload, validate=_validate_locked, require_durable=require_durable)
+                path, payload, validate=_validate_locked, read_rows=_read_locked,
+                require_durable=require_durable)
             return True
         except _AlreadyLogged:
             return False
