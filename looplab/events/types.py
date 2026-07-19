@@ -249,6 +249,11 @@ EV_DEPS_INSTALLED = "deps_installed"
 EV_WORKSPACE_SEEDED = "workspace_seeded"
 EV_RUN_SETUP_STARTED = "run_setup_started"
 EV_RUN_SETUP_FINISHED = "run_setup_finished"
+# Training-log monitor (engine/train_monitor.py): a NON-healthy verdict (watch|broken) from the per-eval
+# LLM log observer. DIAGNOSTIC — the fold never reads it (advisory, splice-neutral even though it is
+# appended from the concurrent monitor task), so it never touches node selection or replay; it exists for
+# the owner attention feed + audit trail. Healthy verdicts stay trace-only (no event) to keep the log clean.
+EV_TRAIN_MONITOR_ALERT = "train_monitor_alert"
 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(
     v for k, v in globals().items() if k.startswith("EV_") and isinstance(v, str)
@@ -284,6 +289,7 @@ DIAGNOSTIC_EVENTS: frozenset[str] = frozenset({
     EV_LOG_REPAIRED, EV_REFLECTION_NOTE, EV_LESSONS_RECONCILED,
     EV_COMMAND_ACK, EV_FINALIZE_STEP, EV_REPORT_REFRESH_STARTED, EV_REPORT_REFRESH_FAILED,
     EV_CONCEPT_LENS_STARTED, EV_CONCEPT_LENS_COMPLETED, EV_CONCEPT_LENS_FAILED,
+    EV_TRAIN_MONITOR_ALERT,
     # EV_ENV_CHANGED moved to the FOLDED set (F18): it now sets a dedup flag (RunState.env_changed) so
     # the drift note is emitted once, not re-appended on every resume of an upgraded run.
 })
