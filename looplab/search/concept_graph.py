@@ -45,6 +45,7 @@ from itertools import combinations
 from typing import Optional
 
 from looplab.core.concepts import (
+    CONCEPT_DELTA_MISSING_PARENT_REASON,
     MAX_MATERIALIZED_CONCEPTS,
     normalize_concept_id,
     normalized_concept_renames,
@@ -990,8 +991,23 @@ def node_concept_delta(state, node_id) -> dict:
         return {"parent_ids": [], "added": [], "removed": [], "inherited": []}
 
     projection = current_concept_projection(state)
-    parent_ids = list(dict.fromkeys(p for p in (getattr(node, "parent_ids", None) or []) if p in nodes))
+    raw_parent_ids = getattr(node, "parent_ids", None)
+    if raw_parent_ids is None:
+        raw_parent_ids = []
+    invalid_parent_shape = not isinstance(raw_parent_ids, (list, tuple))
+    raw_parent_ids = raw_parent_ids if isinstance(raw_parent_ids, (list, tuple)) else []
+    integer_parent_ids = [
+        parent_id for parent_id in raw_parent_ids
+        if isinstance(parent_id, int) and not isinstance(parent_id, bool)
+    ]
+    parent_ids = list(dict.fromkeys(integer_parent_ids))
     empty = {"parent_ids": sorted(parent_ids), "added": [], "removed": [], "inherited": []}
+    if (invalid_parent_shape or len(integer_parent_ids) != len(raw_parent_ids)
+            or any(parent_id not in nodes for parent_id in parent_ids)):
+        # CODEX AGENT: silently dropping a missing edge reclassifies a corrupt child as an exact root.
+        # Retain every integer reference for diagnosis and fail closed with replay's typed dependency reason.
+        return {**empty, "unavailable": True,
+                "reasons": [CONCEPT_DELTA_MISSING_PARENT_REASON]}
     # CODEX AGENT: a malformed global identity/store projection cannot support either side of a diff.
     # Keep the stable empty shape and expose the receipt instead of calculating authoritative-looking
     # additions from the valid-looking subset that survived canonicalization.
@@ -1038,7 +1054,14 @@ def node_concept_delta(state, node_id) -> dict:
     # makes the broad projection partial, but must not contaminate this node's otherwise exact delta.
     local_reasons.update(projection.global_reasons)
     if node_status == "partial" or local_reasons:
-        result.update({"partial": True, "reasons": sorted(local_reasons)})
+        # A retained child subset can prove concepts that remain present, but absence from that subset
+        # cannot prove removal (the cap/invalid item may have omitted a still-inherited concept).
+        result.update({
+            "removed": [],
+            "partial": True,
+            "reasons": sorted(local_reasons),
+            "unknown_dimensions": ["removed"],
+        })
     return result
 
 

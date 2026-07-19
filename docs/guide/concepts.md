@@ -560,7 +560,9 @@ corrected run. Preserve the event log as the audit source; do not hand-edit a de
 The per-node `node_concept_delta` read model and the Researcher-facing concept tools preserve the same
 distinction. Exact results retain their original `{parent_ids, added, removed, inherited}` shape; an
 incomplete result adds `partial=true` or `unavailable=true` plus ordered `reasons`. Unavailable membership
-infers no delta, while partial output is explicitly labelled as a retained projection. Aggregate
+infers no delta. A partial child keeps only retained `added`/`inherited` lower bounds, suppresses
+`removed`, and publishes `unknown_dimensions=["removed"]`: absence from a capped/invalid subset cannot
+prove that an inherited concept was removed. Aggregate
 tree/membership tools combine receipts only for current nodes, so they neither claim exact absence during
 an unresolved materialization nor let a receipt belonging only to a tombstoned/aborted node poison the
 live view.
@@ -626,7 +628,8 @@ persisted `co_occurs` cache rows are ignored. A hierarchy is then **computed** b
   are all `added` for legacy full authoring, while a delta-authored root inherits the run base). This is a
   pure projection over materialized full-set `node_concepts`, distinct from the optional bounded authored delta
   sidecar. Both sides canonicalize through the consolidation rename, so it shows what each experiment
-  conceptually changed relative to where it came from. Surfaced to the Researcher/Strategist via the
+  conceptually changed relative to where it came from. Missing parent references fail unavailable rather
+  than being silently reinterpreted as a root. Surfaced to the Researcher/Strategist via the
   `node_concept_delta` tool.
 
 These are surfaced at `GET /api/runs/{id}/concepts?lens=…` as a bounded `ConceptFrame` v1: one exact

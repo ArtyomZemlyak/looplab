@@ -296,13 +296,18 @@ def current_concept_projection(state: Any) -> CurrentConceptProjection:
                 reasons.add("invalid_concept_materialization_receipt")
                 global_reasons.add("invalid_concept_materialization_receipt")
                 continue
-            if node_id not in active_nodes:
-                continue
             receipt = _materialization_receipt(raw_receipt)
             if receipt is None:
+                # CODEX AGENT: valid historical receipts follow a deleted node out of the CURRENT
+                # projection, but a malformed durable row is not a receipt and remains global source
+                # corruption. Validate before the lifecycle filter, matching ConceptFrame exactly.
                 reasons.add("invalid_concept_materialization_receipt")
                 global_reasons.add("invalid_concept_materialization_receipt")
-                unavailable.setdefault(node_id, set()).add("invalid_concept_materialization_receipt")
+                if node_id in active_nodes:
+                    unavailable.setdefault(node_id, set()).add(
+                        "invalid_concept_materialization_receipt")
+                continue
+            if node_id not in active_nodes:
                 continue
             receipt_status, receipt_reasons = receipt
             receipt_nodes.add(node_id)

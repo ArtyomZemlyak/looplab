@@ -443,6 +443,7 @@ def test_missing_base_and_partial_receipts_reach_all_concept_tools():
     partial = node_concept_delta(st, 1)
     assert partial["partial"] is True and partial["reasons"] == ["concepts_per_node_cap"]
     assert partial["added"] == ["known/retained"] and partial["inherited"] == ["known/base"]
+    assert partial["removed"] == [] and partial["unknown_dimensions"] == ["removed"]
 
     tools = RunTools()
     tools.bind_state(st)
@@ -454,6 +455,7 @@ def test_missing_base_and_partial_receipts_reach_all_concept_tools():
     retained_delta = tools.execute("node_concept_delta", {"node_id": 1})
     assert "PARTIAL" in retained and "known/retained" in retained
     assert "PARTIAL" in retained_delta and "+added: known/retained" in retained_delta
+    assert "?removed: unknown" in retained_delta and "-removed" not in retained_delta
 
     tree = tools.execute("read_concept_tree", {})
     absent = tools.execute("concept_nodes", {"concept": "unknown/missing"})
@@ -481,6 +483,87 @@ def test_deleted_missing_base_receipt_does_not_poison_current_concept_tools():
     nodes = tools.execute("concept_nodes", {"concept": "known/x"})
     assert "no concepts tagged yet" in tree and "UNAVAILABLE" not in tree
     assert "no experiments tagged" in nodes and "complete zero" not in nodes
+
+
+def test_partial_child_delta_never_infers_removal_from_an_omitted_membership():
+    from looplab.search.concept_graph import node_concept_delta
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft")),
+        1: Node(id=1, parent_ids=[0], operator="improve", idea=Idea(operator="improve")),
+    }
+    st.node_concepts = {
+        0: ["base/a", "maybe/still-inherited"],
+        1: ["base/a", "new/retained"],
+    }
+    _mark_concepts_exact(st)
+    st.node_concept_materialization_receipts = {
+        1: {"status": "partial", "reasons": ["concepts_per_node_cap"]}}
+
+    delta = node_concept_delta(st, 1)
+
+    assert delta["added"] == ["new/retained"]
+    assert delta["inherited"] == ["base/a"]
+    assert delta["removed"] == []
+    assert delta["unknown_dimensions"] == ["removed"]
+    tools = RunTools()
+    tools.bind_state(st)
+    rendered = tools.execute("node_concept_delta", {"node_id": 1})
+    assert "+added: new/retained" in rendered and "=inherited: base/a" in rendered
+    assert "?removed: unknown" in rendered and "-removed: maybe/still-inherited" not in rendered
+
+
+def test_unknown_parent_reference_is_unavailable_instead_of_becoming_a_root():
+    from looplab.search.concept_graph import node_concept_delta
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {1: Node(id=1, parent_ids=[99], operator="improve", idea=Idea(operator="improve"))}
+    st.node_concepts = {1: ["loss/a"]}
+    _mark_concepts_exact(st)
+
+    delta = node_concept_delta(st, 1)
+
+    assert delta == {
+        "parent_ids": [99],
+        "added": [],
+        "removed": [],
+        "inherited": [],
+        "unavailable": True,
+        "reasons": ["delta_dependency_missing_parent"],
+    }
+    tools = RunTools()
+    tools.bind_state(st)
+    rendered = tools.execute("node_concept_delta", {"node_id": 1})
+    assert "parent #99" in rendered and "UNAVAILABLE" in rendered
+    assert "delta_dependency_missing_parent" in rendered and "+added" not in rendered
+
+
+def test_malformed_historical_receipt_remains_global_integrity_failure():
+    from looplab.search.concept_projection import current_concept_projection
+
+    st = RunState(goal="g", direction="max")
+    st.nodes = {
+        0: Node(id=0, operator="draft", idea=Idea(operator="draft"), tombstoned=True),
+        1: Node(id=1, operator="draft", idea=Idea(operator="draft")),
+    }
+    st.node_concepts = {0: [], 1: []}
+    _mark_concepts_exact(st)
+    # Valid historical receipts are ignored by the current projection; malformed durable metadata is
+    # still source corruption and must agree with ConceptFrame's global validation boundary.
+    st.node_concept_materialization_receipts = {
+        0: {"status": "unavailable", "reasons": ["delta_dependency_missing_run_base"]}}
+    assert current_concept_projection(st).status == "complete"
+
+    st.node_concept_materialization_receipts[0] = {
+        "status": "unavailable", "reasons": ["future_invalid_reason"]}
+    projection = current_concept_projection(st)
+    assert projection.status == "partial"
+    assert projection.global_reasons == ("invalid_concept_materialization_receipt",)
+    tools = RunTools()
+    tools.bind_state(st)
+    assert "PARTIAL" in tools.execute("read_concept_tree", {})
+    assert "invalid_concept_materialization_receipt" in tools.execute("read_concept_tree", {})
 
 
 def test_concept_nodes_reports_omitted_experiments():

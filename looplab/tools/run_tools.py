@@ -460,9 +460,18 @@ class RunTools:
         parts = [p for p in (_fmt("+added", d["added"]), _fmt("-removed", d["removed"]),
                              _fmt("=inherited", d["inherited"])) if p]
         kin = "parent" if len(parents) <= 1 else "parents"
-        body = "; ".join(parts) if parts else f"(no concepts tagged on #{nid} or its {kin})"
-        prefix = (f"PARTIAL (reasons={','.join(d.get('reasons') or ['unspecified'])}); "
-                  if d.get("partial") else "")
+        if d.get("partial"):
+            # CODEX AGENT: a partial child can expose retained additions/inheritance, never an exact
+            # removal. Name every suppressed dimension so an agent cannot read an empty list as zero.
+            unknown = [str(value) for value in (d.get("unknown_dimensions") or [])]
+            unknown_note = "; ".join(f"?{dimension}: unknown" for dimension in unknown)
+            body = "; ".join(parts) if parts else "(no retained added/inherited concepts)"
+            if unknown_note:
+                body += "; " + unknown_note
+            prefix = f"PARTIAL (reasons={','.join(d.get('reasons') or ['unspecified'])}); "
+        else:
+            body = "; ".join(parts) if parts else f"(no concepts tagged on #{nid} or its {kin})"
+            prefix = ""
         return f"#{nid} concept delta vs {base}: {prefix}{body}"
 
     def _research_memo(self, st: RunState) -> str:
