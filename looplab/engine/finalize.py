@@ -681,9 +681,10 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
             except Exception:  # noqa: BLE001 - case store is an idempotent upsert
                 pass
 
-        # §22.4 AGENTIC taxonomy steward — portfolio-scoped, DECOUPLED from the run's terminal state, so a
-        # curation hiccup (or an LLM call) never blocks finalization: it is NOT a finalize requirement and
-        # carries no scoped marker (idempotency lives in the stores — append-only aliases, per-task facets).
+        # §22.4 AGENTIC taxonomy steward — portfolio-scoped and not a terminal requirement. A caught
+        # curation failure does not prevent terminal completion, but these calls run synchronously and can
+        # delay finalize / add paid inference before the cost roll-up. Idempotency lives in the stores
+        # (append-only aliases, per-task facets), so this step carries no scoped finalize marker.
         # Gated on `cross_run_curation` + an available LLM client; off => byte-identical finalize AND no extra
         # fold (the flag-check skips the whole block so the default path does zero steward work). The stewards
         # re-check the same gate internally (defense in depth). NOTE: the reviewed graph includes THIS run only
@@ -698,7 +699,7 @@ def finalize_run(engine: "Engine", *, entry_finished: bool, start_time: float) -
                 engine._store_concept_curation(final)
                 engine._store_claim_curation(final)   # agentic claim ratify/reject/pin
                 engine._store_task_facets(final)       # agentic task faceting (once/task)
-            except Exception:  # noqa: BLE001 — agentic curation must never affect the run's finalization
+            except Exception:  # noqa: BLE001 — steward failure must not prevent terminal completion
                 pass
 
         events = engine.store.read_all()

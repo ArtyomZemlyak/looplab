@@ -110,3 +110,13 @@ def test_part_iv_v_default_rationale_discloses_behavior_and_cost():
     assert "after the frozen A/B cleared it" not in source
     assert "proposal-only, so safe to default on" not in source
     assert "it is audit/advisory/proposal-only" not in source
+
+
+def test_curation_rationale_discloses_synchronous_finalize_latency():
+    root = Path(__file__).parents[1]
+    config = (root / "looplab" / "core" / "config.py").read_text(encoding="utf-8")
+    finalize = (root / "looplab" / "engine" / "finalize.py").read_text(encoding="utf-8")
+    assert "calls run synchronously during finalize" in config
+    assert "calls run synchronously" in finalize
+    assert "never blocks/" not in config
+    assert "never blocks finalization" not in finalize

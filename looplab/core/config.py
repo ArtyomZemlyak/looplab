@@ -648,10 +648,10 @@ class Settings(BaseSettings):
     # the concept steward (engine/concept_steward.py) review the freshly-updated portfolio concept graph and
     # PROPOSE a curation — merge duplicate slugs / split conflated ones / purge noise. Proposals are LOGGED to
     # `concept_curation_log.jsonl` for operator ratification (via the serve/CLI governance surface); the LLM
-    # never mutates fold state. Portfolio-scoped, decoupled from the run's terminal state (never blocks/
-    # retries finalize). Proposal-only describes its governance authority, not its runtime cost: with
-    # `memory_dir` and an LLM backend it can add paid finalize calls. ON by explicit experimental product
-    # choice; the bare-library EngineOptions default stays off (engine/options.py). See engine/lessons.py.
+    # never mutates fold state. The calls run synchronously during finalize, so they add latency and may add
+    # paid inference; a caught steward failure does not prevent terminal completion or trigger a retry.
+    # ON by explicit experimental product choice when `memory_dir` + an LLM backend are present; the
+    # bare-library EngineOptions default stays off (engine/options.py). See engine/lessons.py.
     cross_run_curation: bool = True
     # Deprecated compatibility flag. Steward output is untrusted and finalize is proposal-only regardless
     # of this value; retained so old snapshots still validate and logs can disclose that auto was requested.
