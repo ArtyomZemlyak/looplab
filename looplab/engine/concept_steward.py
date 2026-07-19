@@ -148,14 +148,18 @@ def concept_curation_snapshot(memory_dir, *, aliases: Optional[dict] = None,
     """Freeze one portfolio overview and its exact prompt digest before a durable paid claim."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+    from looplab.engine.concept_registry import concept_governance_snapshot
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
 
     base = Path(memory_dir) if memory_dir else None
     cp = base / "concept_capsules.jsonl" if base else None
     caps = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
-    aliases = load_concept_aliases(memory_dir) if aliases is None else aliases
-    splits = load_concept_splits(memory_dir) if splits is None else splits
+    if aliases is None or splits is None:
+        # CODEX AGENT: aliases and splits form one taxonomy. A mutation between two independent
+        # reads could ask the paid steward to review a hybrid policy state that never existed.
+        governance = concept_governance_snapshot(memory_dir)
+        aliases = governance["aliases"] if aliases is None else aliases
+        splits = governance["splits"] if splits is None else splits
     overview = portfolio_concept_overview(caps, aliases=aliases, splits=splits)
     return overview, concept_curation_input_digest(overview, max_proposals=max_proposals)
 

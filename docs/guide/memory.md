@@ -100,6 +100,29 @@ may make it mixed. It also cannot produce an agentic `ratified` proposal. Contex
 the claims endpoint/CLI, and the Atlas preview disclose the lower bound. The producer-prefixed receipt remains
 additive: read health refines overall D8 completeness without redefining what the producer-cap fields mean.
 
+### Operator-governance ledger health
+
+`concept_aliases.jsonl`, `concept_splits.jsonl`, and `claim_decisions.jsonl` are policy, not
+best-effort memory. The `concept_curation_log.jsonl` and `claim_curation_log.jsonl` sidecars are also
+authority for paid steward idempotency: skipping a durable begin/outcome could charge the same action
+again. A skipped row could otherwise be a merge, purge, split, clear, rejection, or pin and would
+change canonical identity or which claims reach a live run. Readers therefore require every physical
+row to be newline-terminated JSON object data with a known schema/action, valid bounded fields, unique
+`action_id`, and consistent writer-owned revisions. Invalid JSON, a non-object row, torn tail,
+unknown/future action or schema, duplicate/colliding action IDs, and revision collisions make that
+ledger **unavailable**; the valid prefix is not applied as though it were complete.
+
+That health state propagates through overview, retrieval, Atlas, curation, agent tools, CLI, and owner
+HTTP reads. HTTP returns a versioned (`v: 1`) `503 governance_ledger_unavailable` no-store receipt
+containing only the ledger and a closed reason class; poisoned row content and local paths are never
+reflected. Healthy curation-history reads explicitly report `status: complete` and `complete: true`;
+there is no partial-200 audit history. Normal
+operator mutations also refuse to append while a ledger is unhealthy, so a later write cannot
+silently bury the quarantine behind a new revision. There is intentionally no automatic semantic
+repair: stop writers, preserve a byte-for-byte backup, and restore or explicitly repair the ledger
+offline after identifying the damaged operator action. `looplab repair-log` is for run
+`events.jsonl`, not these governance sidecars.
+
 The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
 Its core distinction is:
 

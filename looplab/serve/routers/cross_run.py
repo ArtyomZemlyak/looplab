@@ -6,7 +6,6 @@ ask stewards for proposals, but only the typed operator endpoints below may chan
 """
 from __future__ import annotations
 
-import json
 import threading
 from collections import deque
 from contextlib import contextmanager
@@ -88,19 +87,6 @@ def build_router(srv) -> APIRouter:
     def _timestamp() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def _revisions(memory_dir: str) -> dict:
-        from looplab.engine.claims import claim_governance_revision
-        from looplab.engine.concept_registry import (
-            concept_governance_global_revision,
-            concept_governance_revision,
-        )
-        return {
-            "claims": claim_governance_revision(memory_dir),
-            "concept_aliases": concept_governance_revision(memory_dir, "aliases"),
-            "concept_splits": concept_governance_revision(memory_dir, "splits"),
-            "concept_governance": concept_governance_global_revision(memory_dir),
-        }
-
     def _raise_governance_error(exc: Exception) -> None:
         from looplab.engine.claims import ClaimDecisionConflict, ClaimDecisionIdempotencyConflict
         from looplab.engine.concept_registry import (
@@ -108,8 +94,14 @@ def build_router(srv) -> APIRouter:
             ConceptGovernanceGlobalConflict,
             ConceptGovernanceIdempotencyConflict,
         )
+        from looplab.engine.governance_health import GovernanceLedgerUnavailable
         from looplab.events.eventstore import EventStoreLockError
 
+        if isinstance(exc, GovernanceLedgerUnavailable):
+            # CODEX AGENT: never reflect poisoned JSON, parser text, or a filesystem path. The
+            # closed health receipt is sufficient for an operator to identify the ledger to repair.
+            raise HTTPException(
+                503, detail=exc.public_receipt(), headers={"Cache-Control": "no-store"}) from exc
         if isinstance(exc, ClaimDecisionConflict):
             raise HTTPException(409, detail={
                 "code": "claim_revision_conflict",
@@ -140,7 +132,7 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(503, detail={
                 "code": "governance_lock_unavailable",
                 "message": "governance storage cannot guarantee an exclusive write",
-            }) from exc
+            }, headers={"Cache-Control": "no-store"}) from exc
         if isinstance(exc, ValueError):
             raise HTTPException(422, cross_run_text(
                 exc, max_chars=500, single_line=True, entropy=True)) from exc
@@ -154,8 +146,18 @@ def build_router(srv) -> APIRouter:
             raise HTTPException(503, detail={
                 "code": "cross_run_evidence_unavailable",
                 "message": "cross-run evidence cannot be read as one coherent snapshot",
-            }) from exc
+            }, headers={"Cache-Control": "no-store"}) from exc
         raise exc
+
+    def _read_governance(project):
+        """Map strict governance-health failures on read surfaces to one stable 503 contract."""
+        from looplab.engine.governance_health import GovernanceLedgerUnavailable
+        from looplab.events.eventstore import EventStoreLockError
+
+        try:
+            return project()
+        except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
+            _raise_governance_error(exc)
 
     @router.get("/api/cross-run/atlas")
     def atlas(limit: int = Query(24, ge=1, le=100),
@@ -164,23 +166,24 @@ def build_router(srv) -> APIRouter:
         from looplab.engine.claims import atlas_for_memory, locked_claim_evidence_snapshot
 
         memory_dir = _memory_dir()
-        try:
+        def _project():
             with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
+                # Atlas freezes the policy maps and their matching revisions itself. Keep the evidence
+                # locks through that projection so no lesson/research rewrite can create a mixed view.
                 payload = atlas_for_memory(
                     memory_dir, lessons=evidence.lessons_snapshot,
                     research_claims=evidence.research_claims_snapshot,
-                    decisions=evidence.decisions_snapshot, scope_task=scope_task,
-                    max_items=limit, structured=True,
-                )
-        except Exception as exc:
-            _raise_evidence_read_error(exc)
-        payload.update({
-            "projection": "live",
-            "scope_task": cross_run_text(
-                scope_task, max_chars=500, single_line=True, entropy=False),
-            "page": {"limit": limit},
-            "revisions": _revisions(memory_dir),
-        })
+                    scope_task=scope_task, max_items=limit, structured=True)
+            payload.update({
+                "projection": "live",
+                "scope_task": cross_run_text(
+                    scope_task, max_chars=500, single_line=True, entropy=False),
+                "page": {"limit": limit},
+                "revisions": payload["governance"]["revisions"],
+            })
+            return payload
+
+        payload = _read_governance(_project)
         return sanitize_cross_run_projection(
             payload, max_chars=128_000_000, max_items=256,
             max_total_items=500_000)
@@ -193,20 +196,23 @@ def build_router(srv) -> APIRouter:
         """Scope/polarity-safe claims with stable IDs and bounded offset pagination."""
         from looplab.engine.claims import (
             _filter_claim_assessments, _safe_claim_source_summary,
-            _safe_research_source_summary, claims_for_memory, claim_governance_revision,
+            _safe_research_source_summary, claims_for_memory,
             locked_claim_evidence_snapshot,
         )
+        from looplab.engine.governance_health import claim_governance_snapshot
 
         memory_dir = _memory_dir()
-        try:
+        def _project():
             with locked_claim_evidence_snapshot(memory_dir, structured=True) as evidence:
+                governance = claim_governance_snapshot(memory_dir)
                 rows = claims_for_memory(
                     memory_dir, lessons=evidence.lessons_snapshot,
                     research_claims=evidence.research_claims_snapshot,
-                    decisions=evidence.decisions_snapshot, scope_task=scope_task, structured=True,
+                    decisions=governance["decisions"], scope_task=scope_task, structured=True,
                 )
-        except Exception as exc:
-            _raise_evidence_read_error(exc)
+                return rows, governance
+
+        rows, governance = _read_governance(_project)
         research_source = _safe_research_source_summary(
             getattr(rows, "research_source", None)) or {}
         claim_source = _safe_claim_source_summary(getattr(rows, "claim_source", None)) or {}
@@ -225,7 +231,7 @@ def build_router(srv) -> APIRouter:
                 scope_task, max_chars=500, single_line=True, entropy=False),
             "research_source": research_source,
             "claim_source": claim_source,
-            "revision": claim_governance_revision(memory_dir),
+            "revision": governance["revision"],
         }
 
     @router.post("/api/cross-run/claim-decide")
@@ -391,20 +397,183 @@ def build_router(srv) -> APIRouter:
             "governance_revision": rec["governance_revision"],
         }
 
+    _curation_ledgers = {
+        "concept_curation_log.jsonl": ("concept", "concept_curation"),
+        "claim_curation_log.jsonl": ("claim", "claim_curation"),
+    }
+
+    def _validate_curation_row(row: dict, *, kind: str) -> str | None:
+        from looplab.engine.governance_health import (
+            validate_optional_text,
+            validate_revision_fields,
+        )
+
+        action = row.get("action")
+        version = row.get("v")
+        if "action" in row and action not in {
+                "steward-invocation-begun", "steward-invocation"}:
+            return "unknown_action"
+        if version is not None and (
+                isinstance(version, bool) or not isinstance(version, int)
+                or version not in {1, 2}):
+            return "unsupported_schema"
+        for field, maximum in (
+                ("by", 120), ("at", 120), ("error", 500),
+                ("error_type", 200), ("ambiguity", 200)):
+            if reason := validate_optional_text(row, field, maximum):
+                return reason
+        if reason := validate_revision_fields(row):
+            return reason
+        proposals = row.get("proposals", {})
+        receipt = row.get("receipt")
+        if not isinstance(proposals, dict) or (receipt is not None and not isinstance(receipt, dict)):
+            return "invalid_record"
+
+        # Modern finalize rows are semantic input-digest receipts, not HTTP action-id receipts. They
+        # share the physical log and must remain visible/strictly validated without entering the HTTP
+        # begin->terminal lifecycle below.
+        if version == 2 and action is None:
+            for field, maximum in (
+                    ("curation_key", 240), ("source_key", 240),
+                    ("run_id", 500), ("task_id", 500), ("input_digest", 80),
+                    ("input_schema", 300), ("model", 300), ("parser", 160)):
+                if reason := validate_optional_text(row, field, maximum):
+                    return reason
+            if (not row.get("curation_key") or not row.get("source_key")
+                    or row.get("outcome") not in {
+                        "unavailable", "empty", "proposed", "error",
+                        "prior_attempt_incomplete_not_replayed",
+                    }
+                    or not isinstance(row.get("auto"), bool)
+                    or not isinstance(row.get("auto_requested"), bool)):
+                return "invalid_record"
+            finish_seq = row.get("finish_seq")
+            if finish_seq is not None and (
+                    isinstance(finish_seq, bool) or not isinstance(finish_seq, int)
+                    or finish_seq < 0):
+                return "invalid_record"
+            return None
+
+        # Known pre-v2 finalize rows are run-keyed. Their absence of an HTTP action id means they are
+        # audit/proposal history only; they never satisfy a new on-demand paid action-id lookup.
+        if action is None and not row.get("action_id"):
+            if version not in (None, 1):
+                return "unsupported_schema"
+            for field, maximum in (("run_id", 500), ("task_id", 500)):
+                if reason := validate_optional_text(row, field, maximum):
+                    return reason
+            if (not row.get("run_id") or row.get("outcome") not in {
+                    "unavailable", "empty", "proposed", "error"}):
+                return "invalid_record"
+            for field in ("auto", "auto_requested"):
+                if field in row and not isinstance(row[field], bool):
+                    return "invalid_record"
+            return None
+
+        # The oldest HTTP audit projection carried action_id/proposals but no discriminator. Treat it
+        # as a terminal receipt so the same id can never become a new paid cache miss.
+        if action is None:
+            action_id = row.get("action_id")
+            if (version is not None or not isinstance(action_id, str) or not action_id
+                    or len(action_id) > 160 or row.get("from") not in (None, kind)
+                    or row.get("outcome") not in (None, "empty", "proposed", "error")):
+                return "invalid_record"
+            return None
+
+        if version != 1 or row.get("from") != kind:
+            return "unsupported_schema" if version != 1 else "invalid_record"
+
+        if action == "steward-invocation-begun":
+            invocation_id = row.get("invocation_id")
+            if (not isinstance(invocation_id, str) or not invocation_id
+                    or len(invocation_id) > 160 or row.get("outcome") != "begun"):
+                return "invalid_record"
+            if any(row.get(field) not in (None, "", {}) for field in (
+                    "action_id", "proposals", "receipt", "error", "begun_revision")):
+                return "invalid_record"
+            return None
+
+        action_id = row.get("action_id")
+        outcome = row.get("outcome")
+        if (not isinstance(action_id, str) or not action_id or len(action_id) > 160
+                or outcome not in {"empty", "proposed", "error"}):
+            return "invalid_record"
+        if "invocation_id" in row and row["invocation_id"] not in (None, ""):
+            return "invalid_record"
+        begun_revision = row.get("begun_revision")
+        if begun_revision is not None and (
+                isinstance(begun_revision, bool) or not isinstance(begun_revision, int)
+                or begun_revision < 1):
+            return "invalid_revision"
+        error = row.get("error")
+        if outcome == "error":
+            if not isinstance(error, str) or not error:
+                return "invalid_record"
+        elif error not in (None, ""):
+            return "invalid_record"
+        return None
+
+    def _read_curation_rows(path: Path, *, kind: str, ledger: str) -> list[dict]:
+        from looplab.engine.governance_health import (
+            GovernanceLedgerUnavailable,
+            read_governance_rows,
+            validate_local_revisions,
+        )
+
+        rows = read_governance_rows(
+            path, ledger=ledger,
+            validate=lambda row: _validate_curation_row(row, kind=kind),
+        )
+        validate_local_revisions(rows, ledger=ledger)
+        normalized: list[dict] = []
+        for row in rows:
+            if row.get("action") is None and row.get("action_id"):
+                proposals = row.get("proposals") or {}
+                has_proposals = any(
+                    isinstance(value, list) and value for value in proposals.values())
+                outcome = row.get("outcome")
+                if not outcome:
+                    outcome = ("error" if row.get("error")
+                               else ("proposed" if has_proposals else "empty"))
+                normalized.append({
+                    **row, "v": 1, "action": "steward-invocation",
+                    "from": kind, "outcome": outcome,
+                })
+            else:
+                normalized.append(row)
+
+        beginnings: dict[str, int] = {}
+        outcomes: set[str] = set()
+        for position, row in enumerate(normalized, start=1):
+            if row.get("action") not in {
+                    "steward-invocation-begun", "steward-invocation"}:
+                continue
+            if row["action"] == "steward-invocation-begun":
+                invocation_id = row["invocation_id"]
+                if invocation_id in beginnings or invocation_id in outcomes:
+                    raise GovernanceLedgerUnavailable(
+                        ledger, "duplicate_action_id", line=position)
+                beginnings[invocation_id] = position
+                continue
+            action_id = row["action_id"]
+            if action_id in outcomes:
+                raise GovernanceLedgerUnavailable(
+                    ledger, "duplicate_action_id", line=position)
+            outcomes.add(action_id)
+            begun_revision = row.get("begun_revision")
+            if action_id in beginnings:
+                if begun_revision != beginnings[action_id]:
+                    raise GovernanceLedgerUnavailable(
+                        ledger, "revision_mismatch", line=position)
+            elif begun_revision is not None:
+                raise GovernanceLedgerUnavailable(
+                    ledger, "revision_mismatch", line=position)
+        return normalized
+
     def _iter_log(path: Path):
-        """Stream valid object rows without materializing an unbounded curation ledger."""
-        if not path.exists():
-            return
-        with open(path, "r", encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except Exception:  # noqa: BLE001 - mutable audit ledgers skip damaged rows
-                    continue
-                if isinstance(row, dict):
-                    yield row
+        """Yield a curation ledger only after its complete paid-call history validates."""
+        kind, ledger = _curation_ledgers[path.name]
+        yield from _read_curation_rows(path, kind=kind, ledger=ledger)
 
     def _recent_log(name: str, limit: int) -> dict:
         path = Path(_memory_dir()) / name
@@ -413,15 +582,18 @@ def build_router(srv) -> APIRouter:
         for row in _iter_log(path):
             latest.append(_public_cross_run_row(row))
             count += 1
-        return {"entries": list(reversed(latest)), "n": count, "limit": limit}
+        return {
+            "v": 1, "status": "complete", "complete": True,
+            "entries": list(reversed(latest)), "n": count, "limit": limit,
+        }
 
     @router.get("/api/cross-run/curation-log")
     def curation_log(limit: int = Query(20, ge=1, le=200)):
-        return _recent_log("concept_curation_log.jsonl", limit)
+        return _read_governance(lambda: _recent_log("concept_curation_log.jsonl", limit))
 
     @router.get("/api/cross-run/claim-curation-log")
     def claim_curation_log(limit: int = Query(20, ge=1, le=200)):
-        return _recent_log("claim_curation_log.jsonl", limit)
+        return _read_governance(lambda: _recent_log("claim_curation_log.jsonl", limit))
 
     def _steward_client():
         try:
@@ -459,7 +631,11 @@ def build_router(srv) -> APIRouter:
         try:
             # This is the receipt for an already-paid external call. A best-effort sync would let the
             # server acknowledge bytes that a restart can lose and strand the same action in ambiguity.
-            return _append_governance(path, rec, require_durable=True)
+            return _append_governance(
+                path, rec, require_durable=True,
+                read_rows=lambda current: _read_curation_rows(
+                    current, kind=kind, ledger=f"{kind}_curation"),
+            )
         except Exception as exc:
             _raise_governance_error(exc)
 
@@ -478,21 +654,26 @@ def build_router(srv) -> APIRouter:
             "outcome": "begun",
         }
         try:
-            return _append_governance(path, rec, require_durable=True)
+            return _append_governance(
+                path, rec, require_durable=True,
+                read_rows=lambda current: _read_curation_rows(
+                    current, kind=kind, ledger=f"{kind}_curation"),
+            )
         except Exception as exc:
             _raise_governance_error(exc)
 
     def _cached_steward(name: str, action_id: str) -> dict | None:
         path = Path(_memory_dir()) / name
         begun = None
+        outcome = None
         for row in _iter_log(path):
             if (row.get("action") == "steward-invocation"
                     and str(row.get("action_id") or "") == action_id):
-                return row
+                outcome = row
             if (row.get("action") == "steward-invocation-begun"
                     and str(row.get("invocation_id") or "") == action_id):
                 begun = row
-        return begun
+        return outcome or begun
 
     def _steward_response(record: dict) -> dict:
         invocation = _public_cross_run_row({key: record.get(key) for key in
@@ -538,6 +719,7 @@ def build_router(srv) -> APIRouter:
 
     @contextmanager
     def _steward_guard(kind: str, name: str):
+        from looplab.engine.governance_health import GovernanceLedgerUnavailable
         from looplab.events.eventstore import EventStoreLockError, _interprocess_lock
 
         # Durable action-id dedupe happens only after the LLM returns. Hold a separate cross-process
@@ -549,7 +731,7 @@ def build_router(srv) -> APIRouter:
             with _steward_locks[kind]:
                 with _interprocess_lock(base / f"{name}.invoke.lock", required=True):
                     yield
-        except EventStoreLockError as exc:
+        except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
             _raise_governance_error(exc)
 
     @router.post("/api/cross-run/concept-steward")
@@ -558,6 +740,11 @@ def build_router(srv) -> APIRouter:
         """Run a proposal-only taxonomy review; typed operator actions apply selected proposals."""
         if apply:
             raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
+        from looplab.engine.concept_registry import concept_governance_snapshot
+
+        # Refuse before client creation / durable paid-call claim: an unhealthy taxonomy cannot
+        # produce a trustworthy prompt, and paying a steward to review a guessed projection is waste.
+        _read_governance(lambda: concept_governance_snapshot(_memory_dir()))
         with _steward_guard("concept", "concept_curation_log.jsonl"):
             cached = _cached_steward("concept_curation_log.jsonl", action_id)
             if cached is not None:
@@ -589,6 +776,9 @@ def build_router(srv) -> APIRouter:
         """Run a proposal-only claim review; typed operator actions apply selected proposals."""
         if apply:
             raise HTTPException(422, "steward endpoints are proposal-only; apply typed operator actions")
+        from looplab.engine.claims import claim_governance_revision
+
+        _read_governance(lambda: claim_governance_revision(_memory_dir()))
         with _steward_guard("claim", "claim_curation_log.jsonl"):
             cached = _cached_steward("claim_curation_log.jsonl", action_id)
             if cached is not None:

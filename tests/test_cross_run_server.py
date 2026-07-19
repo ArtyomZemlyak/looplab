@@ -125,6 +125,45 @@ def test_invalid_utf8_source_row_is_partial_200_and_does_not_hide_valid_tail(
         assert payload["n_claims"] == 1
 
 
+def test_governance_corruption_is_a_no_store_503_without_raw_content(tmp_path):
+    memory = _seed_memory()
+    poison = "SECRET_GOVERNANCE_ROW_MUST_NOT_LEAK"
+    (memory / "claim_decisions.jsonl").write_text(poison + "\n", encoding="utf-8")
+    client = TestClient(make_app(tmp_path))
+
+    for endpoint in ("/api/cross-run/claims", "/api/cross-run/atlas"):
+        response = client.get(endpoint)
+        assert response.status_code == 503
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["detail"] == {
+            "v": 1,
+            "status": "unavailable", "complete": False,
+            "code": "governance_ledger_unavailable",
+            "ledger": "claim_decisions", "reason": "malformed_json",
+        }
+        rendered = response.text
+        assert poison not in rendered and str(memory) not in rendered
+
+
+def test_operator_http_write_cannot_append_over_unhealthy_concept_ledger(tmp_path):
+    memory = _seed_memory()
+    path = memory / "concept_aliases.jsonl"
+    path.write_bytes(b'{"action":"purge","from":"hn"')
+    before = path.read_bytes()
+    client = TestClient(make_app(tmp_path))
+
+    response = client.post("/api/cross-run/concept-merge", json={
+        "from_concept": "hn", "to_concept": "hard-neg",
+        "expected_revision": 0, "expected_governance_revision": 0,
+        "action_id": "must-not-append",
+    })
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["reason"] == "torn_tail"
+    assert response.headers["cache-control"] == "no-store"
+    assert path.read_bytes() == before
+
+
 def _claim_action(client, *, decision="rejected", action_id="claim-action-1", note=""):
     snapshot = client.get("/api/cross-run/claims").json()
     claim = snapshot["claims"][0]
@@ -522,7 +561,9 @@ def test_concept_steward_endpoints(tmp_path, monkeypatch):
     # The LLM proposal is audited but never mutates meaning; an operator must select a typed action.
     from looplab.engine.concept_registry import load_concept_aliases
     assert load_concept_aliases(str(md)) == {}
-    log = client.get("/api/cross-run/curation-log").json()["entries"]
+    history = client.get("/api/cross-run/curation-log").json()
+    assert history["v"] == 1 and history["status"] == "complete" and history["complete"] is True
+    log = history["entries"]
     assert log[0]["action_id"] == "steward-proposal-1"
     # A lost-response retry is served from the durable invocation receipt.
     retry = client.post("/api/cross-run/concept-steward", params={"action_id": "steward-proposal-1"})
@@ -546,6 +587,85 @@ def test_steward_error_is_redacted_in_response_and_audit_log(tmp_path, monkeypat
     log = (Path(os.environ["LOOPLAB_MEMORY_DIR"]) / "concept_curation_log.jsonl").read_text()
     persisted = response.text + log
     assert secret not in persisted and "steward:" in persisted.lower()
+
+
+@pytest.mark.parametrize(("kind", "log_endpoint", "steward_endpoint"), [
+    ("concept", "/api/cross-run/curation-log", "/api/cross-run/concept-steward"),
+    ("claim", "/api/cross-run/claim-curation-log", "/api/cross-run/claim-steward"),
+])
+def test_poisoned_curation_history_is_503_and_never_replays_paid_steward(
+        tmp_path, monkeypatch, kind, log_endpoint, steward_endpoint):
+    import looplab.core.llm as llm_module
+
+    memory = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    memory.mkdir(parents=True, exist_ok=True)
+    path = memory / f"{kind}_curation_log.jsonl"
+    poison = "SECRET_CURRATION_ROW_MUST_NOT_LEAK"
+    path.write_text(poison + "\n", encoding="utf-8")
+    before = path.read_bytes()
+    client_creations: list[int] = []
+
+    def paid_client(*_args, **_kwargs):
+        client_creations.append(1)
+        return object()
+
+    monkeypatch.setattr(llm_module, "make_llm_client", paid_client)
+    client = TestClient(make_app(tmp_path))
+
+    for response in (
+        client.get(log_endpoint),
+        client.post(steward_endpoint, params={"action_id": "must-not-replay"}),
+    ):
+        assert response.status_code == 503
+        assert response.headers["cache-control"] == "no-store"
+        assert response.json()["detail"] == {
+            "v": 1, "status": "unavailable", "complete": False,
+            "code": "governance_ledger_unavailable",
+            "ledger": f"{kind}_curation", "reason": "malformed_json",
+        }
+        assert poison not in response.text and str(memory) not in response.text
+
+    assert client_creations == []
+    assert path.read_bytes() == before
+
+
+def test_known_finalize_and_legacy_curation_rows_remain_complete_paid_history(
+        tmp_path, monkeypatch):
+    import looplab.core.llm as llm_module
+
+    memory = Path(os.environ["LOOPLAB_MEMORY_DIR"])
+    memory.mkdir(parents=True, exist_ok=True)
+    path = memory / "claim_curation_log.jsonl"
+    digest = "a" * 64
+    rows = [{
+        "v": 2, "curation_key": f"claim:v2:{digest}",
+        "source_key": "source:v1:" + "b" * 64,
+        "run_id": "r1", "task_id": "t", "finish_seq": 7,
+        "input_digest": digest, "input_schema": "claim-curation/input-v1",
+        "model": "m", "parser": "tool_call_once", "outcome": "empty",
+        "auto": False, "auto_requested": False,
+        "proposals": {"decisions": []}, "receipt": None, "revision": 1,
+    }, {
+        # Known oldest HTTP audit shape: no discriminator, but its action id remains a
+        # terminal at-most-once receipt and can never become a new paid cache miss.
+        "action_id": "legacy-paid", "revision": 2,
+        "proposals": {"decisions": []}, "receipt": None,
+    }]
+    path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    client_creations: list[int] = []
+    monkeypatch.setattr(
+        llm_module, "make_llm_client",
+        lambda *_args, **_kwargs: client_creations.append(1) or object(),
+    )
+    client = TestClient(make_app(tmp_path))
+
+    history = client.get("/api/cross-run/claim-curation-log")
+    assert history.status_code == 200
+    assert history.json()["complete"] is True and history.json()["n"] == 2
+    retry = client.post(
+        "/api/cross-run/claim-steward", params={"action_id": "legacy-paid"})
+    assert retry.status_code == 200 and retry.json()["invocation"]["action_id"] == "legacy-paid"
+    assert client_creations == []
 
 
 def test_concurrent_steward_retry_pays_for_one_llm_invocation(tmp_path, monkeypatch):

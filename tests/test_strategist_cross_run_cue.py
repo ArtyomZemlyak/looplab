@@ -31,6 +31,20 @@ class _Host(StrategyCadenceMixin):
         self.memory_dir = str(memory_dir)
 
 
+def test_strategist_keeps_governance_unavailable_receipt(tmp_path):
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps({
+        "statement": "hard-neg helps", "outcome": "supported", "evidence": [1],
+        "run_id": "r1", "task_id": "t", "direction": "max",
+    }) + b"\n")
+    (tmp_path / "concept_aliases.jsonl").write_text("future-policy\n", encoding="utf-8")
+    host = _Host(tmp_path, on=True)
+
+    assert host._cross_run_note_for_ctx(
+        RunState(run_id="current", task_id="t", direction="max")) == ""
+    assert host._cross_run_note_receipt["status"] == "unavailable"
+    assert host._cross_run_note_receipt["governance"]["ledger"] == "concept_aliases"
+
+
 def test_engine_populates_note_from_memory(tmp_path):
     (tmp_path / "lessons.jsonl").write_bytes(b"\n".join(orjson.dumps(x) for x in [
         {"statement": "hard-neg helps", "outcome": "supported", "evidence": [1], "run_id": "r1",

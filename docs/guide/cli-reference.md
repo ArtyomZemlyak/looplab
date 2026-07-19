@@ -469,9 +469,8 @@ looplab cross-run-concepts MEMORY_DIR [--top 20] [--json]
 
 PART IV CR1a. Appends an exact-slug alias (`FROM_CONCEPT → TO_CONCEPT`) to
 `concept_aliases.jsonl`; omitting the target writes a purge/tombstone overlay. Raw per-run tags are not
-rewritten. Alias writes append under the shared interprocess lock; selected Atlas, digest and agent-tool reads
-load the latest overlay and resolve its chain without claiming a read lock. The `cross-run-concepts` CLI
-intentionally remains a raw-capsule view.
+rewritten. Alias writes append under the shared interprocess lock; Atlas, digest, retrieval, agent-tool and
+`cross-run-concepts` reads load the same latest alias/split projection.
 
 This local CLI is a **lean alias overlay**, not full taxonomy governance: the content-addressed `concept_uid`
 helper is not a release-pinned entity identity, and source/target existence, scope and taxonomy release are not
@@ -484,6 +483,14 @@ the resulting shared governance revision. Owner HTTP merge/purge additionally re
 and merge requires a live canonical target, from the current capsule/split projection; its receipt carries that
 projection's digest. Neither surface
 provides impact preview, assignment backfill or a queryable taxonomy-history workbench.
+
+All concept/claim governance CLI reads and writes fail with exit code 2 when an operator-policy
+sidecar is unhealthy. They print only the ledger name and a bounded reason (`torn_tail`,
+`malformed_json`, `unknown_action`, `unsupported_schema`, duplicate/revision failure, etc.); they do
+not echo the damaged row or path. A normal mutation never appends over that state. Preserve a backup
+and repair/restore the sidecar offline before retrying; `repair-log` applies only to a run's
+`events.jsonl`. Steward commands also refuse an unhealthy paid-invocation curation history before
+client creation, so a malformed cached begin/outcome cannot become a paid cache miss.
 
 ```bash
 looplab concept-merge MEMORY_DIR FROM_CONCEPT [TO_CONCEPT]
@@ -664,6 +671,10 @@ while raw JSONL history remains. The typed owner HTTP action adds claim `clear`,
 server-derived actor/time and stable 409 conflicts. It also requires a currently projected structured
 `claim_uid` plus the exact `evidence_digest` the operator observed and validates both inside the locked CAS.
 That live digest fence is not a versioned evidence release, and no queryable decision-history workbench exists.
+Operator maturity remains explicit policy until a later `clear`; it does not silently expire when evidence
+changes. Structured JSON exposes `decision_fresh`, while claims/context/tool text labels current,
+stale-evidence, or unknown freshness separately so `RATIFIED`/`PINNED` never implies that the reviewed
+evidence digest is still current.
 
 ```bash
 looplab claim-decide MEMORY_DIR "STATEMENT" (--ratify | --reject | --pin) [--note "..."] [--scope TASK_ID]

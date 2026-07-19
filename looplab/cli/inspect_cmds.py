@@ -15,14 +15,34 @@ import orjson
 import typer
 
 from looplab.core.concepts import MAX_MATERIALIZED_CONCEPTS, normalize_concept_id
+from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.core.models import (NODE_CONCEPT_PROVENANCE_CLASSIFIER,
                                  NODE_CONCEPT_PROVENANCE_OPERATOR,
                                  NODE_CONCEPT_PROVENANCE_UNTRUSTED,
                                  node_concept_event_provenance)
-from looplab.events.eventstore import EventStore, EventStoreConcurrencyError
+from looplab.events.eventstore import EventStore, EventStoreConcurrencyError, EventStoreLockError
 from looplab.events.replay import fold
 from looplab.events.types import EV_FINALIZE_STEP, EV_NODE_CONCEPTS, EV_RUN_FINISHED
 from looplab.cli import _engine_singleton, _print_result, _require_run_dir, app
+
+
+def _governance_cli_error(exc: GovernanceLedgerUnavailable | EventStoreLockError):
+    ledger = exc.ledger if isinstance(exc, GovernanceLedgerUnavailable) else "governance"
+    reason = exc.reason if isinstance(exc, GovernanceLedgerUnavailable) else "lock_unavailable"
+    typer.echo(
+        f"governance unavailable: ledger={ledger}, reason={reason}; "
+        "repair the ledger before retrying",
+        err=True,
+    )
+    raise typer.Exit(2) from exc
+
+
+def _governance_cli_read(project):
+    """Fail closed with a bounded operator-facing message, never a poisoned row/traceback."""
+    try:
+        return project()
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as exc:
+        _governance_cli_error(exc)
 
 
 def _persist_node_concepts(store, state, raw_tags, mode: str, vocab_size: int, *,
@@ -741,7 +761,7 @@ def cross_run_concepts_cmd(
     """PART IV cross-run Step 3 (§21.20): portfolio overview over the per-run CONCEPT capsules written when
     `cross_run_concepts` is on. Shows which concepts have been explored across the portfolio and in which
     runs — each with its OWN outcome (raw metrics are NOT compared across tasks). Pure read; no endpoint."""
-    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+    from looplab.engine.concept_registry import concept_governance_snapshot
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
     p = Path(memory_dir)
     path = p if p.is_file() else p / "concept_capsules.jsonl"
@@ -752,8 +772,10 @@ def cross_run_concepts_cmd(
     # cross-run-digest, the Atlas and the agent tools — otherwise this inspector shows the STALE raw graph
     # after a merge/split/purge (live-test finding). The alias/split ledgers live in the memory DIR.
     base = str(p if p.is_dir() else p.parent)
-    ov = portfolio_concept_overview(ConceptCapsuleStore(path).all(),
-                                    aliases=load_concept_aliases(base), splits=load_concept_splits(base))
+    governance = _governance_cli_read(lambda: concept_governance_snapshot(base))
+    ov = portfolio_concept_overview(
+        ConceptCapsuleStore(path).all(), aliases=governance["aliases"],
+        splits=governance["splits"])
     if as_json:
         typer.echo(orjson.dumps(ov, option=orjson.OPT_INDENT_2).decode())
         return
@@ -844,6 +866,8 @@ def concept_merge_cmd(
     try:
         rec = record_concept_alias(str(memory_dir), from_concept=from_concept, to_concept=to_concept,
                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
+        _governance_cli_error(e)
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
@@ -877,6 +901,8 @@ def concept_split_cmd(
     try:
         rec = record_concept_split(str(memory_dir), from_concept=from_concept, rules=rules, default=default,
                                    at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
+        _governance_cli_error(e)
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
@@ -905,7 +931,9 @@ def concept_steward_cmd(
         raise typer.Exit(2)
     from looplab.core.config import Settings
     from looplab.engine.concept_steward import curation_is_empty, steward_concepts
+    from looplab.engine.concept_registry import concept_governance_snapshot
     import datetime as _dt
+    _governance_cli_read(lambda: concept_governance_snapshot(str(memory_dir)))
     settings = Settings()
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
@@ -915,8 +943,9 @@ def concept_steward_cmd(
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
         typer.echo(f"concept-steward needs a reachable LLM endpoint: {e}")
         raise typer.Exit(1)
-    out = steward_concepts(str(memory_dir), client, apply=apply,
-                           at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    out = _governance_cli_read(lambda: steward_concepts(
+        str(memory_dir), client, apply=apply,
+        at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals))
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
         return
@@ -961,6 +990,8 @@ def claim_decide_cmd(
     try:
         rec = record_claim_decision(str(memory_dir), statement=statement, decision=picked[0], note=note,
                                     scope=scope, at=_dt.datetime.now().isoformat(timespec="seconds"))
+    except (GovernanceLedgerUnavailable, EventStoreLockError) as e:
+        _governance_cli_error(e)
     except ValueError as e:
         typer.echo(f"error: {e}")
         raise typer.Exit(2)
@@ -1057,7 +1088,9 @@ def claim_steward_cmd(
         raise typer.Exit(2)
     from looplab.core.config import Settings
     from looplab.engine.claim_steward import curation_is_empty, steward_claims
+    from looplab.engine.claims import claim_governance_revision
     import datetime as _dt
+    _governance_cli_read(lambda: claim_governance_revision(str(memory_dir)))
     settings = Settings()
     if model:
         settings.llm_model = model   # the field is `llm_model`; model_copy(update={"model":...}) wrote a
@@ -1067,8 +1100,9 @@ def claim_steward_cmd(
     except Exception as e:  # noqa: BLE001 — the steward is LLM-only
         typer.echo(f"claim-steward needs a reachable LLM endpoint: {e}")
         raise typer.Exit(1)
-    out = steward_claims(str(memory_dir), client, apply=apply,
-                         at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals)
+    out = _governance_cli_read(lambda: steward_claims(
+        str(memory_dir), client, apply=apply,
+        at=_dt.datetime.now().isoformat(timespec="seconds"), max_proposals=max_proposals))
     if as_json:
         typer.echo(orjson.dumps(out, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1091,15 +1125,17 @@ def cross_run_digest_cmd(
     """PART IV cross-run Step 7 (§21.20.11, GATED): a recursive summary — concepts grouped by AXIS prefix
     into clusters with rollup counts. Deterministic inspector DATA; NOT wired into any prompt until it
     beats the flat baseline on the benchmark corpus (the hierarchy gate). Honors concept aliases. No LLM."""
-    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+    from looplab.engine.concept_registry import concept_governance_snapshot
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
     caps_p = Path(memory_dir) / "concept_capsules.jsonl"
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
     if not caps and getattr(caps, "source_health", {}).get("source_store_complete") is not False:
         typer.echo(f"no concept capsules at {memory_dir}")
         raise typer.Exit(1)
-    dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)),
-                          splits=load_concept_splits(str(memory_dir)))
+    governance = _governance_cli_read(
+        lambda: concept_governance_snapshot(str(memory_dir)))
+    dg = portfolio_digest(
+        caps, aliases=governance["aliases"], splits=governance["splits"])
     if as_json:
         typer.echo(orjson.dumps(dg, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1126,7 +1162,7 @@ def cross_run_search_cmd(
     (claims + concepts) via the shipped lexical+BM25+vector RRF retriever, with a why-recalled receipt.
     Operator-rejected claims are excluded. Pure read; no endpoint."""
     from looplab.engine.claims import cross_run_retrieve
-    r = cross_run_retrieve(str(memory_dir), query, k=k)
+    r = _governance_cli_read(lambda: cross_run_retrieve(str(memory_dir), query, k=k))
     if as_json:
         typer.echo(orjson.dumps(r, option=orjson.OPT_INDENT_2).decode())
         return
@@ -1186,8 +1222,9 @@ def atlas_cmd(
     lessons = load_claim_lessons(base)
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
     research = load_research_claims(base)
-    atlas = atlas_for_memory(base, lessons=lessons, capsules=caps,
-                             research_claims=research, max_items=max_items)
+    atlas = _governance_cli_read(lambda: atlas_for_memory(
+        base, lessons=lessons, capsules=caps,
+        research_claims=research, max_items=max_items))
     claim_source = atlas.get("claim_source") if isinstance(atlas.get("claim_source"), dict) else {}
     concept_source_for_empty = (
         atlas.get("concept_source") if isinstance(atlas.get("concept_source"), dict) else {})
@@ -1290,8 +1327,14 @@ def claims_cmd(
         typer.echo(f"cross-run memory path does not exist or is not a file/directory: {p}")
         raise typer.Exit(1)
     research = load_research_claims(base)
-    claims = claims_for_memory(base, lessons=lessons, research_claims=research,
-                               fuzzy=fuzzy, structured=structured)
+    governance = None
+    if pack:
+        from looplab.engine.governance_health import cross_run_governance_snapshot
+        governance = _governance_cli_read(lambda: cross_run_governance_snapshot(base))
+    claims = _governance_cli_read(lambda: claims_for_memory(
+        base, lessons=lessons, research_claims=research,
+        decisions=(governance["decisions"] if governance is not None else None),
+        fuzzy=fuzzy, structured=structured))
     research_source = _safe_research_source_summary(
         getattr(claims, "research_source", None)) or {}
     claim_source = _safe_claim_source_summary(getattr(claims, "claim_source", None)) or {}
@@ -1301,14 +1344,12 @@ def claims_cmd(
     if pack:
         # compose with the concept overview (Step 3) from the same memory dir when present — honor the
         # recorded taxonomy governance (aliases/splits), consistent with every other consumer (live-test).
-        from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
         base = p if p.is_dir() else p.parent
         caps_path = base / "concept_capsules.jsonl"
         if caps_path.exists():
             overview, concept_rows = _portfolio_concept_overview_data(
-                ConceptCapsuleStore(caps_path).all(),
-                aliases=load_concept_aliases(str(base)),
-                splits=load_concept_splits(str(base)))
+                ConceptCapsuleStore(caps_path).all(), aliases=governance["aliases"],
+                splits=governance["splits"])
         else:
             overview, concept_rows = None, None
         cp = build_context_pack(
@@ -1337,9 +1378,18 @@ def claims_cmd(
             f"research quarantined={int(research_bad or 0)})."
         )
     _mark = {"supported": "✓", "refuted": "✗", "mixed": "⚖", "inconclusive": "·"}
-    _mat = {"operator-ratified": " [RATIFIED]", "operator-rejected": " [REJECTED]", "operator-pinned": " [PINNED]"}
+    _mat = {"operator-ratified": "RATIFIED", "operator-rejected": "REJECTED",
+            "operator-pinned": "PINNED"}
+
+    def _maturity_label(claim) -> str:
+        label = _mat.get(claim.get("maturity"))
+        if not label:
+            return ""
+        freshness = {True: "CURRENT", False: "STALE EVIDENCE", None: "FRESHNESS UNKNOWN"}.get(
+            claim.get("decision_fresh"), "FRESHNESS UNKNOWN")
+        return f" [{label}] [{freshness}]"
     typer.echo(f"Claim records ({len(claims)} shown{' — mixed-evidence only' if contested_only else ''}): "
                "✓ support-only  ✗ opposition-only  ⚖ mixed evidence  · insufficient evidence")
     for c in claims[: max(0, top)]:
-        typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_mat.get(c.get('maturity'), '')} "
+        typer.echo(f"  {_mark.get(c['epistemic'], '?')}{_maturity_label(c)} "
                    f"[{c['n_support']}↑/{c['n_oppose']}↓] {c['statement'][:100]}")

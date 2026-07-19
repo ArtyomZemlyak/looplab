@@ -26,6 +26,7 @@ from looplab.core.models import (NODE_CONCEPT_PROVENANCE_AUTHORED, NODE_CONCEPT_
                                   NODE_CONCEPT_PROVENANCE_OPERATOR, RunState,
                                   node_concept_event_provenance)
 from looplab.engine.costs import bind_cost_accountants
+from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.events.replay import fold
 from looplab.events.types import (EV_CONCEPT_CONSOLIDATION, EV_CONCEPT_COVERAGE_SNAPSHOT,
                                   EV_CONCEPT_EDGE, EV_COVERAGE_SNAPSHOT, EV_HYPOTHESIS_CONCEPTS,
@@ -278,6 +279,12 @@ class StrategyCadenceMixin:
                 "render_digest": hashlib.sha256(note.encode("utf-8")).hexdigest(),
             }
             return note
+        except GovernanceLedgerUnavailable as exc:
+            self._cross_run_note_receipt = {
+                "v": 2, "status": "unavailable", "complete": False,
+                "governance": exc.public_receipt(),
+            }
+            return ""
         except Exception:  # noqa: BLE001 — advisory context, never blocks the strategist cadence
             self._cross_run_note_receipt = {}
             return ""

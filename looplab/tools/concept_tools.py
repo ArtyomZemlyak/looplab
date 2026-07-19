@@ -202,6 +202,9 @@ class ConceptGovernanceTools:
         except Exception as exc:  # noqa: BLE001 — ToolProvider contract: never raise from execute
             # CODEX AGENT: registry exceptions may interpolate persisted slugs and paths. Reflect only
             # stable categories so a legacy secret or prompt-injection string cannot reach the transcript.
+            from looplab.engine.governance_health import GovernanceLedgerUnavailable
+            if isinstance(exc, GovernanceLedgerUnavailable):
+                return "(concept governance unavailable: ledger health failure)"
             if type(exc).__name__ in {
                 "ConceptGovernanceConflict", "ConceptGovernanceGlobalConflict",
                 "ConceptGovernanceIdempotencyConflict",

@@ -46,6 +46,24 @@ def test_off_is_empty(tmp_path):
     assert _Host(tmp_path, on=False)._cross_run_advisory_text(RunState()) == ""
 
 
+def test_unhealthy_governance_suppresses_prompt_but_keeps_health_receipt(tmp_path):
+    _seed(tmp_path, lessons=[_lesson("hard-neg helps", "supported", [1])])
+    (tmp_path / "claim_decisions.jsonl").write_bytes(b'{"decision":"reject"')
+    host = _Host(tmp_path, on=True)
+
+    assert host._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max")) == ""
+    assert host._cross_run_advisory_receipt == {
+        "v": 2, "status": "unavailable", "complete": False,
+        "governance": {
+            "v": 1,
+            "status": "unavailable", "complete": False,
+            "code": "governance_ledger_unavailable",
+            "ledger": "claim_decisions", "reason": "torn_tail",
+        },
+    }
+
+
 def test_no_memory_dir_is_empty():
     h = _Host("", on=True)
     h.memory_dir = ""

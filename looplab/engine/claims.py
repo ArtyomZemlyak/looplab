@@ -21,6 +21,14 @@ import unicodedata
 from collections.abc import Callable
 from typing import Optional
 
+from looplab.engine.governance_health import (
+    GovernanceLedgerUnavailable,
+    read_governance_rows,
+    validate_action_ids,
+    validate_local_revisions,
+    validate_optional_text,
+    validate_revision_fields,
+)
 from looplab.engine.memory import _CLAIM_STANCES, _NEGATIVE, normalize_statement
 from looplab.trust.cross_run import (
     cross_run_identity_text,
@@ -875,6 +883,7 @@ _MAX_DECISION_ACTOR = 120
 _MAX_DECISION_AT = 120
 _MAX_DECISION_ACTION_ID = 160
 _MAX_EVIDENCE_DIGEST = 80
+_CLAIM_LEDGER = "claim_decisions"
 
 
 class ClaimDecisionConflict(ValueError):
@@ -890,6 +899,60 @@ class ClaimDecisionIdempotencyConflict(ValueError):
     """An ``action_id`` was reused with a different semantic decision payload."""
 
 
+def _validate_claim_decision_row(row: dict) -> str | None:
+    """Strict schema fence for rows whose omission changes live claim policy."""
+    from looplab.engine.claim_key import CLAIM_KEY_VERSION
+
+    decision = row.get("decision")
+    if not isinstance(decision, str) or decision not in CLAIM_DECISION_ACTIONS:
+        return "unknown_action"
+    statement = row.get("statement")
+    if (not isinstance(statement, str) or not statement.strip()
+            or len(statement) > _MAX_DECISION_STATEMENT
+            or not _claim_text(statement, _MAX_DECISION_STATEMENT).strip()):
+        return "invalid_record"
+    version = row.get("claim_key_version")
+    # Missing is the migration discriminator. Known historical versions are re-keyed from the
+    # durable statement; a future version may change identity and must not be guessed by this reader.
+    if version is not None and (
+            isinstance(version, bool) or not isinstance(version, int)
+            or version < 1 or version > CLAIM_KEY_VERSION):
+        return "unsupported_schema"
+    for field, maximum in (
+        ("key", 160), ("claim_uid", 80), ("scope", _MAX_DECISION_SCOPE),
+        ("metric", _MAX_DECISION_METRIC), ("note", _MAX_DECISION_NOTE),
+        ("by", _MAX_DECISION_ACTOR), ("at", _MAX_DECISION_AT),
+        ("action_id", _MAX_DECISION_ACTION_ID),
+        ("evidence_digest", _MAX_EVIDENCE_DIGEST),
+    ):
+        if reason := validate_optional_text(row, field, maximum):
+            return reason
+    if "action_id" in row and not row["action_id"].strip():
+        return "invalid_record"
+    return validate_revision_fields(row)
+
+
+def _read_claim_decision_rows(path) -> list[dict]:
+    from pathlib import Path
+
+    rows = read_governance_rows(
+        Path(path), ledger=_CLAIM_LEDGER, validate=_validate_claim_decision_row)
+    validate_action_ids(rows, ledger=_CLAIM_LEDGER)
+    normalized_ids: set[str] = set()
+    for line_number, row in enumerate(rows, start=1):
+        raw_action_id = row.get("action_id")
+        if not raw_action_id:
+            continue
+        action_id = _identity_text(raw_action_id, _MAX_DECISION_ACTION_ID)
+        if action_id != raw_action_id or action_id in normalized_ids:
+            raise GovernanceLedgerUnavailable(
+                _CLAIM_LEDGER, "duplicate_action_id" if action_id in normalized_ids
+                else "invalid_record", line=line_number)
+        normalized_ids.add(action_id)
+    validate_local_revisions(rows, ledger=_CLAIM_LEDGER)
+    return rows
+
+
 def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
     text = str(value or "")
     if required and not text.strip():
@@ -897,9 +960,15 @@ def _bounded(value, name: str, maximum: int, *, required: bool = False) -> str:
     if len(text) > maximum:
         raise ValueError(f"{name} exceeds {maximum} characters")
     if name in {"scope", "metric", "action_id", "at", "evidence_digest"}:
-        return cross_run_identity_text(text, max_chars=maximum).strip()
-    return cross_run_text(
-        text, max_chars=maximum, single_line=True, entropy=True)
+        bounded = cross_run_identity_text(text, max_chars=maximum).strip()
+    else:
+        bounded = cross_run_text(
+            text, max_chars=maximum, single_line=True, entropy=True)
+    # CODEX AGENT: requiredness applies to the persisted value. A control-only statement passed
+    # the raw ``strip`` check but sanitized to empty, was acknowledged, and poisoned the next replay.
+    if required and not bounded.strip():
+        raise ValueError(f"empty {name}")
+    return bounded
 
 
 def _decision_payload(row: dict) -> tuple:
@@ -919,7 +988,7 @@ def _decision_payload(row: dict) -> tuple:
 
 
 def _logical_decision_rows(rows) -> list[dict]:
-    """Quarantine malformed/id-colliding rows and assign one monotonic logical revision per action."""
+    """Assign one monotonic revision after the strict physical-ledger health boundary."""
     logical: list[dict] = []
     actions: dict[str, tuple] = {}
     for raw in rows or []:
@@ -939,11 +1008,10 @@ def claim_governance_revision(memory_dir) -> int:
     """Current logical claim-governance revision; valid legacy rows count in file order."""
     from pathlib import Path
 
-    from looplab.events.eventstore import read_jsonl_lenient
     if not memory_dir:
         return 0
     path = Path(memory_dir) / "claim_decisions.jsonl"
-    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    rows = _read_claim_decision_rows(path)
     return len(_logical_decision_rows(rows))
 
 
@@ -984,11 +1052,14 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
     path = Path(memory_dir) / "claim_decisions.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     from looplab.core.atomicio import best_effort_fsync
-    from looplab.events.eventstore import _interprocess_lock, read_jsonl_lenient
+    from looplab.events.eventstore import _interprocess_lock
     # Idempotency lookup, revision CAS, allocation and append are one critical section. A
     # pre-lock check lets two UI writers both accept revision N and silently create divergent policy.
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
-        rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+        # CODEX AGENT: governance corruption is not a zero-row revision. Refuse every operator
+        # write until the ledger is explicitly repaired; a later pin/clear must never hide the
+        # quarantine behind a fresh, apparently healthy revision.
+        rows = _read_claim_decision_rows(path)
         logical = _logical_decision_rows(rows)
         if aid:
             existing = next((r for r in logical
@@ -1001,8 +1072,9 @@ def record_claim_decision(memory_dir, *, statement: str, decision: str, note: st
                     f"action_id {aid!r} was already used for a different claim decision")
         current = len(logical)
         if expected_revision is not None:
-            if isinstance(expected_revision, bool) or not isinstance(expected_revision, int):
-                raise ValueError("expected_revision must be an integer")
+            if (isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+                    or expected_revision < 0):
+                raise ValueError("expected_revision must be a non-negative integer")
             if expected_revision != current:
                 raise ClaimDecisionConflict(expected_revision, current)
         from contextlib import nullcontext
@@ -1058,11 +1130,11 @@ def load_claim_decisions(memory_dir) -> dict:
     UIDs are recomputed with the current claim-key version, so durable v1 rows migrate on read. A scoped or
     metric-qualified row is indexed ONLY by its structured UID: it must never overwrite the global legacy
     statement key. Unscoped/unqualified rows remain the fallback for every scope. ``clear`` tombstones only
-    the namespace it addresses. Last write wins within each exact namespace.
+    the namespace it addresses. Last write wins within each exact namespace. Missing is empty; an unhealthy
+    policy ledger raises instead of projecting a guessed valid subset.
     """
     from pathlib import Path
 
-    from looplab.events.eventstore import read_jsonl_lenient
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "claim_decisions.jsonl"
@@ -1070,7 +1142,7 @@ def load_claim_decisions(memory_dir) -> dict:
         return {}
     from looplab.engine.claim_key import CLAIM_KEY_VERSION, claim_uid
     out: dict = {}
-    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
+    rows = _read_claim_decision_rows(path)
     for r in _logical_decision_rows(rows):
         statement = _claim_text(r.get("statement"), _MAX_DECISION_STATEMENT)
         scope = _identity_text(r.get("scope"), _MAX_DECISION_SCOPE)
@@ -1319,7 +1391,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     claims/contradictions (mega-review)."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+    from looplab.engine.governance_health import cross_run_governance_snapshot
     from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
                                        _filter_capsule_rows)
     base = Path(memory_dir) if memory_dir else None
@@ -1343,11 +1415,23 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
             capsules, lambda r: str(r.get("task_id") or "") == wanted)
         research = _filter_claim_source_rows(
             research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
-    return portfolio_atlas(lessons, capsules, max_items=max_items,
-                           decisions=(load_claim_decisions(memory_dir) if decisions is None else decisions),
-                           research_claims=research,
-                           aliases=load_concept_aliases(memory_dir),
-                           splits=load_concept_splits(memory_dir), structured=structured)
+    governance = cross_run_governance_snapshot(memory_dir)
+    atlas = portfolio_atlas(
+        lessons, capsules, max_items=max_items,
+        decisions=(governance["decisions"] if decisions is None else decisions),
+        research_claims=research, aliases=governance["aliases"],
+        splits=governance["splits"], structured=structured)
+    if decisions is None:
+        atlas["governance"] = {
+            "status": "complete", "complete": True,
+            "revisions": {
+                "claims": governance["claim_revision"],
+                "concept_aliases": governance["alias_revision"],
+                "concept_splits": governance["split_revision"],
+                "concept_governance": governance["concept_governance_revision"],
+            },
+        }
+    return atlas
 
 
 _CLAIM_WORD = re.compile(r"[^\W_]+", re.UNICODE)
@@ -2069,7 +2153,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
-    from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits)
+    from looplab.engine.governance_health import cross_run_governance_snapshot
     from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
                                        _portfolio_concept_overview_data)
     base = Path(memory_dir) if memory_dir else None
@@ -2091,15 +2175,15 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             research, lambda r: str(r.get("task_id") or "") == wanted, research=True)
     research = _valid_claim_source_rows(research, research=True)
     research_source = _research_source_summary(research)
+    governance = cross_run_governance_snapshot(memory_dir)
     claims = _filter_claim_assessments(
         claim_assessments(lessons, research_claims=research,
-                          decisions=load_claim_decisions(memory_dir), structured=structured),
+                          decisions=governance["decisions"], structured=structured),
         lambda c: c.get("maturity") != "operator-rejected")
     claim_source = (_safe_claim_source_summary(claims.claim_source)
                     or _claim_source_summary(lessons, research, research_source=research_source))
     overview, concept_rows = _portfolio_concept_overview_data(
-        capsules, aliases=load_concept_aliases(memory_dir),
-        splits=load_concept_splits(memory_dir))
+        capsules, aliases=governance["aliases"], splits=governance["splits"])
     # CODEX AGENT: source completeness is part of the retrieval corpus, even when a query happens to match
     # only claims or the same retained concept rows.  Aggregate it across every eligible capsule before
     # query preselection so legacy/omitted concepts cannot masquerade as authoritative absence or exact
@@ -2163,6 +2247,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "n_oppose": c["n_oppose"], "n_unverified": c.get("n_unverified", 0),
             "contradicts": _string_list(c.get("contradicts"), maximum=4, item_maximum=300),
             "maturity": c.get("maturity"), "claim_uid": c.get("claim_uid", ""),
+            "decision_fresh": c.get("decision_fresh"),
             "metric": c.get("metric", ""), "scopes": c.get("scopes", []),
             "research_source": c.get("research_source", research_source),
             "claim_source": c.get("claim_source", claim_source),
@@ -2225,9 +2310,14 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                "contradiction_quota": round(base_quota, 3),
                "effective_quota": round(q, 3), "caveat_target": target,
                "caveat_score_ratio": _CAVEAT_SCORE_RATIO,
-               "caveat_query_coverage": _CAVEAT_QUERY_COVERAGE,
-               "intent_score_bonus": _INTENT_SCORE_BONUS,
-               **retrieval_source}
+                "caveat_query_coverage": _CAVEAT_QUERY_COVERAGE,
+                "intent_score_bonus": _INTENT_SCORE_BONUS,
+                "governance_complete": True,
+                "claim_governance_revision": governance["claim_revision"],
+                "concept_alias_revision": governance["alias_revision"],
+                "concept_split_revision": governance["split_revision"],
+                "concept_governance_revision": governance["concept_governance_revision"],
+                **retrieval_source}
     if not indexed_docs or not str(query or "").strip():
         return {"results": [], "receipt": {**receipt, "n_hits": 0, "n_caveats": 0}}
 
@@ -2421,9 +2511,18 @@ def render_context_pack(pack: dict) -> str:
         contradicts = "; ".join(
             repr(_safe_text(value, 160))
             for value in (c.get("contradicts") or [])[:3])
+        maturity = str(c.get("maturity") or "machine-proposed")
+        policy = ""
+        if maturity in {"operator-ratified", "operator-pinned"}:
+            freshness = {True: "current", False: "stale-evidence", None: "unknown"}.get(
+                c.get("decision_fresh"), "unknown")
+            # CODEX AGENT: operator policy persists until clear, but its evidence fence can age.
+            # Surface both axes so retention priority never masquerades as a fresh ratification.
+            policy = (f"; operator_policy={maturity.removeprefix('operator-')}; "
+                      f"decision_freshness={freshness}")
         lines.append(f"  {_mark.get(c['epistemic'], '?')} [{c['n_support']}↑/{c['n_oppose']}↓] "
                      f"UNTRUSTED_MEMORY={statement!r}"
-                     + (f"; contradicts={contradicts}" if contradicts else ""))
+                     + policy + (f"; contradicts={contradicts}" if contradicts else ""))
     cov = pack.get("coverage")
     if cov:
         if cov.get("source_complete") is not True:

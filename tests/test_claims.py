@@ -217,6 +217,9 @@ def test_invalid_decision_raises(tmp_path):
         record_claim_decision(str(tmp_path), statement="x", decision="bogus")
     with pytest.raises(ValueError):
         record_claim_decision(str(tmp_path), statement="", decision="ratified")
+    with pytest.raises(ValueError, match="empty statement"):
+        record_claim_decision(str(tmp_path), statement="\x00\x01", decision="ratified")
+    assert not (tmp_path / "claim_decisions.jsonl").exists()
 
 
 def test_every_persistable_research_statement_is_governable(tmp_path):
@@ -251,23 +254,26 @@ def test_claim_decision_revision_cas_and_idempotency_are_atomic_contracts(tmp_pa
         record_claim_decision(str(tmp_path), statement="z helps", decision="pinned",
                               expected_revision=0, action_id="action-2")
     assert exc.value.current_revision == 1 and claim_governance_revision(str(tmp_path)) == 1
+    with pytest.raises(ValueError, match="non-negative integer"):
+        record_claim_decision(
+            str(tmp_path), statement="z helps", decision="pinned", expected_revision=-1)
 
 
-def test_claim_governance_append_survives_a_torn_jsonl_tail(tmp_path):
-    from looplab.engine.claims import load_claim_decisions, record_claim_decision
-    from looplab.engine.memory import normalize_statement
+def test_claim_governance_append_refuses_a_torn_jsonl_tail(tmp_path):
+    import pytest
+
+    from looplab.engine.claims import record_claim_decision
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
 
     path = tmp_path / "claim_decisions.jsonl"
     path.write_bytes(b'{"statement":"torn"')
-    stored = record_claim_decision(
-        str(tmp_path), statement="durable verdict", decision="pinned",
-        expected_revision=0, action_id="after-torn",
-    )
-    assert stored["revision"] == 1
-    physical_lines = path.read_bytes().splitlines()
-    assert physical_lines[0] == b'{"statement":"torn"' and physical_lines[1].startswith(b"{")
-    loaded = load_claim_decisions(str(tmp_path))
-    assert loaded[normalize_statement("durable verdict")]["decision"] == "pinned"
+    before = path.read_bytes()
+    with pytest.raises(GovernanceLedgerUnavailable, match="torn_tail"):
+        record_claim_decision(
+            str(tmp_path), statement="durable verdict", decision="pinned",
+            expected_revision=0, action_id="after-torn",
+        )
+    assert path.read_bytes() == before
 
 
 def test_clear_only_tombstones_its_exact_scope_and_global_key_does_not_leak(tmp_path):
@@ -1018,6 +1024,49 @@ def test_structured_evidence_digest_changes_with_proof_not_governance(tmp_path):
         _lesson(statement, "supported", [2], run_id="r2"),
     ])
     assert claims_for_memory(tmp_path, structured=True)[0]["evidence_digest"] != first
+
+
+def test_stale_evidence_is_disclosed_without_implicitly_clearing_operator_policy(tmp_path):
+    from looplab.engine.claims import (
+        build_context_pack,
+        claims_for_memory,
+        record_claim_decision,
+        render_context_pack,
+    )
+
+    statement = "dropout improves generalization"
+    path = tmp_path / "lessons.jsonl"
+    _write_lessons(path, [_lesson(statement, "supported", [1], run_id="r1")])
+    original = claims_for_memory(tmp_path, structured=True)[0]
+    record_claim_decision(
+        tmp_path, statement=statement, scope="t", decision="ratified",
+        evidence_digest=original["evidence_digest"], action_id="ratify-original",
+    )
+
+    _write_lessons(path, [
+        _lesson(statement, "supported", [1], run_id="r1"),
+        _lesson(statement, "supported", [2], run_id="r2"),
+    ])
+    stale_ratification = claims_for_memory(tmp_path, structured=True)[0]
+    assert stale_ratification["maturity"] == "operator-ratified"
+    assert stale_ratification["decision_fresh"] is False
+    rendered = render_context_pack(build_context_pack([stale_ratification]))
+    assert "operator_policy=ratified" in rendered
+    assert "decision_freshness=stale-evidence" in rendered
+
+    record_claim_decision(
+        tmp_path, statement=statement, scope="t", decision="rejected",
+        evidence_digest=stale_ratification["evidence_digest"], action_id="reject-second",
+    )
+    _write_lessons(path, [
+        _lesson(statement, "supported", [1], run_id="r1"),
+        _lesson(statement, "supported", [2], run_id="r2"),
+        _lesson(statement, "supported", [3], run_id="r3"),
+    ])
+    stale_rejection = claims_for_memory(tmp_path, structured=True)[0]
+    assert stale_rejection["maturity"] == "operator-rejected"
+    assert stale_rejection["decision_fresh"] is False
+    assert build_context_pack([stale_rejection])["claims"] == []
 
 
 def test_rejecting_an_opposite_changes_live_contradiction_not_evidence_digest(tmp_path):

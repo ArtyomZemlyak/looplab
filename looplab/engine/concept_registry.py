@@ -35,6 +35,15 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
+from looplab.engine.governance_health import (
+    GovernanceLedgerUnavailable,
+    read_governance_rows,
+    validate_action_ids,
+    validate_local_revisions,
+    validate_optional_text,
+    validate_revision_fields,
+)
+
 # Versioned identity contract. Bump only on a normalization change that would re-key existing concepts; a
 # record carries no version today (the algorithm is the contract), but the constant pins the intent and
 # lets a future migration detect a normalization mode change.
@@ -50,6 +59,8 @@ _MAX_SPLIT_TERMS = 32
 _MAX_SPLIT_TERM = 200
 _MAX_ACTION_ID = 160
 _CONCEPT_GOVERNANCE_THREAD_LOCK = threading.Lock()
+_ALIAS_LEDGER = "concept_aliases"
+_SPLIT_LEDGER = "concept_splits"
 
 
 class ConceptGovernanceConflict(ValueError):
@@ -274,25 +285,73 @@ def clear_concept_alias(memory_dir, *, from_concept: str, by: str = "operator", 
         )
 
 
+def _validate_concept_common(row: dict, *, actions: set[str]) -> str | None:
+    version = row.get("v", CONCEPT_KEY_VERSION)
+    if (isinstance(version, bool) or not isinstance(version, int)
+            or version != CONCEPT_KEY_VERSION):
+        return "unsupported_schema"
+    if "action" in row:
+        action = row["action"]
+        if not isinstance(action, str) or action not in actions:
+            return "unknown_action"
+    if not isinstance(row.get("from"), str):
+        return "invalid_record"
+    source = normalize_key(row["from"])
+    if not source or len(source) > _MAX_CONCEPT:
+        return "invalid_record"
+    for field, maximum in (
+        ("by", _MAX_ACTOR), ("at", _MAX_AT), ("action_id", _MAX_ACTION_ID),
+    ):
+        if reason := validate_optional_text(row, field, maximum):
+            return reason
+    if "action_id" in row and not row["action_id"].strip():
+        return "invalid_record"
+    return validate_revision_fields(row)
+
+
+def _validate_alias_row(row: dict) -> str | None:
+    if reason := _validate_concept_common(row, actions={"set", "purge", "clear"}):
+        return reason
+    action = row.get("action", "legacy")
+    source = normalize_key(row["from"])
+    if action == "clear":
+        if "to" in row and row["to"] not in ("", None):
+            return "invalid_record"
+        return None
+    if action == "purge":
+        if row.get("to", "") != "":
+            return "invalid_record"
+        return None
+    if "to" not in row or not isinstance(row["to"], str):
+        return "invalid_record"
+    target = normalize_key(row["to"])
+    if len(target) > _MAX_CONCEPT:
+        return "invalid_record"
+    if action == "set" and (not target or target == source):
+        return "invalid_record"
+    return None
+
+
+def _read_alias_rows(path: Path) -> list[dict]:
+    rows = read_governance_rows(path, ledger=_ALIAS_LEDGER, validate=_validate_alias_row)
+    validate_action_ids(rows, ledger=_ALIAS_LEDGER)
+    validate_local_revisions(rows, ledger=_ALIAS_LEDGER)
+    return rows
+
+
 def load_concept_aliases(memory_dir) -> dict:
     """`{from_key -> to_key}` from `concept_aliases.jsonl` (last write per source wins). A `to` of "" is
-    kept as the tombstone marker so `resolve_slug` can drop purged concepts. {} when none/unreadable."""
-    from looplab.events.eventstore import read_jsonl_lenient
+    kept as the tombstone marker so `resolve_slug` can drop purged concepts. {} when absent; raises when
+    policy health is unavailable."""
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "concept_aliases.jsonl"
     if not path.exists():
         return {}
     out: dict = {}
-    for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
-        if r.get("v", CONCEPT_KEY_VERSION) != CONCEPT_KEY_VERSION:
-            continue
+    for line_number, r in enumerate(_read_alias_rows(path), start=1):
         src = normalize_key(r.get("from"))
         action = str(r.get("action") or "legacy")
-        if not src:
-            continue
-        if len(src) > _MAX_CONCEPT:
-            continue
         if action == "clear":
             out.pop(src, None)
         elif action == "purge":
@@ -303,8 +362,11 @@ def load_concept_aliases(memory_dir) -> dict:
                 out[src] = dst
         elif action == "legacy":
             dst = normalize_key(r.get("to"))
-            if len(dst) <= _MAX_CONCEPT:
-                out[src] = _TOMBSTONE if not dst else dst
+            out[src] = _TOMBSTONE if not dst else dst
+        target = out.get(src)
+        if target and target != _TOMBSTONE and _would_cycle(src, target, out):
+            raise GovernanceLedgerUnavailable(
+                _ALIAS_LEDGER, "identity_cycle", line=line_number)
     return out
 
 
@@ -481,48 +543,74 @@ def clear_concept_split(memory_dir, *, from_concept: str, by: str = "operator", 
         )
 
 
+def _validate_split_row(row: dict) -> str | None:
+    if reason := _validate_concept_common(row, actions={"set", "clear"}):
+        return reason
+    action = row.get("action", "legacy")
+    source = normalize_key(row["from"])
+    if action == "clear":
+        if any(row.get(field) not in (None, "", []) for field in ("rules", "default")):
+            return "invalid_record"
+        return None
+    raw_rules = row.get("rules")
+    if not isinstance(raw_rules, list) or len(raw_rules) > _MAX_SPLIT_RULES:
+        return "invalid_record"
+    targets: list[str] = []
+    for raw_rule in raw_rules:
+        if not isinstance(raw_rule, dict):
+            return "invalid_record"
+        target, raw_terms = raw_rule.get("to"), raw_rule.get("when_any")
+        if (not isinstance(target, str) or not normalize_key(target)
+                or len(normalize_key(target)) > _MAX_CONCEPT
+                or normalize_key(target) == source
+                or not isinstance(raw_terms, list) or not raw_terms
+                or len(raw_terms) > _MAX_SPLIT_TERMS):
+            return "invalid_record"
+        if any(not isinstance(term, str) or not normalize_key(term)
+               or len(normalize_key(term)) > _MAX_SPLIT_TERM for term in raw_terms):
+            return "invalid_record"
+        targets.append(normalize_key(target))
+    default = row.get("default", "")
+    if (not isinstance(default, str) or len(normalize_key(default)) > _MAX_CONCEPT
+            or (not raw_rules and normalize_key(default) in ("", source))):
+        return "invalid_record"
+    if normalize_key(default):
+        targets.append(normalize_key(default))
+    if len(set(targets)) != len(targets):
+        return "invalid_record"
+    return None
+
+
+def _read_split_rows(path: Path) -> list[dict]:
+    rows = read_governance_rows(path, ledger=_SPLIT_LEDGER, validate=_validate_split_row)
+    validate_action_ids(rows, ledger=_SPLIT_LEDGER)
+    validate_local_revisions(rows, ledger=_SPLIT_LEDGER)
+    return rows
+
+
 def load_concept_splits(memory_dir) -> dict:
     """`{from_key -> {"rules": [...], "default": key}}` from `concept_splits.jsonl` (last write per source
-    wins). {} when none/unreadable."""
-    from looplab.events.eventstore import read_jsonl_lenient
+    wins). {} when absent; raises when policy health is unavailable."""
     if not memory_dir:
         return {}
     path = Path(memory_dir) / "concept_splits.jsonl"
     if not path.exists():
         return {}
     out: dict = {}
-    for r in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
-        if r.get("v", CONCEPT_KEY_VERSION) != CONCEPT_KEY_VERSION:
-            continue
+    for r in _read_split_rows(path):
         src = normalize_key(r.get("from"))
-        if not src:
-            continue
         action = str(r.get("action") or "legacy")
         if action == "clear":
             out.pop(src, None)
             continue
-        if action not in {"legacy", "set"}:
-            continue
         raw_rules = r.get("rules")
-        if len(src) > _MAX_CONCEPT or not isinstance(raw_rules, list) or len(raw_rules) > _MAX_SPLIT_RULES:
-            continue
         rules = []
         for raw_rule in raw_rules:
-            if not isinstance(raw_rule, dict):
-                continue
             target, raw_terms = normalize_key(raw_rule.get("to")), raw_rule.get("when_any")
-            if (not target or len(target) > _MAX_CONCEPT or not isinstance(raw_terms, list)
-                    or len(raw_terms) > _MAX_SPLIT_TERMS):
-                continue
             terms = [normalize_key(term) for term in raw_terms]
-            if any(len(term) > _MAX_SPLIT_TERM for term in terms):
-                continue
             terms = [term for term in terms if term]
-            if terms:
-                rules.append({"to": target, "when_any": terms})
+            rules.append({"to": target, "when_any": terms})
         default = normalize_key(r.get("default"))
-        if len(default) > _MAX_CONCEPT:
-            continue
         if rules or (default and default != src):
             out[src] = {"rules": rules, "default": default}
     return out
@@ -641,9 +729,15 @@ def _observed_concept_snapshot(memory_dir, *, aliases: Optional[dict] = None,
 
 def _ledger_revision(path: Path) -> int:
     """Current append revision, including legacy records that pre-date explicit revision fields."""
-    from looplab.events.eventstore import read_jsonl_lenient
-
-    rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
+    if path.name == "concept_aliases.jsonl":
+        rows = _read_alias_rows(path)
+    elif path.name == "concept_splits.jsonl":
+        rows = _read_split_rows(path)
+    else:
+        # The shared append primitive also serves proposal receipt logs. Those are audit output,
+        # not operator policy, and retain their separate lenient projection contract.
+        from looplab.events.eventstore import read_jsonl_lenient
+        rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True) if path.exists() else []
     explicit = [r.get("revision") for r in rows
                 if isinstance(r.get("revision"), int) and not isinstance(r.get("revision"), bool)]
     return max([len(rows), *explicit], default=0)
@@ -661,19 +755,33 @@ def concept_governance_revision(memory_dir, kind: str) -> int:
 
 def concept_governance_global_revision(memory_dir) -> int:
     """Monotonic ordering shared by alias and split ledgers (0 when absent)."""
-    from looplab.events.eventstore import read_jsonl_lenient
-
     if not memory_dir:
         return 0
     rows: list[dict] = []
-    for name in ("concept_aliases.jsonl", "concept_splits.jsonl"):
-        path = Path(memory_dir) / name
-        if path.exists():
-            rows.extend(read_jsonl_lenient(path, loads=json.loads, dicts_only=True))
-    explicit = [row.get("governance_revision") for row in rows
-                if isinstance(row.get("governance_revision"), int)
-                and not isinstance(row.get("governance_revision"), bool)]
-    return max([len(rows), *explicit], default=0)
+    alias_rows = _read_alias_rows(Path(memory_dir) / "concept_aliases.jsonl")
+    split_rows = _read_split_rows(Path(memory_dir) / "concept_splits.jsonl")
+    rows.extend(alias_rows)
+    rows.extend(split_rows)
+    total = len(rows)
+    explicit: set[int] = set()
+    legacy_count = 0
+    for row in rows:
+        if "governance_revision" not in row:
+            legacy_count += 1
+            continue
+        revision = row["governance_revision"]
+        if revision > total or revision in explicit:
+            raise GovernanceLedgerUnavailable(
+                "concept_governance", "revision_collision")
+        explicit.add(revision)
+    # Legacy rows occupy the implicit prefix. Modern writers allocate exactly the next global
+    # position, regardless of which physical child ledger receives the action. A gap or a modern
+    # value inside the legacy prefix is therefore a collision with operator history, not a value
+    # that can safely be replaced by ``len(rows)``.
+    if explicit != set(range(legacy_count + 1, total + 1)):
+        raise GovernanceLedgerUnavailable(
+            "concept_governance", "revision_collision")
+    return total
 
 
 def concept_governance_snapshot(memory_dir) -> dict:
@@ -728,6 +836,7 @@ def _idempotency_payload(rec: dict) -> str:
 
 def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[], None]] = None,
                        guard: Optional[Callable[[], None]] = None,
+                       read_rows: Optional[Callable[[Path], list[dict]]] = None,
                        expected_revision: Optional[int] = None,
                        governance_memory_dir=None,
                        expected_governance_revision: Optional[int] = None,
@@ -747,13 +856,27 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
     from looplab.events.eventstore import _interprocess_lock
 
     with _interprocess_lock(Path(str(path) + ".lock"), required=True):
+        strict_rows = read_rows(path) if read_rows is not None else None
+        if governance_memory_dir is not None:
+            # The caller holds the memory-wide lock, so this health preflight is stable through
+            # idempotency lookup and append. A retry may return its old receipt only when the full
+            # alias+split policy remains projectable; an unhealthy sibling ledger is not an exact state.
+            concept_governance_global_revision(governance_memory_dir)
         # Idempotency keys are namespaced by the physical governance ledger. Alias and split endpoints may
         # use the same caller-generated key; changing that boundary requires a durable cross-ledger action
         # index rather than an unlocked scan of the sibling file.
         action_id = str(rec.get("action_id") or "")
         if action_id and path.exists():
-            from looplab.events.eventstore import read_jsonl_lenient
-            for existing in read_jsonl_lenient(path, loads=json.loads, dicts_only=True):
+            if strict_rows is not None:
+                existing_rows = strict_rows
+            elif path.name == "concept_aliases.jsonl":
+                existing_rows = _read_alias_rows(path)
+            elif path.name == "concept_splits.jsonl":
+                existing_rows = _read_split_rows(path)
+            else:
+                from looplab.events.eventstore import read_jsonl_lenient
+                existing_rows = read_jsonl_lenient(path, loads=json.loads, dicts_only=True)
+            for existing in existing_rows:
                 if str(existing.get("action_id") or "") != action_id:
                     continue
                 # Resolve idempotency before CAS/validation. A transport retry carrying the original stale
@@ -775,7 +898,13 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
                 raise ConceptGovernanceGlobalConflict(
                     expected_governance_revision, governance_revision
                 )
-        current = _ledger_revision(path)
+        if strict_rows is None:
+            current = _ledger_revision(path)
+        else:
+            explicit = [row.get("revision") for row in strict_rows
+                        if isinstance(row.get("revision"), int)
+                        and not isinstance(row.get("revision"), bool)]
+            current = max([len(strict_rows), *explicit], default=0)
         created = not path.exists()
         _validate_expected_revision(expected_revision)
         if expected_revision is not None and expected_revision != current:
@@ -787,12 +916,14 @@ def _append_governance(path: Path, rec: dict, *, validate: Optional[Callable[[],
         # Allocate the CAS revision inside the same required lock as validation and append.
         rec["revision"] = current + 1
         separator = ""
-        if path.exists() and path.stat().st_size:
+        if (read_rows is None
+                and path.name not in {"concept_aliases.jsonl", "concept_splits.jsonl"}
+                and path.exists() and path.stat().st_size):
             with open(path, "rb") as existing:
                 existing.seek(-1, 2)
                 if existing.read(1) not in (b"\n", b"\r"):
-                    # Lenient replay ignores a torn tail, but appending JSON directly to it would also hide
-                    # the new acknowledged action. Separate the fragments in the same locked/fsynced write.
+                    # Non-policy receipt logs retain their historical torn-tail separation. Strict
+                    # operator ledgers were rejected by _ledger_revision before reaching this branch.
                     separator = "\n"
         line = separator + json.dumps(rec) + "\n"
         with open(path, "a", encoding="utf-8") as f:

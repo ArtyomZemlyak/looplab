@@ -393,7 +393,10 @@ class CrossRunTools:
             # absolute paths. Tool results become prompt/event material, so they are allow-listed;
             # observability records only a stable operation/category, never the exception string.
             tool = name if isinstance(name, str) and name in _TOOL_NAMES else "unknown"
-            if isinstance(exc, OSError):
+            from looplab.engine.governance_health import GovernanceLedgerUnavailable
+            if isinstance(exc, GovernanceLedgerUnavailable):
+                failure = "governance_unavailable"
+            elif isinstance(exc, OSError):
                 failure = "storage"
             elif isinstance(exc, (ValueError, TypeError, KeyError)):
                 failure = "invalid_data"
@@ -408,7 +411,7 @@ class CrossRunTools:
     def _execute(self, name: str, args: dict) -> str:
         if not self.dir:
             return "(no cross-run memory configured)"
-        from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+        from looplab.engine.concept_registry import concept_governance_snapshot
         from looplab.engine.memory import _portfolio_concept_overview_data
 
         if name == "cross_run_prior_attempts":
@@ -420,9 +423,10 @@ class CrossRunTools:
             qt = _toks(idea)
             scoped_capsules = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
+            governance = concept_governance_snapshot(self.dir)
             ov, concept_rows = _portfolio_concept_overview_data(
-                scoped_capsules, aliases=load_concept_aliases(self.dir),
-                splits=load_concept_splits(self.dir))
+                scoped_capsules, aliases=governance["aliases"],
+                splits=governance["splits"])
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             # CODEX AGENT: the six-row tool envelope is the only result cap. Search the full retained
             # canonical set first so a query for public-overview row #513 cannot yield an exact-looking miss.
@@ -498,10 +502,17 @@ class CrossRunTools:
                 evidence = "[" + ", ".join(repr(_safe_text(ref, 120)) for ref in refs) + "]"
                 contradicts = "; ".join(
                     repr(_safe_text(statement, 180)) for statement in (c.get("contradicts") or [])[:3])
+                maturity = _safe_text(c.get("maturity"), 40)
+                freshness = ""
+                if maturity.startswith("operator-"):
+                    value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
+                        c.get("decision_fresh"), "unknown")
+                    freshness = f"; decision_freshness={value}"
                 return (f"[{mark.get(c['epistemic'], '?')}: {c['n_support']} for / "
                         f"{c['n_oppose']} against] "
                         f"UNTRUSTED_MEMORY={_safe_text(c['statement'], 240)!r}; "
-                        f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={_safe_text(c.get('maturity'), 40)!r}"
+                        f"UNTRUSTED_MEMORY_EVIDENCE={evidence}; maturity={maturity!r}"
+                        + freshness
                         + (f"; contradicts={contradicts}" if contradicts else ""))
 
             lines = ([_partial_claim_source_warning(claim_source, research_source)]
@@ -572,13 +583,13 @@ class CrossRunTools:
             # PART V Phase 4/5: the caller-visible cross-run concept graph. Scoped to this run's task family when
             # bound; portfolio-wide for an unbound (assistant/CLI) caller — the same _scoped_capsules the
             # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
-            from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import portfolio_concept_graph
             scoped_capsules = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
-            graph = portfolio_concept_graph(scoped_capsules,
-                                            aliases=load_concept_aliases(self.dir),
-                                            splits=load_concept_splits(self.dir))
+            governance = concept_governance_snapshot(self.dir)
+            graph = portfolio_concept_graph(
+                scoped_capsules, aliases=governance["aliases"],
+                splits=governance["splits"])
             # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
             # display — they are hierarchy scaffolding, not concepts any run touched.
             explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
@@ -693,8 +704,15 @@ class CrossRunTools:
                     contradicts = "; ".join(
                         repr(_safe_text(statement, 180))
                         for statement in (h.get("contradicts") or [])[:3])
+                    maturity = _safe_text(h.get("maturity"), 40)
+                    freshness = ""
+                    if maturity.startswith("operator-"):
+                        value = {True: "current", False: "stale-evidence", None: "unknown"}.get(
+                            h.get("decision_fresh"), "unknown")
+                        freshness = f"; maturity={maturity}; decision_freshness={value}"
                     lines.append(f"[claim {h['epistemic']}: {h['n_support']}↑/{h['n_oppose']}↓; "
                                  f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
+                                 + freshness
                                  + (f"; contradicts={contradicts}" if contradicts else ""))
                 else:
                     count = (f"×{h['n_runs']} run(s)" if source_complete and scope_complete

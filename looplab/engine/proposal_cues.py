@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 
 from looplab.core.models import NodeStatus, RunState
+from looplab.engine.governance_health import GovernanceLedgerUnavailable
 from looplab.search.coverage import snapshot_matches_analytics_projection
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
@@ -301,7 +302,7 @@ class ProposalCuesMixin:
                 load_research_claims,
                 render_context_pack,
             )
-            from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
+            from looplab.engine.governance_health import cross_run_governance_snapshot
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
                 _capsule_source_summary,
@@ -390,17 +391,21 @@ class ProposalCuesMixin:
                            and same_live_direction(current_direction, r.get("direction"))),
                 research=True,
             )
+            # Freeze all three operator-policy ledgers together. The live prompt must never combine
+            # an alias map from before a split with a claim overlay from after it.
+            governance = cross_run_governance_snapshot(base)
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
             capsule_source = _capsule_source_summary(capsules)
             if capsules or capsule_source.get("source_complete") is not True:
                 overview, concept_rows = _portfolio_concept_overview_data(
-                    capsules, aliases=load_concept_aliases(base),
-                    splits=load_concept_splits(base))
+                    capsules, aliases=governance["aliases"],
+                    splits=governance["splits"])
             else:
                 overview, concept_rows = None, None
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
+                                       decisions=governance["decisions"],
                                        structured=getattr(self, "_cross_run_structured_claims", False))
             claim_source = getattr(claims, "claim_source", {})
             if (not lessons and not overview and not research
@@ -444,6 +449,14 @@ class ProposalCuesMixin:
                 "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }
             return ("\n" + text) if text else ""
+        except GovernanceLedgerUnavailable as exc:
+            # CODEX AGENT: suppressing untrusted policy is safe; erasing its health state is not.
+            # Keep a closed, content-free receipt so audit distinguishes disabled/empty from unavailable.
+            self._cross_run_advisory_receipt = {
+                "v": 2, "status": "unavailable", "complete": False,
+                "governance": exc.public_receipt(),
+            }
+            return ""
         except Exception:  # noqa: BLE001 — advisory context is best-effort, never blocks proposing
             self._cross_run_advisory_receipt = {}
             return ""

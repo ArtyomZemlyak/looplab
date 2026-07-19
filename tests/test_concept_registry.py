@@ -135,7 +135,9 @@ def test_alias_action_id_retry_returns_original_before_stale_cas(tmp_path):
                              expected_revision=0, action_id="req-1")
 
 
-def test_alias_loader_quarantines_malformed_explicit_actions(tmp_path):
+def test_alias_loader_fails_closed_on_malformed_explicit_actions(tmp_path):
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
+
     rows = [
         {"v": 1, "action": "set", "from": "empty-target", "to": ""},
         {"v": 1, "action": "purge", "from": "purged", "to": "must-not-become-alias"},
@@ -143,8 +145,14 @@ def test_alias_loader_quarantines_malformed_explicit_actions(tmp_path):
     ]
     (tmp_path / "concept_aliases.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-    aliases = load_concept_aliases(str(tmp_path))
-    assert "empty-target" not in aliases and aliases["purged"] == "\x00purged" and "future" not in aliases
+    with pytest.raises(GovernanceLedgerUnavailable) as exc:
+        load_concept_aliases(str(tmp_path))
+    assert exc.value.public_receipt() == {
+        "v": 1,
+        "status": "unavailable", "complete": False,
+        "code": "governance_ledger_unavailable",
+        "ledger": "concept_aliases", "reason": "invalid_record",
+    }
 
 
 def test_resolve_follows_chain_and_is_cycle_safe():
@@ -514,17 +522,14 @@ def test_append_governance_validation_aborts_append_atomically(tmp_path):
     assert '"c"' in p.read_text(encoding="utf-8")
 
 
-def test_governance_append_survives_a_torn_jsonl_tail(tmp_path):
-    from looplab.engine.concept_registry import (concept_governance_revision, load_concept_aliases,
-                                                 record_concept_alias)
+def test_governance_append_refuses_a_torn_jsonl_tail(tmp_path):
+    from looplab.engine.concept_registry import record_concept_alias
+    from looplab.engine.governance_health import GovernanceLedgerUnavailable
     p = tmp_path / "concept_aliases.jsonl"
     p.write_text('{"action":"set","from":"partial', encoding="utf-8")
+    before = p.read_bytes()
 
-    receipt = record_concept_alias(str(tmp_path), from_concept="b", to_concept="c",
-                                   expected_revision=0, action_id="tail-retry")
-
-    assert receipt["revision"] == 1
-    assert load_concept_aliases(str(tmp_path)) == {"b": "c"}
-    assert concept_governance_revision(str(tmp_path), "aliases") == 1
-    assert record_concept_alias(str(tmp_path), from_concept="b", to_concept="c", expected_revision=0,
-                                action_id="tail-retry") == receipt
+    with pytest.raises(GovernanceLedgerUnavailable, match="torn_tail"):
+        record_concept_alias(str(tmp_path), from_concept="b", to_concept="c",
+                             expected_revision=0, action_id="tail-retry")
+    assert p.read_bytes() == before
