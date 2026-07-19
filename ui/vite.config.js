@@ -72,23 +72,25 @@ export default defineConfig({
             },
             {
               name: 'analysis-support',
-              // Charts and analysis projections have the same run/report/panel consumers; the only
-              // narrower consumer is DirectionsOverview, whose app closures already include Dag.
-              // One stream shares their dictionary and removes a redundant gzip/chunk boundary.
-              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|charts)\.(js|jsx)$/,
+              // Charts, report projections and code-diff views share the same run analysis
+              // consumers. Keeping the code viewer here prevents Markdown-only Assistant surfaces
+              // from downloading it while preserving one dictionary for the analysis workspace.
+              test: /[/\\]src[/\\](report|reportModel|researchMemoModel|trustSemantics|charts|CodeViewer|lineDiff)\.(js|jsx)$/,
               includeDependenciesRecursively: false,
             },
             {
               name: 'text-support',
-              // Markdown is already present wherever the narrower code viewer is opened. Sharing
-              // their parser/rendering dictionary removes another tiny transfer boundary without
-              // pulling either feature into the app shell.
-              test: /[/\\]src[/\\](CodeViewer\.jsx|lineDiff\.js|markdown\.jsx)$/,
+              // Markdown is shared by owner and public Assistant/report prose; keep its stream free
+              // of the heavier code/diff renderer used only by run-analysis surfaces.
+              test: /[/\\]src[/\\]markdown\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {
-              name: 'graph-support',
-              test: /[/\\]src[/\\](dagViewport|grouping)\.js$/,
+              name: 'run-visual-support',
+              // Run workspaces consume both semantic grouping/canvas policy and the virtual event
+              // window. The optional portfolio map reaches only the same pure grouping subset: no
+              // React Flow, owner controls or route component crosses into this support stream.
+              test: /[/\\]src[/\\](dagViewport|grouping|timelineModel|timelineWindow)\.js$|[/\\]src[/\\]VirtualTimeline\.jsx$/,
               includeDependenciesRecursively: false,
             },
             {
@@ -118,12 +120,6 @@ export default defineConfig({
               name: 'live-support',
               // Polling hooks and the run index travel together on every owner list/run surface.
               test: /[/\\]src[/\\](hooks|runIndex)\.js$/,
-              includeDependenciesRecursively: false,
-            },
-            {
-              name: 'timeline-support',
-              // The virtualized feed is the primary consumer of its canonical event model.
-              test: /[/\\]src[/\\](timelineModel\.js|timelineWindow\.js|VirtualTimeline\.jsx)$/,
               includeDependenciesRecursively: false,
             },
           ],

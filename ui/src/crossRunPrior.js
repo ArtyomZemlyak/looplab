@@ -1,0 +1,54 @@
+import { fmt } from './util.js'
+
+const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
+const count = value => Number.isInteger(value) && value >= 0
+const metric = value => typeof value === 'number' && Number.isFinite(value) ? value : null
+const array = value => Array.isArray(value) ? value : []
+const labels = value => array(value).slice(0, 64).filter(item => typeof item === 'string')
+  .map(item => item.trim().slice(0, 80)).filter(Boolean)
+
+export function crossRunPriorNarration(data) {
+  const rawRuns = array(data?.prior_runs)
+  const runs = rawRuns.slice(0, 8).filter(record)
+  const matched = labels(data?.matched_concepts)
+  const first = runs[0]
+  const v2 = data?.v === 2
+  const source = record(data?.concept_source) ? data.concept_source : null
+  const sourceKnown = v2 && source && typeof source.source_complete === 'boolean'
+    && ['partial_capsules', 'source_unknown_capsules', 'source_concepts_omitted',
+      'source_outcomes_omitted'].every(key => count(source[key]))
+    && source.source_unknown_capsules <= source.partial_capsules
+    && source.source_complete === (source.partial_capsules === 0)
+  const listKnown = v2 && count(data?.prior_runs_total) && count(data?.prior_runs_omitted)
+    && rawRuns.length <= 8 && data.prior_runs_total === rawRuns.length + data.prior_runs_omitted
+    && typeof data.prior_runs_complete === 'boolean'
+    && data.prior_runs_complete === (data.prior_runs_omitted === 0)
+    && runs.length === rawRuns.length
+  const runSource = first && record(first.source_receipt) ? first.source_receipt : null
+  const runSourceKnown = !first || (runSource && typeof runSource.concepts_complete === 'boolean'
+    && typeof runSource.concept_outcomes_complete === 'boolean')
+  const receiptsKnown = sourceKnown && listKnown && runSourceKnown
+    && (!source.source_complete || !first
+      || (runSource.concepts_complete && runSource.concept_outcomes_complete))
+
+  let history = 'prior match recorded; run details unavailable'
+  if (listKnown) history = `tried in ${data.prior_runs_total} earlier run${data.prior_runs_total === 1 ? '' : 's'}`
+    + (data.prior_runs_omitted ? ` (${data.prior_runs_omitted} run records omitted)` : '')
+  else if (runs.length) history = `found in ${runs.length} retained run record${runs.length === 1 ? '' : 's'}`
+
+  const runMatched = labels(first?.matched_concepts)
+  const matchedOutcome = v2 && runSourceKnown ? array(first?.matched_concept_outcomes).find(row => {
+    const concept = labels([row?.concept])[0]
+    return record(row) && row.outcome_retained === true && metric(row.outcome) !== null
+      && matched.includes(concept) && runMatched.includes(concept)
+  }) : null
+  const concept = labels([matchedOutcome?.concept])[0]
+  const runBest = metric(first?.run_best_metric) ?? metric(first?.best_metric)
+  const outcome = matchedOutcome ? `; closest run matched outcome ${concept}=${fmt(matchedOutcome.outcome)}`
+    : runBest !== null ? `; closest run best ${fmt(runBest)}` : ''
+  let warning = receiptsKnown ? '' : ' · evidence completeness unknown'
+  if (receiptsKnown && !source.source_complete) warning = source.source_unknown_capsules
+    ? ' · PARTIAL source (some capsule receipts unknown)' : ' · PARTIAL source'
+  if (receiptsKnown && !data.prior_runs_complete) warning += ' · PARTIAL run list'
+  return `cross-run prior${matched.length ? ': ' + matched.slice(0, 3).join(', ') : ''} — ${history}${outcome}${warning}`
+}

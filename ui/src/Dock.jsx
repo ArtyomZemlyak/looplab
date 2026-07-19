@@ -14,6 +14,7 @@ import VirtualTimeline from './VirtualTimeline.jsx'
 import { timelineEventKey } from './timelineModel.js'
 import { DataTable } from './accessibility.jsx'
 import { tracePartial, traceUnavailable } from './traceProjection.js'
+import { crossRunPriorNarration } from './crossRunPrior.js'
 
 
 // The run's EVENTS window (round-9): one scrubbable, filterable feed that renders every run event
@@ -111,7 +112,9 @@ const NARR = {
   node_tombstoned: (d) => { const ids = Array.isArray(d.node_ids) ? d.node_ids : (d.node_id != null ? [d.node_id] : []); return ids.length ? `deleted node${ids.length === 1 ? '' : 's'} ${ids.map(n => '#' + n).join(', ')}` : 'deleted a node subtree' },
   holdout_evaluated: (d) => `holdout (final-exam) score for #${d.node_id} → ${fmt(d.metric)}`,
   novelty_graded: (d) => `novelty graded ${d.node_id != null ? '#' + d.node_id + ' ' : ''}level ${d.level}${d.grade ? ' (' + d.grade + ')' : ''} → ${d.recommendation || 'allow'}`,
-  cross_run_prior: (d) => { const cs = (d.matched_concepts || []).slice(0, 3).join(', '); const runs = d.prior_runs || []; const best = runs[0]; return `cross-run prior${cs ? ': ' + cs : ''} — tried in ${runs.length || 'an'} earlier run${runs.length === 1 ? '' : 's'}${best && best.best_metric != null ? ' (best ' + fmt(best.best_metric) + ')' : ''}` },
+  // # CODEX AGENT: A capsule's best metric is run-wide, not the matched concept's outcome. Only the
+  // v2 retained-outcome row earns concept-level wording; every fallback says "run best" explicitly.
+  cross_run_prior: crossRunPriorNarration,
   comment_created: (d) => `comment on #${d.node_id ?? '?'}: ${String(d.text || d.body || '').slice(0, 80)}`,
   comment_edited: (d) => `comment edited on #${d.node_id ?? '?'}`,
   comment_resolution_changed: (d) => `comment ${d.resolved === true ? 'resolved' : d.resolved === false ? 'reopened' : 'resolution changed'} on #${d.node_id ?? '?'}`,
@@ -199,7 +202,8 @@ const NARR_VALID = {
   node_tombstoned: d => (Array.isArray(d?.node_ids) && d.node_ids.length > 0) || ownValue(d, 'node_id'),
   holdout_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
   novelty_graded: d => ownValue(d, 'level'),
-  cross_run_prior: d => Array.isArray(d?.matched_concepts) || Array.isArray(d?.prior_runs),
+  cross_run_prior: d => Array.isArray(d?.matched_concepts) && Array.isArray(d?.prior_runs)
+    && (d.matched_concepts.length > 0 || d.prior_runs.length > 0),
   comment_created: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
   comment_edited: d => ownValue(d, 'node_id'),
   comment_resolution_changed: d => ownValue(d, 'node_id'),
@@ -218,41 +222,17 @@ function eventNode(e) {
 // the legend, the row, and the filter all agree.
 // [key, label] — the icon is a monochrome glyph (GROUP_GLYPH), not an emoji (round-7 readability pass).
 const GROUPS = [
-  ['proposal', 'proposals'],
-  ['eval', 'results'],
-  ['decision', 'decisions'],
-  ['research', 'research'],
-  ['report', 'report'],
-  ['trust', 'trust'],
-  ['control', 'actions'],
-  ['lifecycle', 'lifecycle'],
+  ['proposal', 'proposals', 'node_building node_created'],
+  ['eval', 'results', 'node_evaluated node_failed node_repaired node_confirmed best_confirmed proxy_scored ablate deps_installed confirm_done confirm_eval agent_validated holdout_evaluated stage_finished'],
+  ['decision', 'decisions', 'policy_decision strategy_decision rung_promoted agent_decision set_strategy hypothesis_ranked foresight_selected coverage_snapshot'],
+  ['research', 'research', 'research_completed deep_research hypothesis_added hypothesis_merged lessons_refreshed lessons_distilled cross_run_prior hypothesis_updated lessons_reconciled'],
+  ['report', 'report', 'report_generated reflection_note report_refresh_failed'],
+  ['trust', 'trust', 'reward_hack_suspected data_leakage spec_drift novelty_rejected drift_unavailable workspace_changed novelty_graded'],
+  ['control', 'actions', 'hint pause resume run_abort node_abort fork promote annotation inject_node force_confirm force_ablate approval_requested approval_granted budget_extend run_reopened spec_approved spec_approval_requested spec_proposed command_ack fork_done inject_done node_reset node_tombstoned concept_tag_edited inject_failed comment_created comment_edited comment_resolution_changed trust_gate_changed restart'],
+  ['lifecycle', 'lifecycle', 'run_started run_finished llm_cost budget data_profiled data_provenance host_grading diversity_archive setup_started setup_step setup_finished workspace_seeded run_setup_started run_setup_finished env_changed log_repaired'],
 ]
-const TYPE2GROUP = {
-  node_building: 'proposal', node_created: 'proposal',
-  node_evaluated: 'eval', node_failed: 'eval', node_repaired: 'eval', node_confirmed: 'eval', best_confirmed: 'eval', proxy_scored: 'eval', ablate: 'eval',
-  policy_decision: 'decision', strategy_decision: 'decision', rung_promoted: 'decision', agent_decision: 'decision', set_strategy: 'decision', hypothesis_ranked: 'decision', foresight_selected: 'decision',
-  research_completed: 'research', deep_research: 'research',
-  hypothesis_added: 'research', hypothesis_merged: 'research', lessons_refreshed: 'research', lessons_distilled: 'research', coverage_snapshot: 'decision', deps_installed: 'eval',
-  report_generated: 'report', reflection_note: 'report',
-  reward_hack_suspected: 'trust', data_leakage: 'trust', spec_drift: 'trust', novelty_rejected: 'trust',
-  hint: 'control', pause: 'control', resume: 'control', run_abort: 'control', node_abort: 'control',
-  fork: 'control', promote: 'control', annotation: 'control', inject_node: 'control', force_confirm: 'control',
-  force_ablate: 'control', approval_requested: 'control', approval_granted: 'control', budget_extend: 'control',
-  run_reopened: 'control', spec_approved: 'control', spec_approval_requested: 'control', spec_proposed: 'control',
-  command_ack: 'control',
-  fork_done: 'control', inject_done: 'control',
-  confirm_done: 'eval', confirm_eval: 'eval', agent_validated: 'eval',
-  drift_unavailable: 'trust', workspace_changed: 'trust',
-  run_started: 'lifecycle', run_finished: 'lifecycle', llm_cost: 'lifecycle', budget: 'lifecycle',
-  data_profiled: 'lifecycle', data_provenance: 'lifecycle', host_grading: 'lifecycle', diversity_archive: 'lifecycle',
-  setup_started: 'lifecycle', setup_step: 'lifecycle', setup_finished: 'lifecycle', workspace_seeded: 'lifecycle',
-  run_setup_started: 'lifecycle', run_setup_finished: 'lifecycle', env_changed: 'lifecycle',
-  node_reset: 'control', node_tombstoned: 'control', concept_tag_edited: 'control', inject_failed: 'control',
-  comment_created: 'control', comment_edited: 'control', comment_resolution_changed: 'control', trust_gate_changed: 'control',
-  holdout_evaluated: 'eval', novelty_graded: 'trust', cross_run_prior: 'research', hypothesis_updated: 'research',
-  report_refresh_failed: 'report', log_repaired: 'lifecycle', stage_finished: 'eval',
-  lessons_reconciled: 'research', restart: 'control',
-}
+const TYPE2GROUP = Object.fromEntries(GROUPS.flatMap(([group, , types]) =>
+  types.split(' ').map(type => [type, group])))
 // Monochrome glyph per kind (default) + a few high-signal per-type overrides. Names resolve in
 // icons.jsx GLYPHS (unknown → 'dot' fallback). Color is carried by CSS (only user/trust/highlighted).
 const GROUP_GLYPH = {

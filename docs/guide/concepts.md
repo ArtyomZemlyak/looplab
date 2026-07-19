@@ -728,6 +728,11 @@ The target CR0–CR3 design adds the full applicability/coverage frame, durable 
 incremental summaries and interactive Research Atlas; see
 [Project review §21.20](../17-project-review-and-directions-2026-07-11.md#cross-run-research-architecture).
 
+The per-run `cross_run_prior` timeline signal remains audit-only. Its v2 receipt separates a prior
+run's `run_best_metric` from `matched_concept_outcomes`: the UI names a concept outcome only when the
+matching row says it was retained, otherwise it explicitly labels the value as the **run best**. Capsule
+or bounded-run omissions are shown as partial/unknown evidence rather than inferred as complete history.
+
 ### Harmonic memory (`memora`, optional)
 
 An idea import from [Memora](https://github.com/microsoft/Memora) (Microsoft Research, ICML'26).

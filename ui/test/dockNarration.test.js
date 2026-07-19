@@ -50,6 +50,58 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.match(eventNarration({ type: 'future_event', data: { text: 'bounded' },
       _log_page: { truncated: true, raw_bytes: 2048 } }),
     /details omitted \(2.048 source bytes exceed page limit\)/)
+
+    const completeSource = {
+      source_complete: true, partial_capsules: 0, source_unknown_capsules: 0,
+      source_concepts_omitted: 0, source_outcomes_omitted: 0,
+    }
+    const completeRunSource = {
+      concepts_total: 2, concepts_omitted: 0, concepts_complete: true,
+      concept_outcomes_total: 2, concept_outcomes_omitted: 0, concept_outcomes_complete: true,
+    }
+    const prior = overrides => ({
+      type: 'cross_run_prior', data: {
+        v: 2, matched_concepts: ['loss/target'], prior_runs_total: 1,
+        prior_runs_omitted: 0, prior_runs_complete: true, concept_source: completeSource,
+        prior_runs: [{
+          run_id: 'old', best_metric: 0.9, run_best_metric: 0.9,
+          matched_concepts: ['loss/target'], source_receipt: completeRunSource,
+          matched_concept_outcomes: [
+            { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+          ],
+        }],
+        ...overrides,
+      },
+    })
+    const exact = eventNarration(prior())
+    assert.match(exact, /matched outcome loss\/target=0\.1/)
+    assert.doesNotMatch(exact, /run best|completeness unknown|PARTIAL/)
+
+    const runBest = eventNarration(prior({ prior_runs: [{
+      run_id: 'old', best_metric: 0.9, run_best_metric: 0.9,
+      matched_concepts: ['loss/target'], source_receipt: completeRunSource,
+      matched_concept_outcomes: [
+        { concept: 'loss/target', outcome_retained: false, outcome: null },
+      ],
+    }] }))
+    assert.match(runBest, /closest run best 0\.9/)
+    assert.doesNotMatch(runBest, /matched outcome/)
+
+    const partial = eventNarration(prior({
+      concept_source: { ...completeSource, source_complete: false, partial_capsules: 1,
+        source_unknown_capsules: 1 },
+    }))
+    assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
+
+    assert.equal(eventNarration({ type: 'cross_run_prior', data: {
+      matched_concepts: 'loss/target', prior_runs: [],
+    } }), 'cross_run_prior — details could not be summarized')
+    assert.equal(eventNarration({ type: 'cross_run_prior', data: {
+      matched_concepts: ['loss/target'], prior_runs: 'corrupt',
+    } }), 'cross_run_prior — details could not be summarized')
+    assert.match(eventNarration({ type: 'cross_run_prior', data: {
+      matched_concepts: ['loss/target'], prior_runs: [{ best_metric: 0.9 }],
+    } }), /closest run best 0\.9 · evidence completeness unknown/)
   } finally {
     await vite.close()
   }

@@ -113,26 +113,8 @@ function agentBadge(rep) {
   return null
 }
 
-// Champion lightning (Reactor/Energy "full" only): jagged arcs crackling around the best node's card.
-// Always rendered for the best node; CSS hides it unless [data-fx="full"]. There's exactly ONE champion,
-// so the extra SVG is negligible. Coords are in the card's 188×84 space; bolts spill outside via overflow.
-const BOLTS = [
-  'M22 4 L12 -10 L24 -18 L8 -34',          // top-left strike
-  'M166 4 L180 -10 L166 -20 L184 -34',     // top-right strike
-  'M4 28 L-14 24 L-4 40 L-20 50',          // left arc
-  'M184 30 L202 26 L190 42 L208 52',       // right arc
-  'M76 1 L84 -16 L98 -7 L106 -24 L114 -9', // top-centre crown
-  'M70 84 L62 98 L80 94 L70 110',          // bottom discharge
-]
-function Bolts() {
-  return (
-    <svg className="ll-bolts" viewBox="0 0 188 84" preserveAspectRatio="none" aria-hidden="true">
-      {BOLTS.map((d, i) => (
-        <path key={i} d={d} className={i % 3 === 1 ? 'b-accent' : ''} style={{ animationDelay: `${(i * 0.17).toFixed(2)}s` }} />
-      ))}
-    </svg>
-  )
-}
+// Champion lightning is a CSS-only decorative overlay: no per-render SVG paths or inline timers.
+const Bolts = () => <span className="ll-bolts" aria-hidden="true" />
 
 function NodeActionTrigger({ nodeId, expanded, onOpen }) {
   return <button type="button" className="node-action-trigger nodrag nopan"

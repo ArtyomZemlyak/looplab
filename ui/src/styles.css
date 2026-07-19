@@ -1729,21 +1729,21 @@ pre.code.event-json { max-height: 220px; }
 /* selection halo reads on top of the glows */
 [data-fx] .node-card.sel { box-shadow: 0 0 0 2px var(--accent), 0 0 22px -2px var(--accent), var(--shadow-card); }
 
-/* ── champion lightning ── jagged arcs crackle around the best node (full only). Rendered for the best
-   node always; shown only under [data-fx="full"]. Each bolt strikes on its own staggered flicker so the
-   crown reads as live electricity. Pure overlay, pointer-events:none — never blocks the card. */
+/* ── champion lightning ── two CSS-native crown bolts avoid SVG path DOM/inline timers. */
 [data-fx="full"] .node-card.best { position: relative; }
 .ll-bolts { display: none; }
 [data-fx="full"] .node-card.best > .ll-bolts {
   display: block; position: absolute; inset: 0; width: 100%; height: 100%;
   overflow: visible; pointer-events: none; z-index: 3; }
-[data-fx="full"] .node-card.best > .ll-bolts path {
-  fill: none; stroke: var(--best); stroke-width: 2.4; stroke-linecap: round; stroke-linejoin: round;
-  filter: url(#ll-energy-glow); opacity: .25; animation: ll-bolt .9s steps(1, end) infinite; }
-[data-fx="full"] .node-card.best > .ll-bolts path.b-accent { stroke: var(--accent); }
-/* slight per-bolt period variation → the crown crackles organically instead of pulsing in lock-step */
-[data-fx="full"] .node-card.best > .ll-bolts path:nth-child(3n+1) { animation-duration: 1.05s; }
-[data-fx="full"] .node-card.best > .ll-bolts path:nth-child(3n+2) { animation-duration: .78s; }
+[data-fx="full"] .node-card.best > .ll-bolts::before,
+[data-fx="full"] .node-card.best > .ll-bolts::after {
+  content: ''; position: absolute; top: -27px; width: 22px; height: 34px;
+  background: var(--best); opacity: .25; filter: drop-shadow(0 0 5px var(--best));
+  clip-path: polygon(58% 0, 28% 47%, 53% 43%, 18% 100%, 79% 37%, 54% 41%, 82% 0);
+  animation: ll-bolt .9s steps(1, end) infinite; }
+[data-fx="full"] .node-card.best > .ll-bolts::before { left: 12px; }
+[data-fx="full"] .node-card.best > .ll-bolts::after {
+  right: 12px; background: var(--accent); transform: scaleX(-1); animation-duration: .78s; }
 /* always a faint arc present, with several hard strikes per cycle → reads as live, continuous lightning */
 @keyframes ll-bolt {
   0%   { opacity: .22; }
@@ -1806,7 +1806,8 @@ pre.code.event-json { max-height: 220px; }
   [data-fx="full"] .node-card.best,
   [data-fx="full"] .node-card.sel,
   [data-fx="full"] .node-card.s-failed,
-  [data-fx="full"] .node-card.best > .ll-bolts path,
+  [data-fx="full"] .node-card.best > .ll-bolts::before,
+  [data-fx="full"] .node-card.best > .ll-bolts::after,
   [data-fx="full"] .node-card.best > .ll-ring,
   [data-fx="full"] .node-card.best > .ll-ring::before,
   [data-fx] .fx-switch > button.primary,
