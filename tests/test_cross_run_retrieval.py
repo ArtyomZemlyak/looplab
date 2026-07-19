@@ -167,7 +167,7 @@ def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
         _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
     second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
         _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
-    assert first["receipt"]["corpus_digest_version"] == 3
+    assert first["receipt"]["corpus_digest_version"] == 4
     assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
     assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
 
@@ -191,6 +191,40 @@ def test_receipt_digest_commits_to_aggregate_capsule_completeness():
     assert receipt["corpus_digest"] != exact["receipt"]["corpus_digest"]
     assert receipt["retrieval_digest"] != exact["receipt"]["retrieval_digest"]
     assert partial["results"][0]["stable_id"] == exact["results"][0]["stable_id"]
+
+
+def test_receipt_digest_commits_to_applicability_scope_completeness():
+    capsule = build_concept_capsule(
+        run_id="r1", fingerprint=["k"], direction="max",
+        concepts=["distillation"], concept_outcomes={})
+    complete_scope = {
+        "scope_complete": True, "scope_unknown_capsules": 0,
+        "scope_fingerprint_unknown_capsules": 0,
+        "scope_fingerprint_items_omitted": 0, "scope_direction_unknown_capsules": 0,
+    }
+    partial_scope = {
+        "scope_complete": False, "scope_unknown_capsules": 1,
+        "scope_fingerprint_unknown_capsules": 1,
+        "scope_fingerprint_items_omitted": 0, "scope_direction_unknown_capsules": 0,
+    }
+
+    exact = cross_run_retrieve(
+        "", "distillation", capsules=[capsule], lessons=[], scope_receipt=complete_scope)
+    partial = cross_run_retrieve(
+        "", "distillation", capsules=[capsule], lessons=[], scope_receipt=partial_scope)
+
+    assert exact["receipt"]["scope_complete"] is True
+    assert partial["receipt"]["scope_complete"] is False
+    assert partial["receipt"]["scope_unknown_capsules"] == 1
+    assert exact["receipt"]["corpus_digest"] != partial["receipt"]["corpus_digest"]
+    assert exact["receipt"]["retrieval_digest"] != partial["receipt"]["retrieval_digest"]
+    assert exact["results"][0]["stable_id"] == partial["results"][0]["stable_id"]
+
+    malformed = cross_run_retrieve("", "distillation", capsules=[capsule], lessons=[], scope_receipt={
+        **partial_scope, "scope_fingerprint_unknown_capsules": 2,
+    })
+    assert malformed["receipt"]["scope_receipt_known"] is False
+    assert malformed["receipt"]["scope_complete"] is False
 
 
 def test_quota_does_not_inject_an_unrelated_caveat(tmp_path):

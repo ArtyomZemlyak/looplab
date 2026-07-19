@@ -20,7 +20,7 @@ import unicodedata
 from pathlib import Path
 
 from looplab.tools._base import fn_spec
-from looplab.trust.cross_run import cross_run_text, same_live_direction
+from looplab.trust.cross_run import cross_run_text, same_live_direction, valid_live_direction
 
 _WORD = re.compile(r"[^\W_]+", re.UNICODE)
 _LOG = logging.getLogger(__name__)
@@ -62,6 +62,21 @@ def _partial_source_warning(view: dict) -> str:
             + (f"; {unknown} legacy capsule(s) have unknown totals" if unknown else "") + ").")
 
 
+def _partial_scope_warning(view: dict) -> str:
+    """Compact receipt for capsules whose applicability could not be classified exactly."""
+    if view.get("scope_complete") is True:
+        return ""
+    unknown = int(view.get("scope_unknown_capsules", 0) or 0)
+    fingerprint_unknown = int(view.get("scope_fingerprint_unknown_capsules", 0) or 0)
+    direction_unknown = int(view.get("scope_direction_unknown_capsules", 0) or 0)
+    omitted = int(view.get("scope_fingerprint_items_omitted", 0) or 0)
+    return ("WARNING: PARTIAL capsule applicability scope "
+            f"({unknown} capsule(s) unclassified; {fingerprint_unknown} fingerprint receipt(s) "
+            f"unknown; {omitted} fingerprint item(s) known omitted; "
+            f"{direction_unknown} direction(s) unknown). Retained scope counts are lower bounds; "
+            "absence is not proof that no applicable record exists.")
+
+
 class CrossRunTools:
     """Read-only cross-run knowledge for the tool-loop. `role` ∈ {"researcher","developer"} scopes the
     claims to that role's lessons (+ shared/untagged); anything else sees all. Never raises from execute."""
@@ -77,6 +92,13 @@ class CrossRunTools:
         self._concept_projection_status = "complete"
         self._concept_projection_reasons: tuple[str, ...] = ()
         self._bound = False
+        self._capsule_scope_receipt = {
+            "scope_complete": True,
+            "scope_unknown_capsules": 0,
+            "scope_fingerprint_unknown_capsules": 0,
+            "scope_fingerprint_items_omitted": 0,
+            "scope_direction_unknown_capsules": 0,
+        }
 
     def bind_state(self, state, parent=None) -> None:
         """Learn the current run's direction and scope before any agent query.
@@ -242,11 +264,65 @@ class CrossRunTools:
             return lessons
         return [lz for lz in lessons if str(lz.get("role") or "") in ("", self.role)]
 
+    def _partition_capsules(self, caps: list[dict]) -> tuple[list[dict], list[dict], dict]:
+        """Partition capsules into scope-eligible, applicability-unknown, and known-ineligible rows."""
+        if not self._bound:
+            receipt = {
+                "scope_complete": True,
+                "scope_unknown_capsules": 0,
+                "scope_fingerprint_unknown_capsules": 0,
+                "scope_fingerprint_items_omitted": 0,
+                "scope_direction_unknown_capsules": 0,
+            }
+            return list(caps), [], receipt
+
+        from looplab.engine.memory import (
+            _capsule_completeness,
+            _capsule_fingerprint_scope_complete,
+        )
+        eligible: list[dict] = []
+        unknown: list[dict] = []
+        fingerprint_unknown = fingerprint_omitted = direction_unknown = 0
+        current_direction_valid = valid_live_direction(self._direction)
+        for capsule in caps:
+            persisted_direction = capsule.get("direction")
+            if not current_direction_valid or not valid_live_direction(persisted_direction):
+                unknown.append(capsule)
+                direction_unknown += 1
+                continue
+            if persisted_direction != self._direction:
+                continue
+            if self._task_id and str(capsule.get("task_id") or "") == self._task_id:
+                eligible.append(capsule)
+                continue
+            if not _capsule_fingerprint_scope_complete(capsule):
+                # CODEX AGENT: failing closed at the visibility gate is not permission to erase the row
+                # from the denominator. Its related-task applicability is UNKNOWN, so every bound absence
+                # and frequency surface must carry this aggregate receipt.
+                unknown.append(capsule)
+                meta = _capsule_completeness(
+                    capsule, "fingerprint", len(capsule.get("fingerprint") or []))
+                fingerprint_unknown += int(meta is None or meta[0] is None)
+                fingerprint_omitted += int(meta[1] or 0) if meta is not None else 0
+                continue
+            if self._in_scope(capsule, source="capsule"):
+                eligible.append(capsule)
+        receipt = {
+            "scope_complete": not unknown,
+            "scope_unknown_capsules": len(unknown),
+            "scope_fingerprint_unknown_capsules": fingerprint_unknown,
+            "scope_fingerprint_items_omitted": fingerprint_omitted,
+            "scope_direction_unknown_capsules": direction_unknown,
+        }
+        return eligible, unknown, receipt
+
     def _scoped_capsules(self) -> list[dict]:
         from looplab.engine.memory import ConceptCapsuleStore
         p = self.dir / "concept_capsules.jsonl"
         caps = ConceptCapsuleStore(p).all() if p.exists() else []
-        return [c for c in caps if self._in_scope(c, source="capsule")]
+        eligible, _unknown, receipt = self._partition_capsules(caps)
+        self._capsule_scope_receipt = receipt
+        return eligible
 
     def _role_research_claims(self) -> list[dict]:
         """D8 is researcher evidence, never developer memory; bound rows are exact-task-only."""
@@ -295,26 +371,39 @@ class CrossRunTools:
             if len(idea) > 4000:
                 return "(cross-run tool error: idea exceeds 4000 characters)"
             qt = _toks(idea)
-            ov = portfolio_concept_overview(self._scoped_capsules(), aliases=load_concept_aliases(self.dir),
+            scoped_capsules = self._scoped_capsules()
+            scope_receipt = self._capsule_scope_receipt
+            ov = portfolio_concept_overview(scoped_capsules, aliases=load_concept_aliases(self.dir),
                                             splits=load_concept_splits(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
             scored = sorted(ov["concepts"],
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
             hits = [e for e in scored if (not qt) or (qt & _toks(e["concept"]))][:6]
             if not hits:
-                if ov.get("source_complete") is not True:
-                    return ("(no retained prior run records these concepts; source is partial)\n"
-                            + _partial_source_warning(ov))
+                if (ov.get("source_complete") is not True
+                        or scope_receipt.get("scope_complete") is not True):
+                    lines = ["(no retained scope-eligible prior run records these concepts; partial "
+                             "source/scope is not proof that no applicable run exists)"]
+                    if ov.get("source_complete") is not True:
+                        lines.append(_partial_source_warning(ov))
+                    if scope_receipt.get("scope_complete") is not True:
+                        lines.append(_partial_scope_warning(scope_receipt))
+                    return "\n".join(lines)
                 return "(no prior runs recorded these concepts yet)"
             lines = [_partial_source_warning(ov)] if ov.get("source_complete") is not True else []
+            if scope_receipt.get("scope_complete") is not True:
+                lines.append(_partial_scope_warning(scope_receipt))
             for e in hits:
                 runs = ", ".join(
                     f"{_safe_text(r.get('run_id'), 100)!r}" +
                     (f"={r['metric']:g}" if isinstance(r.get("metric"), (int, float))
                      and not isinstance(r.get("metric"), bool) else "")
                     for r in e["runs"][:5])
+                count_label = (f"tried in {e['n_runs']} run(s)"
+                               if scope_receipt.get("scope_complete") is True
+                               else f"retained in at least {e['n_runs']} scope-eligible run(s)")
                 lines.append(f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(e.get('concept'), 160)!r} — "
-                             f"tried in {e['n_runs']} run(s): {runs}")
+                             f"{count_label}: {runs}")
             return "TRIED BEFORE (untrusted persisted data; surface, not a block):\n" + "\n".join(lines)
 
         if name == "cross_run_claims":
@@ -355,8 +444,10 @@ class CrossRunTools:
 
         if name == "cross_run_atlas":
             from looplab.engine.claims import atlas_for_memory
+            scoped_capsules = self._scoped_capsules()
+            scope_receipt = self._capsule_scope_receipt
             atlas = atlas_for_memory(self.dir, lessons=self._role_lessons(),
-                                     capsules=self._scoped_capsules(),
+                                     capsules=scoped_capsules,
                                      research_claims=self._role_research_claims(), structured=True)
             lines = [f"Bounded live projection: {atlas['n_runs']} run(s), {atlas['n_concepts']} concept(s), "
                      f"{atlas['n_claims']} claim record(s), {atlas['n_contested']} mixed-evidence."]
@@ -371,8 +462,10 @@ class CrossRunTools:
             coverage = (atlas.get("context_pack") or {}).get("coverage") or {}
             if coverage.get("source_complete") is not True:
                 lines.append(_partial_source_warning(coverage))
-            helps = coverage.get("helps") or []
-            hurts = coverage.get("hurts") or []
+            if scope_receipt.get("scope_complete") is not True:
+                lines.append(_partial_scope_warning(scope_receipt))
+            helps = (coverage.get("helps") or []) if scope_receipt.get("scope_complete") is True else []
+            hurts = (coverage.get("hurts") or []) if scope_receipt.get("scope_complete") is True else []
             if helps or hurts:
                 seg = []
                 if helps:
@@ -399,19 +492,30 @@ class CrossRunTools:
             # atlas uses. Aliases/splits honor the operator/steward taxonomy governance.
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import portfolio_concept_graph
-            graph = portfolio_concept_graph(self._scoped_capsules(),
+            scoped_capsules = self._scoped_capsules()
+            scope_receipt = self._capsule_scope_receipt
+            graph = portfolio_concept_graph(scoped_capsules,
                                             aliases=load_concept_aliases(self.dir),
                                             splits=load_concept_splits(self.dir))
             # EXCLUDE the 0-run structural spine (materialized ancestor path prefixes) from the "explored"
             # display — they are hierarchy scaffolding, not concepts any run touched.
             explored = [e for e in graph["concepts"] if e.get("n_runs", 0) >= 1]
             if not explored:
-                if graph.get("source_complete") is not True:
-                    return "(no retained cross-run concepts)\n" + _partial_source_warning(graph)
+                if (graph.get("source_complete") is not True
+                        or scope_receipt.get("scope_complete") is not True):
+                    lines = ["(no retained scope-eligible cross-run concepts; partial source/scope is not "
+                             "proof of absence)"]
+                    if graph.get("source_complete") is not True:
+                        lines.append(_partial_source_warning(graph))
+                    if scope_receipt.get("scope_complete") is not True:
+                        lines.append(_partial_scope_warning(scope_receipt))
+                    return "\n".join(lines)
                 return "(no cross-run concepts yet)"
             lines = [f"Global concept map: {len(explored)} explored concept(s) across {graph['n_runs']} run(s)."]
             if graph.get("source_complete") is not True:
                 lines.append(_partial_source_warning(graph))
+            if scope_receipt.get("scope_complete") is not True:
+                lines.append(_partial_scope_warning(scope_receipt))
             # the is_a hierarchy, surfaced as its top axes (the coarse structure of the map)
             axes = sorted({str(e.get("concept") or "").split("/", 1)[0] for e in explored} - {""})
             if axes:
@@ -447,26 +551,36 @@ class CrossRunTools:
             # Pass one fully-scoped snapshot. `_in_scope` already applies exact-task or bounded fingerprint
             # transfer to every source; applying an additional exact scope_task filter here would silently
             # discard the intentionally-related rows.
+            scoped_capsules = self._scoped_capsules()
+            scope_receipt = self._capsule_scope_receipt
             r = cross_run_retrieve(self.dir, query, lessons=self._role_lessons(),
-                                   capsules=self._scoped_capsules(),
+                                   capsules=scoped_capsules,
                                    research_claims=self._role_research_claims(),
-                                   intent=intent, structured=True)
+                                   intent=intent, structured=True,
+                                   scope_receipt=scope_receipt)
             hits = r["results"][:8]
             rc = r.get("receipt") or {}
             source_complete = rc.get("source_complete") is True
+            scope_complete = rc.get("scope_complete") is True
+            fully_complete = source_complete and scope_complete
             if not hits:
-                lines = [("(no retained cross-run knowledge matched; the partial concept source is not "
-                          "proof that no matching concept exists)") if not source_complete
+                lines = [("(no retained cross-run knowledge matched; the partial concept source/scope is not "
+                          "proof that no matching concept exists)") if not fully_complete
                          else "(no cross-run knowledge matched)"]
                 if not source_complete:
                     # CODEX AGENT: a legacy/capped capsule may have omitted the matching concept entirely;
                     # an empty retrieval is only absence from retained records, never proof of novelty.
                     lines.append(_partial_source_warning(rc))
+                if not scope_complete:
+                    lines.append(_partial_scope_warning(rc))
                 lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
                              f"intent={_safe_text(rc.get('intent'), 20)} hits=0 "
-                             f"source_complete={str(source_complete).lower()}]")
+                             f"source_complete={str(source_complete).lower()} "
+                             f"scope_complete={str(scope_complete).lower()}]")
                 return "\n".join(lines)
             lines = [_partial_source_warning(rc)] if not source_complete else []
+            if not scope_complete:
+                lines.append(_partial_scope_warning(rc))
             for h in hits:
                 if h["kind"] == "claim":
                     contradicts = "; ".join(
@@ -476,13 +590,14 @@ class CrossRunTools:
                                  f"score={h.get('score')}] UNTRUSTED_MEMORY={_safe_text(h['text'], 160)!r}"
                                  + (f"; contradicts={contradicts}" if contradicts else ""))
                 else:
-                    count = (f"×{h['n_runs']} run(s)" if source_complete
+                    count = (f"×{h['n_runs']} run(s)" if fully_complete
                              else f"retained in at least {h['n_runs']} run(s)")
                     lines.append(f"[concept {count}; score={h.get('score')}] "
                                  f"UNTRUSTED_MEMORY={_safe_text(h['text'], 120)!r}")
             lines.append(f"[receipt corpus={_safe_text(rc.get('corpus_digest'), 40)} "
                          f"intent={_safe_text(rc.get('intent'), 20)} hits={rc.get('n_hits', len(hits))} "
-                         f"source_complete={str(source_complete).lower()}]")
+                         f"source_complete={str(source_complete).lower()} "
+                         f"scope_complete={str(scope_complete).lower()}]")
             return "\n".join(lines)
 
         if name == "similar_runs":
@@ -502,6 +617,7 @@ class CrossRunTools:
             mine = set(canonicalize_concepts(
                 sorted(self._concepts), aliases=aliases, splits=splits))
             caps = self._scoped_capsules()
+            scope_receipt = self._capsule_scope_receipt
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
             from looplab.engine.memory import _capsule_source_summary
@@ -512,6 +628,8 @@ class CrossRunTools:
             def _receipt(*, matched: int, returned: int) -> str:
                 return (f"[receipt scope={scope} direction={direction or 'invalid'} "
                         f"eligible_capsules={len(prior_caps)} matched={matched} returned={returned} "
+                        f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
+                        f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                         f"taxonomy_revision={taxonomy['governance_revision']}]")
 
             if self._concept_projection_status == "unavailable":
@@ -545,12 +663,18 @@ class CrossRunTools:
                          "(no prior run shares a reliable concept with this one among retained capsules)"]
                 if source_summary.get("source_complete") is not True:
                     lines.append(_partial_source_warning(source_summary))
+                if scope_receipt.get("scope_complete") is not True:
+                    lines.append(_partial_scope_warning(scope_receipt))
                 lines.append(_receipt(matched=0, returned=0))
                 return "\n".join(lines)
             if not ranked:
                 lines = ["(no prior run shares a retained concept with this one)"]
                 if source_summary.get("source_complete") is not True:
                     lines.append(_partial_source_warning(source_summary))
+                if scope_receipt.get("scope_complete") is not True:
+                    lines[0] = ("(no scope-eligible prior run shares a retained concept with this one; "
+                                "partial scope is not proof of absence)")
+                    lines.append(_partial_scope_warning(scope_receipt))
                 lines.append(_receipt(matched=0, returned=0))
                 return "\n".join(lines)
             ranked.sort(key=lambda x: (-x[0], -x[1], x[2]))
@@ -559,6 +683,8 @@ class CrossRunTools:
             lines.append(f"{returned} prior run(s) most similar by shared concepts (advisory):")
             if source_summary.get("source_complete") is not True:
                 lines.append(_partial_source_warning(source_summary))
+            if scope_receipt.get("scope_complete") is not True:
+                lines.append(_partial_scope_warning(scope_receipt))
             for jac, n, rid, shared in ranked[:limit]:
                 preview = ", ".join(
                     f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(concept, 160)!r}"
@@ -611,7 +737,7 @@ class CrossRunTools:
             prior_caps = [cap for cap in caps
                           if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
             source_summary = _capsule_source_summary(prior_caps)
-            scoped_caps = [cap for cap in prior_caps if self._in_scope(cap, source="capsule")]
+            scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
             mine = set(canonicalize_concepts(
                 sorted(self._concepts), aliases=aliases, splits=splits))
             canonical_by_capsule: dict[int, set[str]] = {
@@ -624,39 +750,53 @@ class CrossRunTools:
                 rid = str(cap.get("run_id") or "")
                 if rid and mine & canonical_by_capsule[id(cap)]:
                     cross_run_ids.add(rid)
+            unknown_scope_run_ids = {
+                str(cap.get("run_id") or "") for cap in unknown_scope_caps
+                if str(cap.get("run_id") or "")
+            }
             vocab: dict[str, dict] = {}
             for cap in prior_caps:
                 rid = str(cap.get("run_id") or "")
                 if not rid:
                     continue
-                bucket = "cross_runs" if rid in cross_run_ids else "global_runs"
+                bucket = ("cross_runs" if rid in cross_run_ids else
+                          "unknown_runs" if rid in unknown_scope_run_ids else "global_runs")
                 for concept in canonical_by_capsule[id(cap)]:
                     meta = vocab.setdefault(
-                        concept, {"cross_runs": set(), "global_runs": set(), "own": False})
+                        concept, {"cross_runs": set(), "global_runs": set(),
+                                  "unknown_runs": set(), "own": False})
                     meta[bucket].add(rid)
             for concept in mine:
                 vocab.setdefault(
-                    concept, {"cross_runs": set(), "global_runs": set(), "own": False})["own"] = True
+                    concept, {"cross_runs": set(), "global_runs": set(),
+                              "unknown_runs": set(), "own": False})["own"] = True
 
             def _scope(meta: dict) -> str:
                 if meta["own"]:
                     return "own"
                 if meta["cross_runs"]:
                     return "cross"
+                if meta["unknown_runs"]:
+                    return "unknown"
                 return ("global" if self._concept_projection_status == "complete"
                         else "unknown")
 
             def _run_count(meta: dict) -> int:
-                return (1 if meta["own"] else 0) + len(meta["cross_runs"] | meta["global_runs"])
+                return ((1 if meta["own"] else 0)
+                        + len(meta["cross_runs"] | meta["global_runs"] | meta["unknown_runs"]))
 
             def _receipt(*, candidates: int, returned: int) -> str:
                 direction = self._direction if self._bound else "any"
                 return (f"[receipt requested_scope={want} direction={direction or 'invalid'} "
                         f"prior_capsules={len(prior_caps)} scoped_capsules={len(scoped_caps)} "
+                        f"scope_complete={str(scope_receipt.get('scope_complete') is True).lower()} "
+                        f"scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                         f"candidates={candidates} returned={returned} "
                         f"taxonomy_revision={taxonomy['governance_revision']}]")
 
             concept_dependent_scope = want in {"own", "cross"}
+            capsule_scope_uncertain = (want in {"all", "cross", "global"}
+                                       and scope_receipt.get("scope_complete") is not True)
             if concept_dependent_scope and self._concept_projection_status == "unavailable":
                 return (f"(current run concepts are UNAVAILABLE; scope '{want}' cannot be computed from "
                         "a fallback empty set)\n" + self._concept_projection_note() + "\n"
@@ -667,7 +807,7 @@ class CrossRunTools:
                                 or (want in {"all", "global"}
                                     and self._concept_projection_status != "complete")) else "")
             if want != "all":
-                if want == "global" and self._concept_projection_status != "complete":
+                if want == "global":
                     # CODEX AGENT: prior vocabulary stays usable; only its relationship to this
                     # run is unknown until current membership materializes.
                     vocab = {s: m for s, m in vocab.items()
@@ -681,6 +821,8 @@ class CrossRunTools:
                 lines.append(message)
                 if want != "own" and source_summary.get("source_complete") is not True:
                     lines.append(_partial_source_warning(source_summary))
+                if capsule_scope_uncertain:
+                    lines.append(_partial_scope_warning(scope_receipt))
                 lines.append(_receipt(candidates=0, returned=0))
                 return "\n".join(lines)
             if not query:
@@ -696,6 +838,8 @@ class CrossRunTools:
                     lines.insert(0, partial_note.rstrip())
                 if want != "own" and source_summary.get("source_complete") is not True:
                     lines.append(_partial_source_warning(source_summary))
+                if capsule_scope_uncertain:
+                    lines.append(_partial_scope_warning(scope_receipt))
                 # Candidate/returned units must match: this branch returns axes, while the heading already
                 # reports the underlying slug vocabulary size.
                 lines.append(_receipt(candidates=len(ordered_axes), returned=min(len(ordered_axes), limit)))
@@ -721,13 +865,21 @@ class CrossRunTools:
                          "Because the current projection is PARTIAL, this is not proof that the slug is new."]
                 if want != "own" and source_summary.get("source_complete") is not True:
                     lines.append(_partial_source_warning(source_summary))
+                if capsule_scope_uncertain:
+                    lines.append(_partial_scope_warning(scope_receipt))
                 lines.append(_receipt(candidates=0, returned=0))
                 return "\n".join(lines)
             if not scored:
-                if want != "own" and source_summary.get("source_complete") is not True:
+                if ((want != "own" and source_summary.get("source_complete") is not True)
+                        or capsule_scope_uncertain):
+                    warnings = []
+                    if want != "own" and source_summary.get("source_complete") is not True:
+                        warnings.append(_partial_source_warning(source_summary))
+                    if capsule_scope_uncertain:
+                        warnings.append(_partial_scope_warning(scope_receipt))
                     return (f"No RETAINED slug matches {_safe_text(query, 256)!r} in scope '{want}'; "
-                            "the capsule source is partial, so this is not proof the concept is new.\n"
-                            + _partial_source_warning(source_summary) + "\n"
+                            "the capsule source/scope is partial, so this is not proof the concept is new.\n"
+                            + "\n".join(warnings) + "\n"
                             + _receipt(candidates=0, returned=0))
                 return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
                         "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
@@ -735,7 +887,8 @@ class CrossRunTools:
             scored.sort()                            # own before cross before global; then best match first
             _label = {"own": "this run", "cross": "cross-run", "global": "global map",
                       "unknown": "relation to current run unknown"}
-            order = ("own→cross→global" if self._concept_projection_status == "complete"
+            order = ("own→cross→global" if (self._concept_projection_status == "complete"
+                                             and scope_receipt.get("scope_complete") is True)
                      else "own→cross→unknown")
             lines = [f"Existing slugs matching {_safe_text(query, 256)!r} "
                      f"({order}) — REUSE the closest, don't respell "
@@ -744,6 +897,8 @@ class CrossRunTools:
                 lines.insert(0, partial_note.rstrip())
             if want != "own" and source_summary.get("source_complete") is not True:
                 lines.append(_partial_source_warning(source_summary))
+            if capsule_scope_uncertain:
+                lines.append(_partial_scope_warning(scope_receipt))
             for _r, negscore, slug, meta in scored[:limit]:
                 lines.append(f"  [{_label[_scope(meta)]}] "
                              f"UNTRUSTED_MEMORY_CONCEPT={_safe_text(slug, 160)!r} "
@@ -773,6 +928,7 @@ class CrossRunTools:
             prior_caps = [c for c in caps
                           if not self._run_id or str(c.get("run_id") or "") != self._run_id]
             source_summary = _capsule_source_summary(prior_caps)
+            scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
             # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's
             # "world concept map"); the trustworthy relative-rank TENDENCY below is task-family scoped.
             mine = set(canonicalize_concepts(sorted(self._concepts), aliases=aliases, splits=splits))
@@ -858,11 +1014,10 @@ class CrossRunTools:
                              + ", ".join(f"UNTRUSTED_MEMORY={_safe_text(a, 80)!r}" for a in alt[:6]))
 
             # Track record: SCOPED overview = the trustworthy tendency; global count = portfolio context.
-            scoped_caps = [c for c, _concepts in canonical_caps
-                           if self._in_scope(c, source="capsule")]
+            scoped_ids = {id(capsule) for capsule in scoped_caps}
             scoped_canon_caps = [
                 c for c, concepts in canonical_caps
-                if canon in concepts and self._in_scope(c, source="capsule")]
+                if canon in concepts and id(c) in scoped_ids]
             global_canon_caps = [c for c, concepts in canonical_caps if canon in concepts]
             # CODEX AGENT: absence/completeness denominators include every eligible capsule, not only rows
             # where this concept survived the bounded source projection. Matching rows still own the
@@ -874,10 +1029,13 @@ class CrossRunTools:
             ov_global = portfolio_concept_overview(
                 global_canon_caps, aliases=aliases, splits=splits)
             grow = next((r for r in ov_global["concepts"] if r["concept"] == canon), None)
-            scoped_complete = scoped_source_summary.get("source_complete") is True
+            scoped_complete = (scoped_source_summary.get("source_complete") is True
+                               and scope_receipt.get("scope_complete") is True)
             global_complete = source_summary.get("source_complete") is True
-            if not scoped_complete:
+            if scoped_source_summary.get("source_complete") is not True:
                 lines.append("  task-family " + _partial_source_warning(scoped_source_summary))
+            if scope_receipt.get("scope_complete") is not True:
+                lines.append("  task-family " + _partial_scope_warning(scope_receipt))
             if row:
                 track_label = ("track record (your task family)" if scoped_complete
                                else "track record (returned task-family observations)")
@@ -946,7 +1104,11 @@ class CrossRunTools:
             lines.append(f"  [receipt scope={'bound_task_family' if self._bound else 'portfolio'} "
                          f"eligible_prior_runs={len(scoped_caps)} matching_scoped_runs="
                          f"{len(scoped_canon_caps)} matching_global_runs={len(global_canon_caps)} "
-                         f"task_source_complete={str(scoped_complete).lower()} "
+                         f"task_source_complete="
+                         f"{str(scoped_source_summary.get('source_complete') is True).lower()} "
+                         f"task_scope_complete="
+                         f"{str(scope_receipt.get('scope_complete') is True).lower()} "
+                         f"task_scope_unknown_capsules={scope_receipt.get('scope_unknown_capsules', 0)} "
                          f"global_source_complete={str(global_complete).lower()} "
                          f"taxonomy_revision={taxonomy['governance_revision']}]")
             return "\n".join(lines)

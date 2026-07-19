@@ -93,10 +93,21 @@ def test_related_advisory_rejects_capsule_with_unknown_fingerprint_projection(tm
         capsule.pop(f"fingerprint_{suffix}")
     _seed(tmp_path, capsules=[capsule])
 
-    text = _RelatedHost(tmp_path, on=True)._cross_run_advisory_text(
+    host = _RelatedHost(tmp_path, on=True)
+    text = host._cross_run_advisory_text(
         RunState(run_id="current", task_id="current", direction="max"))
 
-    assert text == ""
+    assert "capsule applicability scope is PARTIAL" in text
+    assert "absence is not proof" in text
+    assert "hard-neg" not in text
+    assert host._cross_run_advisory_receipt["v"] == 2
+    assert host._cross_run_advisory_receipt["concept_scope"] == {
+        "scope_complete": False,
+        "scope_unknown_capsules": 1,
+        "scope_fingerprint_unknown_capsules": 1,
+        "scope_fingerprint_items_omitted": 0,
+        "scope_direction_unknown_capsules": 0,
+    }
 
 
 def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):

@@ -205,7 +205,12 @@ class ProposalCuesMixin:
             from looplab.engine.claims import (build_context_pack, claims_for_memory, load_research_claims,
                                                render_context_pack)
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
-            from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+            from looplab.engine.memory import (
+                ConceptCapsuleStore,
+                _capsule_completeness,
+                _capsule_fingerprint_scope_complete,
+                portfolio_concept_overview,
+            )
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
@@ -219,6 +224,36 @@ class ProposalCuesMixin:
             fp_fn = getattr(self, "_task_fingerprint", None)
             fp = ([t for t in fp_fn(state, state.best()) if not str(t).startswith("param:")]
                   if callable(fp_fn) else [])
+
+            scope_unknown = fingerprint_unknown = fingerprint_omitted = direction_unknown = 0
+            for row in capsules:
+                if rid and str(row.get("run_id") or "") == rid:
+                    continue
+                persisted_direction = row.get("direction")
+                if not valid_live_direction(persisted_direction):
+                    scope_unknown += 1
+                    direction_unknown += 1
+                    continue
+                if persisted_direction != current_direction:
+                    continue
+                if tid and str(row.get("task_id") or "") == tid:
+                    continue
+                if not tid and not fp:
+                    scope_unknown += 1
+                    continue
+                if not _capsule_fingerprint_scope_complete(row):
+                    scope_unknown += 1
+                    meta = _capsule_completeness(
+                        row, "fingerprint", len(row.get("fingerprint") or []))
+                    fingerprint_unknown += int(meta is None or meta[0] is None)
+                    fingerprint_omitted += int(meta[1] or 0) if meta is not None else 0
+            concept_scope = {
+                "scope_complete": scope_unknown == 0,
+                "scope_unknown_capsules": scope_unknown,
+                "scope_fingerprint_unknown_capsules": fingerprint_unknown,
+                "scope_fingerprint_items_omitted": fingerprint_omitted,
+                "scope_direction_unknown_capsules": direction_unknown,
+            }
 
             def _scoped(row, *, capsule: bool = False):
                 if rid and str(row.get("run_id") or "") == rid:
@@ -259,14 +294,24 @@ class ProposalCuesMixin:
             overview = (portfolio_concept_overview(capsules,
                         aliases=load_concept_aliases(base), splits=load_concept_splits(base))
                         if capsules else None)
-            if not lessons and not overview and not research:
+            if (not lessons and not overview and not research
+                    and concept_scope["scope_complete"]):
                 self._cross_run_advisory_receipt = {}
                 return ""
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                        structured=getattr(self, "_cross_run_structured_claims", False))
             pack = build_context_pack(claims, concept_overview=overview)
+            pack["concept_scope"] = concept_scope
             text = render_context_pack(pack)
+            if not concept_scope["scope_complete"]:
+                # CODEX AGENT: filtered unknown-scope capsules remain part of the model-visible receipt.
+                # Otherwise a live prompt with zero eligible rows silently turns unknown applicability into
+                # exact absence even though the fingerprint writer explicitly reported a lossy projection.
+                text += ("\nCross-run capsule applicability scope is PARTIAL: "
+                         f"{concept_scope['scope_unknown_capsules']} capsule(s) unclassified, "
+                         f"{concept_scope['scope_fingerprint_items_omitted']} fingerprint item(s) known "
+                         "omitted. Retained counts are lower bounds; absence is not proof.")
             text = cross_run_text(text, max_chars=16_000, single_line=False, entropy=True)
             # Digest the exact bounded structured pack behind the rendered prompt, not raw legacy stores.
             # A raw hash is both a credential oracle and an identity for bytes the model never received.
@@ -276,12 +321,13 @@ class ProposalCuesMixin:
                                 ensure_ascii=False, sort_keys=True, default=str,
                                 separators=(",", ":")).encode("utf-8")
             self._cross_run_advisory_receipt = {
-                "v": 1,
+                "v": 2,
                 "scope_task": cross_run_text(
                     tid, max_chars=500, single_line=True, entropy=False),
                 "excluded_run": cross_run_text(
                     rid, max_chars=500, single_line=True, entropy=False),
                 "n_lessons": len(lessons), "n_capsules": len(capsules), "n_research": len(research),
+                "concept_scope": concept_scope,
                 "corpus_digest": hashlib.sha256(corpus).hexdigest(),
                 "render_digest": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             }

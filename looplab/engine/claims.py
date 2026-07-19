@@ -1176,7 +1176,7 @@ _INTENTS = ("failed", "contested", "worked", "explore")
 # Document ids are a stable identity for the same searchable statement/concept.  The corpus digest has a
 # separate schema because it also commits to aggregate source receipts that do not belong in every doc id.
 _RETRIEVAL_DOCUMENT_VERSION = 2
-_RETRIEVAL_CORPUS_VERSION = 3
+_RETRIEVAL_CORPUS_VERSION = 4
 _INTENT_SCORE_BONUS = 0.001
 _CAVEAT_SCORE_RATIO = 0.50
 _CAVEAT_QUERY_COVERAGE = 0.10
@@ -1238,7 +1238,8 @@ def _preselect_retrieval_docs(docs, query: str, limit: int):
 
 def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, capsules=None,
                        research_claims=None, scope_task: str = "", contradiction_quota: float = 0.34,
-                       max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None) -> dict:
+                       max_corpus: int = 2000, structured: bool = False, intent: Optional[str] = None,
+                       scope_receipt: Optional[dict] = None) -> dict:
     """CR2a retrieval planner (§21.20.5, full CR): RRF-fuse the portfolio's cross-run KNOWLEDGE — claims
     (epistemic state / operator maturity) + concepts (#runs) — over the shipped `HybridRetriever`
     (lexical + BM25 + vector; reuses hybrid_merge, NO new fuser), then shape the ranked recall with:
@@ -1251,8 +1252,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     - a bounded corpus (`max_corpus`, truncation REPORTED not silent) + a why-recalled RECEIPT (intent,
       quota, corpus digest, degraded-channel note, per-hit rank).
 
-    Every source is SCOPED before indexing: pass scoped `lessons`/`capsules`, and `scope_task` filters the
-    D8 research claims to that task so a task-bound agent cannot retrieve another task's claims (CODEX).
+    Every source is SCOPED before indexing: pass scoped `lessons`/`capsules` plus their aggregate
+    `scope_receipt`, and `scope_task` filters the D8 research claims to that task so a task-bound agent
+    cannot retrieve another task's claims (CODEX).
     Operator-rejected claims never enter the corpus. Advisory; pure w.r.t. the passed/loaded stores."""
     from pathlib import Path
 
@@ -1290,6 +1292,34 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         "source_concepts_omitted": int(overview.get("source_concepts_omitted", 0) or 0),
         "source_outcomes_omitted": int(overview.get("source_outcomes_omitted", 0) or 0),
     }
+    scope_keys = (
+        "scope_unknown_capsules", "scope_fingerprint_unknown_capsules",
+        "scope_fingerprint_items_omitted", "scope_direction_unknown_capsules",
+    )
+    if scope_receipt is None:
+        scope_source = {"scope_receipt_known": True, "scope_complete": True,
+                        **{key: 0 for key in scope_keys}}
+    else:
+        source = scope_receipt if isinstance(scope_receipt, dict) else {}
+        counts_valid = all(
+            isinstance(source.get(key), int) and not isinstance(source.get(key), bool)
+            and source.get(key) >= 0 for key in scope_keys
+        )
+        complete_valid = type(source.get("scope_complete")) is bool
+        unknown = source.get("scope_unknown_capsules") if counts_valid else 0
+        fingerprint_unknown = source.get("scope_fingerprint_unknown_capsules", 0) if counts_valid else 0
+        direction_unknown = source.get("scope_direction_unknown_capsules", 0) if counts_valid else 0
+        consistent = (complete_valid and counts_valid
+                      and source.get("scope_complete") == (unknown == 0)
+                      and fingerprint_unknown + direction_unknown <= unknown)
+        scope_source = {
+            "scope_receipt_known": consistent,
+            # CODEX AGENT: a caller-supplied malformed applicability receipt fails closed. Retrieval may
+            # retain its positive documents, but neither an empty result nor a frequency is exact.
+            "scope_complete": consistent and source.get("scope_complete") is True,
+            **{key: source.get(key) if counts_valid else 0 for key in scope_keys},
+        }
+    concept_source.update(scope_source)
     docs: list[tuple[str, str, dict]] = []
     for c in claims:
         evidence_digest = _json_digest({"support": c.get("support", []), "oppose": c.get("oppose", []),

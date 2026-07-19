@@ -61,7 +61,9 @@ within-run rank signs against the full valid outcome field before retaining the 
 concept IDs and outcome keys are never persisted as evidence and count as omitted input, so their removal cannot
 produce `complete=true`; an invalid direction is rejected instead of being coerced into inverted `min` evidence.
 A capped fingerprint, or a legacy v2 row without its fingerprint receipt, remains usable for an exact
-`task_id` but cannot authorize fuzzy related-task transfer. A legacy v2 row without either concept triplet
+`task_id` but cannot authorize fuzzy related-task transfer. Bound tools and proactive context retain an
+aggregate `scope_complete` / `scope_unknown_capsules` receipt for those excluded rows, so a filtered empty
+result is reported as unknown rather than proof that no applicable run exists. A legacy v2 row without either concept triplet
 remains readable for its positive retained
 concept/outcome observations, but its source totals are **unknown**, the portfolio projection is partial, and its
 old `concept_signs` are ignored because the former writer may have calculated them after truncation. Overview,

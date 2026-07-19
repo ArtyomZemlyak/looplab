@@ -483,7 +483,21 @@ def test_bound_related_scope_rejects_capsule_with_unknown_fingerprint_projection
     exact.bind_state(SimpleNamespace(
         task_id="foreign", goal="totally different words", direction="max"))
 
-    assert "hard-neg" not in related.execute("cross_run_prior_attempts", {"idea": "hard-neg"})
+    prior = related.execute("cross_run_prior_attempts", {"idea": "hard-neg"})
+    atlas = related.execute("cross_run_atlas", {})
+    concept_map = related.execute("cross_run_concept_map", {})
+    search = related.execute("cross_run_search", {"query": "hard-neg"})
+    similar = related.execute("similar_runs", {})
+    slugs = related.execute(
+        "find_concept_slugs", {"query": "hard-neg", "scope": "cross"})
+    card = related.execute("concept_card", {"slug": "data/hard-neg"})
+
+    for output in (prior, atlas, concept_map, search, slugs, card):
+        assert "PARTIAL capsule applicability scope" in output
+        assert "absence is not proof" in output
+    assert "hard-neg" not in prior
+    assert "scope_complete=false" in search and "scope_complete=false" in similar
+    assert "task_scope_complete=false" in card
     assert "hard-neg" in exact.execute("cross_run_prior_attempts", {"idea": "hard-neg"})
 
 
@@ -991,7 +1005,8 @@ def test_concept_card_does_not_claim_complete_denominators_from_matching_rows_on
     assert "consistently RANKED BETTER" not in out
     assert "paired in retained records with:" in out
     assert "eligible_prior_runs=3 matching_scoped_runs=2" in out
-    assert "task_source_complete=false global_source_complete=false" in out
+    assert "task_source_complete=false task_scope_complete=true" in out
+    assert "global_source_complete=false" in out
 
 
 def test_concept_card_fuzzy_resolves_respelling(tmp_path):
