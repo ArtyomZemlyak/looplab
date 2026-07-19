@@ -72,6 +72,10 @@ capsule file also has an additive read-health receipt (`source_store_complete`, 
 malformed/schema-invalid/duplicate quarantine counts). Quarantined content is never returned as evidence, but
 any quarantined durable row forces `source_complete=false`; scope filtering and de-duplication preserve that
 receipt so an unreadable row cannot be laundered into an exact zero or a "new concept" claim.
+`partial_capsules` is deliberately orthogonal: it counts readable capsule rows with incomplete/unknown
+per-capsule bounds, so it can be zero while file-level quarantine still makes `source_complete=false`.
+Consumers must treat `source_complete` as the authority and must never infer completeness from
+`partial_capsules == 0`.
 
 The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
 Its core distinction is:
