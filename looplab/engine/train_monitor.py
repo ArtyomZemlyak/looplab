@@ -38,6 +38,11 @@ class TrainingVerdict(BaseModel):
                     "stuck at its initialization value (not learning), or an uncaught exception.")
     reason: str = Field(description="One short sentence naming the SPECIFIC log evidence for the status.")
     confidence: float = Field(default=0.5, description="Confidence in the status, 0.0 to 1.0.")
+    recheck_after_s: Optional[float] = Field(
+        default=None,
+        description="Optional: seconds until you want to look again. Use a LARGER value when the run is "
+                    "healthy and steady (there is no need to watch a boring, well-behaved run closely), a "
+                    "SMALLER value when you saw something to keep an eye on. Omit to keep the default cadence.")
 
 
 # The observer's framing. A contract: it fixes the observer's role (the engineer who wrote THIS loop),
@@ -72,6 +77,29 @@ def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000
             records.append(seg)
     out = "\n".join(records[-max_lines:])
     return out[-max_chars:] if len(out) > max_chars else out
+
+
+# Phase 2 self-pacing constants. After this many CONSECUTIVE healthy verdicts (and no explicit
+# agent-requested recheck), the monitor geometrically backs OFF — a steadily-healthy run does not need
+# close watching — capped so it never fully stops (a late failure is still caught, just cheaply).
+_HEALTHY_BACKOFF_K = 3
+_MONITOR_CADENCE_CAP_S = 3600.0     # never wait more than an hour between checks (stays safe on late failures)
+
+
+def next_monitor_sleep(base: float, *, status: Optional[str] = None,
+                       recheck_after_s: Optional[float] = None, healthy_streak: int = 0,
+                       backoff_after: int = _HEALTHY_BACKOFF_K, cap: float = _MONITOR_CADENCE_CAP_S) -> float:
+    """The delay until the NEXT check, given the base cadence and the latest verdict. Pure/deterministic.
+
+    Precedence: an explicit agent-requested `recheck_after_s` wins (the observer self-paces — but never
+    faster than `base`, to bound LLM cost, and never slower than `cap`); otherwise a run that has been
+    healthy for `backoff_after`+ consecutive checks backs off geometrically (×2 each extra healthy tick,
+    bounded); everything else keeps the base cadence."""
+    if isinstance(recheck_after_s, (int, float)) and not isinstance(recheck_after_s, bool) and recheck_after_s > 0:
+        return min(cap, max(base, float(recheck_after_s)))
+    if status == "healthy" and healthy_streak >= backoff_after:
+        return min(cap, base * (2.0 ** min(healthy_streak - backoff_after + 1, 6)))
+    return base
 
 
 def active_training_log(workdir) -> Optional[Path]:
@@ -115,6 +143,25 @@ class TrainingMonitorMixin:
     orchestrator.py). Gated on `self._train_monitor`; started as a sibling task in `_evaluate`'s task
     group so it lives exactly as long as the eval and is cancelled with it."""
 
+    def _monitor_cadence(self) -> float:
+        """The BASE check interval, derived from the per-experiment time budget so a short training is
+        watched often and a multi-hour one sparsely (a fixed 600s would miss a 5-minute run entirely and
+        over-watch a 5-hour one). ~10% of the budget, clamped to [30s, 30min], then floored by the config
+        `train_monitor_interval_s` so the user can force MORE-frequent checks. Falls back to the config
+        interval when no budget is known (solution.py path / no eval_spec)."""
+        cfg = max(0.02, float(getattr(self, "_train_monitor_interval_s", 600.0) or 600.0))
+        budget = None
+        fn = getattr(self, "_experiment_time_budget", None)
+        if callable(fn):
+            try:
+                budget = fn()
+            except Exception:  # noqa: BLE001 — cadence is advisory; a budget hiccup just uses the config
+                budget = None
+        if isinstance(budget, (int, float)) and not isinstance(budget, bool) and budget > 0:
+            derived = min(1800.0, max(30.0, float(budget) * 0.1))
+            return min(cfg, derived)         # config is an upper bound: the user can only tighten it
+        return cfg
+
     def _training_verdict(self, digest: str, context: str) -> Optional[TrainingVerdict]:
         """One-shot LLM judgment of the live log (SYNC — the caller runs it in a worker thread). Uses the
         Developer's client (the Developer wrote the loop, so it knows what its own logs should look like)
@@ -151,12 +198,15 @@ class TrainingMonitorMixin:
         import anyio
 
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_TRAIN_MONITOR_ALERT
-        # A tiny floor guards only against a pathological busy-spin from a mis-set sub-millisecond value
-        # (the config field is gt=0; the product default is 600s). It is NOT a "minimum useful cadence".
-        interval = max(0.02, float(getattr(self, "_train_monitor_interval_s", 600.0) or 600.0))
+        # Base cadence derived from the per-experiment time budget (Phase 2): a short training is watched
+        # often, a multi-hour one sparsely. The next delay adapts per verdict — the observer self-paces
+        # (LLM `recheck_after_s`) and a steadily-healthy run backs off — via `next_monitor_sleep`.
+        base = self._monitor_cadence()
+        next_sleep = base
         last_digest: Optional[str] = None
+        healthy_streak = 0
         while True:
-            await anyio.sleep(interval)      # only cancellation (eval finished) unwinds the task, from here
+            await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
             if cancel.is_set():
                 return
             try:
@@ -169,7 +219,12 @@ class TrainingMonitorMixin:
                 with self.tracer.span("train_monitor", node_id=node_id) as sp:
                     sp.set_many(generation=generation,
                                 digest_lines=tail.count("\n") + 1, digest_chars=len(tail))
-                    verdict = await anyio.to_thread.run_sync(self._training_verdict, tail, context)
+                    # abandon_on_cancel=True: when the eval finishes and the task group cancels, node
+                    # completion must NOT wait for an in-flight LLM call (an endpoint timeout+retry could be
+                    # minutes). Cancel unwinds immediately; the abandoned thread finishes in the background and
+                    # its (now-moot) verdict is discarded. The verdict is advisory, so losing it is harmless.
+                    verdict = await anyio.to_thread.run_sync(
+                        self._training_verdict, tail, context, abandon_on_cancel=True)
                     if verdict is not None:
                         conf = max(0.0, min(1.0, float(verdict.confidence)))
                         # The reason is LLM text derived from the raw log; redact it before it lands in the
@@ -178,6 +233,11 @@ class TrainingMonitorMixin:
                         reason = (verdict.reason or "")
                         reason = (_redact(reason) if callable(_redact) else reason)[:300]
                         sp.set_many(status=verdict.status, confidence=round(conf, 3), reason=reason[:200])
+                        healthy_streak = healthy_streak + 1 if verdict.status == "healthy" else 0
+                        next_sleep = next_monitor_sleep(
+                            base, status=verdict.status, recheck_after_s=verdict.recheck_after_s,
+                            healthy_streak=healthy_streak)
+                        sp.set("next_check_s", round(next_sleep, 2))
                         if verdict.status != "healthy":
                             # Advisory flag only. DIAGNOSTIC => the fold never reads it, so appending it from
                             # this concurrent monitor task is splice-neutral and replay-safe by construction.

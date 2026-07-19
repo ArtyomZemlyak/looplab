@@ -134,12 +134,14 @@ class _FakeDeveloper:
 
 
 class _VerdictHost(TrainingMonitorMixin):
-    def __init__(self, tracer, developer, interval=0.05):
+    def __init__(self, tracer, developer, interval=0.05, redact=None):
         self.tracer = tracer
         self.developer = developer
         self._train_monitor_interval_s = interval
         self._write_lock = anyio.Lock()
         self.store = _FakeStore()
+        if redact is not None:
+            self._redact = redact
 
 
 class _FakeStore:
@@ -150,9 +152,9 @@ class _FakeStore:
         self.events.append((event_type, data))
 
 
-def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22):
+def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
-    host = _VerdictHost(tracer, developer, interval=0.05)
+    host = _VerdictHost(tracer, developer, interval=0.05, redact=redact)
     cancel = threading.Event()
 
     async def drive():
@@ -214,3 +216,91 @@ def test_no_client_degrades_to_trace_only_observation(tmp_path):
     tm = [s for s in spans if s.get("name") == "train_monitor"]
     assert tm, "still observes (Phase 0 trace) without an LLM client"
     assert "status" not in tm[0]["attributes"]             # no verdict without a client
+
+
+def test_watch_verdict_alerts_and_confidence_is_clamped(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("epoch 3 val_loss rising\n")
+    client = _FakeClient({"status": "watch", "reason": "val loss ticking up", "confidence": 1.7})
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+
+    alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert alerts and alerts[0]["status"] == "watch"       # non-healthy that isn't 'broken' still alerts
+    assert alerts[0]["confidence"] == 1.0                  # out-of-range confidence clamped into [0, 1]
+
+
+def test_reason_is_redacted_before_storage(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: nan\n")
+    client = _FakeClient({"status": "broken", "reason": "crashed near SECRET-TOKEN in the log",
+                          "confidence": 0.9})
+    host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client),
+        redact=lambda s: s.replace("SECRET-TOKEN", "[redacted]"))
+
+    alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert alerts and "SECRET-TOKEN" not in alerts[0]["reason"] and "[redacted]" in alerts[0]["reason"]
+    tm = [s for s in spans if s.get("name") == "train_monitor"]
+    assert "SECRET-TOKEN" not in tm[0]["attributes"].get("reason", "")
+
+
+class _RaisingClient:
+    def __init__(self):
+        self.calls = 0
+
+    def complete_tool(self, messages, schema):
+        self.calls += 1
+        raise RuntimeError("endpoint is down")
+
+
+def test_llm_error_skips_verdict_but_keeps_watching(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\n")
+    client = _RaisingClient()
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+
+    assert client.calls >= 1                                # the LLM WAS attempted...
+    assert [e for e in host.store.events if e[0] == EV_TRAIN_MONITOR_ALERT] == []   # ...and its failure
+    tm = [s for s in spans if s.get("name") == "train_monitor"]                     # never crashed the task
+    assert tm and "status" not in tm[0]["attributes"]      # observed (trace) but no verdict this tick
+
+
+# --------------------------------------------------------------------------- Phase 2: adaptive cadence
+def test_next_monitor_sleep_pacing():
+    from looplab.engine.train_monitor import _HEALTHY_BACKOFF_K, next_monitor_sleep as nxt
+    base = 100.0
+    assert nxt(base) == base                               # nothing special -> base
+    assert nxt(base, status="watch", healthy_streak=0) == base
+    # agent self-pace: honored, but never faster than base (cost bound) and never slower than the cap
+    assert nxt(base, recheck_after_s=250) == 250.0
+    assert nxt(base, recheck_after_s=10) == base
+    assert nxt(base, recheck_after_s=999999) == 3600.0
+    assert nxt(base, recheck_after_s=0) == base            # non-positive ignored
+    assert nxt(base, recheck_after_s=True) == base         # bool is not a seconds value
+    # steadily-healthy -> geometric backoff after K consecutive; recheck still takes precedence
+    assert nxt(base, status="healthy", healthy_streak=_HEALTHY_BACKOFF_K - 1) == base
+    assert nxt(base, status="healthy", healthy_streak=_HEALTHY_BACKOFF_K) == base * 2
+    assert nxt(base, status="healthy", healthy_streak=_HEALTHY_BACKOFF_K + 1) == base * 4
+    assert nxt(base, status="healthy", healthy_streak=99, recheck_after_s=150) == 150.0
+
+
+class _CadenceHost(TrainingMonitorMixin):
+    def __init__(self, cfg, budget):
+        self._train_monitor_interval_s = cfg
+        self._budget = budget
+
+    def _experiment_time_budget(self):
+        return self._budget
+
+
+def test_monitor_cadence_derives_from_budget():
+    # ~10% of the per-experiment budget, clamped [30s, 30min], then capped by the config interval.
+    assert _CadenceHost(600.0, 300.0)._monitor_cadence() == 30.0      # 10% of 300 = 30 (< config)
+    assert _CadenceHost(600.0, 1800.0)._monitor_cadence() == 180.0    # 10% of 1800 = 180
+    assert _CadenceHost(600.0, 18000.0)._monitor_cadence() == 600.0   # 10% = 1800 but config 600 caps it
+    assert _CadenceHost(600.0, 60.0)._monitor_cadence() == 30.0       # floored at 30s
+    assert _CadenceHost(600.0, None)._monitor_cadence() == 600.0      # no budget -> config
+    assert _CadenceHost(600.0, 0)._monitor_cadence() == 600.0         # non-positive budget -> config
