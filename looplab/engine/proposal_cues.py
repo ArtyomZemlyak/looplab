@@ -7,6 +7,8 @@ orchestrator.py and foresight.py) and asserts every hint attr set here is in
 `agents/roles.py::RESEARCHER_HINT_ATTRS`."""
 from __future__ import annotations
 
+import math
+
 from looplab.core.models import NodeStatus, RunState
 from looplab.trust.cross_run import (cross_run_text, same_live_direction,
                                      sanitize_cross_run_projection, valid_live_direction)
@@ -43,6 +45,34 @@ class ProposalCuesMixin:
                           "exploit the leader with cheap experiments — budget nearly spent")
                 hint += (f"\nBudget guidance: {rem:.0f}s of {max_es:.0f}s eval budget remain "
                          f"({frac:.0%}); {stance}.")
+        # Experiment TIME-BUDGET cue (repo tasks): a training that cannot finish inside the per-experiment
+        # wall-clock limit is KILLED and yields NO metric — pure waste. Real runs configured 26h/7h
+        # trainings against a ~5h limit and timed out repeatedly because no role SAW the limit or estimated
+        # fit. Surface the operative limit + prior nodes' MEASURED eval wall-clock (fit vs killed) so the
+        # Researcher sizes epochs/steps to fit and probes per-step time when it's unknown.
+        if self._repo_spec:
+            timed = sorted((n for n in state.nodes.values()
+                            if isinstance(getattr(n, "eval_seconds", None), (int, float))
+                            and n.eval_seconds and n.eval_seconds > 0),
+                           key=lambda n: n.id, reverse=True)[:3]
+            calib = "; ".join(
+                f"node {n.id}: {n.eval_seconds / 60:.0f} min"
+                + (" — FAILED/killed" if n.status is NodeStatus.failed else " (completed)")
+                for n in timed)
+            limit = (self.timeout if isinstance(self.timeout, (int, float))
+                     and math.isfinite(self.timeout) and self.timeout > 0 else None)
+            limit_txt = (f"each experiment (train+eval) must finish within ~{limit:.0f}s "
+                         f"(~{limit / 3600.0:.1f}h)" if limit else
+                         "each experiment runs under a fixed wall-clock budget")
+            hint += (
+                f"\nExperiment TIME BUDGET — {limit_txt}. A training that exceeds it is KILLED and yields "
+                f"NO metric (pure waste). BEFORE fixing epochs/steps, ESTIMATE the wall-clock: "
+                f"total_steps = epochs × ceil(train_rows / batch_size); total_steps × per-step-time must "
+                f"stay WELL under the budget (leave room for data prep + eval). If per-step time on THIS "
+                f"data/hardware is unknown, run a SHORT probe (a few hundred steps or a subsample) to "
+                f"measure it FIRST, then size epochs to fit — a smaller experiment that COMPLETES beats a "
+                f"bigger one that gets killed."
+                + (f" Measured so far — {calib}." if calib else ""))
         if self._failure_reflection:
             fails = sorted((n for n in state.nodes.values()
                             if n.status is NodeStatus.failed and n.error_reason),

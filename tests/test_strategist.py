@@ -366,6 +366,29 @@ def test_budget_aware_hint_includes_remaining(tmp_path):
     assert "Budget guidance" not in getattr(eng.researcher, "_complexity_hint", "")
 
 
+def test_experiment_time_budget_cue_surfaces_limit_and_calibration(tmp_path):
+    # The Researcher must SEE the per-experiment wall-clock limit and prior nodes' MEASURED eval time
+    # (fit vs killed) so it sizes epochs to fit — the fix for repeatedly configuring trainings that
+    # time out with no metric. Fires for repo tasks (self._repo_spec truthy) with a finite timeout.
+    eng = _engine(tmp_path / "tb")
+    eng._repo_spec = {"editables": []}          # make it look like a repo task
+    eng.timeout = 18000.0                        # ~5h per-experiment budget
+    st = RunState(direction="max")
+    st.nodes[0] = Node(id=0, operator="draft", idea=Idea(operator="draft", params={"x": 1.0}),
+                       metric=None, status=NodeStatus.failed, eval_seconds=5400.0)     # killed at 90 min
+    st.nodes[1] = Node(id=1, operator="draft", idea=Idea(operator="draft", params={"x": 2.0}),
+                       metric=0.7, status=NodeStatus.evaluated, eval_seconds=3480.0)   # completed in 58 min
+    eng._set_complexity_hint(st, None)
+    hint = getattr(eng.researcher, "_complexity_hint", "")
+    assert "Experiment TIME BUDGET" in hint and "~5.0h" in hint
+    assert "ESTIMATE the wall-clock" in hint and "probe" in hint
+    assert "node 1: 58 min (completed)" in hint and "node 0: 90 min — FAILED/killed" in hint
+    # not a repo task -> the cue stays silent (no false alarm on toy/dataset runs without a repo)
+    eng._repo_spec = {}
+    eng._set_complexity_hint(st, None)
+    assert "Experiment TIME BUDGET" not in getattr(eng.researcher, "_complexity_hint", "")
+
+
 def test_run_base_hint_requires_explicit_delta_mode(tmp_path):
     eng = _engine(tmp_path / "concept-mode", concept_run_base=True)
     st = RunState(direction="min", run_base_concepts=["base/x"])
