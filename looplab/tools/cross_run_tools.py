@@ -899,7 +899,11 @@ class CrossRunTools:
                 return (f"No existing slug matches {_safe_text(query, 256)!r} in scope '{want}' — "
                         "it looks NEW. Mint it as `axis/name` (reuse an existing AXIS if one fits; call "
                         "with no query to list axes).\n" + _receipt(candidates=0, returned=0))
-            scored.sort()                            # own before cross before global; then best match first
+            # Sort by the ORDERABLE prefix only (rank, -score, slug). The 4th tuple element is a `meta`
+            # dict — never put it in the comparison key: `scored.sort()` would raise TypeError the moment
+            # the first three tie, and execute() would swallow it into "(cross-run tool unavailable)".
+            scored.sort(key=lambda t: (t[0], t[1], t[2]))   # own < cross < global; then best match first
+
             _label = {"own": "this run", "cross": "cross-run", "global": "global map",
                       "unknown": "relation to current run unknown"}
             order = ("own→cross→global" if (self._concept_projection_status == "complete"
