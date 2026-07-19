@@ -15,10 +15,9 @@ export const ATLAS_SOURCE_KEYS = Object.freeze([
 
 const record = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
 const list = value => Array.isArray(value) ? value : []
-const count = (value, fallback = 0) => {
-  const parsed = Number(value)
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : fallback
-}
+// CODEX AGENT: JSON booleans and numeric strings are not receipt counts. Number-coercing them would
+// fabricate evidence (true -> 1) or let an untyped total hide rows omitted by the client projection.
+const count = (value, fallback = 0) => Number.isSafeInteger(value) && value >= 0 ? value : fallback
 
 const thinProjectionTotal = (atlas, included, fallback) => {
   const total = atlas.thin_coverage_total

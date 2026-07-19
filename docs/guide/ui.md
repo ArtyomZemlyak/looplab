@@ -215,7 +215,8 @@ The run workspace's legacy **Analysis → Cross-run** panel is likewise not a sc
 It retains bounded same-task-ID navigation and per-run objective observations, but does not rank, crown, draw
 relative bars, or overlay values on one axis. A shared `task_id` does not bind metric name/unit, dataset and
 evaluation identity, or a comparison protocol; those operations remain unavailable until a validated
-`ComparisonContract` exists.
+`ComparisonContract` exists. If the displayed run has no non-blank `task_id`, the panel fails closed with no
+observations: multiple legacy rows with a missing identity are not members of one task.
 
 Old run links may still contain a `focus` query from the retired Direction surface. The router does not
 silently apply it: the value is ignored and the UI announces **“Legacy Direction focus is no longer

@@ -1115,8 +1115,10 @@ const CROSS_RUN_OBSERVATION_LIMIT = 100
 export function CrossRunPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
-  const task = typeof state.task_id === 'string' ? state.task_id : ''
-  const observations = runs.filter(r => r.task_id === task)
+  const task = typeof state.task_id === 'string' && state.task_id.trim() ? state.task_id : ''
+  // CODEX AGENT: an absent task identity is not a shared identity. Never combine legacy rows merely
+  // because they all encode the missing value as an empty string.
+  const observations = (task ? runs.filter(r => r.task_id === task) : [])
     .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
     .filter(r => r.m != null)
   const rows = observations.slice(0, CROSS_RUN_OBSERVATION_LIMIT)
@@ -1130,11 +1132,17 @@ export function CrossRunPanel({ state, onClose }) {
         <span className="muted">task ID:</span><code>{task || 'not recorded'}</code>
         <span className="muted">{rows.length} shown · comparison unavailable</span>
       </div>}
-      {resource.data && <div className="notice resource-warning" role="status">
-        <b>Cross-run ranking unavailable.</b>
-        <span> A shared task ID does not bind metric name/unit, dataset and evaluation identity, or a
-          comparison protocol. Values below remain per-run observations.</span>
-      </div>}
+      {resource.data && (task
+        ? <div className="notice resource-warning" role="status">
+            <b>Cross-run ranking unavailable.</b>
+            <span> A shared task ID does not bind metric name/unit, dataset and evaluation identity, or a
+              comparison protocol. Values below remain per-run observations.</span>
+          </div>
+        : <div className="notice resource-warning" role="status">
+            <b>Same-task observations unavailable.</b>
+            <span> This run has no recorded task ID, so no portfolio row can be bound to it. Rows with
+              missing identities are never grouped.</span>
+          </div>)}
       {rows.length
         ? <DataTable caption="Same-task per-run metric observations" card={false}><table className="tbl"><thead><tr><th>run</th><th>recorded objective</th><th>direction</th><th>nodes</th><th>status</th></tr></thead><tbody>
             {rows.map(r => <tr key={r.run_id}>
@@ -1143,7 +1151,8 @@ export function CrossRunPanel({ state, onClose }) {
               <td className="muted">{r.direction}</td><td className="muted">{r.nodes}</td>
               <td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td></tr>)}
           </tbody></table></DataTable>
-        : resource.state === 'ready' && <div className="muted">No per-run metric observations for this task ID yet.</div>}
+        : resource.state === 'ready' && task
+          && <div className="muted">No per-run metric observations for this task ID yet.</div>}
       {hidden > 0 && <div className="muted" style={{ marginTop: 8 }}>
         {hidden} additional observation{hidden === 1 ? '' : 's'} omitted by the client render limit.
       </div>}

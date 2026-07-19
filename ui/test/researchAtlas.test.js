@@ -242,6 +242,30 @@ test('Atlas derives evidence balance from sanitized totals instead of payload la
   ])
 })
 
+test('Atlas never coerces booleans or numeric strings into evidence and ledger totals', () => {
+  const view = buildResearchAtlasView({
+    n_runs: true,
+    n_concepts: '8',
+    n_contested: '3',
+  }, {
+    n: '9',
+    claims: [{
+      ...claim(20), support: [], oppose: [], unverified: [], contradicts: [],
+      n_support: true, n_oppose: '2', n_unverified: false, n_contradicts: '4',
+    }],
+  }, { n: true, entries: [] })
+
+  assert.deepEqual(view.totals, {
+    runs: 1, concepts: 0, claims: 1, contested: 0, curation: 0,
+  })
+  assert.deepEqual(
+    [view.claims[0].nSupport, view.claims[0].nOppose,
+      view.claims[0].nUnverified, view.claims[0].nContradicts],
+    [0, 0, 0, 0],
+  )
+  assert.equal(view.claims[0].epistemic, 'inconclusive')
+})
+
 test('Atlas never reconstructs a positive from a partial D8 prefix and renders its warning', async () => {
   const partial = {
     source_complete: false,

@@ -144,6 +144,19 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     assert.equal(document.querySelectorAll('tbody tr').length, 100)
     assert.match(document.body.textContent, /2 additional observations omitted by the client render limit/)
 
+    await render(panels.CrossRunPanel, { key: 'missing-task', state: { task_id: '' } })
+    await reply(requests.at(-1), [{
+      run_id: 'legacy-empty-1', task_id: '', direction: 'max', best_metric: 1,
+      best_confirmed: null, nodes: 1, finished: true, phase: 'finished', label: 'Legacy one',
+    }, {
+      run_id: 'legacy-empty-2', task_id: '', direction: 'min', best_metric: 2,
+      best_confirmed: null, nodes: 1, finished: true, phase: 'finished', label: 'Legacy two',
+    }])
+    assert.match(document.body.textContent,
+      /Same-task observations unavailable.*no recorded task ID.*missing identities are never grouped/is)
+    assert.equal(document.querySelectorAll('tbody tr').length, 0)
+    assert.doesNotMatch(document.body.textContent, /Legacy one|Legacy two/)
+
     await render(panels.GpuPanel)
     const hungRequest = requests.at(-1)
     assert.equal(hungRequest.options.signal.aborted, false)
