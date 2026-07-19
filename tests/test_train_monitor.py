@@ -341,6 +341,34 @@ def test_broken_verdict_does_not_kill_when_disabled(tmp_path):
     assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)    # but still flagged
 
 
+def test_llm_call_cap_stops_spending_but_keeps_observing(tmp_path, monkeypatch):
+    # Past the per-node LLM-call backstop the monitor keeps OBSERVING (trace) but stops calling the LLM,
+    # and marks the span `llm_capped` so the cap is never silent. Drive it by mutating the log each call.
+    import looplab.engine.train_monitor as tm
+    monkeypatch.setattr(tm, "_MAX_MONITOR_LLM_CALLS", 2)
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    logf = wd / "train.log"
+    logf.write_text("step 0 loss: 1.0\n")
+
+    class _AppendingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_tool(self, messages, schema):
+            self.calls += 1
+            with open(logf, "a", encoding="utf-8") as fh:   # change the log so the NEXT tick has a fresh digest
+                fh.write(f"step {self.calls} loss: {1.0 / (self.calls + 1):.3f}\n")
+            return {"status": "healthy", "reason": "ok", "confidence": 0.6}
+
+    client = _AppendingClient()
+    _host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.5)
+    assert client.calls == 2, f"LLM must stop at the cap (fired {client.calls})"
+    tm_spans = [s for s in spans if s.get("name") == "train_monitor"]
+    assert any(s["attributes"].get("llm_capped") for s in tm_spans)   # the cap is surfaced, never silent
+
+
 def test_monitor_cadence_derives_from_budget():
     # ~10% of the per-experiment budget, clamped [30s, 30min], then capped by the config interval.
     assert _CadenceHost(600.0, 300.0)._monitor_cadence() == 30.0      # 10% of 300 = 30 (< config)

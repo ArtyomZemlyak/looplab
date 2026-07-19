@@ -84,6 +84,10 @@ def training_log_digest(text: str, *, max_lines: int = 40, max_chars: int = 4000
 # close watching — capped so it never fully stops (a late failure is still caught, just cheaply).
 _HEALTHY_BACKOFF_K = 3
 _MONITOR_CADENCE_CAP_S = 3600.0     # never wait more than an hour between checks (stays safe on late failures)
+# Per-node LLM-call backstop. The adaptive cadence + healthy backoff already bound calls to ~budget/base
+# (≈150 even for a 24h eval); this is a never-normally-hit ceiling for a pathological always-changing,
+# never-healthy log. Past it the monitor keeps observing (trace) but stops spending on the LLM.
+_MAX_MONITOR_LLM_CALLS = 200
 
 
 def next_monitor_sleep(base: float, *, status: Optional[str] = None,
@@ -226,6 +230,7 @@ class TrainingMonitorMixin:
         next_sleep = base
         last_digest: Optional[str] = None
         healthy_streak = 0
+        llm_calls = 0
         while True:
             await anyio.sleep(next_sleep)    # only cancellation (eval finished) unwinds the task, from here
             if cancel.is_set():
@@ -240,12 +245,21 @@ class TrainingMonitorMixin:
                 with self.tracer.span("train_monitor", node_id=node_id) as sp:
                     sp.set_many(generation=generation,
                                 digest_lines=tail.count("\n") + 1, digest_chars=len(tail))
-                    # abandon_on_cancel=True: when the eval finishes and the task group cancels, node
-                    # completion must NOT wait for an in-flight LLM call (an endpoint timeout+retry could be
-                    # minutes). Cancel unwinds immediately; the abandoned thread finishes in the background and
-                    # its (now-moot) verdict is discarded. The verdict is advisory, so losing it is harmless.
-                    verdict = await anyio.to_thread.run_sync(
-                        self._training_verdict, tail, context, abandon_on_cancel=True)
+                    # Per-node backstop on LLM cost (the adaptive cadence + healthy-backoff are the primary
+                    # budget control; this only bounds a pathological run whose digest keeps changing while
+                    # staying non-healthy). Past the cap we keep OBSERVING (trace-only) but stop calling the
+                    # LLM. Surfaced on the span — a silent cap would read as "all healthy" when it isn't.
+                    verdict = None
+                    if llm_calls >= _MAX_MONITOR_LLM_CALLS:
+                        sp.set("llm_capped", True)
+                    else:
+                        # abandon_on_cancel=True: when the eval finishes and the task group cancels, node
+                        # completion must NOT wait for an in-flight LLM call (an endpoint timeout+retry could be
+                        # minutes). Cancel unwinds immediately; the abandoned thread finishes in the background
+                        # and its (now-moot) verdict is discarded. The verdict is advisory, so losing it is fine.
+                        verdict = await anyio.to_thread.run_sync(
+                            self._training_verdict, tail, context, abandon_on_cancel=True)
+                        llm_calls += 1
                     if verdict is not None:
                         conf = max(0.0, min(1.0, float(verdict.confidence)))
                         # The reason is LLM text derived from the raw log; redact it before it lands in the

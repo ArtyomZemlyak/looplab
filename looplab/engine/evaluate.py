@@ -200,9 +200,11 @@ class EvaluateMixin:
                     _tg.start_soon(_watch)
                     # Training-log monitor (off by default): a sibling task that tails this eval's live
                     # training log on a timer while it runs in the worker thread, asks the Developer to
-                    # judge its health, and records the verdict (advisory; never intervenes here).
-                    # Cancelled with the eval by `_tg.cancel_scope.cancel()` below.
-                    if getattr(self, "_train_monitor", False):
+                    # judge its health, and records the verdict (advisory unless kill is enabled).
+                    # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
+                    # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
+                    # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
+                    if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
                         _idea = getattr(node, "idea", None)
                         _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
                         _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
