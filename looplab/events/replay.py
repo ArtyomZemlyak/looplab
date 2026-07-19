@@ -266,16 +266,20 @@ def _on_node_building(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         return
     current = st.nodes.get(nid)
     if current is not None and (nid in st.aborted_nodes or current.tombstoned):
-        if _building_matches_event(st, d, nid):
-            st.building = None
+        _clear_build_marker(st, d, nid)
         return
     if current is not None and not _generation_matches(current, d):
         return
-    st.building = {"node_id": nid, "operator": d.get("operator"),
-                   "parent_ids": d.get("parent_ids", []), "started": e.ts}
+    marker = {"node_id": nid, "operator": d.get("operator"),
+              "parent_ids": d.get("parent_ids", []), "started": e.ts}
     generation = _event_generation(d)
     if generation is not _MISSING:
-        st.building["generation"] = generation
+        marker["generation"] = generation
+    # Set BOTH the singular back-compat marker and this node's entry in the multi-build collection
+    # (same dict object). A concurrent sibling's node_building overwrites `st.building` (last wins) but
+    # only its OWN `st.buildings` key, so every in-flight build survives in the collection.
+    st.building = marker
+    st.buildings[nid] = marker
 
 def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # Don't let a duplicate node_created RESURRECT a settled node (invariant #2 "first terminal
@@ -302,13 +306,11 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     # log) must not crash the WHOLE fold — skip the bad event instead (the engine, sole writer,
     # always round-trips a validated Idea, so this only fires on a corrupt log).
     if not _parent_generation_map_matches(st, d):
-        if _building_matches_event(st, d, nid):
-            st.building = None
+        _clear_build_marker(st, d, nid)
         return
     current = st.nodes.get(nid)
     if current is not None and (nid in st.aborted_nodes or current.tombstoned):
-        if _building_matches_event(st, d, nid):
-            st.building = None
+        _clear_build_marker(st, d, nid)
         return
     generation = _event_generation(d)
     if generation is _MISSING:
@@ -464,8 +466,7 @@ def _on_node_created(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         st.approval_subject = None
         st.approval_generation = None
         st.approved_node_id = None
-    if _building_matches_event(st, d, n.id):
-        st.building = None          # the real node is here now — drop the "building" marker
+    _clear_build_marker(st, d, n.id)   # the real node is here now — drop the "building" marker(s)
 
 def _nonneg_seconds(v) -> float:
     """Coerce a PERSISTED eval-cost value to a FINITE, NON-NEGATIVE float before it enters the
@@ -551,13 +552,13 @@ def _event_generation(d: dict, *, legacy_attempt: bool = False):
     return generation if generation is not None and generation >= 0 else None
 
 
-def _building_matches_event(st: RunState, d: dict, nid: int) -> bool:
-    """Only let an event clear the transient marker for the same node lifecycle.
+def _marker_matches_event(marker: Optional[dict], d: dict, nid: int) -> bool:
+    """Core generation guard shared by the singular `st.building` and each per-node `st.buildings`
+    entry: only let an event clear the transient marker for the SAME node lifecycle.
 
     Reruns reuse node ids. A late generation-1 failure must not erase a generation-2 build marker.
     Historical markers were unstamped, so they retain the legacy id-only clear behaviour.
     """
-    marker = st.building
     if not marker or marker.get("node_id") != nid:
         return False
     marker_generation = _event_generation(marker)
@@ -566,6 +567,25 @@ def _building_matches_event(st: RunState, d: dict, nid: int) -> bool:
     event_generation = _event_generation(d, legacy_attempt=True)
     return (event_generation is not _MISSING and event_generation is not None
             and event_generation == marker_generation)
+
+
+def _building_matches_event(st: RunState, d: dict, nid: int) -> bool:
+    """Whether `d` clears the SINGULAR back-compat `st.building` marker for `nid`
+    (see `_marker_matches_event`)."""
+    return _marker_matches_event(st.building, d, nid)
+
+
+def _clear_build_marker(st: RunState, d: dict, nid: int) -> None:
+    """Clear the transient build marker for `nid` on ITS OWN created/terminal/reset/abort event —
+    BOTH the singular `st.building` (last concurrent build; back-compat) and the per-node
+    `st.buildings` entry, each gated on its own generation. Under `parallel_build>1` the singular
+    field holds only the last-appended build, so an EARLIER concurrent build's terminal matches its
+    `st.buildings` entry but NOT the singular; keying each off its own marker is exactly what stops
+    that entry from leaking a stale breathing 'building…' ghost."""
+    if _building_matches_event(st, d, nid):
+        st.building = None
+    if _marker_matches_event(st.buildings.get(nid), d, nid):
+        st.buildings.pop(nid, None)
 
 
 def _generation_matches(n: Node, d: dict, *, legacy_attempt: bool = False) -> bool:
@@ -754,8 +774,8 @@ def _remove_current_failure(st: RunState, n: Node) -> None:
 def _on_node_failed(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
     n = _node_for_event(st, d)
     nid = _coerce_node_id(d)
-    if nid is not None and _building_matches_event(st, d, nid):
-        st.building = None
+    if nid is not None:
+        _clear_build_marker(st, d, nid)
     if n is not None:
         if n.id in st.aborted_nodes and d.get("reason") != "aborted":
             _charge_terminal_cost(st, n, d, ctx)
@@ -941,6 +961,8 @@ def _on_node_tombstoned(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> Non
         st.pause_generation = None
     if st.building and st.building.get("node_id") in affected:
         st.building = None
+    for _aff in affected:
+        st.buildings.pop(_aff, None)   # a tombstoned subtree may hold several in-progress builds
     if st.finished:
         if ctx.best_confirmed in affected:
             ctx.best_confirmed = None
@@ -1076,8 +1098,7 @@ def _on_node_reset(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
                 # survives, but no old stage artifact or workdir checkpoint may be reused.
                 n.rerun_stage = None
                 n.stages = []
-        if _building_matches_event(st, d, n.id):
-            st.building = None
+        _clear_build_marker(st, d, n.id)
         # Reset itself clears `finished`, so a later resume cannot observe the old finished edge.
         # Invalidate the completed confirmation/approval epoch here, before clearing it.
         # Requeuing every OTHER incumbent (wiping its metric to force a re-eval on the newly-hidden
@@ -2195,10 +2216,11 @@ def _on_run_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if not bool(d.get("finalization_required", False)):
             st.finalized_finish_seq = e.seq
     st.stop_reason = d.get("reason")
-    # Drop any dangling "building" marker: if a dev session died mid-build (no node_created /
+    # Drop any dangling "building" marker(s): if a dev session died mid-build (no node_created /
     # node_failed) the marker would otherwise persist, and the UI would show a breathing
     # "building…" card + a false "working" pulse on a run that is over.
     st.building = None
+    st.buildings.clear()
 
 
 def _on_finalization_finished(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
@@ -2355,8 +2377,7 @@ def _on_node_abort(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
         if n is not None:
             n.rerun_from = None
             n.rerun_stage = None
-        if _building_matches_event(st, d, nid):
-            st.building = None
+        _clear_build_marker(st, d, nid)
         if st.pause_node_id == nid:
             st.paused = False
             st.pause_node_id = None

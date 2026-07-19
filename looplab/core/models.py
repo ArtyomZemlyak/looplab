@@ -714,6 +714,14 @@ class RunState(BaseModel):
     # parent_ids, started}; cleared when that node's node_created/node_failed folds. NOT in `nodes`, so it
     # never affects id allocation (max(nodes)+1) or resume. None when no node is mid-build.
     building: Optional[dict] = None
+    # ALL nodes currently being built, keyed by node_id — the `parallel_build>1` superset of the
+    # singular `building` above (which stays the MOST-RECENT build, untouched, for back-compat). Each
+    # value is the SAME transient marker shape {node_id, operator, parent_ids, started, generation?}.
+    # Under concurrent builds the singular field holds only the last-appended `node_building`, so the UI
+    # would render just one ghost; this collection lets it render every in-flight build. Empty when
+    # nothing is mid-build and on old logs (default_factory). Like `building`, never in `nodes`, so id
+    # allocation (max(nodes)+1) and resume are untouched.
+    buildings: dict[int, dict] = Field(default_factory=dict)
     best_node_id: Optional[int] = None
     # Node ids the trust gate bars the search from BREEDING (improve/merge/ablate/confirm target) —
     # the hard-flagged (cheating/leaking) set under trust_gate=gate/block, stamped by the fold's

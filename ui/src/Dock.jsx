@@ -400,9 +400,21 @@ function agentStatus(live, log) {
   // WRITING vs RUNNING are distinct and were conflated before (both said "Running experiment"):
   //   • `building` is set from node_building until node_created folds → the Developer is WRITING code;
   //   • a node with status 'pending' → its code is written and the sandbox is TRAINING it.
-  if (live.building && live.building.node_id != null) {
-    const op = live.building.operator || ''
-    const id = live.building.node_id
+  // Parallel builds (parallel_build>1): several Developers write at once. Show the count — mirroring the
+  // parallel-eval strip below — instead of naming only the last-appended build. Derive the label from the
+  // `buildings` marker LIST (node_id->marker object) so the single-build label is right even after the
+  // last-appended build (the singular `live.building`) finishes but a sibling survives. Fall back to the
+  // singular `building` for a serial-build run or an old server that doesn't send `buildings`.
+  const buildMarkers = (live.buildings && typeof live.buildings === 'object')
+    ? Object.values(live.buildings).filter(b => b && b.node_id != null)
+    : (live.building && live.building.node_id != null ? [live.building] : [])
+  if (buildMarkers.length > 1) {
+    const ids = buildMarkers.map(b => b.node_id).sort((a, b) => a - b)
+    return `Writing ${buildMarkers.length} experiments in parallel… (#${ids.join(', #')})`
+  }
+  if (buildMarkers.length === 1) {
+    const op = buildMarkers[0].operator || ''
+    const id = buildMarkers[0].node_id
     return /repair|debug/.test(op) ? `Repairing experiment #${id}…`
       : /merge/.test(op) ? `Merging into experiment #${id}…`
       : `Writing experiment #${id}…`
@@ -635,9 +647,10 @@ function EventRow({ e, onFocusEvent, autoOpen, runId, readOnly = false, liveBuil
     ? e.data.generation : (e.type === 'node_repaired' ? e.data?.attempt : 0)
   const traceGeneration = Number.isInteger(rawTraceGeneration) && rawTraceGeneration >= 0
     ? rawTraceGeneration : null
-  const exactBuilding = liveBuilding != null && traceNid === liveBuilding.nodeId
-    && traceGeneration != null
-    && traceGeneration === liveBuilding.generation
+  // `liveBuilding` is a Map<nodeId, generation> of every concurrent build; this row live-polls its trace
+  // only when it IS one of those exact building lifecycles (right node AND right generation).
+  const exactBuilding = liveBuilding != null && traceNid != null && traceGeneration != null
+    && liveBuilding.get(traceNid) === traceGeneration
   // Clear the error flag only on a SUCCESSFUL load (not eagerly at the start of every poll tick):
   // clearing then re-setting each 4s tick made the error/Retry banner flicker on a persistent failure.
   const loadNodeTrace = (alive) => get(runNodeApiPath(runId, traceNid, '/trace'))
@@ -843,13 +856,25 @@ export default function Dock({ runId, live, liveSeq, expectedGeneration, timelin
   // expanded ("thinking") until it resolves. null on a finished/replayed run — AND on a STALLED/zombie
   // run (engine_running===false): a run whose engine died mid-eval leaves a node stuck 'pending', and
   // without this guard its node_created row would auto-expand the retained span projection forever.
+  // A Map<nodeId, generation> of EVERY node building right now (parallel_build>1 builds several at
+  // once), so each concurrent build's feed row live-polls its own trace — not just the singular
+  // last-appended one. `buildings` is a node_id->marker object; fall back to the singular `building`
+  // for a serial-build / old server. null when nothing is live-building (keeps the poll disabled).
   const liveBuilding = useMemo(() => {
-    if (readOnly || !atLiveView || timeline.generation !== expectedGeneration || !live?.building) return null
-    const nodeId = Number(live.building.node_id)
-    const generation = Object.hasOwn(live.building, 'generation')
-      ? live.building.generation : (live.nodes?.[nodeId]?.attempt ?? 0)
-    if (!Number.isInteger(nodeId) || nodeId < 0 || !Number.isInteger(generation) || generation < 0) return null
-    return { nodeId, generation }
+    if (readOnly || !atLiveView || timeline.generation !== expectedGeneration) return null
+    const bag = (live?.buildings && typeof live.buildings === 'object')
+      ? Object.values(live.buildings)
+      : (live?.building ? [live.building] : [])
+    if (!bag.length) return null
+    const map = new Map()
+    for (const b of bag) {
+      if (!b) continue
+      const nodeId = Number(b.node_id)
+      const generation = Object.hasOwn(b, 'generation') ? b.generation : (live.nodes?.[nodeId]?.attempt ?? 0)
+      if (!Number.isInteger(nodeId) || nodeId < 0 || !Number.isInteger(generation) || generation < 0) continue
+      map.set(nodeId, generation)
+    }
+    return map.size ? map : null
   }, [readOnly, atLiveView, timeline.generation, expectedGeneration, live])
 
   // Scrubber: pointer/key movement is a LOCAL preview. Commit only on pointer-up/key-up/blur so a

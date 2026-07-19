@@ -126,18 +126,25 @@ def _attention_states(st) -> str:
     # the INSTANT it starts, so flagging every `st.building` would fire on essentially every query
     # during normal active work (noise, not an action item). We use the `started` event timestamp
     # (epoch seconds) to distinguish a genuinely STUCK build; a missing/zero ts skips the check.
-    b = getattr(st, "building", None)
-    if isinstance(b, dict) and b.get("node_id") is not None and not st.finished:
-        started = b.get("started") or 0.0
-        try:
-            import time
-            stuck_s = time.time() - float(started)
-        except (TypeError, ValueError):
-            stuck_s = 0.0
-        if started and stuck_s > _STUCK_BUILD_SECONDS:
-            lines.append(f"- STUCK BUILD: node {b.get('node_id')} has been building for "
-                         f"{int(stuck_s // 60)} min (Researcher/Developer not yet done) — it may be "
-                         "stuck; consider checking its live trace.")
+    # Scan EVERY in-flight build (parallel_build>1 runs several at once), not just the singular
+    # last-appended marker, so a stuck earlier concurrent build is still surfaced. Falls back to the
+    # singular `building` for a serial-build / old-shape state.
+    builds = list(getattr(st, "buildings", None).values()) if getattr(st, "buildings", None) else (
+        [getattr(st, "building", None)] if isinstance(getattr(st, "building", None), dict) else [])
+    if not st.finished:
+        for b in builds:
+            if not (isinstance(b, dict) and b.get("node_id") is not None):
+                continue
+            started = b.get("started") or 0.0
+            try:
+                import time
+                stuck_s = time.time() - float(started)
+            except (TypeError, ValueError):
+                stuck_s = 0.0
+            if started and stuck_s > _STUCK_BUILD_SECONDS:
+                lines.append(f"- STUCK BUILD: node {b.get('node_id')} has been building for "
+                             f"{int(stuck_s // 60)} min (Researcher/Developer not yet done) — it may be "
+                             "stuck; consider checking its live trace.")
     if not lines:
         return ""
     return "ATTENTION — run states that may need action:\n" + "\n".join(lines)

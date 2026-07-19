@@ -85,6 +85,7 @@
   "breed_excluded": [],
   "budget_overrides": {},
   "building": null,
+  "buildings": {},
   "champion": null,
   "comments_revision": -1,
   "concept_consolidation": {},

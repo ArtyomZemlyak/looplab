@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
   fetchEventStream, get, normalizeRunGeneration, observeRunGeneration, runApiPath,
 } from './api.js'
+import { withBuilding } from './buildingModel.js'
 
 // Keep responsive behavior in React aligned with the CSS breakpoints.  The workspace uses this to
 // switch persistent desktop panes into temporary drawers on smaller screens; listening to the media
@@ -56,22 +57,8 @@ export function usePoll(fn, ms, deps = [], { pauseHidden = false, immediate = tr
   }, deps)
 }
 
-// Splice the currently-BUILDING node (server marker `state.building`) into `nodes` as a synthetic
-// status:'building' card, so it shows the INSTANT the engine starts on it — before node_created — and
-// every node consumer (canvas / list / panels) renders it with no extra wiring. Cleared server-side the
-// moment node_created folds. Kept out of the real event-sourced node set on the backend (id allocation).
-function withBuilding(state) {
-  const b = state && state.building
-  // Don't splice a phantom "building…" card once the run is over: a finished run clears the marker
-  // server-side, but a STALLED run (engine died mid-build, engine_running===false, not finished) would
-  // otherwise leave a breathing card for a node that will never appear.
-  if (!b || b.node_id == null || state.finished || state.engine_running === false
-      || !state.nodes || state.nodes[b.node_id]) return state
-  return { ...state, nodes: { ...state.nodes, [b.node_id]: {
-    id: b.node_id, operator: b.operator || 'improve', parent_ids: b.parent_ids || [],
-    status: 'building', building: true, idea: { operator: b.operator || 'improve', rationale: 'building…' },
-  } } }
-}
+// `withBuilding` (the synthetic building-node splice) lives in ./buildingModel.js so it can be unit
+// tested without React; imported at the top of this module.
 
 // Subscribe to a run's live folded state over SSE. The server emits `event: state` frames whose
 // data is { state, seq, generation, event_count? }. Returns the latest live state + connection

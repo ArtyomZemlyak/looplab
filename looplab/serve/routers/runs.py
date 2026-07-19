@@ -1634,9 +1634,15 @@ def build_router(srv) -> APIRouter:
             if seq is not None:
                 raise HTTPException(404, "no such node at requested sequence")
             trace = _node_trace(rd, nid)
-            building = bool(st.building and st.building.get("node_id") == nid)
+            # Prefer THIS node's own build marker from the multi-build collection; under parallel_build>1
+            # the singular `st.building` holds only the last-appended build, so keying off it would return
+            # a sibling build's operator/parent_ids. Fall back to the singular for a serial-build log.
+            b = st.buildings.get(nid)
+            if b is None and st.building and st.building.get("node_id") == nid:
+                b = st.building
+            building = bool(b)
             if building or trace.get("nodes"):
-                b = st.building or {}
+                b = b or {}
                 return {"id": nid, "status": "building",
                         "operator": b.get("operator"), "parent_ids": b.get("parent_ids", []),
                         "idea": None, "code": "", "annotations": [], "trace": trace}

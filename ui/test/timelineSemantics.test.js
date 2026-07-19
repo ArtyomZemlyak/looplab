@@ -71,8 +71,10 @@ test('Dock uses around paging, local-only drag preview, native event controls, a
 test('expanded node trace polls only its exact live lifecycle and refreshes once after settle', async () => {
   const dock = await source('Dock.jsx')
   assert.match(dock, /get\(runNodeApiPath\(runId, traceNid, '\/trace'\)\)/)
-  assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?live\.building\.generation[\s\S]*?return \{ nodeId, generation \}/)
-  assert.match(dock, /const exactBuilding =[\s\S]*?traceGeneration === liveBuilding\.generation/)
+  // liveBuilding is a Map<nodeId, generation> of EVERY concurrent build (parallel_build>1), so each
+  // in-flight build's row polls its own exact lifecycle — not just the singular last-appended one.
+  assert.match(dock, /timeline\.generation !== expectedGeneration[\s\S]*?Object\.values\(live\.buildings\)[\s\S]*?map\.set\(nodeId, generation\)[\s\S]*?return map\.size \? map : null/)
+  assert.match(dock, /const exactBuilding =[\s\S]*?liveBuilding\.get\(traceNid\) === traceGeneration/)
   assert.match(dock, /usePoll\([\s\S]*?4000,[\s\S]*?enabled: open && !readOnly && traceNid != null && exactBuilding/)
   assert.match(dock, /if \(!open \|\| readOnly \|\| traceNid == null \|\| exactBuilding\) return undefined[\s\S]*?\[open, readOnly, runId, traceNid, exactBuilding, nodeTraceNonce\]/)
   assert.doesNotMatch(dock, /get\(`\/api\/runs\/\$\{runId\}\/trace`\)/)

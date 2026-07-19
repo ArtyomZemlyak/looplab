@@ -178,7 +178,9 @@ export default function Inspector({ runId, nodeId, state, live, tab, setTab, onT
   // injected pending node doesn't poll-spin every 4s or mislabel itself as "training".
   const latestId = Math.max(-1, ...Object.keys(state?.nodes || {}).map(Number))
   const evaluatingThis = nodeStatus === 'pending' && !live?.paused && Number(nodeId) === latestId
-  const nodeWorking = engineActive && (live.building?.node_id === nodeId || evaluatingThis)
+  // `withBuilding` splices EVERY in-flight build into `live.nodes` (building:true), so keying off the
+  // spliced node — not the singular `live.building` — lights up whichever concurrent build this is.
+  const nodeWorking = engineActive && (live?.nodes?.[nodeId]?.building === true || evaluatingThis)
   usePoll((alive) => {
     // alive() gates the async resolution: if the user selects a different node (or the poll is
     // disabled) while this /nodes/{nodeId} request is in flight, its late response must NOT overwrite
@@ -891,8 +893,11 @@ function Trace({ n, runId, live, working, onReload }) {
   // (building → writing / repairing / merging), or the sandbox running its eval pipeline (pending →
   // training / scoring). `_op` is only set in the building case (the eval has no operator), so it
   // cleanly disambiguates the two.
-  const building = working && live?.building?.node_id === n.id
-  const _op = building ? (live.building.operator || '') : ''
+  // Read this node's OWN build marker off the spliced node (`withBuilding` sets building:true + operator
+  // on every concurrent build), not the singular `live.building` which is only the last-appended one.
+  const _bnode = live?.nodes?.[n.id]
+  const building = working && _bnode?.building === true
+  const _op = building ? (_bnode.operator || '') : ''
   const statusLabel = !working ? null
     : building
       ? (/repair|debug/.test(_op) ? '🔧 repairing…' : /merge/.test(_op) ? '🔀 merging…' : '✍️ writing code…')
