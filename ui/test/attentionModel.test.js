@@ -75,6 +75,7 @@ test('attention routes expose only allow-listed diagnostic destinations behind a
     ['failure_spike', { view: 'dag', panel: 'failures', nodeId: 7 }],
     ['run_failed', { view: 'dag', panel: 'failures', nodeId: 7 }],
     ['stalled', { view: 'dag', panel: 'events', nodeId: null }],
+    ['train_monitor', { view: 'dag', panel: null, nodeId: 7 }],   // deep-link to the evaluating node
   ]
 
   for (const [kind, expected] of cases) {
@@ -194,4 +195,16 @@ test('source normalization drops malformed entries, deduplicates opaque ids, and
   assert.equal(items.length, 2)
   assert.equal(items[0].kind, 'assistant_permission')
   assert.equal(items[1].kind, 'finished', 'last duplicate wins without rendering both identities')
+})
+
+test('a broken training-monitor alert is allow-listed, notify-eligible, and copy-complete', () => {
+  const item = normalizeRunAttention(runItem({
+    kind: 'train_monitor', severity: 'warning', node_id: 7, node_generation: 3,
+    browser: true, derived: false,
+  }))
+  assert.ok(item, 'train_monitor must survive the client allow-list')
+  assert.equal(item.title, 'Training looks broken')
+  assert.ok(item.detail && item.actionLabel, 'COPY must supply title/detail/action')
+  assert.equal(item.notifyEligible, true, 'browser && !derived → one-time desktop notification')
+  assert.equal(item.needsAction, true)
 })

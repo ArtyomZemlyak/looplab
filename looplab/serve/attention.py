@@ -4,6 +4,9 @@ The append-only run logs remain the source of truth.  This module deliberately e
 allow-listed envelope instead of forwarding event ``data``: goals, errors, paths, code, prompts and
 provider material never enter the attention feed.  Stable opaque ids are generation + seq + kind
 derived, so polling/replay does not duplicate a signal and reset/replacement cannot alias the old one.
+(The training-monitor item deliberately keys its id on the NODE + node-generation instead of the alert
+seq, so a training's repeated per-tick 'broken' alerts collapse to one inbox item that updates in place
+rather than a fresh notification each tick; a genuinely new episode after a reset still re-notifies.)
 """
 from __future__ import annotations
 
@@ -23,6 +26,7 @@ from looplab.events.types import (
     EV_PAUSE,
     EV_RUN_FINISHED,
     EV_SPEC_APPROVAL_REQUESTED,
+    EV_TRAIN_MONITOR_ALERT,
 )
 from looplab.serve.run_commands import run_generation_token
 
@@ -186,6 +190,63 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
         )
         if item:
             items.append(item)
+
+    # Training-log monitor: surface a CONFIDENT 'broken' verdict (the live-log observer judged the
+    # training likely wasted) as an owner signal while the node is still evaluating. EV_TRAIN_MONITOR_ALERT
+    # is a DIAGNOSTIC event (fold-ignored), so we read it off the raw rows, keep only the LATEST 'broken'
+    # per (node, generation), and give it a node-keyed STABLE opaque id so repeated ticks update one item
+    # instead of spamming the inbox / re-firing the browser alert. 'watch'/'healthy' stay in the event
+    # feed + trace — only the actionable 'broken' enters attention.
+    monitor_latest: dict[tuple[int, int], Event] = {}
+    for event in rows:
+        if event.type != EV_TRAIN_MONITOR_ALERT:
+            continue
+        d = event.data or {}
+        if str(d.get("status") or "").strip().lower() != "broken":
+            continue
+        nid = _integer(d.get("node_id"))
+        gen = _integer(d.get("generation"))
+        if nid is None or gen is None:
+            continue
+        prev = monitor_latest.get((nid, gen))
+        if prev is None or (_integer(event.seq) or -1) > (_integer(prev.seq) or -1):
+            monitor_latest[(nid, gen)] = event
+    rid = _run_id(run_id)
+    for (nid, gen), event in sorted(monitor_latest.items()):
+        # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
+        # node's broken alert is stale and not actionable. Mirrors the failure-spike lifecycle guard.
+        cur = state.nodes.get(nid)
+        if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
+                or cur.tombstoned or nid in state.aborted_nodes):
+            continue
+        if not rid or len(generation) != 64 or _integer(event.seq) is None:
+            continue
+        # Deliberately NO reason text in the envelope: like failure_spike, the feed points to the run
+        # rather than embedding LLM-derived log prose (the redaction contract — the full verdict lives
+        # in the event feed / trace, which ARE redacted-at-source but are the place for detail).
+        items.append({
+            # (node, generation)-keyed via the kind slot: stable across a lifecycle's repeated ticks
+            # (no inbox/notify spam), but a genuinely NEW broken episode after a reset/re-run (bumped
+            # generation) gets a fresh id and re-notifies. `kind` (the item field) stays "train_monitor".
+            "id": _opaque_id(rid, generation, nid, f"train_monitor:{gen}"),
+            "kind": "train_monitor",
+            "severity": "warning",
+            "title": "Training looks broken",
+            "detail": (f"Experiment #{nid}: the live-log monitor judged the training likely wasted. "
+                       "Open the run to inspect the training log and the monitor verdict."),
+            "run_id": rid,
+            "generation": generation,
+            "seq": _integer(event.seq),
+            "created": _timestamp(event.ts),
+            "browser": True,
+            # derived=False: this item IS backed by a real appended EV_TRAIN_MONITOR_ALERT (a real
+            # seq), unlike the synthesized-liveness signals. It must be False for `notifyEligible`
+            # (browser && !derived && !stale) to fire the one-time desktop notification.
+            "active": True,
+            "derived": False,
+            "node_id": nid,
+            "node_generation": gen,
+        })
 
     # Developer-crash auto-pause is a system failure; an explicit operator pause has no node owner
     # and is intentionally quiet. The folded generation check prevents an old pause from alerting

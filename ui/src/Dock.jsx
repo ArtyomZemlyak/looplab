@@ -126,6 +126,7 @@ const NARR = {
   log_repaired: (d) => `event log repaired${d.dropped_lines != null ? ` — dropped ${d.dropped_lines} corrupt line${d.dropped_lines === 1 ? '' : 's'}, kept ${d.good_records ?? '?'} records` : ' at a divergence boundary'}`,
   stage_finished: (d) => `stage ${d.name || d.stage || '?'} ${d.status === 'ok' || d.status === 'passed' || d.ok === true ? '✓' : (d.status || 'finished')}${d.node_id != null ? ` (#${d.node_id})` : ''}`,
   lessons_reconciled: (d) => `lessons reconciled${d.n_retired != null || d.n_added != null ? ` — ${d.n_retired || 0} retired, ${d.n_added || 0} re-derived` : ''}`,
+  train_monitor_alert: (d) => `training monitor: #${d.node_id} looks ${d.status}${d.reason ? ' — ' + String(d.reason).slice(0, 90) : ''}${d.confidence != null ? ` (${Math.round(d.confidence * 100)}% conf)` : ''}`,
   restart: () => 'run restart requested (pause-and-resume handoff)',
 }
 
@@ -172,6 +173,7 @@ const NARR_VALID = {
   fork: d => ownValue(d, 'from_node_id'),
   inject_node: d => objectValue(d, 'idea'),
   annotation: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
+  train_monitor_alert: d => ownValue(d, 'node_id') && ownValue(d, 'status'),
   hypothesis_added: d => ownValue(d, 'statement'),
   hypothesis_merged: d => ownValue(d, 'statement'),
   lessons_distilled: d => ownValue(d, 'count'),
@@ -404,6 +406,9 @@ function agentStatus(live, log) {
       : `Writing experiment #${id}…`
   }
   const pend = Object.values(live.nodes || {}).filter(n => n.status === 'pending').map(n => n.id)
+  // Surface parallelism: with max_parallel>1 several nodes train at once (each pinned to its own GPU).
+  // The strip named only the highest id before, hiding the fan-out — show the count when >1.
+  if (pend.length > 1) return `Running ${pend.length} experiments in parallel… (training #${[...pend].sort((a, b) => a - b).join(', #')})`
   if (pend.length) return `Running experiment #${Math.max(...pend)}… (training)`
   // Between experiments: infer from the last MEANINGFUL event (skip the bookkeeping noise above), so the
   // label stays put on "Planning…" instead of blinking every time a coverage/cost event lands.

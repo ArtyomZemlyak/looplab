@@ -30,6 +30,7 @@ test('timeline narration stays renderable for malformed and forward-compatible e
       ['run_setup_finished', {}],
       ['node_confirmed', { node_id: 2, mean: 1, seeds: 3 }],
       ['strategy_decision', { strategy: {} }],
+      ['train_monitor_alert', { node_id: 3 }],           // missing status -> no coerced verdict
     ]) {
       assert.equal(eventNarration({ type, data }),
         `${type} — details could not be summarized`, `${type} must not coerce a missing field`)
@@ -37,6 +38,9 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.equal(eventNarration({ type: 'run_started', data: {
       task_id: 'task-a', direction: 'max',
     } }), 'run started — task-a (max)')
+    assert.equal(eventNarration({ type: 'train_monitor_alert', data: {
+      node_id: 3, status: 'broken', reason: 'loss diverged', confidence: 0.9,
+    } }), 'training monitor: #3 looks broken — loss diverged (90% conf)')
     assert.equal(eventNarration({ type: 'future_event', data: {
       text: 'params.x was undefined at eval',
     } }), '{"text":"params.x was undefined at eval"}')

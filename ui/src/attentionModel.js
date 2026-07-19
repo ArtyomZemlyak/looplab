@@ -8,12 +8,12 @@ const CONTROL_RE = /[\u0000-\u001f\u007f]/
 
 export const ATTENTION_KINDS = new Set([
   'approval', 'approval_incomplete', 'spec_approval', 'failure_spike', 'run_failed',
-  'budget_exhausted', 'finished', 'stopped', 'finalization_stalled', 'stalled',
+  'budget_exhausted', 'finished', 'stopped', 'finalization_stalled', 'stalled', 'train_monitor',
 ])
 const SEVERITIES = new Set(['action', 'warning', 'danger', 'success'])
 const NEEDS_ACTION = new Set([
   'approval', 'approval_incomplete', 'spec_approval', 'failure_spike', 'run_failed',
-  'finalization_stalled', 'stalled', 'assistant_permission',
+  'finalization_stalled', 'stalled', 'assistant_permission', 'train_monitor',
 ])
 
 const COPY = Object.freeze({
@@ -27,6 +27,7 @@ const COPY = Object.freeze({
   stopped: ['Run finalized', 'The run was intentionally stopped and its durable wrap-up is ready.', 'View report'],
   finalization_stalled: ['Finalization needs recovery', 'The engine stopped before durable wrap-up completed.', 'Open Events'],
   stalled: ['Run engine stopped', 'No engine process is advancing this run.', 'Open Events'],
+  train_monitor: ['Training looks broken', 'The live-log monitor judged this training likely wasted. Open the run to inspect the log and verdict.', 'Inspect training'],
   assistant_permission: ['Assistant approval needed', 'Open Assistant to review the exact action and scope.', 'Open Assistant'],
 })
 
@@ -49,6 +50,8 @@ export function attentionHref(item) {
     if (item.nodeId != null) state.nodeId = item.nodeId
   } else if (item.kind === 'run_failed' && item.nodeId != null) {
     state.panel = 'failures'; state.nodeId = item.nodeId
+  } else if (item.kind === 'train_monitor' && item.nodeId != null) {
+    state.nodeId = item.nodeId          // deep-link to the evaluating node (its live training log)
   } else state.panel = 'events'
   const query = encodeRunRouteState(state, { forceGeneration: true })
   return `#/run/${encodeURIComponent(item.runId)}${query ? `?${query}` : ''}`

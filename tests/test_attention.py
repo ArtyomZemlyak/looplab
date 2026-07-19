@@ -23,6 +23,7 @@ from looplab.events.types import (  # noqa: E402
     EV_RUN_STARTED,
     EV_SPEC_APPROVAL_REQUESTED,
     EV_SPEC_PROPOSED,
+    EV_TRAIN_MONITOR_ALERT,
 )
 from looplab.serve.attention import project_run_attention  # noqa: E402
 from looplab.serve.run_commands import run_generation_token  # noqa: E402
@@ -411,3 +412,40 @@ def test_attention_cache_does_not_thrash_above_old_512_run_boundary(tmp_path, mo
     assert calls == 513
     assert client.get("/api/attention?limit=1").status_code == 200
     assert calls == 513  # unchanged second poll performs zero re-folds
+
+
+def test_broken_training_monitor_alert_surfaces_a_stable_node_keyed_item(tmp_path):
+    # A confident 'broken' monitor verdict on a still-evaluating node surfaces one attention item;
+    # repeated alerts keep the SAME (node-keyed) id, and 'watch'/'healthy' never enter the inbox.
+    store = _store(tmp_path)
+    _node(store, 0)                                   # pending (created, no terminal) -> evaluating
+    store.append(EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "watch",
+        "reason": "loss plateauing", "confidence": 0.6})
+    first = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "train_monitor" not in _kinds(first)       # 'watch' stays out of the inbox
+
+    store.append(EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "broken",
+        "reason": "loss diverged to NaN", "confidence": 0.95})
+    second = project_run_attention("demo", store.read_all(), engine_running=True)
+    mon = [i for i in second if i["kind"] == "train_monitor"]
+    assert len(mon) == 1
+    assert mon[0]["severity"] == "warning" and mon[0]["node_id"] == 0
+    assert "#0" in mon[0]["detail"] and "wasted" in mon[0]["detail"]
+    # The redaction contract: the LLM-derived verdict reason never enters the attention envelope.
+    assert "NaN" not in json.dumps(mon[0]) and "diverged" not in json.dumps(mon[0])
+
+    # A later broken tick updates in place — same stable id, no duplicate / re-notify spam.
+    store.append(EV_TRAIN_MONITOR_ALERT, {
+        "node_id": 0, "generation": 0, "status": "broken",
+        "reason": "still diverged", "confidence": 0.97})
+    third = [i for i in project_run_attention("demo", store.read_all(), engine_running=True)
+             if i["kind"] == "train_monitor"]
+    assert len(third) == 1 and third[0]["id"] == mon[0]["id"]
+
+    # Once the node reaches a terminal (no longer pending), the stale alert drops from the inbox.
+    store.append(EV_NODE_FAILED, {"node_id": 0, "generation": 0, "reason": "monitor_broken",
+                                  "error": "stopped", "eval_seconds": 1.0})
+    done = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "train_monitor" not in _kinds(done)
