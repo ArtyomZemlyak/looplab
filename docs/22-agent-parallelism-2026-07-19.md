@@ -22,9 +22,12 @@ The run spine (`engine/orchestrator.py::run`) each iteration:
        self._create_node(a)          # orchestrator.py:1013-1021 — "sequential -> deterministic ids"
    continue
    ```
-3. otherwise dispatches `evals` — **these ARE parallel** up to `max_parallel`
-   (`_dispatch_evals` → `CapacityLimiter(max_parallel)` → `_evaluate`), and each concurrent eval is now
-   pinned to a distinct GPU (`_evaluate::_acquire_gpu` + `orchestrator._detect_gpu_ids`/`_free_gpus`).
+3. otherwise dispatches `evals` — **these ARE parallel** up to `max_parallel`, with **CONTINUOUS
+   dispatch**: `_dispatch_evals` keeps a `Semaphore(max_parallel)` pool FULL, so the instant a short eval
+   frees its slot (and its GPU) the next queued eval is admitted from the SAME batch — no head-of-line
+   idle while a long sibling runs (`_dispatch_evals` → `Semaphore(max_parallel)` → `_evaluate`, each eval
+   given a no-op `CapacityLimiter(1)`). Each concurrent eval is pinned to a distinct GPU
+   (`_evaluate::_acquire_gpu` + `orchestrator._detect_gpu_ids`/`_free_gpus`).
 
 `_create_node` (`orchestrator.py:1680`) is the expensive part and is **fully synchronous**:
 

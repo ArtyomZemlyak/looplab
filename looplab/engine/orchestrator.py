@@ -1753,27 +1753,48 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                             break
                         await self._evaluate(a["node_id"], limiter, max_es)
                 else:
-                    # G3 distributed/parallel eval: fan out under a CapacityLimiter (worker pool). The
-                    # eval-budget guard the review flagged for this path: cap the number STARTED so an
-                    # over-budget run launches at most ~max_parallel more evals, not the whole batch.
-                    limiter = anyio.CapacityLimiter(self.max_parallel)
-                    cur = fold(self.store.read_all())
-                    started = 0
+                    # G3 distributed/parallel eval: CONTINUOUS dispatch. A pool of `max_parallel` slots
+                    # is kept FULL — the instant any eval finishes and frees its slot (and, via
+                    # `_evaluate`'s finally, its GPU back to `_free_gpus`), the producer admits the NEXT
+                    # queued eval into that slot. This closes the head-of-line gap the old
+                    # `started >= max_parallel: break` left: that break capped the batch at max_parallel
+                    # STARTED and deferred the rest to a FUTURE spine iteration, so a short eval that
+                    # freed its GPU left it idle for the whole remaining life of a long sibling (the
+                    # 10h-vs-1h case). The semaphore bounds concurrency to max_parallel AND refills a
+                    # freed slot; each eval gets its own no-op CapacityLimiter(1) so `_evaluate`'s
+                    # internal `async with limiter` is inert and the semaphore is the SOLE bound.
+                    # fast_acquire: when a slot is already free the admit takes no checkpoint, so a batch
+                    # that fits in the pool behaves like the old tight loop (all started before any child
+                    # runs); the checkpoint only happens on the genuine refill wait.
+                    #
+                    # STILL A BARRIER: the inner task group joins the WHOLE batch before returning, so
+                    # `bg_tg`'s lifecycle and every `pending_nodes()`-keyed guarantee are unchanged.
+                    slots = anyio.Semaphore(self.max_parallel, fast_acquire=True)
+
+                    async def _eval_in_slot(nid: int) -> None:
+                        try:
+                            # A private single-token limiter -> `_evaluate`'s `async with limiter` is a
+                            # no-op; the outer semaphore is what bounds fan-out and drives the refill.
+                            await self._evaluate(nid, anyio.CapacityLimiter(1), max_es)
+                        finally:
+                            slots.release()          # free the slot -> wakes the producer to admit next
+
                     async with anyio.create_task_group() as tg:
                         for a in evals:
+                            # Fresh fold PER ADMISSION (like the serial branch, unlike the old fold-once):
+                            # continuous dispatch means earlier evals in THIS batch complete mid-loop, so
+                            # the abort-skip and the eval-budget guard both act on LIVE state — strictly
+                            # stricter than the dead fold-once check the old comment flagged.
+                            cur = fold(self.store.read_all())
                             if self._skip_if_aborted(a, cur):
-                                continue
-                            # Budget guard (parallel path): cap each fan-out batch to the worker-pool
-                            # size. `cur` is folded ONCE before this loop and never changes mid-batch
-                            # (the evals join only at the task-group exit), so a budget check on cur
-                            # here is dead — the real enforcement is the per-iteration outer guard (it
-                            # re-folds and finishes the run once total_eval_seconds >= max_es). Capping
-                            # the batch to max_parallel bounds the overshoot to ~one batch instead of
-                            # launching the whole `evals` list at once.
-                            if started >= self.max_parallel:
+                                continue              # skipped evals never consume a slot
+                            # Budget guard (parallel path): now that `cur` reflects mid-batch completions,
+                            # this actually enforces the eval-second cap — admit no more once spent. The
+                            # overshoot is bounded to the ~max_parallel evals already in flight.
+                            if (max_es is not None and cur.total_eval_seconds >= max_es):
                                 break
-                            tg.start_soon(self._evaluate, a["node_id"], limiter, max_es)
-                            started += 1
+                            await slots.acquire()     # blocks only when the pool is full -> the refill point
+                            tg.start_soon(_eval_in_slot, a["node_id"])
             finally:
                 # Evals have joined (or errored out) — stop the repeating research loop. One-shot
                 # research (repeat off) leaves `bg_tg` uncancelled so its single memo still records,
