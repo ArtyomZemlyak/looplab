@@ -14,6 +14,7 @@ from looplab.events.types import (  # noqa: E402
     EV_APPROVAL_GRANTED,
     EV_APPROVAL_REQUESTED,
     EV_FINALIZATION_FINISHED,
+    EV_ASHA_RANK,
     EV_NODE_CREATED,
     EV_NODE_ABORT,
     EV_NODE_EVALUATED,
@@ -449,3 +450,38 @@ def test_broken_training_monitor_alert_surfaces_a_stable_node_keyed_item(tmp_pat
                                   "error": "stopped", "eval_seconds": 1.0})
     done = project_run_attention("demo", store.read_all(), engine_running=True)
     assert "train_monitor" not in _kinds(done)
+
+
+def test_asha_underperform_surfaces_a_soft_node_keyed_inbox_item(tmp_path):
+    # An ASHA underperform flag on a still-evaluating node surfaces ONE SOFT (inbox-only, browser=False,
+    # not action-required) attention item, node-keyed so repeated flags update in place; it drops once
+    # the node terminates. Softer tier than the train-monitor 'broken' signal.
+    store = _store(tmp_path)
+    _node(store, 0)                                   # pending (created, no terminal) -> evaluating
+    first = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "asha" not in _kinds(first)                # nothing flagged yet
+
+    store.append(EV_ASHA_RANK, {
+        "node_id": 0, "generation": 0, "intermediate": 0.31,
+        "quantile": 0.5, "population": 4, "direction": "min"})
+    second = project_run_attention("demo", store.read_all(), engine_running=True)
+    ash = [i for i in second if i["kind"] == "asha"]
+    assert len(ash) == 1
+    assert ash[0]["severity"] == "warning" and ash[0]["node_id"] == 0
+    assert ash[0]["browser"] is False                 # inbox-only -> never desktop-notified
+    # Backend detail is the API-shape sentence (the web client renders from its own COPY table, not
+    # this text); it is #node-anchored and carries no per-event numbers.
+    assert "#0" in ash[0]["detail"] and "unlikely" in ash[0]["detail"]
+
+    # A later flag on the same lifecycle updates in place — same stable id (no duplicate / spam).
+    store.append(EV_ASHA_RANK, {
+        "node_id": 0, "generation": 0, "intermediate": 0.28,
+        "quantile": 0.5, "population": 5, "direction": "min"})
+    third = [i for i in project_run_attention("demo", store.read_all(), engine_running=True)
+             if i["kind"] == "asha"]
+    assert len(third) == 1 and third[0]["id"] == ash[0]["id"]
+
+    # Once the node terminates (no longer pending), the stale rank flag drops from the inbox.
+    store.append(EV_NODE_EVALUATED, {"node_id": 0, "generation": 0, "metric": 0.3, "eval_seconds": 1.0})
+    done = project_run_attention("demo", store.read_all(), engine_running=True)
+    assert "asha" not in _kinds(done)

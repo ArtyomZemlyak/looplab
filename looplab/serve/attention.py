@@ -21,6 +21,7 @@ from looplab.engine.finalize import incomplete_finalize_scope
 from looplab.events.replay import fold
 from looplab.events.types import (
     EV_APPROVAL_REQUESTED,
+    EV_ASHA_RANK,
     EV_FINALIZATION_FINISHED,
     EV_NODE_FAILED,
     EV_PAUSE,
@@ -242,6 +243,60 @@ def project_event_attention(run_id: str, events: Iterable[Event]) -> dict:
             # derived=False: this item IS backed by a real appended EV_TRAIN_MONITOR_ALERT (a real
             # seq), unlike the synthesized-liveness signals. It must be False for `notifyEligible`
             # (browser && !derived && !stale) to fire the one-time desktop notification.
+            "active": True,
+            "derived": False,
+            "node_id": nid,
+            "node_generation": gen,
+        })
+
+    # ASHA live-curve watchdog: surface a node whose latest intermediate metric ranked BELOW its
+    # already-finished siblings (successive-halving's "unlikely to catch up") as an owner FYI while it
+    # is still evaluating — so a multi-hour parallel run's weak experiments are visible to STOP early
+    # (freeing a GPU) instead of running to the end unnoticed. EV_ASHA_RANK is a DIAGNOSTIC event
+    # (fold-ignored), recorded once when the node FLIPS to underperforming (deduped at source); read it
+    # off the raw rows and keep the LATEST per (node, generation) with a node-keyed STABLE opaque id (a
+    # fresh underperform episode after a reset/rerun bumps the generation -> a new id). This is a SOFTER
+    # tier than the training-monitor 'broken' signal: below-median is common and may still recover, so
+    # it is inbox-only (browser=False -> no desktop-notification spam) and not action-REQUIRED.
+    asha_latest: dict[tuple[int, int], Event] = {}
+    for event in rows:
+        if event.type != EV_ASHA_RANK:
+            continue
+        d = event.data or {}
+        nid = _integer(d.get("node_id"))
+        gen = _integer(d.get("generation"))
+        if nid is None or gen is None:
+            continue
+        prev = asha_latest.get((nid, gen))
+        if prev is None or (_integer(event.seq) or -1) > (_integer(prev.seq) or -1):
+            asha_latest[(nid, gen)] = event
+    for (nid, gen), event in sorted(asha_latest.items()):
+        # Only while THIS lifecycle is still evaluating (pending): a finished/failed/aborted/tombstoned
+        # node's rank flag is stale. Mirrors the training-monitor + failure-spike lifecycle guard.
+        cur = state.nodes.get(nid)
+        if (cur is None or cur.attempt != gen or cur.status is not NodeStatus.pending
+                or cur.tombstoned or nid in state.aborted_nodes):
+            continue
+        if not rid or len(generation) != 64 or _integer(event.seq) is None:
+            continue
+        # Simple #node-anchored sentence, mirroring the train-monitor item's shape. The owner-facing
+        # display text comes from the CLIENT copy table (attentionModel.js::COPY[kind]) like every kind
+        # — the web client deliberately never renders feed-supplied prose — so this backend `detail` is
+        # the API-shape sentence, not the rendered string; keep it generic (no per-event numbers).
+        items.append({
+            "id": _opaque_id(rid, generation, nid, f"asha:{gen}"),
+            "kind": "asha",
+            "severity": "warning",
+            "title": "Underperforming vs finished experiments",
+            "detail": (f"Experiment #{nid}'s live metric ranks below its finished siblings and is unlikely "
+                       "to catch up. Open the run to inspect its training curve, or stop it to free the GPU."),
+            "run_id": rid,
+            "generation": generation,
+            "seq": _integer(event.seq),
+            "created": _timestamp(event.ts),
+            # Inbox-only advisory: browser=False -> not desktop-notified (notifyEligible is
+            # browser && !derived && !stale). derived=False keeps it a real, event-backed item.
+            "browser": False,
             "active": True,
             "derived": False,
             "node_id": nid,

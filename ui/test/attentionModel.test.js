@@ -76,6 +76,7 @@ test('attention routes expose only allow-listed diagnostic destinations behind a
     ['run_failed', { view: 'dag', panel: 'failures', nodeId: 7 }],
     ['stalled', { view: 'dag', panel: 'events', nodeId: null }],
     ['train_monitor', { view: 'dag', panel: null, nodeId: 7 }],   // deep-link to the evaluating node
+    ['asha', { view: 'dag', panel: null, nodeId: 7 }],            // deep-link to the underperforming node
   ]
 
   for (const [kind, expected] of cases) {
@@ -84,7 +85,7 @@ test('attention routes expose only allow-listed diagnostic destinations behind a
       severity: kind === 'finished' ? 'success' : 'warning',
       node_id: ['stalled', 'finished', 'budget_exhausted', 'stopped'].includes(kind) ? null : 7,
       node_generation: ['stalled', 'finished', 'budget_exhausted', 'stopped'].includes(kind) ? null : 3,
-      browser: kind !== 'stalled',
+      browser: !['stalled', 'asha'].includes(kind),   // asha is an inbox-only soft advisory (no notify)
       derived: kind === 'stalled',
     }))
     assert.ok(item, kind)
@@ -207,4 +208,16 @@ test('a broken training-monitor alert is allow-listed, notify-eligible, and copy
   assert.ok(item.detail && item.actionLabel, 'COPY must supply title/detail/action')
   assert.equal(item.notifyEligible, true, 'browser && !derived → one-time desktop notification')
   assert.equal(item.needsAction, true)
+})
+
+test('an ASHA underperform advisory is allow-listed and copy-complete but soft (inbox-only)', () => {
+  const item = normalizeRunAttention(runItem({
+    kind: 'asha', severity: 'warning', node_id: 7, node_generation: 3,
+    browser: false, derived: false,
+  }))
+  assert.ok(item, 'asha must survive the client allow-list')
+  assert.equal(item.title, 'Underperforming vs finished experiments')
+  assert.ok(item.detail && item.actionLabel, 'COPY must supply title/detail/action')
+  assert.equal(item.notifyEligible, false, 'browser=false → no desktop notification (soft advisory)')
+  assert.equal(item.needsAction, false, 'advisory FYI, not action-required')
 })
