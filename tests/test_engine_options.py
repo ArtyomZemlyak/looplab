@@ -37,6 +37,8 @@ ATTR_BY_FIELD = {
     "max_parallel": "max_parallel",
     "train_monitor": "_train_monitor",
     "train_monitor_interval_s": "_train_monitor_interval_s",
+    "train_monitor_kill": "_train_monitor_kill",
+    "train_monitor_kill_confidence": "_train_monitor_kill_confidence",
     "timeout": "timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "confirm_top_k": "confirm_top_k",

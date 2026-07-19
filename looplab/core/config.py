@@ -198,6 +198,13 @@ class Settings(BaseSettings):
     # tick cadence (the Developer can size it per node later); floored at 1s in the loop.
     train_monitor: bool = False
     train_monitor_interval_s: float = Field(default=600.0, gt=0)
+    # Phase 3 — INTERVENTION (opt-in, separate from observation): let the monitor tree-kill a training the
+    # LLM judges 'broken' (diverged / silent CPU fallback / not learning) EARLY, instead of burning the
+    # whole budget. Off by default — the observer only WATCHES unless this is on. A kill only fires on a
+    # 'broken' verdict (a plateau is 'watch', never killed) with confidence >= the threshold; the node then
+    # fails normally (reason='monitor_broken'), so replay reconstructs it from that one terminal event.
+    train_monitor_kill: bool = False
+    train_monitor_kill_confidence: float = Field(default=0.8, ge=0.0, le=1.0)
     timeout: float = Field(default=30.0, gt=0)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).

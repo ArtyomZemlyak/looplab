@@ -102,6 +102,20 @@ def next_monitor_sleep(base: float, *, status: Optional[str] = None,
     return base
 
 
+def should_monitor_kill(verdict: Optional["TrainingVerdict"], *, enabled: bool, threshold: float) -> bool:
+    """Whether a verdict warrants an EARLY KILL (Phase 3). Pure/deterministic. Kills only on a 'broken'
+    verdict (the prompt makes a slow/plateauing-but-progressing run 'watch', never 'broken') with
+    confidence >= `threshold`, and only when the intervention is `enabled` (opt-in). 'watch' and 'healthy'
+    never kill — the monitor stays advisory for them."""
+    if not enabled or verdict is None or verdict.status != "broken":
+        return False
+    try:
+        conf = max(0.0, min(1.0, float(verdict.confidence)))
+    except (TypeError, ValueError):
+        return False
+    return conf >= threshold
+
+
 def active_training_log(workdir) -> Optional[Path]:
     """The workdir's most-recently-written `<stage>.log` — the live log of whichever stage is running
     NOW (the sandbox writes one `<stage>.log` per stage; during training the train stage's file is the
@@ -184,17 +198,24 @@ class TrainingMonitorMixin:
             return None
 
     async def _monitor_training(self, node_id: int, generation: int, workdir, cancel,
-                                context: str = "") -> None:
+                                context: str = "", kill_signal: Optional[dict] = None) -> None:
         """Tail the live training log every `train_monitor_interval_s`, ask the Developer to judge its
-        health, and record the verdict.
+        health, record the verdict, and (opt-in) kill a broken run early.
 
-        Phase 1 (advisory): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
+        Advisory (always): every tick with a CHANGED digest emits a `train_monitor` trace span carrying
         the verdict; a NON-healthy verdict additionally appends an EV_TRAIN_MONITOR_ALERT diagnostic event
         (fold-ignored — never touches node selection or replay — for the owner attention feed + audit).
-        Healthy verdicts stay trace-only, so events.jsonl carries only actionable flags. NO intervention:
-        the run is never killed here (that is Phase 3). With no LLM client wired it degrades to Phase 0
-        (trace-only observation). Exits when the eval finishes (`cancel`, or the task group is cancelled);
-        a per-tick hiccup skips the tick and never disables the watcher for the rest of a long eval."""
+        Healthy verdicts stay trace-only, so events.jsonl carries only actionable flags.
+
+        Intervention (Phase 3, only when `_train_monitor_kill` is on): on a confident 'broken' verdict the
+        monitor records the reason into `kill_signal` and sets `cancel` — the SAME tree-kill path an
+        operator abort uses — then stops. `_evaluate` sees the killed eval and writes the node's single
+        terminal `node_failed` (reason='monitor_broken'); replay reconstructs the node from that terminal
+        and never re-invokes the LLM. A plateau is 'watch', never 'broken', so it is never killed.
+
+        With no LLM client wired it degrades to trace-only observation. Exits when the eval finishes
+        (`cancel`, or the task group is cancelled); a per-tick hiccup skips the tick and never disables the
+        watcher for the rest of a long eval."""
         import anyio
 
         from looplab.events.types import DIAGNOSTIC_EVENTS, EV_TRAIN_MONITOR_ALERT
@@ -247,6 +268,17 @@ class TrainingMonitorMixin:
                                     "node_id": node_id, "generation": generation,
                                     "status": verdict.status, "reason": reason,
                                     "confidence": round(conf, 3)})
+                        # Phase 3 intervention (opt-in): a confident 'broken' run is tree-killed EARLY. Hand
+                        # the reason to `_evaluate` via `kill_signal`, set `cancel` (same path as an operator
+                        # abort), and stop watching — `_evaluate` writes the single terminal node_failed.
+                        if kill_signal is not None and should_monitor_kill(
+                                verdict, enabled=getattr(self, "_train_monitor_kill", False),
+                                threshold=float(getattr(self, "_train_monitor_kill_confidence", 0.8) or 0.0)):
+                            kill_signal["kill"] = True
+                            kill_signal["reason"] = reason
+                            kill_signal["confidence"] = round(conf, 3)
+                            cancel.set()
+                            return
             except anyio.get_cancelled_exc_class():
                 raise                        # cooperative cancellation — must propagate, never be swallowed
             except Exception:  # noqa: BLE001 — a transient per-tick hiccup (disk/LLM/tracer) SKIPS this tick;
