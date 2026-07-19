@@ -93,6 +93,35 @@ def test_run_argv_kills_diverged_stage_early():
     assert "DIVERGED" in err                                    # the reason the agent reads
 
 
+def test_run_argv_kills_stalled_stage_early():
+    # A stage that prints its metric then goes SILENT while staying alive (a hung distributed finalize /
+    # wedged CUDA op / deadlock) must be tree-killed by the STALL watchdog well before the full timeout —
+    # not left to burn the whole (multi-hour) budget. The metric it printed before hanging is preserved.
+    prog = ("import time, sys\n"
+            "print('RECALL@100: 0.5', flush=True)\n"     # useful work done + metric printed
+            "time.sleep(120)\n")                          # then hangs silently forever
+    t0 = time.time()
+    rc, out, err, timed_out = run_argv([sys.executable, "-c", prog], "/tmp", timeout=60, stall_timeout=2)
+    dt = time.time() - t0
+    assert dt < 20, f"stalled stage not killed early ({dt:.1f}s)"
+    assert not timed_out                                        # a STALL is NOT a deadline timeout
+    assert rc != 0                                              # tree-killed -> non-zero -> stage-fail path
+    assert "STALLED" in err                                     # the reason the agent reads
+    assert "RECALL@100: 0.5" in out                            # metric printed before the hang is salvageable
+
+
+def test_run_argv_stall_watchdog_no_false_positive_on_chatty_run():
+    # A run that keeps emitting output (a tqdm progress bar, epoch logs) must NOT be stall-killed: the
+    # quiet clock resets on every chunk, so only true silence triggers the watchdog.
+    prog = ("import time, sys\n"
+            "for i in range(20):\n"
+            "    print('step', i, flush=True); time.sleep(0.1)\n"
+            "print('RECALL@100: 0.9', flush=True)\n")
+    rc, out, err, timed_out = run_argv([sys.executable, "-c", prog], "/tmp", timeout=30, stall_timeout=2)
+    assert rc == 0 and not timed_out and "STALLED" not in err
+    assert "RECALL@100: 0.9" in out
+
+
 def test_run_argv_combines_stdout_and_stderr_health_evidence():
     # Frameworks commonly route tqdm/Lightning metrics to stderr. Threshold evidence may straddle both
     # streams, but partial records from the two streams must never be concatenated into a fake line.

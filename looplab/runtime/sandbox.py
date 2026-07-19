@@ -115,6 +115,16 @@ class RunResult:
     # None on the classic single-command path.
     stages: Optional[list] = None
     failed_stage: Optional[str] = None
+    # STALL watchdog: True when the stage was tree-killed for going silent while alive (a hung
+    # distributed finalize / wedged CUDA op / deadlock), NOT for a real deadline timeout. A stall that
+    # had already printed its metric keeps `metric` set — the orchestrator SALVAGES it (a completed
+    # train+eval that only hung on teardown still counts) instead of wasting the whole run.
+    stalled: bool = False
+
+
+# Distinctive sentinel in the killed stage's stderr, so command_eval/the orchestrator can tell a STALL
+# apart from any other non-zero exit without threading a new value through run_argv's 4-tuple return.
+STALL_SENTINEL = "LOOPLAB health-check: stage STALLED"
 
 
 class Sandbox(Protocol):
@@ -224,7 +234,8 @@ def parse_mem_bytes(spec) -> Optional[int]:
 def run_argv(argv: list[str], workdir: str, timeout: float,
              env: Optional[dict] = None, max_output_bytes: int = 64_000, cancel=None,
              log_path: Optional[str] = None, mem_bytes: Optional[int] = None,
-             fsize_bytes: Optional[int] = None, health_check: bool = False):
+             fsize_bytes: Optional[int] = None, health_check: bool = False,
+             stall_timeout: Optional[float] = None):
     """Run one subprocess (argv, no shell) in `workdir` with timeout + process-tree kill +
     capped UTF-8/replace capture. Returns (returncode, stdout, stderr, timed_out). The single
     place process management lives — SubprocessSandbox, DockerSandbox, and command_eval all
@@ -351,7 +362,7 @@ def run_argv(argv: list[str], workdir: str, timeout: float,
     # adversarial/buggy fast printer on the untrusted solution.py path (which never sets log_path)
     # could accumulate its whole output in HOST RAM for up to `timeout` seconds — a host-memory DoS.
     rc, out, err, timed_out = _tee_drain(proc, log_path, timeout, max_output_bytes, cancel,
-                                         health_check=health_check)
+                                         health_check=health_check, stall_timeout=stall_timeout)
     if docker_cidfile is not None:
         # Defense-in-depth: the cidfile now lives in the host temp dir (unreachable by the container),
         # but never let a cleanup hiccup (a FUSE OSError, or — pre-#5 — untrusted code having replaced
@@ -449,13 +460,21 @@ class _StageHealthMonitor:
         return self.hits >= self.threshold
 
 
-def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False):
+def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=False,
+               stall_timeout=None):
     """Drain `proc`'s stdout+stderr concurrently in fixed-size binary chunks: mirror them to
     `log_path` (a live, tail-able combined log) while accumulating bounded per-stream tails.
     Honors the same wall-clock timeout + cancel-event tree-kill as the buffered path. Reader
     threads (daemon) own the pipes so the parent never deadlocks on a chatty child.  Chunked reads
     matter for the no-newline case: `readline()` can allocate an arbitrarily large candidate-owned
-    line before returning, which bypasses any cap applied after the read."""
+    line before returning, which bypasses any cap applied after the read.
+
+    `stall_timeout` (optional seconds): a STALL watchdog for long stages (training/eval). A hung
+    child — a distributed/DataParallel finalize deadlock, a wedged CUDA op, a lock never released —
+    stays ALIVE producing NO output, so the plain wall-clock deadline would burn the WHOLE (often
+    multi-hour) `timeout` before killing it. When set, if NOTHING is written to either stream for
+    `stall_timeout` seconds while the child is still running, tree-kill it early with a STALLED
+    marker (distinct from a real timeout: the training already printed everything it was going to)."""
     import codecs
     import threading
     import time as _time
@@ -479,6 +498,11 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 if health_check else None)
     health_lock = threading.Lock()
     diverged = threading.Event()
+    stalled = threading.Event()
+    # Last-output clock for the STALL watchdog: any chunk on either stream bumps it (monotonic). The
+    # main loop kills the child if it goes quiet for `stall_timeout` while still alive. A mutable holder
+    # (not a bare float) so the pump threads and the wait loop share ONE value without a reassignment race.
+    last_output = [_time.monotonic()]
 
     def _observe_health(key: str, text: str = "", *, final: bool = False) -> None:
         if monitors is None:
@@ -512,6 +536,7 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 buf = bufs[key]
                 buf.append(chunk)
                 size += len(chunk)
+                last_output[0] = _time.monotonic()   # STALL watchdog: fresh output resets the quiet clock
                 if size > cap * 2:                  # collapse to the last `cap` bytes (metric is last line)
                     joined = b"".join(buf)[-cap:]
                     buf.clear()
@@ -565,6 +590,19 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
                 except Exception:
                     pass
                 break
+            if (stall_timeout and not stalled.is_set()
+                    and (_time.monotonic() - last_output[0]) >= stall_timeout):
+                # STALL watchdog: the child is alive but has emitted NOTHING for `stall_timeout` — a hung
+                # distributed finalize / wedged CUDA op / deadlock that would otherwise sit until the full
+                # (multi-hour) deadline. Tree-kill NOW. NOT a timeout: mark it STALLED so the failure reason
+                # is honest and any metric it already printed before going quiet stays salvageable.
+                stalled.set()
+                _kill_tree(proc)
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    pass
+                break
             if (cancel is not None and cancel.is_set()) or _time.monotonic() >= deadline:
                 _kill_tree(proc)
                 try:
@@ -578,9 +616,13 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     t_err.join(timeout=5)
     marker = ("\n‼ LOOPLAB health-check: training DIVERGED — non-finite loss/grad_norm "
               "reported repeatedly; aborting the stage early.\n")
-    if diverged.is_set() and logf is not None:
+    stall_marker = (f"\n‼ LOOPLAB health-check: stage STALLED — no output for "
+                    f"{int(stall_timeout or 0)}s while the process stayed alive (likely a hung "
+                    "distributed finalize / wedged CUDA op / deadlock); aborting the stage early.\n")
+    active_marker = stall_marker if stalled.is_set() else marker
+    if (diverged.is_set() or stalled.is_set()) and logf is not None:
         try:
-            logf.write(marker)
+            logf.write(active_marker)
             logf.flush()
         except Exception:
             pass
@@ -592,12 +634,12 @@ def _tee_drain(proc, log_path, timeout, max_output_bytes, cancel, health_check=F
     rc = proc.returncode if proc.returncode is not None else -1
     out = b"".join(bufs["out"]).decode("utf-8", "replace")
     err = b"".join(bufs["err"]).decode("utf-8", "replace")
-    if diverged.is_set():
-        err += marker
-        # A short process can exit before the 250 ms parent poll observes `diverged`. Under the monitor's
-        # CONSECUTIVE semantics, a set flag means the run's final metric records were an unbroken non-finite
-        # streak (it ended diverged, not merely overflowed once early), so its zero status does not make the
-        # result healthy; fail closed after the drain.
+    if diverged.is_set() or stalled.is_set():
+        err += active_marker
+        # A short process can exit before the 250 ms parent poll observes the flag. A set flag means we
+        # deliberately tree-killed the stage, so a lingering zero status must NOT read as healthy; fail
+        # closed after the drain. (STALLED keeps timed_out False so command_eval can still salvage a metric
+        # the child printed before it went quiet — the STALLED marker tells the agent what happened.)
         if rc == 0:
             rc = -1
     return rc, out, err, timed_out

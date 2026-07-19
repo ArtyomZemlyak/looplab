@@ -40,6 +40,31 @@ def test_nan_metric_rejected(tmp_path):
     assert res.metric is None                          # NaN -> no metric, not a NaN best
 
 
+def test_stall_watchdog_salvages_metric_printed_before_the_hang(tmp_path):
+    # A single-command eval that prints its metric then HANGS silently (a distributed finalize deadlock /
+    # wedged CUDA op) is stall-killed early AND still returns the metric it printed, flagged stalled=True,
+    # so a train+eval that only deadlocked on teardown is salvaged rather than wasted.
+    (tmp_path / "p.py").write_text(
+        "import time,sys\nprint('RECALL@100: 0.5', flush=True)\ntime.sleep(60)\n", encoding="utf-8")
+    spec = {"kind": "stdout_regex", "pattern": r"RECALL@100: ([0-9.]+)", "group": 1}
+    import time as _t
+    t0 = _t.time()
+    res = run_command_eval([sys.executable, "p.py"], str(tmp_path), 30, spec, stall_timeout=2)
+    assert _t.time() - t0 < 20            # killed at the stall window, not the 30s timeout / 60s sleep
+    assert res.metric == 0.5             # the printed metric is SALVAGED
+    assert res.stalled is True           # flagged as a stall (so the engine gate accepts it)
+    assert res.timed_out is False        # a stall is not a deadline timeout
+
+
+def test_stall_watchdog_does_not_salvage_when_no_metric_was_printed(tmp_path):
+    # A stall with NO metric printed before the silence (hung mid-training) must NOT invent one: salvage
+    # is self-gating on `metric is not None`.
+    (tmp_path / "p.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+    spec = {"kind": "stdout_regex", "pattern": r"RECALL@100: ([0-9.]+)", "group": 1}
+    res = run_command_eval([sys.executable, "p.py"], str(tmp_path), 30, spec, stall_timeout=2)
+    assert res.metric is None and res.stalled is True
+
+
 def test_drift_nan_is_not_corroborated():
     assert _drift(float("nan"), float("nan"), 1e-6) is True   # NaN never "agrees"
     assert _drift(1.0, 1.0, 1e-6) is False

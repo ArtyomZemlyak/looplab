@@ -26,8 +26,9 @@ from contextlib import nullcontext
 from pathlib import Path
 from typing import Optional
 
-from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, finite_timeout,
-                                     json_line_extras, json_line_metric, json_line_trials, run_argv)
+from looplab.runtime.sandbox import (RunResult, STALL_SENTINEL, _to_float, docker_timed_out,
+                                     finite_timeout, json_line_extras, json_line_metric,
+                                     json_line_trials, run_argv)
 
 # A stage name is interpolated into a log FILE PATH (`<name>.log`) and shown in the trace, so it must
 # be a short filesystem-safe SLUG — no path separators, drive letters, control chars, NUL, or dot
@@ -41,6 +42,21 @@ from looplab.runtime.sandbox import (RunResult, _to_float, docker_timed_out, fin
 # in a log filename and trace/span attributes). `\Z` anchors the true end of string.
 _STAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 MAX_STAGE_COUNT = 16
+
+# STALL watchdog window: a stage (train/eval) that emits NOTHING for this long while still ALIVE is
+# treated as hung (a distributed/DataParallel finalize deadlock, a wedged CUDA op, a lock never
+# released) and tree-killed early — instead of sitting until the full, often multi-hour, stage
+# deadline. Bounded generously so a legitimately slow-but-quiet phase (hard-negative mining, a large
+# FAISS build, a checkpoint save) is not falsely killed; a real deadlock still dies in ~minutes.
+_MAX_STALL_S = 1800.0
+
+
+def _stall_window(timeout: float) -> Optional[float]:
+    """Silence-before-kill for a stage, capped at `_MAX_STALL_S` and never longer than the stage's own
+    deadline (for a short scorer the deadline fires first, so the stall check is a harmless no-op)."""
+    if not timeout or timeout <= 0:
+        return None
+    return min(_MAX_STALL_S, float(timeout))
 
 
 def safe_stage_name(name: str) -> bool:
@@ -561,6 +577,7 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                      log_dir: Optional[str] = None,
                      stages: Optional[list] = None,
                      start_stage: Optional[str] = None,
+                     stall_timeout: Optional[float] = None,
                      check_fn=None) -> RunResult:
     """Run `command` (argv, no shell) in `cwd`, capped + timeout + tree-kill, then read the
     metric. If `setup` is given (e.g. a dependency install), it runs FIRST in `setup_cwd`
@@ -669,9 +686,10 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
                 # stdout for a diverged (non-finite) loss and tree-kill early instead of burning the whole
                 # timeout on a model that can no longer learn — the killed stage then fails with a DIVERGED
                 # marker the agent reads. Off for the short scorer `cmd` (it is not a training loop).
-                rc, out, err, to = run_argv(_w(_bound(_scmd, _sto), str(wd)), wd,
-                                            _sto + grace, env, max_output_bytes, cancel,
-                                            log_path=_log(f"{_sname}.log"), health_check=True)
+                rc, out, err, to = run_argv(
+                    _w(_bound(_scmd, _sto), str(wd)), wd, _sto + grace, env, max_output_bytes, cancel,
+                    log_path=_log(f"{_sname}.log"), health_check=True,
+                    stall_timeout=(stall_timeout if stall_timeout is not None else _stall_window(_sto)))
                 to = to or (is_docker and docker_timed_out(rc))
                 if _sh is not None:
                     _sh.set_many(exit_code=rc, timed_out=to, stage=_sname)
@@ -703,9 +721,14 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
             # command starts, so the "Evaluate" block shows live instead of only when the command ends.
             with _sp("stage_started", kind="tool", phase="evaluate"):
                 pass
-            rc, out, err, to = run_argv(_w(_bound(command, timeout), str(wd)), wd,
-                                         timeout + grace, env, max_output_bytes, cancel,
-                                         log_path=_log("eval.log"))
+            # A single-command RepoTask eval IS the training (train->eval in one process, often
+            # multi-hour), not just a short scorer — so it gets the STALL watchdog too (health_check
+            # stays off here: the NaN scan is for declared training stages, and a scorer may legitimately
+            # print 'nan'; the stall watchdog is output-based and safe for any command).
+            rc, out, err, to = run_argv(
+                _w(_bound(command, timeout), str(wd)), wd, timeout + grace, env, max_output_bytes, cancel,
+                log_path=_log("eval.log"),
+                stall_timeout=(stall_timeout if stall_timeout is not None else _stall_window(timeout)))
             to = to or (is_docker and docker_timed_out(rc))   # 124 (SIGTERM) or 137 (SIGKILL escalation)
             if _h is not None:
                 _h.set_many(exit_code=rc, timed_out=to)
@@ -749,6 +772,6 @@ def run_command_eval(command: list[str], cwd: str, timeout: float, metric: dict,
     trials = json_line_trials(out) if not to else None
     return RunResult(exit_code=rc, stdout=out, stderr=err, metric=m, timed_out=to, drift=drift,
                      extra_metrics=extra, violations=(viol or None), trials=trials,
-                     stages=stage_results)
+                     stages=stage_results, stalled=(STALL_SENTINEL in err))
 
 

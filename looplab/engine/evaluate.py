@@ -184,7 +184,13 @@ class EvaluateMixin:
                     cancel.set()                  # eval finished on its own …
                     _tg.cancel_scope.cancel()     # … stop the watcher now (no poll-interval latency)
                 total_eval = round(total_eval + (time.time() - _t0), 3)   # cumulative eval cost (#2)
-                ok = res.metric is not None and res.exit_code == 0 and not res.timed_out
+                # STALL SALVAGE: a stage the stall-watchdog tree-killed AFTER it had already printed its
+                # metric (a completed train+eval that only hung on teardown — a distributed finalize
+                # deadlock / wedged CUDA op) still counts: the metric is real, the non-zero exit is only
+                # the kill. Self-gating — `res.metric is not None` on a stall means the value WAS emitted
+                # before the silence. NOT for a real deadline timeout (that is still mid-training).
+                ok = (res.metric is not None and not res.timed_out
+                      and (res.exit_code == 0 or getattr(res, "stalled", False)))
                 if superseded:
                     # The reset discards this lifecycle's metric/state, not compute already spent. A
                     # stale-generation terminal is fold-budget-only: replay rejects its state fields
