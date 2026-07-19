@@ -785,12 +785,14 @@ class RunState(BaseModel):
     approved_node_id: Optional[int] = None      # explicit human choice; overrides algorithmic best
     archive: Optional[dict] = None        # diversity-archive summary at run end (I22)
     # Breadth read-model recorded at the strategist cadence: the run's narrowing curve (themes,
-    # niches, theme entropy, dominant-theme fraction). Audit-only — never affects selection; each
-    # entry carries `at_node` so the emission gate is idempotent on resume. See search/coverage.py.
+    # niches, theme entropy, dominant-theme fraction). The folded field is not a selector input, but
+    # a live Strategist may use it to change later search policy. Each entry carries `at_node` so the
+    # emission gate is idempotent on resume. See search/coverage.py.
     coverage_snapshots: list[dict] = Field(default_factory=list)
     # PART IV Phase 2a: concept-graph coverage + uncovered-region snapshots (the "0 coverage in {X}"
-    # pivot signal) recorded at the strategist cadence when `concept_pivot` is on. Audit-only — never
-    # affects selection; each entry carries `at_node` so the emission gate is idempotent on resume.
+    # pivot signal) recorded at the strategist cadence when `concept_pivot` is on. The folded field
+    # does not directly select a winner, but the live Researcher cue can change future candidates.
+    # Each entry carries `at_node` so the emission gate is idempotent on resume.
     # Additive/reader-defaulted: empty on old logs -> byte-identical fold. See search/concept_graph.py.
     concept_coverage_snapshots: list[dict] = Field(default_factory=list)
     # PART IV D5 (§21.16, Phase 2c): per-node concept memberships (node_id -> [concept_id]). A membership

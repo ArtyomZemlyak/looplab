@@ -474,10 +474,11 @@ class StrategyCadenceMixin:
     def _maybe_snapshot_coverage(self, state: RunState) -> RunState:
         """Record a `coverage_snapshot` (breadth read-model) at the strategist cadence, then re-fold.
         Recorded even when NO Strategist is wired, so the run's narrowing curve is always queryable
-        over the log / replayable historically (fold -> coverage_signal). Audit-only — it never
-        affects node selection; folded only so the at_node gate makes a resume idempotent (each
-        node-count decision point is reached once across the run's lifetime). No-op when
-        coverage_context is off, off-cadence, mid-eval, or already snapshotted at this node-count."""
+        over the log / replayable historically (fold -> coverage_signal). The fold reducer never
+        selects a node from this record, but a live Strategist can consume the signal and change later
+        search policy. It is folded so the at_node gate makes resume idempotent (each node-count
+        decision point is reached once). No-op when coverage_context is off, off-cadence, mid-eval,
+        or already snapshotted at this node-count."""
         n = len(state.nodes)
         if (not self._coverage_context or not self._should_consult(state)
                 or self._already_covered_at(state, n)):
@@ -488,11 +489,11 @@ class StrategyCadenceMixin:
 
     def _maybe_snapshot_concept_coverage(self, state: RunState) -> RunState:
         """PART IV Phase 2a: record a compact concept-graph coverage + uncovered-region snapshot at the
-        strategist cadence when `concept_pivot` is on. Deterministic (heuristic tagger over the task-type
-        skeleton) -> replay-reproducible; audit-only + the source of the explore-stance pivot directive.
-        Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op off-cadence / mid-eval / when
-        the flag is off / when the task has no curated concept skeleton (so it never perturbs a generic
-        task). Never affects selection."""
+        strategist cadence when `concept_pivot` is on. The producer is LLM-backed when a client is wired,
+        with a deterministic heuristic fallback; recording the result makes replay deterministic. The
+        folded record does not select a node directly, but its explore-stance directive can change future
+        Researcher candidates. Same at_node idempotence gate as `_maybe_snapshot_coverage`; no-op
+        off-cadence / mid-eval / when the flag is off / when neither a client nor fallback skeleton works."""
         if not getattr(self, "_concept_pivot", False) or not self._should_consult_concepts(state):
             return state
         n = len(state.nodes)
@@ -582,8 +583,8 @@ class StrategyCadenceMixin:
         client = _rc() if callable(_rc) else None
         seed = skeleton_for(state.task_id or "")
         seed = seed if seed.concepts() else None
-        # ENTIRE computation is guarded: an audit-only snapshot must NEVER perturb the run (the LLM build,
-        # the consolidation, AND the pure rollups over an arbitrary grown graph all sit under one try).
+        # CODEX AGENT: guard the whole producer so a failed snapshot cannot perturb the run. A successfully
+        # recorded snapshot is deliberately behavioral: its uncovered-region cue can steer later proposals.
         try:
             graph = tags = cov = None
             important: list = []
@@ -592,8 +593,9 @@ class StrategyCadenceMixin:
                 parser = getattr(getattr(self, "deep_researcher", None), "parser", "tool_call")
                 # INCREMENTAL (§21.16, Phase 2c): reuse per-node tags already recorded as `node_concepts`
                 # events and only LLM-tag NEW nodes, so per-run tagging is ~O(nodes) not ~O(nodes × cadences).
-                # Bounded further by `_concept_pivot` being OFF by default (the method early-returns when the
-                # flag is off, §295). The audit snapshot stays lightweight: `tools=None` tags from the node's
+                # Bare-library EngineOptions keeps `_concept_pivot` off, while product `Settings` is ON;
+                # cadence, bounded per-pass work, and incremental reuse therefore bound product cost.
+                # The snapshot producer uses `tools=None` and tags from the node's
                 # RECORDED text (idea/params/result/log excerpts in state), i.e. mode="llm", NOT a live
                 # per-node tool-loop (passing run tools would make it fully agentic but far heavier).
                 # Span-scope the concept-map LLM generations (tagging + consolidation + importance) so they

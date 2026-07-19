@@ -120,3 +120,16 @@ def test_curation_rationale_discloses_synchronous_finalize_latency():
     assert "calls run synchronously" in finalize
     assert "never blocks/" not in config
     assert "never blocks finalization" not in finalize
+
+
+def test_part_iv_comments_distinguish_fold_storage_from_live_steering():
+    root = Path(__file__).parents[1]
+    strategy = (root / "looplab" / "engine" / "strategy.py").read_text(encoding="utf-8")
+    graph = (root / "looplab" / "search" / "concept_graph.py").read_text(encoding="utf-8")
+    assert "product `Settings` is ON" in strategy
+    assert "can steer later proposals" in strategy
+    assert "change admission" in graph
+    assert "configured live-client call is synchronous" in graph
+    assert "`_concept_pivot` being OFF by default" not in strategy
+    assert "off-by-default + audit-only" not in graph
+    assert "Never raises, never blocks the caller" not in graph

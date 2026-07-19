@@ -427,7 +427,8 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
     `grow=False`: this text is a PROPOSAL/HYPOTHESIS, not an executed result, so it must NOT mint new
     vocabulary. Degrades to the deterministic `tag_text` on no client / any failure; RESPECTS an empty LLM
     verdict (the model naming nothing = 'fits no known concept', kept empty), but recovers via `tag_text`
-    when the model named only UNKNOWN ids. Never raises, never blocks the caller."""
+    when the model named only UNKNOWN ids. Never raises; a configured live-client call is synchronous and
+    can add provider latency/cost before returning or falling back."""
     if client is None:
         return tag_text(text, graph, allow_plural=allow_plural)
     try:
@@ -441,9 +442,9 @@ def tag_text_llm(text: str, graph: ConceptGraph, client, *, parser: str = "tool_
         known = [c for c in graph.concepts() if not c.id.endswith("/*")]
         # PROMPT CONTRACT (CLAUDE.md): this is a DELIBERATE generalization of F2's experiment-specific
         # tagging prompt so ONE tagger serves both proposed experiments (F2) and hypotheses (HT) — the
-        # framing is "research item (proposed experiment or a hypothesis)". Tags shift only negligibly vs
-        # the old idea-only wording, and this path is off-by-default + audit-only + can only flip a novelty
-        # defer->allow (never a wrong reject), so the change is low-risk and intentional, not a cleanup.
+        # framing is "research item (proposed experiment or a hypothesis)". This path is active under the
+        # product-on Part IV flags: hypothesis tags are descriptive, while proposal tags can flip graded
+        # novelty from defer to allow and therefore change admission (never direct metric ranking).
         system = (
             "You tag a machine-learning research item (a proposed experiment or a hypothesis) with the "
             "CONCEPTS it touches, choosing ONLY from the KNOWN VOCABULARY below (do NOT invent ids — this is "

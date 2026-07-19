@@ -1702,8 +1702,8 @@ def _materialize_concept_deltas(
 
 
 def _on_concept_coverage_snapshot(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
-    # PART IV Phase 2a: audit-only concept-graph coverage / uncovered-region curve; the at_node gate
-    # dedups on resume. NEVER touches selection (mirrors _on_coverage_snapshot).
+    # PART IV Phase 2a: the fold only retains the coverage / uncovered-region curve and never selects
+    # from it; the live proposal path may later consume the record as a steering cue. at_node dedups resume.
     st.concept_coverage_snapshots.append(d)
 
 def _on_node_concepts(st: RunState, e: Event, d: dict, ctx: "_FoldCtx") -> None:
