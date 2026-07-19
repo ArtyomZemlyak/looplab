@@ -112,3 +112,105 @@ def test_monitor_no_span_without_a_log(tmp_path):
     wd.mkdir()                                              # no *.log -> nothing to observe
     spans = _run_monitor(tmp_path, workdir=wd)
     assert [s for s in spans if s.get("name") == "train_monitor"] == []
+
+
+# --------------------------------------------------------------------------- Phase 1: LLM verdict
+from looplab.events.types import EV_TRAIN_MONITOR_ALERT  # noqa: E402
+
+
+class _FakeClient:
+    def __init__(self, verdict):
+        self._verdict = verdict
+        self.calls = 0
+
+    def complete_tool(self, messages, schema):             # the tool_call parser path
+        self.calls += 1
+        return dict(self._verdict)
+
+
+class _FakeDeveloper:
+    def __init__(self, client):
+        self.client = client
+
+
+class _VerdictHost(TrainingMonitorMixin):
+    def __init__(self, tracer, developer, interval=0.05):
+        self.tracer = tracer
+        self.developer = developer
+        self._train_monitor_interval_s = interval
+        self._write_lock = anyio.Lock()
+        self.store = _FakeStore()
+
+
+class _FakeStore:
+    def __init__(self):
+        self.events = []
+
+    def append(self, event_type, data):
+        self.events.append((event_type, data))
+
+
+def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22):
+    tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
+    host = _VerdictHost(tracer, developer, interval=0.05)
+    cancel = threading.Event()
+
+    async def drive():
+        async with anyio.create_task_group() as tg:
+            tg.start_soon(host._monitor_training, 0, 0, str(workdir), cancel, "ctx")
+            await anyio.sleep(hold_s)
+            tg.cancel_scope.cancel()
+
+    anyio.run(drive)
+    spans = ([json.loads(ln) for ln in (tmp_path / "spans.jsonl").read_text().splitlines() if ln.strip()]
+             if (tmp_path / "spans.jsonl").exists() else [])
+    return host, spans
+
+
+def test_broken_verdict_appends_alert_event_and_stamps_span(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: nan\nRuntimeError: CUDA error: device-side assert\n")
+    client = _FakeClient({"status": "broken", "reason": "loss is nan and a CUDA assert fired",
+                          "confidence": 0.95})
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+
+    alerts = [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT]
+    assert alerts, "a broken verdict must append an alert event"
+    assert alerts[0]["status"] == "broken" and alerts[0]["node_id"] == 0
+    assert 0.0 <= alerts[0]["confidence"] <= 1.0
+    tm = [s for s in spans if s.get("name") == "train_monitor"]
+    assert tm and tm[0]["attributes"].get("status") == "broken"
+
+
+def test_healthy_verdict_stays_trace_only_no_event(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\nstep 3 loss: 0.3\n")
+    client = _FakeClient({"status": "healthy", "reason": "loss steadily decreasing", "confidence": 0.8})
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client))
+
+    assert [d for (t, d) in host.store.events if t == EV_TRAIN_MONITOR_ALERT] == []   # clean event log
+    tm = [s for s in spans if s.get("name") == "train_monitor"]
+    assert tm and tm[0]["attributes"].get("status") == "healthy"                       # but traced
+
+
+def test_unchanged_digest_does_not_re_call_the_llm(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\n")     # static log across every tick
+    client = _FakeClient({"status": "healthy", "reason": "ok", "confidence": 0.7})
+    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.3)
+    assert client.calls == 1, f"LLM should fire once for a static digest, not per tick (fired {client.calls})"
+
+
+def test_no_client_degrades_to_trace_only_observation(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("step 1 loss: 0.5\nstep 2 loss: 0.4\n")
+    host, spans = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(None))
+
+    assert [e for e in host.store.events if e[0] == EV_TRAIN_MONITOR_ALERT] == []
+    tm = [s for s in spans if s.get("name") == "train_monitor"]
+    assert tm, "still observes (Phase 0 trace) without an LLM client"
+    assert "status" not in tm[0]["attributes"]             # no verdict without a client
