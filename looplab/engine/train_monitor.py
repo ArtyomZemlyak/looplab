@@ -127,7 +127,13 @@ def active_training_log(workdir) -> Optional[Path]:
     freshest). The mtime heuristic follows the moving active stage without coupling to the sandbox's live
     stage cursor (unobservable from the engine's worker thread); if the solution code also drops its OWN
     `*.log`, the freshest one still tracks the most recent training output, which is what the observer
-    wants. None when there is no `*.log` at all (the solution.py path writes none)."""
+    wants. None when there is no `*.log` at all (the solution.py path writes none).
+
+    REVIEW NOTE (accepted tradeoff, not fixed): the `*.log` glob is intentionally broad. It could in
+    principle latch onto a non-stage log the training code dropped (e.g. a stale checkpoint `.log` with a
+    newer mtime). Narrowing to the exact `<stage>.log` names would need the sandbox's dynamic stage list,
+    which the engine cannot see from the worker thread — and the failure is benign (a slightly-less-relevant
+    tail feeds an ADVISORY verdict), so the simple freshest-file heuristic is kept over a fragile coupling."""
     try:
         logs = list(Path(workdir).glob("*.log"))
     except OSError:
@@ -144,7 +150,12 @@ def read_training_tail(workdir, *, max_read_bytes: int = 131_072,
                        max_lines: int = 40, max_chars: int = 4000) -> str:
     """Read only the LAST `max_read_bytes` of the active stage log and digest it. Bounded read (seek to
     the tail) so a multi-GB training log never loads into memory; a torn leading line is dropped by the
-    utf-8 'replace' decode + the digest keeping only whole trailing lines. '' when there is no log yet."""
+    utf-8 'replace' decode + the digest keeping only whole trailing lines. '' when there is no log yet.
+
+    REVIEW NOTE (accepted, not fixed): this bounded seek-to-tail pattern (stat size → seek → read) also
+    appears inline in `serve/routers/runs.py::_tail` and `events/eventstore.py::_disk_last_seq`. Each copy
+    differs in its line-boundary handling (and there is no existing shared helper — `sandbox._clamp_tail_bytes`
+    clamps an in-memory STRING, not a file), so a 3-call-site extraction is deferred as not worth the churn."""
     path = active_training_log(workdir)
     if path is None:
         return ""
