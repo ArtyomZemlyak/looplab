@@ -299,7 +299,7 @@ class ProposalCuesMixin:
                 ConceptCapsuleStore,
                 _capsule_completeness,
                 _capsule_fingerprint_scope_complete,
-                portfolio_concept_overview,
+                _portfolio_concept_overview_data,
             )
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
@@ -381,9 +381,12 @@ class ProposalCuesMixin:
                         and same_live_direction(current_direction, r.get("direction"))]
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
-            overview = (portfolio_concept_overview(capsules,
-                        aliases=load_concept_aliases(base), splits=load_concept_splits(base))
-                        if capsules else None)
+            if capsules:
+                overview, concept_rows = _portfolio_concept_overview_data(
+                    capsules, aliases=load_concept_aliases(base),
+                    splits=load_concept_splits(base))
+            else:
+                overview, concept_rows = None, None
             if (not lessons and not overview and not research
                     and concept_scope["scope_complete"]):
                 self._cross_run_advisory_receipt = {}
@@ -391,7 +394,10 @@ class ProposalCuesMixin:
             # lessons + D8 claims + operator decisions; structured claim key when enabled (§21.20.13).
             claims = claims_for_memory(base, lessons=lessons, research_claims=research,
                                        structured=getattr(self, "_cross_run_structured_claims", False))
-            pack = build_context_pack(claims, concept_overview=overview)
+            # CODEX AGENT: live tendency selection consumes the exact scoped retained aggregate before the
+            # overview's display cap; build_context_pack still bounds every model-visible list itself.
+            pack = build_context_pack(
+                claims, concept_overview=overview, _concept_rows=concept_rows)
             pack["concept_scope"] = concept_scope
             text = render_context_pack(pack)
             if not concept_scope["scope_complete"]:

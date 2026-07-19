@@ -7,6 +7,8 @@ only — never auto-injected). Composes Step 4 claims + Step 3 concept overview.
 """
 from __future__ import annotations
 
+import orjson
+
 from looplab.engine.claims import build_context_pack, claim_assessments, render_context_pack
 
 
@@ -118,6 +120,40 @@ def test_coverage_helps_hurts_carry_run_counts():
     assert pack["coverage"]["hurts"] == ["regularization/rdrop (n=3)"]
     txt = render_context_pack(pack)
     assert "(n=5)" in txt and "RANK BETTER" in txt and "(n=3)" in txt
+
+
+def test_claims_cli_pack_derives_tendencies_before_overview_cap(tmp_path):
+    from typer.testing import CliRunner
+
+    from looplab.cli import app
+    from looplab.engine.memory import ConceptCapsuleStore, build_concept_capsule
+
+    popular = [f"popular/c{index:03d}" for index in range(512)]
+    capsules = []
+    for group in range(2):
+        concepts = popular[group * 256:(group + 1) * 256]
+        for repeat in range(3):
+            capsules.append(build_concept_capsule(
+                run_id=f"popular-{group}-{repeat}", fingerprint=["k"], direction="max",
+                concepts=concepts, concept_outcomes={}))
+    for repeat in range(2):
+        capsules.append(build_concept_capsule(
+            run_id=f"tendency-{repeat}", fingerprint=["k"], direction="max",
+            concepts=["zz/target", "zz/baseline"],
+            concept_outcomes={"zz/target": 0.9, "zz/baseline": 0.1}))
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    for capsule in capsules:
+        store.add(capsule)
+    (tmp_path / "lessons.jsonl").write_bytes(orjson.dumps({
+        "statement": "retained claim", "outcome": "supported", "evidence": [1],
+        "run_id": "claim-run", "task_id": "t",
+    }) + b"\n")
+
+    result = CliRunner().invoke(app, ["claims", str(tmp_path), "--pack"])
+
+    assert result.exit_code == 0
+    assert "RANK BETTER UNTRUSTED_MEMORY=" in result.stdout and "zz/target (n=2)" in result.stdout
+    assert "RANK WORSE UNTRUSTED_MEMORY=" in result.stdout and "zz/baseline (n=2)" in result.stdout
 
 
 def test_partial_coverage_withholds_directional_tendencies():

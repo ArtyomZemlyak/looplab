@@ -439,7 +439,9 @@ PART IV cross-run Step 3 (§21.20). A portfolio overview over **valid concept ca
 from finalized opt-in runs: which raw concept slugs appear and in which recorded runs, each with its own
 metric-bearing outcome. Each new capsule has bounded-source completeness triplets for concepts and outcomes;
 the text command warns when known items were omitted, and `--json` exposes aggregate plus per-run source
-receipts. Legacy v2 capsules without those fields remain positive observations but have unknown totals and do
+receipts. The aggregate overview is also independently capped at 512 concept rows: its exact `n_concepts` /
+`concepts_omitted` receipt is present in JSON and text mode explicitly reports a non-zero projection omission.
+Legacy v2 capsules without those fields remain positive observations but have unknown totals and do
 not contribute their potentially post-truncation rank signs. Missing, malformed, untagged or non-opt-in runs
 remain outside this corpus, so capsule completeness is not whole-portfolio coverage. Raw metrics are deliberately **not** compared across tasks (different
 task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
@@ -531,7 +533,10 @@ PROPOSES a curation (merge duplicate slugs / split conflated ones / purge noise)
 review the exact returned rows, then translate only the selected operations into typed `concept-merge` /
 `concept-split` commands or owner HTTP governance actions. The deprecated `--apply` spelling remains so old
 scripts fail clearly, but exits 2 **before model setup, paid inference or mutation**; it never re-runs and applies
-an unreviewed batch. Needs a reachable LLM. This is the on-demand companion to finalize-time
+an unreviewed batch. The prompt carries separate capsule-source and model-visible vocabulary-projection
+receipts. If either is incomplete, deterministic validation allows direct synonym merges only and rejects
+split/purge proposals whose rarity or absence premise could depend on omitted concepts. Needs a reachable LLM.
+This is the on-demand companion to finalize-time
 `cross_run_curation`.
 
 ```bash
@@ -575,7 +580,10 @@ PART IV CR2a. Runs a bounded hybrid recall over statement-grouped claims plus al
 and excludes operator-rejected claims. The payload includes an intent classification, aggregate result score
 and relevance rank, corpus digest, corpus/hit/truncation counts, the effective contradiction quota/caveat count,
 and a declaration that the 64-bucket hash "vector" channel is a lexical proxy rather than a semantic model.
-The corpus is capped internally at 2,000 records and rebuilt per call.
+The corpus is capped internally at 2,000 records by default and rebuilt per call. Query-aware preselection sees
+the full validated canonical retained concept set before that cap, rather than the overview's top-512 display
+projection. Receipts distinguish exact concept/claim totals, indexed counts and omissions, and commit those
+counts plus any bypassed overview projection tail to the versioned retrieval digest.
 
 It still does not expose each channel's per-hit contribution, carry evidence refs/source/scope/snapshot/index-
 health on each result, enforce a ComparisonContract, or persist the derivation receipt. The CLI has no scope
@@ -621,7 +629,7 @@ looplab claims MEMORY_DIR [--top 20] [--contested] [--pack] [--fuzzy] [--structu
 | `MEMORY_DIR` | *(required)* | Cross-run memory dir holding `lessons.jsonl` and/or `research_claims.jsonl` (or a lessons file) |
 | `--top N` | `20` | How many most-evidenced claims to list |
 | `--contested` | off | Show only `mixed` (support **and** oppose) claims |
-| `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly |
+| `--pack` | off | Render the hard claim-count-capped agent **context pack** (Step 5): pinned → ratified → mixed → support-only (`supported` wire state) → opposition-only (`refuted`) → insufficient; a caveat can replace the weakest non-pinned positive; omitted pins are counted explicitly. Concept tendencies are derived from the full retained pre-cap aggregate while the rendered labels remain bounded |
 | `--fuzzy` | off | Suggestion-grade bounded token-Jaccard complete-link merge: every pair must clear the threshold and share scope, polarity and maturity; it is non-transitive and never scope-agnostic, but remains display/review grouping rather than claim identity |
 | `--structured` | off | Group by the scope+polarity-safe **structured claim key** (`engine/claim_key.py`) instead of the display statement: claims from different tasks never merge, opposite-polarity assertions ("X helps" vs "X never helps") surface as a CONTRADICTION rather than collapsing, and grouping is O(n) exact-key (no transitive over-merge). Governance overlays by scope-precise `claim_uid` |
 | `--json` | off | Emit the full assessments (or, with `--pack`, the pack) as JSON |

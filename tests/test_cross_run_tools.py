@@ -54,6 +54,21 @@ def test_prior_attempts_surfaces_tried_concepts(tmp_path):
     assert "hard-neg" in out and "2 run(s)" in out and "surface, not a block" in out
 
 
+def test_prior_attempts_searches_full_retained_concept_set_before_result_cap(tmp_path):
+    popular = [f"popular/c{index:03d}" for index in range(512)]
+    _seed(tmp_path, capsules=[
+        _cap("popular-a", popular[:256], {}),
+        _cap("popular-b", popular[256:], {}),
+        _cap("sentinel", ["zz/sentinel"], {}),
+    ])
+
+    out = CrossRunTools(tmp_path).execute(
+        "cross_run_prior_attempts", {"idea": "zz sentinel"})
+
+    assert "TRIED BEFORE" in out and "zz/sentinel" in out
+    assert "no prior runs" not in out
+
+
 def test_prior_attempts_empty(tmp_path):
     assert "no prior runs" in CrossRunTools(tmp_path).execute("cross_run_prior_attempts", {"idea": "x"})
 
@@ -1172,9 +1187,13 @@ def test_concept_card_tendency_uses_only_the_bound_task_family(tmp_path):
     assert "globally used in 5 prior run(s)" in out
 
 
-def test_concept_card_counts_a_known_slug_beyond_the_overview_display_cap(tmp_path):
+def test_concept_card_counts_a_known_slug_beyond_the_overview_display_cap(tmp_path, monkeypatch):
+    import looplab.engine.memory as memory
     from looplab.engine.memory import build_concept_capsule
 
+    # Lower the display cap to make the exact-key failure small while retaining a >512-concept portfolio.
+    # The target ties its 255 matching-capsule siblings and sorts after them, so a public-row lookup misses.
+    monkeypatch.setattr(memory, "_MAX_OVERVIEW_CONCEPTS", 1)
     capsules = []
     for group in range(3):
         concepts = [f"group-{group}/concept-{index:03d}" for index in range(255)]

@@ -372,7 +372,7 @@ class CrossRunTools:
         if not self.dir:
             return "(no cross-run memory configured)"
         from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
-        from looplab.engine.memory import portfolio_concept_overview
+        from looplab.engine.memory import _portfolio_concept_overview_data
 
         if name == "cross_run_prior_attempts":
             idea = args.get("idea")
@@ -383,10 +383,13 @@ class CrossRunTools:
             qt = _toks(idea)
             scoped_capsules = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
-            ov = portfolio_concept_overview(scoped_capsules, aliases=load_concept_aliases(self.dir),
-                                            splits=load_concept_splits(self.dir))
+            ov, concept_rows = _portfolio_concept_overview_data(
+                scoped_capsules, aliases=load_concept_aliases(self.dir),
+                splits=load_concept_splits(self.dir))
             # rank concepts by keyword overlap with the idea (fall back to most-explored)
-            scored = sorted(ov["concepts"],
+            # CODEX AGENT: the six-row tool envelope is the only result cap. Search the full retained
+            # canonical set first so a query for public-overview row #513 cannot yield an exact-looking miss.
+            scored = sorted(concept_rows,
                             key=lambda e: (-(len(qt & _toks(e["concept"])) if qt else 0), -e["n_runs"]))
             hits = [e for e in scored if (not qt) or (qt & _toks(e["concept"]))][:6]
             if not hits:
@@ -955,8 +958,8 @@ class CrossRunTools:
                                                          concept_governance_snapshot,
                                                          normalize_key, resolve_slug)
             from looplab.engine.memory import (_capsule_source_summary,
-                                               concept_profit_tendencies, portfolio_concept_graph,
-                                               portfolio_concept_overview)
+                                               _portfolio_concept_overview_data,
+                                               concept_profit_tendencies, portfolio_concept_graph)
 
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
@@ -1059,12 +1062,14 @@ class CrossRunTools:
             # where this concept survived the bounded source projection. Matching rows still own the
             # observed metrics/signs, but a non-matching partial row may have omitted this exact concept.
             scoped_source_summary = _capsule_source_summary(scoped_caps)
-            ov_scoped = portfolio_concept_overview(
+            _scoped_overview, scoped_rows = _portfolio_concept_overview_data(
                 scoped_canon_caps, aliases=aliases, splits=splits)
-            row = next((r for r in ov_scoped["concepts"] if r["concept"] == canon), None)
-            ov_global = portfolio_concept_overview(
+            row = next((r for r in scoped_rows if r["concept"] == canon), None)
+            _global_overview, global_rows = _portfolio_concept_overview_data(
                 global_canon_caps, aliases=aliases, splits=splits)
-            grow = next((r for r in ov_global["concepts"] if r["concept"] == canon), None)
+            # CODEX AGENT: card lookup is exact-key aggregation, not a display projection. Resolve the
+            # requested row from the helper's complete retained aggregate, never its bounded first value.
+            grow = next((r for r in global_rows if r["concept"] == canon), None)
             scoped_complete = (scoped_source_summary.get("source_complete") is True
                                and scope_receipt.get("scope_complete") is True)
             global_complete = source_summary.get("source_complete") is True

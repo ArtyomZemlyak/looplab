@@ -1017,7 +1017,8 @@ _CAVEAT_STATES = ("mixed", "refuted", "inconclusive")
 
 
 def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] = None,
-                       max_claims: int = 5) -> dict:
+                       max_claims: int = 5,
+                       _concept_rows: Optional[list[dict]] = None) -> dict:
     """Assemble a CLAIM-COUNT-bounded cross-run context pack from claim assessments (+ an optional concept
     overview) for a proposing agent (§21.20.5, Step 5). ("Claim-count", not token/byte: the pack caps the
     number of claims + per-claim field lengths; a true serialized-token envelope is the CR2b TODO — see the
@@ -1095,7 +1096,12 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
     }
     if concept_overview:
         from looplab.engine.memory import concept_profit_tendencies
-        rows = [e for e in (concept_overview.get("concepts") or []) if isinstance(e, dict)]
+        # CODEX AGENT: callers that own the retained capsule snapshot may supply its private pre-cap rows.
+        # The pack still emits only `max_claims` labels/tendencies; this prevents the public overview's
+        # display cap from becoming a silent analytics cap while keeping the outward prompt bounded.
+        row_source = (_concept_rows if _concept_rows is not None
+                      else concept_overview.get("concepts"))
+        rows = [e for e in (row_source or []) if isinstance(e, dict)]
         source_complete = concept_overview.get("source_complete") is True
         # PART V Phase 1 profit signal: surface concepts with a CONSISTENT, MULTI-RUN rank tendency (advisory
         # only — prompts, never selection). The threshold lives in ONE shared helper so the context pack and
@@ -1176,7 +1182,7 @@ _INTENTS = ("failed", "contested", "worked", "explore")
 # Document ids are a stable identity for the same searchable statement/concept.  The corpus digest has a
 # separate schema because it also commits to aggregate source receipts that do not belong in every doc id.
 _RETRIEVAL_DOCUMENT_VERSION = 2
-_RETRIEVAL_CORPUS_VERSION = 4
+_RETRIEVAL_CORPUS_VERSION = 5
 _INTENT_SCORE_BONUS = 0.001
 _CAVEAT_SCORE_RATIO = 0.50
 _CAVEAT_QUERY_COVERAGE = 0.10
@@ -1259,7 +1265,7 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     from pathlib import Path
 
     from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits)
-    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
@@ -1278,8 +1284,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     claims = [c for c in claim_assessments(lessons, research_claims=research,
                                            decisions=load_claim_decisions(memory_dir), structured=structured)
               if c.get("maturity") != "operator-rejected"]
-    overview = portfolio_concept_overview(capsules, aliases=load_concept_aliases(memory_dir),
-                                          splits=load_concept_splits(memory_dir))
+    overview, concept_rows = _portfolio_concept_overview_data(
+        capsules, aliases=load_concept_aliases(memory_dir),
+        splits=load_concept_splits(memory_dir))
     # CODEX AGENT: source completeness is part of the retrieval corpus, even when a query happens to match
     # only claims or the same retained concept rows.  Aggregate it across every eligible capsule before
     # query preselection so legacy/omitted concepts cannot masquerade as authoritative absence or exact
@@ -1291,6 +1298,10 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         "source_unknown_capsules": int(overview.get("source_unknown_capsules", 0) or 0),
         "source_concepts_omitted": int(overview.get("source_concepts_omitted", 0) or 0),
         "source_outcomes_omitted": int(overview.get("source_outcomes_omitted", 0) or 0),
+        # The public overview is independently bounded. Commit both its display omission and the exact
+        # retained concept cardinality to the corpus identity so a cap change/tail cannot look identical.
+        "concepts_total": len(concept_rows),
+        "overview_concepts_omitted": int(overview.get("concepts_omitted", 0) or 0),
     }
     scope_keys = (
         "scope_unknown_capsules", "scope_fingerprint_unknown_capsules",
@@ -1334,7 +1345,9 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "decision_revision": (c.get("decision") or {}).get("revision"),
             "governance_digest": _json_digest(c.get("decision") or {}),
             "evidence_digest": evidence_digest}))
-    for e in overview["concepts"]:
+    # CODEX AGENT: query-aware preselection must see every validated canonical row. Iterating the public
+    # top-512 projection made concept #513 look absent with source_complete=true and truncated=0.
+    for e in concept_rows:
         docs.append(_retrieval_doc("concept", _claim_text(e.get("concept"), 500), {
             "n_runs": e["n_runs"],
             "runs": [_identity_text(r.get("run_id"), 500) for r in e["runs"][:5]
@@ -1342,10 +1355,20 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
             "evidence_digest": _json_digest(e["runs"])}))
 
     n_total = len(docs)
-    corpus_digest = _retrieval_corpus_digest(docs, concept_source=concept_source)
     max_corpus = max(1, min(int(max_corpus), _MAX_RETRIEVAL_CORPUS))
     indexed_docs = _preselect_retrieval_docs(docs, str(query or ""), max_corpus)
     truncated = n_total - len(indexed_docs)
+    concepts_indexed = sum(kind == "concept" for kind, _text, _meta in indexed_docs)
+    claims_indexed = sum(kind == "claim" for kind, _text, _meta in indexed_docs)
+    projection_receipt = {
+        "concepts_indexed": concepts_indexed,
+        "concepts_omitted": len(concept_rows) - concepts_indexed,
+        "claims_total": len(claims),
+        "claims_indexed": claims_indexed,
+        "claims_omitted": len(claims) - claims_indexed,
+    }
+    corpus_digest = _retrieval_corpus_digest(docs, concept_source=concept_source)
+    retrieval_source = {**concept_source, **projection_receipt}
     # The AGENT may pass an explicit `intent` (it knows why it is searching — genuinely agentic); otherwise
     # classify deterministically from the query text. An unknown value falls back to classification.
     intent = intent if intent in _INTENTS else _classify_intent(query)
@@ -1367,14 +1390,14 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
                "vector_channel": "hash_embed(64-bucket bag-of-words; lexical proxy, not semantic)",
                "corpus_digest": corpus_digest,
                "retrieval_digest": _retrieval_corpus_digest(
-                   indexed_docs, concept_source=concept_source), "truncated": truncated,
+                   indexed_docs, concept_source=retrieval_source), "truncated": truncated,
                "preselection": "query-overlap+one-per-source/v1",
                "contradiction_quota": round(base_quota, 3),
                "effective_quota": round(q, 3), "caveat_target": target,
                "caveat_score_ratio": _CAVEAT_SCORE_RATIO,
                "caveat_query_coverage": _CAVEAT_QUERY_COVERAGE,
                "intent_score_bonus": _INTENT_SCORE_BONUS,
-               **concept_source}
+               **retrieval_source}
     if not indexed_docs or not str(query or "").strip():
         return {"results": [], "receipt": {**receipt, "n_hits": 0, "n_caveats": 0}}
 
@@ -1477,7 +1500,7 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     # capsule + lesson-cited runs), so one atlas payload never reports two different run counts — otherwise a
     # lesson-only memory says n_runs>0 at the top but coverage.n_runs==0, the very "zero runs" artifact the
     # union set out to fix (CODEX).
-    pack_overview = {**overview, "n_runs": n_runs, "concepts": full_concept_rows}
+    pack_overview = {**overview, "n_runs": n_runs}
     explored = full_concept_rows[:max_items]
     thin_coverage = thin[:max_items]
     contradictions = [_bounded_claim_projection(row) for row in contested[:max_items]]
@@ -1500,7 +1523,9 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
         "contradictions": contradictions,
         "contradictions_total": len(contested),
         "contradictions_omitted": len(contested) - len(contradictions),
-        "context_pack": build_context_pack(claims, concept_overview=pack_overview, max_claims=max_items),
+        "context_pack": build_context_pack(
+            claims, concept_overview=pack_overview, max_claims=max_items,
+            _concept_rows=full_concept_rows),
     }
     return sanitize_cross_run_projection(
         payload, max_chars=128_000_000, max_items=128, max_total_items=100_000)

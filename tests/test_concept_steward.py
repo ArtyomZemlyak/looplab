@@ -135,6 +135,12 @@ def test_partial_source_receipt_changes_paid_digest_and_prompt_envelope():
         "source_unknown_capsules": 1,
         "source_concepts_omitted": 0,
         "source_outcomes_omitted": 0,
+        "projection_receipt_known": True,
+        "projection_complete": True,
+        "concepts_total": 1,
+        "concepts_included": 1,
+        "concepts_omitted": 0,
+        "overview_concepts_omitted": 0,
     }
     assert complete_envelope["source_receipt"]["source_complete"] is True
     assert "RETAINED LOWER BOUND" in partial_client.messages[0]["content"]
@@ -166,6 +172,47 @@ def test_partial_source_cannot_propose_absence_based_split_or_purge():
         "from_concept": "data/aug", "to_concept": "data/augmentation", "why": ""}]
     assert proposals["splits"] == []
     assert proposals["purges"] == []
+
+
+def test_bounded_vocabulary_receipt_blocks_absence_curation_and_changes_digest():
+    concepts = [f"axis/c{index:03d}" for index in range(513)]
+    complete_projection, _ = _overview(concepts[:200])
+    bounded_projection, _ = _overview(
+        concepts[:256], concepts[256:512], concepts[512:])
+    assert concept_curation_input_digest(complete_projection) != concept_curation_input_digest(
+        bounded_projection)
+
+    class _Capture(_Client):
+        messages = None
+
+        def complete_tool(self, messages, json_schema):
+            self.messages = messages
+            return self._c
+
+    client = _Capture({
+        "merges": [{"from_concept": "axis/c000", "to_concept": "axis/c001"}],
+        "splits": [{
+            "from_concept": "axis/c002",
+            "rules": [{"to": "axis/fine", "when_any": ["fine"]}],
+            "default": "axis/c002",
+        }],
+        "purges": ["axis/c003"],
+    })
+
+    proposals = propose_concept_curation(bounded_projection, client)
+    envelope = json.loads(client.messages[1]["content"].split("\n", 1)[1])
+    receipt = envelope["source_receipt"]
+
+    assert receipt["source_complete"] is True
+    assert receipt["projection_receipt_known"] is True
+    assert receipt["projection_complete"] is False
+    assert (receipt["concepts_total"], receipt["concepts_included"],
+            receipt["concepts_omitted"]) == (513, 200, 313)
+    assert receipt["overview_concepts_omitted"] == 1
+    assert proposals["merges"] == [{
+        "from_concept": "axis/c000", "to_concept": "axis/c001", "why": ""}]
+    assert proposals["splits"] == [] and proposals["purges"] == []
+    assert "projection_complete" in client.messages[0]["content"]
 
 
 def test_only_one_operation_per_source_survives_validation():

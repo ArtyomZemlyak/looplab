@@ -46,6 +46,38 @@ def test_includes_concepts_from_capsules(tmp_path):
     assert any(h["kind"] == "concept" and "distillation" in h["text"] for h in r["results"])
 
 
+def test_query_preselection_sees_concepts_beyond_public_overview_cap():
+    popular = [f"popular/c{index:03d}" for index in range(512)]
+    capsules = [
+        build_concept_capsule(
+            run_id="popular-a", fingerprint=["k"], direction="max",
+            concepts=popular[:256], concept_outcomes={}),
+        build_concept_capsule(
+            run_id="popular-b", fingerprint=["k"], direction="max",
+            concepts=popular[256:], concept_outcomes={}),
+        build_concept_capsule(
+            run_id="sentinel", fingerprint=["k"], direction="max",
+            concepts=["zz/sentinel"], concept_outcomes={}),
+    ]
+
+    out = cross_run_retrieve(
+        "", "zz sentinel", capsules=capsules, lessons=[], k=1, max_corpus=3)
+
+    assert out["results"][0]["text"] == "zz/sentinel"
+    receipt = out["receipt"]
+    assert receipt["source_complete"] is True
+    assert receipt["n_corpus"] == receipt["concepts_total"] == 513
+    assert receipt["overview_concepts_omitted"] == 1
+    assert (receipt["concepts_indexed"], receipt["concepts_omitted"]) == (3, 510)
+    assert receipt["truncated"] == 510
+    full = cross_run_retrieve(
+        "", "zz sentinel", capsules=capsules, lessons=[], k=1, max_corpus=513)
+    assert full["receipt"]["corpus_digest"] == receipt["corpus_digest"]
+    assert full["receipt"]["retrieval_digest"] != receipt["retrieval_digest"]
+    assert (full["receipt"]["concepts_indexed"],
+            full["receipt"]["concepts_omitted"]) == (513, 0)
+
+
 def test_operator_rejected_claim_is_excluded(tmp_path):
     _seed(tmp_path, lessons=[_lesson("dubious trick helps")])
     record_claim_decision(str(tmp_path), statement="dubious trick helps", decision="rejected")
@@ -167,7 +199,7 @@ def test_receipt_digest_tracks_metadata_but_document_id_stays_stable():
         _lesson("stable claim improves recall", evidence=(1,), run_id="r1")])
     second = cross_run_retrieve("", "stable claim", k=2, capsules=[], lessons=[
         _lesson("stable claim improves recall", evidence=(9,), run_id="r2")])
-    assert first["receipt"]["corpus_digest_version"] == 4
+    assert first["receipt"]["corpus_digest_version"] == 5
     assert first["receipt"]["corpus_digest"] != second["receipt"]["corpus_digest"]
     assert first["results"][0]["stable_id"] == second["results"][0]["stable_id"]
 

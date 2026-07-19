@@ -764,6 +764,11 @@ def cross_run_concepts_cmd(
                    f"{ov.get('source_outcomes_omitted', 0)} outcome(s) known omitted"
                    + (f"; {ov.get('source_unknown_capsules', 0)} legacy capsule(s) have unknown totals"
                       if ov.get("source_unknown_capsules", 0) else ""))
+    # CODEX AGENT: capsule-source completeness and this read-model's display cap are independent. The
+    # headline is an exact retained total, so text mode must disclose when its backing row projection is not.
+    if ov.get("concepts_omitted"):
+        typer.echo(f"  Bounded overview omitted {ov['concepts_omitted']} concept row(s); "
+                   "use --json for projection receipts.")
     typer.echo("  (rank = RAW per-concept +better/~neutral/-worse-half sign counts across its runs; "
                "advisory, relative rank not causal profit)")
     for e in ov["concepts"][: max(0, top)]:
@@ -1238,7 +1243,7 @@ def claims_cmd(
     `<memory_dir>/lessons.jsonl` (unifies with the D8 claim shape); no LLM/endpoint."""
     from looplab.engine.claims import (build_context_pack, claims_for_memory,
                                        load_research_claims, render_context_pack)
-    from looplab.engine.memory import ConceptCapsuleStore, portfolio_concept_overview
+    from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
     from looplab.events.eventstore import read_jsonl_lenient
     p = Path(memory_dir)
     if p.is_file():
@@ -1266,11 +1271,16 @@ def claims_cmd(
         from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
         base = p if p.is_dir() else p.parent
         caps_path = base / "concept_capsules.jsonl"
-        overview = (portfolio_concept_overview(ConceptCapsuleStore(caps_path).all(),
-                                               aliases=load_concept_aliases(str(base)),
-                                               splits=load_concept_splits(str(base)))
-                    if caps_path.exists() else None)
-        cp = build_context_pack(claims, concept_overview=overview, max_claims=top)
+        if caps_path.exists():
+            overview, concept_rows = _portfolio_concept_overview_data(
+                ConceptCapsuleStore(caps_path).all(),
+                aliases=load_concept_aliases(str(base)),
+                splits=load_concept_splits(str(base)))
+        else:
+            overview, concept_rows = None, None
+        cp = build_context_pack(
+            claims, concept_overview=overview, max_claims=top,
+            _concept_rows=concept_rows)
         typer.echo(orjson.dumps(cp, option=orjson.OPT_INDENT_2).decode() if as_json
                    else (render_context_pack(cp) or "(empty context pack)"))
         return

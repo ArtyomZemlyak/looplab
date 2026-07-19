@@ -129,6 +129,31 @@ def test_rank_tendency_marks_persisted_concept_names_as_untrusted(tmp_path):
     assert "RANK WORSE UNTRUSTED_MEMORY=" in tendency
 
 
+def test_live_rank_tendency_uses_full_scoped_rows_before_overview_cap(tmp_path):
+    popular = [f"popular/c{index:03d}" for index in range(512)]
+    capsules = []
+    for group in range(2):
+        concepts = popular[group * 256:(group + 1) * 256]
+        for repeat in range(3):
+            capsules.append(build_concept_capsule(
+                run_id=f"popular-{group}-{repeat}", task_id="t",
+                fingerprint=["kind:dataset"], direction="max",
+                concepts=concepts, concept_outcomes={}))
+    for repeat in range(2):
+        capsules.append(build_concept_capsule(
+            run_id=f"tendency-{repeat}", task_id="t",
+            fingerprint=["kind:dataset"], direction="max",
+            concepts=["zz/target", "zz/baseline"],
+            concept_outcomes={"zz/target": 0.9, "zz/baseline": 0.1}))
+    _seed(tmp_path, capsules=capsules)
+
+    text = _Host(tmp_path, on=True)._cross_run_advisory_text(
+        RunState(run_id="current", task_id="t", direction="max"))
+
+    assert "RANK BETTER UNTRUSTED_MEMORY=" in text and "zz/target (n=2)" in text
+    assert "RANK WORSE UNTRUSTED_MEMORY=" in text and "zz/baseline (n=2)" in text
+
+
 def test_advisory_rejects_valid_direction_without_scope_identity(tmp_path):
     _seed(tmp_path, lessons=[_lesson("portfolio evidence", "supported", [1])])
     host = _Host(tmp_path, on=True)

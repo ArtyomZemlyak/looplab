@@ -3876,7 +3876,9 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   (`engine/memory.py`) aggregates the Step-2 concept capsules into a portfolio view — per-concept: which runs
   explored it, each with its OWN outcome (raw metrics deliberately NOT compared across tasks) — plus per-run
   cards; surfaced by the `looplab cross-run-concepts` CLI (`--top`, `--json`). Pure read, no LLM. Tests:
-  read-model + CLI (8). **Lean CR1a follow-up:** `concept_uid(slug)` plus an interprocess-locked append-only
+  read-model + CLI (8). The bounded public overview reports exact retained totals plus concept/run-card
+  omissions; text mode now names a non-zero concept-row tail instead of pairing an exact headline with a
+  silently incomplete list. **Lean CR1a follow-up:** `concept_uid(slug)` plus an interprocess-locked append-only
   exact-slug alias/purge overlay landed; selected Atlas/tool/digest reads canonicalize display slugs at read
   time and raw tags stay unchanged. The UID helper is not emitted/consumed by production payloads, changes
   after rename, and the overlay has no release/revision/scope/existence/cycle contract. **TODO to reach full
@@ -3935,7 +3937,11 @@ live prompt experiment; frozen-portfolio replay and A/B gates are required befor
   a CONTRADICTION QUOTA of caveat slots (raised for failed/contested), SCOPES every source (`scope_task`
   filters D8 to the bound task — closes the cross-task leak), bounds the corpus (truncation reported), and
   emits a why-recalled RECEIPT (intent, base+effective quota, caveat target, per-hit rank, corpus digest,
-  honest degraded-channel note). CrossRunTools passes one fully-scoped snapshot. Tests: +6. **Still TODO to
+  honest degraded-channel note). Query preselection, exact concept-card/prior lookup and scoped live
+  context-pack tendencies now consume the full validated canonical retained rows before their independent
+  result/prompt caps. Retrieval receipts and digests split exact concept/claim totals, indexed counts and
+  omissions from the unrelated overview display tail. CrossRunTools passes one fully-scoped snapshot.
+  Tests: +6. **Still TODO to
   reach full CR2a/CR2b:** the capped-multi-channel semantic embedder; the bounded packs at
   Genesis/run-start/proposal/Strategist with measured token envelopes; the Recall@20/nDCG/false-transfer
   gates and the **frozen A/B** (≥15% lower duplicate spend, no trust/exploration regression). The proactive
@@ -4259,7 +4265,10 @@ bounded diagnostic into the full Research Atlas.
   and claim stewards are proposal-only as well: deprecated engine `apply=True` and CLI `--apply` compatibility
   inputs fail before memory reads, model setup, paid inference or mutation. The operator must review the exact
   proposal and translate selected rows into typed `concept-merge` / `concept-split` / `claim-decide` commands or
-  owner HTTP governance; there is no LLM rerun-and-apply shortcut. Claim overlays resolve exact scope+metric,
+  owner HTTP governance; there is no LLM rerun-and-apply shortcut. Concept-steward input schema v3 commits
+  separate capsule-source and model-visible vocabulary-projection receipts; any omitted prompt vocabulary
+  deterministically disables split/purge while leaving direct in-payload synonym merges eligible. Claim
+  overlays resolve exact scope+metric,
   then scope-only, global metric and finally global; an unscoped decision is therefore an intentional
   portfolio-wide fallback, while a scoped decision cannot leak into another task.
 - **Read and UI slices are bounded and honest.** Claims GET adds scope, offset paging and revision metadata;

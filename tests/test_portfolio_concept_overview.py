@@ -164,6 +164,19 @@ def test_cli_prints_overview(tmp_path):
     assert "hard-neg" in res.stdout and "r1=0.88" in res.stdout
 
 
+def test_cli_text_discloses_bounded_overview_projection(tmp_path):
+    store = ConceptCapsuleStore(tmp_path / "concept_capsules.jsonl")
+    store.add(_cap("a", [f"a/{index:03d}" for index in range(256)], {}))
+    store.add(_cap("b", [f"b/{index:03d}" for index in range(256)], {}))
+    store.add(_cap("c", [f"c/{index:03d}" for index in range(100)], {}))
+
+    res = runner.invoke(app, ["cross-run-concepts", str(tmp_path), "--top", "1"])
+
+    assert res.exit_code == 0
+    assert "612 concept(s)" in res.stdout
+    assert "Bounded overview omitted 100 concept row(s)" in res.stdout
+
+
 def test_cli_honors_recorded_merge_and_split(tmp_path):
     # live-test regression: the cross-run-concepts inspector MUST reflect recorded operator/steward
     # governance (merge/purge/split), consistent with cross-run-digest / atlas / agent tools — it used to
