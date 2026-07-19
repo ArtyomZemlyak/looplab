@@ -73,11 +73,14 @@ function SourceWatermark({ sourceKey, label, source, retry, busy, pending, child
 export function ConceptSourceNotice({ source }) {
   if (source.status === 'complete') return null
   const partial = source.status === 'partial'
+  const quarantined = partial && source.store?.quarantined > 0 ? source.store : null
   return <div className="notice resource-warning atlas-degraded" role="status">
     <b>Concept source {partial ? 'partial.' : 'unknown.'}</b>
     <span>{partial
       ? `Bounds (partial/legacy/concepts/outcomes): ${source.counts.join('/')}.`
-      : 'Receipt missing/invalid.'} Absence unknown.</span>
+      : 'Receipt missing/invalid.'}
+      {quarantined && ` Durable rows quarantined: ${quarantined.quarantined} (malformed/invalid/duplicate: ${quarantined.malformed}/${quarantined.invalid}/${quarantined.duplicates}).`}
+      {' Absence unknown.'}</span>
   </div>
 }
 

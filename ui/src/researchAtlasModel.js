@@ -35,14 +35,38 @@ const normalizeConceptSource = atlas => {
     'source_concepts_omitted', 'source_outcomes_omitted']
   const counts = keys.map(key => Object.hasOwn(receipt, key)
     && Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1)
+  const storeKeys = ['source_rows_total', 'source_rows_quarantined',
+    'source_malformed_rows', 'source_invalid_capsule_rows', 'source_duplicate_run_rows']
+  const storeFieldCount = ['source_store_complete', ...storeKeys]
+    .filter(key => Object.hasOwn(receipt, key)).length
+  const hasStoreReceipt = storeFieldCount > 0
+  const storeCounts = storeKeys.map(key => Object.hasOwn(receipt, key)
+    && Number.isSafeInteger(receipt[key]) && receipt[key] >= 0 ? receipt[key] : -1)
+  // CODEX AGENT: old v2 receipts remain readable, while the additive durable-store extension must be
+  // present and coherent as one unit. Quarantine is known partial evidence, not an unknown receipt.
+  const storeValid = !hasStoreReceipt || (storeFieldCount === storeKeys.length + 1
+    && typeof receipt.source_store_complete === 'boolean'
+    && storeCounts.every(value => value >= 0)
+    && storeCounts[1] <= storeCounts[0]
+    && storeCounts[1] === storeCounts[2] + storeCounts[3] + storeCounts[4]
+    && receipt.source_store_complete === (storeCounts[1] === 0))
   const complete = receipt.source_complete
   const valid = Object.hasOwn(receipt, 'source_complete')
     && typeof complete === 'boolean' && counts.every(value => value >= 0)
-    && complete === (counts[0] === 0) && counts[1] <= counts[0]
+    && storeValid && complete === (counts[0] === 0
+      && (!hasStoreReceipt || receipt.source_store_complete)) && counts[1] <= counts[0]
     && !(complete && counts.some(Boolean))
   // CODEX AGENT: missing, malformed, and internally contradictory receipts are UNKNOWN. A fresh HTTP
   // response is not proof that its bounded capsule source was complete.
-  return valid ? { status: complete ? 'complete' : 'partial', counts } : { status: 'unknown' }
+  if (!valid) return { status: 'unknown' }
+  const normalized = { status: complete ? 'complete' : 'partial', counts }
+  if (hasStoreReceipt) {
+    normalized.store = {
+      total: storeCounts[0], quarantined: storeCounts[1], malformed: storeCounts[2],
+      invalid: storeCounts[3], duplicates: storeCounts[4],
+    }
+  }
+  return normalized
 }
 
 const sourceRevision = (key, value) => {

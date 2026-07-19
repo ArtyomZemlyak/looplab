@@ -83,6 +83,15 @@ test('Atlas concept-source receipts fail closed and preserve explicit partial bo
     context_pack: { coverage: partial },
   }, {}, {}).conceptSource,
   { status: 'partial', counts: [2, 1, 44, 8] })
+  const quarantined = {
+    ...complete, source_complete: false, source_store_complete: false,
+    source_rows_total: 5, source_rows_quarantined: 2, source_malformed_rows: 1,
+    source_invalid_capsule_rows: 1, source_duplicate_run_rows: 0,
+  }
+  assert.deepEqual(buildResearchAtlasView({ concept_source: quarantined }, {}, {}).conceptSource,
+    { status: 'partial', counts: [0, 0, 0, 0], store: {
+      total: 5, quarantined: 2, malformed: 1, invalid: 1, duplicates: 0,
+    } })
 
   const unknown = { status: 'unknown' }
   for (const receipt of [
@@ -92,6 +101,9 @@ test('Atlas concept-source receipts fail closed and preserve explicit partial bo
     { ...complete, partial_capsules: 1 },
     { ...partial, partial_capsules: 0 },
     { ...partial, source_unknown_capsules: 3 },
+    { ...complete, source_store_complete: false },
+    { ...quarantined, source_rows_quarantined: 3 },
+    { ...quarantined, source_complete: true },
   ]) {
     assert.deepEqual(buildResearchAtlasView({ concept_source: receipt }, {}, {}).conceptSource,
       unknown)
@@ -539,6 +551,14 @@ test('Atlas empty state distinguishes evidence runs and each independent source'
     assert.ok(noticeDom.window.document.querySelector('[role="status"]'))
     assert.match(noticeDom.window.document.body.textContent,
       /Concept source partial.*2\/1\/44\/8.*Absence unknown/is)
+
+    const quarantineNotice = renderToStaticMarkup(React.createElement(ConceptSourceNotice, {
+      source: { status: 'partial', counts: [0, 0, 0, 0], store: {
+        total: 5, quarantined: 2, malformed: 1, invalid: 1, duplicates: 0,
+      } },
+    }))
+    assert.match(new JSDOM(quarantineNotice).window.document.body.textContent,
+      /Durable rows quarantined: 2.*malformed\/invalid\/duplicate: 1\/1\/0.*Absence unknown/is)
 
     const partial = renderToStaticMarkup(React.createElement(AtlasEmptyState, {
       sourceStates: {
