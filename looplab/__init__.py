@@ -199,6 +199,7 @@ _LAYOUT = {
     "toytask": "adapters",
     "traceview": "events",
     "tracing": "core",
+    "train_monitor": "engine",   # per-eval training-log monitor scaffold (Phase 0, observability)
     "triage": "engine",
     "tui": "serve",
     "tui_api": "serve",
