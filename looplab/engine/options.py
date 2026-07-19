@@ -49,6 +49,8 @@ class EngineOptions:
     there remain the authoritative documentation for each knob's semantics.
     """
     max_parallel: int = 1                # single experiment at a time; > 1 = backlog parallel seam
+    train_monitor: bool = False          # per-eval live training-log observer (off = today)
+    train_monitor_interval_s: float = 600.0   # monitor tick cadence (seconds; floored at 1s in the loop)
     timeout: float = 30.0
     sweep_timeout_mult: float = 8.0      # intra-node sweep nodes get this × the single-eval budget
     confirm_top_k: int = 0

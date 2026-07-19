@@ -50,6 +50,7 @@ from looplab.engine.eval_stages import EvalStagesMixin
 from looplab.engine.evaluate import EvaluateMixin
 from looplab.engine.node_build import NodeBuildMixin
 from looplab.engine.proposal_cues import ProposalCuesMixin
+from looplab.engine.train_monitor import TrainingMonitorMixin
 from looplab.engine.novelty import NoveltyGateMixin
 from looplab.engine.strategy import StrategyCadenceMixin
 from looplab.engine.research_cadence import ResearchCadenceMixin
@@ -130,7 +131,8 @@ def _detect_gpu_ids() -> list[int]:
 # `self._ablate(...)` call site (and every test poking those names on Engine) is untouched.
 class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadenceMixin,
              ResearchCadenceMixin, EvalStagesMixin, CrashRepairMixin, EvalDispatchMixin,
-             AuditMixin, EvaluateMixin, NodeBuildMixin, ProposalCuesMixin):
+             AuditMixin, EvaluateMixin, NodeBuildMixin, ProposalCuesMixin,
+             TrainingMonitorMixin):
     def __init__(
         self,
         run_dir: str | os.PathLike,
@@ -182,6 +184,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             return knobs[field] if field in knobs else getattr(options, field)
 
         max_parallel = _opt("max_parallel")
+        train_monitor = _opt("train_monitor")
+        train_monitor_interval_s = _opt("train_monitor_interval_s")
         timeout = _opt("timeout")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         confirm_top_k = _opt("confirm_top_k")
@@ -429,6 +433,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._free_gpus: list[int] = list(self._gpu_ids)   # free-list handed out per concurrent eval
         self._gpu_lock = threading.Lock()
         self.timeout = timeout
+        self._train_monitor = bool(train_monitor)
+        self._train_monitor_interval_s = train_monitor_interval_s
         self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
         self.confirm_top_k = confirm_top_k

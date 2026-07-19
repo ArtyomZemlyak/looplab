@@ -23,7 +23,7 @@ from looplab.core.config import Settings
 SETTINGS_UI_SCHEMA_CATALOGUE_VERSION = 1
 SETTINGS_UI_SCHEMA_VERSION = 2
 SETTINGS_UI_SCHEMA_CATALOGUE_FIELD_COUNT = 143
-SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 166
+SETTINGS_UI_SCHEMA_SETTINGS_FIELD_COUNT = 168
 SETTINGS_UI_SCHEMA_KEYSET_REVISION = "f46cebaeabd7707622914d510dc41e0919f25e1430e0218da1e9ad2ad946e759"
 _SCHEMA_PATH = Path(__file__).with_name("settings_ui_schema.json")
 _FIELD_TYPES = frozenset({"bool", "enum", "secret", "int", "float", "list", "text"})

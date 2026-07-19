@@ -35,6 +35,8 @@ def _mk_engine(run_dir, **kw) -> Engine:
 # a new knob must be added here for the differential test to keep covering it.
 ATTR_BY_FIELD = {
     "max_parallel": "max_parallel",
+    "train_monitor": "_train_monitor",
+    "train_monitor_interval_s": "_train_monitor_interval_s",
     "timeout": "timeout",
     "sweep_timeout_mult": "sweep_timeout_mult",
     "confirm_top_k": "confirm_top_k",

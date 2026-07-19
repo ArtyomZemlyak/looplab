@@ -191,6 +191,13 @@ class Settings(BaseSettings):
     # one experiment per DETECTED GPU (orchestrator resolves 0 -> GPU count, clamped to >=1) — the
     # "let the box decide" autonomy knob the Strategist can also set.
     max_parallel: int = Field(default=1, ge=0, le=1024)
+    # Training-log monitor (I-series watchdog family): a per-eval background observer that tails the live
+    # training log while a (often multi-hour) declared stage runs in a worker thread. OFF by default so
+    # `off == today`; when on it only OBSERVES (Phase 0: a trace span per tick; later phases add an
+    # advisory LLM verdict and, gated, an early kill on a confidently-broken run). `_interval_s` is the
+    # tick cadence (the Developer can size it per node later); floored at 1s in the loop.
+    train_monitor: bool = False
+    train_monitor_interval_s: float = Field(default=600.0, gt=0)
     timeout: float = Field(default=30.0, gt=0)
     # Intra-node sweep: a sweep node runs a whole grid in one process, so it gets this multiple of
     # `timeout` as its wall-clock budget (solution.py path; RepoTasks use their per-profile timeout).

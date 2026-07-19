@@ -121,6 +121,8 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 |---|---|---|---|
 | `max_nodes` | `LOOPLAB_MAX_NODES` | `8` | Candidate (node) budget for the search |
 | `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Concurrent evaluations. `1` = one experiment at a time (deterministic); raise to fan out |
+| `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `false` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact) |
+| `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Monitor tick cadence in seconds (floored at 1s); no-op unless `train_monitor` is on |
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |

@@ -197,6 +197,11 @@ class EvaluateMixin:
                                 cancel.set()
                                 return
                     _tg.start_soon(_watch)
+                    # Training-log monitor (off by default): a sibling task that tails this eval's live
+                    # training log on a timer while it runs in the worker thread. Advisory only in Phase 0
+                    # (trace spans); cancelled with the eval by `_tg.cancel_scope.cancel()` below.
+                    if getattr(self, "_train_monitor", False):
+                        _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel)
                     # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
                     # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
                     # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment
