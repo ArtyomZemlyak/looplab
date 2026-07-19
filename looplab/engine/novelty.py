@@ -264,8 +264,18 @@ class NoveltyGateMixin:
             return False
         for other in chosen:
             ot = self._idea_text(other).strip().lower()
-            if len(ot) >= 20 and (t == ot or t in ot or ot in t):
+            if len(ot) < 20:
+                continue
+            if t == ot:
                 return True
+            # A pure-substring test would wrongly merge a short idea into a much LONGER distinct one
+            # ("use a deeper net" vs "use a deeper net WITH cross-attention"). Only treat containment as
+            # a near-duplicate when the two texts are also close in LENGTH (the longer isn't materially
+            # extending the shorter with new content).
+            if (t in ot or ot in t):
+                lo, hi = sorted((len(t), len(ot)))
+                if hi <= lo * 1.25:
+                    return True
         return False
 
     def _propose_batch(self, state: RunState, n: int) -> list:
@@ -289,10 +299,18 @@ class NoveltyGateMixin:
                     if idea is not None and not self._intra_batch_dup(idea, ideas):
                         ideas.append(idea)
                 if ideas:
+                    # A native batch backend proposes all N at once, so per-idea FOREAGENT telemetry
+                    # isn't separable here — leave it to the backend to emit its own (no per-node stamp).
+                    self._pending_batch_telemetry = [None] * len(ideas[:n])
                     return ideas[:n]
             except Exception:  # noqa: BLE001 — a batch-backend hiccup falls back to sequential rolls
                 ideas = []
         prev_feedback = getattr(self.researcher, "_novelty_feedback", "")
+        # Capture EACH accepted roll's FOREAGENT telemetry (hypothesis ranking + foresight pick the
+        # researcher set during propose) BEFORE the next roll overwrites it on the shared researcher, so
+        # each pooled build can later emit hypothesis_ranked/foresight_selected for ITS OWN idea instead
+        # of the last roll's (mega-review MEDIUM). Aligned 1:1 with the returned ideas.
+        telem: list = []
         attempts, max_attempts = 0, n * 2 + 2
         try:
             while len(ideas) < n and attempts < max_attempts:
@@ -315,9 +333,28 @@ class NoveltyGateMixin:
                 if idea is None or self._intra_batch_dup(idea, ideas):
                     continue
                 ideas.append(idea)
+                telem.append({
+                    "last_hyp_priority": self._snapshot_role_telemetry("last_hyp_priority"),
+                    "last_foresight": self._snapshot_role_telemetry("last_foresight"),
+                })
         finally:
             setattr(self.researcher, "_novelty_feedback", prev_feedback)
+            # Clear the shared researcher's per-roll telemetry: build 0 reuses self.researcher as its
+            # pooled role, so a leftover last-roll ranking would otherwise be emitted against build 0's
+            # node. Each build restamps its OWN captured snapshot in _create_node.
+            for _a in ("last_hyp_priority", "last_foresight"):
+                try:
+                    setattr(self.researcher, _a, None)
+                except Exception:  # noqa: BLE001
+                    pass
+        self._pending_batch_telemetry = telem
         return ideas
+
+    def _snapshot_role_telemetry(self, attr: str):
+        """A shallow copy of a researcher predictive-telemetry attr (a dict set during propose), or None.
+        Copied so a later consume (setattr None) on the shared researcher can't blank the captured value."""
+        val = getattr(self.researcher, attr, None)
+        return dict(val) if isinstance(val, dict) else None
 
     def _graded_novelty_precheck(self, state: RunState, idea: Idea):
         """PART IV D3 (§21.4, Phase 2b): a concept-graph-aware PRE-gate. When `graded_novelty` is on and

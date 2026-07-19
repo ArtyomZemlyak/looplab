@@ -450,6 +450,37 @@ def test_propose_batch_yields_distinct_ideas_and_drops_intra_batch_dup(tmp_path)
     assert eng.researcher.calls == 4                         # rolled a 4th time to replace the dropped dup
 
 
+def test_propose_batch_captures_per_idea_foreagent_telemetry(tmp_path):
+    # Variant-1 Phase 2 (review MEDIUM): each accepted roll's FOREAGENT telemetry is captured per-idea
+    # (aligned 1:1 with the returned ideas) so each pooled build emits ITS OWN hypothesis_ranked /
+    # foresight_selected — and the shared researcher's per-roll telemetry is CLEARED so build 0 (which
+    # reuses self.researcher) can't emit the last roll's stale ranking against its own node.
+    eng = _engine(tmp_path / "telem")
+    eng._novelty_mode = "off"
+
+    class _RankingResearcher:
+        def __init__(self):
+            self.calls = 0
+            self.last_hyp_priority = None
+            self.last_foresight = None
+
+        def propose(self, state, parent):
+            self.calls += 1
+            i = self.calls
+            self.last_hyp_priority = {"order": [i], "reason": f"roll {i}"}
+            self.last_foresight = {"choice": f"idea{i}"}
+            return Idea(operator="draft", params={"x": i},
+                        rationale=f"distinct research direction number {i} explored")
+
+    eng.researcher = _RankingResearcher()
+    ideas = eng._propose_batch(RunState(), 3)
+    telem = eng._pending_batch_telemetry
+    assert len(ideas) == 3 and len(telem) == 3
+    assert [t["last_hyp_priority"]["reason"] for t in telem] == ["roll 1", "roll 2", "roll 3"]
+    assert [t["last_foresight"]["choice"] for t in telem] == ["idea1", "idea2", "idea3"]
+    assert eng.researcher.last_hyp_priority is None and eng.researcher.last_foresight is None
+
+
 def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
     # A backend that CAN batch (one call -> N ideas) is used directly; `propose` is never touched.
     eng = _engine(tmp_path / "batch-native")

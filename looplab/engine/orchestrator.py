@@ -1034,7 +1034,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                 # Runaway trip: created too many nodes with ZERO reaching terminal since the last
                 # progress. A healthy run creates a batch then evaluates it (which resets the counter);
                 # only a spin (empty-nodes fold re-minting the same id) grows this unbounded. Cap
-                # generously so operator injects / wide seed batches never false-trip.
+                # generously so operator injects / wide seed batches never false-trip. (Phase 2 may build
+                # FEWER than len(creates) when the batch can't diversify to full width — counting the
+                # planned width here only makes the guard trip marginally sooner, i.e. fails safe.)
                 _created_no_terminal += len(creates)
                 if _created_no_terminal > max(self.policy.max_nodes, 4) * 3 + 50:
                     if self._finish_with_report_if_quiescent(state, {
@@ -1064,6 +1066,9 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                         _ideas = self._propose_batch(state, len(_chunk))
                         if not _ideas:
                             continue
+                        # Per-idea FOREAGENT telemetry snapshots captured by _propose_batch (aligned 1:1
+                        # with _ideas), so each build emits ITS OWN hypothesis_ranked/foresight_selected.
+                        _telem = getattr(self, "_pending_batch_telemetry", None) or [None] * len(_ideas)
                         _chunk = _chunk[:len(_ideas)]
                         for _a in _chunk:               # surface the audit events only for what we build
                             if "_scores" in _a:
@@ -1075,7 +1080,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                                   {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
                         _reserved = [self._reserve_node_build(_a) for _a in _chunk]   # serial -> distinct ids
                         async with anyio.create_task_group() as _tg:
-                            for _a, _res, _pair, _idea in zip(_chunk, _reserved, _pb_pairs, _ideas):
+                            for _a, _res, _pair, _idea, _tel in zip(
+                                    _chunk, _reserved, _pb_pairs, _ideas, _telem):
                                 if _res is None:
                                     continue
                                 # If a sibling in THIS chunk already crashed and tripped the
@@ -1089,7 +1095,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # the whole run — the rest of the concurrent batch still finishes.
                                 _tg.start_soon(anyio.to_thread.run_sync,
                                                functools.partial(self._create_node_guarded,
-                                                                  _a, _pair, _res, _idea))
+                                                                  _a, _pair, _res, _idea, _tel))
                         if self._create_paused:
                             break
                     continue
@@ -1838,7 +1844,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._role_pool.append(pair)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
-    def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None) -> None:
+    def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None,
+                     pretelemetry=None) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
         # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
         # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
@@ -1866,6 +1873,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     # batch pass; skip re-research (its complexity/novelty cues already ran on the shared
                     # researcher) and go straight to this build's own developer.implement below.
                     idea = preproposed
+                    # Restore THIS idea's own FOREAGENT telemetry (captured per-roll during the batch
+                    # pass) onto this build's pooled researcher, so the hypothesis_ranked/foresight_selected
+                    # emitters below stamp THIS node with ITS ranking — not the last batch roll's.
+                    if pretelemetry:
+                        for _attr, _val in pretelemetry.items():
+                            if _val is not None:
+                                try:
+                                    setattr(researcher, _attr, _val)
+                                except Exception:  # noqa: BLE001
+                                    pass
                 else:
                     self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
                     with self.tracer.span("propose"):
@@ -2031,7 +2048,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._emit_hypothesis_ranked(node_id, 0, researcher=researcher)
         self._emit_foresight_selected(node_id, 0, researcher=researcher, developer=developer)
 
-    def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None) -> None:
+    def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None,
+                             pretelemetry=None) -> None:
         """Variant-1 parallel build: run one pooled build, converting an UNEXPECTED exception into a
         `node_failed` terminal for its already-reserved id (its `node_building` was appended up front
         under `_id_lock`) instead of letting the exception propagate through the task group and tear
@@ -2039,7 +2057,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         gets exactly one terminal) and lets the rest of the concurrent batch finish. Used ONLY on the
         parallel path; the serial path keeps its historical crash-on-raise so bugs surface in tests."""
         try:
-            self._create_node(action, roles, reserved, preproposed=preproposed)
+            self._create_node(action, roles, reserved, preproposed=preproposed,
+                              pretelemetry=pretelemetry)
         except Exception as exc:  # noqa: BLE001 — one build's crash must not abort the concurrent batch
             node_id = reserved[1] if reserved else None
             if node_id is None:
