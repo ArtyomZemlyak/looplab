@@ -120,6 +120,9 @@ def test_atlas_empty_is_well_formed():
     assert atlas["concept_source"] == {
         "source_complete": True, "partial_capsules": 0, "source_unknown_capsules": 0,
         "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+        "source_store_complete": True, "source_rows_total": 0,
+        "source_rows_quarantined": 0, "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0, "source_duplicate_run_rows": 0,
     }
 
 
@@ -131,10 +134,23 @@ def test_atlas_surfaces_aggregate_partial_capsule_receipt():
     assert atlas["concept_source"] == {
         "source_complete": False, "partial_capsules": 1, "source_unknown_capsules": 0,
         "source_concepts_omitted": 44, "source_outcomes_omitted": 44,
+        "source_store_complete": True, "source_rows_total": 1,
+        "source_rows_quarantined": 0, "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0, "source_duplicate_run_rows": 0,
     }
     assert atlas["concept_source"] == {
         key: atlas["context_pack"]["coverage"][key] for key in atlas["concept_source"]
     }
+
+
+def test_atlas_does_not_launder_invalid_raw_capsules_into_complete_source():
+    atlas = portfolio_atlas([], [None, _cap("good", ["axis/a"], {"axis/a": 1.0})])
+
+    assert atlas["n_runs"] == 1
+    assert atlas["concept_source"]["source_complete"] is False
+    assert atlas["concept_source"]["source_rows_total"] == 2
+    assert atlas["concept_source"]["source_invalid_capsule_rows"] == 1
+    assert atlas["context_pack"]["coverage"]["source_complete"] is False
 
 
 def test_cli_atlas_prints_sections(tmp_path):

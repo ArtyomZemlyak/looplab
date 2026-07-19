@@ -763,7 +763,9 @@ def cross_run_concepts_cmd(
                    f"{ov.get('source_concepts_omitted', 0)} concept(s), "
                    f"{ov.get('source_outcomes_omitted', 0)} outcome(s) known omitted"
                    + (f"; {ov.get('source_unknown_capsules', 0)} legacy capsule(s) have unknown totals"
-                      if ov.get("source_unknown_capsules", 0) else ""))
+                      if ov.get("source_unknown_capsules", 0) else "")
+                   + (f"; {ov.get('source_rows_quarantined', 0)} durable row(s) quarantined"
+                      if ov.get("source_rows_quarantined", 0) else ""))
     # CODEX AGENT: capsule-source completeness and this read-model's display cap are independent. The
     # headline is an exact retained total, so text mode must disclose when its backing row projection is not.
     if ov.get("concepts_omitted"):
@@ -1093,7 +1095,7 @@ def cross_run_digest_cmd(
     from looplab.engine.memory import ConceptCapsuleStore, portfolio_digest
     caps_p = Path(memory_dir) / "concept_capsules.jsonl"
     caps = ConceptCapsuleStore(caps_p).all() if caps_p.exists() else []
-    if not caps:
+    if not caps and getattr(caps, "source_health", {}).get("source_store_complete") is not False:
         typer.echo(f"no concept capsules at {memory_dir}")
         raise typer.Exit(1)
     dg = portfolio_digest(caps, aliases=load_concept_aliases(str(memory_dir)),
@@ -1141,7 +1143,9 @@ def cross_run_search_cmd(
                    "retained records only: "
                    f"{rc.get('source_concepts_omitted', 0)} concept(s) known omitted"
                    + (f"; {rc.get('source_unknown_capsules', 0)} legacy capsule(s) have unknown totals"
-                      if rc.get("source_unknown_capsules", 0) else ""))
+                      if rc.get("source_unknown_capsules", 0) else "")
+                   + (f"; {rc.get('source_rows_quarantined', 0)} durable row(s) quarantined"
+                      if rc.get("source_rows_quarantined", 0) else ""))
     for h in r["results"]:
         if h["kind"] == "claim":
             typer.echo(f"  claim [{h['epistemic']} {h['n_support']}↑/{h['n_oppose']}↓] {h['text'][:100]}")
@@ -1198,6 +1202,8 @@ def atlas_cmd(
             f"{int(concept_source.get('source_concepts_omitted', 0) or 0)} concept(s), "
             f"{int(concept_source.get('source_outcomes_omitted', 0) or 0)} outcome(s) known omitted"
             + (f"; {unknown} legacy capsule(s) have unknown totals" if unknown else "")
+            + (f"; {int(concept_source.get('source_rows_quarantined', 0) or 0)} durable row(s) quarantined"
+               if concept_source.get("source_rows_quarantined", 0) else "")
             + ").")
     if atlas["explored"]:
         typer.echo("Concept observations (concept × returned runs):")

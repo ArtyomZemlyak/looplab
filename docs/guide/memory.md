@@ -67,7 +67,11 @@ result is reported as unknown rather than proof that no applicable run exists. A
 remains readable for its positive retained
 concept/outcome observations, but its source totals are **unknown**, the portfolio projection is partial, and its
 old `concept_signs` are ignored because the former writer may have calculated them after truncation. Overview,
-graph, digest, CLI and agent-facing context surfaces carry or render this partial-source receipt.
+graph, digest, CLI and agent-facing context surfaces carry or render this partial-source receipt. The mutable
+capsule file also has an additive read-health receipt (`source_store_complete`, `source_rows_total`, and
+malformed/schema-invalid/duplicate quarantine counts). Quarantined content is never returned as evidence, but
+any quarantined durable row forces `source_complete=false`; scope filtering and de-duplication preserve that
+receipt so an unreadable row cannot be laundered into an exact zero or a "new concept" claim.
 
 The broader Part-IV design specifies the production **cross-run research index** and UI **Research Atlas**.
 Its core distinction is:

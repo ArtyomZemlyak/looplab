@@ -297,9 +297,11 @@ class ProposalCuesMixin:
             from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
             from looplab.engine.memory import (
                 ConceptCapsuleStore,
+                _capsule_source_summary,
                 _capsule_completeness,
                 _capsule_fingerprint_scope_complete,
                 _portfolio_concept_overview_data,
+                _filter_capsule_rows,
             )
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
@@ -374,14 +376,15 @@ class ProposalCuesMixin:
                 return fingerprint_similarity(fp, stored) >= 0.34
 
             lessons = [r for r in lessons if _scoped(r)]
-            capsules = [r for r in capsules if _scoped(r, capsule=True)]
+            capsules = _filter_capsule_rows(capsules, lambda r: _scoped(r, capsule=True))
             research = [r for r in load_research_claims(base)
                         if (not rid or str(r.get("run_id") or "") != rid)
                         and bool(tid) and str(r.get("task_id") or "") == tid
                         and same_live_direction(current_direction, r.get("direction"))]
             # Resolve the SAME taxonomy snapshot as the Atlas (aliases + splits), so a purged/merged/split
             # concept never leaks into the proactive prompt through this raw overview (CODEX).
-            if capsules:
+            capsule_source = _capsule_source_summary(capsules)
+            if capsules or capsule_source.get("source_complete") is not True:
                 overview, concept_rows = _portfolio_concept_overview_data(
                     capsules, aliases=load_concept_aliases(base),
                     splits=load_concept_splits(base))

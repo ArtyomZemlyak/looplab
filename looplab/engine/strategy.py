@@ -126,7 +126,8 @@ class StrategyCadenceMixin:
             from pathlib import Path
 
             from looplab.engine.claims import atlas_for_memory, load_research_claims
-            from looplab.engine.memory import ConceptCapsuleStore
+            from looplab.engine.memory import (ConceptCapsuleStore, _capsule_source_summary,
+                                               _filter_capsule_rows)
             from looplab.events.eventstore import read_jsonl_lenient
             base = Path(self.memory_dir)
             lp, cp = base / "lessons.jsonl", base / "concept_capsules.jsonl"
@@ -139,9 +140,12 @@ class StrategyCadenceMixin:
                 return (same_live_direction(current_direction, row.get("direction"))
                         and bool(task_id) and str(row.get("task_id") or "") == task_id
                         and (not run_id or str(row.get("run_id") or "") != run_id))
-            lessons, caps, research = ([row for row in rows if _visible(row)]
-                                       for rows in (lessons, caps, research))
-            if not lessons and not caps and not research:
+            lessons = [row for row in lessons if _visible(row)]
+            caps = _filter_capsule_rows(caps, _visible)
+            research = [row for row in research if _visible(row)]
+            capsule_source = _capsule_source_summary(caps)
+            if (not lessons and not caps and not research
+                    and capsule_source.get("source_complete") is True):
                 self._cross_run_note_receipt = {}
                 return ""
             # Use the same scope+polarity-safe projection as the Researcher advisory while
@@ -166,6 +170,8 @@ class StrategyCadenceMixin:
             receipt_keys = (
                 "partial_capsules", "source_unknown_capsules",
                 "source_concepts_omitted", "source_outcomes_omitted",
+                "source_rows_total", "source_rows_quarantined", "source_malformed_rows",
+                "source_invalid_capsule_rows", "source_duplicate_run_rows",
             )
             counts_valid = all(
                 isinstance(raw_source.get(key), int)
@@ -177,7 +183,11 @@ class StrategyCadenceMixin:
                 type(raw_source.get("source_complete")) is bool
                 and counts_valid
                 and _receipt_count("source_unknown_capsules") <= partial_count
-                and raw_source.get("source_complete") == (partial_count == 0)
+                and type(raw_source.get("source_store_complete")) is bool
+                and raw_source.get("source_store_complete") == (
+                    _receipt_count("source_rows_quarantined") == 0)
+                and raw_source.get("source_complete") == (
+                    partial_count == 0 and _receipt_count("source_rows_quarantined") == 0)
                 and (partial_count > 0
                      or (_receipt_count("source_concepts_omitted") == 0
                          and _receipt_count("source_outcomes_omitted") == 0))
@@ -185,6 +195,8 @@ class StrategyCadenceMixin:
             concept_source = {
                 "receipt_known": receipt_known,
                 "source_complete": receipt_known and raw_source.get("source_complete") is True,
+                "source_store_complete": (
+                    receipt_known and raw_source.get("source_store_complete") is True),
                 **{key: _receipt_count(key) for key in receipt_keys},
             }
             parts = [f"{a['n_runs']} returned run(s), {a['n_concepts']} observed concept(s), "
@@ -196,7 +208,8 @@ class StrategyCadenceMixin:
                 f"partial_capsules={concept_source['partial_capsules']}, "
                 f"concepts_known_omitted={concept_source['source_concepts_omitted']}, "
                 f"outcomes_known_omitted={concept_source['source_outcomes_omitted']}, "
-                f"legacy_unknown_totals={concept_source['source_unknown_capsules']}"
+                f"legacy_unknown_totals={concept_source['source_unknown_capsules']}, "
+                f"quarantined_rows={concept_source['source_rows_quarantined']}"
             )
             if not concept_source["source_complete"]:
                 source_part += "; concept observations/counts are retained lower bounds only"

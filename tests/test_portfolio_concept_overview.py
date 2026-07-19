@@ -82,6 +82,9 @@ def test_empty_portfolio_is_well_formed():
         "source_complete": True, "partial_capsules": 0,
         "source_unknown_capsules": 0,
         "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+        "source_store_complete": True, "source_rows_total": 0,
+        "source_rows_quarantined": 0, "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0, "source_duplicate_run_rows": 0,
     }
 
 
@@ -96,9 +99,24 @@ def test_overview_quarantines_malformed_rows_and_caps_nested_runs_truthfully():
     shared = overview["concepts"][0]
 
     assert overview["n_runs"] == 70 and shared["n_runs"] == 70
+    assert overview["source_complete"] is False
+    assert overview["source_invalid_capsule_rows"] == 2
     assert len(shared["runs"]) == 64 and shared["runs_omitted"] == 6
     assert [row["run_id"] for row in shared["runs"]] == sorted(
         row["run_id"] for row in shared["runs"])
+
+
+def test_duplicate_run_rows_are_deterministic_but_never_exact_source():
+    first = _cap("same", ["axis/a"], {"axis/a": 1.0})
+    second = _cap("same", ["axis/b"], {"axis/b": 2.0})
+
+    left = portfolio_concept_overview([first, second])
+    right = portfolio_concept_overview([second, first])
+
+    assert left == right
+    assert left["n_runs"] == 1
+    assert left["source_complete"] is False
+    assert left["source_duplicate_run_rows"] == left["source_rows_quarantined"] == 1
 
 
 def test_overview_caps_top_level_collections_with_full_totals():

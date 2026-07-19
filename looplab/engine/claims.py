@@ -633,7 +633,8 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
     from pathlib import Path
 
     from looplab.engine.concept_registry import load_concept_aliases, load_concept_splits
-    from looplab.engine.memory import ConceptCapsuleStore, _valid_capsule_record
+    from looplab.engine.memory import (ConceptCapsuleStore, _dedup_valid_capsules,
+                                       _filter_capsule_rows)
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if lessons is None:
@@ -644,7 +645,7 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
         cp = base / "concept_capsules.jsonl" if base else None
         capsules = ConceptCapsuleStore(cp).all() if (cp and cp.exists()) else []
     capsule_source = capsules if isinstance(capsules, (list, tuple)) else []
-    capsules = [row for row in capsule_source if _valid_capsule_record(row)]
+    capsules = _dedup_valid_capsules(capsule_source)
     research = load_research_claims(memory_dir) if research_claims is None else list(research_claims)
     research = _valid_claim_source_rows(research, research=True)
     if scope_task:
@@ -652,7 +653,8 @@ def atlas_for_memory(memory_dir, *, lessons=None, capsules=None, research_claims
         # Scope is an access boundary across every joined store, not just D8. Filtering only
         # research rows still leaked other tasks through lessons and concept capsules in the same response.
         lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
-        capsules = [r for r in capsules if str(r.get("task_id") or "") == wanted]
+        capsules = _filter_capsule_rows(
+            capsules, lambda r: str(r.get("task_id") or "") == wanted)
         research = [r for r in research if str(r.get("task_id") or "") == wanted]
     return portfolio_atlas(lessons, capsules, max_items=max_items,
                            decisions=(load_claim_decisions(memory_dir) if decisions is None else decisions),
@@ -1124,6 +1126,14 @@ def build_context_pack(claims: list[dict], *, concept_overview: Optional[dict] =
                 concept_overview.get("n_runs", 0) if "source_complete" not in concept_overview else 0),
             "source_concepts_omitted": concept_overview.get("source_concepts_omitted", 0),
             "source_outcomes_omitted": concept_overview.get("source_outcomes_omitted", 0),
+            "source_store_complete": concept_overview.get(
+                "source_store_complete", source_complete) is True,
+            "source_rows_total": concept_overview.get("source_rows_total", 0),
+            "source_rows_quarantined": concept_overview.get("source_rows_quarantined", 0),
+            "source_malformed_rows": concept_overview.get("source_malformed_rows", 0),
+            "source_invalid_capsule_rows": concept_overview.get(
+                "source_invalid_capsule_rows", 0),
+            "source_duplicate_run_rows": concept_overview.get("source_duplicate_run_rows", 0),
             "top_concepts": [_claim_text(e.get("concept"), 500) for e in rows[:max_claims]],
             # E3: keep the run COUNT (n_helped/n_hurt) in the rendered span — "loss/contrastive (n=7)"
             # vs "(n=2)" tells the Researcher how strong the multi-run tendency is, not just its direction.
@@ -1265,7 +1275,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     from pathlib import Path
 
     from looplab.engine.concept_registry import (load_concept_aliases, load_concept_splits)
-    from looplab.engine.memory import ConceptCapsuleStore, _portfolio_concept_overview_data
+    from looplab.engine.memory import (ConceptCapsuleStore, _filter_capsule_rows,
+                                       _portfolio_concept_overview_data)
     from looplab.events.eventstore import read_jsonl_lenient
     base = Path(memory_dir) if memory_dir else None
     if capsules is None:
@@ -1279,7 +1290,8 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
     if scope_task:
         wanted = str(scope_task)
         lessons = [r for r in lessons if str(r.get("task_id") or "") == wanted]
-        capsules = [r for r in capsules if str(r.get("task_id") or "") == wanted]
+        capsules = _filter_capsule_rows(
+            capsules, lambda r: str(r.get("task_id") or "") == wanted)
         research = [r for r in research if str(r.get("task_id") or "") == wanted]
     claims = [c for c in claim_assessments(lessons, research_claims=research,
                                            decisions=load_claim_decisions(memory_dir), structured=structured)
@@ -1302,6 +1314,13 @@ def cross_run_retrieve(memory_dir, query: str, *, k: int = 8, lessons=None, caps
         # retained concept cardinality to the corpus identity so a cap change/tail cannot look identical.
         "concepts_total": len(concept_rows),
         "overview_concepts_omitted": int(overview.get("concepts_omitted", 0) or 0),
+        "source_store_complete": overview.get("source_store_complete") is True,
+        "source_rows_total": int(overview.get("source_rows_total", 0) or 0),
+        "source_rows_quarantined": int(overview.get("source_rows_quarantined", 0) or 0),
+        "source_malformed_rows": int(overview.get("source_malformed_rows", 0) or 0),
+        "source_invalid_capsule_rows": int(
+            overview.get("source_invalid_capsule_rows", 0) or 0),
+        "source_duplicate_run_rows": int(overview.get("source_duplicate_run_rows", 0) or 0),
     }
     scope_keys = (
         "scope_unknown_capsules", "scope_fingerprint_unknown_capsules",
@@ -1471,10 +1490,10 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
     The legacy ``thin_coverage`` field means only "observed in one returned run". It is not a gap or coverage
     assertion: a true CoverageFrame (§20.6, unknown-vs-zero) needs a frozen scope, eligible denominator and
     health contract, which remain deferred full-CR3a work."""
-    from looplab.engine.memory import _portfolio_concept_overview_data, _valid_capsule_record
+    from looplab.engine.memory import _dedup_valid_capsules, _portfolio_concept_overview_data
     max_items = max(1, min(int(max_items), 100))             # route/CLI-independent hard envelope
     source_capsules = capsules if isinstance(capsules, (list, tuple)) else []
-    capsules = [capsule for capsule in source_capsules if _valid_capsule_record(capsule)]
+    capsules = _dedup_valid_capsules(source_capsules)
     overview, full_concept_rows = _portfolio_concept_overview_data(
         capsules, aliases=aliases, splits=splits)
     # Keep the complete internal sets for exact run totals and the governance evidence digest. Only the
@@ -1513,6 +1532,9 @@ def portfolio_atlas(lessons: list[dict], capsules: list[dict], *, max_items: int
         "concept_source": {key: overview[key] for key in (
             "source_complete", "partial_capsules", "source_unknown_capsules",
             "source_concepts_omitted", "source_outcomes_omitted",
+            "source_store_complete", "source_rows_total", "source_rows_quarantined",
+            "source_malformed_rows", "source_invalid_capsule_rows",
+            "source_duplicate_run_rows",
         )},
         "explored": explored,                               # what's been tried (concept × runs)
         "explored_total": len(full_concept_rows),
@@ -1570,6 +1592,8 @@ def render_context_pack(pack: dict) -> str:
                 f"{int(cov.get('source_outcomes_omitted', 0))} outcome(s) known omitted"
                 + (f"; {int(cov.get('source_unknown_capsules', 0))} legacy capsule(s) have unknown totals"
                    if cov.get("source_unknown_capsules", 0) else "")
+                + (f"; {int(cov.get('source_rows_quarantined', 0))} durable row(s) were quarantined"
+                   if cov.get("source_rows_quarantined", 0) else "")
                 + "); "
                 "coverage describes returned observations only; directional tendencies are withheld.")
         top = ", ".join(repr(_safe_text(x, 100))

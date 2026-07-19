@@ -9,6 +9,7 @@ off-switch, and replay-safety.
 """
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -427,6 +428,12 @@ def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
         "source_unknown_capsules": 0,
         "source_concepts_omitted": 0,
         "source_outcomes_omitted": 0,
+        "source_store_complete": True,
+        "source_rows_total": 1,
+        "source_rows_quarantined": 0,
+        "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0,
+        "source_duplicate_run_rows": 0,
     }
     run = cp["prior_runs"][0]
     assert run["run_best_metric"] == 0.88
@@ -443,6 +450,32 @@ def test_cross_run_prior_surfaces_as_audit_without_changing_grade(tmp_path):
     }
     assert "similarity" in cp["prior_runs"][0]        # receipt carries the ranking similarity
     assert cp["stance"] == "balanced"
+
+
+def test_cross_run_prior_event_carries_store_quarantine_health(tmp_path):
+    mem = tmp_path / "mem"
+    mem.mkdir()
+    _seed_prior(mem, _CONCEPT)
+    capsule_path = mem / "concept_capsules.jsonl"
+    capsule_path.write_text(
+        capsule_path.read_text(encoding="utf-8")
+        + json.dumps({"v": 2, "run_id": "bad-shape", "concepts": "hidden/target"})
+        + "\n{broken\n",
+        encoding="utf-8",
+    )
+    s = _run_with_cached_concept(tmp_path, _CONCEPT)
+    eng = _GateEngine(s, mem)
+    eng._reflect_client = lambda: _IdeaReflectClient([_CONCEPT])
+
+    idea = Idea(operator="improve", params={"rank": 8.0}, rationale="different implementation")
+    assert eng._graded_novelty_precheck(fold(s.read_all()), idea) is idea
+
+    source = fold(s.read_all()).cross_run_priors[0]["concept_source"]
+    assert source["source_complete"] is source["source_store_complete"] is False
+    assert source["source_rows_total"] == 3
+    assert source["source_rows_quarantined"] == 2
+    assert source["source_malformed_rows"] == 1
+    assert source["source_invalid_capsule_rows"] == 1
 
 
 def test_cross_run_prior_separates_matched_outcome_from_run_best_and_marks_legacy_partial(tmp_path):
@@ -485,6 +518,12 @@ def test_cross_run_prior_separates_matched_outcome_from_run_best_and_marks_legac
         "source_unknown_capsules": 1,
         "source_concepts_omitted": 0,
         "source_outcomes_omitted": 0,
+        "source_store_complete": True,
+        "source_rows_total": 1,
+        "source_rows_quarantined": 0,
+        "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0,
+        "source_duplicate_run_rows": 0,
     }
 
 
@@ -517,6 +556,12 @@ def test_cross_run_prior_completeness_includes_partial_nonmatching_capsules(tmp_
         "source_unknown_capsules": 1,
         "source_concepts_omitted": 0,
         "source_outcomes_omitted": 0,
+        "source_store_complete": True,
+        "source_rows_total": 2,
+        "source_rows_quarantined": 0,
+        "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0,
+        "source_duplicate_run_rows": 0,
     }
 
 

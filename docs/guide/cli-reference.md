@@ -442,7 +442,9 @@ the text command warns when known items were omitted, and `--json` exposes aggre
 receipts. The aggregate overview is also independently capped at 512 concept rows: its exact `n_concepts` /
 `concepts_omitted` receipt is present in JSON and text mode explicitly reports a non-zero projection omission.
 Legacy v2 capsules without those fields remain positive observations but have unknown totals and do
-not contribute their potentially post-truncation rank signs. Missing, malformed, untagged or non-opt-in runs
+not contribute their potentially post-truncation rank signs. Malformed JSON, schema-invalid rows and duplicate
+run identities are quarantined rather than returned; their read-health counts make `source_complete=false`, so
+the text form cannot report an exact absence from a damaged capsule file. Missing, untagged or non-opt-in runs
 remain outside this corpus, so capsule completeness is not whole-portfolio coverage. Raw metrics are deliberately **not** compared across tasks (different
 task/direction ⇒ no shared contract), so a concept lists `run_id=metric` per run rather than a single
 fabricated "best". Each concept also carries a **direction-normalized rank rollup** (`+better/~neutral/-worse`

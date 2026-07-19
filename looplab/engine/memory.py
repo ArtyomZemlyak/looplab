@@ -13,7 +13,9 @@ from typing import Callable, Optional
 
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
-from looplab.events.eventstore import read_jsonl_lenient, write_jsonl_atomic
+from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
+                                       replace_jsonl_rows_atomic_preserving_quarantine,
+                                       write_jsonl_atomic)
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
 
 _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "from", "predict",
@@ -603,6 +605,39 @@ _MAX_OVERVIEW_RUN_CARDS = 512
 _MAX_OVERVIEW_CARD_CONCEPTS = 64
 
 
+_EMPTY_CAPSULE_STORE_HEALTH = {
+    "source_store_complete": True,
+    "source_rows_total": 0,
+    "source_rows_quarantined": 0,
+    "source_malformed_rows": 0,
+    "source_invalid_capsule_rows": 0,
+    "source_duplicate_run_rows": 0,
+}
+
+
+class _CapsuleRows(list):
+    """List-compatible capsule snapshot carrying file/schema quarantine health through projections."""
+
+    def __init__(self, rows=(), *, source_health: Optional[dict] = None):
+        super().__init__(rows)
+        self.source_health = {**_EMPTY_CAPSULE_STORE_HEALTH, **(source_health or {})}
+
+
+def _capsule_rows(rows=(), *, source=None) -> _CapsuleRows:
+    """Copy rows while preserving the originating store health receipt."""
+    origin = source if source is not None else rows
+    health = getattr(origin, "source_health", None)
+    if health is None and isinstance(origin, (list, tuple)):
+        health = {**_EMPTY_CAPSULE_STORE_HEALTH, "source_rows_total": len(origin)}
+    return _CapsuleRows(rows, source_health=health)
+
+
+def _filter_capsule_rows(rows, predicate) -> _CapsuleRows:
+    """Filter a capsule snapshot without laundering quarantined source rows into exact absence."""
+    source = rows if isinstance(rows, (list, tuple)) else []
+    return _capsule_rows((row for row in source if predicate(row)), source=source)
+
+
 def _finite_metric(value) -> bool:
     if value is None:
         return True
@@ -636,7 +671,8 @@ def _capsule_completeness(
 
 
 def _capsule_source_summary(capsules: list[dict]) -> dict:
-    """Aggregate explicit source-omission receipts from already-validated capsules."""
+    """Aggregate capsule omissions plus the durable store's quarantine/read-health receipt."""
+    capsules = _dedup_valid_capsules(capsules)
     concept_omitted = outcome_omitted = partial = unknown = 0
     for capsule in capsules:
         concept_meta = _capsule_completeness(capsule, "concepts", len(capsule.get("concepts") or []))
@@ -650,12 +686,19 @@ def _capsule_source_summary(capsules: list[dict]) -> dict:
         outcome_omitted += outcome_meta[1] or 0
         unknown += int(concept_meta[0] is None or outcome_meta[0] is None)
         partial += int(not concept_meta[2] or not outcome_meta[2])
+    store_health = {
+        **_EMPTY_CAPSULE_STORE_HEALTH,
+        **(getattr(capsules, "source_health", None) or {}),
+    }
     return {
-        "source_complete": partial == 0,
+        # CODEX AGENT: quarantine keeps poisoned content out, but it cannot turn an unreadable durable row
+        # into proof of absence. Completeness crosses both the per-capsule bounds and file/schema health.
+        "source_complete": partial == 0 and store_health["source_store_complete"] is True,
         "partial_capsules": partial,
         "source_unknown_capsules": unknown,
         "source_concepts_omitted": concept_omitted,
         "source_outcomes_omitted": outcome_omitted,
+        **store_health,
     }
 
 
@@ -727,22 +770,50 @@ def _valid_capsule_record(capsule) -> bool:
             and _capsule_completeness(capsule, "concept_outcomes", len(outcomes)) is not None)
 
 
-def _dedup_valid_capsules(capsules) -> list[dict]:
+def _dedup_valid_capsules(capsules) -> _CapsuleRows:
     """Quarantine + deterministically de-duplicate a raw capsule sequence: keep only valid records, collapse
     duplicate run ids to ONE, and return them in sorted-run-id order. The shared portfolio read-models feed
     this RAW decoded rows (a caller may concatenate shards or hand a pre-compaction file), so the collision
     winner must be INPUT-ORDER-INDEPENDENT — pick the row with the lexicographically-greatest canonical JSON
     (a stable representative), not "last seen in list order". The store path has unique run ids, so it never
     collides; this only bites the raw-row callers the docstring promises to tolerate."""
+    source = capsules if isinstance(capsules, (list, tuple)) else []
+    inherited = {
+        **_EMPTY_CAPSULE_STORE_HEALTH,
+        **(getattr(source, "source_health", None) or {}),
+    }
     by_run: dict[str, dict] = {}
-    for capsule in capsules if isinstance(capsules, (list, tuple)) else []:
+    invalid_capsules = valid_rows = 0
+    for capsule in source:
         if not _valid_capsule_record(capsule):
+            invalid_capsules += 1
             continue
+        valid_rows += 1
         rid = capsule["run_id"]
         prev = by_run.get(rid)
         if prev is None or json.dumps(capsule, sort_keys=True) > json.dumps(prev, sort_keys=True):
             by_run[rid] = capsule
-    return [by_run[run_id] for run_id in sorted(by_run)]
+    duplicates = valid_rows - len(by_run)
+    malformed = int(inherited.get("source_malformed_rows", 0) or 0)
+    invalid = max(int(inherited.get("source_invalid_capsule_rows", 0) or 0), invalid_capsules)
+    duplicate_rows = max(int(inherited.get("source_duplicate_run_rows", 0) or 0), duplicates)
+    quarantined = max(
+        int(inherited.get("source_rows_quarantined", 0) or 0),
+        malformed + invalid + duplicate_rows,
+    )
+    source_total = int(inherited.get("source_rows_total", 0) or 0)
+    if not hasattr(source, "source_health"):
+        source_total = len(source)
+    health = {
+        "source_store_complete": inherited.get("source_store_complete") is True and quarantined == 0,
+        "source_rows_total": source_total,
+        "source_rows_quarantined": quarantined,
+        "source_malformed_rows": malformed,
+        "source_invalid_capsule_rows": invalid,
+        "source_duplicate_run_rows": duplicate_rows,
+    }
+    return _CapsuleRows(
+        (by_run[run_id] for run_id in sorted(by_run)), source_health=health)
 
 
 # A concept whose outcome sits within this fraction of the run's own outcome SPREAD around the median is
@@ -906,6 +977,7 @@ class ConceptCapsuleStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.capsules: list[dict] = []
+        self.source_health = dict(_EMPTY_CAPSULE_STORE_HEALTH)
         self._reload()
 
     @staticmethod
@@ -919,8 +991,21 @@ class ConceptCapsuleStore:
         return _valid_capsule_record(c)
 
     def _reload(self) -> None:
-        rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
+        rows, read_health = read_jsonl_lenient_with_health(
+            self.path, loads=json.loads, dicts_only=True)
         self.capsules = [c for c in rows if self._valid_capsule(c)]   # drop poisoned rows, keep the rest
+        invalid_capsules = int(read_health["invalid_shape_lines"]) + len(rows) - len(self.capsules)
+        duplicate_runs = len(self.capsules) - len({c["run_id"] for c in self.capsules})
+        malformed = int(read_health["malformed_lines"])
+        quarantined = malformed + invalid_capsules + duplicate_runs
+        self.source_health = {
+            "source_store_complete": quarantined == 0,
+            "source_rows_total": int(read_health["source_lines"]),
+            "source_rows_quarantined": quarantined,
+            "source_malformed_rows": malformed,
+            "source_invalid_capsule_rows": invalid_capsules,
+            "source_duplicate_run_rows": duplicate_runs,
+        }
 
     def add(self, capsule: dict) -> bool:
         """Upsert by `run_id` under the same interprocess lock the case/lesson stores use, re-reading
@@ -930,13 +1015,14 @@ class ConceptCapsuleStore:
             return False
         rid = str(capsule.get("run_id") or "")
         with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
-            rows = read_jsonl_lenient(self.path, loads=json.loads, dicts_only=True)
             # CODEX AGENT: quarantine is a read policy, not permission to erase old/future durable data.
-            # Preserve every decoded row we do not understand; an upsert supersedes only the exact run id.
-            persisted = [row for row in rows if str(row.get("run_id") or "") != rid]
-            persisted.append(capsule)
-            write_jsonl_atomic(self.path, persisted, dumps=json.dumps)
-            self.capsules = [row for row in persisted if self._valid_capsule(row)]
+            # Preserve raw malformed AND decoded future rows; supersede only the exact run id.
+            replace_jsonl_rows_atomic_preserving_quarantine(
+                self.path, [capsule],
+                replace_if=lambda row: str(row.get("run_id") or "") == rid,
+                loads=json.loads, dumps=json.dumps,
+            )
+            self._reload()
         return True
 
     def prior_capsules(self, fingerprint: list[str], *, min_sim: float = 0.3,
@@ -978,7 +1064,7 @@ class ConceptCapsuleStore:
         return acc
 
     def all(self) -> list[dict]:
-        return list(self.capsules)
+        return _CapsuleRows(self.capsules, source_health=self.source_health)
 
 
 def portfolio_concept_overview(capsules: list[dict], *, aliases: Optional[dict] = None,

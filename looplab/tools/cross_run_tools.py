@@ -58,8 +58,15 @@ def _partial_source_warning(view: dict) -> str:
     known = (f"{view.get('source_concepts_omitted', 0)} concept(s), "
              f"{view.get('source_outcomes_omitted', 0)} outcome(s) known omitted")
     unknown = int(view.get("source_unknown_capsules", 0) or 0)
-    return ("WARNING: PARTIAL capsule source (" + known
-            + (f"; {unknown} legacy capsule(s) have unknown totals" if unknown else "") + ").")
+    quarantined = int(view.get("source_rows_quarantined", 0) or 0)
+    details = [known]
+    if unknown:
+        details.append(f"{unknown} legacy capsule(s) have unknown totals")
+    if quarantined:
+        details.append(
+            f"{quarantined} durable row(s) quarantined as malformed, invalid, or duplicate")
+    suffix = " Absence and retained frequencies are not exact." if quarantined else ""
+    return "WARNING: PARTIAL capsule source (" + "; ".join(details) + ")." + suffix
 
 
 def _partial_scope_warning(view: dict) -> str:
@@ -267,6 +274,8 @@ class CrossRunTools:
 
     def _partition_capsules(self, caps: list[dict]) -> tuple[list[dict], list[dict], dict]:
         """Partition capsules into scope-eligible, applicability-unknown, and known-ineligible rows."""
+        from looplab.engine.memory import _capsule_rows
+
         if not self._bound:
             receipt = {
                 "scope_complete": True,
@@ -275,7 +284,7 @@ class CrossRunTools:
                 "scope_fingerprint_items_omitted": 0,
                 "scope_direction_unknown_capsules": 0,
             }
-            return list(caps), [], receipt
+            return _capsule_rows(caps, source=caps), _capsule_rows((), source=caps), receipt
 
         from looplab.engine.memory import (
             _capsule_completeness,
@@ -315,7 +324,10 @@ class CrossRunTools:
             "scope_fingerprint_items_omitted": fingerprint_omitted,
             "scope_direction_unknown_capsules": direction_unknown,
         }
-        return eligible, unknown, receipt
+        # CODEX AGENT: scope filtering cannot erase file/schema quarantine health. A damaged row has no
+        # trustworthy task/direction with which to prove it was ineligible, so every absence stays partial.
+        return (_capsule_rows(eligible, source=caps),
+                _capsule_rows(unknown, source=caps), receipt)
 
     def _all_capsules(self) -> list[dict]:
         """Every stored capsule, de-duplicated to ONE row per run id — the SAME contract the Atlas/advisory
@@ -655,9 +667,10 @@ class CrossRunTools:
                 sorted(self._concepts), aliases=aliases, splits=splits))
             caps = self._scoped_capsules()
             scope_receipt = self._capsule_scope_receipt
-            prior_caps = [cap for cap in caps
-                          if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
-            from looplab.engine.memory import _capsule_source_summary
+            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
+            prior_caps = _filter_capsule_rows(
+                caps, lambda cap: (not self._run_id
+                                   or str(cap.get("run_id") or "") != self._run_id))
             source_summary = _capsule_source_summary(prior_caps)
             scope = "bound_task_family" if self._bound else "portfolio"
             direction = self._direction if self._bound else "any"
@@ -762,7 +775,7 @@ class CrossRunTools:
             #   global — only in unrelated prior runs (the wider world map; hunt cross-direction synergy here)
             from looplab.engine.concept_registry import (canonicalize_concepts,
                                                          concept_governance_snapshot)
-            from looplab.engine.memory import _capsule_source_summary
+            from looplab.engine.memory import _capsule_source_summary, _filter_capsule_rows
 
             # CODEX AGENT: identity, cross-run visibility, and display trust are one boundary. Resolve every
             # operand through ONE governance snapshot; only a same-direction task-family capsule can make a
@@ -770,8 +783,9 @@ class CrossRunTools:
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             caps = self._all_capsules()
-            prior_caps = [cap for cap in caps
-                          if not self._run_id or str(cap.get("run_id") or "") != self._run_id]
+            prior_caps = _filter_capsule_rows(
+                caps, lambda cap: (not self._run_id
+                                   or str(cap.get("run_id") or "") != self._run_id))
             source_summary = _capsule_source_summary(prior_caps)
             scoped_caps, unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
             mine = set(canonicalize_concepts(
@@ -959,13 +973,15 @@ class CrossRunTools:
                                                          normalize_key, resolve_slug)
             from looplab.engine.memory import (_capsule_source_summary,
                                                _portfolio_concept_overview_data,
-                                               concept_profit_tendencies, portfolio_concept_graph)
+                                               _filter_capsule_rows, concept_profit_tendencies,
+                                               portfolio_concept_graph)
 
             taxonomy = concept_governance_snapshot(self.dir)
             aliases, splits = taxonomy["aliases"], taxonomy["splits"]
             caps = self._all_capsules()
-            prior_caps = [c for c in caps
-                          if not self._run_id or str(c.get("run_id") or "") != self._run_id]
+            prior_caps = _filter_capsule_rows(
+                caps, lambda c: (not self._run_id
+                                 or str(c.get("run_id") or "") != self._run_id))
             source_summary = _capsule_source_summary(prior_caps)
             scoped_caps, _unknown_scope_caps, scope_receipt = self._partition_capsules(prior_caps)
             # The DECODE vocabulary is GLOBAL (a concept means the same thing everywhere — the user's

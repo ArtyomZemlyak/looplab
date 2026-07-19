@@ -143,6 +143,57 @@ def iter_jsonl(path: str | os.PathLike) -> Iterator[dict]:
             yield obj
 
 
+def read_jsonl_lenient_with_health(path: str | os.PathLike, *, loads=orjson.loads,
+                                   keep_bad: bool = False, dicts_only: bool = True,
+                                   errors: str = "strict") -> tuple[list, dict]:
+    """Read a mutable JSONL store and return its additive quarantine receipt.
+
+    The ordinary lenient reader intentionally skips damaged rows so one bad mutable-store record cannot
+    hide every later record.  Consumers that make completeness or absence claims also need to know that a
+    row was skipped.  This companion keeps the existing returned rows byte-for-byte compatible while
+    reporting non-blank source lines that were not accepted by the selected parser/shape contract.
+    """
+    p = Path(path)
+    out: list = []
+    source_lines = malformed_lines = invalid_shape_lines = 0
+    if not p.exists():
+        return out, {
+            "read_complete": True,
+            "source_lines": 0,
+            "accepted_rows": 0,
+            "invalid_lines": 0,
+            "malformed_lines": 0,
+            "invalid_shape_lines": 0,
+        }
+    for line in p.read_text(encoding="utf-8", errors=errors).splitlines():
+        rec = None
+        nonblank = bool(line.strip())
+        if nonblank:
+            source_lines += 1
+            try:
+                v = loads(line)
+                if not dicts_only or isinstance(v, dict):
+                    rec = v
+                else:
+                    invalid_shape_lines += 1
+            except Exception:  # noqa: BLE001 — any unparseable line is damage to step over
+                malformed_lines += 1
+        if rec is not None:
+            out.append(rec)
+        else:
+            if keep_bad:
+                out.append(None)
+    invalid_lines = malformed_lines + invalid_shape_lines
+    return out, {
+        "read_complete": invalid_lines == 0,
+        "source_lines": source_lines,
+        "accepted_rows": source_lines - invalid_lines,
+        "invalid_lines": invalid_lines,
+        "malformed_lines": malformed_lines,
+        "invalid_shape_lines": invalid_shape_lines,
+    }
+
+
 def read_jsonl_lenient(path: str | os.PathLike, *, loads=orjson.loads,
                        keep_bad: bool = False, dicts_only: bool = True,
                        errors: str = "strict") -> list:
@@ -165,23 +216,9 @@ def read_jsonl_lenient(path: str | os.PathLike, *, loads=orjson.loads,
       must cost one span, not the whole timings report).
 
     Missing file -> []. An unreadable file raises OSError (callers decide how to degrade)."""
-    p = Path(path)
-    out: list = []
-    if not p.exists():
-        return out
-    for line in p.read_text(encoding="utf-8", errors=errors).splitlines():
-        rec = None
-        if line.strip():
-            try:
-                v = loads(line)
-                rec = v if (not dicts_only or isinstance(v, dict)) else None
-            except Exception:  # noqa: BLE001 — any unparseable line is "damage to step over"
-                rec = None
-        if rec is not None:
-            out.append(rec)
-        elif keep_bad:
-            out.append(None)
-    return out
+    rows, _health = read_jsonl_lenient_with_health(
+        path, loads=loads, keep_bad=keep_bad, dicts_only=dicts_only, errors=errors)
+    return rows
 
 
 def write_jsonl_atomic(path: str | os.PathLike, rows, *, dumps=orjson.dumps) -> None:
@@ -202,6 +239,46 @@ def write_jsonl_atomic(path: str | os.PathLike, rows, *, dumps=orjson.dumps) -> 
         return (d if isinstance(d, bytes) else d.encode("utf-8")) + b"\n"
 
     atomic_write_bytes(Path(path), b"".join(_line(o) for o in rows))
+
+
+def replace_jsonl_rows_atomic_preserving_quarantine(
+        path: str | os.PathLike, rows, *, replace_if, loads=orjson.loads,
+        dumps=orjson.dumps) -> None:
+    """Atomically replace selected decoded rows without erasing unreadable/future records.
+
+    Mutable-store upserts historically went through ``read_jsonl_lenient`` followed by a whole-file
+    rewrite.  That silently deleted every quarantined raw line and made the next health receipt look
+    complete.  Preserve every non-blank raw line byte-for-byte unless it decodes to an object explicitly
+    superseded by ``replace_if``; append the replacement rows in the store's normal encoding.  An explicit
+    repair/migration, rather than an unrelated write, remains the only operation allowed to discard damage.
+
+    Callers must hold their store's interprocess lock around this helper.
+    """
+    from looplab.core.atomicio import atomic_write_bytes
+
+    p = Path(path)
+    retained: list[bytes] = []
+    if p.exists():
+        # Split only on the JSONL delimiter. ``bytes.splitlines`` also treats form-feed / vertical-tab as
+        # boundaries and would violate the byte-preservation promise for a poisoned raw record.
+        for raw in p.read_bytes().split(b"\n"):
+            if not raw.strip():
+                continue
+            try:
+                decoded = loads(raw)
+            except Exception:  # noqa: BLE001 — this is the raw quarantine we must retain
+                retained.append(raw)
+                continue
+            if isinstance(decoded, dict) and replace_if(decoded):
+                continue
+            retained.append(raw)
+
+    def _line(value) -> bytes:
+        encoded = dumps(value)
+        return encoded if isinstance(encoded, bytes) else encoded.encode("utf-8")
+
+    retained.extend(_line(row) for row in rows)
+    atomic_write_bytes(p, b"".join(raw + b"\n" for raw in retained))
 
 
 def log_divergence(path: str | os.PathLike) -> Optional[dict]:

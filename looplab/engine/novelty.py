@@ -602,6 +602,9 @@ class NoveltyGateMixin:
                 normalized = {
                     **capsule, "concepts": concepts, "concept_outcomes": outcomes,
                     "_source_receipt": source_receipt,
+                    # CODEX AGENT: a valid matching capsule does not make unreadable sibling rows vanish.
+                    # Carry one snapshot-level health receipt into the durable v2 prior event.
+                    "_store_source_health": dict(store.source_health),
                 }
                 canonical_caps.append((similarity, normalized))
                 prior.update(concepts)
@@ -624,6 +627,7 @@ class NoveltyGateMixin:
             # matching capsule past the top-N is never silently dropped from the receipt (CODEX).
             runs = []
             source_receipts = []
+            store_health = None
             for sim, c in prior_caps:
                 source = c.get("_source_receipt")
                 if not isinstance(source, dict):
@@ -637,6 +641,8 @@ class NoveltyGateMixin:
                 # partial row where the target is not retained may have omitted that target; filtering to
                 # matching rows would repeat the false-completeness bug fixed in concept_card.
                 source_receipts.append(source)
+                if store_health is None and isinstance(c.get("_store_source_health"), dict):
+                    store_health = c["_store_source_health"]
                 shared = sorted(set(str(x) for x in (c.get("concepts") or [])) & set(matched))
                 if not shared:
                     continue
@@ -674,14 +680,26 @@ class NoveltyGateMixin:
                 or receipt.get("concept_outcomes_total") is None
                 for receipt in source_receipts
             )
+            store_health = store_health if isinstance(store_health, dict) else {}
+            quarantined = store_health.get("source_rows_quarantined")
+            quarantined = (quarantined if isinstance(quarantined, int)
+                           and not isinstance(quarantined, bool) and quarantined >= 0 else 0)
             concept_source = {
-                "source_complete": partial == 0,
+                "source_complete": partial == 0 and quarantined == 0,
                 "partial_capsules": partial,
                 "source_unknown_capsules": unknown,
                 "source_concepts_omitted": sum(
                     receipt.get("concepts_omitted") or 0 for receipt in source_receipts),
                 "source_outcomes_omitted": sum(
                     receipt.get("concept_outcomes_omitted") or 0 for receipt in source_receipts),
+                "source_store_complete": quarantined == 0,
+                "source_rows_total": int(store_health.get("source_rows_total", 0) or 0),
+                "source_rows_quarantined": quarantined,
+                "source_malformed_rows": int(store_health.get("source_malformed_rows", 0) or 0),
+                "source_invalid_capsule_rows": int(
+                    store_health.get("source_invalid_capsule_rows", 0) or 0),
+                "source_duplicate_run_rows": int(
+                    store_health.get("source_duplicate_run_rows", 0) or 0),
             }
             self.store.append(EV_CROSS_RUN_PRIOR, {
                 "v": 2,

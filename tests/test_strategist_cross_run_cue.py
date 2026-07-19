@@ -79,6 +79,12 @@ def test_source_completeness_changes_strategist_note_and_semantic_receipt(tmp_pa
         "source_unknown_capsules": 1,
         "source_concepts_omitted": 0,
         "source_outcomes_omitted": 0,
+        "source_store_complete": True,
+        "source_rows_total": 1,
+        "source_rows_quarantined": 0,
+        "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0,
+        "source_duplicate_run_rows": 0,
     }
     assert (complete_host._cross_run_note_receipt["corpus_digest"]
             != partial_host._cross_run_note_receipt["corpus_digest"])

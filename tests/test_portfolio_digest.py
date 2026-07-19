@@ -48,6 +48,9 @@ def test_empty_is_well_formed():
         "axes_omitted": 0, "concepts_omitted": 0,
         "source_complete": True, "partial_capsules": 0, "source_unknown_capsules": 0,
         "source_concepts_omitted": 0, "source_outcomes_omitted": 0,
+        "source_store_complete": True, "source_rows_total": 0,
+        "source_rows_quarantined": 0, "source_malformed_rows": 0,
+        "source_invalid_capsule_rows": 0, "source_duplicate_run_rows": 0,
     }
 
 

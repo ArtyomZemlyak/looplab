@@ -988,6 +988,25 @@ def test_partial_legacy_capsules_never_turn_absence_into_a_new_concept_claim(tmp
     assert "WARNING: PARTIAL capsule source" in concept_map
 
 
+def test_quarantined_capsule_rows_qualify_every_agent_facing_absence(tmp_path):
+    _seed(tmp_path, capsules=[_cap("good", ["known/x"], {})])
+    path = tmp_path / "concept_capsules.jsonl"
+    with path.open("ab") as handle:
+        handle.write(b'{"v":2,"run_id":"poison","concepts":"hidden/target"}\n{broken json\n')
+    tools = CrossRunTools(tmp_path)
+
+    prior = tools.execute("cross_run_prior_attempts", {"idea": "hidden target"})
+    search = tools.execute("find_concept_slugs", {"query": "hidden target"})
+    retrieval = tools.execute("cross_run_search", {"query": "hidden target"})
+    card = tools.execute("concept_card", {"slug": "hidden/target"})
+
+    for result in (prior, search, retrieval, card):
+        assert "partial" in result.lower()
+        assert "quarantined" in result.lower()
+    assert "looks NEW" not in search + card
+    assert "no prior runs recorded these concepts yet" not in prior
+
+
 @pytest.mark.parametrize("args, message", [
     ({"query": 7}, "query must be a string"),
     ({"query": "x" * 257}, "query exceeds 256 characters"),

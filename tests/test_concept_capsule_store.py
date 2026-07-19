@@ -144,6 +144,35 @@ def test_capsule_store_quarantines_structurally_poisoned_rows(tmp_path):
     assert {row["run_id"] for row in ConceptCapsuleStore(path).all()} == {"good", "new"}
 
 
+def test_capsule_snapshot_carries_malformed_and_schema_quarantine_health(tmp_path):
+    """Quarantine removes poisoned evidence, never the fact that durable evidence became unreadable."""
+    from looplab.engine.memory import portfolio_concept_overview
+
+    path = tmp_path / "health.jsonl"
+    valid = _cap("good", "dense retrieval", ["known/one"], metric=0.8)
+    invalid = {"v": 2, "run_id": "poison", "concepts": "hidden/target"}
+    path.write_text(
+        json.dumps(valid) + "\n" + json.dumps(invalid) + "\n{broken json\n",
+        encoding="utf-8",
+    )
+
+    snapshot = ConceptCapsuleStore(path).all()
+    overview = portfolio_concept_overview(snapshot)
+
+    assert snapshot == [valid]
+    assert snapshot.source_health == {
+        "source_store_complete": False,
+        "source_rows_total": 3,
+        "source_rows_quarantined": 2,
+        "source_malformed_rows": 1,
+        "source_invalid_capsule_rows": 1,
+        "source_duplicate_run_rows": 0,
+    }
+    assert overview["source_complete"] is False
+    assert overview["source_rows_quarantined"] == 2
+    assert {row["concept"] for row in overview["concepts"]} == {"known/one"}
+
+
 def test_capsule_store_quarantines_pre_provenance_legacy_rows(tmp_path):
     path = tmp_path / "c.jsonl"
     current = _cap("current", "dense retrieval", ["hard-neg"], metric=0.8)
@@ -163,16 +192,24 @@ def test_upsert_preserves_quarantined_rows_for_future_migration(tmp_path):
     legacy = {"v": 1, "run_id": "legacy", "fingerprint": ["k"], "direction": "max",
               "concepts": ["old/claim"], "concept_outcomes": {}}
     future = {"v": 999, "run_id": "future", "opaque": {"contract": "unknown"}}
-    path.write_text("".join(json.dumps(row) + "\n" for row in (legacy, future)), encoding="utf-8")
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in (legacy, future)) + "{malformed\n",
+        encoding="utf-8",
+    )
 
     store = ConceptCapsuleStore(path)
     assert store.all() == []
     current = _cap("current", "dense retrieval", ["hard-neg"], metric=0.8)
     assert store.add(current) is True
 
-    persisted = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-    assert persisted == [legacy, future, current]
-    assert ConceptCapsuleStore(path).all() == [current]
+    persisted = path.read_text(encoding="utf-8").splitlines()
+    assert [json.loads(line) for line in persisted[:2]] == [legacy, future]
+    assert persisted[2] == "{malformed"
+    assert json.loads(persisted[3]) == current
+    reloaded = ConceptCapsuleStore(path)
+    assert reloaded.all() == [current]
+    assert reloaded.source_health["source_rows_quarantined"] == 3
+    assert reloaded.source_health["source_malformed_rows"] == 1
 
 
 def test_build_capsule_caps_large_generated_collections_deterministically():
