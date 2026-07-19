@@ -134,12 +134,16 @@ class _FakeDeveloper:
 
 
 class _VerdictHost(TrainingMonitorMixin):
-    def __init__(self, tracer, developer, interval=0.05, redact=None):
+    def __init__(self, tracer, developer, interval=0.05, redact=None, kill=False, kill_confidence=0.8):
         self.tracer = tracer
         self.developer = developer
         self._train_monitor_interval_s = interval
+        self._train_monitor_kill = kill
+        self._train_monitor_kill_confidence = kill_confidence
         self._write_lock = anyio.Lock()
         self.store = _FakeStore()
+        self.kill_signal: dict = {}
+        self.cancel = threading.Event()
         if redact is not None:
             self._redact = redact
 
@@ -152,14 +156,15 @@ class _FakeStore:
         self.events.append((event_type, data))
 
 
-def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None):
+def _run_verdict_monitor(tmp_path, *, workdir, developer, hold_s=0.22, redact=None,
+                         kill=False, kill_confidence=0.8):
     tracer = Tracer(JsonlSpanExporter(tmp_path / "spans.jsonl"))
-    host = _VerdictHost(tracer, developer, interval=0.05, redact=redact)
-    cancel = threading.Event()
+    host = _VerdictHost(tracer, developer, interval=0.05, redact=redact,
+                        kill=kill, kill_confidence=kill_confidence)
 
     async def drive():
         async with anyio.create_task_group() as tg:
-            tg.start_soon(host._monitor_training, 0, 0, str(workdir), cancel, "ctx")
+            tg.start_soon(host._monitor_training, 0, 0, str(workdir), host.cancel, "ctx", host.kill_signal)
             await anyio.sleep(hold_s)
             tg.cancel_scope.cancel()
 
@@ -294,6 +299,74 @@ class _CadenceHost(TrainingMonitorMixin):
 
     def _experiment_time_budget(self):
         return self._budget
+
+
+# --------------------------------------------------------------------------- Phase 3: gated early kill
+def test_should_monitor_kill_decision():
+    from looplab.engine.train_monitor import TrainingVerdict, should_monitor_kill as kill
+    broken = TrainingVerdict(status="broken", reason="loss nan", confidence=0.9)
+    watch = TrainingVerdict(status="watch", reason="slow", confidence=0.99)
+    healthy = TrainingVerdict(status="healthy", reason="ok", confidence=0.99)
+    assert kill(broken, enabled=True, threshold=0.8) is True
+    assert kill(broken, enabled=False, threshold=0.8) is False        # opt-in: off by default
+    assert kill(broken, enabled=True, threshold=0.95) is False        # below the confidence bar
+    assert kill(watch, enabled=True, threshold=0.5) is False          # a plateau/'watch' is never killed
+    assert kill(healthy, enabled=True, threshold=0.5) is False
+    assert kill(None, enabled=True, threshold=0.5) is False
+
+
+def test_broken_verdict_fires_kill_when_enabled(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("Using device: cpu\nRuntimeError in dataloader\nloss: nan\n")
+    client = _FakeClient({"status": "broken", "reason": "silent CPU fallback + nan loss",
+                          "confidence": 0.95})
+    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=True)
+
+    assert host.kill_signal.get("kill") is True                       # kill decision recorded for _evaluate
+    assert "CPU" in host.kill_signal.get("reason", "")
+    assert host.cancel.is_set()                                       # the eval's tree-kill was triggered
+    # the advisory alert was still recorded before the kill
+    assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)
+
+
+def test_broken_verdict_does_not_kill_when_disabled(tmp_path):
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    (wd / "train.log").write_text("loss: nan\n")
+    client = _FakeClient({"status": "broken", "reason": "nan", "confidence": 0.99})
+    host, _ = _run_verdict_monitor(tmp_path, workdir=wd, developer=_FakeDeveloper(client), kill=False)
+
+    assert host.kill_signal.get("kill") is None and not host.cancel.is_set()   # observe-only default
+    assert any(t == EV_TRAIN_MONITOR_ALERT for (t, _d) in host.store.events)    # but still flagged
+
+
+def test_llm_call_cap_stops_spending_but_keeps_observing(tmp_path, monkeypatch):
+    # Past the per-node LLM-call backstop the monitor keeps OBSERVING (trace) but stops calling the LLM,
+    # and marks the span `llm_capped` so the cap is never silent. Drive it by mutating the log each call.
+    import looplab.engine.train_monitor as tm
+    monkeypatch.setattr(tm, "_MAX_MONITOR_LLM_CALLS", 2)
+    wd = tmp_path / "node_0"
+    wd.mkdir()
+    logf = wd / "train.log"
+    logf.write_text("step 0 loss: 1.0\n")
+
+    class _AppendingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def complete_tool(self, messages, schema):
+            self.calls += 1
+            with open(logf, "a", encoding="utf-8") as fh:   # change the log so the NEXT tick has a fresh digest
+                fh.write(f"step {self.calls} loss: {1.0 / (self.calls + 1):.3f}\n")
+            return {"status": "healthy", "reason": "ok", "confidence": 0.6}
+
+    client = _AppendingClient()
+    _host, spans = _run_verdict_monitor(
+        tmp_path, workdir=wd, developer=_FakeDeveloper(client), hold_s=0.5)
+    assert client.calls == 2, f"LLM must stop at the cap (fired {client.calls})"
+    tm_spans = [s for s in spans if s.get("name") == "train_monitor"]
+    assert any(s["attributes"].get("llm_capped") for s in tm_spans)   # the cap is surfaced, never silent
 
 
 def test_monitor_cadence_derives_from_budget():

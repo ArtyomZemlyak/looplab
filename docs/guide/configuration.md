@@ -121,8 +121,10 @@ looplab run examples/dataset_task.json -s profile=thorough -s confirm_top_k=5   
 |---|---|---|---|
 | `max_nodes` | `LOOPLAB_MAX_NODES` | `8` | Candidate (node) budget for the search |
 | `max_parallel` | `LOOPLAB_MAX_PARALLEL` | `1` | Concurrent evaluations. `1` = one experiment at a time (deterministic); raise to fan out |
-| `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `false` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact) |
-| `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Monitor tick cadence in seconds (floored at 1s); no-op unless `train_monitor` is on |
+| `train_monitor` | `LOOPLAB_TRAIN_MONITOR` | `true` | Per-eval background observer that tails the live training log while a (long) stage runs. Advisory/observability only (no node-selection or replay impact); no-ops without an LLM client or on the solution.py path |
+| `train_monitor_interval_s` | `LOOPLAB_TRAIN_MONITOR_INTERVAL_S` | `600.0` | Base monitor tick cadence in seconds; the effective cadence adapts to the per-experiment budget and can only be tightened by this. No-op unless `train_monitor` is on |
+| `train_monitor_kill` | `LOOPLAB_TRAIN_MONITOR_KILL` | `false` | Opt-in INTERVENTION: let the monitor tree-kill a training it judges `broken` (diverged / silent CPU fallback / not learning) early. The node then fails normally (`reason=monitor_broken`). Off = observe only |
+| `train_monitor_kill_confidence` | `LOOPLAB_TRAIN_MONITOR_KILL_CONFIDENCE` | `0.8` | Minimum verdict confidence (0–1) required before a `broken` verdict triggers an early kill |
 | `timeout` | `LOOPLAB_TIMEOUT` | `30.0` | Per-evaluation wall-clock limit (seconds) |
 | `sweep_timeout_mult` | `LOOPLAB_SWEEP_TIMEOUT_MULT` | `8.0` | A sweep node (a grid in one process) gets this × `timeout` |
 | `n_seeds` | `LOOPLAB_N_SEEDS` | `3` | Seeds per evaluation / rung-0 width |

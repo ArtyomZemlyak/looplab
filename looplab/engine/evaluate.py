@@ -154,6 +154,7 @@ class EvaluateMixin:
                 cancel = threading.Event()
                 aborted = False
                 superseded = False
+                kill_signal: dict = {}       # filled by the training monitor if it kills a broken run (Phase 3)
                 async with anyio.create_task_group() as _tg:
                     def _intervention_seen() -> str | None:
                         intervention = None
@@ -199,9 +200,11 @@ class EvaluateMixin:
                     _tg.start_soon(_watch)
                     # Training-log monitor (off by default): a sibling task that tails this eval's live
                     # training log on a timer while it runs in the worker thread, asks the Developer to
-                    # judge its health, and records the verdict (advisory; never intervenes here).
-                    # Cancelled with the eval by `_tg.cancel_scope.cancel()` below.
-                    if getattr(self, "_train_monitor", False):
+                    # judge its health, and records the verdict (advisory unless kill is enabled).
+                    # Cancelled with the eval by `_tg.cancel_scope.cancel()` below. Gated on the
+                    # command-eval path (`_eval_spec`): only those write the per-stage `<stage>.log` the
+                    # monitor tails — the solution.py path (toy/dataset) has no live log to watch.
+                    if getattr(self, "_train_monitor", False) and getattr(self, "_eval_spec", None):
                         _idea = getattr(node, "idea", None)
                         _rationale = (getattr(_idea, "rationale", "") or "")[:400] if _idea else ""
                         _mkey = ((self._eval_spec.get("metric") or {}).get("key", "metric")
@@ -209,7 +212,7 @@ class EvaluateMixin:
                         _mon_ctx = f"Optimizing metric {_mkey!r}." + (
                             f" Experiment: {_rationale}" if _rationale else "")
                         _tg.start_soon(self._monitor_training, node_id, generation, workdir, cancel,
-                                       _mon_ctx)
+                                       _mon_ctx, kill_signal)
                     # Pin this eval to a distinct GPU when running in parallel, so concurrent nodes use
                     # separate GPUs (CUDA_VISIBLE_DEVICES remaps the agent's cuda:0 onto the reserved
                     # device — transparent to the config). Unpinned (eval_env=None) on a single-experiment
@@ -245,6 +248,18 @@ class EvaluateMixin:
                             "node_id": node_id, "generation": generation,
                             "error": "aborted by operator (killed mid-eval)",
                             "reason": "aborted", "eval_seconds": total_eval})
+                        self._maybe_crash()
+                    return
+                if kill_signal.get("kill") and not ok:       # the training monitor tree-killed a broken run
+                    # ONE terminal event; reason='monitor_broken' so the fold/failure-reflection knows WHY.
+                    # The LLM verdict already ran live (its EV_TRAIN_MONITOR_ALERT is the advisory record);
+                    # replay reconstructs the node from this terminal and never re-invokes the monitor.
+                    async with self._write_lock:
+                        self.store.append(EV_NODE_FAILED, {
+                            "node_id": node_id, "generation": generation,
+                            "error": ("training monitor stopped a broken run early: "
+                                      + str(kill_signal.get("reason", ""))[:400]),
+                            "reason": "monitor_broken", "eval_seconds": total_eval})
                         self._maybe_crash()
                     return
                 if ok:

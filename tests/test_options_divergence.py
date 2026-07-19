@@ -33,6 +33,11 @@ EXPECTED = {
     "merge_mode": ("auto", "mean"),
     "reflection_priors": (True, False),
     "report_every": (3, 0),
+    # Training-log monitor: ON in the product surface (advisory observer of the live training log; never
+    # touches node selection or replay, no-ops without an LLM client / on the solution.py path), OFF in the
+    # bare-library EngineOptions so a direct `Engine(...)` in a test does no unasked LLM work. The early
+    # KILL (`train_monitor_kill`) stays OFF on BOTH sides — it is an opt-in intervention, not a default.
+    "train_monitor": (True, False),
     "unified_agent": (True, False),
     # Part IV/V machinery now ships ON in the product surface (Settings) while the bare-library
     # EngineOptions stays lean, so a toy `Engine(...)` in a test doesn't fire concept/cross-run

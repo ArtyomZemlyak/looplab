@@ -186,6 +186,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         max_parallel = _opt("max_parallel")
         train_monitor = _opt("train_monitor")
         train_monitor_interval_s = _opt("train_monitor_interval_s")
+        train_monitor_kill = _opt("train_monitor_kill")
+        train_monitor_kill_confidence = _opt("train_monitor_kill_confidence")
         timeout = _opt("timeout")
         sweep_timeout_mult = _opt("sweep_timeout_mult")
         confirm_top_k = _opt("confirm_top_k")
@@ -435,6 +437,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self.timeout = timeout
         self._train_monitor = bool(train_monitor)
         self._train_monitor_interval_s = train_monitor_interval_s
+        self._train_monitor_kill = bool(train_monitor_kill)
+        self._train_monitor_kill_confidence = train_monitor_kill_confidence
         self.sweep_timeout_mult = max(1.0, sweep_timeout_mult)
         self.crash_after = crash_after
         self.confirm_top_k = confirm_top_k
