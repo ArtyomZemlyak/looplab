@@ -1011,26 +1011,70 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             return
         try:
             claims = []
-            for memo in (getattr(final, "research", None) or []):
-                if not isinstance(memo, dict):
+            raw_research = getattr(final, "research", None)
+            if raw_research is None:
+                return
+            # CODEX AGENT: a malformed outer memo collection is one UNKNOWN producer slot, not an
+            # iterable of trusted memos (a dict/string used to be walked key/character by character).
+            memos = raw_research if type(raw_research) in (list, tuple) else (None,)
+            for memo in memos:
+                if type(memo) is not dict:
+                    claims.append(None)
                     continue
-                raw_claims = memo.get("claims") or []
-                verification = memo.get("verification") if isinstance(memo.get("verification"), dict) else {}
-                verdicts = verification.get("verdicts") if isinstance(verification.get("verdicts"), list) else []
-                method = str(verification.get("method") or "")[:80]
+                # Old pre-D8 memos legitimately have no `claims` key. Once the field is present, however,
+                # only the declared list/tuple shape can prove its cardinality. Any scalar/container mismatch
+                # contributes one opaque omitted slot so finalize cannot silently publish a complete receipt.
+                if "claims" not in memo:
+                    continue
+                raw_claims = memo.get("claims")
+                if type(raw_claims) not in (list, tuple):
+                    claims.append(None)
+                    continue
+                verification = memo.get("verification")
+                verification = verification if type(verification) is dict else {}
+                verdicts = verification.get("verdicts")
+                verdicts = verdicts if type(verdicts) in (list, tuple) else ()
+                method_value = verification.get("method")
+                method = method_value[:80] if isinstance(method_value, str) else ""
                 for i, c in enumerate(raw_claims):
-                    if not isinstance(c, dict):
+                    # Preserve one slot per producer item. The D8 writer deliberately counts opaque None
+                    # markers but never indexes/persists their contents, so an all-invalid memo still emits a
+                    # durable incomplete-source sentinel and a malformed prefix cannot shrink the receipt.
+                    if type(c) is not dict:
+                        claims.append(None)
                         continue
-                    # `verify_memo` promises an index-aligned verdict list.  Fail closed if a malformed event
-                    # breaks that alignment or names a different statement: the citation remains drillable,
-                    # but it is never upgraded into positive support.
-                    v = verdicts[i] if i < len(verdicts) and isinstance(verdicts[i], dict) else {}
-                    same = str(v.get("statement") or "").strip() == str(c.get("statement") or "").strip()
-                    verdict = str(v.get("verdict") or "unverified") if same else "unverified"
-                    claims.append({**c, "verification": {
-                        "verdict": verdict, "method": method,
-                        "note": str(v.get("note") or "")[:400] if same else "verification alignment mismatch",
-                    }})
+                    try:
+                        statement = c.get("statement")
+                        if not isinstance(statement, str) or not statement.strip():
+                            claims.append(None)
+                            continue
+                        # `verify_memo` promises an index-aligned verdict list. Fail closed if a malformed
+                        # event breaks that alignment or names a different statement: the citation remains
+                        # drillable, but it is never upgraded into positive support.
+                        v = verdicts[i] if i < len(verdicts) and type(verdicts[i]) is dict else {}
+                        verified_statement = v.get("statement")
+                        same = (isinstance(verified_statement, str)
+                                and verified_statement.strip() == statement.strip())
+                        verdict_value = v.get("verdict")
+                        verdict = (verdict_value if same and isinstance(verdict_value, str)
+                                   else "unverified")
+                        note_value = v.get("note")
+                        note = (note_value[:400] if same and isinstance(note_value, str)
+                                else "verification alignment mismatch")
+                        # Forward only the fields the D8 writer understands. Unknown model output remains
+                        # untrusted run-local data and cannot hitch a ride into durable cross-run memory.
+                        prepared = {
+                            "statement": statement,
+                            "node_ids": c.get("node_ids"),
+                            "urls": c.get("urls"),
+                            "verification": {"verdict": verdict, "method": method, "note": note},
+                        }
+                        for key in ("metric_name", "metric_key", "objective_metric", "metric", "fingerprint"):
+                            if key in c:
+                                prepared[key] = c.get(key)
+                        claims.append(prepared)
+                    except Exception:  # noqa: BLE001 - one hostile legacy item is one omitted source slot
+                        claims.append(None)
             if not claims:
                 return
         except Exception:  # noqa: BLE001 — extraction is best-effort, never fails a run
