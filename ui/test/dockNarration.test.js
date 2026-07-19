@@ -93,11 +93,38 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     }))
     assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
 
+    for (const corrupt of [
+      { concept_source: { ...completeSource, source_concepts_omitted: 1 } },
+      { concept_source: { ...completeSource, source_complete: false,
+        source_concepts_omitted: 1 } },
+      { prior_runs_total: Number.MAX_SAFE_INTEGER + 1 },
+      { prior_runs: [{
+        run_id: 'old', run_best_metric: 0.9, matched_concepts: ['loss/target'],
+        source_receipt: { ...completeRunSource, concepts_omitted: 1 },
+        matched_concept_outcomes: [
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+        ],
+      }] },
+    ]) {
+      const narration = eventNarration(prior(corrupt))
+      assert.match(narration, /evidence completeness unknown/)
+      if (corrupt.prior_runs) assert.doesNotMatch(narration, /matched outcome/)
+    }
+    const corruptSibling = eventNarration(prior({ prior_runs_total: 2, prior_runs: [
+      prior().data.prior_runs[0],
+      { run_id: 'older', matched_concepts: ['loss/target'], source_receipt: null },
+    ] }))
+    assert.match(corruptSibling, /matched outcome loss\/target=0\.1/)
+    assert.match(corruptSibling, /evidence completeness unknown/)
+
     assert.equal(eventNarration({ type: 'cross_run_prior', data: {
       matched_concepts: 'loss/target', prior_runs: [],
     } }), 'cross_run_prior — details could not be summarized')
     assert.equal(eventNarration({ type: 'cross_run_prior', data: {
       matched_concepts: ['loss/target'], prior_runs: 'corrupt',
+    } }), 'cross_run_prior — details could not be summarized')
+    assert.equal(eventNarration({ type: 'cross_run_prior', data: {
+      v: 2, matched_concepts: [], prior_runs: [], prior_runs_total: 0,
     } }), 'cross_run_prior — details could not be summarized')
     assert.match(eventNarration({ type: 'cross_run_prior', data: {
       matched_concepts: ['loss/target'], prior_runs: [{ best_metric: 0.9 }],

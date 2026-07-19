@@ -1,7 +1,7 @@
 import { fmt } from './util.js'
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
-const count = value => Number.isInteger(value) && value >= 0
+const count = value => Number.isSafeInteger(value) && value >= 0
 const metric = value => typeof value === 'number' && Number.isFinite(value) ? value : null
 const array = value => Array.isArray(value) ? value : []
 const labels = value => array(value).slice(0, 64).filter(item => typeof item === 'string')
@@ -18,18 +18,26 @@ export function crossRunPriorNarration(data) {
     && ['partial_capsules', 'source_unknown_capsules', 'source_concepts_omitted',
       'source_outcomes_omitted'].every(key => count(source[key]))
     && source.source_unknown_capsules <= source.partial_capsules
+    && (source.partial_capsules > 0
+      || source.source_concepts_omitted + source.source_outcomes_omitted === 0)
     && source.source_complete === (source.partial_capsules === 0)
   const listKnown = v2 && count(data?.prior_runs_total) && count(data?.prior_runs_omitted)
-    && rawRuns.length <= 8 && data.prior_runs_total === rawRuns.length + data.prior_runs_omitted
+    && rawRuns.length > 0 && rawRuns.length <= 8 && data.prior_runs_total > 0
+    && data.prior_runs_total === rawRuns.length + data.prior_runs_omitted
     && typeof data.prior_runs_complete === 'boolean'
     && data.prior_runs_complete === (data.prior_runs_omitted === 0)
     && runs.length === rawRuns.length
-  const runSource = first && record(first.source_receipt) ? first.source_receipt : null
-  const runSourceKnown = !first || (runSource && typeof runSource.concepts_complete === 'boolean'
-    && typeof runSource.concept_outcomes_complete === 'boolean')
-  const receiptsKnown = sourceKnown && listKnown && runSourceKnown
-    && (!source.source_complete || !first
-      || (runSource.concepts_complete && runSource.concept_outcomes_complete))
+  const runSource = first?.source_receipt
+  const receiptPart = (receipt, name) => count(receipt?.[`${name}_total`])
+    && count(receipt[`${name}_omitted`]) && receipt[`${name}_omitted`] <= receipt[`${name}_total`]
+    && typeof receipt[`${name}_complete`] === 'boolean'
+    && receipt[`${name}_complete`] === (receipt[`${name}_omitted`] === 0)
+  const receiptKnown = receipt => record(receipt)
+    && receiptPart(receipt, 'concepts') && receiptPart(receipt, 'concept_outcomes')
+  const runSourceKnown = !first || receiptKnown(runSource)
+  const receiptsKnown = sourceKnown && listKnown && runs.every(run => receiptKnown(run.source_receipt)
+    && (!source.source_complete
+      || (run.source_receipt.concepts_complete && run.source_receipt.concept_outcomes_complete)))
 
   let history = 'prior match recorded; run details unavailable'
   if (listKnown) history = `tried in ${data.prior_runs_total} earlier run${data.prior_runs_total === 1 ? '' : 's'}`

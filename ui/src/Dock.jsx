@@ -203,7 +203,7 @@ const NARR_VALID = {
   holdout_evaluated: d => ownValue(d, 'node_id') && ownValue(d, 'metric'),
   novelty_graded: d => ownValue(d, 'level'),
   cross_run_prior: d => Array.isArray(d?.matched_concepts) && Array.isArray(d?.prior_runs)
-    && (d.matched_concepts.length > 0 || d.prior_runs.length > 0),
+    && d.matched_concepts.length > 0 && d.prior_runs.length > 0,
   comment_created: d => ownValue(d, 'node_id') && ownValue(d, 'text'),
   comment_edited: d => ownValue(d, 'node_id'),
   comment_resolution_changed: d => ownValue(d, 'node_id'),

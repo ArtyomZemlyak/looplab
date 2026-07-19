@@ -137,6 +137,22 @@ test('materialization receipt parsing fails closed without rejecting future part
   assert.equal(conceptMaterializationStatus({ nodes, node_concept_materialization_receipts: {
     9: { status: 'partial', reasons: ['concepts_per_node_cap'] },
   } }), 'unavailable', 'an orphan receipt cannot silently disappear')
+  const exact = { status: 'partial', reasons: ['concepts_per_node_cap'] }
+  for (const receipts of [
+    { 1: exact, 9: exact },
+    { 1: exact, 2: { ...exact, unexpected: true } },
+    { 1: exact, 2: { status: 'partial', reasons: ['delta_dependency_cycle'] } },
+  ]) {
+    const state = { nodes, node_concepts: { 1: ['loss/retained'] },
+      node_concept_materialization_receipts: receipts }
+    assert.equal(conceptMaterializationStatus(state, 1), 'unavailable',
+      'global receipt corruption must poison a node-specific projection too')
+    assert.equal(nodeTheme(nodes[1], state), null)
+  }
+  assert.equal(conceptMaterializationStatus({
+    nodes: { ...nodes, 3: { id: 3, tombstoned: true } },
+    node_concept_materialization_receipts: { 3: null },
+  }, 1), 'unavailable', 'malformed inactive receipts remain structural corruption')
   for (const receipt of [
     null,
     { status: 'partial', reasons: [] },
