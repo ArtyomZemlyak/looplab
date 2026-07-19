@@ -191,7 +191,9 @@ def test_upsert_preserves_quarantined_rows_for_future_migration(tmp_path):
     path = tmp_path / "c.jsonl"
     legacy = {"v": 1, "run_id": "legacy", "fingerprint": ["k"], "direction": "max",
               "concepts": ["old/claim"], "concept_outcomes": {}}
-    future = {"v": 999, "run_id": "future", "opaque": {"contract": "unknown"}}
+    # Same key is deliberate: an upsert may supersede only a fully-understood current-schema row. A future
+    # record with that key stays quarantined until an explicit migration/repair.
+    future = {"v": 999, "run_id": "current", "opaque": {"contract": "unknown"}}
     path.write_text(
         "".join(json.dumps(row) + "\n" for row in (legacy, future)) + "{malformed\n",
         encoding="utf-8",

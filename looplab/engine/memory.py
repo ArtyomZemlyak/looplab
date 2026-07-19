@@ -1019,7 +1019,11 @@ class ConceptCapsuleStore:
             # Preserve raw malformed AND decoded future rows; supersede only the exact run id.
             replace_jsonl_rows_atomic_preserving_quarantine(
                 self.path, [capsule],
-                replace_if=lambda row: str(row.get("run_id") or "") == rid,
+                # CODEX AGENT: matching an opaque key is not permission to delete a future/invalid schema.
+                # Supersede only a row this reader fully understands; keep an unknown same-run record for
+                # explicit repair/migration alongside the new current-schema capsule.
+                replace_if=lambda row: (self._valid_capsule(row)
+                                        and str(row.get("run_id") or "") == rid),
                 loads=json.loads, dumps=json.dumps,
             )
             self._reload()
