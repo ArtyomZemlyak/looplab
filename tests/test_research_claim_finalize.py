@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from looplab.engine.claims import claim_assessments, load_research_claims
+from looplab.engine.claims import (
+    claim_assessments,
+    load_research_claims,
+    record_research_claims,
+)
 from looplab.engine.lessons import LessonMemory
 
 
@@ -92,3 +96,32 @@ def test_finalize_malformed_outer_research_shape_is_not_walked_as_memos(tmp_path
     assert rows[0]["record_kind"] == "source_receipt"
     assert rows[0]["source_receipt"]["claims_total"] == 1
     assert rows[0]["source_receipt"]["claims_retained"] == 0
+
+
+def test_finalize_explicit_empty_d8_snapshot_clears_stale_same_run_rows(tmp_path):
+    for index, research in enumerate(([], [{"claims": []}])):
+        memory = tmp_path / str(index)
+        record_research_claims(
+            memory,
+            run_id="run-finalize",
+            task_id="task-finalize",
+            claims=[{"statement": "stale claim", "node_ids": [1]}],
+            direction="max",
+        )
+
+        assert _finalize_claims(memory, research) == []
+
+
+def test_finalize_absent_or_legacy_d8_source_does_not_erase_existing_rows(tmp_path):
+    for index, research in enumerate((None, [{"summary": "pre-D8 memo"}])):
+        memory = tmp_path / str(index)
+        record_research_claims(
+            memory,
+            run_id="run-finalize",
+            task_id="task-finalize",
+            claims=[{"statement": "retained claim", "node_ids": [1]}],
+            direction="max",
+        )
+
+        rows = _finalize_claims(memory, research)
+        assert [row.get("statement") for row in rows] == ["retained claim"]

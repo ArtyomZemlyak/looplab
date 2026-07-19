@@ -1017,8 +1017,14 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
             # CODEX AGENT: a malformed outer memo collection is one UNKNOWN producer slot, not an
             # iterable of trusted memos (a dict/string used to be walked key/character by character).
             memos = raw_research if type(raw_research) in (list, tuple) else (None,)
+            # An explicitly observed empty research collection is a complete zero-row D8 snapshot. It must
+            # reach the upsert writer so a finalize retry can clear stale understood rows for the same run.
+            # By contrast, `None` above and a non-empty collection of pre-D8 memos with no `claims` field do
+            # not assert anything about the D8 source and deliberately leave an existing store untouched.
+            d8_source_observed = not memos
             for memo in memos:
                 if type(memo) is not dict:
+                    d8_source_observed = True
                     claims.append(None)
                     continue
                 # Old pre-D8 memos legitimately have no `claims` key. Once the field is present, however,
@@ -1026,6 +1032,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                 # contributes one opaque omitted slot so finalize cannot silently publish a complete receipt.
                 if "claims" not in memo:
                     continue
+                d8_source_observed = True
                 raw_claims = memo.get("claims")
                 if type(raw_claims) not in (list, tuple):
                     claims.append(None)
@@ -1075,7 +1082,7 @@ class LessonMemory(LessonPriorsMixin, LessonDistillMixin, LessonReconcileMixin):
                         claims.append(prepared)
                     except Exception:  # noqa: BLE001 - one hostile legacy item is one omitted source slot
                         claims.append(None)
-            if not claims:
+            if not d8_source_observed:
                 return
         except Exception:  # noqa: BLE001 — extraction is best-effort, never fails a run
             return
