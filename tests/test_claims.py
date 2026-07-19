@@ -426,6 +426,14 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
         "v": 99, "run_id": "same", "task_id": "t", "statement": "future claim",
         "node_ids": [9], "future_contract": {"must": "survive"},
     }
+    future_kind = {
+        "v": 3, "record_kind": "future-claim-family", "run_id": "same", "task_id": "t",
+        "statement": "same-version future family", "node_ids": [10],
+        "source_receipt": {
+            "v": 1, "claims_total": 1, "claims_retained": 1,
+            "claims_omitted": 0, "producer_complete": True,
+        },
+    }
     invalid_current = {
         "v": 3, "run_id": "same", "task_id": "t", "statement": "invalid receipt",
         "node_ids": [8], "source_receipt": {
@@ -434,6 +442,7 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
         },
     }
     path.write_bytes(path.read_bytes() + malformed + orjson.dumps(future) + b"\n"
+                     + orjson.dumps(future_kind) + b"\n"
                      + orjson.dumps(invalid_current) + b"\n")
 
     record_research_claims(tmp_path, run_id="same", task_id="t", claims=[{
@@ -451,9 +460,11 @@ def test_research_claim_upsert_preserves_malformed_future_and_invalid_same_run_r
     same = [row for row in decoded if row.get("run_id") == "same"]
     assert any(row.get("v") == 99 and row.get("future_contract") == {"must": "survive"}
                for row in same)
+    assert future_kind in same
     assert invalid_current in same
     current_rows = [row for row in same
-                    if row.get("v") == 3 and row.get("source_receipt", {}).get("producer_complete") is True]
+                    if row.get("v") == 3 and row.get("record_kind") == "claim"
+                    and row.get("source_receipt", {}).get("producer_complete") is True]
     assert len(current_rows) == 1 and current_rows[0]["node_ids"] == [7]
     assert any(row.get("run_id") == "sibling" for row in decoded)
 

@@ -731,6 +731,7 @@ def record_research_claims(memory_dir, *, run_id: str, task_id: str, claims,
             # to erase bytes and falsely restore source_complete=true.
             replace_if=lambda row: (
                 row.get("v") == _RESEARCH_CLAIM_VERSION
+                and row.get("record_kind") in ("claim", "source_receipt")
                 and _valid_claim_source_row(row, research=True)
                 and _research_source_receipt(row) is not None
                 and _identity_text(row.get("run_id"), _MAX_SOURCE_ID) == rid
