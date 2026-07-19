@@ -62,14 +62,6 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     ])
     root = createRoot(document.getElementById('root'))
 
-    // JSON identity is collision-free for delimiter-bearing ids and changes with every rendered label.
-    const collisionA = [{ run_id: 'a,b', label: 'c' }, { run_id: 'd', label: null }]
-    const collisionB = [{ run_id: 'a', label: 'b,c' }, { run_id: 'd', label: null }]
-    assert.notEqual(panels.crossRunTrajectoryKey(collisionA, 'max', 'task'),
-      panels.crossRunTrajectoryKey(collisionB, 'max', 'task'))
-    assert.notEqual(panels.crossRunTrajectoryKey(collisionA, 'max', 'task'),
-      panels.crossRunTrajectoryKey([{ ...collisionA[0], label: 'changed' }, collisionA[1]], 'max', 'task'))
-
     await render(panels.AuthoringPanel)
     assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading prompts files/)
     assert.doesNotMatch(document.body.textContent, /select a file to edit/)
@@ -127,57 +119,30 @@ test('secondary panels validate reads and serialize poll/retry recovery without 
     await reply(requests.at(-1), [{
       run_id: 'run-1', task_id: 'demo', direction: 'max', best_metric: 1, best_confirmed: null,
       nodes: 2, finished: true, phase: 'finished', label: 'Primary',
+    }, {
+      run_id: 'run-2', task_id: 'demo', direction: 'min', best_metric: 0.5, best_confirmed: 0.4,
+      nodes: 3, finished: true, phase: 'finished', label: 'Secondary',
+    }, {
+      run_id: 'foreign', task_id: 'other', direction: 'max', best_metric: 99, best_confirmed: null,
+      nodes: 1, finished: true, phase: 'finished', label: 'Foreign task',
     }])
-    assert.equal(document.querySelector('select[aria-label="Comparable task"]')?.className, 'text')
     assert.ok(document.querySelector('.panel-resource-toolbar'))
-    await click(button('Overlay trajectories'))
-    await reply(requests.at(-1), { state: { nodes: [] } })
-    assert.match(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay: Unavailable.*Retry/)
-    assert.doesNotMatch(document.body.textContent, /no comparable run trajectories/)
-    await click(button('Retry'))
-    assert.equal(button('Retrying…')?.disabled, true)
-    await reply(requests.at(-1), { state: { nodes: { 0: { id: 0, metric: 1, feasible: true } } } })
-    assert.match(document.body.textContent, /Cross-run trajectories.*Primary/)
+    assert.match(document.body.textContent,
+      /Same-task run observations.*Cross-run ranking unavailable.*shared task ID does not bind metric name\/unit.*per-run observations/is)
+    assert.deepEqual([...document.querySelectorAll('tbody tr')].map(row => row.textContent), [
+      'Primary1max2finished', 'Secondary0.4 (confirmed mean)min3finished',
+    ])
+    assert.equal(document.querySelector('tbody a')?.getAttribute('href'), '#/run/run-1')
+    assert.doesNotMatch(document.body.textContent, /comparable|best run|relative score|Overlay trajectories/i)
+    assert.doesNotMatch(document.body.textContent, /Foreign task/)
 
-    const trajectoryRows = [{ run_id: 'label-run', label: 'Before' }]
-    await render(panels.CrossRunTrajectories, { rows: trajectoryRows, dir: 'max', task: 'demo' })
-    const oldLabelRequest = requests.at(-1)
-    await render(panels.CrossRunTrajectories, {
-      rows: [{ ...trajectoryRows[0], label: 'After' }], dir: 'max', task: 'demo',
-    })
-    const newLabelRequest = requests.at(-1)
-    assert.notEqual(newLabelRequest, oldLabelRequest, 'a rendered label change must reload the keyed trajectory')
-    await reply(oldLabelRequest, { state: { nodes: { 0: { id: 0, metric: 9, feasible: true } } } })
-    assert.match(document.querySelector('[role="status"]')?.textContent || '', /Loading Trajectory overlay/)
-    await reply(newLabelRequest, { state: { nodes: { 0: { id: 0, metric: 2, feasible: true } } } })
-    assert.match(document.body.textContent, /Cross-run trajectories.*After/)
-    assert.doesNotMatch(document.body.textContent, /Before/)
-
-    let trajectoryStart = requests.length
-    await render(panels.CrossRunTrajectories, {
-      rows: [{ run_id: 'healthy-run', label: 'Healthy' }, { run_id: 'gone-run', label: 'Gone' }],
-      dir: 'max', task: 'partial-demo',
-    })
-    let batch = requests.slice(trajectoryStart)
-    assert.equal(batch.length, 2)
-    await reply(batch.find(request => request.url.includes('/healthy-run/')),
-      { state: { nodes: { 0: { id: 0, metric: 3, feasible: true } } } })
-    await reply(batch.find(request => request.url.includes('/gone-run/')), {}, 404)
-    assert.match(document.body.textContent, /Cross-run trajectories.*Healthy/)
-    assert.match(document.querySelector('[role="status"]')?.textContent || '', /1 of 2 run trajectories omitted/)
-    assert.doesNotMatch(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay/)
-
-    trajectoryStart = requests.length
-    await render(panels.CrossRunTrajectories, {
-      rows: [{ run_id: 'gone-a', label: 'Gone A' }, { run_id: 'gone-b', label: 'Gone B' }],
-      dir: 'max', task: 'failed-demo',
-    })
-    batch = requests.slice(trajectoryStart)
-    assert.equal(batch.length, 2)
-    await reply(batch[0], {}, 404)
-    await reply(batch[1], { state: { nodes: [] } })
-    assert.match(document.querySelector('[role="alert"]')?.textContent || '', /Trajectory overlay: Unavailable.*Retry/)
-    assert.doesNotMatch(document.body.textContent, /run trajectories omitted/)
+    await render(panels.CrossRunPanel, { key: 'bounded-observations', state: { task_id: 'demo' } })
+    await reply(requests.at(-1), Array.from({ length: 102 }, (_, index) => ({
+      run_id: `bounded-${index}`, task_id: 'demo', direction: 'max', best_metric: index,
+      best_confirmed: null, nodes: 1, finished: true, phase: 'finished', label: `Bounded ${index}`,
+    })))
+    assert.equal(document.querySelectorAll('tbody tr').length, 100)
+    assert.match(document.body.textContent, /2 additional observations omitted by the client render limit/)
 
     await render(panels.GpuPanel)
     const hungRequest = requests.at(-1)

@@ -3,7 +3,7 @@ import { get, putText, post, fmt, fmtInt, fmtBytes, fmtElapsedSeconds, CONTROL, 
   commandFeedback, runApiPath, runNodeApiPath,
 } from './util.js'
 import { usePoll } from './hooks.js'
-import { Bars, ParallelCoords, Scatter, MultiTrajectory } from './charts.jsx'
+import { Bars, ParallelCoords, Scatter } from './charts.jsx'
 import { hyperImportance } from './report.js'
 import Markdown, { stripMd } from './markdown.jsx'
 import { OpIcon } from './icons.jsx'
@@ -93,16 +93,6 @@ function gpuPayload(value) {
   }
   if (value.available && !Array.isArray(value.gpus)) invalidPanelPayload()
   return { available: value.available, gpus }
-}
-
-function trajectoryNodes(value) {
-  if (!isRecord(value) || !isRecord(value.state) || !isRecord(value.state.nodes)) invalidPanelPayload()
-  const nodes = Object.values(value.state.nodes)
-  for (const node of nodes) {
-    if (!isRecord(node) || !Number.isSafeInteger(node.id) || !nullableNumber(node.metric)
-        || (node.feasible != null && typeof node.feasible !== 'boolean')) invalidPanelPayload()
-  }
-  return nodes
 }
 
 // A poll and a manual retry share one synchronous lock: interval ticks skip an active request, while
@@ -1117,74 +1107,46 @@ export function HyperImportancePanel({ state, onClose }) {
   )
 }
 
-// F2 · Cross-run sweep aggregation — a lab dashboard overlaying every run of the same task:
-// best-metric comparison + which settings won. Uses the /api/runs summary (no per-run refetch).
-export const crossRunTrajectoryKey = (rows, dir, task) => JSON.stringify([
-  task, dir, rows.slice(0, 8).map(row => [row.run_id, row.label ?? null]),
-])
-
-export function CrossRunTrajectories({ rows, dir, task }) {
-  const rowKey = crossRunTrajectoryKey(rows, dir, task)
-  const requested = rows.slice(0, 8)
-  const [resource, retry] = usePanelResource(signal => Promise.all(requested.map(r =>
-    get(runApiPath(r.run_id, '/state'), { signal }).then(p => {
-      const ns = trajectoryNodes(p).filter(n => n.metric != null && n.feasible !== false).sort((a, b) => a.id - b.id)
-      let best = null; const series = []
-      for (const n of ns) { best = best == null ? n.metric : (dir === 'min' ? Math.min(best, n.metric) : Math.max(best, n.metric)); series.push(best) }
-      return { run_id: r.run_id, label: r.label || r.run_id, series }
-    }).catch(() => null))).then(results => {
-    const runs = results.filter(Boolean)
-    // # CODEX AGENT: A deleted or malformed sibling is a bounded omission, not authority to erase
-    // healthy trajectories. With no valid source at all, keep the ordinary retryable error state.
-    if (requested.length && !runs.length) invalidPanelPayload()
-    return { runs, omitted: requested.length - runs.length }
-  }), undefined, rowKey)
-  return <div style={{ marginBottom: 12 }}>
-    <PanelResourceNotice resource={resource} label="Trajectory overlay" onRetry={retry} />
-    {!!resource.data?.omitted && <div className="notice resource-warning" role="status">
-      {resource.data.omitted} of {requested.length} run trajectories omitted because their sources were unavailable or invalid.
-    </div>}
-    {resource.data && <MultiTrajectory runs={resource.data.runs} />}
-  </div>
-}
+// # CODEX AGENT: Same-task IDs are an operational lookup key, not a ComparisonContract. Keep this
+// legacy panel useful for navigation without ranking raw objectives whose metric unit, dataset/eval
+// identity, and protocol are absent from /api/runs. The Research Atlas owns contract-bound comparison.
+const CROSS_RUN_OBSERVATION_LIMIT = 100
 
 export function CrossRunPanel({ state, onClose }) {
   const [resource, retry] = usePanelResource(signal => get('/api/runs', { signal }), runsPayload)
   const runs = resource.data || []
-  const [task, setTask] = useState(state.task_id || '')
-  const [overlay, setOverlay] = useState(false)   // U4: convergence-trajectory overlay
-  const tasks = [...new Set(runs.map(r => r.task_id).filter(Boolean))].sort()
-  const dir = (runs.find(r => r.task_id === task)?.direction) || state.direction
-  const rows = runs.filter(r => r.task_id === task)
+  const task = typeof state.task_id === 'string' ? state.task_id : ''
+  const observations = runs.filter(r => r.task_id === task)
     .map(r => ({ ...r, m: r.best_confirmed ?? r.best_metric }))
     .filter(r => r.m != null)
-    .sort((a, b) => dir === 'min' ? a.m - b.m : b.m - a.m)
-  const top = rows[0]?.m
-  const worst = rows.length ? rows[rows.length - 1].m : 0
-  const span = Math.abs((top ?? 0) - worst) || 1
+  const rows = observations.slice(0, CROSS_RUN_OBSERVATION_LIMIT)
+  const hidden = observations.length - rows.length
   return (
-    <Panel title="Cross-run sweep" sub={resource.data ? `${runs.length} runs · ${tasks.length} tasks` : ''} onClose={onClose} wide>
+    <Panel title="Same-task run observations"
+      sub={resource.data ? `${observations.length} metric observation${observations.length === 1 ? '' : 's'}` : ''}
+      onClose={onClose} wide>
       <PanelResourceNotice resource={resource} label="Cross-run results" onRetry={retry} />
       {resource.data && <div className="panel-resource-toolbar">
-        <span className="muted">task:</span>
-        <select className="text" aria-label="Comparable task" value={task} onChange={e => setTask(e.target.value)}>
-          {tasks.map(t => <option key={t} value={t}>{t}</option>)}</select>
-        <span className="muted">{rows.length} comparable run(s) · {dir}</span>
-        {rows.length > 0 && <button aria-pressed={overlay} className={'btn sm' + (overlay ? ' primary' : '')}
-          onClick={() => setOverlay(o => !o)} title="Overlay each run's running-best trajectory on one axis">Overlay trajectories</button>}
+        <span className="muted">task ID:</span><code>{task || 'not recorded'}</code>
+        <span className="muted">{rows.length} shown · comparison unavailable</span>
       </div>}
-      {overlay && rows.length > 0 && <CrossRunTrajectories rows={rows} dir={dir} task={task} />}
+      {resource.data && <div className="notice resource-warning" role="status">
+        <b>Cross-run ranking unavailable.</b>
+        <span> A shared task ID does not bind metric name/unit, dataset and evaluation identity, or a
+          comparison protocol. Values below remain per-run observations.</span>
+      </div>}
       {rows.length
-        ? <DataTable caption="Comparable run results" card={false}><table className="tbl"><thead><tr><th>run</th><th>best metric</th><th>nodes</th><th>status</th><th>relative score</th></tr></thead><tbody>
-            {rows.map((r, i) => <tr key={r.run_id} className={i === 0 ? 'sel' : ''}>
-              <td>{r.label || r.run_id}{i === 0 ? <OpIcon name="crown" size={10} /> : ''}</td>
-              <td>{fmt(r.m)}{r.best_confirmed != null ? ' (conf)' : ''}</td>
-              <td className="muted">{r.nodes}</td><td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td>
-              <td style={{ width: 180 }}><div className="bar" style={{ height: 8 }}>
-                <div className="fill" style={{ width: Math.max(4, 100 - Math.abs(r.m - top) / span * 100) + '%' }} /></div></td></tr>)}
+        ? <DataTable caption="Same-task per-run metric observations" card={false}><table className="tbl"><thead><tr><th>run</th><th>recorded objective</th><th>direction</th><th>nodes</th><th>status</th></tr></thead><tbody>
+            {rows.map(r => <tr key={r.run_id}>
+              <td><a href={`#/run/${encodeURIComponent(r.run_id)}`}>{r.label || r.run_id}</a></td>
+              <td>{fmt(r.m)}{r.best_confirmed != null ? ' (confirmed mean)' : ''}</td>
+              <td className="muted">{r.direction}</td><td className="muted">{r.nodes}</td>
+              <td className="muted">{r.phase || (r.finished ? 'finished' : '—')}</td></tr>)}
           </tbody></table></DataTable>
-        : resource.state === 'ready' && <div className="muted">No comparable runs for this task yet (need ≥1 finished run with a metric).</div>}
-      {resource.data && <div className="muted" style={{ marginTop: 8 }}>Best run per task is starred. Bars are relative to the task’s best (longer = closer to best).</div>}
+        : resource.state === 'ready' && <div className="muted">No per-run metric observations for this task ID yet.</div>}
+      {hidden > 0 && <div className="muted" style={{ marginTop: 8 }}>
+        {hidden} additional observation{hidden === 1 ? '' : 's'} omitted by the client render limit.
+      </div>}
     </Panel>
   )
 }
