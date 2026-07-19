@@ -253,6 +253,72 @@ class NoveltyGateMixin:
             setattr(_r, "_novelty_feedback", prev)
         return idea
 
+    def _intra_batch_dup(self, idea, chosen: list) -> bool:
+        """Variant-1 Phase 2: is `idea` a near-duplicate of one already chosen in THIS proposal batch,
+        by idea TEXT? Mirrors the semantic gate's 20-char floor — param-only ideas (toy backends whose
+        rationale is a constant like 'random seed point') have no meaningful text identity and are
+        NEVER text-deduped here (their diversity lives in the numeric params, which the normal novelty
+        gate already handles), so batch diversity for LLM ideas never collapses distinct toy seeds."""
+        t = self._idea_text(idea).strip().lower()
+        if len(t) < 20:
+            return False
+        for other in chosen:
+            ot = self._idea_text(other).strip().lower()
+            if len(ot) >= 20 and (t == ot or t in ot or ot in t):
+                return True
+        return False
+
+    def _propose_batch(self, state: RunState, n: int) -> list:
+        """Variant-1 Phase 2 — the ONE shared-researcher pass that yields up to N DISTINCT seed
+        hypotheses for a concurrent draft batch ("one researcher -> N ideas -> N developers"), so a
+        `parallel_build>1` fan-out doesn't pay N independent research rolls that collide on the same
+        direction. A backend MAY expose a true one-call `propose_batch(state, n)`; otherwise we roll
+        the researcher's own `propose` up to a bounded number of times, each time surfacing the
+        directions already taken THIS batch as a transient avoidance directive (reusing the
+        `_novelty_feedback` channel the researcher already reads), applying the normal vs-history
+        novelty gate, and DROPPING an intra-batch near-duplicate. Distinct-by-construction and
+        backend-agnostic; returns 1..N ideas (fewer only if the researcher can't diversify). Runs in
+        the MAIN task before the build fan-out, so it uses `self.researcher` (no pool race)."""
+        n = max(1, int(n))
+        native = getattr(self.researcher, "propose_batch", None)
+        ideas: list = []
+        if callable(native):
+            try:
+                produced = list(native(state, n)) or []
+                for idea in produced:
+                    if idea is not None and not self._intra_batch_dup(idea, ideas):
+                        ideas.append(idea)
+                if ideas:
+                    return ideas[:n]
+            except Exception:  # noqa: BLE001 — a batch-backend hiccup falls back to sequential rolls
+                ideas = []
+        prev_feedback = getattr(self.researcher, "_novelty_feedback", "")
+        attempts, max_attempts = 0, n * 2 + 2
+        try:
+            while len(ideas) < n and attempts < max_attempts:
+                attempts += 1
+                if ideas:
+                    taken = "; ".join(filter(None, (self._idea_text(x)[:200] for x in ideas)))
+                    if taken:
+                        setattr(self.researcher, "_novelty_feedback",
+                                ("BATCH DIVERSITY: other drafts building CONCURRENTLY in this batch already "
+                                 "take these directions — propose a MEANINGFULLY DIFFERENT axis / theme / "
+                                 f"component, not a variation of: {taken}"))
+                self._set_complexity_hint(state, None)          # A0d cues on the shared researcher
+                idea = self.researcher.propose(state, None)
+                if idea is None:
+                    continue
+                # Normal vs-history novelty gate (one informed re-propose on a semantic hit), exactly as
+                # the serial draft path runs it — then drop an intra-batch near-duplicate.
+                idea = self._apply_novelty_gate(
+                    state, idea, repropose=lambda: self.researcher.propose(state, None))
+                if idea is None or self._intra_batch_dup(idea, ideas):
+                    continue
+                ideas.append(idea)
+        finally:
+            setattr(self.researcher, "_novelty_feedback", prev_feedback)
+        return ideas
+
     def _graded_novelty_precheck(self, state: RunState, idea: Idea):
         """PART IV D3 (§21.4, Phase 2b): a concept-graph-aware PRE-gate. When `graded_novelty` is on and
         the task has a curated concept skeleton, grade the proposal over the concept graph BEFORE the flat

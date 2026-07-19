@@ -1056,7 +1056,16 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                     _fan = len(_pb_pairs)
                     for _i in range(0, len(creates), _fan):
                         _chunk = creates[_i:_i + _fan]
-                        for _a in _chunk:               # surface the audit events for each, as the serial path does
+                        # Phase 2: ONE shared-researcher pass produces the DISTINCT seed ideas for this
+                        # chunk (avoidance-driven diversity + novelty gate); the fan-out below then only
+                        # IMPLEMENTS them per-developer, so we never pay N independent research rolls that
+                        # collide. If the researcher can't diversify to the full width, build only as many
+                        # nodes as we got distinct ideas — the loop re-plans the rest next iteration.
+                        _ideas = self._propose_batch(state, len(_chunk))
+                        if not _ideas:
+                            continue
+                        _chunk = _chunk[:len(_ideas)]
+                        for _a in _chunk:               # surface the audit events only for what we build
                             if "_scores" in _a:
                                 self.store.append(EV_POLICY_DECISION,
                                                   {"scores": _a["_scores"], "chosen": _a.get("_chosen"),
@@ -1066,7 +1075,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                                   {"rung": _a["_rung"], "survivors": _a.get("_promoted", [])})
                         _reserved = [self._reserve_node_build(_a) for _a in _chunk]   # serial -> distinct ids
                         async with anyio.create_task_group() as _tg:
-                            for _a, _res, _pair in zip(_chunk, _reserved, _pb_pairs):
+                            for _a, _res, _pair, _idea in zip(_chunk, _reserved, _pb_pairs, _ideas):
                                 if _res is None:
                                     continue
                                 # If a sibling in THIS chunk already crashed and tripped the
@@ -1079,7 +1088,8 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
                                 # appended up front) instead of tearing down the task group and killing
                                 # the whole run — the rest of the concurrent batch still finishes.
                                 _tg.start_soon(anyio.to_thread.run_sync,
-                                               functools.partial(self._create_node_guarded, _a, _pair, _res))
+                                               functools.partial(self._create_node_guarded,
+                                                                  _a, _pair, _res, _idea))
                         if self._create_paused:
                             break
                     continue
@@ -1828,11 +1838,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             self._role_pool.append(pair)
         return [(self.researcher, self.developer)] + self._role_pool[: n - 1]
 
-    def _create_node(self, action: dict, roles=None, reserved=None) -> None:
+    def _create_node(self, action: dict, roles=None, reserved=None, preproposed=None) -> None:
         # Variant-1 parallel build: `roles` is a per-build (researcher, developer) pair from the pool
         # (isolated per-build state so concurrent drafts don't clobber each other's hints/last_files);
         # `reserved` is a pre-reserved (state, id, kind, parents, parent_generations) tuple (the parallel
-        # path reserves ids up front, serially, then fans out). Both default to the serial behaviour.
+        # path reserves ids up front, serially, then fans out). `preproposed` (Phase 2) is a draft Idea
+        # the shared researcher already proposed + novelty-gated in the batch pass (`_propose_batch`), so
+        # the fan-out only IMPLEMENTS it. All default to the serial behaviour.
         if reserved is None:
             reserved = self._reserve_node_build(action)
         if reserved is None:
@@ -1849,13 +1861,19 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
             # node_building was appended inside _reserve_node_build (under _id_lock) — the id is committed
             # to the log atomically, so a PARALLEL build (parallel_build>1) can never pick the same id.
             if kind == "draft":
-                self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
-                with self.tracer.span("propose"):
-                    idea = researcher.propose(state, None)
-                # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
-                idea = self._apply_novelty_gate(
-                    state, idea, repropose=lambda: researcher.propose(state, None),
-                    researcher=researcher)
+                if preproposed is not None:
+                    # Phase 2: the shared researcher already proposed + novelty-gated this idea in the
+                    # batch pass; skip re-research (its complexity/novelty cues already ran on the shared
+                    # researcher) and go straight to this build's own developer.implement below.
+                    idea = preproposed
+                else:
+                    self._set_complexity_hint(state, None, researcher=researcher)   # A0d complexity cue
+                    with self.tracer.span("propose"):
+                        idea = researcher.propose(state, None)
+                    # E1+T5 dedup near-duplicate proposals (one informed re-propose on a semantic hit)
+                    idea = self._apply_novelty_gate(
+                        state, idea, repropose=lambda: researcher.propose(state, None),
+                        researcher=researcher)
                 idea.operator = "draft"        # operator is authoritative from the policy,
                 parents: list[int] = []        # not whatever label the LLM returns
                 with self.tracer.span("implement"):
@@ -2013,7 +2031,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         self._emit_hypothesis_ranked(node_id, 0, researcher=researcher)
         self._emit_foresight_selected(node_id, 0, researcher=researcher, developer=developer)
 
-    def _create_node_guarded(self, action: dict, roles=None, reserved=None) -> None:
+    def _create_node_guarded(self, action: dict, roles=None, reserved=None, preproposed=None) -> None:
         """Variant-1 parallel build: run one pooled build, converting an UNEXPECTED exception into a
         `node_failed` terminal for its already-reserved id (its `node_building` was appended up front
         under `_id_lock`) instead of letting the exception propagate through the task group and tear
@@ -2021,7 +2039,7 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         gets exactly one terminal) and lets the rest of the concurrent batch finish. Used ONLY on the
         parallel path; the serial path keeps its historical crash-on-raise so bugs surface in tests."""
         try:
-            self._create_node(action, roles, reserved)
+            self._create_node(action, roles, reserved, preproposed=preproposed)
         except Exception as exc:  # noqa: BLE001 — one build's crash must not abort the concurrent batch
             node_id = reserved[1] if reserved else None
             if node_id is None:

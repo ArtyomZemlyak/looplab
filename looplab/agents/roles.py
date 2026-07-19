@@ -156,6 +156,10 @@ _SWEEP_CONTRACT = (
 
 class Researcher(Protocol):
     def propose(self, state: RunState, parent: Optional[Node]) -> Idea: ...
+    # OPTIONAL (Variant-1 Phase 2): a backend MAY expose `propose_batch(state, n) -> list[Idea]` that
+    # returns up to N ideas on DISTINCT axes in one pass. The engine probes for it via getattr and, when
+    # absent, degrades to N sequential `propose` calls with an avoidance directive (engine `_propose_batch`)
+    # — so implementing it is a diversity/latency optimization, never required.
 
 
 class Developer(Protocol):

@@ -423,6 +423,50 @@ def test_build_telemetry_emitters_read_and_consume_the_passed_roles(tmp_path):
     assert eng.researcher.last_hyp_priority == {"order": [9], "reason": "shared"}        # shared untouched
 
 
+def test_propose_batch_yields_distinct_ideas_and_drops_intra_batch_dup(tmp_path):
+    # Variant-1 Phase 2: the shared-researcher batch pass must return N ideas on DISTINCT axes and
+    # DROP an intra-batch near-duplicate (an LLM idea whose text repeats one already chosen), degrading
+    # to sequential `propose` with an avoidance directive when the backend can't batch natively.
+    eng = _engine(tmp_path / "batch")
+    eng._novelty_mode = "off"                       # isolate the batch diversity logic from the gate
+
+    class _SeqResearcher:                           # no native propose_batch -> sequential+avoidance path
+        def __init__(self, ideas):
+            self._ideas, self.calls = list(ideas), 0
+
+        def propose(self, state, parent):
+            idea = self._ideas[min(self.calls, len(self._ideas) - 1)]
+            self.calls += 1
+            return idea
+
+    a = Idea(operator="draft", params={"x": 1}, rationale="use a deeper residual network architecture")
+    dup = Idea(operator="draft", params={"x": 2}, rationale="use a deeper residual network architecture")
+    b = Idea(operator="draft", params={"x": 3}, rationale="apply aggressive mixup+cutout augmentation")
+    c = Idea(operator="draft", params={"x": 4}, rationale="switch to AdamW with a cosine LR schedule")
+    eng.researcher = _SeqResearcher([a, dup, b, c])
+    ideas = eng._propose_batch(RunState(), 3)
+    texts = [i.rationale for i in ideas]
+    assert len(ideas) == 3 and len(set(texts)) == 3          # 3 ideas on 3 DISTINCT axes
+    assert eng.researcher.calls == 4                         # rolled a 4th time to replace the dropped dup
+
+
+def test_propose_batch_uses_a_native_backend_when_present(tmp_path):
+    # A backend that CAN batch (one call -> N ideas) is used directly; `propose` is never touched.
+    eng = _engine(tmp_path / "batch-native")
+
+    class _BatchResearcher:
+        def propose_batch(self, state, n):
+            return [Idea(operator="draft", params={"x": i},
+                         rationale=f"distinct research axis number {i} explored here") for i in range(n)]
+
+        def propose(self, state, parent):
+            raise AssertionError("native propose_batch must be preferred over propose")
+
+    eng.researcher = _BatchResearcher()
+    ideas = eng._propose_batch(RunState(), 3)
+    assert len(ideas) == 3 and len({i.params["x"] for i in ideas}) == 3
+
+
 def test_reserve_node_build_hands_distinct_ids_to_parallel_threads(tmp_path):
     # Variant-1 Phase 0: the atomic build reservation must give CONCURRENT builds distinct, monotonic
     # ids (and one node_building each) so parallel_build>1 can never collide on max(nodes)+1.
