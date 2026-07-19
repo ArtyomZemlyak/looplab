@@ -283,6 +283,10 @@ def _safe_research_source_summary(raw) -> Optional[dict]:
     known = out["producer_receipt_known"]
     consistent = (
         out["producer_partial_runs"] + out["producer_unknown_runs"] <= out["producer_runs"]
+        # CODEX AGENT: `known=true` and a non-zero unknown-run count is not a harmless diagnostic
+        # mismatch: it would let a forged aggregate claim exact one-sided evidence while admitting an
+        # unreadable producer receipt. The boolean and count are one invariant at every boundary.
+        and known == (out["producer_unknown_runs"] == 0)
         and out["producer_complete"] == (known and out["producer_partial_runs"] == 0)
         and out["source_complete"] == out["producer_complete"]
         and (not known or (

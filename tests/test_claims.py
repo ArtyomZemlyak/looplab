@@ -560,6 +560,29 @@ def test_d8_producer_cap_receipt_withholds_positive_when_opposition_tail_is_unkn
     assert "exact one-sided states are withheld" in rendered
 
 
+def test_research_source_aggregate_rejects_known_unknown_run_contradiction():
+    from looplab.engine.claims import _safe_research_source_summary
+
+    malformed = {
+        "source_complete": True,
+        "producer_receipt_known": True,
+        "producer_complete": True,
+        "producer_runs": 1,
+        "producer_partial_runs": 0,
+        "producer_unknown_runs": 1,
+        "producer_claims_total": 1,
+        "producer_claims_retained": 1,
+        "producer_claims_omitted": 0,
+    }
+    assert _safe_research_source_summary(malformed) is None
+    assert _safe_research_source_summary({
+        **malformed,
+        "source_complete": False,
+        "producer_receipt_known": False,
+        "producer_complete": False,
+    }) is not None
+
+
 def test_legacy_persisted_d8_source_is_unknown_and_fails_positive_closed(tmp_path):
     import orjson
     from looplab.engine.claims import claims_for_memory, load_research_claims

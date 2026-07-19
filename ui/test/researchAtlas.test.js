@@ -265,6 +265,11 @@ test('Atlas never reconstructs a positive from a partial D8 prefix and renders i
   assert.equal(view.claims[1].epistemic, 'inconclusive')
   assert.equal(view.researchSource.status, 'partial')
 
+  const contradictory = buildResearchAtlasView({}, { research_source: {
+    ...completeResearchSource, producer_runs: 1, producer_unknown_runs: 1,
+  }, claims: [] }, {})
+  assert.deepEqual(contradictory.researchSource, { status: 'unknown', counts: null })
+
   const vite = await createServer({
     root: UI_ROOT, configFile: false, appType: 'custom', logLevel: 'silent',
     server: { middlewareMode: true },

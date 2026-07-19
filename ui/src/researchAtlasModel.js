@@ -81,6 +81,9 @@ const normalizeResearchSource = value => {
   const known = receipt.producer_receipt_known === true
   const consistent = boolsValid && countsValid
     && counts.producer_partial_runs + counts.producer_unknown_runs <= counts.producer_runs
+    // CODEX AGENT: a producer receipt cannot be both known and count an unknown run. Reject the whole
+    // aggregate instead of rendering a contradictory exact/complete state from an untrusted response.
+    && known === (counts.producer_unknown_runs === 0)
     && receipt.producer_complete === (known && counts.producer_partial_runs === 0)
     && receipt.source_complete === receipt.producer_complete
     && (!known || (counts.producer_claims_total >= counts.producer_claims_retained
