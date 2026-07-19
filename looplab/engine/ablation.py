@@ -159,12 +159,16 @@ class AblationMixin:
         if not self._ablation_parent_current(parent_id, generation):
             self._discard_node_build_telemetry()
             return
-        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self._emit_node_created(
-            node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-            idea=durable_idea_payload(idea), code=code,
-            files=getattr(self.developer, "last_files", {}) or {},
-            parent_generations={str(parent_id): generation})
+        # Mint the id AND commit node_created under _id_lock + the node_building-aware ceiling, so an
+        # ablation node can't collide with a concurrent parallel build's reserved id (Variant-1).
+        with self._id_lock:
+            _evs = self.store.read_all()
+            node_id = self._node_id_ceiling(_evs, fold(_evs))
+            self._emit_node_created(
+                node_id=node_id, parent_ids=[parent_id], operator="refine_block",
+                idea=durable_idea_payload(idea), code=code,
+                files=getattr(self.developer, "last_files", {}) or {},
+                parent_generations={str(parent_id): generation})
         if node_id not in fold(self.store.read_all()).nodes:
             self._discard_node_build_telemetry()
             return
@@ -267,12 +271,15 @@ class AblationMixin:
         if not self._ablation_parent_current(parent_id, generation):
             self._discard_node_build_telemetry()
             return
-        node_id = max(fold(self.store.read_all()).nodes, default=-1) + 1
-        self._emit_node_created(
-            node_id=node_id, parent_ids=[parent_id], operator="refine_block",
-            idea=durable_idea_payload(idea), code=new_code,
-            files=getattr(self.developer, "last_files", {}) or {},
-            parent_generations={str(parent_id): generation})
+        # Mint id + commit node_created under _id_lock + the node_building-aware ceiling (Variant-1).
+        with self._id_lock:
+            _evs = self.store.read_all()
+            node_id = self._node_id_ceiling(_evs, fold(_evs))
+            self._emit_node_created(
+                node_id=node_id, parent_ids=[parent_id], operator="refine_block",
+                idea=durable_idea_payload(idea), code=new_code,
+                files=getattr(self.developer, "last_files", {}) or {},
+                parent_generations={str(parent_id): generation})
         if node_id not in fold(self.store.read_all()).nodes:
             self._discard_node_build_telemetry()
             return

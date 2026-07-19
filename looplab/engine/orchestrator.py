@@ -1682,26 +1682,33 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
     # `_triage_crash` / `_repair_error_context` / `_prepare_env` live in
     # looplab/engine/crash_repair.py (CrashRepairMixin — inherited, zero call-site churn).
 
+    @staticmethod
+    def _node_id_ceiling(events, state) -> int:
+        """The next unique, monotonic node id = 1 + max of every id EVER reserved (a `node_building` event)
+        OR created (`state.nodes`). A `node_building` folds to the transient single `st.building` marker,
+        NOT `st.nodes`, so a plain `max(state.nodes)+1` would hand concurrent builds the same id. Every
+        site that MINTS a node (draft build, ablation refine_block, forced inject) computes the id from
+        this helper AND commits (node_building/node_created) under `_id_lock`, so parallel builds never
+        collide. Replay-deterministic (ids follow the log's node_building order); a failed reservation
+        leaves a harmless id gap."""
+        _max_building = max((e.data.get("node_id", -1) for e in events
+                             if e.type == EV_NODE_BUILDING and isinstance(e.data.get("node_id"), int)),
+                            default=-1)
+        return max(max(state.nodes, default=-1), _max_building) + 1
+
     def _reserve_node_build(self, action: dict):
         """Variant-1 atomic build reservation. Under `_id_lock`: fold -> id=max(nodes)+1 -> parent
         lifecycle check -> append `node_building`. Returns (state, node_id, kind, parents, parent_generations)
         or None to SKIP (bad/aborted/tombstoned parent, or a generation mismatch — a reset already won).
         Because the `node_building` append (the id's commit to the log) happens inside the lock, two
-        PARALLEL builds can never allocate the same id. Byte-identical on the serial path (lock uncontended,
-        same events in the same order). The verbatim body moved out of `_create_node` — no logic change."""
+        PARALLEL builds can never allocate the same id. FOLD-identical on the serial path (RunState
+        unchanged; lock uncontended, same events in the same order — the event's trace stamp differs since
+        node_building moved out of the create_node span, but fold ignores trace metadata). The verbatim
+        body moved out of `_create_node` — no logic change."""
         with self._id_lock:
             events = self.store.read_all()
             state = fold(events)
-            # Id = 1 + the max of every id EVER reserved: created nodes (`state.nodes`) AND still-building
-            # reservations (a `node_building` folds to the transient `st.building` marker, NOT `st.nodes`,
-            # so a plain `max(state.nodes)+1` would hand every concurrent build the same id). Scanning the
-            # `node_building` events makes it replay-deterministic (ids follow the append order in the log)
-            # and monotonic; a failed reservation just leaves a harmless id gap. Serial path unchanged:
-            # with no concurrent build, the newest node_building is always the just-created node's own.
-            _max_building = max((e.data.get("node_id", -1) for e in events
-                                 if e.type == EV_NODE_BUILDING and isinstance(e.data.get("node_id"), int)),
-                                default=-1)
-            node_id = max(max(state.nodes, default=-1), _max_building) + 1  # monotonic, unique
+            node_id = self._node_id_ceiling(events, state)
             kind = action["kind"]
             _bparents = (list(action["parent_ids"]) if action.get("parent_ids")
                          else ([action["parent_id"]] if action.get("parent_id") is not None else []))
@@ -2000,8 +2007,13 @@ class Engine(ConfirmPhaseMixin, AblationMixin, NoveltyGateMixin, StrategyCadence
         Manual injection deliberately bypasses the policy's proposal step — the human IS the
         researcher here — but everything downstream (eval, confirmation, best-selection, lineage)
         is identical to an agent-authored node, so a hand-added winner can be selected as best."""
-        state = fold(self.store.read_all())
-        node_id = max(state.nodes, default=-1) + 1
+        # Variant-1: use the node_building-aware ceiling under _id_lock so a forced inject never reuses an
+        # id a concurrent parallel build has reserved. (Inject is served off the parallel-build path and
+        # builds are awaited, so this is defensive; the ceiling is the correctness-relevant part.)
+        with self._id_lock:
+            _evs = self.store.read_all()
+            state = fold(_evs)
+            node_id = self._node_id_ceiling(_evs, state)
         idea_d = dict(req.get("idea") or {})
         idea_d.setdefault("operator", "manual")
         # Coerce params to floats defensively (a manual form may send strings); drop unparseable.
