@@ -636,6 +636,29 @@ def test_engine_does_not_replace_a_partial_empty_base_event(tmp_path):
     assert len([event for event in s.read_all() if event.type == "run_concepts"]) == 1
 
 
+def test_engine_seed_recovers_from_derived_missing_base_receipt(tmp_path):
+    s = _store(tmp_path)
+    s.append("node_created", _created(0, mode="delta", added=["delta/root"]))
+    s.append("node_evaluated", {"node_id": 0, "metric": 0.8})
+    s.append("node_created", _created(1, mode="full", concepts=["base/from-exact-node"]))
+    s.append("node_evaluated", {"node_id": 1, "metric": 0.9})
+    state = fold(s.read_all())
+    assert state.run_base_concept_receipt == {
+        "status": "unavailable",
+        "reasons": ["delta_dependency_missing_run_base"],
+    }
+    assert state.node_concepts[0] == []
+
+    # CODEX AGENT: this receipt is derived proof that no base event exists, not an authored partial base.
+    # The normal once-only seeder must remain able to recover when a later exact full membership is available.
+    seeded = Engine._maybe_seed_run_base_concepts(_seed_host(s), state)
+    assert seeded.run_base_concepts == ["base/from-exact-node"]
+    assert seeded.run_base_concept_receipt is None
+    assert seeded.node_concepts[0] == ["base/from-exact-node", "delta/root"]
+    assert seeded.node_concept_materialization_receipts == {}
+    assert len([event for event in s.read_all() if event.type == "run_concepts"]) == 1
+
+
 def test_unknown_mode_keeps_node_and_propagates_unavailable_receipt(tmp_path):
     s = _store(tmp_path)
     s.append("node_created", _created(

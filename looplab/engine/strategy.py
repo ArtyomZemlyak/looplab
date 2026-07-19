@@ -493,9 +493,21 @@ class StrategyCadenceMixin:
         main task appends it (invariant 1). No-op while off or until a node has authored concepts."""
         if not getattr(self, "_concept_run_base", False):
             return state
-        if state.run_base_concepts or state.run_base_concept_receipt is not None:
+        from looplab.core.concepts import (
+            CONCEPT_DELTA_MISSING_RUN_BASE_REASON,
+            normalized_concept_materialization_receipt,
+        )
+        raw_base_receipt = state.run_base_concept_receipt
+        base_receipt = normalized_concept_materialization_receipt(raw_base_receipt)
+        derived_missing_base = bool(
+            base_receipt is not None
+            and CONCEPT_DELTA_MISSING_RUN_BASE_REASON in base_receipt["reasons"]
+        )
+        if state.run_base_concepts or (raw_base_receipt is not None and not derived_missing_base):
             # A partial/unavailable empty base is still an authored base event. Never overwrite it with
             # a later apparently exact seed; operator repair remains an explicit last-write-wins action.
+            # CODEX AGENT: the fold-derived missing-base receipt is the one exception: it proves that no
+            # EV_RUN_CONCEPTS exists, so a later exact evaluated full node may still perform the intended seed.
             return state
         prov = getattr(state, "node_concept_provenance", None) or {}
         receipts = getattr(state, "node_concept_materialization_receipts", None) or {}
