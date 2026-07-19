@@ -241,15 +241,21 @@ class KnowledgeTools:
                 recs.append((p, Path(p).name + " " + text, {"path": p, "text": text}))
         # Cross-run memory (I19): past best solutions become searchable knowledge.
         if self.cases_path and self.cases_path.exists():
+            from looplab.engine.memory import valid_case_record
+
             # keep_bad=True: `i` is the RAW line number — the stable "case:<i>" record id.
             for i, c in enumerate(read_jsonl_lenient(self.cases_path, loads=json.loads,
                                                      keep_bad=True)):
-                if c is None:              # a single malformed case line must not kill indexing
+                # CODEX AGENT: valid JSON is not necessarily a valid case. Apply the writer/search schema
+                # fence here too so a poisoned goal/params/metric cannot crash or enter agent retrieval.
+                if c is None or not valid_case_record(c):
                     continue
-                text = (f"PAST CASE — task {c.get('task_id')}: {c.get('goal','')}\n"
+                goal = c.get("goal") if isinstance(c.get("goal"), str) else ""
+                rationale = c.get("rationale") if isinstance(c.get("rationale"), str) else ""
+                text = (f"PAST CASE — task {c.get('task_id')}: {goal}\n"
                         f"best params={c.get('params')} metric={c.get('metric')}\n"
-                        f"{c.get('rationale','')}")
-                recs.append((f"case:{i}", c.get("goal", "") + " " + text,
+                        f"{rationale}")
+                recs.append((f"case:{i}", goal + " " + text,
                              {"path": f"case:{c.get('task_id')}", "text": text}))
         return recs
 

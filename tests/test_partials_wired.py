@@ -7,6 +7,7 @@ from pathlib import Path
 
 import anyio
 import orjson
+import pytest
 
 from looplab.trust.confirm import confirm_top_k
 from looplab.events.eventstore import EventStore
@@ -196,10 +197,13 @@ def test_case_library_quarantines_malformed_rows_and_bounds_search(tmp_path):
     path = tmp_path / "cases.jsonl"
     valid = {"task_id": "good", "goal": "bounded retrieval", "direction": "min",
              "metric": 1.0, "params": {"depth": 2}}
+    # Same apparent key as the later upsert: a future row is still not an understood replacement target.
+    future = {**valid, "v": 2, "task_id": "new"}
     path.write_text(
         "[]\n"
         + '{"task_id":"bad-metric","goal":"x","metric":"not-a-number"}\n'
         + '{"task_id":"bad-params","goal":"x","params":[]}\n'
+        + json.dumps(future) + "\n"
         + json.dumps(valid) + "\n",
         encoding="utf-8",
     )
@@ -213,3 +217,52 @@ def test_case_library_quarantines_malformed_rows_and_bounds_search(tmp_path):
     assert library.add({"task_id": "new", "goal": "safe", "direction": "max",
                         "metric": 2.0, "params": {}}) is True
     assert {row["task_id"] for row in JsonlCaseLibrary(path).all()} == {"good", "new"}
+    # An ordinary upsert cannot launder quarantine into an apparently clean file.
+    assert path.read_text(encoding="utf-8").splitlines()[:4] == [
+        "[]",
+        '{"task_id":"bad-metric","goal":"x","metric":"not-a-number"}',
+        '{"task_id":"bad-params","goal":"x","params":[]}',
+        json.dumps(future),
+    ]
+
+
+def test_knowledge_index_applies_case_schema_before_rendering(tmp_path):
+    from looplab.tools.knowledge_tools import KnowledgeTools
+
+    path = tmp_path / "cases.jsonl"
+    poisoned = {"task_id": "poisoned", "goal": ["not", "text"],
+                "direction": "min", "metric": 1.0, "params": {}}
+    valid = {"task_id": "safe", "goal": "polynomial selection",
+             "direction": "min", "metric": 0.5, "params": {"degree": 2}}
+    path.write_text(
+        json.dumps(poisoned) + "\n" + json.dumps(valid) + "\n", encoding="utf-8")
+
+    tools = KnowledgeTools(knowledge_dir=None, cases_path=str(path))
+    result = tools.execute("kb_search", {"query": "polynomial"})
+
+    assert "case:safe" in result
+    assert "poisoned" not in result
+
+
+def test_case_upsert_fails_closed_without_cross_process_lock(tmp_path, monkeypatch):
+    from looplab.events.eventstore import EventStoreLockError
+
+    path = tmp_path / "cases.jsonl"
+    original = {"task_id": "existing", "goal": "kept", "direction": "min",
+                "metric": 1.0, "params": {}}
+    path.write_text(json.dumps(original) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+    required_values = []
+
+    def unavailable(lock_path, *, required=False):
+        required_values.append(required)
+        raise EventStoreLockError(lock_path, OSError("locking unavailable"))
+
+    monkeypatch.setattr("looplab.events.eventstore._interprocess_lock", unavailable)
+    library = JsonlCaseLibrary(path)
+    with pytest.raises(EventStoreLockError, match="locking unavailable"):
+        library.add({"task_id": "new", "goal": "must not land", "direction": "min",
+                     "metric": 0.5, "params": {}})
+
+    assert required_values == [True]
+    assert path.read_bytes() == before

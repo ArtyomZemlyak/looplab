@@ -14,8 +14,7 @@ from typing import Callable, Optional
 from looplab.core.atomicio import atomic_write_text
 from looplab.core.models import NODE_CONCEPT_PROVENANCE_CLASSIFIER
 from looplab.events.eventstore import (read_jsonl_lenient, read_jsonl_lenient_with_health,
-                                       replace_jsonl_rows_atomic_preserving_quarantine,
-                                       write_jsonl_atomic)
+                                       replace_jsonl_rows_atomic_preserving_quarantine)
 from looplab.tools.vectorstore import Hit, Item, VectorStore, hash_embed
 
 _STOP = {"the", "a", "an", "to", "of", "and", "or", "for", "on", "in", "with", "from", "predict",
@@ -489,6 +488,32 @@ def write_auto_skill(skills_dir: str | Path, statement: str, body: str,
         return None
 
 
+def valid_case_record(case) -> bool:
+    """Whether one unversioned durable case is safe for comparison and retrieval.
+
+    ``cases.jsonl`` predates an explicit schema version. A version/kind discriminator therefore
+    belongs to a future contract and must stay quarantined until an explicit migration understands it.
+    """
+    if not isinstance(case, dict) or "v" in case or "record_kind" in case:
+        return False
+    task_id = case.get("task_id")
+    if (not isinstance(task_id, str) or not task_id.strip()
+            or len(task_id) > 500):
+        return False
+    for key, maximum in (("goal", 4000), ("rationale", 8000)):
+        value = case.get(key)
+        if value is not None and (not isinstance(value, str) or len(value) > maximum):
+            return False
+    direction = case.get("direction", "min")
+    if direction not in ("min", "max"):
+        return False
+    metric = case.get("metric")
+    if not _finite_metric(metric):
+        return False
+    params = case.get("params")
+    return params is None or isinstance(params, dict)
+
+
 class JsonlCaseLibrary:
     """Persistent case store (I19, ADR-10): cases on disk as JSONL, keyed by task_id
     with retain-on-improvement. Loads existing cases on init so it accumulates across
@@ -513,42 +538,19 @@ class JsonlCaseLibrary:
 
     @staticmethod
     def _valid_case(case) -> bool:
-        if not isinstance(case, dict):
-            return False
-        task_id = case.get("task_id")
-        if not isinstance(task_id, str) or not task_id or len(task_id) > 500:
-            return False
-        for key, maximum in (("goal", 4000), ("rationale", 8000)):
-            value = case.get(key)
-            if value is not None and (not isinstance(value, str) or len(value) > maximum):
-                return False
-        direction = case.get("direction", "min")
-        if direction not in ("min", "max"):
-            return False
-        metric = case.get("metric")
-        if not _finite_metric(metric):
-            return False
-        params = case.get("params")
-        return params is None or isinstance(params, dict)
-
-    def _flush(self) -> None:
-        # Atomic (temp + os.replace): the file is rewritten WHOLE on every add(), so a non-atomic
-        # write killed mid-flush would truncate and lose the entire accumulated case library.
-        # (add() guarantees self.cases is non-empty here, so the output is byte-identical to the
-        #  historical "\n".join(...) + "\n" form.)
-        write_jsonl_atomic(self.path, self.cases, dumps=json.dumps)
+        return valid_case_record(case)
 
     def add(self, case: dict) -> bool:
         """Upsert by task_id, retaining the better metric. Returns True if stored.
 
-        Under the same best-effort interprocess lock the lessons store / event store use: `add` is a
-        full-file read-modify-write, so two runs sharing `memory_dir` (the live-share scenario) would
-        otherwise clobber each other's cases (the loser's case vanishes). We RE-READ inside the lock so
-        this run's possibly-stale in-memory `self.cases` can't overwrite a concurrent run's write."""
+        Under the same required interprocess lock the other mutable cross-run stores use: `add` is a
+        read-modify-write, so two runs sharing `memory_dir` would otherwise clobber each other. We
+        RE-READ inside the lock so this run's possibly-stale in-memory cases cannot overwrite a concurrent
+        write. A filesystem unable to provide that guarantee fails closed and finalize retries later."""
         if not self._valid_case(case):
             return False
         from looplab.events.eventstore import _interprocess_lock
-        with _interprocess_lock(Path(str(self.path) + ".lock")):
+        with _interprocess_lock(Path(str(self.path) + ".lock"), required=True):
             self._reload()
             return self._add_locked(case)
 
@@ -563,9 +565,16 @@ class JsonlCaseLibrary:
                 better = metric < prev["metric"] if direction == "min" else metric > prev["metric"]
                 if not better:
                     return False
-            self.cases.remove(prev)   # replace (incl. metric-None cases) — upsert by task_id
-        self.cases.append(case)
-        self._flush()
+        # CODEX AGENT: quarantine is a read decision, never permission for an unrelated upsert to erase
+        # malformed or future-schema bytes. Replace only understood current rows for this task; retain every
+        # other raw line byte-for-byte and append the new current record atomically under the required lock.
+        replace_jsonl_rows_atomic_preserving_quarantine(
+            self.path, [case],
+            replace_if=lambda row: (
+                valid_case_record(row) and row.get("task_id") == tid),
+            loads=json.loads, dumps=json.dumps,
+        )
+        self._reload()
         return True
 
     def search(self, query: str, k: int = 3) -> list[dict]:
