@@ -94,6 +94,7 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     assert.match(partial, /PARTIAL source \(some capsule receipts unknown\)/)
 
     for (const corrupt of [
+      { matched_concepts: ['loss/target', ' loss/target'] },
       { concept_source: { ...completeSource, source_concepts_omitted: 1 } },
       { concept_source: { ...completeSource, source_complete: false,
         source_concepts_omitted: 1 } },
@@ -126,6 +127,14 @@ test('timeline narration stays renderable for malformed and forward-compatible e
           { concept: 'loss/target', outcome_retained: true, outcome: 0.2 },
         ],
       }] },
+      { prior_runs: [{
+        run_id: 'old', run_best_metric: 0.9,
+        matched_concepts: ['loss/target', ' loss/target'],
+        source_receipt: completeRunSource, matched_concept_outcomes: [
+          { concept: 'loss/target', outcome_retained: true, outcome: 0.1 },
+          { concept: ' loss/target', outcome_retained: false, outcome: null },
+        ],
+      }] },
     ]) {
       const narration = eventNarration(prior(corrupt))
       assert.match(narration, /evidence completeness unknown/)
@@ -137,6 +146,10 @@ test('timeline narration stays renderable for malformed and forward-compatible e
     ] }))
     assert.match(corruptSibling, /matched outcome loss\/target=0\.1/)
     assert.match(corruptSibling, /evidence completeness unknown/)
+
+    const bidi = eventNarration(prior({ matched_concepts: ['loss/\u202etarget'] }))
+    assert.match(bidi, /evidence completeness unknown/)
+    assert.doesNotMatch(bidi, /\u202e|matched outcome/)
 
     assert.equal(eventNarration({ type: 'cross_run_prior', data: {
       matched_concepts: 'loss/target', prior_runs: [],

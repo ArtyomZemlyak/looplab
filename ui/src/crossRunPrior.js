@@ -1,4 +1,5 @@
 import { fmt } from './util.js'
+import { normalizeConceptId } from './conceptId.js'
 
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value)
 const count = value => Number.isSafeInteger(value) && value >= 0
@@ -7,14 +8,22 @@ const metric = value => typeof value === 'number' && Number.isFinite(value) ? va
 const array = value => Array.isArray(value) ? value : []
 const labels = value => array(value).slice(0, 64).filter(item => typeof item === 'string')
   .map(item => item.trim().slice(0, 80)).filter(Boolean)
-const uniqueLabels = value => Array.isArray(value) && value.length > 0 && value.length <= 64
-  && new Set(value).size === value.length
+// CODEX AGENT: v2 receipt identities are producer-canonical concept ids. Validate with the same
+// grammar as replay/UI concepts so whitespace/case aliases and bidi/control garbage cannot form a
+// second "unique" match or be echoed from a corrupted event log.
+const canonicalLabels = value => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) return null
+  const normalized = value.map(normalizeConceptId)
+  return normalized.every((label, index) => label && label === value[index])
+    && new Set(normalized).size === normalized.length ? normalized : null
+}
 
 export function crossRunPriorNarration(data) {
   const rawRuns = array(data?.prior_runs)
   const runs = rawRuns.slice(0, 8).filter(record)
   const rawMatched = array(data?.matched_concepts)
-  const matched = labels(rawMatched)
+  const canonicalMatched = canonicalLabels(rawMatched)
+  const matched = labels(canonicalMatched)
   const first = runs[0]
   const v2 = data?.v === 2
   const source = record(data?.concept_source) ? data.concept_source : null
@@ -25,7 +34,7 @@ export function crossRunPriorNarration(data) {
     && (source.partial_capsules > 0
       || source.source_concepts_omitted + source.source_outcomes_omitted === 0)
     && source.source_complete === (source.partial_capsules === 0)
-  const listKnown = v2 && uniqueLabels(rawMatched) && matched.length === rawMatched.length
+  const listKnown = v2 && canonicalMatched
     && count(data?.prior_runs_total) && count(data?.prior_runs_omitted)
     && rawRuns.length > 0 && rawRuns.length <= 8 && data.prior_runs_total > 0
     && data.prior_runs_total === rawRuns.length + data.prior_runs_omitted
@@ -39,9 +48,10 @@ export function crossRunPriorNarration(data) {
   const runReceiptKnown = run => {
     const concepts = run?.matched_concepts
     const rows = run?.matched_concept_outcomes
-    if (!uniqueLabels(concepts) || !Array.isArray(rows) || rows.length !== concepts.length
+    const canonical = canonicalLabels(concepts)
+    if (!canonical || !Array.isArray(rows) || rows.length !== canonical.length
         || !rows.every(row => record(row) && concepts.includes(row.concept)
-          && typeof row.concept === 'string' && bool(row.outcome_retained))
+          && normalizeConceptId(row.concept) === row.concept && bool(row.outcome_retained))
         || new Set(rows.map(row => row.concept)).size !== rows.length) return false
     const receipt = run.source_receipt
     return record(receipt) && receiptPart(receipt, 'concepts')
@@ -59,7 +69,7 @@ export function crossRunPriorNarration(data) {
 
   const matchedOutcome = listKnown && first && runReceiptKnown(first)
     ? first.matched_concept_outcomes.find(row => row.outcome_retained
-      && metric(row.outcome) !== null && rawMatched.includes(row.concept)) : null
+      && metric(row.outcome) !== null && canonicalMatched.includes(row.concept)) : null
   const concept = labels([matchedOutcome?.concept])[0]
   const runBest = metric(first?.run_best_metric) ?? metric(first?.best_metric)
   const outcome = matchedOutcome ? `; closest run matched outcome ${concept}=${fmt(matchedOutcome.outcome)}`
